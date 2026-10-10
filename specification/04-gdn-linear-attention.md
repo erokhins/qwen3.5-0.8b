@@ -98,6 +98,12 @@ Per request per GDN layer: `S ∈ F32^{16×128×128}` and the conv window
 
 ## 04.7 Chunked prefill equivalence
 
+Implemented in the engine as `specimpl.gdn_chunk_scan` (UT-transform form, chunk
+64, F32 throughout, right-padding with `\beta = 0`, `g = 0`), selected by
+`--gdn-prefill chunk`. Verified by `engine/gates/run_chunkcheck.py`: chunk vs
+recurrent per GDN layer, `cos \ge 0.99999` on 1-, 1- and 5-chunk fixtures, and
+both equidistant from the reference (A-08 closed).
+
 Any prefill algorithm is correct iff, for every `t`, it returns the `o[t]` and
 final `S` of §04.4 applied token-by-token. The standard Gated-DeltaNet chunk
 form (chunk 64, log-decay prefix sums, UT/WY transform of the delta updates,

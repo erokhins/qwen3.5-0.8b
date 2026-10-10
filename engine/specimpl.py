@@ -34,6 +34,7 @@ EPS = 1e-6
 H_K = H_V = 16
 D_K = D_V = 128
 K_CONV = 4
+GDN_CHUNK = 64                              # S04.7 chunk size (reference default)
 ROPE_THETA = 1e7
 PARTIAL_ROT = 0.25
 ROT_DIM = int(D_HEAD * PARTIAL_ROT)          # 64
@@ -161,9 +162,63 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
 
 
 # ------------------------------- GDN block (S04) ----------------------------
-def gdn(w: Weights, l: int, x: torch.Tensor, dbg: dict | None = None, win=None, S=None):
-    """S04 for a whole segment (T tokens), recurrent form (S04.4) — the engine
-    starts here; the chunked prefill form (S04.7) is a later optimization.
+def gdn_chunk_scan(qn, kn, v, g, beta, S=None, C=GDN_CHUNK):
+    """S04.7 — the chunked form of the same recurrence, used for prefill.
+
+    UT-transform formulation: intra-chunk attention with pairwise decay, one
+    unit-triangular solve per chunk for the delta corrections, then a sequential
+    scan over *chunks* only (not tokens). Sequences are right-padded to a
+    multiple of `C`; padded positions get beta=0 and g=0, so they neither read
+    nor write the state (A-08). Everything is F32, matching the reference.
+
+    qn/kn are [T,H,Dk] (already l2-normalised, qn pre-scaled), v [T,H,Dv],
+    g/beta [T,H] with g the log decay. Returns o [T,H,Dv] and S [H,Dk,Dv].
+    """
+    T, H, DK = kn.shape
+    DV = v.shape[-1]
+    pad = (-T) % C
+
+    def padseq(x):
+        if pad == 0:
+            return x
+        return torch.cat([x, x.new_zeros((pad,) + tuple(x.shape[1:]))], 0)
+
+    q = padseq(qn).float().transpose(0, 1).reshape(H, -1, C, DK)
+    k = padseq(kn).float().transpose(0, 1).reshape(H, -1, C, DK)
+    vv = padseq(v).float().transpose(0, 1).reshape(H, -1, C, DV)
+    de = padseq(g).float().transpose(0, 1).reshape(H, -1, C)
+    be = padseq(beta).float().transpose(0, 1).reshape(H, -1, C)
+    NC = q.shape[1]
+
+    v_beta, k_beta = vv * be[..., None], k * be[..., None]
+    cum = de.cumsum(-1)                                     # log decay since chunk start
+    upper = torch.ones(C, C, dtype=torch.bool).triu(1)
+    # pair[..., i, j] = decay accumulated from j to i, 0 for j > i (strict upper)
+    pair = (cum[..., :, None] - cum[..., None, :]).masked_fill(upper, float("-inf")).exp()
+    ut = (k_beta @ k.transpose(-1, -2)) * pair               # unit-triangular system
+    intra = (q @ k.transpose(-1, -2)) * pair
+    kcd = k_beta * cum.exp()[..., None]
+    nv = torch.linalg.solve_triangular(ut, v_beta, upper=False, unitriangular=True)
+    kcd = torch.linalg.solve_triangular(ut, kcd, upper=False, unitriangular=True)
+
+    q = q * cum.exp()[..., None]
+    k = k * (cum[..., -1:] - cum).exp()[..., None]
+    cdec = cum[..., -1].exp()[..., None, None]
+    S = torch.zeros((H, DK, DV), dtype=torch.float32) if S is None else S.float()
+    out = torch.zeros((H, NC, C, DV), dtype=torch.float32)
+    for i in range(NC):
+        v_new = nv[:, i] - kcd[:, i] @ S                     # correction only (delta rule)
+        out[:, i] = q[:, i] @ S + intra[:, i] @ v_new        # inter-chunk read + intra
+        S = S * cdec[:, i] + k[:, i].transpose(-1, -2) @ v_new
+    return out.reshape(H, NC * C, DV)[:, :T].transpose(0, 1).contiguous(), S
+
+
+def gdn(w: Weights, l: int, x: torch.Tensor, dbg: dict | None = None, win=None, S=None,
+        form: str = "recurrent"):
+    """S04 for a whole segment (T tokens). `form` picks S04.4 (recurrent, token
+    loop — the decode path and the numerical contract) or S04.7 (chunked —
+    prefill). Both must agree: gate `run_chunkcheck.py` asserts it against the
+    reference dumps too.
     `win` is the S08.2 conv window: [k_conv-1, CONV_CH] of **pre-conv** raw."""
     p = f"model.language_model.layers.{l}.linear_attn."
     T = x.shape[0]
@@ -177,10 +232,14 @@ def gdn(w: Weights, l: int, x: torch.Tensor, dbg: dict | None = None, win=None, 
     head = torch.zeros((K_CONV - 1, CONV_CH), dtype=raw.dtype) if win is None else win
     padded = torch.cat([head, raw], 0)
     new_win = padded[-(K_CONV - 1):].clone()                    # S07.2: roll, then read
-    u = raw.new_zeros(raw.shape)
+    u = torch.zeros(raw.shape, dtype=torch.float32)
     for j in range(K_CONV):                                     # tap j -> token t-(3-j)
-        u += padded[j:j + T] * C[:, j]
-    u = torch.nn.functional.silu(u.float()).to(raw.dtype)
+        u += padded[j:j + T].float() * C[:, j].float()
+    # Reference behaviour: the depthwise conv accumulates in F32 and rounds once to
+    # the activation dtype, and silu applies to that rounded value. Accumulating the
+    # four taps in bf16 instead costs ~0.4 % per element in the q/k/v of *every* GDN
+    # layer, which is the largest single share of the deep-layer drift.
+    u = torch.nn.functional.silu(u.to(raw.dtype))
 
     q = u[:, :KEY_DIM].reshape(T, H_K, D_K)
     k = u[:, KEY_DIM:2 * KEY_DIM].reshape(T, H_K, D_K)
@@ -196,14 +255,17 @@ def gdn(w: Weights, l: int, x: torch.Tensor, dbg: dict | None = None, win=None, 
     qn = q.float() * torch.rsqrt(q.float().pow(2).sum(-1, keepdim=True) + 1e-6) * Q_SCALE
     kn = k.float() * torch.rsqrt(k.float().pow(2).sum(-1, keepdim=True) + 1e-6)
     S = torch.zeros((H_V, D_K, D_V), dtype=torch.float32) if S is None else S
-    o = torch.zeros((T, H_V, D_V), dtype=torch.float32)
-    for t in range(T):
-        gam_t, kt, qt, vt, bt = gam[t], kn[t], qn[t], v[t].float(), beta[t]
-        S = S * gam_t[:, None, None]                            # decay
-        r = torch.einsum("hkd,hk->hd", S, kt)                   # retrieve
-        dv = bt[:, None] * (vt - r)                             # delta
-        S = S + torch.einsum("hk,hd->hkd", kt, dv)              # write
-        o[t] = torch.einsum("hk,hkd->hd", qt, S)                # read
+    if form == "chunk" and T > 1:
+        o, S = gdn_chunk_scan(qn, kn, v, g, beta, S)
+    else:
+        o = torch.zeros((T, H_V, D_V), dtype=torch.float32)
+        for t in range(T):
+            gam_t, kt, qt, vt, bt = gam[t], kn[t], qn[t], v[t].float(), beta[t]
+            S = S * gam_t[:, None, None]                        # decay
+            r = torch.einsum("hkd,hk->hd", S, kt)               # retrieve
+            dv = bt[:, None] * (vt - r)                         # delta
+            S = S + torch.einsum("hk,hd->hkd", kt, dv)          # write
+            o[t] = torch.einsum("hk,hkd->hd", qt, S)            # read
 
     if dbg is not None:
         dbg["mixed_qkv_pre_conv"] = raw
@@ -247,11 +309,15 @@ def attention(w: Weights, l: int, x: torch.Tensor, cos: torch.Tensor, sin: torch
     out = torch.zeros((T, N_Q, D_HEAD), dtype=x.dtype)
     for i in range(N_Q):
         j = i // (N_Q // N_KV)                                  # kappa(i)
-        s = qh[:, i, :].float() @ K[:, j, :].float().t() * S_SCALE   # [T, P]
+        # Bit-faithful to the reference: the score matrix is produced and kept in
+        # the activation dtype (bf16) and only the softmax runs in F32. Computing
+        # scores in F32 skips a bf16 rounding of ~3e-3 per score and was a
+        # measurable share of the deep-layer drift.
+        s = (qh[:, i, :] @ K[:, j, :].t()) * S_SCALE          # [T, P], activation dtype
         qi = torch.arange(T)[:, None] + (P - T)                 # global query pos
         allowed = torch.arange(P)[None, :] <= qi                # causal, S05.5
         s = s.masked_fill(~allowed, float("-inf"))
-        attn = torch.softmax(s, dim=-1).to(x.dtype)
+        attn = torch.softmax(s.float(), dim=-1).to(x.dtype)
         out[:, i, :] = attn @ V[:, j, :].to(x.dtype)            # [T, 256]
     pre_gate = out.reshape(T, Q_WIDTH)
     if dbg is not None:
@@ -276,8 +342,9 @@ def mlp(w: Weights, l: int, x: torch.Tensor) -> torch.Tensor:
 class Forward:
     """S03.5 chain with the S08 state; prefill then incremental decode."""
 
-    def __init__(self, w: Weights):
+    def __init__(self, w: Weights, gdn_form: str = "recurrent"):
         self.w = w
+        self.gdn_form = gdn_form            # S04.4 vs S04.7 for prefill
         self.reset()
 
     def reset(self):
@@ -286,7 +353,7 @@ class Forward:
         self.conv_win = {l: None for l in GDN_LAYERS}           # S08.2 windows
         self.rec = {l: None for l in GDN_LAYERS}                # S08.1 recurrent S
 
-    def _layer(self, l: int, x: torch.Tensor, cos, sin, dbg: dict | None):
+    def _layer(self, l: int, x: torch.Tensor, cos, sin, dbg: dict | None, form="recurrent"):
         w = self.w
         pre = f"model.language_model.layers.{l}."
         residual = x
@@ -294,7 +361,7 @@ class Forward:
         sub = {} if dbg is not None else None
         if l in GDN_LAYERS:
             h, self.conv_win[l], self.rec[l] = gdn(
-                w, l, h, sub, self.conv_win[l], self.rec[l])
+                w, l, h, sub, self.conv_win[l], self.rec[l], form)
         else:
             h = attention(w, l, h, cos, sin, self.kv[l], sub)
         if dbg is not None and sub:
@@ -318,7 +385,7 @@ class Forward:
         x = self.w.p["model.language_model.embed_tokens.weight"][ids]   # S02.3
         cos, sin = self._rope(len(ids), x.device)
         for l in range(N_LAYERS):
-            x = self._layer(l, x, cos, sin, dbg)
+            x = self._layer(l, x, cos, sin, dbg, self.gdn_form)
         self.P += len(ids)
         self.x_final = x
         return rmsnorm_zc(x, self.w.p["model.language_model.norm.weight"])  # S03.4
@@ -361,6 +428,8 @@ def main():
                     help="JSON with prefill_ids (e.g. a reference manifest)")
     ap.add_argument("--decode", type=int, default=2)
     ap.add_argument("--keep-f32-scalars", action="store_true", help="A-02 A/B knob")
+    ap.add_argument("--gdn-prefill", default="recurrent", choices=["recurrent", "chunk"],
+                    help="S04.4 token loop or S04.7 chunked scan for the prefill pass")
     ap.add_argument("--dump", default=None, help="write engine tensors here (npz, f32)")
     args = ap.parse_args()
 
@@ -368,7 +437,7 @@ def main():
     w = Weights(Path(args.model), keep_f32_scalars=args.keep_f32_scalars)
     print(f"G0/G1 ok: {len(w.all_names)} tensors, {len(w.p)} loaded, {len(w.skipped)} skipped")
     ids = json.loads(Path(args.prompt_ids_file).read_text())["prefill_ids"]
-    f = Forward(w)
+    f = Forward(w, gdn_form=args.gdn_prefill)
     dbg_p, dbg_d = {}, {}
     gen = f.greedy(ids, args.decode, dbg_p, dbg_d)
     print("greedy:", gen)

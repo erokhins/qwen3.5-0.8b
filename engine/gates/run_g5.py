@@ -41,21 +41,25 @@ def main():
     ap.add_argument("--split", type=int, default=8, help="prefix length kept in prefill")
     ap.add_argument("--extend", type=int, default=5, help="tokens appended incrementally")
     ap.add_argument("--cos-min", type=float, default=0.999)
+    ap.add_argument("--gdn-prefill", default="recurrent", choices=["recurrent", "chunk"],
+                    help="pass the chunked form to BOTH sides; the point of the test is "
+                         "that the state at a chunk boundary is the same either way")
     args = ap.parse_args()
 
     torch.set_grad_enabled(False)
     w = Weights(Path(args.model))
     ids = json.loads(Path(args.prompt_ids_file).read_text())["prefill_ids"]
     # extend the sequence deterministically: greedy continuation from the batch pass
-    ref = Forward(w)
+    ref = Forward(w, gdn_form=args.gdn_prefill)
     gen = ref.greedy(ids, max(args.extend, 1))
     seq = ids + gen[:args.extend]
     T = min(args.split, len(seq) - 1)
-    print(f"seq={len(seq)} tokens, prefill {T} then {len(seq)-T} incremental steps")
+    print(f"seq={len(seq)} tokens, prefill {T} then {len(seq)-T} incremental steps "
+          f"(gdn prefill form={args.gdn_prefill})")
 
-    a = Forward(w)
+    a = Forward(w, gdn_form=args.gdn_prefill)
     na = a.logits(a.prefill(torch.tensor(seq)))
-    b = Forward(w)
+    b = Forward(w, gdn_form=args.gdn_prefill)
     b.prefill(torch.tensor(seq[:T]))
     for tok in seq[T:]:
         nb = b.logits(b.decode(tok))
