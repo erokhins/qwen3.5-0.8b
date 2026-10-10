@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default=str(ROOT / "models" / "Qwen3.5-0.8B"))
-    ap.add_argument("--corpus", default=str(ROOT / "data" / "corpus.txt"))
+    ap.add_argument("--corpus", default=str(ROOT / "speccheck" / "fixtures" / "corpus.txt"))
     ap.add_argument("--tag", default="corpus48")
     ap.add_argument("--steps", type=int, default=24)
     ap.add_argument("--limit", type=int, default=0, help="cap the number of prompts")
