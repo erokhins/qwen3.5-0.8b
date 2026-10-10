@@ -152,6 +152,13 @@ M0 in progress:
   17-token chat prompt + 2 greedy decode steps, greedy continuation `The capital
   of`). This is the oracle for the §10 gates.
 - `.venv/` has torch 2.14 CPU + transformers 5.19 (gitignored).
+- `engine/specimpl.py`: spec implemented from scratch in torch-CPU (not by
+  calling transformers) and `engine/gates/run_gates.py`: **all §10 gates pass** on
+  the `smoke` fixture — 705 tensors compared, cos ≥ 0.9993 everywhere, greedy
+  tokens identical to the reference. Two bugs caught this way: the G0 tensor
+  split (335 loaded / 153 vision, not 344/144) and a real one — the GDN
+  recurrent state was not persisted across calls, so decode restarted from zeros
+  while prefill matched to 1e-5.
 
-Next: G0/G1 (loader + shape gate), then per-op kernels under `prototype/`
-starting with `gdn_decode` and `lm_head_gemv`, gated by §10 G3/G5.
+Next: G5 (incremental == batch invariant, §08.6), then HIP kernels per op under
+`prototype/` starting with `gdn_decode` and `lm_head_gemv`, each gated by G3/G5.
