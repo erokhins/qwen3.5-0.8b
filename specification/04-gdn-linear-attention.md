@@ -24,11 +24,16 @@ a_raw= x · W_aᵀ     ∈ ℝ^{T×16}        per value head
 `SiLU` (`hidden_act`):
 
 ```
-u[t] = silu( raw[t] + Σ_{j=0..3} C[:, j] ⊙ raw[t-(3-j)] )     raw[<0] = 0
+u[t] = silu( Σ_{j=0..3} C[:, j] ⊙ raw[t-(3-j)] )            raw[<0] = 0
 ```
 
 i.e. tap `j` multiplies the token `3-j` positions earlier; the last tap `j=3`
-multiplies the current token. Split `u` into `q, k, v` with §01/§04.1 layout.
+multiplies the current token, and the current token contributes **only** through that
+tap. (An earlier revision of this file had a stray leading `raw[t] +` term, which would
+double-count the current token; `prototype/gdn_decode/check.py` reproduces
+`q/k/v_post_conv` **bit-exactly** with the sum above and with nothing else, so the
+formula here is now measured, not transcribed. [REF: HF-ref
+`speccheck/specimpl.py` conv block, verified 2026-10-10.) Split `u` into `q, k, v` with §01/§04.1 layout.
 Incremental state: the last `k_conv-1 = 3` columns of `raw` (**pre**-conv) —
 see §08.2 `[REF: HF caches pre-conv mixed_qkv]`.
 
@@ -74,6 +79,17 @@ o[t,η] = Σ_i S[i,:] · q̃[i]                          (o = q̃ᵀ S)
 - Decaying `S` before retrieving is HF-ref order; folding the decay into `r`
   (`r = γ·Sᵀk̃`, `S ← γ·S + k̃⊗Δv`) is algebraically identical (§06 note in the
   old project's spec 06).
+- **Measured spread between implementations of this recurrence** (`prototype/gdn_decode`,
+  decode step 1 of `smoke`, layer 0): a plain F32 evaluation of the block above agrees
+  with HF's pinned `state_new` to meanrel 2e-8 but with its `o_pre_norm` only to meanrel
+  **1.45e-3** (max 4.8e-4) — HF's fused read accumulates differently. The same gap shows
+  up for speccheck's own recurrence, and it is inside the §10.1 `gdn` class
+  (cos ≥ 0.999, meanrel ≤ 0.05); a kernel that reproduces *this* block to 1e-6 is
+  therefore correct even though it is not bit-identical to the dump. Gate both ways.
+- `o` must be accumulated from the **stored** `S` (`S = γS; S += k̃⊗Δv; o += q̃·S`), not
+  from the algebraically equivalent split `o = γ(q̃ᵀS) + (q̃·k̃)Δv`: the two split terms
+  cancel, and the split version measured meanrel 1.5e-3 against this block where the
+  in-order version measured 4.5e-8.
 
 ## 04.5 Gated RMSNorm and output projection
 

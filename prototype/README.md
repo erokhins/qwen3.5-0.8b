@@ -7,9 +7,10 @@ only when its gate passes**, and a gate is a script, never an eyeball. Current c
 | dir | op | status |
 |---|---|---|
 | `lm_head_gemv/` | tied logits GEMV, bf16, 248320 × 1024 | **passes** §10.1 logits class at 242.1 GB/s (102 % of the read probe) — `lm_head_gemv/results.md` |
+| `gdn_decode/` | S04.2–S04.4 decode step: conv, gates, gated-delta recurrence, 18 layers | **passes** all four functions (bit-exact conv, 1e-7 vs the spec recurrence) — `gdn_decode/results.md` |
 
-Next in line, in the order §07 says the bytes are: `gdn_decode` (18 layers, state-carrying),
-then the gated full-attention step, then the MLP GEMVs.
+Next in line: the gated full-attention decode step (§05), then the MLP GEMVs; then wiring
+`engine/` to call these instead of simulating them.
 
 ## HIP on ROCm 7.1 / gfx1151 — the things that bit us
 
@@ -31,11 +32,13 @@ Saved here so the next kernel does not rediscover them.
 
 ## Measurement hygiene (rules, not suggestions)
 
-1. **Never trust a bandwidth number above ~240 GB/s.** That is the measured ceiling of this
-   box (`devices/strix-halo-memory-bandwidth.md`). The first `--rows` sweep printed
-   415–710 GB/s: the kernel was using a compile-time rows-per-block while the host launched
-   a different value, so it read a quarter of the table. A number above the roofline is
-   evidence of **skipped work**.
+1. **Never trust a bandwidth number above ~240 GB/s** (`devices/strix-halo-memory-bandwidth.md`
+   is the measured ceiling). It has two innocent explanations and one bug: (a) the working
+   set is small enough to stay resident in the iGPU cache — check by tiling it past any
+   plausible cache and re-measuring, which is how `gdn_decode`'s 918 GB/s at 18 MiB became a
+   believable 255 GB/s at 108 MiB; (b) the clock boosted; (c) **the kernel skipped work**,
+   which is what a `--rows` sweep of `lm_head_gemv` was doing at 710 GB/s. Absent (a) or (b)
+   demonstrated, treat it as (c).
 2. **Correctness-check every config, not just the default.** `run.py` compares each config's
    full logits against the reference (`ndiff`, `max|Δ|`). A fast wrong kernel is the most
    expensive kind of progress.
@@ -48,6 +51,13 @@ Saved here so the next kernel does not rediscover them.
 5. **Report against the probe, not in the abstract.** Every kernel result quotes GB/s *and*
    the percentage of the 237 GB/s reference read, so a slow kernel is visibly slow rather
    than superficially plausible.
+6. **Expect a floor from the reference itself.** GDN's `o_pre_norm` cannot be reproduced
+   better than meanrel 1.45e-3 from the pinned HF dumps no matter how exact the kernel is
+   (§04.4 records why). Gate tight against a mirror of the spec block *and* loosely against
+   the dump; a single threshold would have made either a false FAIL or a false PASS.
+7. **Check inputs for NaNs before blaming the kernel** — `check.py` prints it, because a
+   shared-memory overrun once produced NaNs in one launch configuration and silence in
+   another.
 
 ## Known limitations of what exists so far
 
