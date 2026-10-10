@@ -13,8 +13,10 @@ Given, after a verified target step:
 - `y_next ∈ [0,V)`: the token the target just emitted (the token whose successor
   we want to draft) — embedded with the **shared** table
   (`mtp_use_dedicated_embeddings: false`), so `e = E[y_next]`;
-- `h ∈ ℝ^{1024}`: the target hidden state **before** `RMSnorm_final`
-  (i.e. `x_24`, §03.5) — A-12;
+- `h ∈ ℝ^{1024}`: the target hidden state **after** `RMSnorm_final` — i.e. the vector
+  the `lm_head` sees (§03.4). A-12 originally said *before* (`x_24`, §03.5) and was
+  **falsified by accept rate**: 0.642 post-norm vs 0.232 pre-norm, 9 prompts, k=1
+  (`speccheck/gates/run_mtp.py`). The drafter eats the normed hidden.
 - `p`: position of the drafted token (= `prefix_len` of the target at that point).
 
 ## 09.2 Forward
@@ -53,14 +55,55 @@ step is ~1.55 GB of traffic, a draft step is `40.9 MB + E row + E for logits`).
 Because the draft also streams the tied table for its logits, draft cost ≈
 `0.55 GB/token` — the speedup budget is thin, which is why MTP is M3 and not M0.
 
-## 09.5 What must be pinned before trusting §09
+**A batched verify is not bit-lossless in bf16.** The rule above assumes the target's
+verification computes what it would have computed alone; one forward over
+`[t, d1..dk]` is a batched GEMM where the sequential path is a GEMV, and bf16 rounds
+those differently, so a near-tie argmax can flip inside the verify itself. Measured
+with `verify="steps"` (draft block fed through the ordinary decode path) the output is
+token-identical to plain greedy and the state is bit-identical to a sequential replay;
+with `verify="batch"` agreement came out 1.000 on the gate prompts but is not
+*guaranteed*. An engine that must be exactly lossless has to make its verify path reuse
+the decode kernels bit for bit; one that accepts the A-18 chaos floor may batch.
 
-There is no HF reference for this block, so §10 G8 requires, in order:
+## 09.5 Gate G8 (measured; this is what discharges A-12/A-13)
 
-1. load `mtp.*` and confirm shapes §01.5 (mechanical);
-2. single-step check: feed the *target's* `h` and `y_next` from a real greedy
-   trace, compare `d` against the true next token — a correct MTP should agree on
-   a high fraction of easy continuations (A-12 makes or breaks this);
-3. accept-rate measurement over a corpus: `accepted / drafted`, reported together
-   with tokens/s with drafting off. If accept ≈ 0, A-12 (pre- vs post-final-norm)
-   is the first suspect, then the `fc` concat order.
+There is no HF reference for this block, so `speccheck/gates/run_mtp.py` checks three
+things, in order of strength. Numbers: k=1, 24 tokens, 9 prompts (6 corpus + 3 fixture
+prompts), torch CPU bf16.
+
+1. **G8a — the loop is exactly right (binding, bit-exact).** With `verify="steps"`, the
+   speculative output equals plain greedy token for token, *and* the target state after
+   the run is bit-identical to a sequential replay (`torch.equal` on every GDN `S`,
+   conv window and KV entry, plus `prefix_len`). That is what tests positions, state
+   rollback and MTP KV truncation; it caught an off-by-one in the consumed-prefix
+   definition and, before that, a loop that re-fed the first generated token forever.
+2. **G8b — batched verify stays honest (binding, floored).** Agreement of the batched
+   verify output with plain greedy, measured 1.0000 against the A-18 floor 0.8776.
+3. **Accept rate (binding, decisive between readings of §09).**
+
+| reading of §09 | accept `accepted/drafted` | tokens per target forward |
+|---|---|---|
+| as corrected: post-final-norm `h`, `fc = [emb ‖ hidden]` | **0.642** (86/134) | 1.15 |
+| A-12 as originally written (pre-final-norm `h`) | 0.232 (41/177) | 0.68 |
+| A-13 alternative (`fc = [hidden ‖ emb]`) | 0.014 (3/213) | 0.50 |
+
+A wrong `fc` order collapses to ~0, which is what makes this gate worth running: it
+cannot be passed by an accident of tuning.
+
+**Speed, reported not gated** (`./bench.sh --engine speccheck --mtp K`, §10 tests):
+
+| engine | decode tok/s | accept | tokens/forward |
+|---|---|---|---|
+| speccheck | 23.3 | – | 1.00 |
+| speccheck + mtp1 | 18.3 | 0.582 | 1.11 |
+| speccheck + mtp2 | 15.8 | 0.408 | 1.03 |
+
+Roofline break-even at k=1 needs tokens/forward > (1.55+0.55)/1.55 = 1.36, i.e.
+accept > 0.36, and the measured 0.58 clears that. torch CPU nevertheless *loses* 21 %:
+the draft pays a full 248k-row tied `lm_head` as a slow bf16 GEMV, and this
+implementation pays an extra target forward to roll state back on rejection. Both are
+avoidable in the engine — the draft `lm_head` is bandwidth work like the target's, and
+a per-position state checkpoint (~19 MB) is cheaper than a re-forward — so the honest
+conclusion is **not "MTP does not help"** but "MTP does not help *in Python*, while the
+roofline says ~1.15× at k=1 if the draft is written as a kernel". Re-measure after the
+first real `mtp_layer` kernel exists.

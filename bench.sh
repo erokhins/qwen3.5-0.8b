@@ -7,6 +7,7 @@
 #   ./bench.sh --test decode            # long generation only (decode speed)
 #   ./bench.sh --test prefill_summarize # one named test
 #   ./bench.sh --reps 3                 # median of 3 per test
+#   ./bench.sh --mtp 2                  # also run speccheck drafting 2 tokens/step
 #   ./bench.sh --max-new 256            # override the generation ceiling
 #   ./bench.sh --quick                  # both tests, tiny generation cap
 #   ./bench.sh --keep                   # keep this run's jsonl (default: timestamped copy)
@@ -22,6 +23,7 @@ py="$here/.venv/bin/python"
 ENGINE=both
 TEST=all
 REPS=1
+MTP=""
 MAXNEW=()
 EXTRA=()
 THREADS="${OMP_NUM_THREADS:-8}"
@@ -33,6 +35,7 @@ while [[ $# -gt 0 ]]; do
     --engine) ENGINE="$2"; shift 2 ;;
     --test)   TEST="$2"; shift 2 ;;
     --reps)   REPS="$2"; shift 2 ;;
+    --mtp)    MTP="${2:-1}"; shift 2 ;;
     --max-new) MAXNEW=(--max-new "$2"); shift 2 ;;
     --quick)  MAXNEW=(--max-new 64); shift ;;
     --no-text) EXTRA+=(--no-text); shift ;;
@@ -62,6 +65,14 @@ for e in $( [[ "$ENGINE" == "both" ]] && echo "speccheck hf" || echo "$ENGINE" )
   echo "=== engine=$e threads=$THREADS ==="
   "$py" "$here/bench/run.py" --engine "$e" --jsonl "$f" "${args[@]}"
   files+=("$f")
+  # MTP is a speccheck-only path (transformers has no MTP class for qwen3_5), so the
+  # baseline row above is exactly the number it has to beat.
+  if [[ -n "$MTP" && "$e" == "speccheck" ]]; then
+    fm="$RUNDIR/bench-$stamp-$e-mtp$MTP.jsonl"
+    echo "=== engine=$e+mtp$MTP threads=$THREADS ==="
+    "$py" "$here/bench/run.py" --engine "$e" --mtp "$MTP" --jsonl "$fm" "${args[@]}"
+    files+=("$fm")
+  fi
 done
 
 echo

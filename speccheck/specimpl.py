@@ -304,8 +304,11 @@ NEGATIVE: set[str] = set()
 
 
 def attention(w: Weights, l: int, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-              kv: dict, dbg: dict | None = None, softmax: str = "full"):
-    p = f"model.language_model.layers.{l}.self_attn."
+              kv: dict, dbg: dict | None = None, softmax: str = "full",
+              prefix: str | None = None):
+    # `prefix` lets the MTP block (S09) reuse this code with its own weights;
+    # prefix=None is the ordinary target layer.
+    p = prefix if prefix is not None else f"model.language_model.layers.{l}.self_attn."
     T = x.shape[0]
     qg = x @ w.p[p + "q_proj.weight"].t()                       # S05.1
     qg = qg.view(T, N_Q, D_HEAD * 2)
@@ -373,8 +376,8 @@ def attention(w: Weights, l: int, x: torch.Tensor, cos: torch.Tensor, sin: torch
     return gated @ w.p[p + "o_proj.weight"].t()
 
 
-def mlp(w: Weights, l: int, x: torch.Tensor) -> torch.Tensor:
-    p = f"model.language_model.layers.{l}.mlp."                 # S03.3
+def mlp(w: Weights, l: int, x: torch.Tensor, prefix: str | None = None) -> torch.Tensor:
+    p = prefix if prefix is not None else f"model.language_model.layers.{l}.mlp."  # S03.3
     gate = x @ w.p[p + "gate_proj.weight"].t()
     up = x @ w.p[p + "up_proj.weight"].t()
     # HF-ref applies silu and the gate product in the activation dtype (bf16).
@@ -450,6 +453,24 @@ class Forward:
 
     def logits(self, normed: torch.Tensor) -> torch.Tensor:
         return normed @ self.w.p["model.language_model.embed_tokens.weight"].t()
+
+    def snapshot(self) -> dict:
+        """S08.5 rollback point. Cheap by design: the decode path never mutates a
+        state tensor in place - `gdn` returns a new `S` and KV is appended to a list -
+        so saving the dict/list references is enough to undo a speculative step. An
+        engine that updates state in place needs a real double buffer instead."""
+        return {"P": self.P,
+                "rec": dict(self.rec),
+                "conv_win": dict(self.conv_win),
+                "kv": {l: {n: list(v.get(n, [])) for n in ("k", "v")}
+                       for l, v in self.kv.items()}}
+
+    def restore(self, snap: dict):
+        self.P = snap["P"]
+        self.rec = dict(snap["rec"])
+        self.conv_win = dict(snap["conv_win"])
+        self.kv = {l: {n: list(v.get(n, [])) for n in ("k", "v")}
+                   for l, v in snap["kv"].items()}
 
     def greedy(self, ids: list[int], steps: int, dbg_prefill=None, dbg_decode=None,
                stop_on_eos: bool = True):

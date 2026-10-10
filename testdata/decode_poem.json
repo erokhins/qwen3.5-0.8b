@@ -1,7 +1,8 @@
 {
   "schema": 1,
   "name": "decode_poem",
-  "goal": "decode throughput: tiny prompt, long generation",
+  "goal": "decode",
+  "description": "decode throughput: tiny prompt, long generation",
   "instruction": "Write a poem of exactly fourteen four-line stanzas about a container ship being loaded at night. Keep the language plain and concrete, number each stanza, and end every stanza with a question.",
   "content_file": null,
   "max_new_tokens": 512,

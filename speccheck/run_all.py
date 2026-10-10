@@ -84,6 +84,12 @@ def main():
         results.append(run(py, f"G3 chunk==recurrent {tag}",
                            [f"{G}/run_chunkcheck.py", "--fixture", tag]))
     results.append(run(py, "G-neg negative controls", [f"{G}/run_negative.py"]))
+    results.append(run(py, "G8 MTP (A-12/A-13 accept rate, lossless loop)",
+                       [f"{G}/run_mtp.py", "--k", "1", "--steps", "16" if args.quick
+                        else "24", "--prompts", "4" if args.quick else "6"]))
+    if not args.quick:
+        results.append(run(py, "G8 MTP k=2", [f"{G}/run_mtp.py", "--k", "2",
+                                              "--steps", "24", "--prompts", "4"]))
     results.append(run(py, "A-11/A-10 tokenizer+render",
                        [f"{G}/run_tok.py", "--fixtures", ",".join(
                            [t for t in fixtures if t not in ("p8", "prefix24dec8")])]))

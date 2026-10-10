@@ -66,13 +66,20 @@ def check_shape(t: dict, prompt_tok: int, gen_tok: int) -> str:
 class SpeccheckEngine:
     name = "speccheck"
 
-    def __init__(self, model_dir: Path, gdn_prefill: str, attn_softmax: str):
+    def __init__(self, model_dir: Path, gdn_prefill: str, attn_softmax: str,
+                 mtp_k: int = 0):
         from speccheck import textio
         from speccheck.specimpl import Forward, Weights
         self.textio = textio
         self.tok = textio.Tokenizer(model_dir)
         self.w = Weights(model_dir)
         self.f = Forward(self.w, gdn_form=gdn_prefill, attn_softmax=attn_softmax)
+        self.mtp_k = mtp_k
+        self.m = None
+        if mtp_k:
+            from speccheck.mtp import MTPDraft
+            self.m = MTPDraft(self.w)
+            self.name = f"speccheck+mtp{mtp_k}"
         self.weight_bytes = sum(t.numel() * t.element_size() for t in self.w.p.values())
 
     def render(self, text: str) -> list[int]:
@@ -80,6 +87,8 @@ class SpeccheckEngine:
 
     def reset(self):
         self.f.reset()
+        if self.m is not None:
+            self.m.reset()
 
     def prefill(self, ids: list[int]) -> int:
         return int(self.f.logits(self.f.prefill(torch.tensor(ids)))[-1].argmax())
@@ -148,6 +157,31 @@ def run_test(eng, t: dict, reps: int, max_new: int | None) -> dict:
     rows, preview = [], ""
     for r in range(reps):
         eng.reset()
+        if getattr(eng, "mtp_k", 0):
+            # One timed call: greedy_mtp does the prefill and the speculative loop, and
+            # reports how much of the wall time was prefill via `timer`.
+            from speccheck.mtp import greedy_mtp
+            timer: dict = {}
+            t_all = time.monotonic()
+            out, st = greedy_mtp(eng.f, eng.m, ids, limit - 1, k=eng.mtp_k, timer=timer)
+            total = time.monotonic() - t_all
+            prefill_s = timer.get("prefill_s", 0.0)
+            decode_s = max(total - prefill_s, 1e-9)
+            stop = "eos" if out and out[-1] in EOS_IDS else "max_new"
+            n_dec = max(len(out) - 1, 0)
+            rows.append({"prompt_tokens": len(ids), "prefill_s": prefill_s,
+                         "gen_tokens": len(out), "decode_steps": n_dec,
+                         "decode_s": decode_s, "stop": stop,
+                         "prefill_tok_s": len(ids) / prefill_s if prefill_s else 0.0,
+                         "decode_tok_s": n_dec / decode_s if decode_s else 0.0,
+                         "implied_gbps": (eng.weight_bytes * n_dec / decode_s / 1e9
+                                          if decode_s else 0.0),
+                         "accept": st["accepted"] / max(st["drafted"], 1),
+                         "forwards": st["target_forwards"],
+                         "tok_per_fwd": n_dec / max(st["target_forwards"], 1)})
+            if r == 0:
+                preview = eng.decode(out)
+            continue
         t0 = time.monotonic()
         nxt = eng.prefill(ids)
         prefill_s = time.monotonic() - t0
@@ -167,7 +201,9 @@ def run_test(eng, t: dict, reps: int, max_new: int | None) -> dict:
                      "prefill_tok_s": len(ids) / prefill_s if prefill_s else 0.0,
                      "decode_tok_s": n_dec / decode_s if decode_s else 0.0,
                      "implied_gbps": (eng.weight_bytes * n_dec / decode_s / 1e9
-                                      if decode_s else 0.0)})
+                                      if decode_s else 0.0),
+                     "accept": None, "forwards": n_dec + 1,
+                     "tok_per_fwd": 1.0})
         if r == 0:
             preview = eng.decode(out)
     med = lambda k: statistics.median(r[k] for r in rows)      # noqa: E731
@@ -186,15 +222,18 @@ def run_test(eng, t: dict, reps: int, max_new: int | None) -> dict:
            "decode_s": round(med("decode_s"), 3),
            "decode_tok_s": round(med("decode_tok_s"), 2),
            "implied_gbps": round(med("implied_gbps"), 1),
+           "accept": (round(med("accept"), 3) if med("accept") is not None else "-"),
+           "tok_per_fwd": round(med("tok_per_fwd"), 2),
            "ttft_s": round(med("prefill_s"), 3),
            "weight_GiB": round(eng.weight_bytes / GIB, 3),
            "output_chars": len(preview), "preview": preview[:1200],
            "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    print("%-10s %-18s prompt %5d tok | prefill %7.2fs %7.1f tok/s | gen %5d tok "
-          "decode %6.2fs %6.2f tok/s | %5.1f GB/s | stop=%s | %s"
+    print("%-16s %-18s prompt %5d tok | prefill %7.2fs %7.1f tok/s | gen %5d tok "
+          "decode %6.2fs %6.2f tok/s | %5.1f GB/s | accept %s | tok/fwd %.2f | stop=%s | %s"
           % (eng.name, t["name"], res["prompt_tokens"], res["prefill_s"],
              res["prefill_tok_s"], res["gen_tokens"], res["decode_s"],
-             res["decode_tok_s"], res["implied_gbps"], res["stop"], shape),
+             res["decode_tok_s"], res["implied_gbps"], res["accept"],
+             res["tok_per_fwd"], res["stop"], shape),
           flush=True)
     return res
 
@@ -208,9 +247,10 @@ def print_table(paths: list[str]):
     if not rows:
         sys.exit("no result rows to print")
     hdr = ("ENGINE", "TEST", "prompt", "prefill_s", "prefill tok/s", "gen tok",
-           "decode_s", "decode tok/s", "GB/s", "stop", "shape")
+           "decode_s", "decode tok/s", "GB/s", "accept", "tok/fwd", "stop", "shape")
     cols = ("engine", "test", "prompt_tokens", "prefill_s", "prefill_tok_s",
-            "gen_tokens", "decode_s", "decode_tok_s", "implied_gbps", "stop", "shape")
+            "gen_tokens", "decode_s", "decode_tok_s", "implied_gbps", "accept",
+            "tok_per_fwd", "stop", "shape")
     widths = [max(len(h), *(len(str(r.get(c, ""))) for r in rows)) for h, c in
               zip(hdr, cols)]
     print("  ".join(h.ljust(w) for h, w in zip(hdr, widths)))
@@ -239,6 +279,9 @@ def main():
     ap.add_argument("--no-text", action="store_true", help="skip printing the output")
     ap.add_argument("--gdn-prefill", default="chunk", choices=["recurrent", "chunk"])
     ap.add_argument("--attn-softmax", default="full", choices=["full", "online"])
+    ap.add_argument("--mtp", type=int, default=0, metavar="K",
+                    help="speculative decoding with K MTP draft tokens per target step "
+                         "(speccheck engine only)")
     ap.add_argument("--hf-full-logits", action="store_true",
                     help="let HF run lm_head over every prompt position (slower, "
                          "not the same quantity as speccheck)")
@@ -255,9 +298,13 @@ def main():
     torch.set_grad_enabled(False)
     torch.set_num_threads(int(__import__("os").environ.get("OMP_NUM_THREADS", "0") or 0))
     t0 = time.monotonic()
-    eng = (SpeccheckEngine(Path(args.model), args.gdn_prefill, args.attn_softmax)
+    eng = (SpeccheckEngine(Path(args.model), args.gdn_prefill, args.attn_softmax,
+                           mtp_k=args.mtp)
            if args.engine == "speccheck" else
            HFEngine(Path(args.model), full_logits=args.hf_full_logits))
+    if args.mtp and args.engine != "speccheck":
+        print("# note: --mtp applies to the speccheck engine only; transformers has no "
+              "MTP class for qwen3_5, so the HF reference cannot draft")
     print("# %s engine ready in %.1fs, weights %.2f GiB, threads %s"
           % (eng.name, time.monotonic() - t0, eng.weight_bytes / GIB,
              torch.get_num_threads() or "default"), flush=True)

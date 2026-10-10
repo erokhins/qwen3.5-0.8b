@@ -16,7 +16,9 @@ Gate scripts: `run_gates.py` (G0–G4 tensor parity; stops at the first token fl
 (blocked online softmax == reference softmax), `run_g5.py` (incremental == batch),
 `run_isolated.py` (G3i per-layer from the reference's own input), `run_chunkcheck.py`
 (G3 chunked == recurrent GDN), `run_negative.py` (injected bugs must be caught),
-`run_tok.py` (A-11 chat render + tokenizer, A-10 stop ids). `textio.py` holds the
+`run_tok.py` (A-11 chat render + tokenizer, A-10 stop ids), `run_mtp.py` (G8: MTP
+drafter - accept rate across the three readings of §09, plus a bit-exact losslessness
+check of the speculation loop). `textio.py` holds the
 engine-side renderer/tokenizer contract; `run_all.py` runs the whole suite and exits
 non-zero if anything fails.
 
@@ -63,6 +65,7 @@ narrows to one layer/op while debugging.
 | G0/G1 loader + shapes | PASS — 488 tensors → 335 loaded, 153 vision skipped, every shape asserted |
 | G7 greedy tokens (`run_g7.py`) | PASS — ids identical on `smoke`, `p8`, `p64`, `p300`, `dec8`, `prefix24dec8` (full reference continuation, stop-on-EOS live) |
 | G7 corpus (49 prompts × 24 tok) | PASS — speccheck 0.9124 vs the reference's own self-consistency floor 0.8776 (HF-sdpa vs HF-eager), so corpus equality is judged against the floor (A-18) |
+| G8 MTP (`run_mtp.py`) | PASS — speculation is bit-lossless when the verify reuses the decode path (output *and* target state), and §09's reading beats both wrong readings on accept rate: 0.642 vs 0.232 (pre-final-norm hidden) and 0.014 (swapped `fc`) |
 | A-11/A-10 tokenizer (`run_tok.py`) | PASS — independent renderer reproduces every fixture's prompt ids exactly; pins `248068` and `248069` by id, distinct from `248045` |
 | G2–G4 cascade tensors | PASS — 705 / 235 / 235 / 2115 tensors, worst `cos 0.99923`, worst `meanrel 3.3 %` |
 | G3i isolated per-layer | PASS — worst `cos 0.99995`, and raw projections **bit-exact** (`meanrel 0`) |
@@ -112,3 +115,10 @@ G3i. See `specification/10-reference-dumps-and-gates.md` §10.2 for the table.
   reference disagrees with a legal variant of itself at 0.8776 while speccheck reaches
   0.9124, so the gate is now relative to that floor, and tensor parity stops at the
   first token flip instead of reporting decorrelation as a failure.
+- G8 **falsified A-12**: the MTP block takes the hidden state *after* the final norm,
+  not before it (accept 0.642 vs 0.232). Nothing but the accept rate could tell us -
+  there is no reference dump for this block. Two bugs in my own speculation loop fell
+  out of making that measurement: the verify step kept re-feeding the first generated
+  token (`t` was never advanced, so output became "Paris Paris Paris…"), and the
+  rollback re-fed one token less than the invariant requires. Both are now pinned by a
+  bit-exact state comparison against a sequential replay, not by eyeballing text.

@@ -194,5 +194,17 @@ M0 in progress:
   GB/s `specification/07.4` assumes. That gap is the engine's job; these numbers are
   the baseline `G9` replaces.
 
-Next: MTP draft layer (§09) in `speccheck` to discharge A-12/A-13 with an accept-rate
-measurement, then the HIP scaffold.
+- **MTP (§09) implemented and measured.** `speccheck/mtp.py` runs the draft layer and a
+  greedy speculative loop; `run_mtp.py` (gate G8) shows the loop is bit-lossless when
+  verification reuses the decode path, and **falsified A-12**: the block takes the
+  hidden state *after* the final norm (accept 0.642 vs 0.232 pre-norm; a swapped `fc`
+  concat order collapses to 0.014, which is what makes the gate meaningful). On torch
+  CPU drafting still *loses* — 23.3 → 18.3 tok/s at k=1, 15.8 at k=2 — because the draft
+  pays a 248k-row tied `lm_head` as a slow bf16 GEMV and rejection costs a re-forward.
+  The roofline says k=1 should win ~1.15× at accept 0.58, so the conclusion is “not in
+  Python”, not “MTP does not help”: re-measure once `mtp_layer` is a kernel.
+  `./bench.sh --engine speccheck --mtp 1` prints both rows.
+- Gate suite is **26/26 PASS** via `speccheck/run_all.py`.
+
+Next: the HIP scaffold (`prototype/gdn_decode`, `prototype/lm_head_gemv`), each gated by
+G3i with state injection, then the first `mtp_layer` kernel and a re-measure of G8 speed.

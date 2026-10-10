@@ -1,7 +1,8 @@
 {
   "schema": 1,
   "name": "prefill_summarize",
-  "goal": "prefill throughput: one long prompt, short answer",
+  "goal": "prefill",
+  "description": "prefill throughput: one long prompt, short answer",
   "instruction": "Summarize the article below in five bullet points and one closing sentence.\n\n",
   "content_file": "summarize_source.txt",
   "max_new_tokens": 160,

@@ -39,7 +39,7 @@ outputs BF16 unless the spec pins F32.
 | **G5 incremental == batch** | prefill `T` then decode `D` equals one prefill of `T+D` (states, logits, sampled ids) | sampled ids exact; logits cos ≥ 0.9995 |
 | **G6 online softmax** | decode attention reduced block-wise with `(max, sum)` rescaling (§07.3) instead of one `softmax` — accumulators are per-row reduction state, never carried between steps | sampled ids exact; decode logits cos ≥ 0.9999 (bf16 cascade floor, §10.2) |
 | **G7 end-to-end greedy** | token-for-token match with HF-ref on every short fixture (`smoke`, `p8`, `p64`, `p300`, `dec8`, `prefix24dec8`); on the corpus, prefix agreement must be **at least the reference's own self-consistency floor** (§10.4, A-18) | exact on short fixtures; ≥ floor (measured 0.8776) on corpus |
-| **G8 MTP** | §09.5 sequence: shapes, single-step agreement, measured accept rate | reported, no hard bound |
+| **G8 MTP** | §09.5: bit-exact loop with sequential verify + accept rate across the three readings of §09 | accept ≥ 0.30 and the §09 reading strictly best; speculative output and target state bit-identical to plain greedy when verify reuses the decode path |
 | **G-neg negative controls** | `speccheck/gates/run_negative.py` injects three plausible bugs (wrong `q`/`gate` de-interleave, conv window written before it is read, GDN state not persisted) and asserts the pins *stop* matching, and still match when clean | each injection must drop its canary below cos 0.999 |
 | **G9 perf** | decode tok/s on this box vs the §07.4 roofline (~135 tok/s); `-O2` build only | report; investigate below 60 % |
 
