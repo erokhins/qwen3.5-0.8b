@@ -1,0 +1,262 @@
+/*
+ * prototype/lm_head_gemv/lm_head_gemv.hip.cpp — first real HIP kernel of the engine.
+ *
+ * Op: logits[v] = sum_k h[k] * W[v][k] for v in [0, V), with W the tied embedding/lm_head
+ * table (bf16, [V=248320, H=1024], 508.6 MB) and h one normed hidden row. §01.7 says this
+ * table is ~33 % of all decode bytes, and §07.4 flags a skinny argmax GEMV as a
+ * first-class optimization rather than a micro one, so this is the right first kernel to
+ * find out whether the HIP path can actually sit on the 237 GB/s the probe says is
+ * available.
+ *
+ * Shapes are fixed by the model (H = 1024), which allows the simple thing:
+ *   - one warp per vocab row. 32 lanes x 8 bf16 = 256 elements per step, so H = 1024 is
+ *     four steps of 16 B loads; a warp's loads are 512 contiguous bytes, i.e. coalesced.
+ *   - h (2 KiB bf16 / 4 KiB fp32) staged once into shared memory and read broadcast.
+ *   - fp32 accumulation, bf16 inputs: matches what speccheck does and what §09.4 measured.
+ *   - two output modes: `full` writes all V logits (1 MB, fp32); `fused` skips the logits
+ *     entirely and folds the argmax into the kernel with one atomicMax per row, keyed by a
+ *     sign-flipped float so integer max == float max. Greedy decoding never needs the
+ *     logits themselves (A-17), so this is the mode a decode loop would use.
+ *
+ * Build: prototype/lm_head_gemv/build.sh
+ * Run:   ./lm_head_gemv --w W.bin --h h.bin --out out.bin [--mode full|fused] [--iters N]
+ * Validate: prototype/lm_head_gemv/run.py (does all of the above and gates the result).
+ *
+ * W.bin is raw row-major bf16 (V*H*2 bytes); h.bin is fp32 H floats; out.bin is fp32 V
+ * floats (mode full) or two floats (mode fused: value, index).
+ */
+#include <hip/hip_bfloat16.h>
+#include <hip/hip_runtime.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <vector>
+
+#define CK(x)                                                                    \
+    do {                                                                         \
+        hipError_t e_ = (x);                                                     \
+        if (e_ != hipSuccess) {                                                  \
+            fprintf(stderr, "hip error %s at %s:%d\n", hipGetErrorString(e_),    \
+                    __FILE__, __LINE__);                                         \
+            exit(1);                                                             \
+        }                                                                        \
+    } while (0)
+
+#define HID 1024          // model hidden size (§00)
+#define ROWS_PER_BLOCK 8  // default: one warp per row, 8 rows per block
+
+// Sign-preserving monotonic map: order-preserving uint32 for IEEE754 floats.
+__device__ __forceinline__ unsigned fkey(float f) {
+    unsigned u;
+    memcpy(&u, &f, 4);
+    return (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+}
+
+__device__ __forceinline__ float unfkey(unsigned u) {
+    unsigned v = (u & 0x80000000u) ? (u & 0x7fffffffu) : ~u;
+    float f;
+    memcpy(&f, &v, 4);
+    return f;
+}
+
+// HIP takes the shuffle mask as a 64-bit value (wave32 and wave64 both supported).
+#define FULL_MASK 0xffffffffffffffffull
+
+__global__ void lm_head_gemv_full(const hip_bfloat16* __restrict__ W,
+                                  const float* __restrict__ h, float* __restrict__ out,
+                                  int V, int rpb) {
+    __shared__ float hs[HID];
+    for (int i = threadIdx.x; i < HID; i += blockDim.x) hs[i] = h[i];
+    __syncthreads();
+
+    int row = blockIdx.x * rpb + (threadIdx.x >> 5);
+    int lane = threadIdx.x & 31;
+    if (row >= V) return;
+
+    const uint4* wrow = reinterpret_cast<const uint4*>(W + (size_t)row * HID);
+    float acc = 0.f;
+#pragma unroll
+    for (int v = lane; v < HID / 8; v += 32) {          // 128 uint4 per row, 4 per lane
+        uint4 u = wrow[v];
+        const hip_bfloat16* p = reinterpret_cast<const hip_bfloat16*>(&u);
+        const float* hp = &hs[v * 8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) acc += float(p[j]) * hp[j];
+    }
+#pragma unroll
+    for (int o = 16; o; o >>= 1) acc += __shfl_down_sync(FULL_MASK, acc, o);
+    if (lane == 0) out[row] = acc;
+}
+
+__global__ void lm_head_gemv_fused(const hip_bfloat16* __restrict__ W,
+                                   const float* __restrict__ h,
+                                   unsigned long long* __restrict__ best, int V, int rpb) {
+    __shared__ float hs[HID];
+    for (int i = threadIdx.x; i < HID; i += blockDim.x) hs[i] = h[i];
+    __syncthreads();
+
+    int row = blockIdx.x * rpb + (threadIdx.x >> 5);
+    int lane = threadIdx.x & 31;
+    if (row >= V) return;
+
+    const uint4* wrow = reinterpret_cast<const uint4*>(W + (size_t)row * HID);
+    float acc = 0.f;
+#pragma unroll
+    for (int v = lane; v < HID / 8; v += 32) {
+        uint4 u = wrow[v];
+        const hip_bfloat16* p = reinterpret_cast<const hip_bfloat16*>(&u);
+        const float* hp = &hs[v * 8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) acc += float(p[j]) * hp[j];
+    }
+#pragma unroll
+    for (int o = 16; o; o >>= 1) acc += __shfl_down_sync(FULL_MASK, acc, o);
+    // 248320 < 2^18, so 20 bits of index fit under 44 bits of float key: one atomic per
+    // row and no logits array at all.
+    if (lane == 0) {
+        unsigned long long key = ((unsigned long long)fkey(acc) << 20) | (unsigned)row;
+        atomicMax(best, key);
+    }
+}
+
+static std::vector<char> slurp(const std::string& p, size_t expect) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) {
+        fprintf(stderr, "cannot open %s\n", p.c_str());
+        exit(1);
+    }
+    std::vector<char> b(expect);
+    f.read(b.data(), expect);
+    if ((size_t)f.gcount() != expect) {
+        fprintf(stderr, "%s: wanted %zu bytes, got %lld\n", p.c_str(), expect,
+                (long long)f.gcount());
+        exit(1);
+    }
+    return b;
+}
+
+int main(int argc, char** argv) {
+    std::string wpath, hpath, opath, mode = "full";
+    int iters = 20;
+    int rows_per_block = ROWS_PER_BLOCK;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        auto next = [&]() { return std::string(argv[++i]); };
+        if (a == "--w") wpath = next();
+        else if (a == "--h") hpath = next();
+        else if (a == "--out") opath = next();
+        else if (a == "--mode") mode = next();
+        else if (a == "--iters") iters = atoi(next().c_str());
+        else if (a == "--rows") rows_per_block = atoi(next().c_str());
+        else {
+            fprintf(stderr, "unknown arg %s\n", a.c_str());
+            return 1;
+        }
+    }
+
+    // V is implied by the weight file size: bf16, row-major, hidden = 1024.
+    std::ifstream wf(wpath, std::ios::binary | std::ios::ate);
+    size_t wbytes = (size_t)wf.tellg();
+    int V = (int)(wbytes / (HID * 2));
+    printf("W %zu MiB (%d rows x %d) | mode %s | rows/block %d\n", wbytes >> 20, V, HID,
+           mode.c_str(), rows_per_block);
+
+    auto hbuf = slurp(hpath, HID * sizeof(float));
+
+    // The load path the engine will use: read shards into pinned host memory, then one
+    // hipMemcpy per shard (devices/strix-halo-unified-memory.md, ~76-82 GB/s).
+    char* hw = nullptr;
+    CK(hipHostMalloc(&hw, wbytes));
+    {
+        std::ifstream f(wpath, std::ios::binary);
+        f.read(hw, wbytes);
+    }
+    hip_bfloat16* dw = nullptr;
+    CK(hipMalloc(&dw, wbytes));                       // > carve-out, lands in GTT
+    float* dh = nullptr;
+    CK(hipMalloc(&dh, HID * sizeof(float)));
+    CK(hipMemcpy(dh, hbuf.data(), HID * sizeof(float), hipMemcpyHostToDevice));
+
+    auto t0 = std::chrono::steady_clock::now();
+    CK(hipMemcpy(dw, hw, wbytes, hipMemcpyHostToDevice));
+    auto t1 = std::chrono::steady_clock::now();
+    printf("weight upload %.1f ms (%.1f GB/s)\n",
+           std::chrono::duration<double, std::milli>(t1 - t0).count(),
+           wbytes / std::chrono::duration<double>(t1 - t0).count() / 1e9);
+
+    float* dout = nullptr;
+    unsigned long long* dbest = nullptr;
+    bool fused = mode == "fused";
+    if (fused) {
+        CK(hipMalloc(&dbest, sizeof(unsigned long long)));
+        CK(hipMemset(dbest, 0, sizeof(unsigned long long)));
+    } else {
+        CK(hipMalloc(&dout, (size_t)V * sizeof(float)));
+    }
+
+    int threads = 32 * rows_per_block;
+    int blocks = (V + rows_per_block - 1) / rows_per_block;
+    auto launch = [&]() {
+        if (fused)
+            lm_head_gemv_fused<<<blocks, threads>>>(dw, dh, dbest, V, rows_per_block);
+        else
+            lm_head_gemv_full<<<blocks, threads>>>(dw, dh, dout, V, rows_per_block);
+    };
+
+    launch();  // first touch: pages fault in here, which is why timing starts after it
+    CK(hipGetLastError());
+    CK(hipDeviceSynchronize());
+
+    double best = 1e30;
+    for (int i = 0; i < iters; ++i) {
+        hipEvent_t s, e;
+        CK(hipEventCreate(&s));
+        CK(hipEventCreate(&e));
+        CK(hipEventRecord(s));
+        launch();
+        CK(hipEventRecord(e));
+        CK(hipEventSynchronize(e));
+        float ms = 0.f;
+        CK(hipEventElapsedTime(&ms, s, e));
+        best = std::min(best, (double)ms);
+        CK(hipEventDestroy(s));
+        CK(hipEventDestroy(e));
+    }
+    double bytes = (double)wbytes + (fused ? 8.0 : (double)V * 4);
+    printf("gemv %.3f ms -> %.1f GB/s (%.2f%% of the 237 GB/s probe)\n", best,
+           bytes / (best / 1e3) / 1e9, bytes / (best / 1e3) / 237e9 * 100.0);
+    printf("RESULT mode=%s ms=%.4f gbs=%.1f rows=%d h=%d rows_per_block=%d\n",
+           mode.c_str(), best, bytes / (best / 1e3) / 1e9, V, HID, rows_per_block);
+
+    if (fused) {
+        unsigned long long key = 0;
+        CK(hipMemcpy(&key, dbest, 8, hipMemcpyDeviceToHost));
+        unsigned kb = (unsigned)(key >> 20);
+        unsigned vb = (kb & 0x80000000u) ? (kb & 0x7fffffffu) : ~kb;
+        float val;
+        memcpy(&val, &vb, 4);
+        unsigned idx = (unsigned)(key & 0xfffff);
+        printf("argmax %u (%.4f)\n", idx, val);
+        FILE* f = fopen(opath.c_str(), "wb");
+        float outv[2] = {val, (float)idx};
+        fwrite(outv, 4, 2, f);
+        fclose(f);
+    } else {
+        std::vector<float> hout(V);
+        CK(hipMemcpy(hout.data(), dout, (size_t)V * 4, hipMemcpyDeviceToHost));
+        FILE* f = fopen(opath.c_str(), "wb");
+        fwrite(hout.data(), 4, V, f);
+        fclose(f);
+    }
+    CK(hipFree(dw));
+    CK(hipFree(dh));
+    if (dout) CK(hipFree(dout));
+    if (dbest) CK(hipFree(dbest));
+    CK(hipHostFree(hw));
+    return 0;
+}

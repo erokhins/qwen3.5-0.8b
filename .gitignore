@@ -65,3 +65,10 @@ tmp/
 .idea/
 .vscode/
 .DS_Store
+# Prototype build output ONLY, never sources: build.sh writes the binary next to
+# its source at prototype/<op>/<op>. A bare `prototype/**/<op>` matches the
+# DIRECTORY as well and silently ignores the whole op directory — which is how
+# lm_head_gemv's sources vanished from git. Name the binary path exactly and add
+# one line per new op (or build into prototype/<op>/build/, already covered).
+prototype/lm_head_gemv/lm_head_gemv
+*.o
