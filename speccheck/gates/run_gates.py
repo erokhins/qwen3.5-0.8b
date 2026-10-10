@@ -84,6 +84,34 @@ def metrics(eng: np.ndarray, ref: np.ndarray):
     return cos, maxrel, meanrel
 
 
+def step_of(name: str):
+    """decode step index of a tensor name, or None for prefill tensors."""
+    if not name.startswith("decode"):
+        return None
+    head = name.split(".", 1)[0]
+    try:
+        return int(head[6:])
+    except ValueError:
+        return None
+
+
+def first_divergence(ref: dict, eng: dict):
+    """First decode step at which the engine and the reference stop feeding each
+    other the same token. Tensor parity past that point is meaningless - the inputs
+    differ - so the gate compares up to it and reports the flip (A-18: greedy
+    continuations are chaotic beyond ~8 tokens in bf16 even for the reference
+    against itself)."""
+    steps = sorted({s for k in eng if (s := step_of(k)) is not None})
+    for s in steps:
+        mine = eng.get(f"decode{s}.logits_last")
+        nxt = ref.get(f"decode{s + 1}.input_ids")
+        if mine is None or nxt is None:
+            continue
+        if int(np.argmax(mine)) != int(np.squeeze(nxt)):
+            return s
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ref", default="data/refs/smoke")
@@ -99,6 +127,17 @@ def main():
     common = sorted(set(ref) & set(eng))
     if args.filter:
         common = [k for k in common if args.filter in k]
+
+    div = first_divergence(ref, eng)
+    if div is not None:
+        keep, dropped = [], []
+        for k in common:
+            s = step_of(k)
+            (dropped if (s is not None and s > div) else keep).append(k)
+        common = keep
+        print(f"NOTE token flip after decode{div}: engine and reference feed different "
+              f"tokens from decode{div+1} on, so {len(dropped)} tensors are not "
+              f"comparable (parity checked through decode{div}; see A-18)")
     only_ref = sorted(set(ref) - set(eng))
     only_eng = sorted(set(eng) - set(ref))
 

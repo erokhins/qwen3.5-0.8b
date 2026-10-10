@@ -7,7 +7,7 @@ correct and can be trusted as the contract for real kernels (gates G2-G7).
 
 Sections quoted as "S0x.y" refer to specification/0x-*.md.
 
-    .venv/bin/python -m engine.specimpl --prompt-ids-file data/refs/smoke/manifest.json
+    .venv/bin/python -m speccheck.specimpl --prompt-ids-file data/refs/smoke/manifest.json
 """
 from __future__ import annotations
 

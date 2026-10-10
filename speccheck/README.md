@@ -11,11 +11,14 @@ Two layers live here, and they are deliberately different beasts:
 | `specimpl.py` | torch-CPU implementation of `specification/02..07`, written **from the spec**, not from transformers. It is the executable form of the spec: if it agrees with the HF reference, the spec is right. It is also the numerical contract that real kernels are gated against, and the fallback path while kernels are missing. |
 | `gates/*.py` | §10 parity gates: speccheck tensors vs `tools/reference_dump.py` dumps. |
 
-Gate scripts: `run_gates.py` (G0–G4 tensor parity), `run_g7.py` (G7 sampled ids
-identical to `manifest.greedy_continuation`), `run_g6.py` (G6 blocked online softmax
-== reference softmax), `run_g5.py` (G5 incremental == batch), `run_isolated.py`
-(G3i per-layer from the reference's own input), `run_chunkcheck.py` (G3 chunked ==
-recurrent GDN), `run_negative.py` (G-neg injected bugs must be caught).
+Gate scripts: `run_gates.py` (G0–G4 tensor parity; stops at the first token flip),
+`run_g7.py` (G7 sampled ids; `--corpus`/`--floor` for corpus agreement), `run_g6.py`
+(blocked online softmax == reference softmax), `run_g5.py` (incremental == batch),
+`run_isolated.py` (G3i per-layer from the reference's own input), `run_chunkcheck.py`
+(G3 chunked == recurrent GDN), `run_negative.py` (injected bugs must be caught),
+`run_tok.py` (A-11 chat render + tokenizer, A-10 stop ids). `textio.py` holds the
+engine-side renderer/tokenizer contract; `run_all.py` runs the whole suite and exits
+non-zero if anything fails.
 
 Kernels (HIP/C++, the actual deliverable) will be added per-op under `../prototype/<op>/`
 and graduate here once their §10 gate passes. Nothing here is performance code —
@@ -48,7 +51,9 @@ narrows to one layer/op while debugging.
 | gate | result |
 |---|---|
 | G0/G1 loader + shapes | PASS — 488 tensors → 335 loaded, 153 vision skipped, every shape asserted |
-| G7 greedy tokens (`run_g7.py`) | PASS — ids identical to `manifest.greedy_continuation` on `smoke`, `p64`, `dec8` (full reference continuation, stop-on-EOS live) |
+| G7 greedy tokens (`run_g7.py`) | PASS — ids identical on `smoke`, `p8`, `p64`, `p300`, `dec8`, `prefix24dec8` (full reference continuation, stop-on-EOS live) |
+| G7 corpus (49 prompts × 24 tok) | PASS — speccheck 0.9124 vs the reference's own self-consistency floor 0.8776 (HF-sdpa vs HF-eager), so corpus equality is judged against the floor (A-18) |
+| A-11/A-10 tokenizer (`run_tok.py`) | PASS — independent renderer reproduces every fixture's prompt ids exactly; pins `248068` and `248069` by id, distinct from `248045` |
 | G2–G4 cascade tensors | PASS — 705 / 235 / 235 / 2115 tensors, worst `cos 0.99923`, worst `meanrel 3.3 %` |
 | G3i isolated per-layer | PASS — worst `cos 0.99995`, and raw projections **bit-exact** (`meanrel 0`) |
 | G3 chunk == recurrent | PASS — `cos ≥ 0.99999` per layer on 1-, 1- and 5-chunk fixtures (A-08) |
@@ -89,3 +94,11 @@ G3i. See `specification/10-reference-dumps-and-gates.md` §10.2 for the table.
   dead query — attention fell to cos 0.876 and matched the *previous* prefix. §07.3
   and A-17 now say explicitly that these accumulators are per-row reduction state,
   because a HIP kernel is one plausible design away from repeating this.
+- A-11 caught a **bug in the specification itself**: §02 listed 248068/248069 as
+  `<|im_start|>`/`<|im_end|>`. They are `<|im_start|>`/`<|im_end|>`, and because both render like
+  an im-start in a terminal the error was invisible — the renderer inherited it and
+  tokenization broke at id 13 of 17. §02 is corrected; literals are resolved by id.
+- A-18: the corpus half of G7 could never pass as written (95 % absolute). The
+  reference disagrees with a legal variant of itself at 0.8776 while speccheck reaches
+  0.9124, so the gate is now relative to that floor, and tensor parity stops at the
+  first token flip instead of reporting decorrelation as a failure.

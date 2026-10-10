@@ -168,10 +168,15 @@ M0 in progress:
   rather than a wrong formula — three candidate fixes were implemented and
   measured, none moved it (§10.2).
 - Gate set completed: G6 (blocked online softmax, A-17), G7 as an explicit
-  token-equality gate, and G-neg (`run_negative.py`) which injects three plausible
-  bugs and asserts the pins stop matching — a gate that cannot fail verifies nothing.
-  G6 immediately caught a spec-reading error: `(max, sum)` accumulators are per-row
-  reduction state, not per-request state (wrong version: attention cos 0.876).
+  token-equality gate (short fixtures) plus a corpus gate measured against the
+  reference's own self-consistency floor (A-18: HF-sdpa vs HF-eager = 0.8776,
+  speccheck = 0.9124 over 49 prompts × 24 tokens), A-11/A-10 tokenizer+render gate,
+  and G-neg (`run_negative.py`) which injects three plausible bugs and asserts the
+  pins stop matching — a gate that cannot fail verifies nothing.
+  `speccheck/run_all.py` runs all 24 gate invocations; currently **24/24 PASS**.
+- Two spec bugs found by the new gates: §02 had the wrong literals for 248068/248069
+  (`<|im_start|>`/`<|im_end|>` are distinct tokens from `<|im_start|>`), and §07.3’s
+  “running accumulators” wording invited a per-request reading that is wrong (A-17).
 - Stop rules implemented (A-10): greedy stops after emitting 248046, accepting
   248044 as a legacy stop.
 

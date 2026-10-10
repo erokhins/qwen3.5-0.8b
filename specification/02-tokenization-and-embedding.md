@@ -12,8 +12,8 @@
 | `<|endoftext|>` | 248044 | legacy end-of-text; equals `text_config.eos_token_id` (A-10) |
 | `<|im_start|>` | 248045 | turn start |
 | `<|im_end|>` | 248046 | turn end; `tokenizer.eos_token` |
-| `<|im_start|>` | 248068 | thinking-block start |
-| `<|im_end|>` | 248069 | thinking-block end |
+| `<|think|>` | 248068 | thinking-block start |
+| `<|end|>` | 248069 | thinking-block end |
 
 Vision/tool ids `248047 … 248067` exist in the table and are out of scope (§00.6).
 Stop condition for the engine: emit until `248046` (see A-10 for the `248044`
@@ -29,8 +29,15 @@ for m in messages:                     # concatenated with no extra separators
     "<|im_start|>" + role(m) + "\n" + content(m) + "<|im_end|>\n"
 then, if add_generation_prompt:
     "<|im_start|>assistant\n"
-     + ("<think>\n" if thinking else "<think>\n\n</think>\n\n")
+     + ("<|think|>\n" if thinking else "<|think|>\n\n<|end|>\n\n")
 ```
+
+> **Do not confuse the two start tokens.** 248045 is `<|im_start|>` and 248068 is
+`<|think|>`; some terminals render both as an im-start-looking glyph, so the mistake is
+invisible when reading and only shows up as a tokenization mismatch (position 13
+of the smoke prompt). `speccheck/gates/run_tok.py` pins the literals against the
+tokenizer's own `added_tokens_decoder`, and `speccheck/textio.py` resolves them by
+id rather than by literal for exactly that reason.
 
 `enable_thinking` is exactly this trailing branch `[MEASURED: chat_template.jinja
 lines ~149-152]`; the `preserve_thinking`/`reasoning_content` branches only matter

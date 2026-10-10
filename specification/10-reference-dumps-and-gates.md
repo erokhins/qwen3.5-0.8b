@@ -38,7 +38,7 @@ outputs BF16 unless the spec pins F32.
 | **G4 attention** | `L{ll}.attn.q_rope`, `k_rope`, `attn_out_pre_gate`, `out` for all 6 layers. A `q`/`gate` de-interleave error (§05.1) must fail here with cos ≪ 1 — the gate is required to actually discriminate | cos ≥ 0.999, meanrel ≤ 5 %; de-interleave-negative test must fail |
 | **G5 incremental == batch** | prefill `T` then decode `D` equals one prefill of `T+D` (states, logits, sampled ids) | sampled ids exact; logits cos ≥ 0.9995 |
 | **G6 online softmax** | decode attention reduced block-wise with `(max, sum)` rescaling (§07.3) instead of one `softmax` — accumulators are per-row reduction state, never carried between steps | sampled ids exact; decode logits cos ≥ 0.9999 (bf16 cascade floor, §10.2) |
-| **G7 end-to-end greedy** | token-for-token match with HF-ref on `smoke`, `p8`, `p64`, `p300`, `prefix24+dec8`, then ≥ 95 % prefix agreement on `corpus512` before any perf claim | exact / 95 % |
+| **G7 end-to-end greedy** | token-for-token match with HF-ref on every short fixture (`smoke`, `p8`, `p64`, `p300`, `dec8`, `prefix24dec8`); on the corpus, prefix agreement must be **at least the reference's own self-consistency floor** (§10.4, A-18) | exact on short fixtures; ≥ floor (measured 0.8776) on corpus |
 | **G8 MTP** | §09.5 sequence: shapes, single-step agreement, measured accept rate | reported, no hard bound |
 | **G-neg negative controls** | `speccheck/gates/run_negative.py` injects three plausible bugs (wrong `q`/`gate` de-interleave, conv window written before it is read, GDN state not persisted) and asserts the pins *stop* matching, and still match when clean | each injection must drop its canary below cos 0.999 |
 | **G9 perf** | decode tok/s on this box vs the §07.4 roofline (~135 tok/s); `-O2` build only | report; investigate below 60 % |
@@ -80,7 +80,34 @@ binding *correctness* gate for a single op is **G3i**, which is tight
 (`cos ≥ 0.9999, meanrel ≤ 1 %`) precisely because the cascade is removed. A kernel
 that fails G3i cannot be excused by "cascade noise".
 
-## 10.3 Rules
+## 10.4 Greedy chaos: why corpus-level token equality is not a gate
+
+The original requirement — “≥ 95 % prefix agreement on the corpus before any perf
+claim” — is not achievable by *any* implementation, and saying so is better than
+quietly moving the goalposts later. Measured on 49 plain-text prompts × 24 greedy
+tokens (`data/corpus.txt`, `tools/corpus_dump.py`):
+
+| comparison | mean prefix agreement |
+|---|---|
+| HF-ref sdpa vs HF-ref eager (**the reference against itself**, same weights, same bf16) | **0.8776** |
+| speccheck vs HF-ref eager | **0.9124** |
+
+Divergence starts after ~4–8 tokens and then the continuations are different texts,
+not different renderings of the same text: a near-tie argmax flips, and greedy
+decoding has no mechanism to recover. Consequences, all implemented:
+
+1. G7 is exact-match on short fixtures (where the sampled ids still agree) and
+   *relative* on the corpus: `run_g7.py --corpus corpus48 --floor corpus48sdpa`
+   requires speccheck to be at least as faithful to the oracle as a legal rounding
+   variant of the oracle is.
+2. `run_gates.py` stops comparing decode tensors at the first token flip
+   (`NOTE token flip after decodeN`) — beyond that the two sides are feeding each
+   other different tokens, so the tensors are not comparable.
+3. For the HIP engine, token equality on long generations is therefore **not** the
+   acceptance test; G3i (per-op), G5 (state invariant) and short-fixture G7 are.
+   Corpus agreement vs the floor is the regression tripwire.
+
+## 10.5 Rules
 
 - Every gate is a checked-in binary/script run by `ctest` (or a `run_all.sh` per
   `prototype/<op>/`), never a manual eyeball.
