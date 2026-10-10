@@ -77,22 +77,31 @@ consequences:
   (cf. the `lm_head_gemv` prototype in the old project);
 - below ~130 tok/s the engine is losing time in scheduling or kernel
   overheads, not memory — which is exactly the regime M0–M2 wants to be in.
+  (Measured ceiling is ~151 tok/s, see below: this threshold stays deliberately below
+  the roofline so missing it means a real bug, not ordinary inefficiency.)
 
-**Whose bandwidth is it?** 210–215 GB/s is what the platform can attain, which the iGPU
-is expected to get close to; a CPU-resident path does not get it all. Measured with
-`tools/bw_probe.py` (6 GiB read-only reduction, far above the 32 MiB L3): best
-**~117 GB/s at 16 threads**, 75–117 GB/s across thread counts and runs — run-to-run
-variance is large enough that it must be re-measured before being quoted. So the same
-1.55 GB/token arithmetic caps a *CPU-resident* single-stream bf16 decode at roughly
-**50–75 tok/s**, and the 135–140 figure only holds if the HIP kernels actually pull the
-platform bandwidth. The first `gdn_decode`/`lm_head_gemv` kernel must therefore ship with
-a HIP version of this probe; until then treat 137 tok/s as the GPU-side ceiling and
-~70 tok/s as the CPU-side one.
+**Measured, both sides** (`devices/strix-halo-memory-bandwidth.md`; probes in `tools/`).
+The iGPU and the CPU share one LPDDR5x pool, so these are alternatives, not additive:
 
-Same arithmetic, other levers at 215 GB/s (bytes/token in parentheses): 4-bit blocks
-with a bf16 logits table → 184 tok/s (1.17 GB); 4-bit everywhere → 220 (0.98); MTP at
-k=1, accept 0.58 → 161 (1.34 GB per round / 1.58 tokens, §09.5); batch 8 → ~980 tok/s
-aggregate at 123 tok/s per request (weights amortized, state traffic grows with B).
+| path | pure read | copy (r+w) | 1.565 GB/token ceiling |
+|---|---|---|---|
+| iGPU (`tools/bw_probe_hip.cpp`) | **237 GB/s** (233–240 over a block×thread sweep; 235 at 4 GiB) | 210 GB/s | **~151 tok/s** |
+| CPU (`tools/bw_probe.py`) | 75–117 GB/s | 59–101 GB/s | ~50–75 tok/s |
+| iGPU H2D / D2H | 76–82 / 63–70 GB/s | — | staging paths are bounded here |
+
+So the single-stream bf16 ceiling is **~151 tok/s**, not the 135–140 originally estimated:
+the old 210–215 GB/s figure behaves like a copy/STREAM number, while the access pattern
+a decode step actually has (stream weights once, read-only) reaches ~237 GB/s. The device
+reports 20 CUs and a 2 MiB L2, so nothing about a 1.5 GB weight stream is
+cache-friendly and the roofline really is bandwidth. A CPU-resident engine would have
+capped near 50–75 tok/s, which is a second argument for the GPU path on top of the
+compute one.
+
+Same arithmetic, other levers at 237 GB/s (bytes/token in parentheses): 4-bit blocks with
+a bf16 logits table → 202 tok/s (1.17 GB); 4-bit everywhere → 243 (0.98); 3-bit → 283
+(0.84); MTP k=1 at accept 0.58 → 181 (1.31); MTP k=2 at accept 0.41 → 162 (1.46); batch
+8 → ~1080 tok/s aggregate at ~135 per request (weights amortized, state traffic grows
+with B); 32k context costs ~30 tok/s (KV adds 0.4 GB/token).
 
 ## 07.5 Stop / continuation policy
 
