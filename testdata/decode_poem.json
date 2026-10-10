@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "decode_poem",
+  "goal": "decode throughput: tiny prompt, long generation",
+  "instruction": "Write a poem of exactly fourteen four-line stanzas about a container ship being loaded at night. Keep the language plain and concrete, number each stanza, and end every stanza with a question.",
+  "content_file": null,
+  "max_new_tokens": 512,
+  "expect": {
+    "max_prompt_tokens": 90,
+    "min_gen_tokens": 180
+  },
+  "notes": "Short prompt, long structured generation, so nearly all wall time is single-token steps: this is the number specification/07.4 rooflines against. Measured behaviour: the model writes a few stanzas and stops on its own around 250-300 tokens, so the floor is 180 and max_new_tokens is a ceiling, not a target."
+}

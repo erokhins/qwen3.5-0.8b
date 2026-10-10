@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "tests": ["prefill_summarize", "decode_poem"],
+  "conventions": {
+    "sampling": "greedy only (argmax), no temperature, no seeding",
+    "rendering": "chat template with thinking off, single user turn, add_generation_prompt",
+    "stop": "first generated id in the stop set (248046, 248044) or max_new_tokens",
+    "timing": "prefill = one forward over the whole prompt; decode = per-token forwards with cache; wall-clock monotonic, warm process, weights loaded before timing"
+  }
+}

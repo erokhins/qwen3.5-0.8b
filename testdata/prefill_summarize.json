@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "prefill_summarize",
+  "goal": "prefill throughput: one long prompt, short answer",
+  "instruction": "Summarize the article below in five bullet points and one closing sentence.\n\n",
+  "content_file": "summarize_source.txt",
+  "max_new_tokens": 160,
+  "expect": {
+    "min_prompt_tokens": 1200,
+    "max_gen_tokens": 160
+  },
+  "notes": "The answer is deliberately short so the measurement is dominated by the long prompt. ~1300 words of original prose about container shipping; tokenises to roughly 2k tokens with the Qwen BPE, which is enough for prefill to be several seconds on CPU and long enough that per-forward overhead does not dominate."
+}

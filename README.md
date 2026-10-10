@@ -101,9 +101,14 @@ README.md
 models/<modelname>/          # downloaded checkpoints (gitignored, read-only)
                              # i.e. qwen3.5-0.8b/models/Qwen3.5-0.8B/
 specification/               # math-only, library-agnostic forward-pass spec (≤200 lines each)
+speccheck/                   # independent Python implementation of that spec + all gates (NOT the engine)
+speccheck/chat.sh            # interactive chat on that path, with prefill/decode stats
+testdata/                    # engine-agnostic speed tests (long summarise, long poem) + schema
+bench/                       # engine-agnostic runner; bench.sh at the root drives it
 engine/                      # the engine: kernels, residency, scheduler, state pools, drivers
 prototype/                   # one subdir per op: standalone kernel + reference dump + gate
 engines/                     # cloned reference engines for cross-checking (gitignored, read-only)
+data/                        # reference dumps, fixtures, bench output (gitignored, regenerable)
 thinking/                    # gitignored per-chunk design notes (cross-session memory)
 devices/                     # measured platform facts
 ```
@@ -179,6 +184,15 @@ M0 in progress:
   “running accumulators” wording invited a per-request reading that is wrong (A-17).
 - Stop rules implemented (A-10): greedy stops after emitting 248046, accepting
   248044 as a legacy stop.
+
+- **Speed harness.** `./bench.sh` runs `testdata/` (one prefill-dominated test: summarise
+  a ~2200-token article; one decode-dominated test: write a long poem) against
+  `speccheck` and the HuggingFace reference in separate processes with the same thread
+  count, splitting prefill from per-token decode, and checks the two engines consumed
+  identical prompt ids. Median of 2, 8 threads: prefill 674 tok/s (speccheck) vs 946
+  (HF), decode 23.0 vs 22.6 tok/s, i.e. ~35 GB/s of weight reads against the ~210-215
+  GB/s `specification/07.4` assumes. That gap is the engine's job; these numbers are
+  the baseline `G9` replaces.
 
 Next: MTP draft layer (§09) in `speccheck` to discharge A-12/A-13 with an accept-rate
 measurement, then the HIP scaffold.
