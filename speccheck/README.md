@@ -20,6 +20,16 @@ Gate scripts: `run_gates.py` (G0–G4 tensor parity; stops at the first token fl
 engine-side renderer/tokenizer contract; `run_all.py` runs the whole suite and exits
 non-zero if anything fails.
 
+### Interactive driver
+
+`speccheck/chat.sh` runs a REPL on this path (torch CPU, bf16, greedy) and prints
+per-turn stats: prefill tok/s, decode tok/s, implied weight-read bandwidth, stop
+reason, prefix length and live state size. Multi-turn uses the §08 resume path — only
+the new turn's tokens are prefilled — and `--no-resume` forces a cold full prefill to
+compare. Numbers from this box: ~250 tok/s prefill, ~25 tok/s decode, ~38 GB/s weight
+reads, i.e. ~5× below the 210–215 GB/s the §07.4 roofline assumes. That gap is the
+reason the engine is a separate implementation, and it is the baseline G9 replaces.
+
 Kernels (HIP/C++, the actual deliverable) will be added per-op under `../prototype/<op>/`
 and graduate here once their §10 gate passes. Nothing here is performance code —
 `specimpl.py` runs a 17-token prefill + 2 decode steps in ~3 s on CPU with a
