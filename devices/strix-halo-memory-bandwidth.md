@@ -57,3 +57,34 @@ but not necessarily optimal access pattern; the L2 is only 2 MiB, so nothing abo
 Python driver thread touching memory during decode steals bandwidth from the kernel.
 Re-run both probes after any change to the memory carve-out (`ConfigInfo`/`rmem`) or
 BIOS memory settings.
+
+## 0b. There *is* something cache-friendly: the decode state
+
+`hipGetDeviceProperties` reports `l2CacheSize = 2 MiB` and that is the whole story for the
+weight stream — but a working set of ~18 MiB (all 18 GDN recurrent states, touched every
+decode step) behaves like it is cached. The same kernel and access pattern measured
+**918 GB/s at an 18 MiB working set and 255 GB/s when tiled to 108 MiB**
+(`prototype/gdn_decode`, see its results.md). Some larger cache the property query does not
+report is holding it.
+
+Practical consequences: state-carrying traffic is ~4× cheaper than a cold read predicts, and
+any bandwidth result in the 240–950 GB/s range must be re-measured with the working set
+tiled past ~64 MiB before it is called a bug or believed as a roofline.
+
+## 0c. Kernel launch floor (1.8 µs) and why HIP Graphs do not fix it
+
+`tools/launch_overhead_hip.cpp`, 1000–3000 iterations:
+
+| measurement | result |
+|---|---|
+| empty kernel, back-to-back | **1.75–2.08 µs** |
+| 1-block kernel writing one float | **1.85 µs** |
+| same 64 launches captured into one graph, replayed | 114.05 µs = **1.78 µs/kernel (1.0×)** |
+
+Graphs buy nothing, so the floor is the GPU's per-kernel dispatch cost rather than the host
+submit path. A decode step is ~200 kernel issues, so the floor is **~0.36 ms on top of the
+~6.5 ms of bandwidth** (5–6 %) — and unlike bandwidth, it is paid per *small* op, which is
+where it would actually bite: a 0.09 GB attention projection cannot hide 1.8 µs of dispatch.
+The lever is fusion (fewer, bigger kernels: fuse norms/gating into the GEMV epilogue), not
+graph capture. That is a change to the usual advice, so the probe exists to re-check it on
+any other ROCm part.

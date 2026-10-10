@@ -40,8 +40,14 @@ Decode ceiling for the target is bandwidth-bound, not FLOP-bound: text-only
 weights **1.5457 GB** bf16 + 18.7 MiB/request state ≈ 1.565 GB per token ÷ the
 measured 237 GB/s → **~151 tok/s** theoretical (§07.4, confirmed by
 `prototype/lm_head_gemv` at 242 GB/s); ~1.0 GB at Q4 → ~240 tok/s. Either way the
-0.8B case is memory-roofline-bound, and today's torch path (23 tok/s) is 6× below
-it — which is exactly the gap the engine exists to close.
+0.8B case is memory-roofline-bound, and today's torch path (23 tok/s, CPU, and it is the
+correctness oracle rather than a prototype engine) is 6× below it — which is exactly the
+gap the engine exists to close.
+
+**No end-to-end engine number exists yet.** `bench/performance-status.md` is the honest
+ledger: what has been measured on the GPU (three numbers), what fraction of a token that
+covers (**32 % of the bytes, at 102 % of roofline**), and what is projected from there
+(145–153 tok/s, with the assumptions listed). Read it before quoting a tokens/s figure.
 
 ## Target model — verified facts
 
