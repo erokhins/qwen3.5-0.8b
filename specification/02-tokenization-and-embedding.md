@@ -9,7 +9,7 @@
 
 | token | id | role |
 |---|---|---|
-| `` | 248044 | legacy end-of-text; equals `text_config.eos_token_id` (A-10) |
+| `<|endoftext|>` | 248044 | legacy end-of-text; equals `text_config.eos_token_id` (A-10) |
 | `<|im_start|>` | 248045 | turn start |
 | `<|im_end|>` | 248046 | turn end; `tokenizer.eos_token` |
 | `<|im_start|>` | 248068 | thinking-block start |
