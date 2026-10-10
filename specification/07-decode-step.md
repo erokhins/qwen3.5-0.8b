@@ -1,0 +1,84 @@
+# 07 — Decode step
+
+Single-token, incremental. Inputs: previous sampled token `y ∈ [0,V)`, current
+`prefix_len = P`, and the request state of §08.
+
+## 07.1 Order of operations
+
+```
+p    = P                                       (§02.4; 0-based position of the new token)
+x    = E[y]                                    ∈ ℝ^{1024}           §02.3
+for l = 0..23:
+    if linear_attention: x = §07.2 step_l(x)
+    else:                x = §07.3 step_l(x)
+    x ← residual adds per §03.2
+logits = RMSnorm_final(x) · Eᵀ                 ∈ ℝ^{V}             §03.4
+y'     = argmax_v logits[v]                    (ties: lowest id)
+P     ← P + 1
+```
+
+Both mixers consume `x ∈ ℝ^{1×1024}`; every norm, gate and add is the same
+formula as prefill with `T = 1`.
+
+## 07.2 GDN decode step (§04 with T = 1)
+
+```
+raw  = y_row · W_qkvᵀ ∈ ℝ^{6144};  z = ·W_zᵀ;  b_raw, a_raw ∈ ℝ^{16}
+u    = silu( raw + Σ_{j=0..2} C[:, j] ⊙ convwin[3−1−j] )        # window has 3 cols
+convwin ← roll(convwin, raw)                                   # drop oldest, append raw
+per head η:
+    β, γ from b_raw, a_raw                                      §04.3
+    q̃, k̃ L2-normalized (k̃ over d_k=128)                        §04.4
+    r = S_ηᵀ k̃ ;  Δv = β(v − r) ;  S_η ← γ·S_η + k̃⊗Δv ;  o_η = q̃ᵀS_η
+ô  = RMSNormGated(o, z)                                         §04.5
+out = concat_η(ô) · W_outᵀ
+```
+
+The conv window is updated from **pre-conv** `raw` values (§04.2), so the window
+write and the `u` computation must use the old window contents — an in-place
+ring update, not a write-then-read.
+
+## 07.3 Attention decode step (§05 with T = 1)
+
+```
+q, gate, k, v                                              §05.1
+q̂ = q_norm per head ; k̂ = k_norm per head                  §05.2
+q̂rot, k̂rot = rope(·, p)                                    §05.3
+append k̂rot, v to K^{(l)}, V^{(l)}  (slot P)
+for i = 0..7:  w = softmax_j( (q̂rot[i] · K^{(l)}[κ(i), j]) · s ⊕ mask )
+               a[i] = Σ_j w[j] · V^{(l)}[κ(i), j]
+out = ( concat_i a[i] ⊙ σ(gate) ) · W_oᵀ                    §05.6
+```
+
+`mask` allows `j ≤ P`. During decode the softmax is over `P+1` lanes; the engine
+may either recompute it over the whole prefix each step or keep running
+`(max, sum)` accumulators — if it does, §10 G6 pins the difference (running
+softmax rescaling changes F32 rounding only).
+
+## 07.4 Cost model (this box)
+
+Bytes read per token: all block weights `1.5457 − 0.5086 = 1.0371 GB` minus what
+is not touched — every block weight is touched, the embedding contributes one row
+(2 KB) — plus the tied logits matmul, which streams the whole `0.5086 GB` table.
+So ≈ **1.55 GB/token** (§01.7). At the measured attainable bandwidth of
+~210–215 GB/s (§00.5 sources) the roofline is ~**135–140 tok/s**. Two
+consequences:
+
+- the logits table is ~33 % of decode traffic; a skinny `argmax`-only GEMV that
+  never materializes `logits` is a first-class optimization, not a micro-optimization
+  (cf. the `lm_head_gemv` prototype in the old project);
+- below ~130 tok/s the engine is losing time in scheduling or kernel
+  overheads, not memory — which is exactly the regime M0–M2 wants to be in.
+
+## 07.5 Stop / continuation policy
+
+Greedy only in M0–M2: stop at `248046` (`<|im_end|>`, A-10), at end of context, or
+at the caller's token budget. The engine appends the sampled token to the
+transcript and advances `P`.
+
+## 07.6 Reference fixtures
+
+`tools/reference_dump.py --decode N` pins, per step `s`: `decode{s}.input_ids`,
+`decode{s}.logits_last`, plus the same per-layer operand names as prefill
+(`L{ll}.gdn.*`, `L{ll}.attn.*`, `L{ll}.s_in`, `L{ll}.s_out`) tagged `step=decode{s}`,
+and the post-step cache contents (`decode{s}.L{ll}.*`) used by §10 G5/G7.

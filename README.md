@@ -139,4 +139,19 @@ Conventions inherited from the old project:
 
 ## Status
 
-Initialized: layout + README + `.gitignore`. No engine code yet — M0 is next.
+M0 in progress:
+
+- checkpoint downloaded to `models/Qwen3.5-0.8B/` (1.747 GB, 488 tensors,
+  gitignored); `tools/weights_report.py` prints the authoritative shapes and
+  byte accounting straight from the safetensors header.
+- `specification/` written: index + 00–10 + `ASSUMPTIONS.md`, math-only, every
+  shape verified against the checkpoint and every non-obvious behavior tagged
+  `[REF]`/`[ASSUMPTION A-xx]` against the HF `qwen3_5` reference.
+- `tools/reference_dump.py` works: transformers 5.19 CPU reference, eager
+  attention, pins 297 tensors per run into `data/refs/<tag>/` (`smoke` fixture:
+  17-token chat prompt + 2 greedy decode steps, greedy continuation `The capital
+  of`). This is the oracle for the §10 gates.
+- `.venv/` has torch 2.14 CPU + transformers 5.19 (gitignored).
+
+Next: G0/G1 (loader + shape gate), then per-op kernels under `prototype/`
+starting with `gdn_decode` and `lm_head_gemv`, gated by §10 G3/G5.
