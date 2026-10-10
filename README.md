@@ -152,21 +152,28 @@ M0 in progress:
   17-token chat prompt + 2 greedy decode steps, greedy continuation `The capital
   of`). This is the oracle for the §10 gates.
 - `.venv/` has torch 2.14 CPU + transformers 5.19 (gitignored).
-- `engine/specimpl.py`: spec implemented from scratch in torch-CPU (not by
-  calling transformers) and `engine/gates/`: **all §10 gates pass** on four
+- `speccheck/specimpl.py`: spec implemented from scratch in torch-CPU (not by
+  calling transformers) and `speccheck/gates/`: **all §10 gates pass** on four
   fixtures (`smoke`, `p64`, `p300`=277 tok/5 chunks, `dec8`), with both the
-  recurrent (S04.4) and chunked (S04.7) GDN prefill.
+  recurrent (S04.4) and chunked (S04.7) GDN prefill. `engine/` is reserved for the
+  real HIP engine; `speccheck/` is the independent implementation that checks the
+  specification and will gate the kernels.
 - Bugs the gates caught (not code reading): the G0 tensor split (335 loaded /
   153 vision, not 344/144); the GDN recurrent state not persisted across calls,
   so decode restarted from zeros while prefill matched to 1e-5; MLP gate product
   in F32 instead of the activation dtype.
-- `engine/gates/run_isolated.py` (G3i) feeds the reference's own layer input into
+- `speccheck/gates/run_isolated.py` (G3i) feeds the reference's own layer input into
   one engine layer: projections come out **bit-exact**, worst residual 5–8 ‰.
   That is what proves the 1.5–3.3 % end-to-end drift is bf16 cascade amplification
   rather than a wrong formula — three candidate fixes were implemented and
   measured, none moved it (§10.2).
+- Gate set completed: G6 (blocked online softmax, A-17), G7 as an explicit
+  token-equality gate, and G-neg (`run_negative.py`) which injects three plausible
+  bugs and asserts the pins stop matching — a gate that cannot fail verifies nothing.
+  G6 immediately caught a spec-reading error: `(max, sum)` accumulators are per-row
+  reduction state, not per-request state (wrong version: attention cos 0.876).
+- Stop rules implemented (A-10): greedy stops after emitting 248046, accepting
+  248044 as a legacy stop.
 
-Next: HIP kernels per op under `prototype/` starting with `gdn_decode` and
-`lm_head_gemv`, each signed off with G3i (state injection for decode-step
-isolation is the harness gap to close first), then G9 throughput vs the ~135
-tok/s roofline.
+Next: MTP draft layer (§09) in `speccheck` to discharge A-12/A-13 with an accept-rate
+measurement, then the HIP scaffold.

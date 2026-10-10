@@ -50,10 +50,18 @@ for i = 0..7:  w = softmax_j( (q̂rot[i] · K^{(l)}[κ(i), j]) · s ⊕ mask )
 out = ( concat_i a[i] ⊙ σ(gate) ) · W_oᵀ                    §05.6
 ```
 
-`mask` allows `j ≤ P`. During decode the softmax is over `P+1` lanes; the engine
-may either recompute it over the whole prefix each step or keep running
-`(max, sum)` accumulators — if it does, §10 G6 pins the difference (running
-softmax rescaling changes F32 rounding only).
+`mask` allows `j ≤ P`. During decode the softmax is over `P+1` lanes. The engine may
+compute it as one `softmax` or as a blocked loop with `(max, sum)` rescaling —
+*online* softmax, the reduction a flash-decoding / split-K kernel uses — and §10 G6
+pins that the two agree.
+
+**`(max, sum)` state is per query row, never per request.** Every decode step has a
+new query, so its softmax is a new reduction: an accumulator carried from the
+previous step belongs to a query that no longer exists. Implemented that way by
+mistake here, decode step 1 produced attention with `cos 0.876` to the reference and
+matched the *previous* prefix instead (`0.9946`), then diverged token-wise. The only
+defensible reading of "running accumulators" is the within-row one, and §10 G6 tests
+exactly that (A-17).
 
 ## 07.4 Cost model (this box)
 

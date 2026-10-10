@@ -37,9 +37,10 @@ outputs BF16 unless the spec pins F32.
 | **G3i isolated per-layer** | feed the reference's own `L{ll}.s_in` into one engine layer, compare every pinned tensor of that layer (`run_isolated.py`). This is the gate a kernel is signed off against — no upstream cascade can enter | cos ≥ 0.9999, meanrel ≤ 1 % |
 | **G4 attention** | `L{ll}.attn.q_rope`, `k_rope`, `attn_out_pre_gate`, `out` for all 6 layers. A `q`/`gate` de-interleave error (§05.1) must fail here with cos ≪ 1 — the gate is required to actually discriminate | cos ≥ 0.999, meanrel ≤ 5 %; de-interleave-negative test must fail |
 | **G5 incremental == batch** | prefill `T` then decode `D` equals one prefill of `T+D` (states, logits, sampled ids) | sampled ids exact; logits cos ≥ 0.9995 |
-| **G6 running-softmax** | if running `(max,sum)` softmax accumulators are used (§07.3), tokens identical to full-prefix softmax | sampled ids exact on `corpus512` |
+| **G6 online softmax** | decode attention reduced block-wise with `(max, sum)` rescaling (§07.3) instead of one `softmax` — accumulators are per-row reduction state, never carried between steps | sampled ids exact; decode logits cos ≥ 0.9999 (bf16 cascade floor, §10.2) |
 | **G7 end-to-end greedy** | token-for-token match with HF-ref on `smoke`, `p8`, `p64`, `p300`, `prefix24+dec8`, then ≥ 95 % prefix agreement on `corpus512` before any perf claim | exact / 95 % |
 | **G8 MTP** | §09.5 sequence: shapes, single-step agreement, measured accept rate | reported, no hard bound |
+| **G-neg negative controls** | `speccheck/gates/run_negative.py` injects three plausible bugs (wrong `q`/`gate` de-interleave, conv window written before it is read, GDN state not persisted) and asserts the pins *stop* matching, and still match when clean | each injection must drop its canary below cos 0.999 |
 | **G9 perf** | decode tok/s on this box vs the §07.4 roofline (~135 tok/s); `-O2` build only | report; investigate below 60 % |
 
 ## 10.2 Metrics, drift, and what drift does *not* mean

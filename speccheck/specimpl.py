@@ -35,6 +35,14 @@ H_K = H_V = 16
 D_K = D_V = 128
 K_CONV = 4
 GDN_CHUNK = 64                              # S04.7 chunk size (reference default)
+EOS_PRIMARY = 248046                        # <|im_end|> — the stop token (A-10)
+EOS_LEGACY = 248044                         #  — accepted as stop too
+EOS_IDS = (EOS_PRIMARY, EOS_LEGACY)
+ONLINE_BLK = 64                             # S07.3 block width for online softmax
+
+# Test-only bug injection, set by gates/run_negative.py to prove the gates
+# discriminate (a gate that cannot fail verifies nothing). Empty in normal use.
+NEGATIVE: set[str] = set()
 ROPE_THETA = 1e7
 PARTIAL_ROT = 0.25
 ROT_DIM = int(D_HEAD * PARTIAL_ROT)          # 64
@@ -230,6 +238,10 @@ def gdn(w: Weights, l: int, x: torch.Tensor, dbg: dict | None = None, win=None, 
     # S04.2 causal depthwise conv (kernel 4), zero window before the request.
     C = w.p[p + "conv1d.weight"].reshape(CONV_CH, K_CONV)       # [6144,4]
     head = torch.zeros((K_CONV - 1, CONV_CH), dtype=raw.dtype) if win is None else win
+    if "conv_write_first" in NEGATIVE and T == 1:
+        # ring-buffer bug: the new value overwrites the oldest slot before the taps
+        # read it (S07.2 says read the old window, then roll).
+        head = torch.cat([head[1:], raw[:1]], 0)
     padded = torch.cat([head, raw], 0)
     new_win = padded[-(K_CONV - 1):].clone()                    # S07.2: roll, then read
     u = torch.zeros(raw.shape, dtype=torch.float32)
@@ -285,13 +297,21 @@ def gdn(w: Weights, l: int, x: torch.Tensor, dbg: dict | None = None, win=None, 
 
 
 # ----------------------------- attention block (S05) -------------------------
+# Test-only bug injection, used by `gates/run_negative.py` to prove the gates
+# actually discriminate (a gate that cannot fail verifies nothing). Empty in normal
+# use; each name reproduces a bug this project really had or nearly had.
+NEGATIVE: set[str] = set()
+
+
 def attention(w: Weights, l: int, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-              kv: dict, dbg: dict | None = None):
+              kv: dict, dbg: dict | None = None, softmax: str = "full"):
     p = f"model.language_model.layers.{l}.self_attn."
     T = x.shape[0]
     qg = x @ w.p[p + "q_proj.weight"].t()                       # S05.1
     qg = qg.view(T, N_Q, D_HEAD * 2)
     q_raw, gate = qg[..., :D_HEAD], qg[..., D_HEAD:]
+    if "deinterleave" in NEGATIVE:          # S05.1 says [q|gate]; this is the wrong split
+        q_raw, gate = gate, q_raw
     k_raw = (x @ w.p[p + "k_proj.weight"].t()).view(T, N_KV, D_HEAD)
     v_raw = (x @ w.p[p + "v_proj.weight"].t()).view(T, N_KV, D_HEAD)
 
@@ -307,8 +327,32 @@ def attention(w: Weights, l: int, x: torch.Tensor, cos: torch.Tensor, sin: torch
     P = K.shape[0]
 
     out = torch.zeros((T, N_Q, D_HEAD), dtype=x.dtype)
+    run = softmax == "online" and T == 1                      # S07.3 online reduction
     for i in range(N_Q):
         j = i // (N_Q // N_KV)                                  # kappa(i)
+        if run:
+            # Online (block-wise) softmax over the prefix for THIS query row: the same
+            # math as one torch.softmax, reduced in blocks with (max, sum)
+            # rescaling - which is what a split-K / flash-decoding kernel does.
+            # These accumulators are the reduction state of a single row; they are
+            # NOT carried into the next decode step, because the next step has a
+            # different query. An earlier version did carry them across steps and
+            # parity died: attention cos 0.876 after one step, and the output matched
+            # the *previous* prefix (0.9946) rather than the current one.
+            srow = ((qh[0, i, :][None, :] @ K[:, j, :].t()) * S_SCALE).float()[0]
+            m = torch.full((), float("-inf"), dtype=torch.float32)
+            l = torch.zeros((), dtype=torch.float32)
+            acc = torch.zeros(D_HEAD, dtype=torch.float32)
+            for lo in range(0, P, ONLINE_BLK):
+                blk = srow[lo:lo + ONLINE_BLK]
+                mb = torch.maximum(m, blk.max())
+                rescale = torch.exp(m - mb)
+                e = torch.exp(blk - mb)
+                l = l * rescale + e.sum()
+                acc = acc * rescale + e @ V[lo:lo + ONLINE_BLK, j, :].float()
+                m = mb
+            out[0, i, :] = (acc / l).to(x.dtype)
+            continue
         # Bit-faithful to the reference: the score matrix is produced and kept in
         # the activation dtype (bf16) and only the softmax runs in F32. Computing
         # scores in F32 skips a bf16 rounding of ~3e-3 per score and was a
@@ -342,9 +386,11 @@ def mlp(w: Weights, l: int, x: torch.Tensor) -> torch.Tensor:
 class Forward:
     """S03.5 chain with the S08 state; prefill then incremental decode."""
 
-    def __init__(self, w: Weights, gdn_form: str = "recurrent"):
+    def __init__(self, w: Weights, gdn_form: str = "recurrent", attn_softmax: str = "full"):
         self.w = w
         self.gdn_form = gdn_form            # S04.4 vs S04.7 for prefill
+        self.attn_softmax = attn_softmax    # S07.3 full torch softmax vs online reduction
+        self.generated: list[int] = []
         self.reset()
 
     def reset(self):
@@ -360,10 +406,13 @@ class Forward:
         h = rmsnorm_zc(x, w.p[pre + "input_layernorm.weight"])  # S03.2
         sub = {} if dbg is not None else None
         if l in GDN_LAYERS:
-            h, self.conv_win[l], self.rec[l] = gdn(
+            h, self.conv_win[l], s_new = gdn(
                 w, l, h, sub, self.conv_win[l], self.rec[l], form)
+            if "no_state_persist" in NEGATIVE:      # the historical bug, kept testable
+                s_new = None
+            self.rec[l] = s_new
         else:
-            h = attention(w, l, h, cos, sin, self.kv[l], sub)
+            h = attention(w, l, h, cos, sin, self.kv[l], sub, self.attn_softmax)
         if dbg is not None and sub:
             tag = "gdn." if l in GDN_LAYERS else "attn."
             for k, val in sub.items():
@@ -402,22 +451,27 @@ class Forward:
     def logits(self, normed: torch.Tensor) -> torch.Tensor:
         return normed @ self.w.p["model.language_model.embed_tokens.weight"].t()
 
-    def greedy(self, ids: list[int], steps: int, dbg_prefill=None, dbg_decode=None):
-        out = []
+    def greedy(self, ids: list[int], steps: int, dbg_prefill=None, dbg_decode=None,
+               stop_on_eos: bool = True):
+        """S07.5 greedy loop. `argmax` returns the lowest id on ties, as S07.1 pins.
+        With stop_on_eos the loop ends after emitting an EOS id (A-10: 248046, with
+        248044 accepted as legacy stop); the EOS token itself is part of the output."""
+        out: list[int] = []
         last = self.logits(self.prefill(torch.tensor(ids), dbg_prefill))[-1]
         nxt = int(last.argmax())
         if dbg_prefill is not None:
             dbg_prefill["logits_last"] = last[None, :]
         out.append(nxt)
         for s in range(steps):
+            if stop_on_eos and out[-1] in EOS_IDS:
+                break
             d = {} if dbg_decode is not None else None
             last = self.logits(self.decode(out[-1], d))[-1]
             nxt = int(last.argmax())
             out.append(nxt)
             if dbg_decode is not None:
                 dbg_decode[f"decode{s}"] = d | {"logits_last": last}
-        if dbg_prefill is not None:
-            pass
+        self.generated = out
         return out
 
 
@@ -430,6 +484,11 @@ def main():
     ap.add_argument("--keep-f32-scalars", action="store_true", help="A-02 A/B knob")
     ap.add_argument("--gdn-prefill", default="recurrent", choices=["recurrent", "chunk"],
                     help="S04.4 token loop or S04.7 chunked scan for the prefill pass")
+    ap.add_argument("--attn-softmax", default="full", choices=["full", "online"],
+                    help="S07.3: one torch.softmax over the prefix (full), or the same "
+                         "reduction block-wise with (max, sum) rescaling (online)")
+    ap.add_argument("--no-stop-eos", action="store_true",
+                    help="emit exactly --decode tokens instead of stopping at EOS (A-10)")
     ap.add_argument("--dump", default=None, help="write engine tensors here (npz, f32)")
     args = ap.parse_args()
 
@@ -437,15 +496,16 @@ def main():
     w = Weights(Path(args.model), keep_f32_scalars=args.keep_f32_scalars)
     print(f"G0/G1 ok: {len(w.all_names)} tensors, {len(w.p)} loaded, {len(w.skipped)} skipped")
     ids = json.loads(Path(args.prompt_ids_file).read_text())["prefill_ids"]
-    f = Forward(w, gdn_form=args.gdn_prefill)
+    f = Forward(w, gdn_form=args.gdn_prefill, attn_softmax=args.attn_softmax)
     dbg_p, dbg_d = {}, {}
-    gen = f.greedy(ids, args.decode, dbg_p, dbg_d)
+    gen = f.greedy(ids, args.decode, dbg_p, dbg_d, stop_on_eos=not args.no_stop_eos)
     print("greedy:", gen)
     if args.dump:
         blob = {k: np.asarray(v.detach().float().cpu()) for k, v in dbg_p.items()}
         for step, d in dbg_d.items():
             for k, v in d.items():
                 blob[f"{step}.{k}"] = np.asarray(v.detach().float().cpu())
+        blob["generated_ids"] = np.asarray(gen, dtype=np.int64)   # read by the G7 token gate
         Path(args.dump).parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(args.dump, **blob)
         print("wrote", args.dump, len(blob), "tensors")

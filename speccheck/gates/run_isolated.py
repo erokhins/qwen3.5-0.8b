@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from engine.gates.run_gates import classify, metrics, norm  # noqa: E402
-from engine.specimpl import (ATTN_LAYERS, GDN_LAYERS, Forward, Weights,  # noqa: E402
+from speccheck.specimpl import (ATTN_LAYERS, GDN_LAYERS, Forward, Weights,  # noqa: E402
                              rope_cs)
 
 

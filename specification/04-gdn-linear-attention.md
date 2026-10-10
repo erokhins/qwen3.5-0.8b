@@ -100,7 +100,7 @@ Per request per GDN layer: `S ∈ F32^{16×128×128}` and the conv window
 
 Implemented in the engine as `specimpl.gdn_chunk_scan` (UT-transform form, chunk
 64, F32 throughout, right-padding with `\beta = 0`, `g = 0`), selected by
-`--gdn-prefill chunk`. Verified by `engine/gates/run_chunkcheck.py`: chunk vs
+`--gdn-prefill chunk`. Verified by `speccheck/gates/run_chunkcheck.py`: chunk vs
 recurrent per GDN layer, `cos \ge 0.99999` on 1-, 1- and 5-chunk fixtures, and
 both equidistant from the reference (A-08 closed).
 

@@ -24,7 +24,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from engine.specimpl import GDN_LAYERS, ATTN_LAYERS, Forward, Weights  # noqa: E402
+from speccheck.specimpl import GDN_LAYERS, ATTN_LAYERS, Forward, Weights  # noqa: E402
 
 
 def cos(a: torch.Tensor, b: torch.Tensor) -> float:
