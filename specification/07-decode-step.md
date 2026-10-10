@@ -78,6 +78,22 @@ consequences:
 - below ~130 tok/s the engine is losing time in scheduling or kernel
   overheads, not memory — which is exactly the regime M0–M2 wants to be in.
 
+**Whose bandwidth is it?** 210–215 GB/s is what the platform can attain, which the iGPU
+is expected to get close to; a CPU-resident path does not get it all. Measured with
+`tools/bw_probe.py` (6 GiB read-only reduction, far above the 32 MiB L3): best
+**~117 GB/s at 16 threads**, 75–117 GB/s across thread counts and runs — run-to-run
+variance is large enough that it must be re-measured before being quoted. So the same
+1.55 GB/token arithmetic caps a *CPU-resident* single-stream bf16 decode at roughly
+**50–75 tok/s**, and the 135–140 figure only holds if the HIP kernels actually pull the
+platform bandwidth. The first `gdn_decode`/`lm_head_gemv` kernel must therefore ship with
+a HIP version of this probe; until then treat 137 tok/s as the GPU-side ceiling and
+~70 tok/s as the CPU-side one.
+
+Same arithmetic, other levers at 215 GB/s (bytes/token in parentheses): 4-bit blocks
+with a bf16 logits table → 184 tok/s (1.17 GB); 4-bit everywhere → 220 (0.98); MTP at
+k=1, accept 0.58 → 161 (1.34 GB per round / 1.58 tokens, §09.5); batch 8 → ~980 tok/s
+aggregate at 123 tok/s per request (weights amortized, state traffic grows with B).
+
 ## 07.5 Stop / continuation policy
 
 Greedy only in M0–M2: stop at `248046` (`<|im_end|>`, A-10), at end of context, or
