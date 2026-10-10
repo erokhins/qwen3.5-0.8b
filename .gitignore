@@ -1,0 +1,67 @@
+# --- Checkpoints: models/<modelname>/ are downloads, never committed ---
+models/
+*.safetensors
+*.gguf
+*.bin
+*.pt
+*.pth
+*.onnx
+*.msgpack
+*.npy
+*.npz
+*.h5
+*.ggml
+
+# --- Cloned reference engines (external read-only checkouts) ---
+engines/
+
+# --- Agent scratch / cross-session notes ---
+thinking/
+.junie/
+
+# --- Build output ---
+build/
+build-*/
+cmake_install.cmake
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# --- Reference-data dumps & benchmark output (regenerable, large) ---
+data/
+data_*/
+refs/
+dumps/
+results/
+*.log
+*.tmp
+tmp/
+.cache/
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+.DS_Store
