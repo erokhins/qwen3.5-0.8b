@@ -28,9 +28,21 @@ non-zero if anything fails.
 per-turn stats: prefill tok/s, decode tok/s, implied weight-read bandwidth, stop
 reason, prefix length and live state size. Multi-turn uses the §08 resume path — only
 the new turn's tokens are prefilled — and `--no-resume` forces a cold full prefill to
-compare. Numbers from this box: ~250 tok/s prefill, ~25 tok/s decode, ~38 GB/s weight
-reads, i.e. ~5× below the 210–215 GB/s the §07.4 roofline assumes. That gap is the
+compare. `--mtp K` turns on §09 speculative drafting (K draft tokens per target step,
+greedy verification); each turn then reports `mtp k=K accept accepted/drafted = rate`
+and `tok/forward` — the quantity that decides whether drafting pays — and `/stats` and
+the goodbye line aggregate them. Example (this box, accept 0.66, 1.24 tok/forward):
+
+    [prefill 23 tok 0.05s 459.8 tok/s | decode 39 tok 1.80s 21.6 tok/s |
+     33.4 GB/s weight reads | stop=max_new | resume | prefix 117 | state 20.7 MiB |
+     turn 1.9s | mtp k=1 accept 16/23 = 0.696 | tok/forward 1.30]
+
+Numbers without drafting: ~250 tok/s prefill, ~25 tok/s decode, ~38 GB/s weight reads,
+i.e. ~5× below the 210–215 GB/s the §07.4 roofline assumes. That gap is the
 reason the engine is a separate implementation, and it is the baseline G9 replaces.
+Note that with drafting the chat is bit-lossless but *slower* here (~21 vs ~24 tok/s)
+for the reasons §09.5 spells out — the accept stats are there to make that visible, not
+to claim a win.
 
 Kernels (HIP/C++, the actual deliverable) will be added per-op under `../prototype/<op>/`
 and graduate here once their §10 gate passes. Nothing here is performance code —

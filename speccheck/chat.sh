@@ -5,6 +5,8 @@
 #   speccheck/chat.sh --prompt "..."       # one answer, then exit
 #   speccheck/chat.sh --max-new 32         # cap generation length
 #   speccheck/chat.sh --attn-softmax online
+#   speccheck/chat.sh --mtp 2                # speculative decoding via the S09 MTP
+#                                            # block; each turn reports accept stats
 #
 # torch CPU, bf16, greedy. This is the implementation that validates
 # specification/02..07 — the HIP engine that replaces it will have its own driver

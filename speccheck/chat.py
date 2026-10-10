@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from speccheck import textio                                    # noqa: E402
+from speccheck.mtp import MTPDraft, greedy_mtp                 # noqa: E402
 from speccheck.specimpl import (ATTN_LAYERS, GDN_LAYERS, Forward,  # noqa: E402
                                 Weights)
 from speccheck.textio import Tokenizer                         # noqa: E402
@@ -67,6 +68,9 @@ def main():
     ap.add_argument("--no-resume", action="store_true",
                     help="force a cold full prefill every turn (compares against the "
                          "S08 resume path)")
+    ap.add_argument("--mtp", type=int, default=0, metavar="K",
+                    help="speculative decoding: draft K tokens per target step with the "
+                         "S09 MTP block (prints accept stats per turn)")
     args = ap.parse_args()
 
     torch.set_grad_enabled(False)
@@ -74,18 +78,21 @@ def main():
     w = Weights(Path(args.model))
     tok = Tokenizer(args.model)
     f = Forward(w, gdn_form=args.gdn_prefill, attn_softmax=args.attn_softmax)
+    m = MTPDraft(w) if args.mtp else None
     wbytes = sum(t.numel() * t.element_size() for t in w.p.values())
-    print("speccheck chat | torch CPU bf16 greedy | weights %.2f GiB, %d tensors "
+    print("speccheck chat | torch CPU bf16 greedy%s | weights %.2f GiB, %d tensors "
           "(%d skipped) | load %.1fs\ngdn=%s attn=%s stop_ids=%s max_new=%d\n"
           "commands: /stats /reset /raw <text> /quit"
-          % (wbytes / GIB, len(w.p), len(w.skipped), time.time() - t0,
+          % (f" + MTP k={args.mtp}" if args.mtp else "",
+             wbytes / GIB, len(w.p), len(w.skipped), time.time() - t0,
              args.gdn_prefill, args.attn_softmax, list(textio.EOS_IDS), args.max_new),
           flush=True)
 
     messages: list[dict] = []
     state_ids: list[int] = []          # ids actually in the engine state
     last_stop = ""
-    agg = dict(pre_n=0, pre_t=0.0, dec_n=0, dec_t=0.0, turns=0)
+    agg = dict(pre_n=0, pre_t=0.0, dec_n=0, dec_t=0.0, turns=0, m_acc=0, m_dra=0,
+               m_fwd=0)
 
     def turn(text: str, chat: bool = True):
         nonlocal state_ids, last_stop
@@ -119,23 +126,35 @@ def main():
             messages.pop()
             return
         tt = time.time()
-        logits = f.logits(f.prefill(torch.tensor(delta)))
+        normed = f.prefill(torch.tensor(delta))
         pre_t = time.time() - tt
-        first = int(logits[-1].argmax())
+        first = int(f.logits(normed)[-1].argmax())
 
         out: list[int] = []
         stop = "max_new"
+        mst = None
         tt = time.time()
-        nxt = first
-        while True:
-            out.append(nxt)
-            print(tok.decode([nxt]), end="", flush=True)
-            if nxt in textio.EOS_IDS:
+        if m is not None:
+            # Speculative path: greedy_mtp owns the loop, streams through `sink`, and
+            # reports draft/accept counts. The drafter's own KV persists across turns
+            # exactly like the target state does.
+            out, mst = greedy_mtp(f, m, None, steps=args.max_new - 1, k=args.mtp,
+                                  resume_from=(first, normed[-1:]),
+                                  sink=lambda x: print(tok.decode([x]), end="",
+                                                       flush=True))
+            if out and out[-1] in textio.EOS_IDS:
                 stop = "eos"
-                break
-            if len(out) >= args.max_new:
-                break
-            nxt = int(f.logits(f.decode(nxt))[-1].argmax())
+        else:
+            nxt = first
+            while True:
+                out.append(nxt)
+                print(tok.decode([nxt]), end="", flush=True)
+                if nxt in textio.EOS_IDS:
+                    stop = "eos"
+                    break
+                if len(out) >= args.max_new:
+                    break
+                nxt = int(f.logits(f.decode(nxt))[-1].argmax())
         dec_t = time.time() - tt
         state_ids = state_ids + delta + out
         last_stop = stop
@@ -149,12 +168,22 @@ def main():
         # ~210-215 GB/s the §07.4 roofline assumes; torch CPU on 8 threads is far
         # below it, which is exactly why the engine is a separate implementation.
         gbs = wbytes * n_dec / dec_t / 1e9 if n_dec > 0 and dec_t > 0 else None
+        mtxt = ""
+        if mst is not None:
+            ar = mst["accepted"] / max(mst["drafted"], 1)
+            tpf = n_dec / max(mst["target_forwards"], 1)
+            mtxt = (" | mtp k=%d accept %d/%d = %.3f | tok/forward %.2f"
+                    % (args.mtp, mst["accepted"], mst["drafted"], ar, tpf))
+            agg["m_acc"] += mst["accepted"]
+            agg["m_dra"] += mst["drafted"]
+            agg["m_fwd"] += mst["target_forwards"]
         print("  [prefill %d tok %.2fs %s | decode %d tok %.2fs %s | %s"
-              " | stop=%s | %s | prefix %d | state %.1f MiB | turn %.1fs]"
+              " | stop=%s | %s | prefix %d | state %.1f MiB | turn %.1fs%s]"
               % (len(delta), pre_t, rate(len(delta), pre_t), n_dec, dec_t,
                  rate(n_dec, dec_t),
                  "%.1f GB/s weight reads" % gbs if gbs else "-",
-                 stop, mode, f.P, state_mib(f), time.time() - t_start), flush=True)
+                 stop, mode, f.P, state_mib(f), time.time() - t_start, mtxt),
+              flush=True)
         agg.update(pre_n=agg["pre_n"] + len(delta), pre_t=agg["pre_t"] + pre_t,
                    dec_n=agg["dec_n"] + n_dec, dec_t=agg["dec_t"] + dec_t,
                    turns=agg["turns"] + 1)
@@ -175,24 +204,36 @@ def main():
             break
         if line == "/reset":
             f.reset()
+            if m is not None:
+                m.reset()
             state_ids, messages[:] = [], []
             print("[state reset]")
             continue
         if line == "/stats":
+            mt = ""
+            if agg["m_dra"]:
+                mt = (" | mtp accept %d/%d = %.3f | tok/forward %.2f"
+                      % (agg["m_acc"], agg["m_dra"], agg["m_acc"] / agg["m_dra"],
+                         agg["dec_n"] / max(agg["m_fwd"], 1)))
             print("  turns %d | prefill %d tok @ %s | decode %d tok @ %s | "
-                  "prefix %d | state %.1f MiB | %.2f GiB weights"
+                  "prefix %d | state %.1f MiB | %.2f GiB weights%s"
                   % (agg["turns"], agg["pre_n"], rate(agg["pre_n"], agg["pre_t"]),
                      agg["dec_n"], rate(agg["dec_n"], agg["dec_t"]), f.P,
-                     state_mib(f), wbytes / GIB))
+                     state_mib(f), wbytes / GIB, mt))
             continue
         if line.startswith("/raw "):
             turn(line[5:], chat=False)
             continue
         turn(line)
 
-    print("bye — %d turns | prefill %d tok @ %s | decode %d tok @ %s"
+    mt = ""
+    if agg["m_dra"]:
+        mt = " | mtp accept %.3f (%d/%d), %.2f tok/forward" % (
+            agg["m_acc"] / agg["m_dra"], agg["m_acc"], agg["m_dra"],
+            agg["dec_n"] / max(agg["m_fwd"], 1))
+    print("bye — %d turns | prefill %d tok @ %s | decode %d tok @ %s%s"
           % (agg["turns"], agg["pre_n"], rate(agg["pre_n"], agg["pre_t"]),
-             agg["dec_n"], rate(agg["dec_n"], agg["dec_t"])))
+             agg["dec_n"], rate(agg["dec_n"], agg["dec_t"]), mt))
 
 
 if __name__ == "__main__":

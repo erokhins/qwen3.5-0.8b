@@ -96,7 +96,7 @@ def _timed(fn, timer: dict | None, key: str):
 
 def greedy_mtp(f: Forward, m: MTPDraft, ids: list[int], steps: int, k: int = 1,
                stop_on_eos: bool = True, verify: str = "batch",
-               timer: dict | None = None):
+               timer: dict | None = None, sink=None, resume_from=None):
     """Greedy target + k-token MTP draft per target step (§09.4).
 
     Invariant at the top of each iteration: `t = out[-1]` is the last emitted token at
@@ -112,6 +112,10 @@ def greedy_mtp(f: Forward, m: MTPDraft, ids: list[int], steps: int, k: int = 1,
     `verify="steps"` feeds them one at a time through the ordinary decode path, which
     is the same arithmetic as plain greedy, so G8a can test positions and rollback
     exactly.
+
+    `sink(tok)` is called for every emitted token in order, which is what lets the chat
+    driver stream while speculating; `resume_from=(first_tok, normed_row)` skips the
+    prefill for callers that already ran one.
     """
     stats = dict(target_forwards=0, drafted=0, accepted=0, bonus=0, verify_tokens=0)
 
@@ -129,10 +133,19 @@ def greedy_mtp(f: Forward, m: MTPDraft, ids: list[int], steps: int, k: int = 1,
             tgt.append(int(f.logits(last)[-1].argmax()))
         return last, tgt
 
-    normed = _timed(lambda: f.prefill(torch.tensor(ids)), timer, "prefill_s")
-    stats["target_forwards"] += 1
-    t = int(f.logits(normed)[-1].argmax())
+    if resume_from is None:
+        normed = _timed(lambda: f.prefill(torch.tensor(ids)), timer, "prefill_s")
+        stats["target_forwards"] += 1
+        t = int(f.logits(normed)[-1].argmax())
+    else:
+        # The caller already prefilled (the chat driver keeps the S08 resume path across
+        # turns) and hands over the first sampled token plus the normed hidden row.
+        t, normed = resume_from
     out = [t]
+    emitted = 0
+    if sink is not None:
+        sink(t)
+    emitted = 1
     h = f.x_final[-1:] if m.h_source == "pre_norm" else normed[-1:]
     while len(out) < steps + 1 and not (stop_on_eos and out[-1] in EOS_IDS):
         q = f.P                                   # position of t (not yet consumed)
@@ -157,6 +170,10 @@ def greedy_mtp(f: Forward, m: MTPDraft, ids: list[int], steps: int, k: int = 1,
         stats["bonus"] += 1
         out.extend(drafts[:a])
         out.append(tgt[a] if a < k else tgt[k])
+        if sink is not None:
+            for one in out[emitted:]:
+                sink(one)
+        emitted = len(out)
         t = out[-1]                              # next verify starts from here
     f.generated = out
     return out, stats
