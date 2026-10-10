@@ -15,6 +15,15 @@ lab-only subsystems, not to a fixable kernel bug. Here we keep the parts of
 that engine that are *shared with the whole Qwen3.5/3.6/3.8 family* and drop
 the parts that exist in Flash-Next only.
 
+## Scope: one model, and it is small
+
+**The only target is `Qwen/Qwen3.5-0.8B`, text-only.** See `AGENTS.md` for the full scope
+statement and the traps index. The part that keeps getting confused: the whole bf16
+checkpoint is **1.5457 GB ≈ 4 % of the device-visible memory pool**, so nothing in this
+project needs streaming weights, eviction, quantization-to-fit, or any capacity
+engineering. MoE / 35B-A3B / vision appear only as `[FUTURE]` device observations and are
+not scheduled work.
+
 ## Hardware baseline
 
 Framework Desktop, AMD Ryzen AI Max+ 395 (Strix Halo, `gfx1151`), 128 GB
@@ -23,13 +32,16 @@ LPDDR5x-8000 unified memory, single NUMA node.
 | quantity | value | consequence |
 |---|---|---|
 | OS-visible RAM | ~125.1 GiB | whole checkpoint stays resident; no streaming tricks needed |
-| attainable memory bandwidth | ~210–215 GB/s | decode speed ≈ bytes read per token ÷ bandwidth |
-| measured facts | see `../qwen3.8-flash-next-old/devices/framework-desktop-ryzen-ai-max-395/` | reuse, do not re-measure |
+| **measured iGPU read bandwidth** | **~237–240 GB/s** (copy 210, CPU-side only 75–117) | `devices/strix-halo-memory-bandwidth.md`; decode speed ≈ bytes read per token ÷ bandwidth |
+| device-visible memory pool | ~34 GiB (system RAM via GTT, no real VRAM) | `devices/strix-halo-unified-memory.md` |
+| measured facts | `devices/` (this project) and `../qwen3.8-flash-next-old/devices/framework-desktop-ryzen-ai-max-395/` | reuse, do not re-measure |
 
 Decode ceiling for the target is bandwidth-bound, not FLOP-bound: text-only
-weights ≈ 1.3 GB bf16 → ~150 tok/s theoretical, ~0.5 GB at Q4 → far above what
-the runtime can schedule (i.e. at 0.8B we become **kernel/latency-bound**, which
-is exactly the regime we want for bring-up).
+weights **1.5457 GB** bf16 + 18.7 MiB/request state ≈ 1.565 GB per token ÷ the
+measured 237 GB/s → **~151 tok/s** theoretical (§07.4, confirmed by
+`prototype/lm_head_gemv` at 242 GB/s); ~1.0 GB at Q4 → ~240 tok/s. Either way the
+0.8B case is memory-roofline-bound, and today's torch path (23 tok/s) is 6× below
+it — which is exactly the gap the engine exists to close.
 
 ## Target model — verified facts
 

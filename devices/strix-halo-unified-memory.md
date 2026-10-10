@@ -20,8 +20,15 @@ Probes: `tools/bw_probe_hip.cpp`, `tools/mem_mode_probe_hip.cpp`. Reproduce with
     $ cat /sys/class/drm/card*/device/mem_info_gtt_total    # GTT = system RAM, GPU-mapped
     120259084288                     # ~112 GiB
     $ rocm-smi --showmeminfo vram    # same 2 GiB, ~1.97 GiB already used by the desktop
-    $ .venv/bin/python -c "import torch;print(torch.cuda.get_device_properties(0).total_memory)"
-    # HIP reports ~110 GiB: reservations and GTT are merged into one address space
+    $ /opt/rocm/bin/rocm-smi --showmeminfo vram | grep -i total
+    # HIP-side equivalent (there is no CUDA; the project .venv torch is CPU-only, so ask
+    # HIP from C++ or from a torch build with ROCm, not from this venv):
+    #   hipGetDeviceProperties(...).totalGlobalMem  -> ~110 GiB (reservation + GTT merged)
+
+Note on tooling: the project's `.venv` has a **CPU-only torch**, so nothing in Python can
+see the GPU. Every GPU measurement here is a `hipcc` binary. Also, HIP binaries need
+`-Wl,-rpath,/opt/rocm/lib` (or `LD_LIBRARY_PATH=/opt/rocm/lib`) or they die at load with
+`libamdhip64.so.7: cannot open shared object file`.
 
 ## Measured, per allocation mode (4 GiB buffers, read = grid-stride float4 sum)
 
@@ -47,8 +54,11 @@ Three things this table is telling us:
 
 ## The two real limits
 
-**Total device-visible memory is ~32–34 GiB per process, independent of granularity.**
+> **Scope note.** This model uses ~4 % of the pool (`AGENTS.md`). Nothing in the current
+> milestones depends on either limit; they are recorded because they would bind a larger
+> target, not because the engine must handle them.
 
+**Total device-visible memory is ~32–34 GiB per process, independent of granularity.**
 | test | result |
 |---|---|
 | one `hipMalloc` of 32 GiB | ok, 231 GB/s |
@@ -59,7 +69,7 @@ Three things this table is telling us:
 `GPU_MAX_HEAP_SIZE=100` and `GPU_MAX_ALLOC_SIZE=…` did not change it. It is a total-pool
 limit, not an allocation-size limit, and bandwidth is flat right up to the edge.
 
-Consequence for the roadmap: this model (1.55 GB) and even a 35B at 4-bit (~20 GB) fit
+**[FUTURE] consequence, not a current requirement:** this model (1.55 GB) and even a 35B at 4-bit (~20 GB) fit
 comfortably, but **bf16 35B-A3B (~66 GB) will not fit** in one process. M4 either
 quantizes or raises the carve-out with the `rmem` module (`ConfigInfo=`) / BIOS memory
 settings, which is a root change and must be re-measured with these probes afterwards.
@@ -67,7 +77,14 @@ settings, which is a root change and must be re-measured with these probes after
 **`hipMallocManaged` degrades silently near that limit.** At 4–24 GiB it hit 215–239 GB/s;
 at 32 GiB it dropped to **51.6 GB/s without erroring**. `hipMalloc` fails loudly in the
 same situation, which is the behaviour an engine wants. So: `hipMalloc` + explicit
-`hipMemcpy` for the weight pool; managed only for small host-shared control buffers.
+`hipMemcpy` for the weight pool; managed only for small host-shared control buffers. This
+one *does* apply today — it is an allocation-strategy rule, not a capacity question.
+
+**The pool is system RAM, so it competes.** `free -g` on this box shows tens of GiB in
+buff/cache; page-cache pressure and the desktop's own ~2 GiB of the reservation both come
+out of what is left. A kernel that reads 34 GiB while the page cache is full will be slower
+than the probe measured on an idle machine — re-measure after heavy I/O, and never benchmark
+while something else is touching memory.
 
 ## The recipe the engine will use
 

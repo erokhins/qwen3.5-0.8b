@@ -72,9 +72,13 @@ So ≈ **1.55 GB/token** (§01.7). At the measured attainable bandwidth of
 ~210–215 GB/s (§00.5 sources) the roofline is ~**135–140 tok/s**. Two
 consequences:
 
-- the logits table is ~33 % of decode traffic; a skinny `argmax`-only GEMV that
-  never materializes `logits` is a first-class optimization, not a micro-optimization
-  (cf. the `lm_head_gemv` prototype in the old project);
+- the logits table is ~33 % of decode traffic. **Corrected after measurement**
+  (`prototype/lm_head_gemv/results.md`): on the GPU a fused `argmax`-only GEMV is worth
+  ~1 %, because writing 1 MB of logits is nothing next to reading 485 MB — the table's
+  cost is the *read*, which no output form avoids. Fusing `argmax` is still worth doing,
+  for the reasons in §09/§07.5: greedy never needs the logits (A-17), and it removes a 1 MB
+  host copy plus a host-side argmax per token. On the *CPU* path the fused form remains a
+  first-class optimization, since there the logits materialization is real compute.
 - below ~130 tok/s the engine is losing time in scheduling or kernel
   overheads, not memory — which is exactly the regime M0–M2 wants to be in.
   (Measured ceiling is ~151 tok/s, see below: this threshold stays deliberately below

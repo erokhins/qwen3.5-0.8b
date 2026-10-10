@@ -109,6 +109,17 @@ decoding has no mechanism to recover. Consequences, all implemented:
 
 ## 10.5 Rules
 
+- **Bare dump names are last-writer-wins across phases.** `reference_dump.py` pins
+  `input_ids`, `pre_final_hidden`, `logits_last`, … with the same names in prefill *and*
+  every decode step, so a bare `*.npy` holds whichever phase ran last while the
+  `decodeN.`-prefixed copies survive separately. Consequence, and it cost a debugging
+  session: pairing `pre_final_hidden.npy` with `logits_last.npy` does **not** reproduce the
+  logits (cos 0.25) in a fixture that also contains decode steps. Anyone consuming a dump
+  as "the input that produced that output" must either take a `decodeN.`-prefixed pair or
+  re-run the reference live and self-check against `logits_last` first
+  (`prototype/lm_head_gemv/run.py::normed_row_from_reference` does exactly this).
+  Fixing the tool to namespace prefill names would invalidate every pinned fixture, so the
+  trap is documented rather than removed.
 - Every gate is a checked-in binary/script run by `ctest` (or a `run_all.sh` per
   `prototype/<op>/`), never a manual eyeball.
 - A gate that passes on `smoke` only is **not** passing: `p64`/`p300` are required
