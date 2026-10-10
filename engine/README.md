@@ -18,8 +18,14 @@ Python loop over 17×16 GDN sub-steps.
 .venv/bin/python tools/reference_dump.py --message "The capital of France is" \
     --decode 2 --tag smoke                     # oracle dumps -> data/refs/smoke/
 .venv/bin/python engine/specimpl.py --dump data/eng/smoke.npz    # engine tensors
-.venv/bin/python engine/gates/run_gates.py --json data/gates/smoke.json   # §10 gates
+.venv/bin/python engine/gates/run_gates.py --json data/gates/smoke.json   # §10 G0-G4,G7
+.venv/bin/python engine/gates/run_g5.py --split 8 --extend 5     # §08.6 invariant
 ```
+
+`run_g5.py` checks the invariant the engine's resume/preemption story rests on:
+prefill `T` then decode the rest must equal one batch pass of the whole sequence,
+in per-layer GDN state, conv window, KV, and final logits. It passes for
+`split ∈ {1,2,3,8,17}` (1–3 straddle the `k_conv-1` conv-window boundary).
 
 `run_gates.py` exits non-zero on any failure; `--report-only` prints numbers
 without failing, `--filter SUBSTR` narrows to one layer/op while debugging.
