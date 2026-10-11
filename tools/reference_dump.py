@@ -292,6 +292,39 @@ def main():
             mlp.down_proj.register_forward_hook(
                 sub_hook(i, "act", "silu(gate)*up = down_proj input", take_output=False))
 
+    # ---- projection operands (specification/01 §01.2 / §01.3) ----------------
+    # The nine text-path projection modules, each pinned at its own output, so a projection
+    # kernel is gated against the tensor it produces instead of against a derivative of it:
+    # gdn.mixed_qkv_pre_conv is in_proj_qkv transposed for the conv, gdn.o_pre_norm is after
+    # the gated RMSNorm, attn.q_rope after q_norm + rope, attn.attn_out_pre_gate *before*
+    # o_proj. Same module-hook mechanism as the MLP block above, so these pins exist for
+    # prefill (unprefixed) and for every decode step (decodeN.-prefixed) alike.
+    def proj_hook(i, which, note):
+        def hook(_m, _inp, o):
+            rec.pin(f"L{i:02d}.{which}.out", o, note)
+        return hook
+
+    GDN_PROJ = [
+        ("in_proj_qkv", "in_proj_qkv(x): [q key_dim | k key_dim | v value_dim], the conv operand"),
+        ("in_proj_z", "in_proj_z(x): gate of the gated RMSNorm, before the head reshape"),
+        ("in_proj_b", "in_proj_b(x): beta pre-activation per value head (sigmoid is downstream)"),
+        ("in_proj_a", "in_proj_a(x): decay pre-activation per value head (softplus+dt_bias downstream)"),
+        ("out_proj", "out_proj(gated_out): GDN block output, the residual addend"),
+    ]
+    ATTN_PROJ = [
+        ("q_proj", "q_proj(x): q and the output gate, interleaved per head as [8 heads][2 x 256]"),
+        ("k_proj", "k_proj(x): before k_norm and rope"),
+        ("v_proj", "v_proj(x): value states before the KV-cache write"),
+        ("o_proj", "o_proj(attn_out * sigmoid(gate)): attention block output, the residual addend"),
+    ]
+
+    for i in gdn_layers:
+        for which, note in GDN_PROJ:
+            getattr(layers[i].linear_attn, which).register_forward_hook(proj_hook(i, which, note))
+    for i in attn_layers:
+        for which, note in ATTN_PROJ:
+            getattr(layers[i].self_attn, which).register_forward_hook(proj_hook(i, which, note))
+
     # ---- build the input sequence ------------------------------------------
     seqs, sources = [], []
     for p in args.prompt:

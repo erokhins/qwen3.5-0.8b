@@ -150,6 +150,23 @@ decoding has no mechanism to recover. Consequences, all implemented:
   has no fixture until the hook is widened, and the first version of that hook read
   `down_proj`'s *output*, pinned it under the name `act`, and passed every self-check while
   pointing the gate at the wrong tensor (§03 / `prototype/mlp_gemv/results.md`).
+- **The projection operands are pinned as of W1, and unlike the MLP pins they exist for prefill
+  too.** Nine modules, `decode{N}.L{ii}.{in_proj_qkv,in_proj_z,in_proj_b,in_proj_a,out_proj,
+  q_proj,k_proj,v_proj,o_proj}.out` (unprefixed for the prefill pass), because what already existed
+  was a step downstream in every interesting case: `gdn.mixed_qkv_pre_conv` is `in_proj_qkv`
+  reshaped for the conv, `gdn.o_pre_norm` is after the gated RMSNorm, `attn.q_rope` after `q_norm`
+  and rope, and `attn.attn_out_pre_gate` is **before** `o_proj`. Gating a projection kernel against
+  a derivative of its output is how a transposed weight or a wrong head interleave survives a
+  review, so the direct pins came first.
+  Two facts about them are measured, not assumed (`/tmp/verify_proj_pins.py` at the time, rebuilt
+  from the pins plus checkpoint weights; worth folding into the dumper's self-check):
+  - `q_proj` is interleaved **per head** as `[8 heads][q 256 | gate 256]`. Reconstructing `q_rope`
+    from a contiguous-half split scores cos **−0.14** against the pin, so the layout cannot be
+    gotten quietly wrong (§05.1).
+  - the `self_attn` block-output pin the dumper intended (`L{ii}.attn.out`) **does not exist**:
+    `self_attn` is called with keyword arguments, so a positional-input hook sees nothing. Until
+    that hook is fixed, `o_proj.out` is the only pin of the attention block's output — and it is
+    the residual addend, which is what §03's residual chain needs anyway.
 - Never trust byte values from ad-hoc dumps in the old project
   (`../qwen3.8-flash-next-old/prototype/*/data`): shapes only, per its own
   `REFERENCE.md`.
