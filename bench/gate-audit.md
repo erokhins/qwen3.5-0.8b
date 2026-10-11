@@ -82,6 +82,46 @@ measures 52–97 of 2048 differing; limit is 41), and `proj_gemv`'s 2 % ndiff ha
 wrong kernel through — the rope case is caught bit-exactly by `reference.py::verify` upstream — but
 both are counts that look stronger than they are. Recorded so nobody tightens the wrong one.
 
+### G6 §10-G6 and §10-G3-smoke's bands are calibrated on an implementation accident, not on reference behaviour
+
+Both bands were tuned while speccheck's score matmul was silently running in **F32**. `apply_rope`
+promoted `qh`/`kh` to F32 (an F32 cos/sin table promotes the product), so `qh @ K.t()` was an F32
+matmul — the opposite of what §05.5 and the code's own comment at that line claim ("the score matrix
+is produced and kept in the activation dtype (bf16)"). The bands therefore encode speccheck's plumbing
+rather than anything the reference does.
+
+That is not speculation: it is the only explanation of the numbers. Restoring the pinned BF16 rope
+policy — which makes `qh`/`K` genuinely bf16, and is bit-exact against the pins in
+`prototype/attn_decode` — moved G6's dec8 decode-logits cos from 0.99991951 to 0.99989544 (threshold
+0.9999) and made §10-G3's chunk-vs-recurrent check on `smoke` fail at `L22.gdn.state_new`
+cos 0.99988423. Forcing **only the scores** back to F32 while keeping the pinned rope restored both:
+G6 0.99991511 PASS, G3-smoke PASS. Same model, same pins, same bands; the dtype moved them.
+
+Consequence: any future dtype change upstream of the score matmul moves these two gates again with no
+change to the model. **Cheapest honest closure:** state the score dtype explicitly at the call site —
+`(qh.float() @ K.float().t()) * S_SCALE`, or the bf16 form — so it is a decision on the record with
+the bands calibrated against it, instead of a type-promotion artifact inherited from rope. No band
+value is proposed here, and none should move until the dtype is stated.
+
+### G7 §10-G7's corpus floor has ~0.035 of headroom and two legal variants already sit outside it
+
+The corpus gate requires speccheck's mean prefix agreement over 49 prompts × 24 tokens to be at least
+the reference's own self-consistency floor, **0.8776** (an sdpa-vs-eager realization of the reference
+against itself). speccheck measured **0.9124** — headroom 0.0348, roughly one token per prompt.
+
+Two correct-but-differently-rounded variants of speccheck now sit *below* that floor: **0.8503**
+(pinned BF16 rope, F32 scores) and **0.8121** (pinned BF16 rope, bf16 scores). Neither is a bug: both
+keep sampled ids identical on all six short fixtures, and both apply a rounding policy the pins
+themselves carry. A gate that any legal rounding change can trip is not measuring what it looks like
+it measures — it is measuring distance from one particular rounding realization, and its margin is
+smaller than one policy change.
+
+Recorded as **the gate most likely to produce a false alarm at W6**, where prefill adds more rounding
+decisions (chunked GDN forms, long score rows). This is not a proposal to widen it: the floor is a
+measurement of the reference against itself and widening it would delete the only end-to-end invariant
+that short fixtures cannot provide. When it trips, the honest first move is to re-measure the floor
+for the realization actually under comparison, not to move the threshold.
+
 ## Closed / no finding
 
 - **Fixture pairing: clean.** `lm_head` self-checks live HF against `logits_last`; `glue.final_pair()`
