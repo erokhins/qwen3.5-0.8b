@@ -244,3 +244,137 @@ What a first device run is most likely to break, in the order to look at them:
   the attention stages run at ≤25 lanes against `MAXSC` 512. Same assertions would run against
   `prefix24dec8`; `gate.py` hard-codes the `dec8` path and nothing else, so that is a second call, not
   a flag.
+
+---
+
+# Two device runs in: the loop runs, and six failed checks had one cause — §07.5 armed during the prompt
+
+2026-10-11, two operator-run foreground device passes (workers do not touch the GPU, `AGENTS.md`).
+Nothing here is a timing except where it explicitly says it is not one.
+
+**What the runs established.** The loader loads: 335 tensors, 1.5457 GB resident, ≈1.0 s.
+`check_weights: PASS` — the rank-3 `conv1d.weight` claim that aborted the very first attempt is closed
+by `92d8e5f` and `engine/weights_contract.py`, which is the CPU-side reason it cannot come back.
+The `state:` and `LAUNCH` lines verify against §00/§07 item by item (gate sections (c) and (d) pass),
+so the 424-launch plan and the per-request byte counts are agreed between the two independent readings
+and the binary. Risk 0 above ("the weight table") is retired, and so is the part of the hand-off that
+said no engine code had ever touched the device.
+
+**The six failures, and they were one bug — a phase bug, not numerics.** The run log:
+
+    prompt 6 | fed 9338 | sampled 248046 | top 19.3246193 | P 6 -> 7 [STOP]
+    stopped at step 6 (§07.5: id 248046)
+    - one step per prompt token: 7 vs 17
+    - 8 generation steps: 0
+    - all 8 generated ids match, in order: engine [] / pinned [6511, 314, 9338, 369, 2972, 57590, 159034, 271]
+
+`decode_run` applied §07.5's stop check to *every* step, prompt steps included. The fixture prompt is
+the manifest's `sources[0].ids` — a rendered chat template — so it legitimately contains the
+end-of-turn id **248046 at index 8** (and the think-start/end ids 248068/248069 later); at prompt index
+6 the engine's own argmax happened to be 248046, which ended a 17-token prompt after 7 steps. During
+the prompt phase the sample is discarded and the next token fed comes from the fixture, so a stop match
+there is meaningless. Fixed in `5e7114b`: **the check is armed only in the generation phase**; a
+prompt-phase match is still printed, with its own marker, and the `STEP` line gained `stop=0|1` meaning
+"the §07.5 check fired" rather than "the sample equals `kStopToken`". Two consequences worth keeping in
+mind: `st.stopped` is decode_step's raw match (either phase) while `RESULT stopped=` is the run's
+decision, and **no claim about the numerics follows from either run** — nothing was generated, so the
+eight pinned ids are still neither matched nor contradicted.
+
+One diagnostic the runs did give for free: the prompt path runs end to end and its samples are ordinary
+token ids, not zeros or NaN — `[846, 198, 3710, 2614, 314, 279, 248046]` at top logits 14.70–23.07
+(`tmp/engine_gate/sampled.txt`). They are *not* the template's own next tokens (steps 2, 3, 5, 6 are
+not), which is expected twice over: the reference prefills the prompt as one chunked forward while the
+engine feeds it token-at-a-time through the recurrence (§04.7 vs §04.4, and the README's "What this is
+NOT yet"), and a model is free to want something else mid-template. A gate-side note while reading the
+log: section (b) can pass on **stale** `logits*.bin` if a `--dry-run` wrote that work dir earlier — the
+first run stopped at index 6, so it wrote `logits0..6` only, and its six failures were all in section
+(a); `gate.py` now clears the dir so a missing dump reads as missing.
+
+**And the gate is now written to name this bug itself** (`b7b6766` and the stale-dump follow-up):
+"one step per prompt token" reports the last STEP's kind/index/sample/stop plus the RESULT line and
+says which of the two causes it is; a new check fails if any prompt-phase step fires §07.5;
+`--selftest`'s fourth case replays the truncation (`--break-prompt-stop 6`) and requires both checks to
+bite at that step. `SELFTEST PASS` (clean dry run + four injections), CPU-only.
+
+## The first ms/step figure, recorded as *not* a measurement
+
+The second run printed `RESULT … ms_per_step=14.631`. **This is an observation, not a number.** It is a
+gate run's by-product, which `bench/performance-status.md` §6 refuses as a measurement; it is one
+unwarmed first pass over freshly allocated state and scratch, i.e. the first-GPU-touch regime
+`devices/strix-halo-unified-memory.md` measures at ~35 GB/s instead of ~240; there is no burst and no
+best-of-N; and no `util` was recorded for the window. Do not quote it and do not diff it against
+anything as if it were a measurement.
+
+What it is good for is sizing the first perf item, which comes **after** correctness is green. The
+ledger's §6 op-sum is **8.03 ms → ~124 tok/s** (7.975 ms before the `gdn_decode` re-take — same six
+families, one replaced row), so the unwarmed engine is ~1.8× that. The two most likely causes, in order
+of expected size, are both launch-side:
+
+1. **424 launches per token plus one device sync per step.** At the measured 1.85 µs dispatch floor
+   (`tools/launch_overhead_hip.cpp`) the launch bill alone is ≈0.78 ms/token, and that assumes a warm,
+   deep queue; the step then syncs at the logits, so the host waits on all of it every token. **HIP
+   graphs** — capture one token's 424 launches once, replay them — are the tool that removes the
+   per-launch cost, and they are now the first perf item, because nothing about correctness still needs
+   the launches to be individually visible.
+2. The two deferrals named above (packed projections ≈0.10 ms, a BF16-staged MLP to delete 48 of the
+   115 casts), which shrink that same bill rather than its overhead.
+
+The honest caveat on the comparison: 8.03 ms is a **sum of per-op cold bursts measured separately**, and
+`bench/commit-review-2026-10-11.md` already graded that sum "overstated as a description of the engine",
+so 14.631 − 8.03 is not a measured gap and nobody should defend or attack it as one. The first real
+engine timing is a warm burst in a zero-subagent, `gpu_lock.sh`-recorded window, with the same best-of-N
+discipline as every other §6 row, and it owes both the ms/token and the tok/s rows the ledger has never
+had for the engine.
+
+## The three flagged risks, checked statically — no device, no gate loosened
+
+1. **The q/k/v slice order handed to `rec_kernel`: correct, and worth noting that nothing had ever
+   checked it.** `speccheck/specimpl.py:270-272` slices the conv output as `q = u[:, :KEY_DIM]`,
+   `k = u[:, KEY_DIM:2*KEY_DIM]`, `v = u[:, 2*KEY_DIM:]` with `KEY_DIM = H_K*D_K = 16×128 = 2048` — the
+   same 2048 as `state.h`'s `kValueDim` — so `[q|k|v]` at float offsets 0 / 2048 / 4096, exactly what
+   `decode_step.cpp` hands `gdn_rec` (`sc.g_u`, `+kValueDim`, `+2*kValueDim`). Inside a slice
+   `rec_kernel` indexes `x[h*D + j]` (`prototype/gdn_decode/gdn_decode_kernels.h:90-120`), i.e.
+   head-major with `D = 128`, which matches the reference's `.reshape(T, H_K, D_K)`. Why reading was the
+   only way to know: `prototype/gdn_decode`'s own driver fed `rec_kernel` from the **already-sliced**
+   pins (`q_post_conv`/`k_post_conv`/`v_post_conv`), so §04's device gate could not have seen a
+   transposition in the engine's offsets whatever they were. The first run whose ids come out exact is
+   the empirical counterpart of this reading.
+2. **The conv-window roll-back: size, roll order and slot indexing all check out.** Reference and kernel
+   roll the same way — `new_win = padded[-(K-1):]` (`specimpl.py:260`) is `[win₁, win₂, raw]`, and the
+   kernel writes `new_win[j] = win[j+1]` then `new_win[K-2] = raw` (`gdn_decode_kernels.h:82-86`), with
+   `K-2` the last valid row so nothing runs past the buffer. The engine's scratch is
+   `kConvWindow × kConvChannels` floats (3 × 6144 = 18 432) and the roll-back copy is
+   `kConvWindow*kConvChannels*sizeof(float)` = 73 728 B, exactly one layer's stride; and
+   `conv_window_layer()` strides by `gdn_slot(layer)` — the *slot*, the same index that selects the
+   widened `conv1d.weight`, so the two cannot drift apart by layer (`state.cpp:76-81`). The copy is a
+   `hipMemcpyAsync` on the default stream, enqueued between the conv launch and the launches that read
+   `g_u`, and the engine uses one stream, so there is no race — a second stream would break it, which is
+   worth remembering if a later pass parallelises layers. The rank-3 → flat `[6144][4]` widening of that
+   weight is refused unless the rank is exactly what the shard holds (`prepare_weight_adapters`).
+3. **The logits band: the citation is the soft spot, not the arithmetic — and the constant stays put.**
+   Three separate facts, none of them a gate edit:
+   * *What G5's 0.9995 actually is.* §10.1 G5 is "prefill `T` then decode `D` equals one prefill of
+     `T+D`" — the reference against **itself**, no engine in the loop. The engine-vs-reference
+     comparison this gate makes is strictly harder (a different implementation of every op), and §10's
+     published ceiling for a whole-cascade comparison is §10.2's `cos ≥ 0.999, meanrel ≤ 5 %` — whose
+     own measured worst cascade cos on `dec8` is **0.99923**, *below* the floor this gate hard-gates.
+     So a run with eight exactly-right ids can legitimately land in [0.999, 0.9995) and fail here. When
+     it does, the open question is which §10 figure governs engine-vs-reference token logits — an owner
+     decision, not this file's and not a constant to edit. `BAND` was not touched.
+   * *What a token-level cos can see.* cos over 248 320 entries is dominated by the mass of the
+     vocabulary: a 1-ULP-level error profile (bf16 ≈ 0.2 % per element) puts cos at ≈ 1 − σ²/2 ≈
+     0.999 998, so the floor is nowhere near binding when the arithmetic is right — while still
+     discriminating gross errors (the §10.5 q/gate mis-read measured cos −0.14). What it cannot see is a
+     **wrong token**: at a token level the informative statistic is the top-1/top-2 margin against the
+     worst element error, which is what `gate.py`'s `metrics()` prints as `gap12` and `margin` next to
+     the separate argmax check. When an id is wrong, read those, not the cos.
+   * *The other two figures are already in the file.* G6's 0.9999 is reported-not-gated, and speccheck's
+     own G6 gate meets it on these same pinned `decode{s}.logits_last.npy`, so the reference side is not
+     the risky side; the engine adds what speccheck does not have — bf16 kernels, and a prompt fed
+     token-at-a-time through the recurrence rather than the chunked form (§10.1 G3 self-checks
+     chunk-vs-recurrent at cos ≥ 0.9999). A first run landing between G5's floor and §10.2's cascade
+     ceiling is a reportable finding, not a surprise.
+
+**Hand-off, unchanged and ready:** `./engine/build.sh && .venv/bin/python engine/gate.py`, in a quiescent
+window (`tools/gpu_lock.sh acquire`, zero subagents). Sections (0)/(c)/(d) should be green as before,
+and (a) will be the first token-level correctness result this repo has had.
