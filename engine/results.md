@@ -146,14 +146,19 @@ the token matches.
 
 ## Open questions this phase did not decide
 
-* **Conv window dtype.** `state.h` stores it F32 (1.266 MiB) where §08.1's cell says BF16 (0.633
-  MiB), because the graduated `gdn_decode` conv kernel takes F32 in and out and 36 cast launches
-  per token is the wrong price for 0.6 MiB on a device using 4 % of its pool. The stored *values*
-  are BF16-exact either way. §08.1 has **not** been corrected; the doc still contradicts the code.
-* **§08.1 / §00.5 doc slips, unfixed** (found by `state_sizes.py`, listed in its OPEN lines): the
-  "4 KiB/token/layer" KV cell contradicts the same table's 12 KiB/token total (2 KiB/layer is
-  right); §00.5's 3.07 GiB at full context is 3.00 GiB from its own 12288 B/token. KV layout is
-  head-major `[head][slot][dim]` per the kernel, not §08.5's `[slots][2][256]`.
+* **Conv window dtype — corrected in the spec, 2026-10-11.** `state.h` stores it F32 (1.266 MiB)
+  where §08.1's cell used to say BF16 (0.633 MiB), because the graduated `gdn_decode` conv kernel
+  takes F32 in and out and 36 cast launches per token is the wrong price for 0.6 MiB on a device
+  using 4 % of its pool. The stored *values* are BF16-exact either way. §08.1 and §00.5's conv row
+  now say F32 / 1.27 MiB, naming the old cell; `state_sizes.py` greps both pages for that figure, so
+  the doc cannot drift back to BF16 without the size check failing.
+* **§08.1 / §00.5 doc slips — corrected, 2026-10-11** (all four were found by `state_sizes.py`, and
+  its lines are now `FIXED …` rather than `OPEN …`): the "4 KiB/token/layer" KV cell contradicted the
+  same table's 12 KiB/token total (2 KiB/layer is what the shapes give, and what the audit's proposed
+  8 KiB was not); the MTP KV row had the same 2× slip; §00.5's 3.07 GiB at full context is 3.00 GiB
+  from its own 12288 B/token. **Still open:** KV layout is head-major `[head][slot][dim]` per the
+  kernel, not §08.5's `[slots][2][256]` — §08.5 says so no more than it did, and `state.h` carries
+  the departure.
 * **§04.5 / A-01 still state the affine in F32** in `specification/`, and that is a reading the
   pins refuse: with the weight rounded to BF16 and widened back to F32 it misses 74 860 of 294 912
   elements, with the raw F32 checkpoint weight 105 683 (`prototype/gdn_gated_norm/results.md` §1).

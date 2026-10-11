@@ -11,18 +11,20 @@
 //   GDN conv window      [18][3][6144]    F32       73 728 B/layer    1.265 MiB/request
 //   KV K and V per layer [6]×([cap][2][256] BF16)   2048 B/token/layer, 12 KiB/token total
 //
-// Two deliberate departures from what §08 says. Neither was corrected in the spec when this file
-// landed — `27dbaed`'s header comment claimed that had happened in the same commit, and it had not;
-// both were only FLAGGED, in `state_sizes.py`'s FIXES list, which is where the arithmetic lives.
+// Two things in this struct did not match §08. Neither was corrected when this file landed —
+// `27dbaed`'s comment claimed a spec correction in the same commit and there was none; the two items
+// were only FLAGGED, in `state_sizes.py`'s FIXES list, which is where the arithmetic lives. One has
+// since been corrected in the spec and one has not:
 //   * the conv window is F32, not BF16. The values are BF16-exact (they are pre-conv `raw`
 //     columns, §08.2), but `prototype/gdn_decode`'s conv kernel reads and writes the window as
 //     F32 (`conv_kernel`'s `win`/`new_win` are `float*`), and paying 36 cast launches/token to
 //     store 0.6 MiB instead of 1.27 MiB — of a pool this model uses 4 % of — would be buying a doc
-//     line with the token's time. §08 still says BF16: flagged, not yet corrected.
+//     line with the token's time. CORRECTED 2026-10-11: §08.1 and §00.5 now say F32 / 1.27 MiB,
+//     naming the old cell, and `state_sizes.py` fails if either page stops saying it.
 //   * the window and the KV are laid out head-major (`[head][slot][dim]`) rather than §08.5's
 //     `[slots][2][256]`, because `prototype/attn_decode`'s core indexes
 //     `(kv_head*cap + slot)*256`. Same bytes, different order; the kernel is the authority.
-//     §08.5 says [slots][2][256]: flagged, not yet corrected.
+//     §08.5 is UNCHANGED: flagged, not corrected.
 //
 // `hipMalloc` only, never managed memory: managed degrades silently near the pool limit on this
 // box while `hipMalloc` fails loudly (`devices/strix-halo-unified-memory.md`).

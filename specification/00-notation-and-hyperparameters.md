@@ -113,11 +113,18 @@ engine must declare per-op whether it fuses (see A-01 for norm cast order).
 | item | formula | value |
 |---|---|---|
 | KV cache per token | `2·n_kv·d_head·L_full·2 B` | 12288 B (12 KiB) |
-| KV cache at 262144 ctx | above × 262144 | 3.07 GiB |
+| KV cache at 262144 ctx | above × 262144 | 3.000 GiB (3.22 GB) |
 | GDN state per request | `L_lin·h_v·d_k·d_v·4 B` | 18.0 MiB |
-| GDN conv state per request | `L_lin·6144·(k_conv−1)·2 B` | 0.63 MiB |
+| GDN conv state per request | `L_lin·6144·(k_conv−1)·4 B` | 1.27 MiB |
 | MTP KV per token | `2·n_kv·d_head·L_mtp·2 B` | 2048 B |
 | resident text weights | §01.7 | 1.5457 GB (bf16) |
+
+Two rows in this table were wrong and are corrected here, naming the old value, because
+`engine/state_sizes.py` derives both from the shapes and would keep printing the disagreement:
+the full-context KV row said **3.07 GiB** where `12288 × 262144 = 3.000 GiB` (3.22 GB decimal), and
+the conv-state row multiplied by **2 B** (BF16, 0.63 MiB) where the conv window is F32 — the dtype
+`prototype/gdn_decode`'s `conv_kernel` reads and writes — so `·4 B` and 1.27 MiB. §08.1 has the
+full inventory and the fourth cell this one depends on.
 
 ## 00.6 Explicitly out of scope constants
 

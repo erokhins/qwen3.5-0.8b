@@ -50,7 +50,8 @@ GDN GEMMs and is **compute-bound** for `T ≳ 128` — unlike decode (§07.5).
 
 Long-context note: the cost of §04 is `O(T)` and its memory is `O(1)` per request,
 while §05 costs `O(T²)` time and `O(T)` memory over 6 layers. At 262144 context
-the KV cache is 3.07 GiB per request (§00.5), which on this box is a scheduling
+the KV cache is 3.00 GiB per request (§00.5, corrected from a 3.07 GiB prose row that did not
+follow from `12288 B × 262144`), which on this box is a scheduling
 decision, not a capacity limit (§08.3).
 
 ## 06.5 What prefill must produce for decode

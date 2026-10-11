@@ -44,11 +44,13 @@ and leaves the text path resident on the device.
 * `state.h` declares `RequestState` (§08.1's inventory: GDN `S` 18.0 MiB F32, conv window
   [18][3][6144], KV for the 6 full-attention layers at 12288 B/token) plus `allocate` /
   `free` / `reset` / `check_invariants`. `state.cpp` `hipMalloc`s them on a 512-B boundary and
-  implements §08.6's invariants. Two deliberate departures from §08.1's table, both open:
-  **the conv window is F32, not the table's BF16** (the graduated `gdn_decode` conv kernel reads
-  and writes it as F32; 36 cast launches/token is the wrong price for 0.6 MiB of a pool this model
-  uses 4 % of), and **KV is head-major `[head][slot][dim]`** because that is the layout the
-  graduated `attn_decode` kernel indexes. `state_sizes.py` prints both and flags the doc slips.
+  implements §08.6's invariants. One departure from §08.1's table is now the spec's own reading and
+  one is still only the engine's: **the conv window is F32, not the BF16 §08.1 used to print** (the
+  graduated `gdn_decode` conv kernel reads and writes it as F32; 36 cast launches/token is the wrong
+  price for 0.6 MiB of a pool this model uses 4 % of) — §08.1 and §00.5 were corrected to say so on
+  2026-10-11 — and **KV is head-major `[head][slot][dim]`** because that is the layout the graduated
+  `attn_decode` kernel indexes, which §08.5 still does not say. `state_sizes.py` prints the first as
+  FIXED (and greps the spec pages to keep it true) and the second as an open item.
 * `kernels.h` declares **one launcher per graduated kernel**. The kernels themselves are
   `prototype/<op>/<op>_kernels.h` — the device code of each graduated op, moved **verbatim** out of
   the binary its own gate signed off on (`tools/` has no checker for this; `git show` the extraction
@@ -74,8 +76,10 @@ allocated, no launcher has been launched, and the §07.1 block order exists only
 ```bash
 .venv/bin/python engine/state_sizes.py
 # PASS. 18.000 MiB GDN S + 1.266 MiB F32 conv window = 19.2656 MiB constant per request;
-# 12288 B/token KV; prints three OPEN doc slips (§08.1's 4 KiB/token/layer cell contradicts its
-# own 12 KiB/token total; §08.1's BF16 conv cell; §00.5's 3.07 GiB is 3.00 GiB from the shapes).
+# 12288 B/token KV = 2048 B/token/layer (14 KiB/token including MTP KV); 3.000 GiB at 262144 ctx.
+# It prints three FIXED lines: §08.1's conv dtype, its KV and MTP-KV cells, and §00.5's full-context
+# row are all corrected in `specification/`, and this script greps those pages for the corrected
+# figures — edit a doc row back and the size check fails. Only §08.5's KV layout stays open.
 
 .venv/bin/python prototype/gdn_gated_norm/mirror_probe.py dec8
 # THE LOAD-BEARING CPU RESULT OF THIS PHASE: 144 cases (18 GDN layers x 8 decode steps),
