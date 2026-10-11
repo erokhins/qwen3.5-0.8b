@@ -16,7 +16,8 @@ project as measured until a row moves into the first table.
 | `glue` residual+RMSNorm, fused, 49 launches/token | ~0.5 MB | **0.1336–0.1360 ms** † | 2.73–2.78 µs/launch | launch-bound: roofline is 0.0021 ms |
 | same, unfused (48 adds + 49 norms = 97 launches) | ~0.5 MB | 0.2131–0.2155 ms † | 2.20–2.22 µs/launch | fusion buys 0.0795 ms/token |
 | `attn_decode` §05 core, 6 layers, one launch each | ~0.4 MB at 25 lanes | ~0.011 ms (launch floor arithmetic, not timed) | — | bit-exact to 277 lanes |
-| `gdn_decode` recurrence, 18 layers, state warm | 54 MB (3 × 18 MiB) | **0.062 ms** | 918 GB/s | 387 % — cache-resident |
+| `gdn_decode` recurrence, 18 layers, state warm | 54 MB (3 × 18 MiB) | **0.0646 ms** | 876 GB/s (derived) | 370 % — cache-resident |
+| `gdn_gated_norm` §04.5, 18 layers × 8 dec8 steps = 144 launches | ~2.9 MB/plan (0.37 MB/token) | **0.4227 ms/plan** = 2.936 µs/launch | 6.6 GB/s | launch-bound: 0.0016 ms/token of roofline |
 | same kernel, state tiled to 108 MiB (cold) | 324 MB | 1.344 ms | 255 GB/s | 108 % |
 | kernel launch floor, empty/tiny kernel | — | **1.85 µs**/launch | — | graphs: **1.78 µs**, no gain |
 | iGPU read probe (`tools/bw_probe_hip.cpp`) | 1 GiB | — | 237 GB/s best | reference |
@@ -65,7 +66,8 @@ Weights re-derived from the safetensors headers, grouped as §01.7 (decimal GB, 
 | **the two above together, measured as one 48-launch plan** | 0.4677 | 1.973 ms | **2.990 ms** † | **66 % of the probe** |
 | MTP draft layer (only when drafting) | 0.0409 | 0.173 ms | — | not written |
 | norms and small tensors | ~0.005 | 0.021 ms | — | not written |
-| GDN state traffic (18 layers, warm) | 0.054 | 0.228 ms cold | **0.062 ms** | **kernel exists** |
+| GDN state traffic (18 layers, warm) | 0.054 | 0.228 ms cold | **0.0646 ms** | **kernel exists** |
+| §04.5 gated norm (18 layers) | ~0.0004 | 0.0016 ms | **0.053 ms** | **kernel exists** — launch-bound, 18 × 2.94 µs |
 | **total per token** | **1.605** | **6.52 ms** | **7.81 ms measured** | |
 
 So **1.5588 / 1.605 = 97 %** of the token's bytes are now covered by a kernel that has been
@@ -188,10 +190,16 @@ predict the numbers, so util is recorded and then discounted.
 | glue unfused, 97 launches | 0.2455 ms @256 t | spread 2.7–4.2 % | 0.2131–0.2155 | worse ~15 % |
 | `engine/loader_test --no-verify` | 50 checks PASS; wall **383.9 / 509.0 ms** | 2 runs, 32 % | 794 ms wall | PASS re-confirmed; wall depends on page-cache state, do not compare across runs |
 | glue gate | 784 comparisons, 0 failures, both residual adds bit-exact | deterministic | 784 / 0 | reproduces |
+| glue gate **at 1024 threads** (engine experiment E1) | 784 comparisons, 0 failures; `g1_n` gated 0 / raw 1, both adds bit-exact, all negatives caught | deterministic | — (never run before) | **PASS at the same floor as 256** — see E1 below |
+| `proj_gemv` PACK_X A/B, cold, rows/block 32 (E2) | **unpacked 0.0528 ms/launch = 65.1 % of probe** vs **packed 0.0593 = 58.0 %** | one A/B pair, same window | 66 % / 60 % at rpb 8 | **unpacked wins at every rows/block** — see E2 below |
+| `gdn_decode` recurrence, 18 layers warm (re-take of §1's disowned row) | **0.0646 ms** best, worst 0.0650 | **spread 0.5 %** (warm burst + `--trials` bursts) | 0.062 ms (never re-taken, `d81ff13`-dead timer) | **replaces it**; `rec` alone 0.0064 ms |
+| `gdn_gated_norm` device gate (§04.5) | `DEVICE GATE PASS`; worst ndiff **1/2048**, max ULP 1, zeros 0 / NaN 0, all six negatives localise | deterministic | — (first pass ever) | **PASS** — see §04.5 row below |
+| `gdn_gated_norm` burst | **0.4227 ms** per 144-job plan = **2.936 µs/launch** | **spread 1.4 %** | — (never timed) | ≈0.053 ms/token at 18 GDN layers |
 | proj gate | 912 comparisons, 0 failures | deterministic | 912 / 0 | reproduces |
 
-Token sum from this window: 2.108 + 2.605 + 3.039 + 0.150 + 0.062 (GDN state, §1) + ~0.011 (attention
-core at fixture cache sizes) = **7.975 ms → ~125 tok/s**. The §3 projection of 120–127 tok/s stands.
+Token sum from this window: 2.108 + 2.605 + 3.039 + 0.150 + 0.0646 (GDN state, re-taken) + 0.053
+(§04.5 gated norm, 18 launches) + ~0.011 (attention core at fixture cache sizes) = **8.03 ms →
+~124 tok/s**. The §3 projection of 120–127 tok/s stands.
 
 ### Two findings that came out of the re-take
 
@@ -211,3 +219,50 @@ not the machine. Practical consequences: quote glue at 256 threads (0.185 ms) ra
 someone characterises the bimodality, and treat per-launch µs figures — 2.545 @256 here vs the 1.85 µs
 narrow-block floor — as dispatch contention for a shared queue, not kernel cost. It is ~1.7 % of the
 token either way, so this is a measurement-integrity finding, not a budget one.
+
+### The four rows that were owed, and what came back
+
+**`gdn_decode`'s state row is now a re-take, not an inheritance.** Best **0.0646 ms** over 18 layers of
+warm state, worst 0.0650, **spread 0.5 %**; `rec` alone (one layer) **0.0064 ms**. That replaces the
+0.062 ms the `d81ff13` commit disowned — taken by the per-iteration `hipEventElapsedTime` loop that
+cannot see sub-millisecond work at all — so the row finally has a timer, a `util` record and a spread
+behind it. It is 4 % slower than the number it replaces, which is the direction a wrong timer predicts.
+`check.py` re-ran clean in the same window: **F1–F4 still PASS**, `o` within 1 BF16 ULP of the pinned
+dump on all 18 layers, with 3 layers holding 1-ULP ties. Bandwidth for the row is derived from the same
+56.6 MB of traffic the old row used (876 GB/s = 370 % of the probe), so "above the ~240 GB/s package
+ceiling" is still an open question this re-take does not settle — `check.py` still prints % of probe and
+asserts nothing about it.
+
+**E1 is closed: `glue` at 1024 threads passes with a legal error profile identical to 256.** 784
+comparisons, 0 failures, the norm half at the published floor (`g1_n` gated 0 / raw 1) and both residual
+adds bit-exact, and every negative still lands on its own stage. The point of the experiment was that
+thread count changes `PER` and therefore the F32 summation order of the mean of squares, and a norm's
+floor is 1 ULP with no cancellation band, so only `ndiff` could tell the widths apart — and it did not.
+Consequence, stated the other way round because it is the useful direction: **`engine/kernels_glue.cpp`'s
+`<256>` is a measured preference, not a numerical requirement.** Nothing about the engine's arithmetic
+would break if it launched 1024; whether it should is now only the performance question glue's own §4
+sweep raises (≈2.78 vs 3.75 µs/launch), with the bimodality caveat that file already carries.
+
+**E2 is closed: `PACK_X=false` is the right constant.** Cold, on the prototype's 48-launch token plan, at
+rows/block 32: **unpacked 0.0528 ms/launch = 65.1 % of the read probe** against **packed 0.0593 ms/launch
+= 58.0 %** — unpacked wins at every rows/block swept, not just the gated 8. So the ≈48 cast launches the
+unpacked form bills back (≈0.089 ms at the 1.85 µs floor) do not overturn the ordering, and
+`kernels_proj.cpp` keeps its F32 `x` with a measurement instead of an inference. The half of E2 that
+awaited `decode_step` — the same A/B through `engine/kernels_proj.cpp`'s own launcher — is still owed;
+the engine has a launcher on that path now, so it is runnable.
+
+**§04.5 now has a device row, and it is a PASS.** `prototype/gdn_gated_norm/run.py --gate` over 18 GDN
+layers × 8 `dec8` steps: `gated_out` worst case **ndiff 1/2048** with **max ULP 1**, zeros 0 / NaN 0, and
+all six injected negatives localising (each moves `gated_out`, the four epilogue ones leave
+`norm_pre_gate` at 0/294912). Max ULP 1 is exactly the floor the CPU `neg_probe.py` predicted for a
+128-term reduction done in a different order than torch's, so this is the op sitting on its own floor,
+not a band that happens to be wide. Timing: **0.4227 ms per 144-launch plan = 2.936 µs/launch, spread
+1.4 %** → **≈0.053 ms/token** for the 18 launches a real token makes. Worth 3.5 % of the token budget,
+which makes the packed/3-in-1 launch question here a real later lever, not a rounding error.
+
+The first two device attempts at this gate **failed 144/144 and the kernel was never at fault**: the
+gate's own fixture writer emitted `z.to(torch.uint16)` on a float32 tensor, which converts instead of
+reinterpreting (0.195 became the integer 0, −1.3 wrapped to 0xFFFF), so the kernel read +0 and NaN where
+the pin had neither. The full symptom-by-symptom account is `prototype/gdn_gated_norm/results.md` §8 and
+the trap is a row in `AGENTS.md`; recorded here because a PASS with that history needs its provenance
+next to it, not three files away.
