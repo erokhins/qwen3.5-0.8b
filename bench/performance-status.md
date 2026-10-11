@@ -11,6 +11,8 @@ project as measured until a row moves into the first table.
 |---|---|---|---|---|
 | `lm_head_gemv` bf16 GEMV, 248320 × 1024 | 485.0 MB | **2.105 ms** | 242.1 GB/s | **102 %** |
 | `mlp_gemv` MLP, 24 layers, cold weights | 528.5 MB | **2.650 ms** | 199.4 GB/s | **84 %** |
+| `proj_gemv` all 9 projections × 24 layers, 48 launches, cold | 445.7 MB | **2.990 ms** † | 156.3 GB/s | **66 %** † |
+| `proj_gemv` best config seen (rows/block 32, same conditions) | 445.7 MB | 2.785 ms † | 167.8 GB/s | 71 % † |
 | `gdn_decode` recurrence, 18 layers, state warm | 54 MB (3 × 18 MiB) | **0.062 ms** | 918 GB/s | 387 % — cache-resident |
 | same kernel, state tiled to 108 MiB (cold) | 324 MB | 1.344 ms | 255 GB/s | 108 % |
 | kernel launch floor, empty/tiny kernel | — | **1.85 µs**/launch | — | graphs: **1.78 µs**, no gain |
@@ -55,35 +57,49 @@ Weights re-derived from the safetensors headers, grouped as §01.7 (decimal GB, 
 |---|---|---|---|---|
 | `lm_head` / `embed_tokens` (tied) | 0.5086 | 2.146 ms | **2.105 ms** | **kernel exists, 102 % of roofline** |
 | MLP, 24 layers (gate/up/down) | 0.5285 | 2.230 ms | **2.650 ms** | **kernel exists, 84 % of roofline** |
-| GDN `in_proj`/`out_proj` + conv, 18 layers | 0.3796 | 1.602 ms | — | not written (recurrence is written) |
-| full attention `qkv`/`o`, 6 layers | 0.0881 | 0.372 ms | — | not written |
+| GDN `in_proj`/`out_proj` + conv, 18 layers | 0.3796 | 1.602 ms | — † | **kernel exists** (`proj_gemv`), see † |
+| full attention `qkv`/`o`, 6 layers | 0.0881 | 0.372 ms | — † | **kernel exists** (`proj_gemv`), see † |
+| **the two above together, measured as one 48-launch plan** | 0.4677 | 1.973 ms | **2.990 ms** † | **66 % of the probe** |
 | MTP draft layer (only when drafting) | 0.0409 | 0.173 ms | — | not written |
 | norms and small tensors | ~0.005 | 0.021 ms | — | not written |
 | GDN state traffic (18 layers, warm) | 0.054 | 0.228 ms cold | **0.062 ms** | **kernel exists** |
-| **total per token** | **1.605** | **6.52 ms** | **4.82 ms measured** | |
+| **total per token** | **1.605** | **6.52 ms** | **7.81 ms measured** | |
 
-So **1.0371 / 1.605 = 65 %** of the token's bytes are covered by a kernel that runs at 84–102 %
-of the measured roofline, and the recurrence (which touches no weights) is done. What is left is
-**one shape class** — `mlp_gemv`'s `mlp_down<IN>` instantiated at the GDN and attention projection
-shapes — plus §05's attention itself.
+So **1.5588 / 1.605 = 97 %** of the token's bytes are now covered by a kernel that has been
+measured on this box — `lm_head`, the MLP, every projection, and the GDN recurrence. What is left
+is norms/gating/residual (~0.005 GB, launch-bound rather than bandwidth-bound) and §05's attention
+_core_, which is in flight. Coverage stopped being the interesting number; the spread did —
+**102 % / 84 % / 66 %** for `lm_head` / MLP / projections, and within the projections alone the
+per-shape results run from 77 % of the probe (`in_proj_qkv` packed) down to 39 % (`v_proj`) and
+5 % for the 16-row `in_proj_b`/`in_proj_a`. The wide shapes behave like `lm_head`; the narrow ones
+behave like nothing measured before, and that is what moved the projection below.
+
+† **The projection numbers are provisional.** `gpu_lock.sh util` read 9 % at acquire and 60 % at
+release — something worked on the GPU mid-run without the lock — so they are floors, not
+measurements, and a clean re-measure is outstanding (§5 item 1).
 
 ## 3. Projection, with the assumptions named
 
 | assumption | value | risk |
 |---|---|---|
-| remaining GEMVs reach the same fraction of the probe the MLP did | ~200 GB/s (84 %) | **medium** — `lm_head` hit 102 % with 31040 blocks, the MLP lands at 84 % with 128–448; the remaining projections are 3456/1536/6144-row shapes, i.e. the MLP's end of that range, not `lm_head`'s. Weighted down further because the MLP's own 16 % shortfall is unexplained (see §1), so there is no mechanism to say which side a new shape lands on |
-| launch floor | +0.36 ms (200 launches × 1.8 µs), partly hidden by overlap | **medium** for the small ops: a 0.09 GB attention projection at the 1.8 µs floor cannot overlap much |
+| ~~remaining GEMVs reach the same fraction of the probe the MLP did~~ **measured** | projections land at **66 %**, not 84 % | no longer an assumption — the per-shape spread is 39–77 % of the probe and the weighted result is 66 %. The row-count theory is dead: `in_proj_qkv` has 6144 rows and reaches 77 %, `k_proj`/`v_proj` have 512 and reach ~40 %, while `lm_head` with 248320 rows reached 102 % |
+| launch floor | +0.36 ms (200 launches × 1.8 µs), partly hidden by overlap | **medium** — the projections alone are 48 launches/token and the small ones are already launch-dominated: `in_proj_b`/`in_proj_a` cost 3.2 µs/launch to move 32 KiB, which is why they are folded into the packed launch |
 | weights already resident (no H2D per token) | assumed | low — H2D is 76–82 GB/s, so it would dominate if violated |
-| no fp32 upcast traffic for accumulation | assumed | low — now demonstrated: `mlp_gemv` accumulates in F32 registers and moves no extra bytes |
+| no fp32 upcast traffic for accumulation | assumed | low — demonstrated twice now: MLP and projections both accumulate in F32 registers and move no extra bytes |
 | MTP drafting disabled | assumed | drafting adds 0.0409 GB + an extra logits read per accepted burst |
 
-**Projected single-stream bf16 decode: ~6.8–7.3 ms/token = ~137–147 tok/s.** That is a revision
-*down* from the 145–153 this file used to carry, and the reason is the MLP row: the §07.4 roofline
-assumes every byte stream arrives at probe speed, and the two GEMV families with enough rows to
-fill 20 CUs disagree with each other by 18 %. 4.82 ms of the budget is now measured; the remaining
-1.99 ms of roofline (GDN + attention projections, norms) projects to ~2.0–2.4 ms of real time.
-§07.4's headline 151 tok/s is above the optimistic end of that range and should be treated as
-conditional on the block-count gap closing.
+**Projected single-stream bf16 decode: ~7.9–8.3 ms/token = ~120–127 tok/s.** That is a second
+revision *downward* (was 145–153, then 137–147), and the cause is the same both times: the §07.4
+roofline assumes every byte stream arrives at probe speed, and each family measured so far arrives
+slower than the one before it — 102 %, then 84 %, then 66 %. 7.81 ms of the token is now measured,
+so only attention's core and the norms remain, and they are small in bytes (~0.03 ms of roofline)
+but not in launches. §07.4's headline 151 tok/s is now roughly 25 % above the measured trajectory
+and should be treated as wrong on this box unless the narrow-shape gap closes.
+
+The one lever that is already visible: `rows/block` 32 measured 8 % better than the shipped default
+of 8 on the projections (2.785 vs 2.990 ms), which is ~0.2 ms/token — worth more than anything else
+known, and currently an open decision rather than a change, because it was measured on a contended
+box.
 
 ## 4. What *is* measured end-to-end today (and is not the engine)
 
@@ -95,9 +111,11 @@ record as *not* the engine's performance.
 
 ## 5. What has to happen before this file can say "measured"
 
-1. The projection GEMVs — `mlp_gemv`'s shape-generic kernel instantiated at GDN `in_proj` /
-   `out_proj` and the attention `qkv`/`o` shapes (38 % of the token), and §05's attention itself.
-   MLP is done: `prototype/mlp_gemv` graduated 2026-08.
+1. **Re-measure the projections on a quiet box.** They are the third of the token and they came in
+   at 66 % under contention; both the headline 2.990 ms and the `rows/block` 32 finding (+8 %) need
+   a clean run with util near 0 at both ends of the lock before they are quoted anywhere else.
+2. §05's attention core (RoPE, per-head norm, GQA read over the KV cache, output gate) and the
+   norm/gating/residual glue. `mlp_gemv` and `proj_gemv` graduated 2026-08.
 2. Fused per-layer epilogues (RMSNorm, gating, residual) so the small ops stop paying 1.8 µs
    each — the launch floor is 0.36 ms/token if eager and graphs will not fix it. `mlp_gateup`
    already shows the pattern: the epilogue lives inside the GEMV that produces its input.
