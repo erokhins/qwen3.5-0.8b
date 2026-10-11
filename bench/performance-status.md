@@ -13,6 +13,8 @@ project as measured until a row moves into the first table.
 | `mlp_gemv` MLP, 24 layers, cold weights | 528.5 MB | **2.650 ms** | 199.4 GB/s | **84 %** |
 | `proj_gemv` all 9 projections × 24 layers, 48 launches, cold | 445.7 MB | **2.990 ms** † | 156.3 GB/s | **66 %** † |
 | `proj_gemv` best config seen (rows/block 32, same conditions) | 445.7 MB | 2.785 ms † | 167.8 GB/s | 71 % † |
+| `glue` residual+RMSNorm, fused, 49 launches/token | ~5 MB | **0.137 ms** † | ~37 GB/s | launch-bound, not bandwidth-bound |
+| `attn_decode` §05 core, 6 layers, one launch each | ~0.4 MB at 25 lanes | ~0.011 ms (launch floor arithmetic, not timed) | — | bit-exact to 277 lanes |
 | `gdn_decode` recurrence, 18 layers, state warm | 54 MB (3 × 18 MiB) | **0.062 ms** | 918 GB/s | 387 % — cache-resident |
 | same kernel, state tiled to 108 MiB (cold) | 324 MB | 1.344 ms | 255 GB/s | 108 % |
 | kernel launch floor, empty/tiny kernel | — | **1.85 µs**/launch | — | graphs: **1.78 µs**, no gain |
@@ -66,9 +68,13 @@ Weights re-derived from the safetensors headers, grouped as §01.7 (decimal GB, 
 | **total per token** | **1.605** | **6.52 ms** | **7.81 ms measured** | |
 
 So **1.5588 / 1.605 = 97 %** of the token's bytes are now covered by a kernel that has been
-measured on this box — `lm_head`, the MLP, every projection, and the GDN recurrence. What is left
-is norms/gating/residual (~0.005 GB, launch-bound rather than bandwidth-bound) and §05's attention
-_core_, which is in flight. Coverage stopped being the interesting number; the spread did —
+measured on this box — `lm_head`, the MLP, every projection, the GDN recurrence, and the norms.
+What is left is §05's attention core, and that number is a standing warning about the whole
+table: **attention's traffic is a function of context length, not of the model.** At the fixture's
+25 lanes the KV read is ~0.4 MB/token, which is why `attn_decode` is launch-bound and costs
+~11 µs. At a 4k context the same six layers read ~25 MB/token — an extra ~0.1 ms that this table
+cannot see, because the fixtures are short. Any tok/s number taken at prefix-24 is therefore an
+optimistic bound on long-context behaviour, not a prediction of it. Coverage stopped being the interesting number; the spread did —
 **102 % / 84 % / 66 %** for `lm_head` / MLP / projections, and within the projections alone the
 per-shape results run from 77 % of the probe (`in_proj_qkv` packed) down to 39 % (`v_proj`) and
 5 % for the 16-row `in_proj_b`/`in_proj_a`. The wide shapes behave like `lm_head`; the narrow ones
@@ -95,6 +101,11 @@ slower than the one before it — 102 %, then 84 %, then 66 %. 7.81 ms of the to
 so only attention's core and the norms remain, and they are small in bytes (~0.03 ms of roofline)
 but not in launches. §07.4's headline 151 tok/s is now roughly 25 % above the measured trajectory
 and should be treated as wrong on this box unless the narrow-shape gap closes.
+
+The two small ops confirm that framing rather than changing it: `glue` at 0.137 ms/token is 97 →
+49 launches worth of saving (fusion bought ~0.079 ms/token, ~1 % of the budget, which is exactly
+what a launch-count item should return), and `attn_decode` is ~11 µs/token of dispatch at short
+context. Neither moves the projection. What moves it is the 66 %.
 
 The one lever that is already visible: `rows/block` 32 measured 8 % better than the shipped default
 of 8 on the projections (2.785 vs 2.990 ms), which is ~0.2 ms/token — worth more than anything else
