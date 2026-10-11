@@ -27,8 +27,9 @@ timing; parity is claimed only over the forced pins.
 
 `--selftest` re-runs this file in subprocesses against injected bugs — a wrong sampled id, a swapped
 top-two logits, 5 % logits noise that leaves the argmax alone, a §07.5 stop check firing during the
-prompt phase, and a replay step fed the wrong token — and requires each to fail at the step it was
-injected at, because a negative that every check would catch proves nothing
+prompt phase, a replay step fed the wrong token, and — at a step the pin ties — the engine landing on
+an untied id (must FAIL) and on the pin's other tied id (must PASS as TIE) — and requires each to fail
+at the step it was injected at, because a negative that every check would catch proves nothing
 (`prototype/mlp_gemv/results.md`). It is the only part of a gate that can be validated before the
 engine has ever run, and it is why a first device run need not double as a test of this file.
 
@@ -37,7 +38,10 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
   (0) FIXTURE PAIRING, proved rather than assumed (§10.5). See `pairing_checks`.
   (a) SAMPLED IDS — the engine's sample after the prompt's last token plus its generation samples
       must equal the manifest's `greedy_continuation`, exactly. §10.1 G7 requires token-for-token
-      exactness, and a token id is an integer: there is no band to argue about.
+      exactness, and a token id is an integer: there is no band to argue about. The ONE exception is a
+      step where the pin itself is an exact tie, which has no defined argmax to agree with; that is a
+      named, proved exception (TIE POLICY, next to the band rationale) and every use of it is printed
+      as a TIE line and counted in the summary, never waived quietly.
   (b) THE LOGITS — each step's logits against that step's pinned `logits_last.npy`, inside `BAND`.
   (c) STATE SIZES — the bytes the engine reports for its request state must equal what
       `engine/state_sizes.py` derives from `state.h`; that file is *run*, not re-typed.
@@ -172,8 +176,50 @@ BAND = {
     "cos_report": 0.9999,    # §10.1 G6, decode logits
 }
 
+# TIE POLICY — an exact tie in the pin is a named, proved exception to "ids exact per step", and it
+# is the strictest thing available, not a concession. DECIDED 2026-10-12 by the operator; the band
+# above is untouched by it, and the two are not the same question.
+#
+# Why an exception is admissible at all: `argmax` over an exact tie is not defined by the mathematics
+# (§03.4 pins ties to the lowest id, which is a *tie-BREAK* — an arbitrary choice among values the
+# model called equal), so "engine's id == pin's id" cannot be demanded at such a step. Measured in
+# `dec64f`: at step 17 the top two pinned logits are both 17.25 (ids 2018, 10407) and at step 18 both
+# 19.75 (ids 1379, 64704) — 2 ways tied at both. That the engine's other choice is not a numerics
+# failure is shown independently by `engine/route_price.py`: both legal specimpl routes also pick
+# 10407 at step 17, i.e. two legal forms of the reference disagree with the pin's tie-break exactly
+# as the engine does.
+#
+# Why the predicate is what it is. The exception is admissible only if the tie is PROVABLE FROM THE
+# PIN, and the proof has to live in the space the tie exists in: the pin's BF16 payload. So:
+#   1. >= 2 ids share the exact maximum **on the BF16 payload**, read through `load_pin`'s own
+#      bit-shift widening (§10.5: a bitcast, never a numeric cast) — never by a float `isclose`;
+#   2. the engine's sampled id is one of the tied ids;
+#   3. RNE(the engine's F32 logit at the pin's top-1 id) equals the pinned BF16 payload, i.e. the
+#      engine's own arithmetic kept the pinned winner inside the pinned value's own BF16 bin.
+# Clause 3 in the engine's F32 space instead would be a category error, not strictness: `lm_head`'s
+# FULL form writes an F32 accumulator with no BF16 rounding
+# (`prototype/lm_head_gemv/lm_head_gemv_kernels.h:64`), so an F32-equals-BF16 test can only pass by
+# luck — measured, step 17 gives engine 17.19451904 against pinned 17.25 (payload 0x418a, which the
+# engine's value RNE-rounds back to), step 18 gives 19.76797104 against 19.75 (0x419e). And clause 3
+# is not vacuous in payload space either: only 48 317 of 248 320 logits at step 17 (19 %) land in
+# their pinned BF16 bin, so it constrains real behaviour.
+#
+# What it deliberately does NOT do: it does not compare the engine's value at the *other* tied ids
+# against a tolerance. At 17.25 one BF16 ULP is 0.125, so "within one ULP" would be a brand-new band
+# with no floor probe behind it, which `AGENTS.md` forbids inventing. The engine's value at every tied
+# id is therefore PRINTED (F32 and payload) and not gated, so a human can see whether the engine saw
+# them as near-tied. If that ever looks load-bearing, size it with a floor probe and promote it then.
+#
+# A tie must never pass silently: every admissible step is reported as TIE with the tied ids, the tied
+# value and the engine's per-id values, and counted in the summary line. An engine that picks a THIRD,
+# untied id at a tied step fails loudly, and `--selftest` proves it does, in both directions: the
+# untied injection must FAIL and the other-tied-id injection must PASS as TIE.
+TIE_POLICY = ("exact tie in the pin (>= 2 ids share the max on the BF16 payload); the engine's id is"
+              " one of them and the pin's top-1 stayed inside its own BF16 bin")
+
 fails: list[str] = []
 notes: list[str] = []
+ties: list[str] = []        # one entry per generation step resolved by the tie policy; counted in report()
 
 
 def check(ok: bool, name: str, detail: object = "") -> bool:
@@ -205,8 +251,126 @@ def load_pin(name: str) -> np.ndarray:
 
 def argmax_low(a: np.ndarray) -> int:
     """§03.4: greedy argmax, ties to the LOWEST id. numpy's argmax returns the first maximum, which
-    is the lowest index; spelled out because the C++ side has to do the same with a strict `>`."""
+    is the lowest index; spelled out because the C++ side has to do the same with a strict `>`.
+    Note what that means at a tie: the id it returns is a property of the tie-BREAK, not of the model
+    — see the TIE POLICY block above and `pin_tie` below."""
     return int(np.argmax(a))
+
+
+def bf16_payload(x) -> np.ndarray:
+    """F32 -> BF16 payload, round-to-nearest-even, done on the bits (no torch, no numeric cast).
+
+    On a value that already IS BF16 this is a bitcast in disguise: it returns the payload it went in
+    with, which is what makes it usable on a pin stored as F32 (dec8) as well as on the engine's F32
+    logits. `engine/pin_bits_probe.py` is the measurement that the pinned logits are BF16-exact (0
+    values moved in either fixture); a fixture that stopped being so says so in `pin_tie`.
+    """
+    u = np.asarray(x, dtype=np.float32).reshape(-1).view(np.uint32)
+    lsb = (u >> 16) & 1                       # RNE, not truncation: add half an ULP plus the lsb
+    return ((u + 0x7FFF + lsb) >> 16).astype(np.uint16)
+
+
+def pin_tie(step: int):
+    """The exact-maximum tie set of one pinned logits dump, or None if that step has a plain winner.
+
+    Everything is on the PIN'S payload. `decode{j}.logits_last.npy` is read raw; the payload is the
+    stored uint16 (or, for an older F32-stored fixture, the BF16 payload of a value the probe already
+    proved is BF16-exact); the winner is located by widening that payload with `load_pin`'s bit shift,
+    because BF16 payload order is not numeric order once the sign bit is set, so the MAX has to be
+    taken on widened floats while MEMBERSHIP is proved on the payload. Ties are payload equality, never
+    a float tolerance.
+    """
+    path = REFS / f"decode{step}.logits_last.npy"
+    raw = np.load(path, allow_pickle=False).reshape(-1)
+    stored = raw.dtype == np.uint16
+    payload = raw if stored else bf16_payload(raw)
+    wide = (payload.astype(np.uint32) << 16).view(np.float32)   # load_pin's bit-shift widening
+    if not stored and not np.array_equal(wide, raw.astype(np.float32)):
+        notes.append(f"{path.name}: its pinned F32 logits are not BF16-exact, so a payload-space tie"
+                     " claim would not be sound at this step. Re-pin with --logits-bits bf16"
+                     " (engine/pin_bits_probe.py is the probe that prices this).")
+        return None
+    top = wide.max()
+    ids = [int(i) for i in np.flatnonzero(wide == top)]
+    if len(ids) < 2:
+        return None
+    return {"ids": ids, "value": float(top), "payload": int(payload[ids[0]]),
+            "top1": ids[0], "payload_is_stored": stored}
+
+
+def tie_verdict(step: int, eng, sampled: int) -> tuple[bool, str]:
+    """Decide one generation step under the tie policy: (admissible, the line to print).
+
+    The single predicate for the whole file — section (a) gates on it and section (b) reuses the answer
+    for its argmax line — so exactly one place decides what an engine may do at a tied step. It fails
+    closed: no tie in the pin, or no engine logits vector to check, means not admissible.
+    """
+    tie = pin_tie(step)
+    if tie is None:
+        return False, ""
+
+    def shown(i: int) -> str:
+        if eng is None:
+            return f"{i} -> (no engine logits)"
+        v = float(eng[i])
+        return f"{i} -> {v:.8g} (bf16 0x{int(bf16_payload(v)[0]):04x})"
+
+    head = (f"TIE step {step}: pinned {tie['value']!r} (payload 0x{tie['payload']:04x}) tied"
+            f" {len(tie['ids'])} ways among ids {tie['ids']}; engine's value at each tied id:"
+            f" " + ", ".join(shown(i) for i in tie["ids"]))
+    if eng is None:
+        return False, head + " | NOT ADMISSIBLE: no engine logits vector, so the tie cannot be proved"
+    in_tie = sampled in tie["ids"]
+    p1 = tie["top1"]
+    got1 = int(bf16_payload(float(eng[p1]))[0])
+    held = got1 == tie["payload"]
+    return (in_tie and held), (head + f" | engine id {sampled}"
+                                 + (" is one of the tied ids" if in_tie
+                                    else " is NOT one of the tied ids")
+                                 + f"; engine's logit at pinned top-1 {p1} = {float(eng[p1]):.8g} ->"
+                                   f" bf16 0x{got1:04x} {'==' if held else '!='} pinned"
+                                   f" 0x{tie['payload']:04x}")
+
+
+def read_engine_logits(work: Path, n_decode: int, prompt_len: int, vocab: int) -> list:
+    """Every generation step's full logits vector, read once, before the section that needs them.
+
+    Section (a) needs them because the tie policy is proved against the engine's OWN numbers, not
+    around them, and a tie that cannot be proved has to fail at (a) rather than be waived. Entries are
+    `(array | None, why_not)`; (b) keeps naming its own reasons so a missing dump still reads as one.
+    """
+    out = []
+    for j in range(n_decode):
+        path = work / f"logits{prompt_len + j}.bin"
+        if not path.exists():
+            out.append((None, "file missing — check --out"))
+            continue
+        a = np.fromfile(path, dtype="<f4")
+        out.append((a, "") if a.size == vocab else (None, f"{a.size} floats, expected {vocab}"))
+    return out
+
+
+def tie_other(step: int) -> int:
+    """The pin's second tied id — the legitimate alternative the tie policy exists to admit. Used by
+    `--tie-alt` so the SELFTEST can prove the policy admits, not only that it refuses."""
+    tie = pin_tie(step)
+    if tie is None:
+        raise SystemExit(f"gate: --tie-alt {step} names a step with no exact tie in the pin, so the"
+                         " injection would prove nothing (the vacuous-negative trap"
+                         " `prototype/mlp_gemv/results.md` warns about)")
+    return tie["ids"][1]
+
+
+def untied_id(step: int) -> int:
+    """An id that is NOT in the pin's tie set — what an engine must never produce at a tied step.
+    Deterministic (the lowest id whose pinned value is not the tied maximum), and it refuses a step
+    that is not tied, for the same reason as `tie_other`."""
+    tie = pin_tie(step)
+    if tie is None:
+        raise SystemExit(f"gate: --break-tie {step} names a step with no exact tie in the pin; that"
+                         " injection would just be the ordinary wrong-id test wearing a tie costume")
+    wide = load_pin(f"decode{step}.logits_last.npy")
+    return int(np.flatnonzero(wide != np.float32(tie["value"]))[0])
 
 
 def metrics(got: np.ndarray, ref: np.ndarray) -> dict:
@@ -485,7 +649,8 @@ def parse_run(text: str) -> dict:
 
 def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids: int = -1,
             break_logits: int = -1, break_noise: int = -1, break_prompt_stop: int = -1,
-            replay: bool = False, break_feed: int = -1) -> tuple[
+            replay: bool = False, break_feed: int = -1, break_tie: int = -1,
+            tie_alt: int = -1) -> tuple[
                 str, int]:
     """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
 
@@ -546,6 +711,15 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             fed = greedy[j] + 1
         if j == break_ids:
             sampled = greedy[j + 1] + 1        # one wrong id, exactly where a real divergence starts
+        if j == break_tie:
+            # The failure the tie policy exists to catch: at a step where the PIN is tied, the engine
+            # produces an id that is not one of the tied ones. `untied_id` refuses a step that is not
+            # tied, so this injection cannot silently degrade into the ordinary wrong-id test.
+            sampled = untied_id(j)
+        if j == tie_alt:
+            # The other direction, which is the property the policy buys: the engine's id is the
+            # pin's OTHER tied id, and the gate must admit that as a TIE rather than fail it.
+            sampled = tie_other(j)
         if j == break_logits:
             # Flip the argmax: raise the runner-up past the top. This is the smallest logits-level
             # failure that matters — a token chosen wrongly, not a vector that is merely noisy.
@@ -579,6 +753,11 @@ def selftest(fixture: str = "dec8") -> int:
     Runs: the clean dry run must pass; each injected bug must fail, and fail *at its own step*.
     A negative that any check would catch is worth nothing (`prototype/mlp_gemv/results.md`), so
     the assertion is about where the failure landed, not that one happened.
+
+    The tie policy gets two cases, because a policy with only a refusal test is indistinguishable from
+    the policy that refuses everything: the engine on the pin's OTHER tied id must PASS as a TIE, and
+    the engine on an untied third id must FAIL. Both are aimed at a step the fixture really has a tie
+    at, and both are skipped out loud if this fixture has none.
     """
     base = [sys.executable, str(Path(__file__).resolve()), "--fixture", fixture]
     cases = [
@@ -603,6 +782,27 @@ def selftest(fixture: str = "dec8") -> int:
          "[FAIL] the tokens the engine fed itself are the ones the reference fed",
          "generation step 4 was fed the wrong token (a replay list off by one)"),
     ]
+    # The tie policy, both directions, at the first step this fixture actually has a tie at — an
+    # injection aimed at a step that is not tied would be caught by every check no matter what the
+    # policy does, which is the vacuous-negative trap `prototype/mlp_gemv/results.md` names. dec8 has
+    # no tied step; dec64f has two (17, 18), so `--selftest --fixture dec64f` is the one that exercises
+    # this pair.
+    man = json.loads((REFS / "manifest.json").read_text())
+    tie_step = next((j for j in range(len(man["greedy_continuation"]) - 1) if pin_tie(j)), None)
+    if tie_step is None:
+        print(f"  [SKIP] tie injections: no exact tie anywhere in {fixture}'s pinned logits."
+              " Run `--selftest --fixture dec64f` to exercise the tie policy (steps 17 and 18).")
+    else:
+        cases += [
+            (["--tie-alt", str(tie_step)], 0,
+             f"TIE step {tie_step}",
+             f"engine sampled the pin's other tied id at tied step {tie_step} — must be ADMITTED"
+             f" (the id is {tie_other(tie_step)}, the pinned top-1 is {pin_tie(tie_step)['top1']})"),
+            (["--break-tie", str(tie_step)], 1,
+             [f"[FAIL] generation step {tie_step}: exact tie in the pin",
+              "is NOT one of the tied ids"],
+             f"engine sampled an UNTIED id at tied step {tie_step} — must fail loudly"),
+        ]
     bad = []
     for extra, want_rc, want_in, what in cases:
         p = subprocess.run(base + ["--dry-run"] + extra, capture_output=True, text=True)
@@ -760,6 +960,15 @@ def main() -> int:
     ap.add_argument("--break-feed", type=int, default=-1, metavar="STEP",
                     help="with --dry-run: feed that step the wrong token, which is an off-by-one"
                          " in the replay list — the plausible way a forced driver breaks")
+    ap.add_argument("--break-tie", type=int, default=-1, metavar="STEP",
+                    help="with --dry-run: at a step where the PIN is an exact tie, sample an id that"
+                         " is NOT one of the tied ids, and require the gate to fail there. Refuses a"
+                         " step that is not tied, so the negative cannot quietly become the"
+                         " ordinary wrong-id test")
+    ap.add_argument("--tie-alt", type=int, default=-1, metavar="STEP",
+                    help="with --dry-run: at a tied step, sample the pin's OTHER tied id — what the"
+                         " engine really does at dec64f steps 17/18 — and require the gate to admit"
+                         " it as a TIE instead of failing it")
     ap.add_argument("--selftest", action="store_true",
                     help="re-run this file in subprocesses: clean dry run must pass, each injected"
                          " bug must fail at its own step")
@@ -826,7 +1035,7 @@ def main() -> int:
     if args.dry_run:
         stdout, rc = dry_run(man, prompt_ids, dec_logits, work, args.break_ids,
                              args.break_logits, args.break_noise, args.break_prompt_stop,
-                             replay, args.break_feed)
+                             replay, args.break_feed, args.break_tie, args.tie_alt)
         notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
                      " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
                      " run is not also the first time this file parses a STEP line. Section (d) is"
@@ -843,6 +1052,12 @@ def main() -> int:
         if args.break_prompt_stop >= 0:
             notes.append(f"injected: the §07.5 stop check fired at prompt step"
                          f" {args.break_prompt_stop} and ended the run there")
+        if args.break_tie >= 0:
+            notes.append(f"injected: generation step {args.break_tie} sampled an id that is not one"
+                         " of the tied ids the pin offers at that step")
+        if args.tie_alt >= 0:
+            notes.append(f"injected: generation step {args.tie_alt} sampled the pin's other tied id"
+                         " — the case the tie policy exists to admit")
     else:
         print("  $ " + " ".join(cmd))
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -899,10 +1114,32 @@ def main() -> int:
           "the prompt's last token samples greedy_continuation[0]",
           f"{prompt_steps[-1]['sampled'] if prompt_steps else 'no prompt step ran'} vs {greedy[0]}")
     got_ids = [int(s["sampled"]) for s in decode_steps]
+    # The engine's logits vectors, read here rather than in (b): the tie policy is proved against what
+    # the engine actually computed, so (a) needs them, and a tie that cannot be proved must FAIL at (a)
+    # rather than be waived.
+    eng_logits = read_engine_logits(work, n_decode, len(prompt_ids), dec_logits[0].size)
+    # One tie decision per step, in the pin's payload space (see TIE POLICY). `tie_ok` is what (b)'s
+    # argmax line reuses, so the two sections cannot disagree about what a tied step means.
+    tie_ok: dict[int, bool] = {}
+    for j in range(min(n_decode, len(got_ids))):
+        admissible, line = tie_verdict(j, eng_logits[j][0], got_ids[j])
+        if not line:
+            continue                       # the ordinary case: the pin has a single winner here
+        ties.append(f"step {j} -> {got_ids[j]}")
+        check(admissible, f"generation step {j}: exact tie in the pin, tested against the tie policy",
+              line)
+        tie_ok[j] = admissible
     for j, (g, w) in enumerate(zip(got_ids, greedy[1:])):
-        check(g == w, f"generation step {j} samples greedy_continuation[{j + 1}]", f"{g} vs {w}")
-    check(got_ids == greedy[1:], f"all {n_decode} generated ids match, in order",
-          f"engine {got_ids} / pinned {greedy[1:]}")
+        by_tie = g != w and tie_ok.get(j, False)
+        check(g == w or by_tie, f"generation step {j} samples greedy_continuation[{j + 1}]",
+              f"{g} vs {w}" + (" — admitted as a proved tie, see the TIE line above" if by_tie else ""))
+    unresolved = [j for j, (g, w) in enumerate(zip(got_ids, greedy[1:]))
+                  if g != w and not tie_ok.get(j, False)]
+    check(not unresolved,
+          f"all {n_decode} generated ids match, in order — exactly, or as a tie proved from the pin",
+          f"{len(tie_ok)} step(s) resolved by the tie policy"
+          f" ({', '.join(sorted(ties)) if ties else 'none'}); unmatched steps {unresolved}"
+          f" | engine {got_ids} / pinned {greedy[1:]}")
     fed = [int(s["input"]) for s in decode_steps]
     check(fed == greedy[:-1],
           "the tokens the engine fed itself are the ones the reference fed (the engine feeds itself,"
@@ -938,10 +1175,10 @@ def main() -> int:
     under_g6: list = []
     for j in range(n_decode):
         path = work / f"logits{len(prompt_ids) + j}.bin"
-        if not path.exists():
-            check(False, f"engine wrote {path.name}", "file missing — check --out")
+        eng, why = eng_logits[j]
+        if eng is None:
+            check(False, f"engine wrote {path.name}", why + " — check --out")
             continue
-        eng = np.fromfile(path, dtype="<f4")
         ref = dec_logits[j]
         if eng.shape != ref.shape:
             check(False, f"step {j}: vocabulary length", f"{eng.shape} vs {ref.shape}")
@@ -961,7 +1198,13 @@ def main() -> int:
         check(m["cos"] >= BAND["cos_hard"], f"step {j}: cos >= {BAND['cos_hard']} (§10.1 G5)")
         check(m["meanrel"] <= BAND["meanrel_hard"],
               f"step {j}: meanrel <= {BAND['meanrel_hard']:.0%} (§10.2)")
-        check(argmax_ok, f"step {j}: argmax agrees with the pin", f"{argmax_low(eng)}")
+        check(argmax_ok or tie_ok.get(j, False), f"step {j}: argmax agrees with the pin",
+              f"{argmax_low(eng)}" + ("" if argmax_ok else
+                                      (" — but the pin is tied here and the engine's id is one of the"
+                                       " tied ids, so the tie policy admits it"
+                                       if tie_ok.get(j, False) else
+                                       " — and the pin is tied but the engine's id is not one of the"
+                                       " tied ids")))
         if m["cos"] < BAND["cos_report"]:
             under_g6.append(f"{j}:{m['cos']:.6f}")
     if under_g6:
@@ -1007,12 +1250,16 @@ def report() -> int:
     section("summary")
     for n in notes:
         print("  [note] " + n)
+    if ties:
+        print(f"  [TIE] {len(ties)} generation step(s) were exact ties in the pin and were decided by"
+              f" the tie policy: " + ", ".join(ties))
     if fails:
-        print(f"ENGINE GATE FAIL — {len(fails)} failed")
+        print(f"ENGINE GATE FAIL — {len(fails)} failed"
+              + (f" ({len(ties)} step(s) reported TIE and not counted as failures)" if ties else ""))
         for f in fails:
             print("  - " + f)
         return 1
-    print("ENGINE GATE PASS")
+    print("ENGINE GATE PASS" + (f" — with {len(ties)} step(s) reported TIE" if ties else ""))
     return 0
 
 

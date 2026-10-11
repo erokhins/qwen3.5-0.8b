@@ -733,6 +733,10 @@ excursions, and neither is "state carry-over decaying with position":
 mismatches at 17/18 and 13 band lines (cos/meanrel) in the 26–34 stretch, with everything else — 518
 PASS lines, fixture integrity, the deep-vs-shallow identity, the launch plan, the state sizes — green.
 
+*(Restated later, and the restatement is the correction: the gate's own fail list splits as 5 tie-driven
+lines — 2 per-step id, 1 aggregate, 2 `argmax agrees with the pin` — and **10** band lines, steps 27,
+28(×2), 29(×2), 30, 31, 32(×2), 34. Both halves are dealt with below.)*
+
 ## The 300-token free run: it needs `--no-stop` to mean 300
 
 A teacher-forced chain never lets the engine's own divergence happen, so depth-as-smoke has to be a free
@@ -754,11 +758,19 @@ were deleted again. The stopped variant also passes and asserts the stronger thi
    exception (proof required from the pin: the engine's id must carry the pinned top-1 logit exactly), or
    `dec64f` stays red at 17/18 and everyone lives with a failing deep gate. Both are defensible; the band
    and the rule are §10's and the operator's.
+   → **CLOSED 2026-10-12.** Decided (payload-space predicate, not F32 equality) and implemented; see
+   "Decision 1 of the deep gate" at the end of this file. `dec64f` now reports steps 17/18 as TIE and the
+   gate is red only on the band half.
 2. **Whether the 26–34 excursion needs a bug.** The correlation says scale, not decay, but scale is a
    reading, not an attribution. The measurement that settles it is an engine-side per-step state
    fingerprint (the same four moments the pin carries) printed by `decode_run`, which would make `(e)` a
    two-column comparison instead of a correlation. That is a new engine flag plus a device run, and it is a
    scope decision, so it is written here rather than built.
+   → **ANSWERED A DIFFERENT WAY 2026-10-12, and the state fingerprint is still owed.** Pricing the two
+   legal reference routes against each other at all 64 steps (`engine/route_price.py --fixture dec64f`)
+   puts *them* under G5 at 6 of the engine's 7 failing steps, so no engine bug is needed to explain the
+   window — but step 34 is outside the legal spread, and only the engine's own moments can speak to that.
+   See "Decision 2 of the deep gate" below for the table, the three band options, and the eos confound.
 3. **`MAXSC`.** 512 lanes is fine for everything this repo runs today (64-deep gate, 300-deep smoke, a
    4k-context request is a prefill conversation). Recorded, not touched.
 
@@ -994,3 +1006,81 @@ The G5/G6 bands were **not** edited, and `engine/gate.py --fixture dec64f` still
 Whatever is chosen, the 27–34 rows of `dec64f` are a poor thing to hang a band on, because they are simultaneously
 the low-energy window and the post-eos window; the no-crossing fixture (`dec64t`) should exist before the band is
 rewritten, and if the dips do not move with the energy curve there, item 1 needs re-measuring rather than adopting.
+
+
+# Decision 1 of the deep gate: the tie policy is implemented — what it may excuse, and what it still refuses
+
+`dec64f` FAILed 15 lines. Restating that count from the gate's own fail list rather than from the
+paragraph above, which had it wrong: **5 of the 15 were tie-driven** (the two per-step id lines, the
+aggregate "all 64 ids in order" line, and two `argmax agrees with the pin` lines) and **10 were band
+lines** — steps 27, 28(×2), 29(×2), 30, 31, 32(×2), 34. The earlier "13 band lines" in this file was
+arithmetic done on the wrong side of the split; the gate's list is the authority.
+
+The tie half is now decided and implemented. **It is a sharpening of the id rule, not a loosening**: an
+exact tie has no defined `argmax` (§03.4's lowest-id rule is a *tie-break* — an arbitrary choice among
+values the model called equal), so "engine's id == pin's id" is not a mathematical requirement at such a
+step; what replaces it is proved from the pin and fails loudly otherwise.
+
+## The measured ties
+
+```
+step 17  pinned maximum 17.25, payload 0x418a, tied 2 ways: ids [2018, 10407]   engine sampled 10407
+step 18  pinned maximum 19.75, payload 0x419e, tied 2 ways: ids [1379, 64704]   engine sampled 64704
+```
+
+Both proved on the BF16 payload of `decode{17,18}.logits_last.npy` through `gate.py`'s own bit-shift
+widening (§10.5: a bitcast, never a numeric cast). The engine's own numbers at those steps, printed now
+by the gate rather than gated:
+
+| step | pinned top-1 id | pinned value | engine's F32 there | engine's BF16 RNE | pinned payload | engine's tied-id values |
+|---|---|---|---|---|---|---|
+| 17 | 2018 | 17.25 | 17.19451904 | 0x418a | 0x418a | 2018 → 17.194519, 10407 → 17.237261 |
+| 18 | 1379 | 19.75 | 19.76797104 | 0x419e | 0x419e | 1379 → 19.767971, 64704 → 19.785622 |
+
+## The predicate, and why each clause is that shape
+
+A step is admitted as a TIE iff, **per step**: (1) ≥ 2 ids share the exact maximum **on the BF16
+payload**; (2) the engine's sampled id is one of the tied ids; (3) `RNE(engine's F32 logit at the pin's
+top-1 id) == the pinned payload`. Each tied step prints `TIE` with the tied ids, the tied value and the
+engine's value at every tied id, and is counted in the summary line.
+
+* **Why clause 3 is stated in payload space and not in the engine's F32.** Demanding F32 equality
+  against a BF16 quantity is not strictness, it is a category error: `lm_head`'s FULL form writes an F32
+  accumulator with no BF16 rounding (`prototype/lm_head_gemv/lm_head_gemv_kernels.h:64`), so the test
+  could only ever pass by luck — and a gate that can only pass by luck teaches nothing. Measured: engine
+  17.19451904 vs pinned 17.25 (Δ −0.0555) and 19.76797104 vs 19.75 (Δ +0.0180), i.e. the literal reading
+  keeps steps 17/18 red forever and `dec64f` at 15 fails by construction.
+* **Why it is still a real constraint.** Only 48 317 of 248 320 logits at step 17 (19.5 %) land in the
+  BF16 bin their pin says — so "the pinned winner stayed inside its own bin" is not a formality, and it
+  fails if the engine's top-1 drifts by half a bin.
+* **Why there is no 1-ULP clause on the *other* tied ids.** At 17.25 one BF16 ULP is 0.125, so a
+  within-one-ULP predicate would be a brand-new band with no floor probe behind it, which `AGENTS.md`
+  forbids inventing. Those values are therefore printed, not gated; if they ever look load-bearing they
+  get a floor probe and get promoted then.
+* **Why the exception can never hide anything.** An engine that picks a *third*, untied id at a tied step
+  fails on the tie check *and* on the id check *and* on the aggregate. `--selftest` proves both
+  directions at a step the fixture really ties:
+
+```bash
+.venv/bin/python engine/gate.py --selftest --fixture dec64f     # 8 cases: … + --tie-alt 17 must PASS as
+                                                               # TIE, --break-tie 17 (untied id) must FAIL
+.venv/bin/python engine/gate.py --fixture dec64f               # device: correctness only
+```
+
+`--break-tie`/`--tie-alt` refuse a step that is not tied, so neither injection can quietly degrade into
+the ordinary wrong-id test (the vacuous-negative trap `prototype/mlp_gemv/results.md` names), and
+`--selftest` on a fixture with no tie says `[SKIP]` out loud instead of pretending. dec8 has no tied
+step; its gate is unchanged — `ENGINE GATE PASS`, same 94 checks.
+
+## Where the deep gate stands after it
+
+`dec64f` is now **`ENGINE GATE FAIL — 10 failed (2 step(s) reported TIE and not counted as failures)`**,
+all ten in the 27–34 window that the section above shows two legal reference routes failing too, and
+**that is the expected state — the gate is not being chased green.** `dec8` still passes at 94 checks and
+the bands are untouched by either decision.
+
+New in `engine/gate.py`: the `TIE POLICY` comment block next to the band rationale (the rule and its
+justification live there, not in this file), `bf16_payload()` (RNE on the bits), `pin_tie()` (payload-space
+tie set), `tie_verdict()` (the single predicate — (a) gates on it and (b)'s argmax line reuses its answer,
+so the two sections cannot disagree), `read_engine_logits()` (the engine's vectors are now read before (a),
+because a tie that cannot be proved must fail rather than be waived), and the two injection flags.
