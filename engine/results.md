@@ -466,3 +466,113 @@ them chunked (§04.4 vs §04.7), and the reference's *own* chunk-vs-recurrent se
 at cos ≥ 0.9999 — the same order as the engine's entire deficit. What would separate that from "the
 kernels are slightly off": `speccheck/run_chunkcheck.py --fixture dec8`, which prices the route inside the
 reference with no engine in the loop.
+
+## (2) The first throughput row, and the ~4 ms between it and the op-sum
+
+Cited from `bench/performance-status.md` §6, which carries its provenance (three runs, blocking calls,
+zero subagents, spread **2.1 %**, `util` 76/71/69 % recorded and discounted per §6): **11.978 / 12.053 /
+12.232 ms/step = 83.5 / 82.9 / 81.7 tok/s**, over 81 steps each — `RESULT steps=81`, the 17-token prompt
+fed one token per step plus 64 requested generation steps, generation ending when the engine emitted id
+248046 at generation step 54. Against the op-sum ledger (**8.03 ms**, 7.975 before the `gdn_decode`
+re-take) the gap is **3.95 ms**.
+
+Framed as bandwidth, which is the honest frame: one token reads ≈1.608 GB (1.5457 GB weights + 0.0566 GB
+of GDN state pass + ~6 MB of activations/copies). The engine sustains **134 GB/s = 57 % of the 237 GB/s
+probe**; the sum of its parts implies **200 GB/s = 84 %**. The gap is worth 0.94 GB at probe rate — about
+60 % of the checkpoint, read once more and not seen.
+
+### The part of the gap that is plan structure — priced, not guessed
+
+The ledger's 8.03 ms is a sum of per-family cold bursts, each measured on **its own** launch plan. Pricing
+the plan `decode_step` actually runs (424 launches, cited per row) accounts for **1.27 ms** of the gap:
+
+| item | ledger §6 bills | the engine pays | Δ | basis |
+|---|---|---|---|---|
+| projections | 3.039 ms — the **packed 48-launch** plan at rows/block 8 | **3.600 ms** — 114 launches, unpacked (`PACK_X=false`), rows/block 8 | **+0.56** | `prototype/proj_gemv/results.md` per-shape cold table summed over the engine's plan (3.541 ms), scaled by the 1.0166 clean/contended ratio §6 measures on the same plan |
+| cast launches | **not billed at all** | **0.431 ms** — 115 launches × 3.75 µs | **+0.43** | 3.75 µs/launch is glue's measured cost for one 256-thread block (glue §4; §6's re-take reads 2.545 µs at the same width, which would price it at 0.293 ms — this is the least certain row in the table, and §6 already says dispatch-bound numbers here are bimodal). Their traffic is 1.74 MB = 0.007 ms, so this row is dispatch and nothing else |
+| `gdn_conv` 18 + `gdn_gates` 18 | not billed | ≈0.130 ms | +0.13 | **estimate** — 5 µs/launch for a 24-block conv, 2.2 µs for `gates_kernel<<<1,16>>>`. Neither has a measured per-launch cost anywhere in this repo |
+| the 19 D2D copies (embedding row + 18 conv-window rolls) | not billed | ≈0.057 ms | +0.06 | **estimate** at 3 µs/copy; the conv rolls alone are 1.33 MB/token of traffic, which is nothing, so this is dispatch |
+| GDN recurrence | 0.0646 ms — the prototype's **one-launch 18-layer** form | 0.115 ms — 18 separate launches × the re-taken 6.4 µs | +0.05 | §6's `rec alone 0.0064 ms` |
+| glue | 0.150 ms @512 threads | 0.185 ms @256 (the width `kernels_glue.cpp` launches) | +0.035 | §6 |
+| **GPU side, priced** | **8.030** | **9.295** | **+1.27** | |
+
+Then the host tail, which is serial with the GPU because the step syncs once at the logits, measured on
+CPU (no device) at the arithmetic `decode_step` does: fresh `vector<float>(248320)` + first touch + the
+strict-`>` argmax = **0.128 ms/step**, of which the warm scan alone is 0.121 ms and the allocation plus
+page faults only 0.007 ms; plus **0.014–0.016 ms** for the 0.993 MB D2H at the doc's bulk 63–70 GB/s;
+plus **0.254 ms** if the run writes the per-step logits dump (`--out`). So **0.14 ms always, 0.40 ms in a
+gate-shaped run**. Total accounted for: **≈1.4–1.7 ms of 3.95**.
+
+### The ~2.5 ms no existing measurement can attribute, and what would settle it
+
+That residue is 21 % of the token, and it is the finding: **the sum of the parts is not the whole on this
+box, and nothing in `bench/` can say why.** The candidates, in the order I would test them:
+
+1. **Per-layer serialization between the wide GEMVs and the small kernels.** Every launch in a token
+   depends on the one before it, and 237 of the 424 are short (49 glue launches of *one block each*, 115
+   casts, 18 `<<<1,16>>>` gates kernels, 19 memcpys, 36 16-row `in_proj_a`/`_b` GEMVs). In a family burst
+   those launches queue behind each other with a deep pipeline; in the engine each one is a rendezvous
+   between two bandwidth-bound kernels that have to drain around it. At ~3.75 µs each they cost 0.89 ms —
+   priced above. At ~10 µs of exposed bubble each they cost 2.4 ms, which is the residue. Nothing on this
+   box distinguishes those two numbers today.
+   *Confirm with:* per-family clocks inside `decode_step` — a `--time-stages` flag that syncs and reads
+   `steady_clock` at the family boundaries and prints ms/token per family from inside a real step. That
+   instrument does not exist; it is ~40 lines and it is the one thing that would turn this list into a
+   table. It is not written here because it inserts syncs into the path it would be measuring, which is a
+   trade-off for the owner to accept, not for a worker to assume.
+2. **The GDN state stops being cache-resident.** The ledger bills the 56.6 MB state pass at the re-taken
+   warm figure (876 GB/s, 0.0646 ms) because a burst touching 18 MiB repeatedly keeps it resident. In the
+   engine, 1.55 GB of weight traffic streams past between two touches of that state. Priced at the
+   prototype's own cold row (255 GB/s) the same bytes cost 0.222 ms: **+0.16 ms**, inside the residue.
+   *Confirm with:* the same stage clocks — the 18 `rec` launches measured inside a step against the 0.115
+   ms the launch-split arithmetic predicts.
+3. **Interleaving cost per se** (DRAM page locality, TLB walks across 335 allocations in a per-layer order
+   no prototype reproduces). Unquantified; it is what's left if 1 and 2 come back clean. The same stage
+   clocks would show it as the three big families each running slower inside the engine than in their own
+   burst, with no change in their launch counts.
+
+### Levers, ranked by expected ms/token
+
+| # | lever | expected | bit-identical? | how to confirm |
+|---|---|---|---|---|
+| 1 | **`proj` rows/block 8 → 32** — all 114 engine projections launch at 256 threads (`kRowsPerBlock = 8` × 32 lanes), the width the §4 curve prices at 3.75 µs against 2.776 µs at 1024, and the block-starved narrow shapes are the ones that care | **−0.50 ms** — a clean-window pair on the same 48-job plan: 3.039 ms at rpb 8 (§6) vs 2.534 ms at rpb 32 (E2's 0.0528 ms/launch × 48, same window as the engine's 11.978) | **yes, by construction**: one wavefront owns a row (`proj_gemv_kernels.h:116-133` — `row = blockIdx.x*rpb + threadIdx.x/ws`, the K loop strides by lane, `reduce_row` is a within-warp butterfly), so `rpb` moves rows per block and nothing that touches a value | re-take the rpb ladder in one clean window, then A/B the engine (commands below). It is one constant in `engine/kernels_proj.cpp`, and it is a decision, not a fix: 8 is the op's gated default |
+| 2 | **Pack the GDN input projections** — `in_proj_qkv` + `z` + `b` + `a` in one launch per GDN layer, −54 launches. The deferral in this file priced it at ≈0.10 ms from launch count; the per-shape table prices the *same bytes* 4× faster merged | **−0.11 ms** (the `b`/`a` fold, as `proj_gemv` measured it) to **−0.57 ms** (the full four-into-one; cross-`tile` comparison, so treat as the upper bound) | same kernel, fewer launches — the outputs are the same dots | `prototype/proj_gemv/run.py --layers all --steps all --time --sweep`; the gap between `PACK_inproj` (181.9 GB/s) and the four separate shapes (141 GB/s) *is* the price |
+| 3 | **The 115 cast launches** — upper bound −0.43 ms, and the cheap deletion is not the one this file has been carrying. Folding the widening into the *producer* (`glue_add_norm` holds the norm row in registers and could also write the F32 copy for a 4 KB store) removes 49 of them for near-zero marginal traffic. Folding them into the *consumer*, which is the old `mlp_gateup`/`mlp_down` plan, has a measured precedent against it: `PACK_X` cost **+0.278 ms** over 48 launches to save 48 casts | −0.18 … −0.43 ms, and plausibly net-negative if done the consumer way | yes (every BF16 is exact in F32) | anchor the µs/launch at 256 threads (command below), then decide which producer to touch — both are graduated kernels, so both cost a re-gate |
+| 4 | **The per-step logits tail** — 0.128 ms of host scan/alloc + 0.015 ms D2H, always serial with the GPU, plus 0.254 ms when a run dumps logits. The sync itself is **not** the lever: §03.4's lowest-id tie rule put the argmax on the host, and a tie-correct fused argmax would shrink the D2H from 0.993 MB to 4 B but could not remove the wait | −0.14 … −0.40 ms | n/a — no value changes | A/B `decode_run` with and without `--out` (command below); the CPU pieces are already measured above |
+| 5 | ~~HIP graphs~~ | **−0.06 ms** | — | **retired by measurement**: §1's probe replays 64 captured launches at 1.78 µs against 1.85 µs eager. This file's earlier "graphs are the first perf item" line is superseded (note added there) |
+| — | per-step allocation churn | −0.007 ms | — | measured; not a lever |
+| — | stage dumps written every step | −0.254 ms, **only** when `--out` is passed | — | measured on CPU; a serving loop never pays it, so this is a note about how the throughput figure was taken, not an engine item |
+
+**So: the biggest single lever is neither the casts nor the per-step sync. It is the 114 projections at 256
+threads** — with the packed-plan fold immediately behind it, the two together worth −0.6 … −1.1 ms, i.e. as
+much of the gap as everything else combined. The casts are an upper bound with a measured counter-example,
+and the sync is 1.3 % of the step. The biggest *unknown* is the 2.5 ms residue, and it needs one instrument,
+not one more measurement of a family in isolation.
+
+**Commands for the top three** (operator-run; a worker may not open a GPU window):
+
+```bash
+# 1 · the projections' block width, and the packing question, in one clean window.
+.venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time --sweep
+
+# 2 · the engine A/B once `engine/kernels_proj.cpp`'s kRowsPerBlock says 32 (bit-identical per the
+#     kernel geometry above; the proj gate should still be re-run because it owns the default).
+#     Same shape as the throughput row: 17 prompt tokens one per step, then 64 generation steps.
+IDS=248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198,248068,271,248069,271
+./engine/build/decode_run --ids "$IDS" --steps 64            # no --out: driver's dump excluded
+./engine/build/decode_run --ids "$IDS" --steps 64 --out tmp/engine_gate_nodump   # with it
+
+# 3 · the dispatch anchor every small-kernel row above is priced from, at the widths the engine uses
+#     (256 threads: glue, casts, the narrow projections; 1024 is the width glue prefers).
+.venv/bin/python prototype/glue/run.py --time --threads 256 --iters 300
+.venv/bin/python prototype/glue/run.py --time --threads 1024 --iters 300
+```
+
+### Context, not action: there is no prefill
+
+§07.1 has no chunked prefill, so all 17 prompt steps cost a full decode step — ≈0.2 s of prompt before the
+first generated token, and 17 of the 81 steps in every figure above are prompt steps. A prefill pass would
+remove most of that from a first-token figure and would not change a token of the steady-state 11.978 ms.
+It is recorded here as context for reading the row, not as a work item: the gap this section is about is a
+decode-step gap, and prefill does not touch it.
+
