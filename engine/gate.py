@@ -70,15 +70,38 @@ STOP_ID = 248046
 #                   it is the hard floor here.
 #   meanrel <= 5 %  §10.2's cascade ceiling ("cos >= 0.999, meanrel <= 5 %"), the band G2/G3/G4 use
 #                   for every whole-cascade tensor comparison.
-#   cos >= 0.9999   §10.1 G6, decode logits under online softmax — the tighter figure the reference
-#                   itself achieves for a decode-step logits vector. REPORTED, not gated: whether
-#                   the engine should be held to it is a policy call, and §10.2 warns that cascade
-#                   floors are "a floor, not a knob". See engine/results.md "what this gate does not
-#                   claim".
+#   cos >= 0.9999   §10.1 G6, decode logits under online softmax. REPORTED, not gated — DECIDED
+#                   2026-10-11, do not promote it; the reasoning is below, not in a results file,
+#                   because a band comment is the thing a future reader edits.
 #
 #   ndiff / max ULP REPORTED, NOT GATED. §10.1 F1-F4 is explicit about why: on a chained dot the
 #   LEGAL ndiff is 29-47 %, and a max-ULP bound is blind to a whole-tensor 1-ULP shift. A threshold
 #   on either would be theatre.
+#
+# Why G6's 0.9999 is advisory here and G5's 0.9995 is the floor — and why the three §10 cos figures
+# are not interchangeable thresholds for the same quantity:
+#
+#   * G3i (cos >= 0.9999) measures an ISOLATED single layer fed the reference's own `s_in`, and it is
+#     the tightest figure precisely because "no upstream cascade can enter" (§10.1). It is the right
+#     bar for one kernel and the wrong bar for a token.
+#   * G6's 0.9999 is a decode-step logits vector in the REFERENCE, i.e. the whole 24-layer chain
+#     already upstream of it, with the softmax form as the only variable. It is a bf16-cascade figure,
+#     not a per-op one.
+#   * G5's 0.9995 is the incremental-vs-batch invariant: same model, same cascade, two ways of getting
+#     to position T+D.
+#   The rule, as decided: an end-to-end quantity must not be judged by a per-layer or per-operation
+#   bar, because the error it is allowed to carry is the accumulated error of all 24 layers and the
+#     whole token chain, not the error of one stage. G3i/G5/G6 therefore compare different things —
+#     one stage, two routes to one position, and one form of one stage — and a threshold moved between
+#     them is a different measurement, not a stricter or looser one.
+#   What actually decides correctness on this gate is **token identity (G7, exact ids)**; the logits
+#     band is supporting evidence about *how* the engine got there, which is why a step whose cos sits
+#     between the two figures is reported (the G6 note below) and not failed. The first end-to-end
+#     pass had exactly that profile: step 1 at cos 0.999886 — under G6, over the G5 floor, with every
+#     one of the eight ids exact and the reference's own top-1/top-2 margin 7-23x the largest element
+#     error at every step. It stays a documented observation. `engine/logits_floor.py` is the CPU-side
+#     floor probe for that comparison (legal reassociation of the reference's own logits dot), and
+#     engine/results.md records what side of it 0.999886 falls on.
 #
 # §10.2 also fixes the DEFINITIONS: cos is over the flattened tensor, meanrel = mean|Δ| / mean|ref|
 # (a ratio of means, not a mean of ratios — the latter explodes on the near-zero logits that most of
@@ -574,9 +597,11 @@ def main() -> int:
               f"{argmax_low(eng)}")
         if m["cos"] < BAND["cos_report"]:
             notes.append(f"step {j}: cos {m['cos']:.6f} is under G6's decode-logits figure "
-                         f"{BAND['cos_report']} (still above the G5 floor that is gated). Whether to"
-                         " promote G6's number to a hard floor here is an owner decision, not a"
-                         " gate edit — see engine/results.md.")
+                         f"{BAND['cos_report']} (still above the G5 floor that is gated). G6 is"
+                         " ADVISORY here by decision, not an open question: an end-to-end token"
+                         " carries the whole 24-layer cascade, so it is not judged by a figure"
+                         " belonging to a narrower comparison — see the BAND comment above and"
+                         " engine/logits_floor.py for the measured legal floor of this tensor.")
         else:
             print(f"  [info] step {j}: cos {m['cos']:.6f} clears G6's {BAND['cos_report']}")
 
