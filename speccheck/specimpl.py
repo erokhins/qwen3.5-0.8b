@@ -163,10 +163,19 @@ def rotate_half(a: torch.Tensor) -> torch.Tensor:
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """S05.3: rotate the first ROT_DIM dims of each head, pass the rest through.
-    x: [T, heads, D_HEAD]; cos/sin: [T, ROT_DIM]."""
+    x: [T, heads, D_HEAD]; cos/sin: [T, ROT_DIM] — F32 from rope_cs, cast here.
+
+    The table and BOTH products round to the activation dtype:
+    `bf16(bf16(z*c) + bf16(rot*s))`. That is what the reference does (transformers' rotary embedding
+    returns `emb.cos().to(dtype)`, so the multiply never sees an F32 table), and it is what the
+    dumps carry: with an F32 table this function missed 52-97 of every 2048 `attn.q_rope` elements
+    on dec8 (cos 0.99983, meanrel 0.0174 — inside the S10 attn threshold, so no gate failed, which
+    is exactly why the wrong policy survived). Found by prototype/attn_decode reproducing the same
+    pins bit-for-bit with the BF16 policy; see S05.3 and `speccheck/rope_table_probe.py`.
+    """
     rot, rest = x[..., :ROT_DIM], x[..., ROT_DIM:]
-    c, s = cos[:, None, :], sin[:, None, :]
-    return torch.cat([rot * c + rotate_half(rot) * s, rest], -1)
+    c, s = cos[:, None, :].to(x.dtype), sin[:, None, :].to(x.dtype)
+    return torch.cat([(rot * c + rotate_half(rot) * s).to(x.dtype), rest], -1)
 
 
 # ------------------------------- GDN block (S04) ----------------------------
