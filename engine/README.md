@@ -104,6 +104,9 @@ Compile-only HIP (compiling is not running; allowed while the GPU is busy):
 bash engine/build.sh                                   # loader_test only, today
 for TU in state kernels_gdn kernels_glue kernels_proj; do \
   hipcc -O3 -Wno-unused-command-line-argument -I. -Iengine -c engine/$TU.cpp -o /tmp/$TU.o; done
+# Re-verified on the current tree with these exact commands: four TUs, zero stderr (no warnings),
+# `engine/build.sh` and `prototype/gdn_gated_norm/build.sh` both link. That is the whole extent of
+# the compile claim — nothing else in engine/ exists to compile.
 bash prototype/gdn_gated_norm/build.sh                 # kernel + host driver + engine/loader.cpp
 for OP in gdn_decode attn_decode glue proj_gemv mlp_gemv lm_head_gemv; do \
   bash prototype/$OP/build.sh; done                    # all six still build after the extraction
@@ -126,6 +129,30 @@ tools/gpu_lock.sh acquire "engine W5b GPU pass" && tools/gpu_lock.sh util
 # norm_pre_gate alone; w_f32/affine_uncast/single_cast/silu_rounded with norm_pre_gate 0/294912.
 
 tools/gpu_lock.sh release "engine W5b GPU pass"
+```
+
+```bash
+# E1 (engine/results.md) — glue's gate at the width the engine does NOT launch. Until this runs,
+# the engine's <256 is "the gated width", not "the width that also wins at 1024".
+tools/gpu_lock.sh acquire "glue gate at 1024 (E1)" && tools/gpu_lock.sh util
+.venv/bin/python prototype/glue/run.py --threads 1024
+.venv/bin/python prototype/glue/run.py --threads 1024 --negative
+tools/gpu_lock.sh release "glue gate at 1024 (E1)"
+# expect: the same 784 comparisons, 0 failures, and the norm half at the published floor (the
+# 256-thread order measures 3 / 393 216). 1024 changes the F32 summation order, and ndiff is the
+# only criterion that can see it, so "it passes" is not the result — "it passes AT THE SAME FLOOR"
+# is. If the floor moves or the band has to widen, <1024 stays out of the engine and glue's §4 sweep
+# row needs the caveat. The negatives must still each be caught at their own stage.
+
+# E2 (engine/results.md) — the half that is runnable today: the two PACK_X configs, cold, on the
+# prototype's 48-launch token plan, in the same quiescent window as each other.
+tools/gpu_lock.sh acquire "proj_gemv PACK_X A/B (E2)" && tools/gpu_lock.sh util
+.venv/bin/python prototype/proj_gemv/run.py --time --sweep
+tools/gpu_lock.sh release "proj_gemv PACK_X A/B (E2)"
+# expect: unpacked rows/block 8 ≈2.99 ms / 66 % of probe, the `x left BF16 in shared` row
+# ≈3.27 ms / 60 % — the pair the engine's PACK_X=false comment cites. Add the cast the engine now
+# pays (≈48 launches ≈0.089 ms at the 1.85 µs floor) before quoting either as its own cost. The
+# other half of E2 — the same A/B through `engine/kernels_proj.cpp` — waits for `decode_step`.
 ```
 
 ```text

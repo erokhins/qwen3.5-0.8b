@@ -1,5 +1,37 @@
 # `engine/` — weight residency (W5 first half)
 
+**Two device experiments stand between this file's launch configurations and "trusted", and neither
+has ever run.** Nothing in `engine/` has touched a device, so these are not polish: **E1** decides a
+numerics question that no other criterion on a norm can see, and **E2** decides a 0.279 ms/token
+performance claim imported from a different host. Commands are in `README.md`'s device list; no
+ledger row should be written from the prose below until they have run.
+
+* **E1 — glue's correctness gate at 1024 threads.** The engine launches `glue_add_norm<256>`, the
+  width the 784-comparison gate actually ran at, because `glue_kernels.h:83-102` derives
+  `PER = H/THREADS`: 256 → 4 elements/thread then an 8-partial warp tree, 1024 → 1/thread and a
+  32-partial tree. That is a **different F32 summation order for the mean of squares**, and a norm's
+  legal floor is 1 ULP with no cancellation band, so the only criterion that can tell the two apart
+  is `ndiff` — which `prototype/glue/results.md:113` names as "the criterion doing the work". The
+  published floor (3 / 393 216) was measured on the 256-thread order, so the 1024 order the sweep
+  prefers (≈2.78 vs 3.75 µs/launch, §4 there) has no floor measurement at all; `results.md:170`
+  asks for exactly this re-run and `:230` still lists it open.
+  *Expected:* `784 comparisons`, 0 failures, ndiff at the same floor. *Failure mode that matters:*
+  the gate passes at 1024 only by loosening `NDIFF_PCT_MAX`, or the ndiff count moves enough that
+  "same arithmetic, different width" is false — in which case 256 is not a preference but a
+  requirement and the sweep's 1024 row needs the caveat. (A CPU pre-answer to the floor half exists:
+  `floor_probe.py`'s `THREADS = 256` constant is a numpy mirror of the order, not device code.)
+* **E2 — `proj_gemv` PACK_X=false vs true, cold, on the engine's own launcher.** The engine now
+  instantiates `PACK_X=false` (`kernels_proj.cpp`), which is both the gated config and the measured
+  faster one — but both numbers (2.991 vs 3.269 ms) come from `prototype/proj_gemv`'s host at its own
+  geometry, and `PACK_X=false` makes the caller hand F32 `x`, so ≈48 cast launches/token (≈0.089 ms
+  at the 1.85 µs floor) come back into the plan. The comparison has never been made on the engine's
+  launcher, and cannot be until `decode_step` exists.
+  *Expected:* unpacked ≤ packed − casts, i.e. the prototype's ordering reproduces, ≈0.28 ms/token
+  between the configs. *Failure mode:* if packed-with-casts wins on the engine's geometry, `false` is
+  the wrong constant and `kernels_proj.cpp`'s comment must carry the engine's own number instead of
+  the prototype's. Repeatable-now half (prototype token plan, same quiescent window):
+  `--time --sweep`, which prints both rows.
+
 Status: **gate PASS — 52 checks, 0 failures** (`engine/loader_test`, built by
 `engine/build.sh`). Residency only: no token loop, no per-request state, no kernel calls
 (`README.md`). Binary: `engine/loader_test`. Gate: `engine/loader_test` itself; its
@@ -99,10 +131,14 @@ no number here is a measurement of anything except the compiler's willingness.
    `decode_step` does not exist yet.
 2. **Dtype adapters: ≈66 cast launches/token.** `mlp_gemv` and `gdn_decode`'s conv/gates/rec take
    F32 activations, while `glue`/`proj_gemv` produce BF16, so the engine widens (48 of the 66 are
-   the MLP's `x`). `cast_bf16_to_f32_3` already folds three regions into one launch for exactly
-   this reason. The real fix is a BF16-staged form of `mlp_gateup`/`mlp_down` — `proj_gemv` proved
-   that is bit-identical for a dot product — which would delete most of the 66. Not done: it means
-   touching a graduated kernel and re-gating it, and `mlp_gemv`'s gate belongs to another phase.
+   the MLP's `x`, and E2's `PACK_X=false` adds ≈48 more for the projections' `x`).
+   `cast_bf16_to_f32`, `cast_f32_to_bf16` and `cast_bf16_to_f32_3` are **declared** for exactly this
+   reason (`kernels.h:82-91`) and **not written** — `kernels_cast.cpp` is in README's "Not written"
+   list, so nothing currently folds three regions into one launch and this whole deferral rests on
+   code that does not exist yet. The real fix is a BF16-staged form of `mlp_gateup`/`mlp_down` —
+   `proj_gemv` proved that is bit-identical for a dot product — which would delete most of the 66.
+   Not done: it means touching a graduated kernel and re-gating it, and `mlp_gemv`'s gate belongs to
+   another phase.
 
 Both deferrals are launch-count, not bandwidth: at ≈240 GB/s the token's memory floor is well under
 1 ms and 358 launches is ≈0.66 ms, so they are the first thing a perf pass should attack — after
