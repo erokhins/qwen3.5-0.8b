@@ -424,12 +424,12 @@ with `gate.py::metrics()`'s own arithmetic, so these are the gate's numbers and 
 | 6 | 0.999905 | 1.412 % | 11.2× |
 | 7 | 0.999968 | 0.730 % | **7.4×** |
 
-`ndiff` is 248 317/248 320 — what a chain this long is expected to produce, and correctly excluded
-(§10.1 F1–F4: a chained dot's legal ndiff is 29–47 %, so ndiff there proves nothing). The decisive
-column is the last one: **at every step the reference's own top-1/top-2 margin is at least 7.4× the
-largest element error the engine produces** — the error had to grow almost an order of magnitude before a
-token could flip, and after eight tokens none flipped. Token identity is what §10 makes the correctness
-gate (G7), and this is what supporting evidence looks like next to it.
+`ndiff` is 248 316–248 319 out of 248 320 at every step — what a chain this long is expected to produce,
+and correctly excluded (§10.1 F1–F4: a chained dot's legal ndiff is 29–47 %, so ndiff there proves
+nothing). The decisive column is the last one: **at every step the reference's own top-1/top-2 margin is at
+least 7.4× the largest element error the engine produces** — the error had to grow almost an order of
+magnitude before a token could flip, and after eight tokens none flipped. Token identity is what §10 makes
+the correctness gate (G7), and this is what supporting evidence looks like next to it.
 
 ### The band question the pass raised, the decision, and the floor measured under it
 
