@@ -73,4 +73,5 @@ tmp/
 # prototype/<op>/build/, already covered).
 prototype/lm_head_gemv/lm_head_gemv
 prototype/gdn_decode/gdn_decode
+prototype/mlp_gemv/mlp_gemv
 *.o

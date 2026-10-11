@@ -8,9 +8,13 @@ only when its gate passes**, and a gate is a script, never an eyeball. Current c
 |---|---|---|
 | `lm_head_gemv/` | tied logits GEMV, bf16, 248320 × 1024 | **passes** §10.1 logits class at 242.1 GB/s (102 % of the read probe) — `lm_head_gemv/results.md` |
 | `gdn_decode/` | S04.2–S04.4 decode step: conv, gates, gated-delta recurrence, 18 layers | **passes** all four functions (bit-exact conv, 1e-7 vs the spec recurrence) — `gdn_decode/results.md` |
+| `mlp_gemv/` | S03.3 MLP decode path: gate+up+SwiGLU fused, then down, 24 layers | **passes** F1–F4 over 192 layer×step cases at 2.650 ms/token cold = 84 % of the read probe — `mlp_gemv/results.md` |
+| `bf16_ulp.py` | shared BF16 ULP comparator + scale-aware report | used by `mlp_gemv`; **has a selftest, run it** — the naive `uint16` comparator it replaces is silently wrong for every negative number |
 
-Next in line: the gated full-attention decode step (§05), then the MLP GEMVs; then wiring
-`engine/` to call these instead of simulating them.
+Next in line: the gated full-attention decode step (§05, 5.5 % of token bytes) and the GDN /
+attention *projection* GEMVs — `mlp_gemv`'s `mlp_down<IN>` is the same shape-generic kernel and
+only needs its `(in, out)` instantiated to cover them; then wiring `engine/` to call these
+instead of simulating them.
 
 ## HIP on ROCm 7.1 / gfx1151 — the things that bit us
 
@@ -55,7 +59,26 @@ Saved here so the next kernel does not rediscover them.
    better than meanrel 1.45e-3 from the pinned HF dumps no matter how exact the kernel is
    (§04.4 records why). Gate tight against a mirror of the spec block *and* loosely against
    the dump; a single threshold would have made either a false FAIL or a false PASS.
-7. **Check inputs for NaNs before blaming the kernel** — `check.py` prints it, because a
+   `mlp_gemv/floor_probe.py` is the version of this for a plain dot: reordering the reference's
+   own F32 sum moves ~1 element in 1e5 by >1 BF16 ULP, always at an element that cancelled to
+   ~1e-6 of the tensor max. So a BF16 gate against a dump needs a cancellation band
+   (that probe measures what to set it to), and a chain case needs aggregate metrics — a flat
+   "max 1 ULP" rule forbids correctness, and a ULP bound on a chained output measures the
+   sensitivity of the arithmetic rather than the kernel.
+7. **Below ~1 ms, `hipEventElapsedTime` returns exactly 0 on this iGPU.** Timings for
+   per-layer decode kernels must come from a burst (submit N launches, one sync, wall-clock /
+   N), and a zero is a broken timer, not a fast kernel.
+8. **A tiled working set only defeats the cache if consecutive touches of the same bytes are
+   far apart.** Replicating a weight 6× and launching all 6 replicas of one kernel back to back
+   re-reads cached bytes and reported 344 GB/s for a kernel that streams 237 GB/s. Interleave
+   the kernels the way a real token does (gateup, down, next replica) and check the reported
+   bytes against what the kernel itself claims.
+9. **Sweeps and negative tests must load their own inputs.** Both `mlp_gemv` config sweep and
+   its negative injections inherited the previous layer's weight files from the main loop, which
+   made the sweep rank configs against the wrong matrix and every injection "caught" no matter
+   what the kernel did. A negative test that cannot fail is worse than none: it is the reason to
+   believe a PASS that means nothing.
+10. **Check inputs for NaNs before blaming the kernel** — `check.py` prints it, because a
    shared-memory overrun once produced NaNs in one launch configuration and silence in
    another.
 
