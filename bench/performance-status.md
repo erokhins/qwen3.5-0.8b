@@ -13,7 +13,8 @@ project as measured until a row moves into the first table.
 | `mlp_gemv` MLP, 24 layers, cold weights | 528.5 MB | **2.650 ms** | 199.4 GB/s | **84 %** |
 | `proj_gemv` all 9 projections × 24 layers, 48 launches, cold | 445.7 MB | **2.990 ms** † | 156.3 GB/s | **66 %** † |
 | `proj_gemv` best config seen (rows/block 32, same conditions) | 445.7 MB | 2.785 ms † | 167.8 GB/s | 71 % † |
-| `glue` residual+RMSNorm, fused, 49 launches/token | ~5 MB | **0.137 ms** † | ~37 GB/s | launch-bound, not bandwidth-bound |
+| `glue` residual+RMSNorm, fused, 49 launches/token | ~0.5 MB | **0.1336–0.1360 ms** † | 2.73–2.78 µs/launch | launch-bound: roofline is 0.0021 ms |
+| same, unfused (48 adds + 49 norms = 97 launches) | ~0.5 MB | 0.2131–0.2155 ms † | 2.20–2.22 µs/launch | fusion buys 0.0795 ms/token |
 | `attn_decode` §05 core, 6 layers, one launch each | ~0.4 MB at 25 lanes | ~0.011 ms (launch floor arithmetic, not timed) | — | bit-exact to 277 lanes |
 | `gdn_decode` recurrence, 18 layers, state warm | 54 MB (3 × 18 MiB) | **0.062 ms** | 918 GB/s | 387 % — cache-resident |
 | same kernel, state tiled to 108 MiB (cold) | 324 MB | 1.344 ms | 255 GB/s | 108 % |
@@ -80,9 +81,14 @@ per-shape results run from 77 % of the probe (`in_proj_qkv` packed) down to 39 %
 5 % for the 16-row `in_proj_b`/`in_proj_a`. The wide shapes behave like `lm_head`; the narrow ones
 behave like nothing measured before, and that is what moved the projection below.
 
-† **The projection numbers are provisional.** `gpu_lock.sh util` read 9 % at acquire and 60 % at
-release — something worked on the GPU mid-run without the lock — so they are floors, not
-measurements, and a clean re-measure is outstanding (§5 item 1).
+† **The projection and glue numbers are provisional.** Both were taken while something else worked on
+the GPU without the lock — `glue`'s two windows read 94 %→75 % and 98 %→35 % `util`, and an earlier
+one 17 %→60 % — so they are floors, not measurements, and the quiescent pass in §5 item 0 re-takes
+them. Rows in `glue`'s own sweep with 9–331 % spread are marked not-quotable in its `results.md`
+rather than quietly dropped. One real knob came out of the contended data anyway, because it is a
+*ratio*: µs/launch depends on block width — 2.776 / 3.06 / 3.75 / 5.30 µs at 1024 / 512 / 256 / 128
+threads, which means the 1.85 µs launch floor from the probe is a floor for a narrow block only, and
+per-launch cost at a useful block width is ~50 % above it.
 
 ## 3. Projection, with the assumptions named
 
