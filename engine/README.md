@@ -6,8 +6,11 @@ implementation in `../speccheck/` validates the specification and is **not** the
 What exists now is **W5's first half: weight residency** (`bench/build-queue.md` W5) plus **W5b's
 token loop**: per-request state, one launcher per graduated kernel, and `decode_step`, which runs one
 token through all of it. `engine/decode_run.cpp` drives it and `engine/gate.py` gates it against the
-pinned `dec8` fixture. **Neither has been executed** — see *Hand-off*: the gate is written, the device
-pass is not. No token has come out of this engine yet.
+pinned `dec8` fixture. **Two device passes have run** (`engine/results.md`, last section): the loader
+loads, `check_weights` passes, the state sizes and the 424-launch plan verify against §07, and the loop
+executes — but **no generation token has come out of this engine yet.** The first two runs ended inside
+the prompt because §07.5's stop check was armed during it; that is fixed in `5e7114b`, and the token
+result is what the next device pass is for.
 
 ## `loader.{h,cpp}` — what it guarantees
 
@@ -68,9 +71,9 @@ and leaves the text path resident on the device.
   family per TU is a compile-time requirement, not a style choice.
 * **All ten TUs exist and compile clean** (`hipcc -O3`, zero stderr): `state`, `loader`,
   `loader_test`, the seven `kernels_*`, `decode_step`, `decode_run`. `engine/build.sh` links both
-  binaries into `engine/build/`. **Not one of them has been executed**: the state buffers have never
-  been `hipMalloc`'d outside `loader_test`'s own scratch, no launcher has been launched, and
-  `gate.py` has never seen a logits file. "Compiles clean, never run" is still the state of the work.
+  binaries into `engine/build/`. The compile claim is no longer the interesting one: `decode_run` has
+  run twice on the device, so the state buffers have been `hipMalloc`'d for a token and the launchers
+  launched (`engine/results.md`); what has not happened is a step that *generated* a token.
 
 ## `decode_step.{h,cpp}` — one token, §07.1's order
 
@@ -94,11 +97,13 @@ Two things to know before reading it:
 
 ## Hand-off — read this if you did not write it
 
-Nothing below marked **device** has ever been executed. No buffer in `state.cpp` has been allocated
-for a token, no launcher in `kernels_*.cpp` has been launched from the engine, and no logits vector
-has come back. The §07.1 block order now exists as code (`decode_step.cpp`), not only as comments —
-which is the difference between this hand-off and the last one: what is missing is a measurement, not
-an implementation. "Compiles clean, never run" is still the state of the work, not an oversight.
+Everything marked **device** below has now been run — twice, in a foreground zero-subagent window — and
+`engine/results.md`'s last section carries the result: the loader loads, `check_weights` passes, the
+state sizes and the launch plan verify against §07, and the loop executes through the prompt. What has
+NOT happened is a generated token: both runs ended inside the prompt because §07.5's stop check was
+armed during it, fixed in `5e7114b` (the gate now fails loudly if a prompt-phase step ever fires it
+again). So the difference between this hand-off and the last one is that the implementation has met the
+device once; what is still missing is the token result and every timing.
 
 ### CPU-only — safe to run while anything else is running
 
@@ -138,16 +143,17 @@ an implementation. "Compiles clean, never run" is still the state of the work, n
 
 `.venv/bin/python engine/gate.py --selftest`
 # Proves the token gate DISCRIMINATES, with no engine and no device: it re-runs gate.py in
-# subprocesses against a CPU stand-in with three bugs injected — a wrong sampled id at a named step,
-# a swapped top-two logits, and 5 % logits noise that leaves the argmax alone — and requires each to
-# fail at the step it was injected at. Ends "SELFTEST PASS". `--dry-run` is the same stand-in without
-# the injections, and is what exercises sections (a)–(d)'s parsing before a GPU window exists.
+# subprocesses against a CPU stand-in with four bugs injected — a wrong sampled id at a named step, a
+# swapped top-two logits, 5 % logits noise that leaves the argmax alone, and the §07.5 stop check
+# firing during the prompt (the bug the first device run had) — and requires each to fail at the step it
+# was injected at. Ends "SELFTEST PASS". `--dry-run` is the same stand-in without the injections, and is
+# what exercises sections (a)–(d)'s parsing before a GPU window exists.
 
 `.venv/bin/python engine/gate.py --no-engine`
 # Sections (0), (c) and — with --selftest/--dry-run — the whole judging half of the token gate, with
 # no binary and no device: it proves the dec8 fixture pairs with itself (the §10.5 trap, as 26
 # assertions), runs engine/state_sizes.py against the sizes it will later compare with decode_run's,
-# and requires three injected bugs to be caught at their own steps. Runs in about a second, and is
+# and requires four injected bugs to be caught at their own steps. Runs in about a second, and is
 # the part of the gate a worker is allowed to run. Ends "ENGINE GATE PASS" with a note that (a),(b)
 # were skipped (or, under --dry-run, that the stand-in stood in).
 
@@ -177,7 +183,7 @@ bytes — the difference matters here, because a run that touches the pool while
 being timed contaminates that timing:
 
 ```bash
-.venv/bin/python engine/gate.py --selftest      # no binary, no device, no allocation: four runs of
+.venv/bin/python engine/gate.py --selftest      # no binary, no device, no allocation: five runs of
 .venv/bin/python engine/gate.py --no-engine     # this file against CPU stand-ins. Safe anywhere.
 ./engine/build/decode_run --sizes-only          # NO kernel launches, but it loads the checkpoint:
                                                 # 2.4 GB of hipMalloc + H2D + the warm read pass.
@@ -233,7 +239,8 @@ tools/gpu_lock.sh release "proj_gemv PACK_X A/B (E2)"
 ```
 
 ```bash
-# 3. THE TOKEN GATE — the first time any engine code except loader_test touches the device.
+# 3. THE TOKEN GATE — run twice already (both runs stopped inside the prompt; see engine/results.md),
+#    and the first one to produce eight generation ids is the interesting one.
 #    One command; it builds nothing, runs engine/build/decode_run, and judges the result.
 tools/gpu_lock.sh acquire "engine decode_step token gate (W5b)" && tools/gpu_lock.sh util
 .venv/bin/python engine/gate.py --build      # builds first (--build), then runs the gate
@@ -245,11 +252,17 @@ tools/gpu_lock.sh release "engine decode_step token gate (W5b)"
 #       the engine. If one does, the fixture moved: stop and re-read §10.5, do not touch the kernel.
 #   (a) sampled ids      — the 9 samples are exactly
 #                          [760, 6511, 314, 9338, 369, 2972, 57590, 159034, 271]
+#                          A `[STOP]` may only ever appear on a `decode` line: the dec8 prompt contains
+#                          the stop id 248046 at index 8, so a prompt-phase match is normal and must be
+#                          ignored (§07.5 is a generation rule; `decode_run.cpp` says why).
 #   (b) logits           — per step, cos >= 0.9995 (§10.1 G5) and meanrel <= 5 % (§10.2), and the
 #                          argmax must equal the pin's. ndiff/max-ULP lines are printed for the record.
 #   (c) state sizes      — engine's bytes == state_sizes.py's, byte-exact, at cap 26.
 #   (d) launch plan      — glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
 # If it FAILS, in this order:
+#   0. Fewer prompt steps than 17? `gate.py` now prints the last STEP's kind/index/sample/stop and the
+#      RESULT line, so the cause is in its own output — a fired stop check there is `5e7114b`'s bug
+#      coming back, not a numerics failure. Do not read the run log to find out what the gate said.
 #   1. Read the (a) lines first. A wrong id at step 0 (760 expected) means the prompt path, not the
 #      decode path; a wrong id at step k>0 with step 0 right means the state did not survive a step.
 #   2. `./engine/build/decode_run --ids 248045,846,... --steps 1 --out tmp/g` reproduces one step
@@ -273,9 +286,14 @@ the two named deferrals:
 3. The two levers `results.md` defers: packed projections (merges the 16-row `in_proj_a`/`in_proj_b`
    launches and several other small dots) and BF16-staged `mlp_gateup`/`mlp_down` (would remove 48 of
    the 115 casts/token). Both are launch-count and traffic wins; neither is a correctness item, and
-   `gate.py`'s (d) section is what has to be updated if the plan changes.
+   `gate.py`'s (d) section is what has to be updated if the plan changes. And the new one, one rank
+   above them once a token is green: **HIP graphs** over the 424-launch token, because the engine's one
+   unwarmed `ms_per_step` observation (14.631, not a measurement — `results.md` says why) is ~1.8× the
+   ledger's op-sum and dispatch is the first suspect.
 4. `attn_decode` is called `fused=1, full=1, split=1, score_f32=0, tile=min(TILE, threads/warp)`, and
-   its `MAXSC` caps `lvalid` at 512 — the dec8 fixture is far inside (max 25). Beyond 512 the engine
+   its `MAXSC` caps `lvalid` at 512 — the dec8 fixture is far inside (max 25), and the two device runs
+   got as far as prompt index 6 with it, so the cap held and the run did not reach the attention stages
+   at full length. Beyond 512 the engine
    needs the split-block form §07.3 describes; `kernels_attn.cpp` throws rather than truncating.
 
 ## Build and run the gate
