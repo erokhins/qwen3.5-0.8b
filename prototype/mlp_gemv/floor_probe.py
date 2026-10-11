@@ -11,6 +11,8 @@ and `math.fsum` (exactly rounded, so it is the truth the others approximate) —
 worst BF16 ULP distance between any two of them. Two things fall out:
 
   * the distribution of distances, which sizes the per-output threshold;
+  * how much of the gate's cancellation band those offenders actually use, and the tightest band
+    these measurements would still pass at (a band nobody measures is a band nobody calibrated);
   * whether a large distance ever lands on an element whose magnitude is a tiny fraction of
     the tensor max. It does: a near-zero dot is a cancellation, its absolute F32 error is
     ordinary but its BF16 ULP distance explodes. That is why the gate in run.py is
@@ -18,6 +20,7 @@ worst BF16 ULP distance between any two of them. Two things fall out:
     of a flat ULP bound that a correct kernel can trip by being unlucky.
 
     .venv/bin/python prototype/mlp_gemv/floor_probe.py [--fixture dec8] [--layers all]
+                                                     [--perturb K] [--trials N]
 """
 from __future__ import annotations
 
@@ -35,8 +38,35 @@ sys.path.insert(0, str(ROOT / "prototype"))
 import bf16_ulp  # noqa: E402
 
 
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "prototype"))
+import bf16_ulp  # noqa: E402
+
+# The band `run.py` (and §10.1) exempts small elements with, and the number this probe exists to
+# keep honest. Read it as "the gate is currently written with this", not as a wish: `--band-scan`
+# prints the tightest value these measurements would still pass at.
+CANCEL_BAND = 1e-4
+
+
 def ulp_dist(a, b) -> np.ndarray:
     return bf16_ulp.ulp_dist(a, b)
+
+
+def band_stats(ref: np.ndarray, dd: np.ndarray, band: float = CANCEL_BAND) -> dict:
+    """How much of a comparison's >1-ULP distance actually needs the band, and how much slack
+    the band has. `worst_off_rel` is the largest |ref|/max|ref| over ALL offenders (not just the
+    single farthest one), i.e. the tightest band these numbers would pass at: an element passes
+    iff it is outside the band or within 1 ULP, so any band >= that value passes this case."""
+    scale = float(np.abs(ref).max())
+    rel = (np.abs(ref) / scale if scale else np.zeros(np.shape(ref))).ravel()
+    dd = np.asarray(dd).ravel()
+    if rel.size != dd.size:
+        raise ValueError("band_stats: ref has %d elements, distance has %d" % (rel.size, dd.size))
+    off = dd > 1
+    return dict(n=dd.size, n_band=int((rel <= band).sum()), n_off=int(off.sum()),
+                n_off_in_band=int((off & (rel <= band)).sum()),
+                worst_off_rel=float(rel[off].max()) if off.any() else 0.0)
 
 
 def blocked_sum(A: np.ndarray, x: np.ndarray, block: int = 128) -> np.ndarray:
@@ -48,6 +78,10 @@ def blocked_sum(A: np.ndarray, x: np.ndarray, block: int = 128) -> np.ndarray:
     then 14, 7, and a naive half-fold throws one away). Pad to a power of two and fill
     columns explicitly."""
     n = x.shape[0]
+    assert n % block == 0, ("blocked_sum would silently drop a K remainder: n=%d is not a "
+                            "multiple of block=%d, and the dropped tail is exactly the "
+                            "wrong-reduction-length bug this probe is meant to measure"
+                            % (n, block))
     nblocks = n // block
     acc = np.empty((A.shape[0], nblocks), dtype=np.float32)
     for b in range(nblocks):
@@ -71,6 +105,9 @@ def main() -> int:
     ap.add_argument("--perturb", type=int, default=1,
                     help="also measure how far a 1-ULP error in `act` propagates through "
                          "down_proj, with this many injected elements per trial")
+    ap.add_argument("--trials", type=int, default=8,
+                    help="perturbation trials per layer x step case (fixed: a worst-of-N is "
+                         "not a bound until N is printed next to it)")
     args = ap.parse_args()
     if bf16_ulp.selftest():
         raise SystemExit("bf16_ulp selftest failed - the floor cannot be measured")
@@ -90,7 +127,8 @@ def main() -> int:
     pre = "model.language_model.layers.%d.mlp."
 
     hist = {k: {"max": 0, "over1": 0, "over2": 0, "n": 0, "worst_frac_of_max": 1.0,
-                "worst_at": None, "per_variant": {}} for k in ("gate_pre", "out")}
+                "worst_at": None, "per_variant": {}, "n_band": 0, "n_off": 0,
+                "n_off_in_band": 0, "worst_off_rel": 0.0} for k in ("gate_pre", "out")}
     for l in layers:
         for step in steps:
             p = "%s.L%02d.mlp." % (step, l)
@@ -117,6 +155,10 @@ def main() -> int:
                 scale = float(np.abs(refs[nm]).max())
                 for vname, v in variants:
                     dd = ulp_dist(v, ref)
+                    bs = band_stats(refs[nm], dd)
+                    for key_ in ("n_band", "n_off", "n_off_in_band"):
+                        h[key_] += bs[key_]
+                    h["worst_off_rel"] = max(h["worst_off_rel"], bs["worst_off_rel"])
                     pv = h.setdefault("per_variant", {})
                     pv[vname] = {"max": max(pv.get(vname, {}).get("max", 0), int(dd.max())),
                                  "over1": pv.get(vname, {}).get("over1", 0) + int((dd > 1).sum()),
@@ -141,6 +183,14 @@ def main() -> int:
         for vname, pv in sorted(h.get("per_variant", {}).items()):
             print("      %-12s max %5d ULP | >1 ULP: %d / %d (%.4f%%)"
                   % (vname, pv["max"], pv["over1"], pv["n"], 100.0 * pv["over1"] / pv["n"]))
+        print("   band usage (|ref|/max <= %g): %d / %d elements (%.3f%%) sit in the band; "
+              "%d of the %d >1-ULP offenders are in it and %d are outside it"
+              % (CANCEL_BAND, h["n_band"], h["n"], 100.0 * h["n_band"] / h["n"],
+                 h["n_off_in_band"], h["n_off"], h["n_off"] - h["n_off_in_band"]))
+        print("   tightest band these measurements pass at: |ref|/max %.1e  -> the gate's %g "
+              "carries %.0fx margin over the worst offender"
+              % (h["worst_off_rel"], CANCEL_BAND,
+                 CANCEL_BAND / h["worst_off_rel"] if h["worst_off_rel"] else float("inf")))
     print("\nRead: a large ULP distance is a cancellation, not an error — it lands where "
           "|ref| is a rounding-critical fraction of the tensor max. A gate that forbids it "
           "outright forbids correctness.")
@@ -149,9 +199,16 @@ def main() -> int:
         # Chain sensitivity: F4 feeds the kernel's own `act` into the down GEMV, so a legal
         # 1-ULP difference in act is not allowed to produce a 1-ULP difference in out. Inject
         # k one-ULP errors into the reference act and measure what down_proj does with them.
-        print("\nact -> out propagation, %d injected 1-ULP elements per trial:" % args.perturb)
+        #
+        # Fixed trials per case, and N is printed. The first version stopped each case at its
+        # first positive trial, so the quoted "worst" was a worst-of-something-between-1-and-4
+        # per case and nothing on the page said which.
+        print("\nact -> out propagation, %d injected 1-ULP elements per trial, %d trials per "
+              "layer x step case:" % (args.perturb, args.trials))
         rng = np.random.default_rng(7)
         worst = {"ulp": 0, "frac": 1.0, "where": None}
+        surv = {"cases": 0, "cases_hit": 0, "trials": 0, "elems": 0, "over1": 0,
+                "over1_in_band": 0, "worst_off_rel": 0.0}
         for l in layers:
             for step in steps:
                 p = "%s.L%02d.mlp." % (step, l)
@@ -160,7 +217,11 @@ def main() -> int:
                 act = torch.from_numpy(np.load(d / (p + "act.npy"))).to(torch.bfloat16)
                 out_ref = torch.from_numpy(np.load(d / (p + "out.npy"))).to(torch.bfloat16)
                 Wd = key[pre % l + "down_proj.weight"]
-                for _ in range(4):
+                orf = out_ref.float().reshape(-1).numpy().astype(np.float64)
+                oscale = float(np.abs(orf).max())
+                surv["cases"] += 1
+                case = {"over1": 0, "max": 0, "worst_off_rel": 0.0}
+                for _ in range(args.trials):
                     idx = rng.choice(act.numel(), args.perturb, replace=False)
                     flat = act.view(-1).clone()
                     # step each chosen element exactly one representable BF16 up, via the
@@ -172,24 +233,36 @@ def main() -> int:
                         torch.bfloat16)
                     got = flat.reshape(act.shape) @ Wd.t()
                     dd = ulp_dist(got, out_ref)
-                    scale = float(out_ref.float().abs().max())
+                    bs = band_stats(orf, dd)
+                    surv["trials"] += 1
+                    surv["elems"] += bs["n"]
+                    surv["over1"] += bs["n_off"]
+                    surv["over1_in_band"] += bs["n_off_in_band"]
+                    surv["worst_off_rel"] = max(surv["worst_off_rel"], bs["worst_off_rel"])
+                    case["over1"] += bs["n_off"]
+                    case["max"] = max(case["max"], int(dd.max()))
+                    case["worst_off_rel"] = max(case["worst_off_rel"], bs["worst_off_rel"])
                     i = int(dd.argmax())
                     if int(dd.max()) > worst["ulp"]:
                         worst = {"ulp": int(dd.max()),
-                                 "frac": float(abs(out_ref.float().reshape(-1)[i].numpy())
-                                               / scale),
+                                 "frac": float(abs(orf[i]) / oscale),
                                  "where": "L%02d %s" % (l, step)}
-                    nd = int((dd > 1).sum())
-                    if nd:
-                        print("   L%02d %s: %d/%d out elements >1 ULP (max %d) from %d "
-                              "1-ULP act flips" % (l, step, nd, dd.size, int(dd.max()),
-                                                   args.perturb))
-                        break
-            else:
-                continue
-            break
-        print("   worst seen anywhere: %d ULP at |ref|/max = %.1e (%s)"
-              % (worst["ulp"], worst["frac"], worst["where"]))
+                if case["over1"]:
+                    surv["cases_hit"] += 1
+                    print("   L%02d %s: %d >1 ULP out elements over %d trials x %d elements "
+                          "(max %d ULP, worst offender |ref|/max %.1e) from %d 1-ULP act flips"
+                          % (l, step, case["over1"], args.trials, dd.size, case["max"],
+                             case["worst_off_rel"], args.perturb))
+        print("   survey: %d layer x step cases x %d trials = %d perturbed dots, %d elements"
+              % (surv["cases"], args.trials, surv["trials"], surv["elems"]))
+        print("   %d/%d cases produced at least one >1 ULP element; %d of %d offenders sit "
+              "inside the %g band (the only ones the gate may exempt)"
+              % (surv["cases_hit"], surv["cases"], surv["over1_in_band"], surv["over1"],
+                 CANCEL_BAND))
+        print("   worst seen anywhere: %d ULP at |ref|/max = %.1e (%s), worst offender "
+              "|ref|/max = %.1e over %d trials/case"
+              % (worst["ulp"], worst["frac"], worst["where"], surv["worst_off_rel"],
+                 args.trials))
     return 0
 
 

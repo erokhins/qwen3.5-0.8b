@@ -68,18 +68,30 @@ correct kernel, and the probe is what says so rather than an argument:
   So the distance is the reference's own cancellation, not the kernel's error. Forbidding it
   forbids correctness.
 - Inject a legal 1-ULP difference into `act` (one representable BF16 step, sign-aware) and
-  re-run `down_proj`: the output moves by up to **142 ULP at small elements**, and with 3 flips
-  up to 29055 ULP at an element that is 3.3e-4 of the max — still a cancellation, still legal.
-  This is why F4 is judged on cos (≥ 0.9999) and meanrel (≤ 1e-3) and not per element: a
-  per-element bound there measures the sensitivity of a 3584-term dot with cancellation, which
-  is arithmetic, not the kernel.
+  re-run `down_proj`. Sized survey: **192 layer × step cases × 8 fixed trials = 1 536 perturbed
+  dots, 1 572 864 output elements, `--perturb 1`.** All 192 cases produced at least one element
+  more than 1 ULP from the pin; 7 483 elements did (0.48 % of them), the farthest being
+  **28 665 ULP at |ref|/max = 1.9e-5** (L23 decode2). With 3 flips per trial: 16 021 offenders,
+  worst 28 621 ULP. Note where the offenders sit: only **850 of the 7 483 are inside the 1e-4
+  band** — the largest one is at 1.3e-1 of the tensor max, an element that is 13 % of the output
+  and not a cancellation at all. So this is not F4 being judged loosely, it is F4 being unjudgeable
+  per element: one legal 1-ULP flip anywhere in a 3584-term dot can move a *large* output element
+  by tens of thousands of ULP. Hence cos (≥ 0.9999) and meanrel (≤ 1e-3) there, and nothing else.
+  The earlier version of this bullet quoted "up to 142 ULP", which was the worst over an unstated
+  1–4 trials per case: the loop stopped at each case's first positive trial (and its `break` was
+  dead code, so the coverage looked wider than it was). Fixed-size trials and N on the line moved
+  the quoted worst by ~200×, which is the whole reason to report N.
 
 The probe had to be fixed twice before it could be believed, and both bugs are the kind that
 manufactures a false conclusion: broadcasting a `(rows,)` block sum onto an `(rows, nblocks)`
 accumulator (returns the dot times a power of two), and folding an odd number of block columns
 (`in = 3584` gives 28 blocks → 14 → 7 → and a naive half-fold silently drops one). A floor
 probe that lies is worse than no floor probe: with the broken version the reference "looked"
-imprecise by 31721 ULP and the honest response would have been to loosen the real gate.
+imprecise by 31721 ULP and the honest response would have been to loosen the real gate. The
+docstring of `blocked_sum` claims that remainder class is handled, and it still had no assert —
+`n % block != 0` would have dropped a K tail and printed it as the reference being imprecise,
+which is the same failure mode one level down. It asserts now (`in = 1024` and `3584` are both
+multiples of 128, so no published number came from a truncated sum).
 
 ## The SwiGLU rounding policy — `ulp_probe.py`
 

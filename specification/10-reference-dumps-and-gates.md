@@ -50,8 +50,12 @@ reference's **own** F32 summation moves about 1 element in 100 000 by more than 
 an element that cancelled to ~1e-6 of the tensor max (where one ULP is a large fraction of the
 value), and the exactly-rounded sum disagrees there by 4–16 ULP. It also measures the other half:
 a legal 1-ULP difference in `act` — the most a correct kernel with a different summation order may
-produce — lands up to 142 ULP away in `out` at small elements. Judging F4 per-element would judge
-the sensitivity of a 3584-term dot, not the kernel.
+produce — produces an `out` element more than 1 ULP away from the pin in **every one of the 192
+layer × step cases measured** (192 cases × 8 fixed trials = 1 536 perturbed dots; 7 483 offending
+elements; worst 28 665 ULP). Most of those offenders are not small elements — the largest sits at
+0.13 of the tensor max — so judging F4 per-element would judge the sensitivity of a 3584-term dot,
+not the kernel. `prototype/mlp_gemv/floor_probe.py --layers all` prints all of this, with the trial
+count on the line, because a worst-of-N is not a bound until N is next to it.
 
 ## 10.2 Metrics, drift, and what drift does *not* mean
 
