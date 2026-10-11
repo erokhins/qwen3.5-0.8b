@@ -3,9 +3,11 @@
 The deliverable: C++/HIP for `gfx1151`, gated by `../speccheck/`. The Python
 implementation in `../speccheck/` validates the specification and is **not** the engine.
 
-What exists now is **W5's first half: weight residency** (`bench/build-queue.md` W5) plus the
-**first pieces of W5b**: per-request state and the launchers that will drive it. There is no token
-loop on disk yet, so nothing here produces a token — see *Hand-off* below for the exact line.
+What exists now is **W5's first half: weight residency** (`bench/build-queue.md` W5) plus **W5b's
+token loop**: per-request state, one launcher per graduated kernel, and `decode_step`, which runs one
+token through all of it. `engine/decode_run.cpp` drives it and `engine/gate.py` gates it against the
+pinned `dec8` fixture. **Neither has been executed** — see *Hand-off*: the gate is written, the device
+pass is not. No token has come out of this engine yet.
 
 ## `loader.{h,cpp}` — what it guarantees
 
@@ -34,8 +36,12 @@ and leaves the text path resident on the device.
 
 ## What this is NOT yet
 
-* No token loop and no `decode_step()` on disk — the launcher layer below it is, the loop is not.
-* No kernel calls from a host loop, no prefill, no sampling, no `gate.py`.
+* No `prefill.{h,cpp}`. A prompt is fed to `decode_step` one token at a time — which is what
+  `gate.py` does and what a chunked prefill would have to agree with, but it is 17 separate calls
+  where the reference does one chunked forward, so prefill is slow and its GDN layers run the
+  recurrence where the reference ran the chunked form (§10.5). The token gate does not care; a
+  prefill-throughput gate will.
+* No MTP drafting, no batching, no sampler other than greedy, no KV eviction (§08.7).
 * Slab allocation, multi-shard streaming, and loading are unchanged from the per-tensor
   pattern described above (fine at 4 % of the pool; see `results.md` for what it costs).
 
@@ -56,14 +62,35 @@ and leaves the text path resident on the device.
   the binary its own gate signed off on (`tools/` has no checker for this; `git show` the extraction
   commits `5dbfb9a..cc24680`, whose diffs are a pure move plus one `#include`). `decode_step` must
   call these, never a copy.
-* Each launcher family is its own TU (`kernels_gdn.cpp`, `kernels_glue.cpp`, `kernels_proj.cpp`)
+* Each launcher family is its own TU (`kernels_gdn.cpp`, `kernels_glue.cpp`, `kernels_proj.cpp`,
+  `kernels_mlp.cpp`, `kernels_attn.cpp`, `kernels_lmhead.cpp`, `kernels_cast.cpp`)
   because the ops each define colliding macros (`D`, `H`, `HID`, `EPS`, `SCALE`, `FULL_MASK`) — one
   family per TU is a compile-time requirement, not a style choice.
-* **Written so far:** `state.cpp`, `kernels_gdn.cpp`, `kernels_glue.cpp`, `kernels_proj.cpp` — all
-  four compile clean (`hipcc -O3`, zero warnings). **Not written:** `kernels_mlp.cpp`,
-  `kernels_attn.cpp`, `kernels_lmhead.cpp`, `kernels_cast.cpp`, `decode_step.{h,cpp}`,
-  `prefill.{h,cpp}`, `decode_run.cpp`, `gate.py`. So `kernels.h` currently declares launchers with
-  no definitions and nothing links; `engine/build.sh` still builds only `loader_test`.
+* **All ten TUs exist and compile clean** (`hipcc -O3`, zero stderr): `state`, `loader`,
+  `loader_test`, the seven `kernels_*`, `decode_step`, `decode_run`. `engine/build.sh` links both
+  binaries into `engine/build/`. **Not one of them has been executed**: the state buffers have never
+  been `hipMalloc`'d outside `loader_test`'s own scratch, no launcher has been launched, and
+  `gate.py` has never seen a logits file. "Compiles clean, never run" is still the state of the work.
+
+## `decode_step.{h,cpp}` — one token, §07.1's order
+
+`decode_step(weights, state, scratch, token, &logits)` embeds the token, runs 24 blocks (GDN §07.2 /
+attention §07.3 by `layer_types`, each followed by the MLP §03.3), takes the final norm, launches
+`lm_head_full`, and argmaxes on the host — strict `>`, so ties go to the **lowest** id (§03.4; the
+fused-argmax kernel resolves them the other way, which is why the engine keeps the full logits).
+It syncs once, at the logits. It contains **no model arithmetic**: every value comes from a kernel
+that has its own gate.
+
+Two things to know before reading it:
+
+* **The norm pairing is §03.2's, and the final norm is not a launch.** Layer 0's mixer norm uses the
+  glue kernel's norm-only form; after that each layer is mixer → glue(add + post-attention norm) →
+  MLP → glue(add + the *next* norm), and layer 23's second glue call takes the final norm as a side
+  effect of the residual add. 49 glue launches per token, which is the plan `prototype/glue/run.py`
+  pins and `bench/gate-audit.md`'s §07 audit demanded; `gate.py` re-derives it in Python.
+* **The conv window is rolled into scratch and copied back** (one D2D memcpy per GDN layer). The
+  roll-back is the documented cost of `conv_kernel`'s `__restrict__` `win`/`new_win`, sized in the
+  comment where it is spent.
 
 ## Hand-off — read this if you did not write it
 
@@ -96,6 +123,12 @@ allocated, no launcher has been launched, and the §07.1 block order exists only
 # the same gate over all four fixtures (dec8 decode, prefix24dec8 decode, smoke decode, p300
 # prefill = 10.2 M elements), under two seconds on this box. Ends "MIRROR GATE: PASS".
 
+`.venv/bin/python engine/gate.py --no-engine`
+# Sections (0) and (c) of the token gate, with no binary and no device: it proves the dec8 fixture
+# pairs with itself (the §10.5 trap, as 26 assertions) and runs engine/state_sizes.py against the
+# sizes it will later compare with decode_run's. Runs in about a second, and is the only part of the
+# gate a worker is allowed to run. Ends "ENGINE GATE PASS" with a note that (a),(b),(d) were skipped.
+
 .venv/bin/python speccheck/run_all.py
 # CPU torch. Expected green as of the rope revert d06b4e3. Any failure is worth reporting; note
 # that this suite's rmsnorm_gated is bit-exact against the pins only when the weight arrives BF16,
@@ -105,15 +138,25 @@ allocated, no launcher has been launched, and the §07.1 block order exists only
 Compile-only HIP (compiling is not running; allowed while the GPU is busy):
 
 ```bash
-bash engine/build.sh                                   # loader_test only, today
-for TU in state kernels_gdn kernels_glue kernels_proj; do \
+bash engine/build.sh                                   # -O3: engine/build/{loader_test,decode_run}
+for TU in state loader loader_test kernels_gdn kernels_glue kernels_proj kernels_mlp \
+          kernels_attn kernels_lmhead kernels_cast decode_step decode_run; do \
   hipcc -O3 -Wno-unused-command-line-argument -I. -Iengine -c engine/$TU.cpp -o /tmp/$TU.o; done
-# Re-verified on the current tree with these exact commands: four TUs, zero stderr (no warnings),
-# `engine/build.sh` and `prototype/gdn_gated_norm/build.sh` both link. That is the whole extent of
-# the compile claim — nothing else in engine/ exists to compile.
+# Re-verified on the current tree with these exact commands: twelve TUs, zero stderr (no warnings),
+# and `engine/build.sh` links both binaries. That is the whole extent of the compile claim — neither
+# binary has been executed.
 bash prototype/gdn_gated_norm/build.sh                 # kernel + host driver + engine/loader.cpp
 for OP in gdn_decode attn_decode glue proj_gemv mlp_gemv lm_head_gemv; do \
   bash prototype/$OP/build.sh; done                    # all six still build after the extraction
+```
+
+Two of the gate's four sections need no device at all, and one needs the weights but launches
+nothing — all three are safe while anything else is running:
+
+```bash
+.venv/bin/python engine/gate.py --no-engine   # fixture pairing (0) + state sizes (c), no binary
+./engine/build/decode_run --sizes-only        # loads the checkpoint, runs check_weights, launches 0
+.venv/bin/python engine/gate.py --build       # the whole gate; the device pass, see below
 ```
 
 ### Device — operator only, in a quiescent GPU pass (zero subagents, then `tools/gpu_lock.sh`)
@@ -159,32 +202,56 @@ tools/gpu_lock.sh release "proj_gemv PACK_X A/B (E2)"
 # expect: unpacked rows/block 8 ≈2.99 ms / 66 % of probe, the `x left BF16 in shared` row
 # ≈3.27 ms / 60 % — the pair the engine's PACK_X=false comment cites. Add the cast the engine now
 # pays (≈48 launches ≈0.089 ms at the 1.85 µs floor) before quoting either as its own cost. The
-# other half of E2 — the same A/B through `engine/kernels_proj.cpp` — waits for `decode_step`.
+# other half of E2 — the same A/B through `engine/kernels_proj.cpp` — needs a PACK_X switch in that
+# launcher first (it hard-codes the gated, measured-faster `false`); that is deferral #1 above, not
+# a measurement waiting to be made.
 ```
 
-```text
-3. NOT RUNNABLE YET — the token gate. Expected result once decode_run.cpp + gate.py exist:
-     prefill_ids (17 tokens, data/refs/dec8/manifest.json) fed token-at-a-time, then 8 decode
-     steps; the 9 sampled ids must equal greedy_continuation
-     [760, 6511, 314, 9338, 369, 2972, 57590, 159034, 271]
-     — prefill's last sample is 760, the 8 decode steps give the rest. Decode-step logits compare
-     against decode{s}.logits_last.npy through prototype/bf16_ulp.py (report(n>ulp 1, cos >=
-     0.9999)); the pins are the ONLY authority, and bare logits_last.npy is the PREFILL output
-     (argmax 760), not the last decode step's — see §10.5's last-writer-wins trap.
-     Do not add engine/decode_run to .gitignore as a directory pattern; exact path, the trap in
-     .gitignore's comment block is a live one.
+```bash
+# 3. THE TOKEN GATE — the first time any engine code except loader_test touches the device.
+#    One command; it builds nothing, runs engine/build/decode_run, and judges the result.
+tools/gpu_lock.sh acquire "engine decode_step token gate (W5b)" && tools/gpu_lock.sh util
+./engine/build.sh && .venv/bin/python engine/gate.py --build
+tools/gpu_lock.sh release "engine decode_step token gate (W5b)"
+# Expected on a first clean run:
+#   (0) fixture pairing  — 26 PASS lines, no FAIL. These are the reference's own invariants
+#       (`decode{s}.input_ids == greedy_continuation[s]`,
+#        `argmax(decode{s}.logits_last) == greedy_continuation[s+1]`), so they cannot fail because of
+#       the engine. If one does, the fixture moved: stop and re-read §10.5, do not touch the kernel.
+#   (a) sampled ids      — the 9 samples are exactly
+#                          [760, 6511, 314, 9338, 369, 2972, 57590, 159034, 271]
+#   (b) logits           — per step, cos >= 0.9995 (§10.1 G5) and meanrel <= 5 % (§10.2), and the
+#                          argmax must equal the pin's. ndiff/max-ULP lines are printed for the record.
+#   (c) state sizes      — engine's bytes == state_sizes.py's, byte-exact, at cap 26.
+#   (d) launch plan      — glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
+# If it FAILS, in this order:
+#   1. Read the (a) lines first. A wrong id at step 0 (760 expected) means the prompt path, not the
+#      decode path; a wrong id at step k>0 with step 0 right means the state did not survive a step.
+#   2. `./engine/build/decode_run --ids 248045,846,... --steps 1 --out tmp/g` reproduces one step
+#      with every intermediate still on the device; the per-step lines name the position and token.
+#   3. A `(b)` failure with a correct `(a)` is a band problem, not a token problem, and the band is
+#      §10's, not this gate's to loosen. Report it; do not edit the constant.
+#   4. `(c)`/`(d)` failing while `(a)`/`(b)` pass means the state struct or the block plan drifted
+#      from §00/§07 — decode_run prints both sides of each comparison.
 ```
 
-### What the next worker still owes W5b
+## What the next worker owes W5b
 
-In dependency order: `kernels_cast.cpp` (engine's own `cast_*`, declared already), then
-`kernels_mlp.cpp` / `kernels_attn.cpp` / `kernels_lmhead.cpp` (one TU each, macros collide), then
-`decode_step.{h,cpp}` in §07.1's order (§07.2 for the 18 linear layers, §07.3 for the 6 attention
-ones, residual adds per §03.2, final norm-only glue, `lm_head_full` + host argmax with a strict `>`
-so ties go to the **lowest** id per §03.4), then `prefill.{h,cpp}` (token-at-a-time through
-`decode_step`, no chunked variant), then `decode_run.cpp` and `gate.py`. `attn_decode` must be
-called `full=1, split=1, fused=1, score_f32=0, tile=8` and its `MAXSC` caps `lvalid` at 512, which
-the dec8 fixture is far inside.
+Nothing on the code side — the loop, the driver and the gate exist. What is left is measurement and
+the two named deferrals:
+
+1. **Run the device pass above**, in a quiescent window, and land the result in `results.md` and
+   `bench/performance-status.md` §6 (including the first ms/token figure, which the ledger has never
+   had for the engine).
+2. `prefill.{h,cpp}` — token-at-a-time through `decode_step` is already what `gate.py` does, so this
+   is a chunked/parallel prefill and nothing else. It is a throughput item, not a correctness one.
+3. The two levers `results.md` defers: packed projections (merges the 16-row `in_proj_a`/`in_proj_b`
+   launches and several other small dots) and BF16-staged `mlp_gateup`/`mlp_down` (would remove 48 of
+   the 115 casts/token). Both are launch-count and traffic wins; neither is a correctness item, and
+   `gate.py`'s (d) section is what has to be updated if the plan changes.
+4. `attn_decode` is called `fused=1, full=1, split=1, score_f32=0, tile=min(TILE, threads/warp)`, and
+   its `MAXSC` caps `lvalid` at 512 — the dec8 fixture is far inside (max 25). Beyond 512 the engine
+   needs the split-block form §07.3 describes; `kernels_attn.cpp` throws rather than truncating.
 
 ## Build and run the gate
 

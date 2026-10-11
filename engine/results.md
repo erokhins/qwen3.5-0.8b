@@ -131,24 +131,27 @@ no number here is a measurement of anything except the compiler's willingness.
 
 1. **Unpacked projections.** `proj_gemv` is called once per projection (q, k, v, o, in_proj_qkv,
    in_proj_z, in_proj_b, in_proj_a, out_proj…) rather than through the packed multi-weight form the
-   kernel supports. ≈358 launches/token instead of ≈225; at the ≈1.85 µs/launch floor
-   (`tools/launch_overhead_hip.cpp`) that is ≈0.25 ms/token of pure launch cost, ≈0.12 ms of it
-   removable by packing. Deferred because packing changes the buffer plan in `decode_step`, and
-   `decode_step` does not exist yet.
-2. **Dtype adapters: ≈66 cast launches/token.** `mlp_gemv` and `gdn_decode`'s conv/gates/rec take
-   F32 activations, while `glue`/`proj_gemv` produce BF16, so the engine widens (48 of the 66 are
-   the MLP's `x`, and E2's `PACK_X=false` adds ≈48 more for the projections' `x`).
-   `cast_bf16_to_f32`, `cast_f32_to_bf16` and `cast_bf16_to_f32_3` are **declared** for exactly this
-   reason (`kernels.h:82-91`) and **not written** — `kernels_cast.cpp` is in README's "Not written"
-   list, so nothing currently folds three regions into one launch and this whole deferral rests on
-   code that does not exist yet. The real fix is a BF16-staged form of `mlp_gateup`/`mlp_down` —
-   `proj_gemv` proved that is bit-identical for a dot product — which would delete most of the 66.
-   Not done: it means touching a graduated kernel and re-gating it, and `mlp_gemv`'s gate belongs to
-   another phase.
+   kernel supports. Now that `decode_step` exists the real bill is known rather than estimated:
+   **424 launches/token, 114 of them projection GEMVs** (`gate.py` section (d) asserts the split).
+   The packable part is `in_proj_a`+`in_proj_b` (16 rows, 32 KiB each, same input row) alongside
+   `in_proj_qkv`/`in_proj_z`: one packed launch instead of four per GDN layer, so 54 launches ≈
+   **0.10 ms/token** at the ≈1.85 µs floor (`tools/launch_overhead_hip.cpp`). The earlier "≈358
+   launches, ≈0.12 ms removable" in this file was arithmetic over a plan the loop does not use.
+2. **Dtype adapters: 115 cast launches/token.** `mlp_gemv` and `gdn_decode`'s conv/gates/rec take
+   F32 activations, while `glue`/`proj_gemv`/`gdn_gated_norm` emit BF16, so the engine widens: 5 per
+   GDN layer, 4 per attention layer, 1 before `lm_head`. 48 of the 115 are the MLP's (its input row
+   and its `act`, twice across 24 layers). `kernels_cast.cpp` now exists, and the GDN layer's three
+   widenings (`in_proj_qkv`, `in_proj_a`, `in_proj_b`) are already folded into ONE launch
+   (`cast_bf16_to_f32_3`), which is why a GDN layer costs 5 casts and not 7. The real fix is still a
+   BF16-staged form of `mlp_gateup`/`mlp_down` — `proj_gemv` proved that is bit-identical for a dot
+   product — which would delete 48 of the 115. Not done: it means touching a graduated kernel and
+   re-gating it, and `mlp_gemv`'s gate belongs to another phase. What was done here instead is the
+   other half of the old estimate: `conv1d.weight` and `dt_bias` are widened **once per request** by
+   `prepare_weight_adapters`, not once per token, so those 36 rows cost 36 launches per request.
 
 Both deferrals are launch-count, not bandwidth: at ≈240 GB/s the token's memory floor is well under
-1 ms and 358 launches is ≈0.66 ms, so they are the first thing a perf pass should attack — after
-the token matches.
+1 ms and 424 launches is ≈0.78 ms, so they are the first thing a perf pass should attack — after the
+token matches.
 
 ## Open questions this phase did not decide
 
@@ -176,3 +179,45 @@ the token matches.
 * **`lm_head` full + host argmax**, not the fused single-kernel form: the fused form resolves ties
   to the highest id and §03.4 fixes ties to the lowest. Costs ≈1 MB D2H + a host scan (≈0.04 ms)
   per token and gives the gate its logits. Worth revisiting only with a tie-corrected fused kernel.
+
+---
+
+# W5b's token loop on disk: `decode_step` + `decode_run` + `gate.py` — compiled, none of it run
+
+2026-10-11. `decode_step.{h,cpp}`, `decode_run.cpp`, `gate.py`, and the four launcher TUs that were
+missing (`kernels_cast`, `kernels_mlp`, `kernels_attn`, `kernels_lmhead`). All twelve TUs compile
+clean at `-O3` and `engine/build.sh` links `engine/build/{loader_test,decode_run}`. **No engine
+binary has been executed**, so nothing in this section is a measurement.
+
+What is settled without a device:
+
+* `check_weights(store)` pins every shape and §01.6 dtype this loop depends to the checkpoint it
+  actually loaded — including `dt_bias`/`conv1d.weight` being **BF16** (which is why
+  `prepare_weight_adapters` exists) and `lm_head.weight` being the embedding blob rather than a
+  second 485 MiB. A wrong dtype assumption aborts at load instead of reading garbage.
+* `gate.py --no-engine` proves the `dec8` fixture pairs with itself — 26 assertions, including that
+  the bare `logits_last.npy` is the prefill (argmax 760) and the bare `input_ids.npy` is decode7's —
+  and that `state_sizes.py`'s bytes are the bytes `decode_run` will report. That half is green.
+* The block plan is agreed between two independent implementations: `gate.py` counts one token's
+  launches from §07 in Python, `planned_launch_counts()` derives the same numbers from §00's
+  constants in C++, and the gate fails on any mismatch. glue 49 · proj 114 · gdn 72 · attn 6 ·
+  mlp 48 · cast 115 · other 20 = **424**.
+
+What a first device run is most likely to break, in the order to look at them:
+
+1. **The KV append inside the fused attention launch.** `stage_head()` gates the §05.7 cache write on
+   `q_rope != nullptr` — the same null check as the three stage dumps — so `kernels_attn.cpp` refuses
+   null stage pointers rather than silently skipping the append. If the fused path turns out not to
+   append at all, every step after the prompt reads empty KV and the first wrong token appears at
+   decode step 0 with the prompt steps also wrong.
+2. **The q/k/v slice order handed to `rec_kernel`.** `mixed_qkv` is [q|k|v] in 2048-wide blocks
+   (§04.1) and `decode_step` passes `g_u`, `g_u+2048`, `g_u+4096`. A k/v transposition shows up as a
+   prompt that samples correctly and a chain that diverges at step 1.
+3. **The conv-window roll-back.** `conv_kernel` writes the rolled window to scratch and the layer's
+   window is updated by one D2D copy; if the copy's size or the slot indexing is off, the drift is
+   gradual and shows up several tokens in, not immediately.
+4. **The logits band.** `cos ≥ 0.9995` is §10.1 G5's published figure for incremental-vs-batch
+   logits, not a number measured against this engine. If the ids come out exactly right and the band
+   fails, that is a policy question about which §10 figure governs a token-level logits vector —
+   report it, do not loosen the constant. `ndiff` and max-ULP are already excluded on principle
+   (§10.1 F1–F4).
