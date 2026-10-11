@@ -51,6 +51,32 @@ rotate_half(a)[i] = −a[i+32] (i<32),  a[i−32] (i≥32)
 so pairs are `(i, i+32)` for `i = 0..31`. Both `q̂` and `k̂` are rotated; `v` is
 not. Positions come from §02.4.
 
+**Rounding policy — measured, and not stated here until now.** The table enters the rotate as BF16,
+and each product is rounded before the add:
+
+```
+c[p], s[p] ∈ BF16        (evaluate in F32, cast to BF16 — HF's rotary embedding returns cos.to(dtype))
+rot(z)[d]  = bf16( bf16(z[d]·c[p,d]) + bf16(rotate_half(z)[d]·s[p,d]) )      d < 64
+```
+
+Keeping the table in F32 — which is what `rot*c + rotate_half(rot)*s` does by type promotion, and
+what `speccheck::apply_rope` did until this was corrected — misses **52–97 of every 2048
+`attn.q_rope` elements** on `dec8` (cos 0.99983, meanrel 0.0174: comfortably inside §10 G4's
+threshold, which is why no gate ever failed on it). The BF16 policy reproduces `attn.q_rope` and
+`attn.k_rope` bit-for-bit: 0 wrong elements over 277 positions × 6 attention layers × 512 rope
+elements each (`speccheck/rope_table_probe.py`). The evidence was a prototype kernel matching the
+pins the oracle could not match, so the pins — not taste — are the source of this rule.
+
+Two boundaries the same probe measured, both of which constrain any implementation of this section:
+
+* the dumps carry **F32 libm artifacts, not correctly-rounded values**: evaluating the same angle in
+  F64 and rounding down misses 3 of 277 positions (180, 217, 241) that the F32 path gets exactly.
+  "More precision" in the table is therefore not a route to matching the pins.
+* a device libm's F32 `cosf`/`sinf` need not agree with this box's CPU libm: the gfx1151 table
+  written by `prototype/attn_decode` differs from torch's (and from a plain glibc `cosf`) in 2 of
+  128 entries at `p = 64` and in 0 of 128 at the other 276 positions. See §07.3 and
+  `prototype/attn_decode/results.md` for what that residual costs.
+
 ## 05.4 mrope is inert for text-only
 
 `mrope_interleaved: true`, `mrope_section: [11,11,10]`. HF-ref builds `cos/sin`
