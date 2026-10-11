@@ -55,6 +55,7 @@ note. Do not implement a [FUTURE] item without an explicit request.
 | "max 1 ULP against the dump" is **not** an achievable bound for a long dot: reordering the reference's own F32 sum already moves ~1 element in 1e5 by more than 1 ULP, always at an element that cancelled to ~1e-6 of the tensor max. A BF16 gate needs a cancellation band and aggregate metrics, both sized by a floor probe, not by taste | `prototype/mlp_gemv/floor_probe.py`, §10.1 (F1–F4) |
 | a forward hook that reads the hook's `output` argument instead of `input` can pin *the answer* under the name of an intermediate — the MLP's `act` is `down_proj`'s **input**, and the wrong version reproduced real reference tensors and passed every self-check | §10.5, `prototype/mlp_gemv/results.md` |
 | a negative test that loads another layer's weights "catches" every injection no matter what the kernel does — vacuous. Injected bugs must also be required to appear **only** where the bug lives | `prototype/mlp_gemv/run.py --negative`, §10.1 |
+| `Tensor.to(torch.uint16)` casts numerically; `.view(torch.uint16)` bitcasts — a fixture writer that confuses them writes garbage that looks like unwritten memory (float 0.195 → the integer 0, −1.3 → 0xFFFF, read back as BF16 +0 and NaN; a red device gate, a green CPU mirror, and a kernel that was never at fault) | `prototype/gdn_gated_norm/results.md` §8, `prototype/gdn_gated_norm/run.py` (`write_bf16_raw`, `verify_cases`, `--selftest`) |
 
 ## GPU execution is serialized and belongs to the main agent
 
