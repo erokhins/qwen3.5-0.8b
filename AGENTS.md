@@ -100,6 +100,13 @@ Therefore, as a hard rule:
 
 ## Standing rules
 
+- **Budget verification to what a change can affect.** `speccheck/run_all.py` is 26 gates and ~20 min;
+  run it **only** after touching `speccheck/specimpl.py` or a gate file. For everything else
+  (`prototype/*` plan writers, bench docs, loaders) `run_all.py --quick` (11 gates) plus the op's own
+  CPU probe is the correct level. Three workers today expired their budget re-running a suite that was
+  already green and could not have been affected by their edit — the failure mode is silent, because
+  re-verifying always looks responsible. If a result is already on disk and nothing that feeds it
+  changed, cite it instead of re-making it.
 
 - **Verify against the reference implementation at every step.** `speccheck/` is the
   independent checker (torch CPU, gated against the pinned HF dumps in `data/refs/`);
