@@ -122,6 +122,17 @@ record as *not* the engine's performance.
 
 ## 5. What has to happen before this file can say "measured"
 
+0. **A quiescent GPU pass, run by the main agent with no subagents live.** Every device command run
+   today — `mlp_gemv`, `proj_gemv`, `attn_decode`, `glue` gates and the cold timing sweeps — was run
+   while other agents were active on the box, which the new serialization rule forbids. None of
+   those numbers may be quoted until this pass re-takes them in one order:
+   (a) `prototype/glue/run.py` full, (b) `prototype/proj_gemv/run.py --layers all --steps all
+   --negative` + its cold sweep, (c) `prototype/mlp_gemv/run.py --layers all --fixture dec8
+   --negative` + cold, (d) `prototype/attn_decode/run.py --long --negative`, (e) `engine/loader_test
+   --no-verify` for the startup number, (f) the engine's own gate and the first tok/s row. Record
+   `gpu_lock.sh util` at both ends of each and state the repeat spread; anything without both is
+   provisional and says so.
+
 1. **Re-measure the projections on a quiet box.** They are the third of the token and they came in
    at 66 % under contention; both the headline 2.990 ms and the `rows/block` 32 finding (+8 %) need
    a clean run with util near 0 at both ends of the lock before they are quoted anywhere else.
