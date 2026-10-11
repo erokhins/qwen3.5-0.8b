@@ -23,13 +23,24 @@ reads the file with — while `engine::WeightStore` is keyed on the **§02.5 nor
 (`lm.layers.N.linear_attn.norm.weight`). `at()` refuses a name it does not hold rather than
 normalising what it is given, which is the right refusal (a store that tolerated both spellings would
 be answering for tensors it does not hold), so the producer was wrong and now converts through
-`prototype/weight_names.py`, the one Python mirror of `engine/loader.cpp::normalize_name`. The same
-module gives `run.py --gate` a **CPU** pre-flight: every name in a plan is checked against the store
-key set — 336 names, derived from `model.safetensors.index.json`, tied to `loader_test`'s 335 +
-tied-head count — before the binary is launched, so a naming mistake prints the offending name
-instead of dying with a C++ `std::out_of_range` in a subprocess. Nothing about the kernel, its pins,
-or its bands changed; the CPU mirror still passes (144 cases, ndiff 0) and the device half is still
-`NOT RUN`.
+`prototype/weight_names.py`, the one Python mirror of `engine/loader.cpp::normalize_name`. Plan files
+now come out of exactly one function, `write_plan()`, which refuses to return a plan whose weight
+names are *not* store keys — so no launch path can skip the check, and a naming mistake prints the
+offending name on the CPU instead of dying with a C++ `std::out_of_range` in a subprocess. The store's
+key set
+(336 names, from `model.safetensors.index.json`, tied to `loader_test`'s 335 loaded + tied-head count)
+is derivable without allocating anything, and the CPU command for the whole check is
+
+```bash
+.venv/bin/python prototype/gdn_gated_norm/run.py --preflight
+# == pre-flight (no device): assemble the gate's plan and resolve its weight names ==
+#   plan /tmp/.../plan.txt: 144 weight name(s), all present in the store's 336-name key set
+# PREFLIGHT: PASS
+```
+
+Nothing about the kernel, its pins, or its bands changed: `--preflight` writes the same 144 rows × 6
+fields the gate writes, with only the name column moved; the CPU mirror still passes (144 cases, ndiff
+0) and the device half is still `NOT RUN`.
 
 ## 1. The finding: the pins put the affine in the activation dtype, and the oracle lands there too
 
@@ -168,6 +179,7 @@ the band can be tightened the day it lands at 0 rather than being loosened.
 
 * Device half never executed (`run.py --gate`, `--gate --time`): commands in `engine/README.md`, and
   row 9 of `bench/commit-review-2026-10-11.md` §4 — whose first attempt died on the weight-name
-  mismatch described in the header, now fixed and CPU-guarded.
+  mismatch described in the header. Fixed and CPU-guarded: `run.py --preflight` checks the plan
+  without a device.
 * `results.md` here carries no timing row for the same reason.
 * §04.5/A-01 correction in `specification/` is listed as a hand-off item, not done in this commit.

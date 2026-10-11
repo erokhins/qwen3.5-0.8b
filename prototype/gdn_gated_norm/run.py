@@ -2,6 +2,7 @@
 """Gate for §04.5's gated RMSNorm: a CPU mirror that needs no device, and a device gate.
 
     .venv/bin/python prototype/gdn_gated_norm/run.py --mirror     # CPU only, no GPU touched
+    .venv/bin/python prototype/gdn_gated_norm/run.py --preflight  # CPU only: plan + name check
     .venv/bin/python prototype/gdn_gated_norm/run.py --gate       # device: run + negatives
     .venv/bin/python prototype/gdn_gated_norm/run.py --gate --time
 
@@ -21,10 +22,12 @@ needs no lock (AGENTS.md).
 A plan names its weight the way `WeightStore` is keyed — the §02.5 engine name
 (`lm.layers.N.linear_attn.norm.weight`), never the checkpoint key `mirror_probe.py` reads the file
 with. Getting that wrong aborts the subprocess in `store.at()` with an uncaught `std::out_of_range`,
-which is how the first-ever device run of this gate died, so `write_cases()` builds every plan name
-through `weight_names.normalize_name` (the same §02.5 mirror the guard below checks against) and
-each plan is verified against the store's key set **before** the binary is launched: a bad name now
-prints the offending name on the CPU instead of a SIGABRT from a child process.
+which is how the first-ever device run of this gate died. So plan files are written by
+`write_plan()`, the only function here that produces one, and it refuses to hand back a plan whose
+weight names are not store keys: no launch path can skip the check, because no launch path can get
+an unchecked plan. `--preflight` is that same producer-and-guard path with the launch taken out, so
+the contract is checkable without a device — which matters, because `--mirror` (the CPU half that
+decides the arithmetic) never asks the store for anything and could not have seen the bug.
 
 Band for `gated_out`: max 1 BF16 ULP with ≤1 % of elements differing, which is the band
 prototype/gdn_decode/check.py already uses for this exact op class (an F32 norm whose pins are
@@ -113,9 +116,45 @@ def write_cases(d: Path, fixture: str) -> list[dict]:
     return cases
 
 
+def plan_rows(c, out, norm):
+    """One plan line's fields: `NAME OFILE ZFILE WNAME OUT [NORM]`, the format the binary parses."""
+    return (c["name"], c["ofile"], c["zfile"], c["wname"], out, norm)
+
+
+def write_plan(path: Path, rows) -> Path:
+    """The only function here that produces a plan file — and it never hands back an unchecked one.
+
+    Every row's weight name must be a `WeightStore` key (column `WEIGHT_FIELD`) before the path is
+    returned, so no launch path can reach `run_binary` with a name the store would refuse: there is
+    nothing to remember to call, which is the difference between a guard and a habit.
+    """
+    with path.open("w") as f:
+        for row in rows:
+            f.write(" ".join(str(x) for x in row) + "\n")
+    wn.check_plan(path, WEIGHT_FIELD)
+    return path
+
+
+def preflight() -> int:
+    """CPU only: run the real producer and the real guard, and launch nothing.
+
+    `--gate` needs the device and a quiet box; the naming contract it rests on does not, and
+    `--mirror` — the CPU half that decides the arithmetic — never asks the store for anything, so it
+    could watch the naming bug ship. This is the check that closes that gap on the CPU.
+    """
+    print("== pre-flight (no device): assemble the gate's plan and resolve its weight names ==")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        cases = write_cases(d, FIXTURE)
+        plan = write_plan(d / "plan.txt",
+                          [plan_rows(c, d / (c["name"] + ".gated.bin"),
+                                      d / (c["name"] + ".norm.bin")) for c in cases])
+        n = len(plan.read_text().rstrip().splitlines())
+    print("PREFLIGHT:", "PASS" if n == len(cases) else "FAIL (%d rows, %d cases)" % (n, len(cases)))
+    return 0 if n == len(cases) else 1
+
+
 def run_binary(plan: Path, outdir: Path, neg: str = "none") -> None:
-    if BIN.exists() is False and Path(str(BIN) + "/gdn_gated_norm").exists() is False:
-        pass
     exe = BIN if BIN.is_file() else Path(__file__).parent / "gdn_gated_norm"
     cmd = [str(exe), "--mode", "once", "--plan", str(plan), "--neg", neg]
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
@@ -140,16 +179,10 @@ def device_gate(with_time: bool) -> int:
         cases = write_cases(d, FIXTURE)
         print("== device gate: %d cases (%d GDN layers × %d decode steps of %s) =="
               % (len(cases), len({c['layer'] for c in cases}), len(STEPS), FIXTURE))
-        plan = d / "plan.txt"
-        outs = {}
-        with plan.open("w") as f:
-            for c in cases:
-                c["out"] = d / (c["name"] + ".gated.bin")
-                c["norm"] = d / (c["name"] + ".norm.bin")
-                f.write("%s %s %s %s %s %s\n" % (
-                    c["name"], c["ofile"], c["zfile"], c["wname"],
-                    c["out"], c["norm"]))
-        wn.check_plan(plan, WEIGHT_FIELD)
+        for c in cases:
+            c["out"] = d / (c["name"] + ".gated.bin")
+            c["norm"] = d / (c["name"] + ".norm.bin")
+        plan = write_plan(d / "plan.txt", [plan_rows(c, c["out"], c["norm"]) for c in cases])
         print("\n-- clean run --")
         run_binary(plan, d)
         worst_ulp, worst_ndiff, n_el, tightest = 0, 0, 0, 0.0
@@ -173,14 +206,10 @@ def device_gate(with_time: bool) -> int:
         print("\n-- negatives (each must move only the stage it lives in) --")
         for neg, must, must_not in NEGATIVES:
             plan_neg = d / ("plan_%s.txt" % neg)
-            with plan_neg.open("w") as f:
-                for c in cases:
-                    c["nout"] = d / (c["name"] + ".%s.gated.bin" % neg)
-                    c["nnorm"] = d / (c["name"] + ".%s.norm.bin" % neg)
-                    f.write("%s %s %s %s %s %s\n" % (
-                        c["name"], c["ofile"], c["zfile"], c["wname"],
-                        c["nout"], c["nnorm"]))
-            wn.check_plan(plan_neg, WEIGHT_FIELD)
+            for c in cases:
+                c["nout"] = d / (c["name"] + ".%s.gated.bin" % neg)
+                c["nnorm"] = d / (c["name"] + ".%s.norm.bin" % neg)
+            write_plan(plan_neg, [plan_rows(c, c["nout"], c["nnorm"]) for c in cases])
             run_binary(plan_neg, d, neg)
             moved = {s: 0 for s in STAGES}
             for c in cases:
@@ -213,15 +242,19 @@ def device_gate(with_time: bool) -> int:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--mirror", action="store_true", help="CPU-only cast-order gate (no GPU)")
+    ap.add_argument("--preflight", action="store_true",
+                    help="CPU-only: build the real plan and resolve its weight names, launch nothing")
     ap.add_argument("--gate", action="store_true", help="device gate (needs the GPU idle)")
     ap.add_argument("--time", action="store_true", help="with --gate: burst timing too")
     a = ap.parse_args()
-    if not (a.mirror or a.gate):
+    if not (a.mirror or a.preflight or a.gate):
         ap.print_help()
         raise SystemExit(2)
     rc = 0
     if a.mirror:
         rc |= mirror_only()
+    if a.preflight:
+        rc |= preflight()
     if a.gate:
         rc |= device_gate(a.time)
     raise SystemExit(rc)
