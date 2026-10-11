@@ -4,6 +4,7 @@
     .venv/bin/python prototype/gdn_gated_norm/run.py --mirror     # CPU only, no GPU touched
     .venv/bin/python prototype/gdn_gated_norm/run.py --preflight  # CPU only: plan + name check
     .venv/bin/python prototype/gdn_gated_norm/run.py --gate       # device: run + negatives
+    .venv/bin/python prototype/gdn_gated_norm/run.py --selftest   # CPU: fixture round-trip guard
     .venv/bin/python prototype/gdn_gated_norm/run.py --gate --time
 
 --mirror is the half that decides the arithmetic: it compares BF16 bit patterns of six readings of
@@ -89,18 +90,122 @@ def mirror_only() -> int:
     return rc
 
 
+def write_f32_raw(t: torch.Tensor, path: Path) -> None:
+    """Write `t`'s F32 payload. The kernel's `o` parameter is `const float*`, so F32 is the file
+    format, not a choice — and `mirror_probe.cases()` already hands over `o` as float32, so this is
+    a widening no-op rather than a conversion. `astype` copies, which is what makes the naive version
+    of this line safe where the BF16 one below was not: numpy has one float32 and one uint16, and it
+    cannot reinterpret one as the other by accident. `verify_cases` checks it anyway."""
+    assert t.dtype == torch.float32, (path, t.dtype)
+    t.detach().cpu().contiguous().numpy().astype(np.float32, copy=False).tofile(path)
+
+
+def write_bf16_raw(t: torch.Tensor, path: Path) -> None:
+    """Write `t`'s BF16 payload bytes.
+
+    `.view(torch.uint16)` reinterprets the two bytes; `.to(torch.uint16)` **converts** them, and the
+    difference is the whole of results.md §8: `mirror_probe.cases()` yields `z` as float32, so
+    `.to(torch.uint16)` truncated 0.195 to the integer 0 and wrapped -1.3 to 0xFFFF, which the kernel
+    then read back as +0 and NaN — 1525 zeros and 320 NaN per case, from a pin holding neither. The
+    assert is here because `.view` needs equal element sizes, which is exactly the thing that was
+    silently wrong when a wider dtype was passed in.
+    """
+    assert t.dtype == torch.bfloat16, (path, t.dtype)
+    t.detach().cpu().contiguous().view(torch.uint16).numpy().tofile(path)
+
+
+def verify_cases(cases: list[dict]) -> list[str]:
+    """Read every fixture file back and prove it holds the tensor that was meant to go in.
+
+    A gate that manufactures its own inputs has to check the manufacturing. This one did not, and the
+    first device run is the cost: `write_cases` manufactured NaN out of a clean pin, the gate compared
+    that NaN against the pin for 144 cases, and the log blamed the kernel (`ndiff 2048/2048, max ULP
+    49 174`) while the kernel was right. Three checks, cheapest failure first:
+
+      length      — a short or long file is a writer bug, not a numerical one.
+      NaN         — NaN in the file where the pin has none. Real activations do not contain NaN, and
+                    a numeric cast instead of a bitcast is the only way this gate can invent one, so
+                    the message says that rather than merely reporting a count.
+      bit pattern — every element identical, not merely close: these are payload bytes, so "close"
+                    has no meaning here and a one-bit difference is a different tensor.
+    """
+    problems: list[str] = []
+    for c in cases:
+        for kind, path, want, size in (("o", c["ofile"], c["src_o"], 2048), ("z", c["zfile"],
+                                                                       c["src_z"], 2048)):
+            raw = np.fromfile(path, dtype=np.uint16 if kind == "z" else np.float32)
+            if raw.size != size:
+                problems.append("%s.%s: %d elements on disk, %d expected" % (c["name"], kind,
+                                                                             raw.size, size))
+                continue
+            if kind == "z":
+                gb = raw.astype(np.int32)
+                wb = bf16_ulp.bf16_bits(want)
+                bad_nan = int((((gb & 0x7FFF) >= 0x7F81) & ((wb & 0x7FFF) < 0x7F81)).sum())
+            else:
+                gb = np.frombuffer(raw.tobytes(), dtype=np.uint32).astype(np.int64)
+                wb = np.frombuffer(want.numpy().astype(np.float32).tobytes(),
+                                   dtype=np.uint32).astype(np.int64)
+                bad_nan = int((np.isnan(raw) & ~np.isnan(want.numpy())).sum())
+            if bad_nan:
+                problems.append("%s.%s: %d NaN in the file where the pin has none — a numeric cast "
+                                "(Tensor.to(uint16)) instead of a bitcast (.view(uint16)) is what "
+                                "does that" % (c["name"], kind, bad_nan))
+            diff = int((gb != wb).sum())
+            if diff:
+                first = int(np.flatnonzero(gb != wb)[0])
+                problems.append("%s.%s: %d/%d elements differ from the tensor meant to go in "
+                                "(first at lane %d: file 0x%x, tensor 0x%x)"
+                                % (c["name"], kind, diff, size, first, gb[first] & 0xFFFF if kind
+                                   == "z" else gb[first], wb[first] & 0xFFFF if kind == "z"
+                                   else wb[first]))
+    return problems
+
+
+def fixture_selftest() -> int:
+    """CPU only: prove `verify_cases` catches the writer bug it was written for.
+
+    A guard nobody has seen fail is a guard that can rot. Both halves are required: the good write must
+    pass (or the guard rejects everything and looks like it works), and the injected numeric cast must
+    be rejected *for the right reason* — the NaN clause, naming the cast.
+    """
+    o, z, _w, _ref = next(mp.cases(FIXTURE, STEPS))
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        case = dict(name="t000", ofile=d / "t000.o.f32", zfile=d / "t000.z.bin",
+                    src_o=o.reshape(-1), src_z=z.reshape(-1))
+        write_f32_raw(case["src_o"], case["ofile"])
+        write_bf16_raw(case["src_z"].to(torch.bfloat16), case["zfile"])
+        clean = verify_cases([case])
+        print("  bitcast write  -> %s" % ("accepted" if not clean else "REJECTED: %s" % clean))
+        # The injection: the writer this gate shipped with, numeric cast on a float32 tensor.
+        case["zfile"].unlink()
+        case["src_z"].to(torch.uint16).numpy().tofile(case["zfile"])
+        broken = verify_cases([case])
+        caught = bool(broken) and "numeric cast" in broken[0]
+        print("  numeric-cast   -> %s" % ("rejected: %s" % broken[0] if broken else "ACCEPTED"))
+    ok = (not clean) and caught
+    print("FIXTURE SELFTEST:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def write_cases(d: Path, fixture: str) -> list[dict]:
-    """One case per (step, GDN layer): pin values as raw files + the expected outputs."""
+    """One case per (step, GDN layer): pin values as raw files + the expected outputs.
+
+    The files are written through the two `write_*_raw` helpers and then read back by `verify_cases`,
+    which cannot be skipped from here: this is the only producer of gate inputs, so the alternative
+    to checking here is remembering to check at every call site.
+    """
     fx = ROOT / "data" / "refs" / fixture
     cases = []
     for (o, z, w, ref) in mp.cases(fixture, STEPS):
         l = len(cases)
         name = "c%03d" % l
         of, zf = d / (name + ".o.f32"), d / (name + ".z.bin")
-        o.numpy().astype(np.float32).tofile(of)
-        z.to(torch.uint16).numpy().tofile(zf)
+        write_f32_raw(o.reshape(-1), of)
+        write_bf16_raw(z.reshape(-1).to(torch.bfloat16), zf)
         cases.append(dict(name=name, ofile=of, zfile=zf, weight=w, ref=ref, layer=None,
-                          wname=None))
+                          wname=None, src_o=o.reshape(-1), src_z=z.reshape(-1)))
     # map cases back to layers by re-reading the pin order (cases() iterates layer-major)
     idx = 0
     for l in range(24):
@@ -113,6 +218,12 @@ def write_cases(d: Path, fixture: str) -> list[dict]:
                 cases[idx]["wname"] = wn.normalize_name(
                     ops.LAYER_PREFIX % l + "linear_attn.norm.weight")[1]
                 idx += 1
+    problems = verify_cases(cases)
+    if problems:
+        raise SystemExit("fixture writer produced %d bad file(s):\n  %s"
+                         % (len(problems), "\n  ".join(problems[:8])))
+    print("fixture verified: %d cases read back from disk, %d elements per case, bit-identical to"
+          " the pins (o as F32, z as BF16 payload)" % (len(cases), 2048))
     return cases
 
 
@@ -293,17 +404,21 @@ def device_gate(with_time: bool) -> int:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--mirror", action="store_true", help="CPU-only cast-order gate (no GPU)")
+    ap.add_argument("--selftest", action="store_true",
+                    help="CPU-only: prove the fixture round-trip guard rejects a numeric cast")
     ap.add_argument("--preflight", action="store_true",
                     help="CPU-only: build the real plan and resolve its weight names, launch nothing")
     ap.add_argument("--gate", action="store_true", help="device gate (needs the GPU idle)")
     ap.add_argument("--time", action="store_true", help="with --gate: burst timing too")
     a = ap.parse_args()
-    if not (a.mirror or a.preflight or a.gate):
+    if not (a.mirror or a.preflight or a.gate or a.selftest):
         ap.print_help()
         raise SystemExit(2)
     rc = 0
     if a.mirror:
         rc |= mirror_only()
+    if a.selftest:
+        rc |= fixture_selftest()
     if a.preflight:
         rc |= preflight()
     if a.gate:
