@@ -159,21 +159,34 @@ device once; what is still missing is the token result and every timing.
 # whether an engine's whole-token cos deficit needs a bug to explain it: the engine's is smaller than this
 # spread at every step. ~90 s, torch CPU.
 
-`.venv/bin/python engine/gate.py --selftest`
+`.venv/bin/python engine/gate.py --selftest [--fixture dec64f]`
 # Proves the token gate DISCRIMINATES, with no engine and no device: it re-runs gate.py in
-# subprocesses against a CPU stand-in with four bugs injected — a wrong sampled id at a named step, a
-# swapped top-two logits, 5 % logits noise that leaves the argmax alone, and the §07.5 stop check
-# firing during the prompt (the bug the first device run had) — and requires each to fail at the step it
+# subprocesses against a CPU stand-in with five bugs injected — a wrong sampled id at a named step, a
+# swapped top-two logits, 5 % logits noise that leaves the argmax alone, the §07.5 stop check
+# firing during the prompt (the bug the first device run had), and a replay step fed the wrong token
+# (the off-by-one a forced driver makes) — and requires each to fail at the step it
 # was injected at. Ends "SELFTEST PASS". `--dry-run` is the same stand-in without the injections, and is
-# what exercises sections (a)–(d)'s parsing before a GPU window exists.
+# what exercises sections (a)–(e)'s parsing before a GPU window exists. It takes ~6 s on dec8, ~15 s on
+# dec64f (64 steps of stand-in logits), and both are green.
 
-`.venv/bin/python engine/gate.py --no-engine`
+`.venv/bin/python engine/gate.py --no-engine [--fixture dec64f]`
 # Sections (0), (c) and — with --selftest/--dry-run — the whole judging half of the token gate, with
 # no binary and no device: it proves the dec8 fixture pairs with itself (the §10.5 trap, as 26
 # assertions), runs engine/state_sizes.py against the sizes it will later compare with decode_run's,
 # and requires four injected bugs to be caught at their own steps. Runs in about a second, and is
 # the part of the gate a worker is allowed to run. Ends "ENGINE GATE PASS" with a note that (a),(b)
-# were skipped (or, under --dry-run, that the stand-in stood in).
+# were skipped (or, under --dry-run, that the stand-in stood in). On --fixture dec64f it also checks
+# the pinned state fingerprints (finite, right layer routing, KV delta exactly 0) and that dec64f's
+# first 8 steps are bit-identical to dec8's — all CPU, all green.
+
+`.venv/bin/python tools/reference_dump.py --message "The capital of France is" --decode 64 --tag dec64f --lean --deep-steps 63 --logits-bits bf16`
+# The deep fixture P1 gates against: forced greedy for 64 steps, per-layer operands at ONE step only,
+# logits as BF16 bit patterns, and a 4-moment state fingerprint at every step — 60 MB, where pinning
+# all 64 steps the way dec8 pins 8 would cost 1.66 GB. torch CPU, ~6 s, no device, safe for a worker.
+# Add `--verify data/refs/dec64f` to regenerate into scratch and byte-compare against the pins (§10.5's
+# rule that a fresh run must reproduce them); `--verify data/refs/dec8` still passes under the changed
+# dumper. `engine/results.md` has the size table, why BF16 logits lose no bits here, and what the
+# fingerprint can and cannot see.
 
 .venv/bin/python speccheck/run_all.py
 # CPU torch. Expected green as of the rope revert d06b4e3. Any failure is worth reporting; note
@@ -206,6 +219,14 @@ being timed contaminates that timing:
 ./engine/build/decode_run --sizes-only          # NO kernel launches, but it loads the checkpoint:
                                                 # 2.4 GB of hipMalloc + H2D + the warm read pass.
                                                 # Run it in a GPU window, not beside a timing.
+# The three flags the deep gate and the chat driver added, and why each exists:
+#   --replay ID,ID,…  feed each GENERATION step a caller-supplied token instead of the engine's own
+#                     sample, so a 64-step pin tests the model at depth instead of testing A-18's chaos
+#                     floor; it also leaves §07.5 unarmed, because that pin steps past the stop id.
+#   --no-stop         the same §07.5 waiver for a FREE run. Only the depth smoke uses it, because the
+#                     model's own stop made a "300-token" smoke a 38-token one.
+#   --session         resident line protocol (feed/gen/reset/stats/quit) for engine/chat.sh, so the
+#                     1.55 GB load and the RequestState survive across turns.
 ```
 
 ### Device — operator only, in a quiescent GPU pass (zero subagents, then `tools/gpu_lock.sh`)
@@ -289,6 +310,39 @@ tools/gpu_lock.sh release "engine decode_step token gate (W5b)"
 #      §10's, not this gate's to loosen. Report it; do not edit the constant.
 #   4. `(c)`/`(d)` failing while `(a)`/`(b)` pass means the state struct or the block plan drifted
 #      from §00/§07 — decode_run prints both sides of each comparison.
+```
+
+The same gate, 64 steps deep, and a free run for depth (device, seconds each; both were first run by a
+worker under the `<60 s` correctness allowance in `AGENTS.md`, so their results are in `results.md` and
+their timing is quoted nowhere):
+
+```bash
+tools/gpu_lock.sh acquire "engine deep token gate"
+.venv/bin/python engine/gate.py --fixture dec64f          # 17 prompt + 64 REPLAYED steps, ~2 s
+.venv/bin/python engine/gate.py --smoke 300 --smoke-no-stop   # 317 lanes, no parity claim, ~5 s
+tools/gpu_lock.sh release "engine deep token gate"
+# Expected as of 2026-10-11: dec8 PASSES (93 checks). dec64f FAILS with 15 lines and they are two
+#   separate findings, both written up in engine/results.md — two id mismatches at steps 17/18 where
+#   the PIN has an exact BF16 tie (top1-top2 gap 0.000000, so the greedy id there is a coin flip), and
+#   13 cos/meanrel lines at steps 26-34 where the reference's own GDN state energy halves (pinned
+#   S n2 4457 -> 2029). Neither is drift with depth: corr(1-cos, step) = -0.033 and the last 8 steps
+#   are better than the first 8. Do NOT loosen a band for either; the two open decisions (tie policy,
+#   and whether the excursion needs a bug) are at the end of results.md.
+#   --smoke passes either way: --no-stop exists because without it the model's own stop at 38 tokens
+#   made a "300-token" smoke a 38-token one. It checks crash/NaN/id-range/state-inside-allocation and
+#   nothing else; prefix_len 317 vs cap 318 is the tightest §08.6 has ever been here.
+```
+
+`engine/chat.sh` — the engine's own REPL (device, holds the GPU lock for its whole life):
+
+```bash
+engine/chat.sh                                        # REPL: /stats /reset /raw <text> /quit
+engine/chat.sh --prompt "Name two prime numbers bigger than 90." --max-new 24
+# Drives `decode_run --session`, so weights and RequestState stay resident between turns and a turn is
+# one decode_step per token with no reload and no re-prefill. Its tok/s and TTFT are NOT ledger numbers
+# (bench/performance-status.md §6 owns clean windows); the header says so on every start. It refuses to
+# start if engine/build/decode_run is missing or tools/gpu_lock.sh is held, and it never prints a chat
+# template special as literal text — special ids come out as [248046] markers, per AGENTS.md.
 ```
 
 ## What the next worker owes W5b

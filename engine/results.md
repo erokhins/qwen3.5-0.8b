@@ -607,3 +607,208 @@ remove most of that from a first-token figure and would not change a token of th
 It is recorded here as context for reading the row, not as a work item: the gap this section is about is a
 decode-step gap, and prefill does not touch it.
 
+
+
+# P1 of `bench/plan-2026-10-12`: the same gate 64 steps deep — teacher-forced — and what depth said
+
+2026-10-11, a worker's shift. Every device command here is a correctness-only gate under the `<60 s`
+allowance in `AGENTS.md`: PASS/FAIL, one run each, blocking, `tools/gpu_lock.sh` held. **No engine timing
+appears anywhere in this section** — not ms, not tok/s, not a burst — because a worker's window is not the
+§6 window. `engine/gate.py` prints `decode_run`'s own ms line and the gate's note says the same thing:
+that line is a by-product. Wall time, `util` and the exact command lines of the runs are in the worker's
+report, deliberately not here, so nothing from a contaminated window can be mistaken for ledger material.
+
+## The fixture: `dec64f` — 60 MB on disk, not the 1.7 GB a naive 64-step dump costs
+
+`dec8` costs 292 MB for 8 steps (25.9 MB/step) because it pins every per-layer operand of every step.
+64 steps of that is 1.66 GB, so the dumper grew a pin policy instead of a bigger budget:
+
+```bash
+# make it
+.venv/bin/python tools/reference_dump.py \
+    --message "The capital of France is" --decode 64 --tag dec64f \
+    --lean --deep-steps 63 --logits-bits bf16
+# prove it reproduces byte-for-byte (§10.5's rule: a fresh run must reproduce the pin)
+.venv/bin/python tools/reference_dump.py \
+    --message "The capital of France is" --decode 64 --tag dec64f \
+    --lean --deep-steps 63 --logits-bits bf16 --verify data/refs/dec64f
+```
+
+| what | how it is pinned | bytes |
+|---|---|---|
+| `logits_last`, all 64 steps + prefill | BF16 **bit patterns** in a `uint16` payload | 30.8 MiB |
+| per-layer operands + cache operands | full dump, but only at the one `--deep-steps` step (63) | 25.9 MiB |
+| state fingerprint, every step incl. prefill | `[layer,4]` float64 per kind (S, conv, KV) | 85.3 KiB |
+| **fixture total on disk** | 826 tensors + `manifest.json` | **60 MB (56.8 MiB of pins)** |
+
+Two decisions inside that table, both checked rather than assumed:
+
+- **BF16 logits are bit-lossless here, not a loosened tolerance.** The model is BF16, so its logits already
+  land on BF16 values: rounding the pins to BF16 and comparing gives max abs difference 0 and cos exactly
+  1.0 on the checked steps (`tmp/probe_bf16_logits.py`, a one-off). Halving the logit cost buys that for
+  free; a gate reading them widens `uint16 → float32` by the bit shift, never a numeric cast (§04.5's trap).
+- **The state fingerprint is moments, not content.** Full state content is 18.66 MiB/step = 1.15 GB for 64
+  steps, so each step pins `n2 = Σx²`, `maxabs`, `mean` and `dn2 = Σ(x − x_prev)²` per layer per kind. What
+  that can and cannot see is stated in the gate, not implied: it catches a state that decayed, was zeroed,
+  was scaled or was left behind; it cannot see a corruption that preserves the multiset of values. The KV
+  `dn2` column is a hard check and came out **exactly 0.0 at every step** — the append-only-cache invariant,
+  verified on the reference. (It did not at first: the first `fp_row` compared a flattened prefix, and a
+  grown KV cache's flat prefix is misaligned across heads, so an actually-append-only cache reported a
+  delta of ~3.0e3. The fix compares along the common extent of dim `-2` per part.)
+
+Checks on the fixture itself, all in the gate and all passing:
+
+- `--verify` re-runs the whole dump into scratch and byte-compares: **REPRODUCE PASS** for `dec64f`, and
+  the pre-existing `dec8` still reproduces under the modified dumper (`--verify data/refs/dec8` → PASS),
+  which is the regression proof for `tools/reference_dump.py`.
+- `dec64f`'s first 8 steps are **bit-identical to `dec8`'s** — logits bytes and ids — so the deep fixture
+  extends the shallow one rather than resembling it (gate section `(f2)`). Caught nothing this time, which
+  is the point: it is the check that makes the two fixtures one story.
+- The pinned chain runs *through* the end-of-turn token: id 248046 is sampled at generation step 24 and the
+  chain continues (25 → 198, 26 → 248044, …). Teacher forcing is what lets a fixture go past a stop token
+  at all — see the replay note below.
+
+## Why the deep gate replays, and why that is not a weaker claim
+
+A-18's measured chaos floor says a free-running bf16 greedy continuation is not comparable past ~4–8
+tokens (HF-sdpa vs HF-eager agreed 0.8776 over 49 prompts × 24 tokens). A 64-token free-run pin would
+therefore be a pin of the divergence, not of the engine. So above `FREE_RUN_BOUND = 8` the gate drives
+`decode_run --replay <the reference's own ids>`: the engine is fed the reference's token at every step and
+still reports its own argmax, which is printed and compared. Two consequences, both asserted:
+
+- a divergence shows at **one** step instead of cascading over the remaining ones;
+- §07.5's stop check stays unarmed in a replay, because the pinned chain steps past 248046 by design. The
+  gate asserts no replay step reports `stop=1` and prints where the chain hits the stop id.
+
+`dec8` is untouched: 8 steps, self-fed, `ENGINE GATE PASS` at 93 checks, same bands. The bands were not
+touched anywhere — `cos >= 0.9995` (G5) hard, `cos >= 0.9999` (G6) advisory, ids exact, per step.
+
+One preflight was added because the ceiling is a kernel constant: the gate reads `MAXSC` out of
+`prototype/attn_decode/attn_decode_kernels.h` rather than restating it, and refuses a plan above it.
+`17 + 64 = 81` lanes and `17 + 300 = 317` both fit under 512; the wall is at 513 lanes (this prompt: 496
+generated tokens), and raising it is the §07.3 split-block prefill work, not a decode item.
+
+## The answer to the question P1 was for: the curve is flat in depth, and neither excursion is decay
+
+64 rows printed per run (gate section `(e)`); the reading, with the numbers behind it:
+
+| steps | ids vs pin | cos | what else was happening |
+|---|---|---|---|
+| 0–16 | exact, 17/17 | 0.999886 … 0.999968 (median `1−cos` 7.8e-5) | indistinguishable from `dec8`'s eight |
+| 17, 18 | **2 mismatches** (engine 10407 vs pin 2018; 64704 vs 1379) | 0.999954, 0.999967 — healthy | **exact ties in the reference**: the pin's top-1 and top-2 are the same BF16 value, `gap 0.000000` at 17.2500 and at 19.7500. At step 17 the id the engine preferred has pinned logit 17.2500 too — a three-way tie. |
+| 19–24 | exact | ≥ 0.999924 | |
+| 25–38 | exact | dips to **0.997844** at step 32 (meanrel 7.09 %), 7 steps under G5's floor | the **reference's own** GDN state energy halves: pinned `S n2` 4457 → 2029 (minimum exactly at step 27), then climbs back |
+| 39–63 | exact | back to 0.999861 … 0.999973 (median `1−cos` 4.2e-5, *better* than the head) | |
+
+So depth itself bought no drift: `corr(1−cos, step index) = −0.033`, least-squares slope −7.5e-7/step, and
+the last eight steps are better than the first eight (ratio 0.54). Two separate things caused the two
+excursions, and neither is "state carry-over decaying with position":
+
+```bash
+# the arithmetic behind the second reading, over the gate's own (e) table
+.venv/bin/python tmp/probe_curve_scale.py
+```
+
+- `corr(1−cos, 1/(S n2)) = 0.769`, and `err × (S n2)` has median **0.1994** over the 25 steps up to the
+  pinned stop token and **0.2074** over the post-stop steps — ratio 1.04. Read plainly: the engine's
+  discrepancy, measured in units of the reference's own state energy, is constant across all 64 steps;
+  where the reference's state gets small, the same absolute difference crosses an absolute cos floor.
+  **What this does *not* settle:** it cannot distinguish "the reference's state got small" from "the engine
+  failed to maintain its state and the pin shows the deficit". The two have the same signature here and the
+  only instrument that separates them is the engine's own per-step state moments next to the pinned ones —
+  `decode_run` prints allocation (`STATE cap=…`), not moments. Escalated as the next instrument, not
+  assumed away.
+- The two id mismatches are not a numerics failure either. `engine/gate.py` already prints, for every step,
+  the reference's own top1−top2 gap and how many times the largest element error it fits inside; at steps
+  17 and 18 that line reads `gap 0.000 = 0×`, i.e. the greedy choice at that step is a tie in the pin
+  itself, decided by tie-break and nothing else. G7's "ids exact per step" cannot be satisfied against an
+  exact tie, and that is a gate-policy question (does a proven tie become a named exception, with the tie
+  required from the pin?) — decided by the operator, not by the worker who noticed it. The gate still
+  FAILs on it, and the bands are untouched.
+
+`ENGINE GATE FAIL — 15 failed` on `--fixture dec64f` is therefore the honest current state: 2 tie-driven id
+mismatches at 17/18 and 13 band lines (cos/meanrel) in the 26–34 stretch, with everything else — 518
+PASS lines, fixture integrity, the deep-vs-shallow identity, the launch plan, the state sizes — green.
+
+## The 300-token free run: it needs `--no-stop` to mean 300
+
+A teacher-forced chain never lets the engine's own divergence happen, so depth-as-smoke has to be a free
+run. The first attempt (`gate.py --smoke 300`) passed every check and reached **38** generation steps: on
+this prompt the model emits 248046 after 38 tokens, so the smoke was a 38-token smoke wearing a 300 label.
+`decode_run --no-stop` now exists for exactly that: the same waiver §07.5 already has in replay, for a run
+whose whole purpose is reaching a depth. Nothing that claims parity passes it, and the gate says so in the
+`--no-stop` assertion line.
+
+With it, `gate.py --smoke 300 --smoke-no-stop` passes: 17 prompt steps, 300 generated, `prefix_len` 317
+against `cap` 318 (§08.6's invariant, at the tightest it has ever been), every sampled id a vocabulary id,
+every logits vector finite across all 300 (largest |logit| seen: 35.37), and the 300 MiB of dumps it wrote
+were deleted again. The stopped variant also passes and asserts the stronger thing about a stop: it stopped
+*on* 248046, in the generation phase.
+
+## What a worker may not decide, left open on purpose
+
+1. **Tie policy.** Two of 64 pinned ids are exact ties in the reference. Either they become a named
+   exception (proof required from the pin: the engine's id must carry the pinned top-1 logit exactly), or
+   `dec64f` stays red at 17/18 and everyone lives with a failing deep gate. Both are defensible; the band
+   and the rule are §10's and the operator's.
+2. **Whether the 26–34 excursion needs a bug.** The correlation says scale, not decay, but scale is a
+   reading, not an attribution. The measurement that settles it is an engine-side per-step state
+   fingerprint (the same four moments the pin carries) printed by `decode_run`, which would make `(e)` a
+   two-column comparison instead of a correlation. That is a new engine flag plus a device run, and it is a
+   scope decision, so it is written here rather than built.
+3. **`MAXSC`.** 512 lanes is fine for everything this repo runs today (64-deep gate, 300-deep smoke, a
+   4k-context request is a prefill conversation). Recorded, not touched.
+
+
+# P2 of the same plan: `engine/chat.sh` — the engine's own REPL
+
+`speccheck/chat.sh` drives the torch CPU reference. `engine/chat.sh` drives the compiled engine: one
+`decode_step` per token on the iGPU, through `decode_run --session`, with the weights and the
+`RequestState` resident in one process between turns. Resident is the entire design point — the load is
+1.55 GB of `hipMalloc` + `hipMemcpy` before the first token and the request state cannot cross a process
+boundary, so a process per turn would pay the load again *and* re-feed the transcript, which makes the
+per-turn TTFT figure meaningless.
+
+```bash
+engine/chat.sh                                  # REPL: /stats /reset /raw <text> /quit
+engine/chat.sh --prompt "Name two prime numbers bigger than 90." --max-new 24
+```
+
+Three things this driver has to be, that the torch one does not:
+
+- **A citizen of the one-device rule.** It takes `tools/gpu_lock.sh` for its whole life, refuses to start
+  while someone else holds it (with the holder's tag), and its header says in as many words that its tok/s
+  is not a ledger number — `bench/performance-status.md` §6 owns clean windows. It needs no `OMP_NUM_THREADS`
+  knob, unlike the original: the engine's parallelism is its kernel block counts, not host threads.
+- **Polite when the box is not ready.** Missing binary → the `bash engine/build.sh` line and exit 1; missing
+  checkpoint → the `hf download` line; lock held → the holder and a refusal. All three are exercised paths,
+  not hypotheticals.
+- **Incapable of emitting a chat-template special as literal text.** Every special id (248045, 248046,
+  248044, 248068, 248069) prints as `[248046]`-style markers. `speccheck/chat.py` streams them literally;
+  this one deliberately does not, because of the `AGENTS.md` rule about what a literal end-of-turn token
+  does to a transcript on this box.
+
+The session protocol it speaks is documented at its source (`decode_run.cpp`, `session_loop`):
+`feed <id>…` → `FED n prefix_len`, `gen <n>` → streamed `GEN id pos` then `END steps stop prefix_len`,
+`reset`, `stats`, `quit`. Two invariants there were found by running it, not by reading it, and are now
+asserted by behaviour:
+
+- `feed` must leave the state's next sample **pending** (it is the first token of the answer, and `gen`
+  emits it first). Clearing it made every turn answer with `ERROR gen with no sampled token` — the first
+  session-mode run at all, and the reason a driver that talks to a mode is worth more than a unit test of
+  its parser.
+- At a **stop**, the emitted stop token was never stepped, so it stays pending and the next `feed` steps
+  it (transcript complete, driver does not resend it). At a **max_new cut**, the last emitted token *was*
+  stepped and the pending sample was never shown to anyone, so it is dropped — otherwise the state would
+  hold a token the user never saw, and the driver closes the assistant turn instead. That is why a turn
+  line prints `prompt 20 tok (fed 21)`: the +1 is the pending token, visible by construction.
+
+Rendering reuses `speccheck/textio.py` for the same reason the torch driver does — the incremental-turn
+rule (close the assistant turn only if generation was cut before the stop token, then append the next user
+turn and the generation header) is the pinned template's contract, and re-rendering the whole conversation
+is not a token extension of what the state holds. One fix of its own: byte-level BPE splits a multi-byte
+character across tokens, so streaming one token at a time prints U+FFFD (the torch driver has this
+artefact), and printing by character count does not fix it — two bytes of an emoji decode to two
+replacement characters and then collapse to one, so the string can *shrink* while growing. The stable
+prefix is everything before a trailing replacement run; that is what streams, and the tail is flushed when
+the run ends. `Say hello in Spanish and add a friendly emoji.` now renders `👋`/`😊` intact.
