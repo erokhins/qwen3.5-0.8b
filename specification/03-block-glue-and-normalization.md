@@ -40,8 +40,24 @@ scaling, no hyperconnections/Gated-Residual (Flash-Next-only, absent here).
 mlp(x) = ( silu(x·W_gateᵀ) ⊙ (x·W_upᵀ) ) · W_downᵀ
 ```
 
-`silu` elementwise in the activation dtype; the `gate ⊙ up` product and the
-`down_proj` accumulate in F32 (engine policy, A-07).
+`silu` elementwise in the activation dtype; every dot accumulates in F32 and rounds once
+(engine policy, A-07). The epilogue is stricter than that sentence suggests, and the difference
+is measured, not theoretical (`prototype/mlp_gemv/ulp_probe.py`): HF's dtype path is **three**
+roundings, not one —
+
+```
+g     = BF16( F32 dot(x, W_gate) )        u = BF16( F32 dot(x, W_up) )
+act   = BF16( BF16( g·(1/(1+exp(-g))) ) × u )     # silu in F32 on the rounded gate, then ×u
+out   = BF16( F32 dot(act, W_down) )
+```
+
+Doing the whole epilogue in F32 — the natural kernel, and the tempting literal reading of A-07,
+which is about accumulation and not about this — moves **27 % of `act` elements** by 1 ULP away
+from the reference. Two smaller facts belong here too: HF's order is `x·(1/(1+exp(-x)))` and the
+algebraically identical division form costs a 2 ULP outlier at a *large* element; and an F32
+`exp` differing from libm's by 1 ULP flips roughly one BF16 `act` element per few thousand,
+which is why §10.1's F2 line carries a 2 ULP band instead of 1. All of it is arithmetic
+sensitivity of a specific implementation; matching it is what "greedy parity" means here.
 
 ## 03.4 Logits head (tied)
 

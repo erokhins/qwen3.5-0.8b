@@ -42,6 +42,16 @@ outputs BF16 unless the spec pins F32.
 | **G8 MTP** | §09.5: bit-exact loop with sequential verify + accept rate across the three readings of §09 | accept ≥ 0.30 and the §09 reading strictly best; speculative output and target state bit-identical to plain greedy when verify reuses the decode path |
 | **G-neg negative controls** | `speccheck/gates/run_negative.py` injects three plausible bugs (wrong `q`/`gate` de-interleave, conv window written before it is read, GDN state not persisted) and asserts the pins *stop* matching, and still match when clean | each injection must drop its canary below cos 0.999 |
 | **G9 perf** | decode tok/s on this box vs the §07.4 roofline (~135 tok/s); `-O2` build only | report; investigate below 60 % |
+| **F1–F4 MLP decode path** | `prototype/mlp_gemv/run.py`, against the MLP pins (`decode{N}.L{ii}.mlp.{in,gate_pre,up_pre,act,out}`). F1 `gate_pre`/`up_pre` (two independent dots), F2 `act` (the SwiGLU rounding policy), F3 `out` from the *reference* `act` (isolates `down_proj` from everything upstream), F4 `out` from the *kernel's* `act` (the chain a real token runs), plus a cross-check of `speccheck.layers.mlp` against the same pins | no element above 1e-4 of the tensor max may exceed 1 BF16 ULP (2 for `act`); ≤2 % of elements differ; G3i-class cos ≥ 0.9999, meanrel ≤ 1e-2. F4 is aggregate-only (cos ≥ 0.9999, meanrel ≤ 1e-3) — see below |
+
+The MLP gate is the one place where a per-element ULP bound had to be derived rather than
+assumed, and `prototype/mlp_gemv/floor_probe.py` is where it comes from: reordering the
+reference's **own** F32 summation moves about 1 element in 100 000 by more than 1 ULP, always at
+an element that cancelled to ~1e-6 of the tensor max (where one ULP is a large fraction of the
+value), and the exactly-rounded sum disagrees there by 4–16 ULP. It also measures the other half:
+a legal 1-ULP difference in `act` — the most a correct kernel with a different summation order may
+produce — lands up to 142 ULP away in `out` at small elements. Judging F4 per-element would judge
+the sensitivity of a 3584-term dot, not the kernel.
 
 ## 10.2 Metrics, drift, and what drift does *not* mean
 
@@ -126,7 +136,20 @@ decoding has no mechanism to recover. Consequences, all implemented:
   because of the chunk-64 padding in §04.7.
 - Reference dumps are regenerated whenever the tool, transformers version, or
   checkpoint changes; the `manifest.json` fields (`transformers`, `torch`,
-  `dtype`) are part of the fixture identity.
+  `dtype`) are part of the fixture identity. **`tools/dump_fixtures.sh`** is the single source
+  of the exact command line per fixture (including `--no-mlp-io` where a fixture carries no
+  decode step), and **`tools/check_dump_reproduction.py`** re-verifies a fresh dump against the
+  pinned one with zero tolerance — bit-identical BF16, byte-identical ids. Use it after any
+  re-dump: it is what stands between a `transformers` bump and silently different numerics, and
+  it already caught a fixture whose prompt had been generated as a *continuation* rather than a
+  completion (so its 24-token prefix was not the one §08.6 invariant 1 needs).
+- **The MLP pins exist as of `prototype/mlp_gemv`, with two limits.**
+  `decode{N}.L{ii}.mlp.{in,gate_pre,up_pre,act,out}` are captured by module hooks, so they exist
+  only for decode steps (k=1) — a prefill still pins only `s_in`/`s_out` per layer — and `act` is
+  `down_proj`'s **input**, i.e. the SwiGLU product. A kernel that batches rows through the MLP
+  has no fixture until the hook is widened, and the first version of that hook read
+  `down_proj`'s *output*, pinned it under the name `act`, and passed every self-check while
+  pointing the gate at the wrong tensor (§03 / `prototype/mlp_gemv/results.md`).
 - Never trust byte values from ad-hoc dumps in the old project
   (`../qwen3.8-flash-next-old/prototype/*/data`): shapes only, per its own
   `REFERENCE.md`.
