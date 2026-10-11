@@ -291,11 +291,6 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
     greedy = man["greedy_continuation"]
     cfg = man["text_config"]
     lines = []
-    # A stand-in run that truncates (see `break_prompt_stop`) writes FEWER logits files than the last
-    # case did, and section (b) reads them by name — so stale files from a previous case would be
-    # compared as if this run had produced them. Clear the dir first.
-    for stale in work.glob("logits*.bin"):
-        stale.unlink()
     cap = len(prompt_ids) + len(dec_logits) + 1
     plan = launch_plan(cfg["num_hidden_layers"],
                        sum(1 for t in cfg["layer_types"] if t == "linear_attention"),
@@ -446,6 +441,16 @@ def main() -> int:
     section("(run) decode_run — one decode_step per token: the prompt, then generation")
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
+    # Section (b) reads `logits{pos}.bin` by name, so a run that stops early is judged against whatever
+    # the PREVIOUS run left behind. The first device run stopped at prompt index 6, so it wrote
+    # logits0..6 — and still reported only six failures, all in section (a), which is only possible if
+    # section (b) found logits17..24.bin that run cannot have written (its default `--work` is the same
+    # directory `--dry-run` and `--selftest` write into). Clear them: (b) must judge the run it is
+    # judging, and a missing dump has to read as missing.
+    for stale in work.glob("logits*.bin"):
+        stale.unlink()
+    for stale in work.glob("logits*.bin"):
+        stale.unlink()
     cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
            "--steps", str(n_decode), "--out", str(work)]
     if args.dry_run:
