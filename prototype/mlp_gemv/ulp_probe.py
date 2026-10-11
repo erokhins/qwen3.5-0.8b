@@ -17,6 +17,11 @@ Three questions, all on real reference data (the pinned `L{ll}.mlp.*` operands):
    and out of `silu`, then a BF16 multiply, or F32 throughout (the A-07 reading)? The
    answer picks the kernel's epilogue, and §03.3 is ambiguous enough to need measurement.
 
+Every ULP number here comes from the shared comparator `prototype/bf16_ulp.py`, whose
+`selftest()` runs before anything is printed: this file's first version carried its own
+BF16 ordering, its `< 0` branch was dead on a uint16 view, and the distances it printed for
+negative values were nonsense (see bf16_ulp's module docstring for the failure mode).
+
     .venv/bin/python prototype/mlp_gemv/ulp_probe.py [--fixture dec8] [--layers 0,11,23]
 """
 from __future__ import annotations
@@ -33,6 +38,8 @@ from safetensors import safe_open
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "prototype"))
+import bf16_ulp  # noqa: E402
 CKPT = ROOT / "models" / "Qwen3.5-0.8B"
 
 
@@ -45,25 +52,16 @@ def ckpt_tensor(key: str) -> torch.Tensor:
 
 
 def bf16_bits(t: torch.Tensor) -> np.ndarray:
-    """BF16 payload as uint16, so equality is bit equality."""
-    return t.detach().to(torch.bfloat16).contiguous().view(torch.uint16).numpy()
+    """BF16 payload, so equality is bit equality (shared comparator, one spelling)."""
+    return bf16_ulp.bf16_bits(t)
 
 
 def ulp_report(got: torch.Tensor, ref: torch.Tensor) -> str:
-    """Compare as BF16 bit patterns and report distance in ULPs of BF16."""
-    g = bf16_bits(got).astype(np.int32)
-    r = bf16_bits(ref).astype(np.int32)
-    # BF16 is IEEE-truncated-fp32-in-miniature: for same-sign values the integer distance
-    # of the bit patterns is the ULP distance. Sign-flip to a monotone order first.
-    gm = np.where(g < 0, 0 - g, g ^ 0x8000)          # uint16 -> monotone int
-    rm = np.where(r < 0, 0 - r, r ^ 0x8000)
-    d = np.abs(gm - rm)
-    n = d.size
+    """Distance in BF16 ULPs, from bf16_ulp.report — do not write another ordering here."""
+    c = bf16_ulp.report(got, ref)
     return ("ndiff %d/%d (%.3f%%) | max %d ULP | >1 ULP: %d | cos %.8f"
-            % (int((d > 0).sum()), n, 100.0 * (d > 0).mean(), int(d.max()),
-               int((d > 1).sum()),
-               float(got.float().flatten() @ ref.float().flatten()
-                     / (got.float().flatten().norm() * ref.float().flatten().norm()))))
+            % (c["ndiff"], c["n"], 100.0 * c["ndiff"] / c["n"], c["maxulp"],
+               c["over1"], c["cos"]))
 
 
 def main() -> int:
@@ -73,6 +71,8 @@ def main() -> int:
     ap.add_argument("--step", default="decode0")
     ap.add_argument("--layers", default="0,3,11,23")
     args = ap.parse_args()
+    if bf16_ulp.selftest():        # the comparator is part of every number printed below
+        raise SystemExit("bf16_ulp selftest failed - the floor cannot be measured")
 
     d = ROOT / "data" / "refs" / args.fixture
     ids = json.loads((d / "manifest.json").read_text())["prefill_ids"]

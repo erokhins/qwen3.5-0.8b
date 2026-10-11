@@ -104,6 +104,18 @@ further details cost real debugging time:
   large element. Matching libm bit-for-bit is not the deliverable; `--negative f32act` shows the
   gate still catches the policy that matters.
 
+The `act` policy numbers above were originally printed by a comparator that was itself broken —
+`ulp_probe.py` carried its own BF16 ordering with the dead `< 0` branch described in the trap
+below. It now imports `prototype/bf16_ulp.py` and runs `selftest()` first, like `run.py` and
+`floor_probe.py` do. Re-running it with the working comparator leaves every ULP column
+unchanged (all-f32 `act`: 978/984/963/1001 of 3584 = 26.9–27.9 % at **max 1 ULP**, `>1 ULP: 0`,
+for layers 0/3/11/23 of `decode0`; the three recompute rows are still BIT-EQUAL), because the
+broken key is correct for same-sign pairs and this probe only ever compares a value against a
+neighbour of itself. What did change: the old `cos` column was an F32 dot and printed things like
+`1.00000048` for tensors that are bit-identical; the shared comparator does the aggregates in
+F64 and prints exactly `1.00000000`. **No number in §03.3 or in this file needed correcting** —
+but until the comparator was real, none of those ULP columns were evidence of anything.
+
 ## Negative tests — `run.py --negative`
 
 The `speccheck/gates/run_negative.py` convention: inject plausible wrong kernels and require the
@@ -190,7 +202,10 @@ floor, 3.4 % of this op's time. A split gate/up/down version would pay 72.
   "everything is within 1 ULP" for the whole negative half of the range. Correct:
   `np.where(bits & 0x8000, bits ^ 0xFFFF, bits ^ 0x8000)`. `prototype/bf16_ulp.py` has a
   selftest that prints next-neighbour distances against the torch ground truth; run it before
-  trusting any ULP number.
+  trusting any ULP number. **This op shipped that bug** — `ulp_probe.py` had its own copy of the
+  comparator, so every ULP figure it printed came from a dead branch. Its numbers survived the fix
+  (see above), but only because it compares same-sign neighbours; a probe that compares across
+  zero would have produced the opposite conclusion and the gate would have been loosened to match.
 - **`hipEventElapsedTime` is 0 below ~1 ms on this iGPU.** Sub-millisecond kernels timed with
   events report zero, which looks like an infinitely fast kernel rather than a broken timer.
 - **Pinning `act` means hooking `down_proj`'s *input*, not its output.** The first version read
