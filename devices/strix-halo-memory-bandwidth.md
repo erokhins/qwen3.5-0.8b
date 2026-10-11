@@ -25,6 +25,31 @@ Other facts the probe printed: `hipGetDeviceProperties` reports **20 CUs** and
 **2 MiB L2** for the 8060S, and the visible device memory is a **110 GiB** carve-out,
 so 4 GiB allocations succeed without `hipMallocManaged`.
 
+### The CU count, settled — HIP says 20, `rocminfo` says 40, and the difference matters
+
+`rocminfo` prints `Compute Unit: 40` for the gfx1151 agent, while `hipGetDeviceProperties`
+and `hipDeviceGetAttribute(hipDeviceAttributeMultiprocessorCount)` both say **20**. The number
+a kernel is sized against is the HIP one — that is what a launch grid is scheduled on — and any
+occupancy argument written against 40 is off by a factor of two. Settled with
+`tools/device_query.cpp` (built with the usual `-O3 -Wl,-rpath,/opt/rocm/lib`), which prints
+both sources side by side rather than asking the reader to trust a transcript:
+
+| fact | value | why it matters here |
+|---|---|---|
+| `multiProcessorCount` | **20** | the divisor in every "is the grid big enough" argument |
+| `maxThreadsPerMultiProcessor` | 2048 | 20 × 2048 = **40960 resident threads**; `warpSize` 32 ⇒ 64 waves/CU |
+| `maxBlocksPerMultiProcessor` | 64 | block-count ceiling per CU is not the binding limit at 256-thread blocks |
+| `l2CacheSize` | **2.0 MiB** | why a 22 MB layer beats the tile trick and why a 42/84 MiB working set genuinely defeats the cache |
+| `totalGlobalMem` / `hipMemGetInfo` | 110 GiB / **34.2 GiB free** | the two numbers in the unified-memory note: 110 GiB is the nominal carve-out, ~34 GiB is what is actually allocatable today |
+| `asyncEngineCount` | 8 | copy engines exist, so H2D can overlap compute in principle |
+| `concurrentKernels` | **1** | but the driver claims it will not run two kernels at once — relevant to any plan that overlaps a small op with a big GEMV; re-check before relying on it either way |
+
+One consequence recorded here because it was a wrong argument in two other files: `down_proj`
+at `rows/block = 8` issues 128 blocks × 256 threads = 32768 threads, which fits inside the
+40960 resident-thread capacity, so its 12 % bandwidth shortfall versus `lm_head_gemv` is **not**
+a block-count under-fill and remains unexplained. `prototype/mlp_gemv/results.md` and
+`bench/performance-status.md` carried the 40-CU version of that claim.
+
 ## What this means for the decode roofline
 
 Ceiling = bandwidth / bytes-per-token. §01.7 + §00.5 give **1.565 GB/token** for
