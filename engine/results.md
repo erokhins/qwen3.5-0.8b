@@ -72,3 +72,55 @@ instrument, not the guarantee — the verify pass would still hash every byte.
 Nothing in `prototype/` was called (other agents own those files), so no kernel result
 depends on this loader and nothing here depends on a kernel. The dependency is the
 checkpoint file only.
+
+---
+
+# W5b on disk: `state.{h,cpp}` + the launcher layer — proven, deferred, open
+
+Everything in this section is **compiled, never run on a device**. No allocation has happened, so
+no number here is a measurement of anything except the compiler's willingness.
+
+## Proven on CPU
+
+* `state_sizes.py` re-derives §08.1's shapes from `state.h`'s own constants and reproduces §00.5's
+  rows (18.0 MiB GDN `S`, 12288 B/token KV). PASS.
+* §04.5's gated RMSNorm is bit-exact against the pins on `dec8` (144 cases / 294 912 elements,
+  ndiff 0) by the CPU mirror in `prototype/gdn_gated_norm/`. That is the only new arithmetic this
+  phase committed to, and it is the one the engine will call.
+
+## Deferred, with the price named
+
+1. **Unpacked projections.** `proj_gemv` is called once per projection (q, k, v, o, in_proj_qkv,
+   in_proj_z, in_proj_b, in_proj_a, out_proj…) rather than through the packed multi-weight form the
+   kernel supports. ≈358 launches/token instead of ≈225; at the ≈1.85 µs/launch floor
+   (`tools/launch_overhead_hip.cpp`) that is ≈0.25 ms/token of pure launch cost, ≈0.12 ms of it
+   removable by packing. Deferred because packing changes the buffer plan in `decode_step`, and
+   `decode_step` does not exist yet.
+2. **Dtype adapters: ≈66 cast launches/token.** `mlp_gemv` and `gdn_decode`'s conv/gates/rec take
+   F32 activations, while `glue`/`proj_gemv` produce BF16, so the engine widens (48 of the 66 are
+   the MLP's `x`). `cast_bf16_to_f32_3` already folds three regions into one launch for exactly
+   this reason. The real fix is a BF16-staged form of `mlp_gateup`/`mlp_down` — `proj_gemv` proved
+   that is bit-identical for a dot product — which would delete most of the 66. Not done: it means
+   touching a graduated kernel and re-gating it, and `mlp_gemv`'s gate belongs to another phase.
+
+Both deferrals are launch-count, not bandwidth: at ≈240 GB/s the token's memory floor is well under
+1 ms and 358 launches is ≈0.66 ms, so they are the first thing a perf pass should attack — after
+the token matches.
+
+## Open questions this phase did not decide
+
+* **Conv window dtype.** `state.h` stores it F32 (1.266 MiB) where §08.1's cell says BF16 (0.633
+  MiB), because the graduated `gdn_decode` conv kernel takes F32 in and out and 36 cast launches
+  per token is the wrong price for 0.6 MiB on a device using 4 % of its pool. The stored *values*
+  are BF16-exact either way. §08.1 has **not** been corrected; the doc still contradicts the code.
+* **§08.1 / §00.5 doc slips, unfixed** (found by `state_sizes.py`, listed in its OPEN lines): the
+  "4 KiB/token/layer" KV cell contradicts the same table's 12 KiB/token total (2 KiB/layer is
+  right); §00.5's 3.07 GiB at full context is 3.00 GiB from its own 12288 B/token. KV layout is
+  head-major `[head][slot][dim]` per the kernel, not §08.5's `[slots][2][256]`.
+* **§04.5 / A-01 still say the wrong cast order** in `specification/`, and
+  `speccheck.specimpl.rmsnorm_gated` still implements the refused reading (105 683 of 294 912
+  elements off the pins, invisible because every gate that reads that tensor uses a cos band).
+  Correcting either is a decision for the spec owner, not this phase.
+* **`lm_head` full + host argmax**, not the fused single-kernel form: the fused form resolves ties
+  to the highest id and §03.4 fixes ties to the lowest. Costs ≈1 MB D2H + a host scan (≈0.04 ms)
+  per token and gives the gate its logits. Worth revisiting only with a tie-corrected fused kernel.
