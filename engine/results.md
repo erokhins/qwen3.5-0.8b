@@ -298,6 +298,13 @@ bite at that step. `SELFTEST PASS` (clean dry run + four injections), CPU-only.
 
 ## The first ms/step figure, recorded as *not* a measurement
 
+**Superseded the same day, twice over.** The `14.631 ms/step` below stayed a non-measurement — it did,
+and `bench/performance-status.md` §6 now carries the real row at **11.978 / 12.053 / 12.232**.
+And item 1 below named HIP graphs as the first perf item, which the measured dispatch curve refutes:
+§1's probe replayed 64 captured launches at 1.78 µs against 1.85 µs eager, so a one-token graph buys
+≈4 % of the dispatch bill (≈0.06 ms) and not the gap. Both corrections live in
+"the first engine throughput row", at the end of this file.
+
 The second run printed `RESULT … ms_per_step=14.631`. **This is an observation, not a number.** It is a
 gate run's by-product, which `bench/performance-status.md` §6 refuses as a measurement; it is one
 unwarmed first pass over freshly allocated state and scratch, i.e. the first-GPU-touch regime
@@ -378,3 +385,84 @@ had for the engine.
 **Hand-off, unchanged and ready:** `./engine/build.sh && .venv/bin/python engine/gate.py`, in a quiescent
 window (`tools/gpu_lock.sh acquire`, zero subagents). Sections (0)/(c)/(d) should be green as before,
 and (a) will be the first token-level correctness result this repo has had.
+
+---
+
+# First end-to-end pass: `ENGINE GATE PASS` at 93 checks — and the first engine token costs 11.978 ms
+
+2026-10-11, third device attempt, operator-run in the foreground zero-subagent window that also produced
+`bench/performance-status.md` §6. The two failures before it were the gate's and the runner's, not the
+engine's: the weight-rank contract (`92d8e5f` + `engine/weights_contract.py`) and §07.5 armed during the
+prompt phase (`5e7114b`). Nothing in this section was measured by a worker — `AGENTS.md` forbids it — and
+the device figures are quoted, not re-made.
+
+## (1) What the pass established
+
+The three lines that make this a token result rather than a load test:
+
+    one step per prompt token: 17 vs 17
+    8 generation steps: 8
+    all 8 generated ids match, in order: [6511, 314, 9338, 369, 2972, 57590, 159034, 271]
+
+§10.1 G7 exactness holds on `dec8`, and it holds through the two places no prototype gate could reach:
+the §05.7 cache append that lives behind `stage_head()`'s null test inside the fused attention launch
+(risk 1), and the `[q|k|v]` slice offsets handed to `rec_kernel` (risk 2). Each had predicted a specific
+signature — a wrong id at decode step 0, or a chain that diverges at step 1 — and neither appeared, so
+both risks are retired by the ids rather than by reading. Risk 4 (the logits band) is answered below.
+
+Per-step logits against the pins, recomputed from the dumps that pass wrote (`tmp/engine_gate/logits17…24.bin`)
+with `gate.py::metrics()`'s own arithmetic, so these are the gate's numbers and not a second metric:
+
+| step | cos (F64 accumulation, §10.2's definition) | meanrel | ref top1−top2 gap ÷ largest element error |
+|---|---|---|---|
+| 0 | 0.999954 | 0.940 % | 23.0× |
+| 1 | **0.999886** | 1.451 % | 13.4× |
+| 2 | 0.999961 | 0.890 % | 33.7× |
+| 3 | 0.999909 | 1.273 % | 18.5× |
+| 4 | 0.999935 | 1.095 % | 21.3× |
+| 5 | 0.999903 | 1.413 % | 26.8× |
+| 6 | 0.999905 | 1.412 % | 11.2× |
+| 7 | 0.999968 | 0.730 % | **7.4×** |
+
+`ndiff` is 248 317/248 320 — what a chain this long is expected to produce, and correctly excluded
+(§10.1 F1–F4: a chained dot's legal ndiff is 29–47 %, so ndiff there proves nothing). The decisive
+column is the last one: **at every step the reference's own top-1/top-2 margin is at least 7.4× the
+largest element error the engine produces** — the error had to grow almost an order of magnitude before a
+token could flip, and after eight tokens none flipped. Token identity is what §10 makes the correctness
+gate (G7), and this is what supporting evidence looks like next to it.
+
+### The band question the pass raised, the decision, and the floor measured under it
+
+Step 1 landed at cos 0.999886 — above the gated G5 floor (0.9995), below G6's advisory 0.9999. Two
+readings were possible: a token-level logits vector legitimately carries the whole 24-layer cascade, so
+G6's figure simply does not belong to this comparison; or the engine has a small real error that the
+margin column happens to be hiding. **Decided: G5's 0.9995 stays the hard floor and G6 stays advisory** —
+an end-to-end quantity must not be judged by a per-layer or per-operation bar, because the error it is
+allowed to carry is the accumulated error of all 24 layers and the whole chain. G3i (0.9999, one isolated
+layer, "no upstream cascade can enter"), G5 (0.9995, two routes to one position) and G6 (0.9999, one
+softmax form inside an already-full cascade) measure three different things; the reasoning is recorded in
+`engine/gate.py`'s BAND comment, not here, because the band comment is what a future reader edits. The
+advisory note still prints, and step 1 stays a documented, non-failing observation.
+
+Which reading is true is now measured, on CPU, by `engine/logits_floor.py`: it rebuilds each step's logits
+from the reference's own inputs (`decode{s}.L23.s_out` + `lm.norm.weight` + the tied table — the rebuild
+reproduces the pin at cos 0.999999999, which is a per-step pairing proof with no last-writer-wins name in
+it) and asks how far *legal* reimplementation can push cos:
+
+| what may differ | worst cos over the 8 steps |
+|---|---|
+| summation order of the logits dot (K permuted; split-K 8 and 32 partials, forward and reversed) | 0.999999999 |
+| the norm's mean-of-squares summed in another order | 0.999999999 |
+| the pin's own BF16 rounding of the logits, which the engine does not replicate (`lm_head_full` writes F32) | 0.999998622 |
+| **legal floor for this comparison** | **0.99999862** |
+
+**The engine's 0.999886 is below that floor** — 1.14e-4 below 1 against the floor's 1.4e-6, about 83×.
+So the dip is *not* summation order in the logits dot: two legal orders of the same products differ by
+~1e-9 here, because every BF16 value is exact in F32 and a 1024-term F32 sum is short. The difference is
+upstream, and it is small in absolute terms — the whole-token deficit is about the size of one stage's
+entire G3i allowance (1e-4), which says the individual kernels are well inside their bands. The prime
+suspect is the prompt route: the engine fed the 17 prompt tokens one per step while the reference prefills
+them chunked (§04.4 vs §04.7), and the reference's *own* chunk-vs-recurrent self-check (G3) is published
+at cos ≥ 0.9999 — the same order as the engine's entire deficit. What would separate that from "the
+kernels are slightly off": `speccheck/run_chunkcheck.py --fixture dec8`, which prices the route inside the
+reference with no engine in the loop.
