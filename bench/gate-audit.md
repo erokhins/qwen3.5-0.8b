@@ -147,3 +147,30 @@ for the realization actually under comparison, not to move the threshold.
   `EXACT_STAGES` deliberately bands them at the measured device-libm floor (p=64). A reader "fixing"
   the code to match the docstring would produce a false FAIL on correct kernels. Docstring line, not a
   kernel change.
+
+## Amendment to G2 (supervisor, after `0a062b5` landed)
+
+`0a062b5` states that §04.5's A-01 cast order "is not what the pins carry" and that
+`specimpl.rmsnorm_gated` is refused by the pins on 105 683 of 294 912 elements. Measured
+independently here, same pins, same 144 cases (18 GDN layers × 8 dec8 steps), `specimpl.rmsnorm_gated`
+called **the way speccheck calls it** — norm weight in BF16, which is how `speccheck.Weights` stores
+every model weight:
+
+    w as the model holds it (BF16)      ndiff      0 / 294912
+    w widened to F32                    ndiff  74860 / 294912
+
+So the oracle is **bit-exact against the pins**, and the 105 683 figure is an artifact of the probe
+handing it an F32-widened weight (`wf = w.float()`), a dtype combination speccheck never produces.
+The kernel's POLICY variant is unaffected — it uses `bf16(w)`, the engine holds BF16 weights, and both
+readings coincide there.
+
+What survives of the finding: **the pin-level assertion on this op was missing and now exists** (the
+mirror probe, six variants, dec8), which was the actual G2 gap. What does not survive: the claim that
+A-01 as *implemented in the oracle* disagrees with the reference. It does not. Before anyone goes
+hunting a phantom oracle bug, note the dtype the probe passed in.
+
+Unresolved, stated rather than smoothed: my F32-w variant measures 74 860 differing where the probe's
+A-01-as-written variant reports 105 683. Same formula on paper, different count, and I did not chase it
+before the agents' budgets ran out. Cheap next step: dump one (o, z, w, pin) tuple from both harnesses
+and diff them element-by-element — if the inputs differ, the two probes are not comparing the same
+thing and one of the two ndiff figures is meaningless.
