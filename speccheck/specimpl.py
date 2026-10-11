@@ -163,19 +163,24 @@ def rotate_half(a: torch.Tensor) -> torch.Tensor:
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """S05.3: rotate the first ROT_DIM dims of each head, pass the rest through.
-    x: [T, heads, D_HEAD]; cos/sin: [T, ROT_DIM] — F32 from rope_cs, cast here.
+    x: [T, heads, D_HEAD]; cos/sin: [T, ROT_DIM].
 
-    The table and BOTH products round to the activation dtype:
-    `bf16(bf16(z*c) + bf16(rot*s))`. That is what the reference does (transformers' rotary embedding
-    returns `emb.cos().to(dtype)`, so the multiply never sees an F32 table), and it is what the
-    dumps carry: with an F32 table this function missed 52-97 of every 2048 `attn.q_rope` elements
-    on dec8 (cos 0.99983, meanrel 0.0174 — inside the S10 attn threshold, so no gate failed, which
-    is exactly why the wrong policy survived). Found by prototype/attn_decode reproducing the same
-    pins bit-for-bit with the BF16 policy; see S05.3 and `speccheck/rope_table_probe.py`.
+    F32 plumbing, on purpose. The MODEL's policy is not this: the pins carry a BF16 rope table with
+    each product rounded before the add (§05.3), and `speccheck/rope_table_probe.py` is the executable
+    proof — torch's F32 table plus BF16 products reproduces the pinned `attn.q_rope` dims 0-of-277
+    positions wrong over 6 attention layers, while the F32 form below misses 52-97 of every 2048
+    elements. `prototype/attn_decode` is gated bit-exact against that policy and the engine will be
+    signed off against it.
+
+    Making this function bit-faithful to it was tried and reverted (see the revert commit for the
+    three gate numbers): this oracle computes its own `q_proj`, which is not bit-identical to the
+    reference's, so rounding the rope on a grid the reference did not use turns sub-ULP differences
+    into whole-ULP ones and the end-to-end gates lose margin. Do not "fix" this back without
+    re-running G6, G3-smoke and G7 corpus.
     """
     rot, rest = x[..., :ROT_DIM], x[..., ROT_DIM:]
-    c, s = cos[:, None, :].to(x.dtype), sin[:, None, :].to(x.dtype)
-    return torch.cat([(rot * c + rotate_half(rot) * s).to(x.dtype), rest], -1)
+    c, s = cos[:, None, :], sin[:, None, :]
+    return torch.cat([rot * c + rotate_half(rot) * s, rest], -1)
 
 
 # ------------------------------- GDN block (S04) ----------------------------
