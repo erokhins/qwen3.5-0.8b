@@ -17,11 +17,22 @@
  * (`lm.layers.N.linear_attn.norm.weight`, F32 [128] per §01.6). OUTFILE receives the 2048 BF16
  * results; NORMFILE, if given, receives BF16(n) — the pre-gate stage the negatives are localised
  * against. `-` skips a write.
+ *
+ * `--mode once` is the correctness path, and it reports on itself: every output buffer is prefilled
+ * with a 0x3F3F sentinel before the launch, and a `sentinel:` line prints for the first job, the last
+ * job, and every job still holding the sentinel (with the first 16 bytes hashed before and after);
+ * every resolved weight row is copied back and range-checked in a `weights:` line. Both exist because
+ * the first run of this gate printed `RESULT mode=once jobs=144` and wrote files that were mostly +0
+ * and NaN — which is the byte pattern untouched fresh pages give, so the log could not tell "the
+ * launch did not write" from "the launch wrote zeros". The weight check is the same argument one level
+ * up: `weights:` names the rows the store handed over and their magnitude, so a wrong-dtype read is
+ * visible in one line.
  */
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -63,12 +74,38 @@ static void spit(const std::string& p, const void* data, size_t nbytes) {
     f.write((const char*)data, (std::streamsize)nbytes);
 }
 
+// A non-zero fill pattern for the output buffers, so "the launch never wrote here" is separable from
+// "the launch wrote zeros". Fresh hipMalloc pages read back as +0, which is exactly what a silent
+// write failure looks like in the output file, so 0x0000 is useless as the prefill. 0x3F3F is 0.746
+// in BF16: plausible enough to spot by eye, and no element of a written buffer can be assumed to it.
+static const uint16_t GN_SENTINEL = 0x3F3F;
+
+static uint64_t fnv1a64(const void* data, size_t n) {
+    const unsigned char* b = (const unsigned char*)data;
+    uint64_t h = 14695981039346656037ull;   // FNV-1a 64-bit offset basis
+    for (size_t i = 0; i < n; ++i) {
+        h ^= b[i];
+        h *= 1099511628211ull;           // FNV-1a 64-bit prime
+    }
+    return h;
+}
+
+// Elements still holding the sentinel after the launch: 0 means the buffer was written, n means it
+// was not touched at all, and anything in between is a partially written (wrong-shape) launch.
+static size_t sentinel_left(const hip_bfloat16* host, size_t n) {
+    const uint16_t* bits = (const uint16_t*)host;
+    size_t left = 0;
+    for (size_t i = 0; i < n; ++i) left += (bits[i] == GN_SENTINEL);
+    return left;
+}
+
 struct Job {
     std::string name, ofile, zfile, wname, out, nout;
     const float* do_ = nullptr;
     const hip_bfloat16* dz = nullptr;
     const float* dw = nullptr;
     hip_bfloat16 *dout = nullptr, *dnorm = nullptr;
+    uint64_t pre_hash = 0;   // fnv1a64 of the first 16 sentinel bytes, taken after the prefill
     size_t bytes() const {
         return (size_t)2048 * 4 + (size_t)2048 * 2 + 128 * 4 + (size_t)2048 * 2
                + (nout == "-" ? 0 : (size_t)2048 * 2);
@@ -202,18 +239,56 @@ int main(int argc, char** argv) {
     };
 
     if (mode == "once") {
+        // Prefill every output with a non-zero sentinel before launching, then report per job what the
+        // launch left behind. The first run of this gate reported a successful launch (`RESULT
+        // mode=once jobs=144` printed, every negative plan too) and wrote files that were mostly +0
+        // and NaN — which is indistinguishable from untouched fresh pages, the thing hipMalloc hands
+        // back zero-filled. With a 0x3F3F prefill, "nothing was written" and "something wrong was
+        // written" are different sentences on the first re-run instead of a second probe.
+        for (auto& j : jobs) {
+            CK(hipMemset(j.dout, GN_SENTINEL & 0xFF, 2048 * 2));   // both bytes, so 0x3F3F
+            if (j.dnorm) CK(hipMemset(j.dnorm, GN_SENTINEL & 0xFF, 2048 * 2));
+            std::vector<unsigned char> pre(16);
+            CK(hipMemcpy(pre.data(), (void*)j.dout, 16, hipMemcpyDeviceToHost));
+            j.pre_hash = fnv1a64(pre.data(), 16);
+        }
         for (auto& j : jobs) launch(j);
         CK(hipDeviceSynchronize());
         std::vector<hip_bfloat16> host(2048);
-        for (auto& j : jobs) {
+        size_t unwritten = 0, partial = 0, norm_unwritten = 0;
+        const size_t last = jobs.size() - 1;
+        for (size_t i = 0; i < jobs.size(); ++i) {
+            Job& j = jobs[i];
             CK(hipMemcpy(host.data(), (void*)j.dout, 2048 * 2, hipMemcpyDeviceToHost));
+            const size_t left = sentinel_left(host.data(), 2048);
+            const uint64_t post = fnv1a64(host.data(), 16);
+            unwritten += (left == 2048);
+            partial += (left > 0 && left < 2048);
+            // Per-job line for every offender, plus the first and last job: "only the last job was
+            // written" is an output-mapping bug and those two lines are what show it.
+            if (left || i == 0 || i == last) {
+                printf("sentinel: %s left %4zu/2048  first16 fnv %016llx -> %016llx  %s\n",
+                       j.name.c_str(), left, (unsigned long long)j.pre_hash,
+                       (unsigned long long)post,
+                       left == 2048 ? "NOT WRITTEN" : left ? "PARTIALLY WRITTEN" : "written");
+            }
             spit(j.out, host.data(), 2048 * 2);
             if (j.nout != "-") {
                 CK(hipMemcpy(host.data(), (void*)j.dnorm, 2048 * 2, hipMemcpyDeviceToHost));
+                const size_t nleft = sentinel_left(host.data(), 2048);
+                norm_unwritten += (nleft == 2048);
+                if (nleft) {
+                    printf("sentinel: %s norm buffer left %zu/2048 (%s)\n", j.name.c_str(), nleft,
+                           nleft == 2048 ? "NOT WRITTEN" : "PARTIALLY WRITTEN");
+                }
                 spit(j.nout, host.data(), 2048 * 2);
             }
         }
-        printf("RESULT mode=once jobs=%zu neg=%s\n", jobs.size(), negname.c_str());
+        printf("write-back: %zu/%zu gated buffers never written, %zu partially written; "
+               "%zu norm buffers never written (prefill 0x%04x)\n",
+               unwritten, jobs.size(), partial, norm_unwritten, GN_SENTINEL);
+        printf("RESULT mode=once jobs=%zu neg=%s unwritten=%zu partial=%zu\n", jobs.size(),
+               negname.c_str(), unwritten, partial);
         return 0;
     }
 

@@ -164,7 +164,11 @@ def run_binary(plan: Path, outdir: Path, neg: str = "none") -> None:
         print(r.stderr[-2000:])
         raise SystemExit("binary failed (rc %d)" % r.returncode)
     for line in r.stdout.strip().splitlines():
-        if line.startswith(("loader:", "plan ", "RESULT")):
+        # `loader:`/`plan `/`RESULT` are the historical lines; the three after them are the driver's
+        # own account of what reached the device: the weight rows it resolved, and whether the launch
+        # actually wrote the buffers it was given (sentinel prefill). The subprocess output is
+        # captured, so a line not echoed here is invisible to the gate log.
+        if line.startswith(("loader:", "plan ", "RESULT", "weights:", "write-back:", "sentinel:")):
             print("  " + line)
 
 
