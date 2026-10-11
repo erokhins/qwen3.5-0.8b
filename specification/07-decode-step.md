@@ -50,10 +50,41 @@ for i = 0..7:  w = softmax_j( (q̂rot[i] · K^{(l)}[κ(i), j]) · s ⊕ mask )
 out = ( concat_i a[i] ⊙ σ(gate) ) · W_oᵀ                    §05.6
 ```
 
-`mask` allows `j ≤ P`. During decode the softmax is over `P+1` lanes. The engine may
-compute it as one `softmax` or as a blocked loop with `(max, sum)` rescaling —
-*online* softmax, the reduction a flash-decoding / split-K kernel uses — and §10 G6
-pins that the two agree.
+`mask` allows `j ≤ P`. During decode the softmax is over `P+1` lanes.
+
+**Which form the engine uses — corrected, and the old claim is named rather than hidden.** This
+paragraph used to say that computing the softmax as one `softmax` or as a blocked loop with `(max,
+sum)` rescaling (*online* softmax, the reduction a flash-decoding / split-K kernel uses) was pinned
+by §10 G6 to "the two agree". **They do not agree bit-for-bit, and no tile size makes them.** §05.5
+rounds the *normalised* weight row to the activation dtype ("computed in F32, then cast") before
+`a = Σ w·v`, and a streaming reduction cannot round a weight it has not divided yet. Measured on
+the §05 decode pins — 6 attention layers × 8 decode steps of `dec8`, `prototype/attn_decode/run.py
+--long`:
+
+| decode softmax form | `attn_out_pre_gate` vs the pins | large elements (>1 ULP) | cos | meanrel |
+|---|---|---|---|---|
+| one `softmax`, weights cast to BF16 | **0 of 98 304 elements differ** | 0 | 1.00000000 | 0 |
+| blocked `(max, sum)` | 25 745 differ (26.2 %) | 6 098 (6.2 %) | ≥ 0.99999134 | ≤ 1.8e-3 |
+
+Over all 53 cases including the long-cache rows the streaming form moves 25.9 % of elements at cos
+0.99999651, meanrel 1.58e-3 (`prototype/attn_decode/floor_probe.py`, F2) — either way it lands
+outside the band this op's gate uses, while the one-pass form is bit-exact.
+
+**Decision: the engine's decode path uses the one-pass form.** Bit-exactness against the pins is the
+strongest gate available in this project, and the second pass is cheap here: one query row's scores
+are `(P+1) × 8 heads × 4 B` = 8.9 KiB at the longest pinned cache (277 lanes), which is one block's
+shared allocation and a rounding error against this box's 2 MiB L2 (`devices/`).
+
+The blocked form is not banned — it is the shape a long-context path has to take (W7 split-K /
+flash-decoding, where a row no longer fits one block), and it stays available in the oracle
+(`specimpl.attention(softmax="online")`) and in the prototype (`--softmax online`). When that path
+is built it must be gated on a **cos/meanrel band** — §10 G6's thresholds are already of that shape
+— and not on agreement with the pins, which it cannot reach.
+
+What G6 really pins is unchanged and was never the thing that failed: the `(max, sum)` pair is
+reduction state of a single query row and is **never carried into the next decode step** (A-17).
+Carrying it produced attention cos 0.876 after one step, matching the *previous* prefix instead of
+the current one.
 
 **`(max, sum)` state is per query row, never per request.** Every decode step has a
 new query, so its softmax is a new reduction: an accumulator carried from the
