@@ -67,4 +67,13 @@ note. Do not implement a [FUTURE] item without an explicit request.
 - Device measurements belong in `devices/` and must be reproducible with a tool in
   `tools/`. Numbers quoted in `specification/` without a probe behind them are assumptions
   and need an `A-xx` tag.
-- Local commits are amended, not stacked, while unpushed.
+- **Commit by topic, and keep commits small.** One commit = one change that stands on its own
+  and can be described in one sentence: a kernel plus its gate and its `results.md`; a tool or
+  probe; a dumper change plus the fixtures it re-pins; a specification correction; a
+  ledger/status update; the traps that op discovered. Prefer several such commits over one that
+  spans the whole session — a reader should be able to revert one topic without touching
+  another, and the subject line should say which. Amending is for finishing a topic's own
+  work-in-progress, not for folding a new topic into the tip. If work already landed as one
+  lump, `git reset --soft` and re-commit it in topical pieces; nothing here is pushed, so
+  splitting is free. A backup ref (`git branch backup-<something>`) before rewriting history is
+  cheap and worth it.
