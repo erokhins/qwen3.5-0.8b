@@ -174,6 +174,7 @@ int main(int argc, char** argv) {
         std::vector<float> logits;
         int fed = 0;
         int sampled = -1;
+        bool run_stopped = false;   // §07.5 reached in the GENERATION phase; see the rule below
         double step_ms = 0.0;
         const int total_steps = (int)o.prompt.size() + o.steps;
         for (int i = 0; i < total_steps; ++i) {
@@ -187,21 +188,42 @@ int main(int argc, char** argv) {
             step_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                   ts).count();
             sampled = r.token;
-            std::printf("%s %d | fed %7d | sampled %7d | top %.6f | P %d -> %d%s\n",
+
+            // ---- §07.5's stop check is armed in the GENERATION phase only. ---------------
+            // While the prompt is being fed, the sample is discarded: the next token fed comes from
+            // the caller's id list, not from the model, so what the engine argmaxed to mid-prompt
+            // says nothing about whether the model wants to stop and cannot be a stop condition.
+            // It is also not hypothetical. The `dec8` prompt is the manifest's `sources[0].ids` — a
+            // rendered chat template — so it legitimately contains id 248046 (the end-of-turn token
+            // `kStopToken` is) at index 8, and 248068/248069 later; and on the first device run the
+            // engine's own argmax at prompt index 6 WAS 248046. Arming the check there ended a
+            // 17-token prompt after 7 steps, produced 0 generation steps, and failed six gate
+            // checks that all said something else. So: a prompt-phase match is printed and ignored;
+            // only a generation-phase match ends the run. Do not "restore" the prompt-phase check.
+            const bool stop_match = r.token == engine::kStopToken;
+            const bool stop_fired = stop_match && !from_prompt;
+            if (stop_fired) run_stopped = true;
+
+            std::printf("%s %d | fed %7d | sampled %7d | top %.6f | P %d -> %d%s%s\n",
                         from_prompt ? "prompt" : "decode", i, token, r.token, r.top_logit,
-                        pos_before, st.prefix_len, r.token == engine::kStopToken ? " [STOP]" : "");
+                        pos_before, st.prefix_len, stop_fired ? " [STOP]" : "",
+                        // The prompt-phase match stays visible: it is a diagnostic of the prompt
+                        // path (and a warning that the fixture's prompt contains the stop id).
+                        (stop_match && from_prompt) ? " [stop id in prompt phase — ignored]" : "");
             // The machine-readable twin of the line above, with the step split into a kind so the
             // gate does not have to re-derive which index the reference's `decode{s}` starts at.
+            // `stop=` is the STOP CHECK (armed, matched, run over) — not the raw match; a prompt-phase
+            // match is `stop=0` with `sampled=248046`, which `gate.py` reads as a fact, not a stop.
             std::printf("STEP kind=%s index=%d input=%d sampled=%d top_logit=%.9g pos_before=%d"
-                        " pos_after=%d\n",
+                        " pos_after=%d stop=%d\n",
                         from_prompt ? "prompt" : "decode", i, token, r.token, r.top_logit,
-                        pos_before, st.prefix_len);
+                        pos_before, st.prefix_len, stop_fired ? 1 : 0);
             if (log) {
                 std::fprintf(log, "%d %d %d %.9g %d\n", i, token, r.token, r.top_logit, pos_before);
                 write_raw(o.out_dir, "logits" + std::to_string(i) + ".bin", logits);
             }
-            if (st.stopped && i + 1 < total_steps) {
-                std::printf("stopped at step %d (§07.5: %d)\n", i, engine::kStopToken);
+            if (stop_fired && i + 1 < total_steps) {
+                std::printf("stopped at step %d (§07.5: id %d)\n", i, engine::kStopToken);
                 break;
             }
             fed++;
@@ -209,9 +231,13 @@ int main(int argc, char** argv) {
         if (log) std::fclose(log);
 
         const int n = fed > 0 ? fed : 1;
+        // `stopped=` here is the RUN's §07.5 decision (generation phase only), which is what the gate
+        // asserts on. `st.stopped` is decode_step's raw record — "some step argmaxed to the stop id,
+        // in either phase" — so it can be true while this says 0, and on `dec8` it is.
         std::printf("RESULT mode=run steps=%d ms_total=%.3f ms_per_step=%.3f last_sampled=%d"
                     " prefix_len=%d stopped=%d\n",
-                    total_steps, step_ms, step_ms / n, sampled, st.prefix_len, st.stopped ? 1 : 0);
+                    total_steps, step_ms, step_ms / n, sampled, st.prefix_len,
+                    run_stopped ? 1 : 0);
         std::fflush(stdout);
         engine::free_scratch(sc);
         engine::free_state(st);

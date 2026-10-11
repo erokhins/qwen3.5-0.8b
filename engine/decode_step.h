@@ -92,8 +92,11 @@ struct StepResult {
     float top_logit = 0.0f;    // the value at the argmax, for the log and the gate's report
 };
 
-// §07.5: greedy decoding stops at `<|im_end|>` (A-10), at end of context, or at the caller's
-// budget. `decode_step` sets `stopped` for the first; the other two are the loop's business.
+// §07.5: greedy decoding stops at id 248046 (the end-of-turn token, A-10), at end of context, or at
+// the caller's budget. `decode_step` sets `stopped` whenever a step's argmax IS that id — in either
+// phase, because it is not told which — so whether the match ENDS a run is the caller's decision, and
+// for the token loop it is generation-phase only: a prompt-phase sample is discarded, so a match
+// there is a diagnostic, not a stop. `decode_run.cpp` owns that rule and says why.
 constexpr int kStopToken = 248046;
 
 // One token through the whole stack: input norm → 24 blocks (GDN §07.2 or attention §07.3 by layer

@@ -92,7 +92,9 @@ struct RequestState {
     int64_t cap = 0;                    // slots allocated per layer (§08.1 "slots")
     int prefix_len = 0;                 // P: §02.4, the 0-based position of the NEXT token is P
     int sampled_token = -1;
-    bool stopped = false;               // §07.5
+    bool stopped = false;               // §07.5: a step's argmax was the stop id (248046). Raw
+                                        // match, any phase — the loop decides if that ends the run
+                                        // (`decode_run.cpp`; §07.5 arms only during generation)
 
     StateSizes sizes() const;
     // §08.4 "new request": zero S and the conv window, P = 0. Zeroing is a hipMemset, once.
