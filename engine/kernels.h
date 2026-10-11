@@ -86,8 +86,8 @@ void lm_head_full(const uint16_t* table, const float* h, float* logits, int voca
 void cast_bf16_to_f32(const uint16_t* src, float* dst, int n);
 void cast_f32_to_bf16(const float* src, uint16_t* dst, int n);
 // Three regions in ONE launch — this is what a per-layer GDN cast costs instead of three launches.
-// DECLARED ONLY: `kernels_cast.cpp` is not written, so none of these three has a definition yet and
-// no deferral below may be described as already handled by this one.
+// `kernels_cast.cpp` defines it; a region may be empty (n = 0) but a non-empty region with a null
+// pointer is a throw, not a wild write.
 void cast_bf16_to_f32_3(const uint16_t* s0, float* d0, int n0, const uint16_t* s1, float* d1,
                         int n1, const uint16_t* s2, float* d2, int n2);
 

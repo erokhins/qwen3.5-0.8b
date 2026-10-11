@@ -48,9 +48,20 @@ constexpr int kConvChannels = 6144;
 constexpr int kConvKernel = 4;
 constexpr int kConvWindow = kConvKernel - 1;   // §08.2: the last k_conv−1 pre-conv columns
 constexpr int kNumKvHeads = 2;
+constexpr int kNumQueryHeads = 8;       // §00.3 num_attention_heads; GQA 8/2, §05.5
 constexpr int kHeadDim = 256;
 constexpr int kHidden = 1024;
+constexpr int kIntermediate = 3584;     // §00.3 intermediate_size (mlp_gemv calls it FF)
 constexpr int kVocab = 248320;
+
+// Derived widths, so a projection's row count is never a typed-in number. Every one of these is a
+// shape `engine/weights_reference.py` / `specimpl._check` also asserts against the checkpoint; the
+// cross-check that they AGREE with the checkpoint is `check_weights()` in decode_step.cpp.
+constexpr int kValueDim = kNumValueHeads * kDv;             // 2048: in_proj_z, gated_out, out_proj's `in`
+constexpr int kQkvRows = 3 * kValueDim;                     // 6144 == kConvChannels, §04.1
+constexpr int kQwidth = kNumQueryHeads * kHeadDim;          // 2048: attn block output, o_proj's `in`
+constexpr int kQprojRows = 2 * kQwidth;                     // 4096: q AND gate per head, §05.1
+constexpr int kKvProjRows = kNumKvHeads * kHeadDim;         // 512: k_proj and v_proj
 
 // §03.5 / §00.3 routing: `full_attention` where l mod 4 == 3 (layers 3,7,11,15,19,23).
 constexpr bool is_full_attention(int layer) { return layer % 4 == 3; }
