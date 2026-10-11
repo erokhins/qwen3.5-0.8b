@@ -192,9 +192,22 @@ binary has been executed**, so nothing in this section is a measurement.
 What is settled without a device:
 
 * `check_weights(store)` pins every shape and §01.6 dtype this loop depends to the checkpoint it
-  actually loaded — including `dt_bias`/`conv1d.weight` being **BF16** (which is why
-  `prepare_weight_adapters` exists) and `lm_head.weight` being the embedding blob rather than a
-  second 485 MiB. A wrong dtype assumption aborts at load instead of reading garbage.
+  actually loaded — including `lm_head.weight` being the embedding blob rather than a second 485 MiB.
+  **This bullet used to claim more than it had earned.** It listed `dt_bias`/`conv1d.weight` as pinned
+  BF16, and the first device run proved the `conv1d.weight` entry wrong: the table claimed rank 2
+  [6144,4] and the shard holds rank 3 [6144,1,4] (it is one of the checkpoint's 18 Conv1d weights —
+  every rank-3 tensor in the file). The store was right, the claim was a guess, and the type system
+  made the guess inevitable: `Expected` was `{d0, d1, dtype}` with `d1 == 0` meaning rank 1, so rank 3
+  was inexpressible. Fixed in 92d8e5f — `Expected` now carries `rank` explicitly, and the
+  [6144,1,4] → flat [6144][4] collapse that `conv_kernel`'s `C[c*K + j]` wants is asserted in
+  `prepare_weight_adapters`, where the flattening is spent, not in the checker. `dt_bias` was the
+  other guess and was already right: BF16 rank-1 [16].
+* `engine/weights_contract.py` is why that class of bug is over. It reads the shard header, `state.h`
+  and the `Expected` table as three independent sources and fails on any disagreement — 320 names
+  clean, plus the rank/F32/§03.5-18-6 census — and it bites when handed a mutated copy (rank-2 conv,
+  dt_bias as [16,1], A_log as BF16 each FAIL at their own row alone). Shape claims are now checked on
+  CPU, which is the only place they can be checked cheaply; the alternative was one GPU window per
+  wrong rank.
 * `gate.py --no-engine` proves the `dec8` fixture pairs with itself — 26 assertions, including that
   the bare `logits_last.npy` is the prefill (argmax 760) and the bare `input_ids.npy` is decode7's —
   and that `state_sizes.py`'s bytes are the bytes `decode_run` will report. That half is green.
@@ -205,6 +218,9 @@ What is settled without a device:
 
 What a first device run is most likely to break, in the order to look at them:
 
+0. **The weight table.** It already broke once, before a single kernel launched: `check_weights`
+   aborted on `conv1d.weight`'s rank. `engine/weights_contract.py` now retires that failure mode on
+   CPU, so if it reappears the shard changed rather than the claim.
 1. **The KV append inside the fused attention launch.** `stage_head()` gates the §05.7 cache write on
    `q_rope != nullptr` — the same null check as the three stage dumps — so `kernels_attn.cpp` refuses
    null stage pointers rather than silently skipping the append. If the fused path turns out not to

@@ -103,6 +103,17 @@ an implementation. "Compiles clean, never run" is still the state of the work, n
 ### CPU-only — safe to run while anything else is running
 
 ```bash
+.venv/bin/python engine/weights_contract.py
+# Every shape and dtype `check_weights` claims, re-read from the safetensors header instead of
+# assumed: three independent sources (the `Expected` table in decode_step.cpp, the §00 constants in
+# state.h, the shard header) and any two may disagree only loudly. 320 engine names vs 488 header
+# tensors, plus the census that keeps the rank field honest — the shard's only rank-3 shape is
+# [6144,1,4], its exactly-36 F32 tensors are exactly 18xA_log + 18xlinear_attn.norm.weight (§01.6),
+# config.json's full_attention_interval=4 reproduces state.h's 18/6 split, and there is no
+# lm_head.weight so §01.1's aliasing is the only option. Run it BEFORE a device window: the bug it
+# was written for (conv1d.weight claimed [6144,4], stored [6144,1,4]) cost a GPU round trip to find.
+# Second argument = a mutated copy of decode_step.cpp, for showing the check bite.
+
 .venv/bin/python engine/state_sizes.py
 # PASS. 18.000 MiB GDN S + 1.266 MiB F32 conv window = 19.2656 MiB constant per request;
 # 12288 B/token KV = 2048 B/token/layer (14 KiB/token including MTP KV); 3.000 GiB at 262144 ctx.

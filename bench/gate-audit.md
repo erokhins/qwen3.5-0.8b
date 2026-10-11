@@ -224,3 +224,43 @@ gate's own fixture writer numeric-cast `z` instead of bitcasting it — which is
 self-verifies, and why this PASS is quoted with its provenance. Write-up:
 `prototype/gdn_gated_norm/results.md` §9 (the pass), §7–§8 (the failures). Timing
 (`2.936 µs/launch`, spread 1.4 %, ≈0.053 ms/token) is `bench/performance-status.md` §6.
+
+## `engine/weights_contract.py` — the engine's shape claims, audited against the shard (CPU)
+
+`.venv/bin/python engine/weights_contract.py` (320 engine names vs 488 header tensors; ends
+`WEIGHTS CONTRACT PASS`).
+
+It exists because a claim failed a device run rather than an audit. `check_weights` asserted
+`linear_attn.conv1d.weight` was `[6144,4]`; the checkpoint holds `[6144,1,4]` (one of the 18 Conv1d
+weights, and every rank-3 tensor in the file), and the struct behind the claim had no rank field, so
+the wrong guess was the only one writable. Finding that out consumed a GPU window — the scarcest
+resource in this repo, per `AGENTS.md` — for a fact that was sitting in a file header the whole time.
+
+Method, and why it counts as independent rather than circular: the script parses three sources that
+share no code with the engine and compares them — the `Expected` table compiled into
+`engine/decode_step.cpp`, the §00 constants in `engine/state.h`, and the safetensors header named by
+`model.safetensors.index.json`. It does not call engine code, does not touch the device, does not
+import torch. §02.5's name normalisation is inverted and the inverse is itself checked (a rename makes
+the row fail as missing rather than passing vacuously), and §03.5's layer routing is applied per list —
+`kGdnBlock` entries are checked on the 18 linear layers only — because asserting `self_attn.o_proj` on
+layer 0 is not a stricter gate, it is a wrong one. The first draft of the script made that mistake and
+its own missing-name failures caught it.
+
+Beyond row-by-row shape/dtype equality it re-derives four structural facts, so a checkpoint change
+cannot slip through a table that was merely updated to match: the only rank-3 shape present is
+`[6144,1,4]`; exactly 36 tensors are F32 and they are exactly 18×`A_log` +
+18×`linear_attn.norm.weight` (§01.6, no third kind); `config.json`'s `full_attention_interval=4`
+reproduces the 18/6 split `state.h` hard-codes; and no `lm_head.weight` exists, which is what makes
+§01.1's aliasing the only option rather than a convenience.
+
+Discrimination is demonstrated, not assumed — the second argument points the script at a mutated copy
+of `decode_step.cpp`. Three mutations were tried: the original rank-2 `conv1d` claim, `dt_bias` as
+`[16,1]`, and `A_log` claimed BF16. Each FAILs at its own rows and at no others, which is the part of
+the `prototype/mlp_gemv/results.md` trap that generalises ("a negative test that trips for any
+injection proves nothing").
+
+What it does **not** cover: it proves the engine's claims agree with the checkpoint, not that the
+engine uses them correctly — offsets, slicing order and the flat `[6144][4]` indexing are the device
+gate's problem, and `prepare_weight_adapters` re-asserts the collapse at the use site for that reason.
+It also reads only the header, so it cannot see whether the loaded bytes match the declared dtype; that
+is `loader_test`'s verification pass.
