@@ -370,11 +370,18 @@ def attention(w: Weights, l: int, x: torch.Tensor, cos: torch.Tensor, sin: torch
                 m = mb
             out[0, i, :] = (acc / l).to(x.dtype)
             continue
-        # Bit-faithful to the reference: the score matrix is produced and kept in
-        # the activation dtype (bf16) and only the softmax runs in F32. Computing
-        # scores in F32 skips a bf16 rounding of ~3e-3 per score and was a
-        # measurable share of the deep-layer drift.
-        s = (qh[:, i, :] @ K[:, j, :].t()) * S_SCALE          # [T, P], activation dtype
+        # The score matmul runs in F32, not in the activation dtype, and that is deliberate pending
+        # G6 — it is NOT what this comment used to claim ("the score matrix is produced and kept in
+        # the activation dtype (bf16)"), which is not what happens. `qh`/`kh` come from `apply_rope`,
+        # whose rope table is F32 by decision (its docstring, and `d06b4e3`), and `torch.cat` of the
+        # rotated F32 slice with the BF16 tail promotes the whole head vector to F32 — so `qh @ K.t()`
+        # promotes to F32 no matter what dtype the weights were loaded in, and the BF16 rounding of
+        # the scores that the old comment credited for "~3e-3 per score" never happens here. What
+        # this block really does: F32 scores → F32 softmax → attention weights rounded back to
+        # `x.dtype` before they multiply V. That promotion is the plumbing `bench/gate-audit.md` G6
+        # says G6 and G3-smoke were measured through, which is exactly why the dtype is left alone:
+        # making the scores actually BF16 moves those bands and needs the gate owner, not a comment.
+        s = (qh[:, i, :] @ K[:, j, :].t()) * S_SCALE          # [T, P], F32 by promotion
         qi = torch.arange(T)[:, None] + (P - T)                 # global query pos
         allowed = torch.arange(P)[None, :] <= qi                # causal, S05.5
         s = s.masked_fill(~allowed, float("-inf"))
