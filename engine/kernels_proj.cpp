@@ -29,7 +29,11 @@ void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int 
     // `--x-packed` only on the timing path, so `<IN,true>` was never compared against a pin), and
     // the configuration the measurement prefers: `results.md:196` times the packed form at
     // 3.269 ms / 60 % of probe against 2.991 ms / 66 % for this one over the 48-launch token plan,
-    // and `:241` hands W5 "`PACK_X = false`, measured above" as the setting to take.
+    // and `:241` hands W5 "`PACK_X = false`, measured above" as the setting to take. Re-measured in
+    // the 2026-10-11 clean window at rows/block 32: **unpacked 0.0528 ms/launch (65.1 % of the read
+    // probe) against packed 0.0593 ms/launch (58.0 %)**, unpacked ahead at every rows/block swept — the
+    // ordering holds under a clean window, so `false` is a measured choice and not an inherited one
+    // (`engine/results.md` E2, closed).
     //
     // The consequence decode_step must know: with PACK_X=false the kernel reads `x` as `const float*`
     // (`proj_gemv_kernels.h:107-110`), so the caller hands F32 activations, NOT the BF16 pointer
@@ -38,8 +42,9 @@ void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int 
     // writes BF16 norms, ≈48 casts/token come back (≈0.089 ms at the measured 1.85 µs launch floor,
     // `tools/launch_overhead_hip.cpp`). Still the cheaper side: 0.089 ms of casts against a measured
     // +0.279 ms kernel penalty. Products and accumulation order are bit-identical in the two forms
-    // (every BF16 is exact in F32), so this is a performance choice, not a numerics one — and the
-    // cold-vs-cold timing on THIS launcher has never been run (results.md, experiment E2).
+    // (every BF16 is exact in F32), so this is a performance choice, not a numerics one. What is still
+    // unmeasured is the A/B through THIS launcher on the engine's own buffer plan — a token-level
+    // timing, listed as the open half of E2 in `engine/results.md`.
     //
     // `in` is 1024 or 2048 for all nine shapes in this checkpoint (§01.2/§01.3); anything else is
     // a bug in the caller, not a shape to instantiate.

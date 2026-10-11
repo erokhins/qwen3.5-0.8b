@@ -1,36 +1,35 @@
 # `engine/` — weight residency (W5 first half)
 
-**Two device experiments stand between this file's launch configurations and "trusted", and neither
-has ever run.** Nothing in `engine/` has touched a device, so these are not polish: **E1** decides a
-numerics question that no other criterion on a norm can see, and **E2** decides a 0.279 ms/token
-performance claim imported from a different host. Commands are in `README.md`'s device list; no
-ledger row should be written from the prose below until they have run.
+**The two device experiments that used to stand between this file's launch configurations and
+"trusted" have both run**, in the 2026-10-11 foreground, zero-subagent window whose numbers are
+recorded in `bench/performance-status.md` §6. Both came back confirming the engine's choice, so the
+comments in `kernels_glue.cpp` and `kernels_proj.cpp` now cite a measurement rather than an inference.
+One half of E2 is still open and says so at the end of its entry.
 
-* **E1 — glue's correctness gate at 1024 threads.** The engine launches `glue_add_norm<256>`, the
-  width the 784-comparison gate actually ran at, because `glue_kernels.h:83-102` derives
-  `PER = H/THREADS`: 256 → 4 elements/thread then an 8-partial warp tree, 1024 → 1/thread and a
-  32-partial tree. That is a **different F32 summation order for the mean of squares**, and a norm's
-  legal floor is 1 ULP with no cancellation band, so the only criterion that can tell the two apart
-  is `ndiff` — which `prototype/glue/results.md:113` names as "the criterion doing the work". The
-  published floor (3 / 393 216) was measured on the 256-thread order, so the 1024 order the sweep
-  prefers (≈2.78 vs 3.75 µs/launch, §4 there) has no floor measurement at all; `results.md:170`
-  asks for exactly this re-run and `:230` still lists it open.
-  *Expected:* `784 comparisons`, 0 failures, ndiff at the same floor. *Failure mode that matters:*
-  the gate passes at 1024 only by loosening `NDIFF_PCT_MAX`, or the ndiff count moves enough that
-  "same arithmetic, different width" is false — in which case 256 is not a preference but a
-  requirement and the sweep's 1024 row needs the caveat. (A CPU pre-answer to the floor half exists:
-  `floor_probe.py`'s `THREADS = 256` constant is a numpy mirror of the order, not device code.)
-* **E2 — `proj_gemv` PACK_X=false vs true, cold, on the engine's own launcher.** The engine now
-  instantiates `PACK_X=false` (`kernels_proj.cpp`), which is both the gated config and the measured
-  faster one — but both numbers (2.991 vs 3.269 ms) come from `prototype/proj_gemv`'s host at its own
-  geometry, and `PACK_X=false` makes the caller hand F32 `x`, so ≈48 cast launches/token (≈0.089 ms
-  at the 1.85 µs floor) come back into the plan. The comparison has never been made on the engine's
-  launcher, and cannot be until `decode_step` exists.
-  *Expected:* unpacked ≤ packed − casts, i.e. the prototype's ordering reproduces, ≈0.28 ms/token
-  between the configs. *Failure mode:* if packed-with-casts wins on the engine's geometry, `false` is
-  the wrong constant and `kernels_proj.cpp`'s comment must carry the engine's own number instead of
-  the prototype's. Repeatable-now half (prototype token plan, same quiescent window):
-  `--time --sweep`, which prints both rows.
+* **E1 — RESOLVED: glue's correctness gate at 1024 threads passes at the same floor as 256.** The
+  question was real: `glue_kernels.h:83-102` derives `PER = H/THREADS`, so 256 → 4 elements/thread and
+  an 8-partial warp tree while 1024 → 1/thread and a 32-partial tree — a **different F32 summation order
+  for the mean of squares** — and a norm's legal floor is 1 ULP with no cancellation band, so `ndiff`
+  was the only criterion that could tell the two widths apart.
+  *Measured:* `784 comparisons`, 0 failures, `g1_n` **gated 0 / raw 1**, both residual adds bit-exact,
+  and every negative still caught at its own stage — a legal error profile identical to the 256-thread
+  run.
+  *What that settles, and in which direction:* the engine's `<256>` is a **measured preference, not a
+  numerical requirement**. Nothing in the engine's arithmetic depends on the width, so a move to 1024 is
+  purely the performance question glue's §4 sweep raises (≈2.78 vs 3.75 µs/launch, with the
+  bimodality caveat `bench/performance-status.md` §6 attaches to launch-bound numbers) and not a
+  numerics blocker. This file no longer owes that experiment; `prototype/glue/results.md:170`'s ask is
+  satisfied.
+* **E2 — RESOLVED (prototype plan): unpacked beats packed at every rows/block.** The engine
+  instantiates `PACK_X=false` (`kernels_proj.cpp`), which is both the gated config and — now measured
+  again in a clean window — the faster one: cold, on the prototype's 48-launch token plan at rows/block
+  32, **unpacked 0.0528 ms/launch = 65.1 % of the read probe** against **packed 0.0593 ms/launch =
+  58.0 %**, with unpacked ahead at every rows/block swept. That matters because `PACK_X=false` bills the
+  caller ≈48 cast launches/token (≈0.089 ms at the 1.85 µs floor) for handing F32 `x`; the measured gap
+  is larger than that bill, so `false` stays the constant and `kernels_proj.cpp` keeps its citation.
+  *Still open in E2:* the A/B through **`engine/kernels_proj.cpp`'s own launcher**, with the casts the
+  engine actually pays, on the engine's own buffer plan. The prototype ordering is now established; that
+  the engine reproduces it is a token-level measurement and belongs with `decode_step`'s timing pass.
 
 Status: **gate PASS — 52 checks, 0 failures** (`engine/loader_test`, built by
 `engine/build.sh`). Residency only: no token loop, no per-request state, no kernel calls
@@ -112,7 +111,7 @@ checkpoint file only.
 Everything in this section is **compiled, never run on a device**. No allocation has happened, so
 no number here is a measurement of anything except the compiler's willingness.
 
-## Proven on CPU
+## Proven on CPU, and — for the one kernel this phase added a launcher for — on the device
 
 * `state_sizes.py` re-derives §08.1's shapes from `state.h`'s own constants and reproduces §00.5's
   rows (18.0 MiB GDN `S`, 12288 B/token KV). PASS.
@@ -120,6 +119,13 @@ no number here is a measurement of anything except the compiler's willingness.
   ndiff 0) by the CPU mirror in `prototype/gdn_gated_norm/`, and so is `specimpl.rmsnorm_gated`
   called the way speccheck calls it (BF16 weight). That is the only new arithmetic this phase
   committed to, and it is the one the engine will call.
+* **That kernel has since run on the device and its gate passes**: worst case ndiff 1/2048, max ULP 1
+  (the reduction-order floor `neg_probe.py` predicted before the run), zeros 0 / NaN 0, six negatives
+  localising, 2.936 µs/launch at spread 1.4 % → ≈0.053 ms/token for the 18 launches. That is
+  `prototype/gdn_gated_norm/run.py --gate`, whose first two attempts failed on the gate's own fixture
+  writer rather than on the kernel — see `prototype/gdn_gated_norm/results.md` §7–§9 and
+  `bench/performance-status.md` §6. **None of `engine/`'s own code has run on a device**: no buffer in
+  `state.cpp` has been allocated and no launcher in `kernels_*.cpp` has been launched from the engine.
 
 ## Deferred, with the price named
 

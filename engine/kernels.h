@@ -22,17 +22,18 @@ namespace engine::kernels {
 // ---- §03.1 + §03.2: residual add fused with the zero-centred RMSNorm (prototype/glue).
 // `delta == nullptr` is the norm-only form (§03.2's first call of the stack, and the final norm);
 // `s_out == nullptr` skips writing the new residual. 256 threads is the width the op's gate ran at
-// (H/THREADS = 4 elements/thread, an 8-partial warp tree): the block width changes the F32 summation
-// order of the mean of squares, so the engine launches the gated width until the 1024 gate runs
-// (kernels_glue.cpp, and results.md experiment E1).
+// (H/THREADS = 4 elements/thread, an 8-partial warp tree). The block width changes the F32 summation
+// order of the mean of squares, and the gate has since been re-run at 1024 with an identical legal
+// error profile — so 256 is this launcher's measured preference, not a numerical requirement
+// (kernels_glue.cpp cites both measurements; engine/results.md E1 is closed).
 void glue_add_norm(const uint16_t* s, const uint16_t* delta, const uint16_t* w,
                    uint16_t* s_out, uint16_t* n_out);
 
 // ---- §04.1 / §05.1: the projection GEMV family (prototype/proj_gemv).
 // `in` must be 1024 or 2048 — the only two widths the checkpoint has for these nine shapes, and
 // the only two the kernel is instantiated for. `x` is F32: the launcher instantiates PACK_X=false,
-// the gated and the measured-faster form, and that form stages `x` from `const float*` inside the
-// kernel (kernels_proj.cpp cites both numbers). Hand it a BF16 buffer and it will read BF16 memory
+// the gated form and the measured-faster one (kernels_proj.cpp cites both numbers; engine/results.md
+// E2 closed the A/B in a clean window). Hand it a BF16 buffer and it will read BF16 memory
 // as floats, so decode_step must cast where its producer left BF16.
 void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int in);
 
