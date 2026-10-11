@@ -137,21 +137,27 @@ int main(int argc, char** argv) {
     CK(hipGetLastError());
     CK(hipDeviceSynchronize());
 
-    double best = 1e30;
-    for (int i = 0; i < iters; ++i) {
-        hipEvent_t s, e;
-        CK(hipEventCreate(&s));
-        CK(hipEventCreate(&e));
-        CK(hipEventRecord(s));
-        launch();
-        CK(hipEventRecord(e));
-        CK(hipEventSynchronize(e));
-        float ms = 0.f;
-        CK(hipEventElapsedTime(&ms, s, e));
-        best = std::min(best, (double)ms);
-        CK(hipEventDestroy(s));
-        CK(hipEventDestroy(e));
+    // Burst wall-clock, not hipEvents. The event path here returned exactly 0.000 ms for a
+    // ~2 ms kernel (best of 40), which is the AGENTS trap taken further than it was written:
+    // the floor is not "below ~1 ms" on this box. Same idiom as prototype/glue: submit a burst,
+    // one sync, divide. best/worst over several bursts is the spread the ledger asks for.
+    auto burst = [&](int n) {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < n; ++i) launch();
+        CK(hipDeviceSynchronize());
+        const auto t1 = std::chrono::steady_clock::now();
+        return std::chrono::duration<double, std::milli>(t1 - t0).count() / n;
+    };
+    const int nb = 5;
+    const int per = std::max(1, iters / nb);
+    burst(1);                        // warm the burst loop itself
+    double best = 1e30, worst = 0.0;
+    for (int b = 0; b < nb; ++b) {
+        const double ms = burst(per);
+        best = std::min(best, ms);
+        worst = std::max(worst, ms);
     }
+    printf("spread best %.4f ms / worst %.4f ms (%d bursts x %d)\n", best, worst, nb, per);
     double bytes = (double)wbytes + (fused ? 8.0 : (double)V * 4);
     printf("gemv %.3f ms -> %.1f GB/s (%.2f%% of the 237 GB/s probe)\n", best,
            bytes / (best / 1e3) / 1e9, bytes / (best / 1e3) / 237e9 * 100.0);
