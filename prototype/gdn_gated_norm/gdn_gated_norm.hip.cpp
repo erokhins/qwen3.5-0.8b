@@ -19,7 +19,7 @@
  * against. `-` skips a write.
  *
  * `--mode once` is the correctness path, and it reports on itself: every output buffer is prefilled
- * with a 0x3F3F sentinel before the launch, and a `sentinel:` line prints for the first job, the last
+ * with a 0x0101 sentinel before the launch, and a `sentinel:` line prints for the first job, the last
  * job, and every job still holding the sentinel (with the first 16 bytes hashed before and after);
  * every resolved weight row is copied back and range-checked in a `weights:` line. Both exist because
  * the first run of this gate printed `RESULT mode=once jobs=144` and wrote files that were mostly +0
@@ -76,9 +76,14 @@ static void spit(const std::string& p, const void* data, size_t nbytes) {
 
 // A non-zero fill pattern for the output buffers, so "the launch never wrote here" is separable from
 // "the launch wrote zeros". Fresh hipMalloc pages read back as +0, which is exactly what a silent
-// write failure looks like in the output file, so 0x0000 is useless as the prefill. 0x3F3F is 0.746
-// in BF16: plausible enough to spot by eye, and no element of a written buffer can be assumed to it.
-static const uint16_t GN_SENTINEL = 0x3F3F;
+// write failure looks like in the output file, so 0x0000 is useless as a prefill. The first choice
+// here was 0x3F3F (0.746) and it was wrong in a way worth keeping: 0.746 is a perfectly ordinary
+// value for the `norm_pre_gate` stage, whose elements are O(1), so 252 norm buffers came back
+// reporting "left 1/2048 (PARTIALLY WRITTEN)" when what had really happened is that one lane was
+// written with a value equal to the prefill. A sentinel is only evidence if the kernel cannot write
+// it: 0x0101 is a BF16 denormal (~1.8e-38), unreachable for either output stage from O(1) inputs,
+// and still one byte value to memset.
+static const uint16_t GN_SENTINEL = 0x0101;
 
 static uint64_t fnv1a64(const void* data, size_t n) {
     const unsigned char* b = (const unsigned char*)data;
@@ -92,10 +97,17 @@ static uint64_t fnv1a64(const void* data, size_t n) {
 
 // Elements still holding the sentinel after the launch: 0 means the buffer was written, n means it
 // was not touched at all, and anything in between is a partially written (wrong-shape) launch.
-static size_t sentinel_left(const hip_bfloat16* host, size_t n) {
+// `first` receives the index of the first survivor (-1 if none): "1 of 2048 left" means different
+// things when it names lane (0,0) of head 0 than when it names a scattered lane.
+static size_t sentinel_left(const hip_bfloat16* host, size_t n, int* first = nullptr) {
     const uint16_t* bits = (const uint16_t*)host;
     size_t left = 0;
-    for (size_t i = 0; i < n; ++i) left += (bits[i] == GN_SENTINEL);
+    for (size_t i = 0; i < n; ++i) {
+        if (bits[i] == GN_SENTINEL) {
+            if (first && *first < 0) *first = (int)i;
+            ++left;
+        }
+    }
     return left;
 }
 
@@ -255,40 +267,58 @@ int main(int argc, char** argv) {
         for (auto& j : jobs) launch(j);
         CK(hipDeviceSynchronize());
         std::vector<hip_bfloat16> host(2048);
-        size_t unwritten = 0, partial = 0, norm_unwritten = 0;
+        size_t unwritten = 0, partial = 0, norm_unwritten = 0, norm_partial = 0;
         const size_t last = jobs.size() - 1;
         for (size_t i = 0; i < jobs.size(); ++i) {
             Job& j = jobs[i];
             CK(hipMemcpy(host.data(), (void*)j.dout, 2048 * 2, hipMemcpyDeviceToHost));
-            const size_t left = sentinel_left(host.data(), 2048);
+            int first = -1;
+            const size_t left = sentinel_left(host.data(), 2048, &first);
             const uint64_t post = fnv1a64(host.data(), 16);
             unwritten += (left == 2048);
             partial += (left > 0 && left < 2048);
             // Per-job line for every offender, plus the first and last job: "only the last job was
             // written" is an output-mapping bug and those two lines are what show it.
             if (left || i == 0 || i == last) {
-                printf("sentinel: %s left %4zu/2048  first16 fnv %016llx -> %016llx  %s\n",
-                       j.name.c_str(), left, (unsigned long long)j.pre_hash,
+                char where[48];
+                if (first < 0) snprintf(where, sizeof where, "first@none");
+                else snprintf(where, sizeof where, "first@%d (h%d,d%d)", first, first / GN_D_V,
+                              first % GN_D_V);
+                printf("sentinel: %s left %4zu/2048 %s  first16 fnv %016llx -> %016llx  %s\n",
+                       j.name.c_str(), left, where, (unsigned long long)j.pre_hash,
                        (unsigned long long)post,
                        left == 2048 ? "NOT WRITTEN" : left ? "PARTIALLY WRITTEN" : "written");
             }
             spit(j.out, host.data(), 2048 * 2);
             if (j.nout != "-") {
                 CK(hipMemcpy(host.data(), (void*)j.dnorm, 2048 * 2, hipMemcpyDeviceToHost));
-                const size_t nleft = sentinel_left(host.data(), 2048);
+                int nfirst = -1;
+                const size_t nleft = sentinel_left(host.data(), 2048, &nfirst);
                 norm_unwritten += (nleft == 2048);
+                norm_partial += (nleft > 0 && nleft < 2048);
                 if (nleft) {
-                    printf("sentinel: %s norm buffer left %zu/2048 (%s)\n", j.name.c_str(), nleft,
-                           nleft == 2048 ? "NOT WRITTEN" : "PARTIALLY WRITTEN");
+                    char nwhere[48];
+                    if (nfirst < 0) snprintf(nwhere, sizeof nwhere, "first@none");
+                    else snprintf(nwhere, sizeof nwhere, "first@%d (h%d,d%d)", nfirst,
+                                  nfirst / GN_D_V, nfirst % GN_D_V);
+                    printf("sentinel: %s norm left %zu/2048 %s (%s)\n", j.name.c_str(), nleft,
+                           nwhere, nleft == 2048 ? "NOT WRITTEN" : "PARTIALLY WRITTEN");
                 }
                 spit(j.nout, host.data(), 2048 * 2);
             }
         }
-        printf("write-back: %zu/%zu gated buffers never written, %zu partially written; "
-               "%zu norm buffers never written (prefill 0x%04x)\n",
-               unwritten, jobs.size(), partial, norm_unwritten, GN_SENTINEL);
-        printf("RESULT mode=once jobs=%zu neg=%s unwritten=%zu partial=%zu\n", jobs.size(),
-               negname.c_str(), unwritten, partial);
+        // Both buffers get both counts. The first version printed only "norm buffers never written"
+        // here while the per-job lines above were reporting partials, so the summary read "0 norm
+        // buffers never written" next to 252 "PARTIALLY WRITTEN" lines and the two looked like a
+        // contradiction when the summary was simply silent about the category it did not count.
+        printf("write-back: gated %zu/%zu never written, %zu partial; norm %zu/%zu never written,"
+               " %zu partial (prefill 0x%04x, unwritable by the kernel, so a survivor is an"
+               " unwritten lane)\n",
+               unwritten, jobs.size(), partial, norm_unwritten, jobs.size(), norm_partial,
+               GN_SENTINEL);
+        printf("RESULT mode=once jobs=%zu neg=%s unwritten=%zu partial=%zu norm_unwritten=%zu"
+               " norm_partial=%zu\n", jobs.size(), negname.c_str(), unwritten, partial,
+               norm_unwritten, norm_partial);
         return 0;
     }
 
