@@ -174,3 +174,20 @@ A-01-as-written variant reports 105 683. Same formula on paper, different count,
 before the agents' budgets ran out. Cheap next step: dump one (o, z, w, pin) tuple from both harnesses
 and diff them element-by-element — if the inputs differ, the two probes are not comparing the same
 thing and one of the two ndiff figures is meaningless.
+
+**Resolution of that unresolved note — measured on CPU, and now asserted in code.** The two figures
+are one formula at two different weights, and both were correct measurements. `mirror_probe.py` now
+carries both readings side by side on identical `o`, `z` and pins, so the weight dtype is the only
+variable, and reproduces each figure exactly (dec8, 144 cases, 294 912 elements):
+
+    w in BF16, product rounded in BF16 (how speccheck calls the oracle)   ndiff      0
+    w BF16-rounded, then widened back to F32 (the amendment's F32-w)      ndiff  74 860
+    w straight from the F32 checkpoint tensor (the probe as committed)     ndiff 105 683
+
+`operands.py:55-65` returns `get_tensor` verbatim, so the probe's `w.float()` was the third row and
+the amendment's was the second; the 30 823-element gap is that difference and nothing else. The gap
+is not a symptom of two harnesses measuring different things. G2's oracle half is closed as an
+executable assertion, not prose: `mirror_probe.py` passes the BF16 weight to `rmsnorm_gated`,
+asserts its row at ndiff 0, asserts the bit-exact set is exactly {kernel, oracle-as-called}, and
+asserts the ladder stays ordered. Run it CPU-only with
+`.venv/bin/python prototype/gdn_gated_norm/run.py --mirror` (ends `MIRROR GATE: PASS`).

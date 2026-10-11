@@ -79,18 +79,23 @@ allocated, no launcher has been launched, and the §07.1 block order exists only
 
 .venv/bin/python prototype/gdn_gated_norm/mirror_probe.py dec8
 # THE LOAD-BEARING CPU RESULT OF THIS PHASE: 144 cases (18 GDN layers x 8 decode steps),
-# 294912 BF16 elements of gdn.gated_out, POLICY row ndiff 0 = BIT-EXACT. Every other reading of
-# §04.5 is refused, including A-01 as literally written (105683 differ) and
-# speccheck.specimpl.rmsnorm_gated (the same 105683). See prototype/gdn_gated_norm/results.md.
+# 294912 BF16 elements of gdn.gated_out. TWO rows are bit-exact (ndiff 0): the kernel's POLICY and
+# speccheck.specimpl.rmsnorm_gated called the way speccheck calls it, i.e. with the norm weight in
+# BF16 as `Weights` stores it. The probe asserts exactly that pair and nothing else ties. The
+# A-01-as-written reading is refused, and how far depends only on the weight dtype it is handed:
+# BF16-rounded-then-widened-to-F32 74860, raw F32 checkpoint weight 105683. (An earlier revision of
+# this README called the oracle itself wrong on the strength of that 105683; it had been handed the
+# raw F32 weight, which speccheck never does. Retracted in fc444d0, asserted here since.) See
+# prototype/gdn_gated_norm/results.md §1.
 
 .venv/bin/python prototype/gdn_gated_norm/run.py --mirror
-# the same gate over all four fixtures (dec8 prefill+decode, prefix24dec8, smoke, p300 prefill);
-# minutes, not seconds, because p300 is 10.2 M elements. Ends "MIRROR PASS".
+# the same gate over all four fixtures (dec8 decode, prefix24dec8 decode, smoke decode, p300
+# prefill = 10.2 M elements), under two seconds on this box. Ends "MIRROR GATE: PASS".
 
 .venv/bin/python speccheck/run_all.py
 # CPU torch. Expected green as of the rope revert d06b4e3. Any failure is worth reporting; note
-# that this suite's rmsnorm_gated is the reading the dumps refuse (above), so a §04.5 change there
-# will move G-gates that currently pass for the wrong reason.
+# that this suite's rmsnorm_gated is bit-exact against the pins only when the weight arrives BF16,
+# so the A-02 knob (--keep-f32-scalars) moves it off bit-exactness by dtype alone.
 ```
 
 Compile-only HIP (compiling is not running; allowed while the GPU is busy):

@@ -85,8 +85,9 @@ no number here is a measurement of anything except the compiler's willingness.
 * `state_sizes.py` re-derives §08.1's shapes from `state.h`'s own constants and reproduces §00.5's
   rows (18.0 MiB GDN `S`, 12288 B/token KV). PASS.
 * §04.5's gated RMSNorm is bit-exact against the pins on `dec8` (144 cases / 294 912 elements,
-  ndiff 0) by the CPU mirror in `prototype/gdn_gated_norm/`. That is the only new arithmetic this
-  phase committed to, and it is the one the engine will call.
+  ndiff 0) by the CPU mirror in `prototype/gdn_gated_norm/`, and so is `specimpl.rmsnorm_gated`
+  called the way speccheck calls it (BF16 weight). That is the only new arithmetic this phase
+  committed to, and it is the one the engine will call.
 
 ## Deferred, with the price named
 
@@ -117,10 +118,14 @@ the token matches.
   "4 KiB/token/layer" KV cell contradicts the same table's 12 KiB/token total (2 KiB/layer is
   right); §00.5's 3.07 GiB at full context is 3.00 GiB from its own 12288 B/token. KV layout is
   head-major `[head][slot][dim]` per the kernel, not §08.5's `[slots][2][256]`.
-* **§04.5 / A-01 still say the wrong cast order** in `specification/`, and
-  `speccheck.specimpl.rmsnorm_gated` still implements the refused reading (105 683 of 294 912
-  elements off the pins, invisible because every gate that reads that tensor uses a cos band).
-  Correcting either is a decision for the spec owner, not this phase.
+* **§04.5 / A-01 still state the affine in F32** in `specification/`, and that is a reading the
+  pins refuse: with the weight rounded to BF16 and widened back to F32 it misses 74 860 of 294 912
+  elements, with the raw F32 checkpoint weight 105 683 (`prototype/gdn_gated_norm/results.md` §1).
+  `speccheck.specimpl.rmsnorm_gated` is **not** among those: called the way speccheck calls it it
+  is bit-exact, 0 of 294 912, because `Weights` hands it a BF16 weight. An earlier revision of this
+  file reported the oracle as 105 683 elements off — that was the mirror probe handing the oracle
+  an F32-widened weight, retracted in `fc444d0`, and the probe now asserts its oracle row at 0.
+  Correcting the spec wording is a decision for the spec owner, not this phase.
 * **`lm_head` full + host argmax**, not the fused single-kernel form: the fused form resolves ties
   to the highest id and §03.4 fixes ties to the lowest. Costs ≈1 MB D2H + a host scan (≈0.04 ms)
   per token and gives the gate its logits. Worth revisiting only with a tie-corrected fused kernel.
