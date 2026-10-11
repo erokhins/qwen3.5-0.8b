@@ -168,3 +168,46 @@ record as *not* the engine's performance.
 5. Close the block-count gap: `down_proj` at 128 blocks reaches 88 % of the probe. If keeping `x`
    packed in shared (halving LDS traffic) or splitting long rows across wavefronts does not fix
    it, say so here and accept 84 % as this box's number for small-GEMV shapes.
+
+## 6. Clean-window re-take (2026-10-11, all subagents stopped, measurements run in the foreground)
+
+Method, because it is the point: every row below was measured while **no subagent was running and the
+supervisor's own turn was blocked inside the measurement command**. A blocking tool call pauses token
+generation, so `flash_serve` — which otherwise busy-polls at ~130 % CPU — was not emitting work during
+the burst. This is the first set taken under the serialization rule, and it refutes what
+`bench/review-2026-10-11.md` §4 claimed: a clean-enough window *is* reachable from inside the session,
+you just have to be the one holding the turn. `gpu use` read 24–91 % across these runs and did **not**
+predict the numbers, so util is recorded and then discounted.
+
+| component | this window | repeat spread | ledger §1 | verdict |
+|---|---|---|---|---|
+| `lm_head_gemv` fused | **2.107–2.110 ms** = 241.0–241.3 GB/s (101.8 % of probe) | 0.15 % (5 bursts × 8, ×3 runs) | 2.105 ms / 242.1 GB/s | reproduces |
+| MLP cold (24 layers, tile 6) | **2.605 ms** = 202.9 GB/s (86 % of probe) | 1 run + 1.7 % vs earlier run's 2.650 | 2.650 ms (84 %) | reproduces |
+| Projections cold (48 launches) | **3.039 ms** = 153.8 GB/s (65 % of probe) | 1.6 % vs the §1 figure | 2.990 ms (66 %) | reproduces |
+| glue fused, 49 launches | **0.1499 ms @512 t / 0.1851 @256 / 0.2563 @128** | **spread 2.7–269 %** — see below | 0.1336–0.1360 | **worse, and unstable** |
+| glue unfused, 97 launches | 0.2455 ms @256 t | spread 2.7–4.2 % | 0.2131–0.2155 | worse ~15 % |
+| `engine/loader_test --no-verify` | 50 checks PASS; wall **383.9 / 509.0 ms** | 2 runs, 32 % | 794 ms wall | PASS re-confirmed; wall depends on page-cache state, do not compare across runs |
+| glue gate | 784 comparisons, 0 failures, both residual adds bit-exact | deterministic | 784 / 0 | reproduces |
+| proj gate | 912 comparisons, 0 failures | deterministic | 912 / 0 | reproduces |
+
+Token sum from this window: 2.108 + 2.605 + 3.039 + 0.150 + 0.062 (GDN state, §1) + ~0.011 (attention
+core at fixture cache sizes) = **7.975 ms → ~125 tok/s**. The §3 projection of 120–127 tok/s stands.
+
+### Two findings that came out of the re-take
+
+**hipEvents are useless here at 2 ms, not just sub-millisecond.** `lm_head_gemv`'s event loop returned
+`0.000 ms → inf GB/s` on every run today, including best-of-40 on a kernel that wall-clocks at 2.11 ms.
+The AGENTS trap row says the event floor is "below ~1 ms"; it is at least that high, and the row is now
+too narrow. Fixed in `d81ff13` by giving this prototype the same steady_clock burst the other four
+already had — which also means `lm_head_gemv` was the only timing on this box that depended on the dead
+path, and the historical 242.1 GB/s was evidently taken while events still worked (or by another path).
+
+**Launch-bound numbers are bimodal on this box; bandwidth-bound ones are not.** The three GEMV
+families repeat within ~2 % window-to-window, but glue's 49-launch fused path has a best-of-N spread
+of 2.7 % at 256 threads and **158–269 % at 512**, i.e. the distribution has a tail several times the
+best and "best of N" is picking a lucky mode rather than estimating a cost. Today's best (0.1499 @512)
+is *worse* than the ledger's 0.1336 despite the cleaner window, so the historical figure was the tail,
+not the machine. Practical consequences: quote glue at 256 threads (0.185 ms) rather than 512 until
+someone characterises the bimodality, and treat per-launch µs figures — 2.545 @256 here vs the 1.85 µs
+narrow-block floor — as dispatch contention for a shared queue, not kernel cost. It is ~1.7 % of the
+token either way, so this is a measurement-integrity finding, not a budget one.
