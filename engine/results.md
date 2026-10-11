@@ -221,3 +221,10 @@ What a first device run is most likely to break, in the order to look at them:
    fails, that is a policy question about which §10 figure governs a token-level logits vector —
    report it, do not loosen the constant. `ndiff` and max-ULP are already excluded on principle
    (§10.1 F1–F4).
+
+* **Fixture: `dec8`, not the `prefix24dec8` `bench/build-queue.md` W5 proposed.** `dec8` is what the
+  task named, it is the fixture whose per-step dumps (`decode{s}.input_ids`,
+  `decode{s}.logits_last`) make the pairing provable, and its prompt is 17 tokens rather than 24 — so
+  the attention stages run at ≤25 lanes against `MAXSC` 512. Same assertions would run against
+  `prefix24dec8`; `gate.py` hard-codes the `dec8` path and nothing else, so that is a second call, not
+  a flag.
