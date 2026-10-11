@@ -1,0 +1,16 @@
+The Framework Desktop is a small machine built around a Ryzen AI Max+ 395, which
+puts a big integrated GPU and a lot of unified memory on the same package. There
+is twelve times more memory than bandwidth, and that ratio decides everything
+about inference here. A decode step reads every weight once, so the step time is
+the weight bytes divided by the bandwidth that the memory controller can actually
+sustain, and no amount of clever scheduling changes that. Quantisation is
+therefore the first lever to pull, because it moves bytes rather than flops. The
+second lever is the model architecture itself. A hybrid model that keeps most of
+its layers linear pays for a decode step in recurrent state traffic instead of key
+value traffic, and on this machine that is a good trade as long as the state stays
+in the memory hierarchy that is already being touched. What is not a good trade is
+an exotic subsystem that no compiler supports, because then the last ten per cent
+of the performance is hidden behind a kernel that cannot be written in the
+available tools, and the project stalls. This engine starts from the boring
+premise that every operation must be inspectable, measurable, and replaceable by a
+kernel that runs on the integrated GPU on the first day.

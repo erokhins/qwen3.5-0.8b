@@ -1,0 +1,1 @@
+The Framework Desktop puts a big integrated GPU and a lot of unified memory on one package, and the ratio of memory to bandwidth decides everything about decode performance on this machine.

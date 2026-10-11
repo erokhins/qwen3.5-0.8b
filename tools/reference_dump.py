@@ -16,6 +16,8 @@ Flags:
   --no-chat        do not append the no-think chat template rendering
   --decode N       greedy continuation steps after prefill (default 1)
   --no-layer-io    omit per-layer input/output dumps
+  --no-mlp-io      omit the per-layer MLP operands (§03.3); they are the widest pins
+                   ([T, 3584] x 3 x 24 layers) and exist to gate the MLP kernel
   --dtype          bfloat16 (default, as shipped) | float32
 """
 from __future__ import annotations
@@ -49,6 +51,7 @@ def parse_args():
     p.add_argument("--no-chat", action="store_true")
     p.add_argument("--decode", type=int, default=1)
     p.add_argument("--no-layer-io", action="store_true")
+    p.add_argument("--no-mlp-io", action="store_true")
     p.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"])
     p.add_argument("--seed", type=int, default=1234)
     return p.parse_args()
@@ -258,6 +261,36 @@ def main():
 
     for i in attn_layers:
         layers[i].self_attn.register_forward_hook(attn_io_hook(i))
+
+    # ---- MLP operands (§03.3) ----------------------------------------------
+    # HF: down_proj(act_fn(gate_proj(x)) * up_proj(x)). Pinning all four operands lets a
+    # kernel be gated in isolation (feed mlp.in, compare gate_pre/up_pre/act/out) with no
+    # upstream cascade, which is what G3i needs. `act` is the down_proj input, i.e. the
+    # bf16-rounded silu(gate) * up product whose rounding policy A-07 pins.
+    if not args.no_mlp_io:
+        def mlp_hook(i):
+            def hook(_m, inp, o):
+                if inp:
+                    rec.pin(f"L{i:02d}.mlp.in", inp[0], "post_attention_layernorm output")
+                rec.pin(f"L{i:02d}.mlp.out", o, "mlp() = down_proj(act), the residual addend")
+            return hook
+
+        def sub_hook(i, which, note, take_output=True):
+            def hook(_m, inp, o):
+                rec.pin(f"L{i:02d}.mlp.{which}", o if take_output else inp[0], note)
+            return hook
+
+        for i, layer in enumerate(layers):
+            mlp = getattr(layer, "mlp", None)
+            if mlp is None:
+                continue
+            mlp.register_forward_hook(mlp_hook(i))
+            mlp.gate_proj.register_forward_hook(sub_hook(i, "gate_pre", "gate_proj(x), bf16"))
+            mlp.up_proj.register_forward_hook(sub_hook(i, "up_pre", "up_proj(x), bf16"))
+            # `act` is down_proj's INPUT, i.e. the operand the engine must reproduce; the
+            # hook has to read inp[0] for that, not the output.
+            mlp.down_proj.register_forward_hook(
+                sub_hook(i, "act", "silu(gate)*up = down_proj input", take_output=False))
 
     # ---- build the input sequence ------------------------------------------
     seqs, sources = [], []
