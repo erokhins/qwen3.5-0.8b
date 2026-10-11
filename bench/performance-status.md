@@ -196,6 +196,7 @@ predict the numbers, so util is recorded and then discounted.
 | `gdn_gated_norm` device gate (§04.5) | `DEVICE GATE PASS`; worst ndiff **1/2048**, max ULP 1, zeros 0 / NaN 0, all six negatives localise | deterministic | — (first pass ever) | **PASS** — see §04.5 row below |
 | `gdn_gated_norm` burst | **0.4227 ms** per 144-job plan = **2.936 µs/launch** | **spread 1.4 %** | — (never timed) | ≈0.053 ms/token at 18 GDN layers |
 | proj gate | 912 comparisons, 0 failures | deterministic | 912 / 0 | reproduces |
+| **`engine/decode_step`, one token end to end — the first engine row** | **11.978 / 12.053 / 12.232 ms/step = 83.5 / 82.9 / 81.7 tok/s** | **spread 2.1 %** (3 runs × 81 steps) | 8.03 ms op-sum ≈ 124 tok/s | **the engine runs, and it is 1.49× the sum of its parts** — provenance below, gap attributed in `engine/results.md` |
 
 Token sum from this window: 2.108 + 2.605 + 3.039 + 0.150 + 0.0646 (GDN state, re-taken) + 0.053
 (§04.5 gated norm, 18 launches) + ~0.011 (attention core at fixture cache sizes) = **8.03 ms →
@@ -266,3 +267,44 @@ reinterpreting (0.195 became the integer 0, −1.3 wrapped to 0xFFFF), so the ke
 the pin had neither. The full symptom-by-symptom account is `prototype/gdn_gated_norm/results.md` §8 and
 the trap is a row in `AGENTS.md`; recorded here because a PASS with that history needs its provenance
 next to it, not three files away.
+
+### The first engine row, and what it cost against the op-sum
+
+Provenance, because this is the row §5 item 0(f) was asking for. Three runs of
+`engine/build/decode_run` in the same foreground, zero-subagent window as every other row in this
+section — blocking call, so `flash_serve` had nothing to emit for the duration — `gpu_lock.sh util`
+**76 / 71 / 69 %**, recorded and then discounted exactly as §6's opening rule discounts 24–91 % for the
+rows above it. Each run was `RESULT steps=81`: the 17-token `dec8` prompt fed **one token per decode
+step** (§07.1 has no prefill yet — see the caveat below) plus 64 requested generation steps, and
+generation ended when the engine emitted id **248046** at generation step 54. `ms_per_step` is
+`decode_run`'s own `steady_clock` mean over the steps actually run — one sync per step, at the logits,
+which is what a token server pays anyway. **This is a warm loop**: unlike the `14.631 ms/step` that
+`engine/results.md` retired (a first pass over freshly allocated state, measured by a gate run that was
+not there to measure), these steps run after the state and scratch have been through the pipeline.
+Spread is 2.1 %, which is bandwidth-bound behaviour, and that is the expected shape: the step is
+~1.6 GB of weight traffic, not a launch-bound microbench, so §6's bimodality warning does not apply to
+it.
+
+Two things this row says, and one it does not.
+
+* **It replaces the projection's claim to be the nearest number to the engine.** §3 projected
+  120–127 tok/s and §6's op-sum gives 8.03 ms ≈ 124 tok/s; the engine delivers 83.5. The projection is
+  now what it always was — a sum of per-family cold bursts, each measured in its own tight loop — and
+  the gap between it and the engine is **3.95 ms/token**, which is 0.94 GB of traffic at the 237 GB/s
+  probe. Stated the other way round: the whole token streams at **134 GB/s = 57 % of the probe**,
+  against the **200 GB/s = 84 %** the sum of its parts implies.
+* **Part of that gap is the plan, not the machine.** ~1.27 ms of it is itemised in
+  `engine/results.md` (the engine runs the 114-launch unpacked projection plan where the ledger row
+  bills the 48-launch packed one; the 115 cast launches are in no ledger row at all), and another
+  ~0.15 ms is the host tail behind the per-step sync. The remaining ~2.5 ms is **not attributable from
+  any measurement in this file**, and says so.
+* **What it does not say: anything about time-to-first-token.** There is no prefill, so all 17 prompt
+  steps cost a full decode step each — 17 × 12 ms ≈ 0.2 s of prompt before the first generated token.
+  A chunked prefill pass would remove most of that, so this row is a steady-state decode figure only,
+  and any first-token number quoted from it would be ~17× wrong.
+
+One open provenance item, flagged rather than hidden: these runs reported `ms_per_step` from a driver
+that may or may not have written the per-step logits dumps (`--out`, 0.993 MB per step). Writing that
+much to the page cache costs **0.254 ms/step** measured on the CPU, so if the dumps were on, ~2 % of
+each figure is the driver, not the engine. The A/B (same three runs without `--out`) is in the hand-off
+in `engine/results.md`.
