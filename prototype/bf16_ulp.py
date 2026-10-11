@@ -170,9 +170,16 @@ def selftest() -> int:
            (torch.tensor([-1.0], dtype=torch.bfloat16), torch.tensor([-1.0078125],
                                                                     dtype=torch.bfloat16), 1)]
     off = [(int(ulp_dist(a, b)[0]), want) for a, b, want in adj]
+    # zero_nan is what the gates print when a comparison fails far, so its two counts get pinned on
+    # the patterns that make a ULP distance uninformative: +0 and -0 are both zero, a BF16 denormal
+    # and ±Inf are neither, and only a NaN exponent with a non-zero mantissa counts as NaN.
+    z = torch.tensor([0.0, -0.0, 2.0 ** -133, float("nan"), float("-nan"), float("inf"),
+                      float("-inf"), 1.0, -2.391], dtype=torch.bfloat16)
+    zn = zero_nan(z)
     print("selftest: %d/%d ordering failures | next-neighbour distances %s (got,want)"
-          % (bad, len(v) - 1, off))
-    return 0 if (bad == 0 and all(g == w for g, w in off)) else 1
+          " | zero_nan %s (want (2, 2) over +0/-0, 2 NaN, denormal, +-inf, 2 finite)"
+          % (bad, len(v) - 1, off, zn))
+    return 0 if (bad == 0 and all(g == w for g, w in off) and zn == (2, 2)) else 1
 
 
 if __name__ == "__main__":
