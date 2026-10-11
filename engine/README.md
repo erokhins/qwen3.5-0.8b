@@ -131,10 +131,12 @@ allocated, no launcher has been launched, and the §07.1 block order exists only
 # the injections, and is what exercises sections (a)–(d)'s parsing before a GPU window exists.
 
 `.venv/bin/python engine/gate.py --no-engine`
-# Sections (0) and (c) of the token gate, with no binary and no device: it proves the dec8 fixture
-# pairs with itself (the §10.5 trap, as 26 assertions) and runs engine/state_sizes.py against the
-# sizes it will later compare with decode_run's. Runs in about a second, and is the only part of the
-# gate a worker is allowed to run. Ends "ENGINE GATE PASS" with a note that (a),(b),(d) were skipped.
+# Sections (0), (c) and — with --selftest/--dry-run — the whole judging half of the token gate, with
+# no binary and no device: it proves the dec8 fixture pairs with itself (the §10.5 trap, as 26
+# assertions), runs engine/state_sizes.py against the sizes it will later compare with decode_run's,
+# and requires three injected bugs to be caught at their own steps. Runs in about a second, and is
+# the part of the gate a worker is allowed to run. Ends "ENGINE GATE PASS" with a note that (a),(b)
+# were skipped (or, under --dry-run, that the stand-in stood in).
 
 .venv/bin/python speccheck/run_all.py
 # CPU torch. Expected green as of the rope revert d06b4e3. Any failure is worth reporting; note
@@ -189,29 +191,29 @@ tools/gpu_lock.sh release "engine W5b GPU pass"
 ```
 
 ```bash
-# E1 (engine/results.md) — glue's gate at the width the engine does NOT launch. Until this runs,
-# the engine's <256 is "the gated width", not "the width that also wins at 1024".
+# E1 — CLOSED 2026-10-11, in a clean window. glue's gate at 1024 threads, the width the engine does
+# NOT launch: PASS with a legal error profile identical to 256 (g1_n gated 0 / raw 1, adds bit-exact,
+# 784/0, every negative caught at its own stage). So <256 in `kernels_glue.cpp` is a measured
+# preference, not a numerical requirement. The numbers are `bench/performance-status.md` §6; to
+# reproduce:
 tools/gpu_lock.sh acquire "glue gate at 1024 (E1)" && tools/gpu_lock.sh util
 .venv/bin/python prototype/glue/run.py --threads 1024
 .venv/bin/python prototype/glue/run.py --threads 1024 --negative
 tools/gpu_lock.sh release "glue gate at 1024 (E1)"
-# expect: the same 784 comparisons, 0 failures, and the norm half at the published floor (the
-# 256-thread order measures 3 / 393 216). 1024 changes the F32 summation order, and ndiff is the
-# only criterion that can see it, so "it passes" is not the result — "it passes AT THE SAME FLOOR"
-# is. If the floor moves or the band has to widen, <1024 stays out of the engine and glue's §4 sweep
-# row needs the caveat. The negatives must still each be caught at their own stage.
+# Why it was run at all: 1024 changes the F32 summation order of the mean of squares, and ndiff is the
+# only criterion that can see it, so "it passes" was never the result — "it passes AT THE SAME FLOOR"
+# was. Re-running it is only worth another GPU pass if `prototype/glue/glue_pins.py` changes.
 
-# E2 (engine/results.md) — the half that is runnable today: the two PACK_X configs, cold, on the
-# prototype's 48-launch token plan, in the same quiescent window as each other.
+# E2 — CLOSED for the prototype half, 2026-10-11. Cold, on the prototype's 48-launch token plan, at
+# rows/block 32: unpacked 0.0528 ms/launch = 65.1 % of the read probe against packed 0.0593 = 58.0 %,
+# and unpacked won at every rows/block swept. So `PACK_X=false` in `kernels_proj.cpp` is a measurement
+# and the ≈48 cast launches it bills back do not overturn the ordering. Numbers: §6 of the ledger.
 tools/gpu_lock.sh acquire "proj_gemv PACK_X A/B (E2)" && tools/gpu_lock.sh util
 .venv/bin/python prototype/proj_gemv/run.py --time --sweep
 tools/gpu_lock.sh release "proj_gemv PACK_X A/B (E2)"
-# expect: unpacked rows/block 8 ≈2.99 ms / 66 % of probe, the `x left BF16 in shared` row
-# ≈3.27 ms / 60 % — the pair the engine's PACK_X=false comment cites. Add the cast the engine now
-# pays (≈48 launches ≈0.089 ms at the 1.85 µs floor) before quoting either as its own cost. The
-# other half of E2 — the same A/B through `engine/kernels_proj.cpp` — needs a PACK_X switch in that
-# launcher first (it hard-codes the gated, measured-faster `false`); that is deferral #1 above, not
-# a measurement waiting to be made.
+# The half still owed is NOT a measurement: running the same A/B through `engine/kernels_proj.cpp`
+# needs a PACK_X switch in that launcher, which hard-codes the gated `false`. That is deferral #1 in
+# `results.md`, and it is a code change with a timing attached, not a command waiting to be typed.
 ```
 
 ```bash
