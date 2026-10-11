@@ -74,4 +74,5 @@ tmp/
 prototype/lm_head_gemv/lm_head_gemv
 prototype/gdn_decode/gdn_decode
 prototype/mlp_gemv/mlp_gemv
+prototype/proj_gemv/proj_gemv
 *.o
