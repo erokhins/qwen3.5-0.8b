@@ -151,6 +151,14 @@ device once; what is still missing is the token result and every timing.
 # does not. Floor comes out at 0.99999862, set almost entirely by the reference's own output rounding —
 # summation order alone is worth ~1e-9. ~11 s and ~1 GB of RAM, no device, no engine binary.
 
+`.venv/bin/python engine/route_price.py`
+# The END-TO-END floor that belongs with the last-op one above: runs the dec8 prompt and its greedy
+# continuation twice through specimpl — chunked GDN prefill (§04.7) against recurrent (§04.4, the form an
+# engine with no prefill has to take) — same weights, same tokens, no engine, no device, and reports how far
+# apart two *legal* reference forms sit on the logits vector at each step. It is the number that decides
+# whether an engine's whole-token cos deficit needs a bug to explain it: the engine's is smaller than this
+# spread at every step. ~90 s, torch CPU.
+
 `.venv/bin/python engine/gate.py --selftest`
 # Proves the token gate DISCRIMINATES, with no engine and no device: it re-runs gate.py in
 # subprocesses against a CPU stand-in with four bugs injected — a wrong sampled id at a named step, a

@@ -456,23 +456,47 @@ it) and asks how far *legal* reimplementation can push cos:
 | the pin's own BF16 rounding of the logits, which the engine does not replicate (`lm_head_full` writes F32) | 0.999998622 |
 | **legal floor for this comparison** | **0.99999862** |
 
-**The engine's 0.999886 is below that floor** — 1.14e-4 below 1 against the floor's 1.4e-6, about 83×.
-So the dip is *not* summation order in the logits dot: two legal orders of the same products differ by
-~1e-9 here, because every BF16 value is exact in F32 and a 1024-term F32 sum is short. The difference is
-upstream, and it is small in absolute terms — the whole-token deficit is about the size of one stage's
-entire G3i allowance (1e-4), which says the individual kernels are well inside their bands. The prime
-suspect is the prompt route: the engine fed the 17 prompt tokens one per step while the reference prefills
-them chunked (§04.4 vs §04.7), and that route is not free inside the reference either —
-`speccheck/gates/run_chunkcheck.py --fixture dec8`, run on CPU with no engine in the loop, prices the
-reference's own chunk-vs-recurrent divergence on this exact fixture: 36 comparisons over 18 GDN layers,
-per-layer state cos from 1.0000000 at `L00` down to **0.99992** at `L21`/`L22` (meanrel up to 1.77e-2),
-PASSing its own `--cos-min 0.9999`. That is the same order as the engine's whole logits deficit, so "the
-prompt route" is quantitatively adequate as the explanation for step 1 being the worst step — and it is a
-*legitimate* implementation difference, not an error: the reference does it to itself and gates it. What
-this does not do is prove the engine's upstream difference *is* only that route; separating the two needs
-the engine's own stage dumps against the per-step pins, which `decode_step` already has pointers for
-(`norm_out`, `q_rope`/`k_rope`/`gate_out`) and nothing currently compares. Bands unchanged either way, and
-step 1 stays a documented, non-failing observation.
+**No step reaches that floor — and for an end-to-end vector it is the wrong floor to judge by.** Distance
+from 1, per step: step 1 **1.14e-4 (83× the floor's 1.4e-6)**, then 4.1e-5, 3.7e-5, 3.5e-5, 3.5e-5, 3.4e-5,
+3.2e-5 (23–35×) and 4.8e-5 at the last step. The shortfall is **systemic — 23–83× at every step** — with
+step 1 about 3.5× above the plateau rather than a lone violator. (This section first read that as "below the
+legal floor, therefore a real discrepancy"; that was a single-op floor being used as an end-to-end one, and
+it is corrected below the same day rather than left standing.)
+
+What 0.99999862 *is* a floor for, precisely: **reassociation-only change at one op**, given the reference's
+own `L23.s_out`. It is not a floor for a token-level logits vector produced by a different whole-network
+implementation, because it holds everything upstream fixed by construction — which is also exactly what makes
+it worth having. It kills summation order as an explanation (two legal orders of the same products differ by
+~1e-9: every BF16 value is exact in F32 and a 1024-term F32 sum is short), and it says that if the engine
+replicated the pin's BF16 output rounding and nothing else differed, no step could sit below 0.99999862.
+Every step does, so the difference is upstream of the last op at every step — which is what needed knowing.
+
+The floor the end-to-end comparison actually needs was then measured **inside the reference, with no engine
+and no device**: `engine/route_price.py` (~90 s torch CPU) runs the dec8 prompt and its 8 greedy continuation
+tokens twice through `specimpl`, once with the chunked GDN prefill (§04.7, the form G3 canonicalises) and
+once with the recurrent form (§04.4 — the form an engine with no prefill necessarily takes, since it fed the
+prompt one token per decode step), same weights, same tokens, compared with `gate.py::metrics`' F64 cos:
+
+| step | 1 − cos, route vs route | engine's own 1 − cos against the pin |
+|---|---|---|
+| 1 | **1.900e-04** | 1.14e-4 |
+| 2–6 | 4.73e-05 … 6.99e-05 | 3.4e-5 … 4.1e-5 |
+| 7–8 | 1.025e-04, 1.080e-04 | 3.2e-5, 4.8e-5 |
+
+**The reference's own two legal routes are further apart from each other than the engine is from the
+reference, at every step**, and the route spread peaks at step 1 — the same shape the engine shows. All eight
+argmaxes agree between the two routes, so this is a numerically visible, token-identical difference of exactly
+the kind G7 exists to tolerate. That retires the "small real discrepancy" reading of step 1: the deficit sits
+*inside* the band the spec leaves open, and no bug is needed to account for it.
+
+What it does not do is prove the engine's difference *is* only the route — the route spread is a lower bound
+on what a legal reimplementation may be doing, not an identity. Separating any remainder still wants the
+engine's stage dumps against the per-step pins: `decode_run --dump-stages` already writes
+`norm_out`/`q_rope`/`k_rope`/`gate_out`, `speccheck/specimpl.py::stage_pairs` already names the pins, and
+`engine/gen_watch.py --all` is already the comparator; nothing currently connects the first to the last.
+
+Bands unchanged either way — and this exchange is the argument for leaving them alone: a per-stage bar applied
+to an end-to-end quantity produced a non-failing flag that measurement then put inside the legal band.
 
 ## (2) The first throughput row, and the ~4 ms between it and the op-sum
 

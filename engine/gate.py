@@ -99,9 +99,14 @@ STOP_ID = 248046
 #     between the two figures is reported (the G6 note below) and not failed. The first end-to-end
 #     pass had exactly that profile: step 1 at cos 0.999886 — under G6, over the G5 floor, with every
 #     one of the eight ids exact and the reference's own top-1/top-2 margin 7-23x the largest element
-#     error at every step. It stays a documented observation. `engine/logits_floor.py` is the CPU-side
-#     floor probe for that comparison (legal reassociation of the reference's own logits dot), and
-#     engine/results.md records what side of it 0.999886 falls on.
+#     error at every step. It stays a documented observation. Two CPU probes price it, both with no
+#     engine and no device: `engine/logits_floor.py` is the LAST-OP floor (legal reassociation of the
+#     reference's own logits dot, its answer 0.99999862), and `engine/route_price.py` is the
+#     END-TO-END floor (the same reference run through two legal GDN prompt forms; its spread is
+#     1-cos 4.7e-5..1.9e-4 and it is wider than the engine's deviation at every step). The engine is
+#     below the first and inside the second, which is why the flag is informational: a per-stage floor
+#     applied to an end-to-end quantity will always fire, and the quantity that could really be wrong
+#     is tokens, which is G7. engine/results.md records both tables and the reasoning.
 #
 # §10.2 also fixes the DEFINITIONS: cos is over the flattened tensor, meanrel = mean|Δ| / mean|ref|
 # (a ratio of means, not a mean of ratios — the latter explodes on the near-zero logits that most of
@@ -600,8 +605,10 @@ def main() -> int:
                          f"{BAND['cos_report']} (still above the G5 floor that is gated). G6 is"
                          " ADVISORY here by decision, not an open question: an end-to-end token"
                          " carries the whole 24-layer cascade, so it is not judged by a figure"
-                         " belonging to a narrower comparison — see the BAND comment above and"
-                         " engine/logits_floor.py for the measured legal floor of this tensor.")
+                         " belonging to a narrower comparison — see the BAND comment above, and"
+                         " the two measured floors in engine/results.md: last-op reassociation"
+                         " 0.99999862 (engine/logits_floor.py) and end-to-end two-legal-routes"
+                         " 1-cos 4.7e-5..1.9e-4 (engine/route_price.py), which brackets this step.")
         else:
             print(f"  [info] step {j}: cos {m['cos']:.6f} clears G6's {BAND['cos_report']}")
 
