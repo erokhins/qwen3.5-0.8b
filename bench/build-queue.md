@@ -17,6 +17,12 @@ the item, and `prototype/mlp_gemv/` as the most recent complete example of a ker
 - **Never loosen a gate to make it pass.** If a criterion is unreachable, measure the floor
   (`prototype/mlp_gemv/floor_probe.py` is the method) and write down why. A gate that cannot
   fail verifies nothing (`--negative` on every injection, located).
+- **No GPU execution inside a worker run — at all.** The engine serving every agent on this box
+  shares the GPU, so a device run made by a worker is contaminated by construction. Workers write
+  the kernel, the gate, and the CPU-side reference work (pins, torch references, band sizing from
+  dumps), **compile** if they like, and hand off the exact command lines. The main agent runs every
+  device command, and only with zero subagents active. A report saying "gate written, not yet run" is
+  a complete deliverable; a report with a device number taken alongside other agents is not.
 - **Timings need the box to themselves:** `tools/gpu_lock.sh acquire <tag>` around every timing
   loop, `release` after. Correctness runs do not need the lock; timing runs do — a second
   process moves a cold bandwidth number by 25 % and flips a config ranking.

@@ -53,7 +53,31 @@ note. Do not implement a [FUTURE] item without an explicit request.
 | a forward hook that reads the hook's `output` argument instead of `input` can pin *the answer* under the name of an intermediate — the MLP's `act` is `down_proj`'s **input**, and the wrong version reproduced real reference tensors and passed every self-check | §10.5, `prototype/mlp_gemv/results.md` |
 | a negative test that loads another layer's weights "catches" every injection no matter what the kernel does — vacuous. Injected bugs must also be required to appear **only** where the bug lives | `prototype/mlp_gemv/run.py --negative`, §10.1 |
 
+## GPU execution is serialized and belongs to the main agent
+
+The inference engine that generates tokens for **this session and every subagent** (`flash_serve`,
+`/models/qwen38-flash-next-v2.hgn`) runs on this same GPU. So GPU work is not just a scarce device,
+it is the thing we are sitting on: any kernel run concurrent with another agent's work — or with our
+own serving — is contaminated, and a contaminated number is worse than no number.
+
+Therefore, as a hard rule:
+
+- **Subagents do not touch the GPU.** No HIP execution, no gate run that launches a kernel, no
+  negative test, no timing sweep, no `hipcc`-then-run. Workers write the kernel, the gate script and
+  the CPU-side reference work (pins, torch references, band sizing from dumps), and **hand off the
+  exact command lines** they could not run.
+- **The main agent runs every GPU command**, and only while **zero subagents are active**. That
+  includes correctness gates, not just performance numbers — a device gate that runs alongside other
+  agents can still be a valid correctness result, but it cannot be a trustworthy timing, and there
+  is no way to tell afterwards which it was.
+- `tools/gpu_lock.sh` still applies (acquire/release by TAG, record `util`), but it is now the second
+  line of defence, not the first: the first is that nothing else is running at all.
+- Consequence for planning: a worker's report will often be "gate written, not yet run". That is an
+  acceptable state — schedule a GPU pass after the workers drain, run the commands they handed over,
+  and feed failures back.
+
 ## Standing rules
+
 
 - **Verify against the reference implementation at every step.** `speccheck/` is the
   independent checker (torch CPU, gated against the pinned HF dumps in `data/refs/`);
