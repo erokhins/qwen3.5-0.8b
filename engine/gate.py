@@ -8,11 +8,12 @@
     .venv/bin/python engine/gate.py --build         # run engine/build.sh first
     .venv/bin/python engine/gate.py --binary P --model DIR --work DIR
 
-`--selftest` re-runs this file in subprocesses against three injected bugs — a wrong sampled id, a
-swapped top-two logits, and 5 % logits noise that leaves the argmax alone — and requires each to fail
-at the step it was injected at, because a negative that every check would catch proves nothing
-(`prototype/mlp_gemv/results.md`). It is the only part of a gate that can be validated before the
-engine has ever run, and it is why a first device run need not double as a test of this file.
+`--selftest` re-runs this file in subprocesses against four injected bugs — a wrong sampled id, a
+swapped top-two logits, 5 % logits noise that leaves the argmax alone, and a §07.5 stop check firing
+during the prompt phase — and requires each to fail at the step it was injected at, because a negative
+that every check would catch proves nothing (`prototype/mlp_gemv/results.md`). It is the only part of
+a gate that can be validated before the engine has ever run, and it is why a first device run need not
+double as a test of this file.
 
 Four sections, in the order the task fixed them plus one that has to come first:
 
@@ -53,6 +54,11 @@ sys.path.insert(0, str(ROOT))
 REFS = ROOT / "data" / "refs" / "dec8"
 DEFAULT_BINARY = ROOT / "engine" / "build" / "decode_run"
 WORK = ROOT / "tmp" / "engine_gate"
+
+# §07.5 / A-10: the id greedy decoding stops on — the end-of-turn token. Spelled as an id, never as
+# template text, and it is the same constant as `engine::kStopToken`. The `dec8` prompt is a rendered
+# chat template, so this id occurs INSIDE the prompt (index 8) as well as in a continuation.
+STOP_ID = 248046
 
 # ---- the band ----------------------------------------------------------------------------------
 # A token's logits vector is the end of a 24-layer cascade, so §10.1/§10.2 have already decided what
@@ -173,6 +179,10 @@ def pairing_checks(man: dict) -> tuple[list, list, np.ndarray]:
           f" come from the bare logits_last.npy, whose argmax was just proved to be"
           f" greedy_continuation[0]. Pinned logits dtype: {dec_logits[0].dtype},"
           f" shape {dec_logits[0].shape}.")
+    stop_at = [i for i, t in enumerate(prompt_ids) if t == STOP_ID]
+    print(f"  [info] the prompt itself contains the stop id {STOP_ID} at index {stop_at}, so a"
+          " prompt-phase step can legitimately sample it. §07.5 is a generation-phase rule and such"
+          " a match must be ignored (section (a) asserts both halves of that).")
     return prompt_ids, dec_logits, dec_inputs
 
 
@@ -260,7 +270,8 @@ def parse_run(text: str) -> dict:
 
 
 def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids: int = -1,
-            break_logits: int = -1, break_noise: int = -1) -> tuple[str, int]:
+            break_logits: int = -1, break_noise: int = -1, break_prompt_stop: int = -1) -> tuple[
+                str, int]:
     """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
 
     Why this is in a gate: sections (a)-(d) parse a line protocol, read binary dumps, and do float
@@ -273,11 +284,18 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
     `break_ids`/`break_logits` inject one deliberate error at that generation step, the way
     `prototype/*/run.py --negative` does: the injected bug has to make the gate fail *at that step*,
     which is the property worth testing — a negative that every check would catch proves nothing
-    (`prototype/mlp_gemv/results.md` has that trap written down).
+    (`prototype/mlp_gemv/results.md` has that trap written down). `break_prompt_stop` injects the one
+    bug the engine actually shipped with: the §07.5 stop check firing during the prompt, which truncates
+    the run there and leaves both the rest of the prompt and all generation steps unsaid.
     """
     greedy = man["greedy_continuation"]
     cfg = man["text_config"]
     lines = []
+    # A stand-in run that truncates (see `break_prompt_stop`) writes FEWER logits files than the last
+    # case did, and section (b) reads them by name — so stale files from a previous case would be
+    # compared as if this run had produced them. Clear the dir first.
+    for stale in work.glob("logits*.bin"):
+        stale.unlink()
     cap = len(prompt_ids) + len(dec_logits) + 1
     plan = launch_plan(cfg["num_hidden_layers"],
                        sum(1 for t in cfg["layer_types"] if t == "linear_attention"),
@@ -291,8 +309,21 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
         # Only the LAST prompt step's sample is checked by section (a) — that is the one the fixture
         # pins. The earlier ones are the engine's own business; here they echo the next prompt token.
         sampled = greedy[0] if i == len(prompt_ids) - 1 else (prompt_ids[i + 1] if i + 1 < len(prompt_ids) else greedy[0])
+        # `stop=` is the §07.5 CHECK being armed and matched — never the raw match. A prompt-phase step
+        # reports stop=0 even if it sampled the stop id, because its sample is discarded; that is what
+        # decode_run prints and what section (a) asserts. `--break-prompt-stop` is the one case where
+        # it is 1, and it reproduces the first device run: the stop match ends the run AT the prompt,
+        # so the remaining prompt tokens and all 8 generation steps are simply missing.
+        if i == break_prompt_stop:
+            # The stop check fires BECAUSE the sample is the stop id, so the stand-in has to say both;
+            # `decode_run` prints `stop=1` only under that condition.
+            lines.append(f"STEP kind=prompt index={i} input={t} sampled={STOP_ID} top_logit=1"
+                         f" pos_before={i} pos_after={i + 1} stop=1")
+            lines.append(f"RESULT mode=run steps={cap - 1} ms_total=0 ms_per_step=0"
+                         f" last_sampled={STOP_ID} prefix_len={i + 1} stopped=1")
+            return "\n".join(lines), 0
         lines.append(f"STEP kind=prompt index={i} input={t} sampled={sampled} top_logit=1"
-                     f" pos_before={i} pos_after={i + 1}")
+                     f" pos_before={i} pos_after={i + 1} stop=0")
     for j in range(len(dec_logits)):
         pos = len(prompt_ids) + j
         sampled = greedy[j + 1]
@@ -312,7 +343,7 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             rng = np.random.default_rng(4)   # fixed: the injection must be reproducible
             logits = logits * (1.0 + 0.05 * rng.standard_normal(logits.shape)).astype(np.float32)
         lines.append(f"STEP kind=decode index={pos} input={greedy[j]} sampled={sampled}"
-                     f" top_logit=1 pos_before={pos} pos_after={pos + 1}")
+                     f" top_logit=1 pos_before={pos} pos_after={pos + 1} stop=0")
         (work / f"logits{pos}.bin").write_bytes(logits.astype(np.float32).tobytes())
     lines.append("RESULT mode=run steps=25 ms_total=0 ms_per_step=0 last_sampled="
                  f"{greedy[-1]} prefix_len={cap - 1} stopped=0")
@@ -329,7 +360,7 @@ def ss_sizes() -> list:
 def selftest() -> int:
     """Prove the gate discriminates, on the CPU, before anyone spends a GPU window on it.
 
-    Three runs: the clean dry run must pass; each injected bug must fail, and fail *at its own step*.
+    Four runs: the clean dry run must pass; each injected bug must fail, and fail *at its own step*.
     A negative that any check would catch is worth nothing (`prototype/mlp_gemv/results.md`), so the
     assertion is about where the failure landed, not that one happened.
     """
@@ -342,12 +373,23 @@ def selftest() -> int:
          "top two logits swapped at step 2"),
         (["--break-noise", "5"], 1, "[FAIL] step 5: cos >= 0.9995 (§10.1 G5)",
          "5 % noise on step 5's logits (argmax untouched, aggregate wrong)"),
+        # The bug the engine actually shipped with, replayed in the stand-in: id 248046 sampled at
+        # prompt index 6 ended a 17-token prompt after 7 steps. Both new checks have to name it.
+        (["--break-prompt-stop", "6"], 1,
+         ["[FAIL] no prompt-phase step fires §07.5's stop check",
+          "[FAIL] one step per prompt token",
+          "that last step's §07.5 stop check HAD fired"],
+         "the stop check fired at prompt index 6 (the first device run's bug: a 17-token prompt"
+         " ended after 7 steps and generation never started)"),
     ]
     bad = []
     for extra, want_rc, want_in, what in cases:
         p = subprocess.run(base + ["--dry-run"] + extra, capture_output=True, text=True)
-        ok = p.returncode == want_rc and (want_in is None or want_in in p.stdout)
-        where = "" if want_in is None else f" (looked for `{want_in}`: {want_in in p.stdout})"
+        needles = [] if want_in is None else ([want_in] if isinstance(want_in, str) else list(want_in))
+        missing = [n for n in needles if n not in p.stdout]
+        ok = p.returncode == want_rc and not missing
+        where = "" if not needles else (" — every expected FAIL line present" if not missing
+                                        else " — missing: " + "; ".join(missing))
         print(f"  [{'PASS' if ok else 'FAIL'}] {what} — rc={p.returncode} want {want_rc}{where}")
         if not ok:
             print("      " + "\n      ".join(l for l in p.stdout.splitlines() if "FAIL" in l)[:400])
@@ -377,6 +419,9 @@ def main() -> int:
     ap.add_argument("--break-noise", type=int, default=-1, metavar="STEP",
                     help="with --dry-run: put 5 % relative noise on that step's logits, which moves"
                          " cos under the floor without changing the argmax")
+    ap.add_argument("--break-prompt-stop", type=int, default=-1, metavar="PROMPT_INDEX",
+                    help="with --dry-run: fire the §07.5 stop check at that prompt step and end the"
+                         " run there, which is the bug the first device run had")
     ap.add_argument("--selftest", action="store_true",
                     help="re-run this file in subprocesses: clean dry run must pass, each injected"
                          " bug must fail at its own step")
@@ -405,7 +450,7 @@ def main() -> int:
            "--steps", str(n_decode), "--out", str(work)]
     if args.dry_run:
         stdout, rc = dry_run(man, prompt_ids, dec_logits, work, args.break_ids,
-                             args.break_logits, args.break_noise)
+                             args.break_logits, args.break_noise, args.break_prompt_stop)
         notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
                      " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
                      " run is not also the first time this file parses a STEP line. Section (d) is"
@@ -419,6 +464,9 @@ def main() -> int:
         if args.break_noise >= 0:
             notes.append(f"injected: generation step {args.break_noise} got 5 % relative noise"
                          " (wrong in aggregate, argmax untouched)")
+        if args.break_prompt_stop >= 0:
+            notes.append(f"injected: the §07.5 stop check fired at prompt step"
+                         f" {args.break_prompt_stop} and ended the run there")
     else:
         print("  $ " + " ".join(cmd))
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -431,17 +479,49 @@ def main() -> int:
     check(True, "decode_run exits 0")
     run = parse_run(stdout)
     check(bool(run["steps"]), "one STEP line per token", f"{len(run['steps'])} lines")
+    if not run["steps"]:
+        notes.append("no STEP lines at all: decode_run printed nothing the gate could parse — read"
+                     " the raw log above (a load failure or a thrown HIP error exits before any step)")
+        return report()
 
     # ---- (a) sampled ids -----------------------------------------------------------------------
     section("(a) sampled token ids — §03.4 greedy, §10.1 G7 exactness")
     prompt_steps = [s for s in run["steps"] if s["kind"] == "prompt"]
     decode_steps = [s for s in run["steps"] if s["kind"] == "decode"]
-    check(len(prompt_steps) == len(prompt_ids), "one step per prompt token",
-          f"{len(prompt_steps)} vs {len(prompt_ids)}")
+    # WHY the prompt came up short, not just that it did. The run log already says what ended it, and
+    # reading that log on a device window is exactly the round trip these two lines exist to skip.
+    if len(prompt_steps) != len(prompt_ids):
+        last = run["steps"][-1] if run["steps"] else {}
+        fired = last.get("stop") == "1"
+        why = (f"{len(prompt_steps)} of {len(prompt_ids)} prompt tokens fed — the run ended early."
+               f" Last STEP: kind={last.get('kind', 'no STEP line at all')}"
+               f" index={last.get('index', '-')} sampled={last.get('sampled', '-')}"
+               f" stop={last.get('stop', '-')}; RESULT: {run['result'] or 'no RESULT line'} — "
+               + ("that last step's §07.5 stop check HAD fired. A stop match during the prompt phase"
+                  " is not a stop: the sample is discarded and the next fed token comes from the"
+                  f" fixture, and a chat prompt legitimately contains the stop id {STOP_ID} (dec8's"
+                  " does, at index 8). `decode_run.cpp` owns the generation-only rule; it is the"
+                  " first device run's bug, reproduced here so it cannot come back quietly"
+                  if fired else
+                  "no stop check on the last step, so this is an early exit or a thrown error rather"
+                  " than §07.5 — read the lines above for the HIP message"))
+    else:
+        why = f"{len(prompt_steps)} vs {len(prompt_ids)}"
+    check(len(prompt_steps) == len(prompt_ids), "one step per prompt token", why)
+    # The same bug seen from the other side, as a standing tripwire: no prompt-phase step may be the one
+    # that fires §07.5. The raw match is NOT the failure here — prompt-phase steps sampling the stop id is
+    # expected on a chat prompt and prints `stop=0` with that id in `sampled=`. `stop=` is what
+    # decode_run's human-readable [STOP] marker means (same printf condition), so this covers it too.
+    prompt_stop = [s for s in prompt_steps if s.get("stop") == "1"]
+    check(not prompt_stop, "no prompt-phase step fires §07.5's stop check",
+          "" if not prompt_stop else
+          f"kind=prompt index={prompt_stop[0].get('index')}"
+          f" sampled={prompt_stop[0].get('sampled')} ended the run; §07.5 arms only during"
+          f" generation (and {STOP_ID} inside a prompt is not news — see decode_run.cpp)")
     check(len(decode_steps) == n_decode, f"{n_decode} generation steps", f"{len(decode_steps)}")
-    check(int(prompt_steps[-1]["sampled"]) == greedy[0],
+    check(int(prompt_steps[-1]["sampled"]) == greedy[0] if prompt_steps else False,
           "the prompt's last token samples greedy_continuation[0]",
-          f"{prompt_steps[-1]['sampled']} vs {greedy[0]}")
+          f"{prompt_steps[-1]['sampled'] if prompt_steps else 'no prompt step ran'} vs {greedy[0]}")
     got_ids = [int(s["sampled"]) for s in decode_steps]
     for j, (g, w) in enumerate(zip(got_ids, greedy[1:])):
         check(g == w, f"generation step {j} samples greedy_continuation[{j + 1}]", f"{g} vs {w}")
@@ -456,7 +536,8 @@ def main() -> int:
           f"positions run {len(prompt_ids)}..{len(prompt_ids) + n_decode - 1} (§02.4's P)",
           f"{positions}")
     if stdout.count("[STOP]") and greedy[-1] not in man["special_ids"].values():
-        notes.append("engine hit the stop token but the manifest's continuation does not")
+        notes.append(f"engine stopped on id {STOP_ID} in the generation phase but the manifest's"
+                     " continuation does not")
 
     # ---- (b) logits ------------------------------------------------------------------------------
     section("(b) logits vs the pinned dumps — band from §10.1 G5 and §10.2")
