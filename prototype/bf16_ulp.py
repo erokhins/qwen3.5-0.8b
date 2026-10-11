@@ -60,6 +60,27 @@ def ulp_dist(a, b) -> np.ndarray:
     return np.abs(monotone_key(bf16_bits(a)) - monotone_key(bf16_bits(b)))
 
 
+def zero_nan(a) -> tuple[int, int]:
+    """How many BF16 elements are zero and how many are NaN, by bit pattern.
+
+    A ULP distance cannot tell these two failures apart: an output of +0 against a pin of -2.39 is
+    ~49 000 ULP, and so is almost any other value that collapsed to nothing. A comparison that
+    prints only `ndiff` and `max ULP` therefore reads the same for "the kernel never wrote real
+    values" (wrong dtype, wrong pointer, kernel that did not run) and "the kernel is slightly off"
+    (a rounding policy), which are different bugs with different fixes. So the counts are read off
+    the pattern: BF16 NaN is exponent all ones with a non-zero mantissa, and ±0 is either sign with
+    the other 15 bits zero (denormals are deliberately NOT counted as zero — they are written
+    values, and a BF16 denormal is exactly what a wrong-dtype weight read produces).
+    """
+    bits = bf16_bits(a).ravel()
+    exp = (bits >> 7) & 0xFF
+    # `bool_mask & int_array` is a bitwise AND, not a logical one: `(exp == 0xFF) & (bits & 0x7F)`
+    # ANDs the mask (0/1) into the mantissa and is 0 for every mantissa but 1. Compare first, then
+    # combine the two masks.
+    nan = (exp == 0xFF) & ((bits & 0x7F) != 0)
+    return int((bits & 0x7FFF == 0).sum()), int(nan.sum())
+
+
 def band_usage(rel, d, ulp_max: int = 1, cancel_rel: float = 1e-4) -> dict:
     """How much of a comparison the cancellation band is actually excusing.
 

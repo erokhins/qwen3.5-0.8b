@@ -172,6 +172,25 @@ def read_out(path: Path, n: int) -> torch.Tensor:
     return torch.from_numpy(np.fromfile(path, dtype=np.uint16)[:n]).view(torch.bfloat16)
 
 
+def print_profile(n_el: int, n_zero: int, n_nan: int, n_pzero: int, n_pnan: int) -> None:
+    """Print the zeros/NaN profile of a gate run, and what that profile means.
+
+    `ndiff 2048/2048, max ULP 49174` is the same headline for two different bugs: a +0 against a pin
+    of -2.39 is ~49 000 ULP, and so is a large-magnitude value that drifted a few thousand ULP. The
+    counts separate them — "the epilogue never saw real values" (weight dtype, wrong pointer, a
+    launch that did not run) from "the rounding policy is wrong" — and they change no verdict.
+    """
+    print("  output profile over %d elements: zeros %d, NaN %d (%.1f %% of the output is neither);"
+          " the pins hold zeros %d, NaN %d"
+          % (n_el, n_zero, n_nan, 100.0 * (n_el - n_zero - n_nan) / max(n_el, 1), n_pzero, n_pnan))
+    if n_zero + n_nan > n_el // 2:
+        print("  MOST of the output is zero or NaN: the epilogue never saw real values, so check"
+              " what the kernel was handed (weight dtype, pointers, whether the launch ran) before"
+              " touching the cast order.")
+    elif n_zero + n_nan > 0:
+        print("  some zeros/NaN in the output: read the per-case counts above before the ULP figure.")
+
+
 def device_gate(with_time: bool) -> int:
     fails: list[str] = []
     with tempfile.TemporaryDirectory() as td:
@@ -186,20 +205,31 @@ def device_gate(with_time: bool) -> int:
         print("\n-- clean run --")
         run_binary(plan, d)
         worst_ulp, worst_ndiff, n_el, tightest = 0, 0, 0, 0.0
+        n_zero = n_nan = n_pzero = n_pnan = n_fail_cases = 0
         clean = {}
         for c in cases:
             got = read_out(c["out"], 2048)
             clean[c["name"]] = dict(gated=got, norm=read_out(c["norm"], 2048))
             rep = bf16_ulp.report(got.float(), c["ref"].float(), ulp_max=1, cancel_rel=1e-4)
+            zero, nan = bf16_ulp.zero_nan(got)
+            p_zero, p_nan = bf16_ulp.zero_nan(c["ref"])
+            n_zero += zero
+            n_nan += nan
+            n_pzero += p_zero
+            n_pnan += p_nan
             worst_ulp = max(worst_ulp, rep["maxulp"])
             worst_ndiff = max(worst_ndiff, rep["ndiff"])
             tightest = max(tightest, rep["worst_off_rel"])
             n_el += rep["n"]
             if rep["n_bad"] or rep["ndiff"] > 0.01 * rep["n"]:
-                fails.append("%s: ndiff %d/%d maxulp %d n_bad %d"
-                             % (c["name"], rep["ndiff"], rep["n"], rep["maxulp"], rep["n_bad"]))
+                n_fail_cases += 1
+                fails.append("%s: ndiff %d/%d maxulp %d n_bad %d | zeros %d nan %d"
+                             % (c["name"], rep["ndiff"], rep["n"], rep["maxulp"], rep["n_bad"],
+                                zero, nan))
         print("  gated_out vs pins over %d elements: worst case ndiff %d/2048, max ULP %d, "
-              "tightest band these results pass at %.1e" % (n_el, worst_ndiff, worst_ulp, tightest))
+              "tightest band these results pass at %.1e"
+              % (n_el, worst_ndiff, worst_ulp, tightest))
+        print_profile(n_el, n_zero, n_nan, n_pzero, n_pnan)
         if worst_ulp > 1:
             fails.append("a gated_out element is more than 1 BF16 ULP from the pin")
 
@@ -212,15 +242,22 @@ def device_gate(with_time: bool) -> int:
             write_plan(plan_neg, [plan_rows(c, c["nout"], c["nnorm"]) for c in cases])
             run_binary(plan_neg, d, neg)
             moved = {s: 0 for s in STAGES}
+            neg_zero = neg_nan = 0
             for c in cases:
                 g = read_out(c["nout"], 2048)
                 nm = read_out(c["nnorm"], 2048)
                 moved["gated_out"] += int((g != clean[c["name"]]["gated"]).sum())
                 moved["norm_pre_gate"] += int((nm != clean[c["name"]]["norm"]).sum())
+                z, na = bf16_ulp.zero_nan(g)
+                neg_zero += z
+                neg_nan += na
             bad = [s for s in must if moved[s] == 0] + [s for s in must_not if moved[s] > 0]
             verdict = "OK" if not bad else "MISCATCHED " + ",".join(bad)
-            print("  %-14s moved gated_out %7d/294912, norm_pre_gate %7d/294912 -> %s"
-                  % (neg, moved["gated_out"], moved["norm_pre_gate"], verdict))
+            # The zeros/NaN pair says the injection moved the value into a wrong-but-real one,
+            # which is a different claim from "moved" alone.
+            print("  %-14s moved gated_out %7d/294912, norm_pre_gate %7d/294912"
+                  " (output zeros %d nan %d) -> %s"
+                  % (neg, moved["gated_out"], moved["norm_pre_gate"], neg_zero, neg_nan, verdict))
             if bad:
                 fails.append("negative %s mislocalised: %s" % (neg, verdict))
 
