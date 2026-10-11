@@ -168,8 +168,9 @@ def main() -> int:
                   % (name, ob["max"], ob["over1"], ob["n"], 100.0 * ob["over1"] / ob["n"],
                      ob["worst_frac"]))
     print("\nRead: a >1 ULP element is a cancellation, not an error - it lands where |ref| is a"
-          "\nrounding-critical fraction of the tensor max. The gate's band (1 ULP on elements"
-          "\nlarger than 1e-4 of the max, aggregates below) is sized on these numbers.")
+          "\nrounding-critical fraction of the tensor max. The gate's rule (1 ULP on elements"
+          "\nlarger than run.py's CANCEL_REL x the max, aggregates below) is sized on these"
+          " numbers.")
 
     if args.perturb:
         print("\noperand sensitivity: %d injected 1-ULP flips in x, what the dot does with them"
