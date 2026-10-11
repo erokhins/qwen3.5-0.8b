@@ -60,6 +60,34 @@ def ulp_dist(a, b) -> np.ndarray:
     return np.abs(monotone_key(bf16_bits(a)) - monotone_key(bf16_bits(b)))
 
 
+def band_usage(rel, d, ulp_max: int = 1, cancel_rel: float = 1e-4) -> dict:
+    """How much of a comparison the cancellation band is actually excusing.
+
+    `rel` is |ref| / max|ref| per element (the scale the band is written against), `d` the ULP
+    distances from `ulp_dist`. Returns:
+
+      n               elements compared
+      n_band          elements the band covers (|ref| <= cancel_rel x max|ref|)
+      n_off           elements further than `ulp_max` (the offenders)
+      n_off_in_band   offenders the band excuses — the only ones a scale-aware gate may forgive
+      worst_off_rel   the largest rel among offenders: **the tightest band these numbers would
+                      pass at**. Anything >= it passes, so a band with no measurement behind it
+                      is a band nobody calibrated. Compare it against `cancel_rel` for margin.
+      in_band         the band mask, so a caller can build its own `bad` without re-spelling
+                      the inequality
+    """
+    rel = np.asarray(rel).ravel()
+    d = np.asarray(d).ravel()
+    if rel.size != d.size:
+        raise ValueError("band_usage: %d values vs %d distances" % (rel.size, d.size))
+    in_band = rel <= cancel_rel
+    off = d > ulp_max
+    return dict(n=int(d.size), n_band=int(in_band.sum()), n_off=int(off.sum()),
+                n_off_in_band=int((off & in_band).sum()),
+                worst_off_rel=float(rel[off].max()) if off.any() else 0.0,
+                in_band=in_band)
+
+
 def report(got, ref, ulp_max: int = 1, cancel_rel: float = 1e-4) -> dict:
     """Compare two BF16-valued tensors.
 
@@ -68,7 +96,10 @@ def report(got, ref, ulp_max: int = 1, cancel_rel: float = 1e-4) -> dict:
     dot that cancelled to 1e-6 of the tensor max moves many ULPs from ordinary F32 summation
     error, and `floor_probe.py` measures that even the exactly-rounded sum disagrees with the
     reference by 4-16 ULP at such elements. So `n_bad` counts only elements that are both far
-    apart and large — a real error shows up there and nothing else does.
+    apart and large — a real error shows up there and nothing else does. `n_band` and
+    `worst_off_rel` (from `band_usage`) say how much of the comparison the band is excusing and
+    how much slack it has; a caller that tightens `cancel_rel` should do it against those two
+    numbers and not against taste.
     """
     d = ulp_dist(got, ref)
     gv = got if isinstance(got, np.ndarray) else np.asarray(got.float().numpy())
@@ -77,15 +108,17 @@ def report(got, ref, ulp_max: int = 1, cancel_rel: float = 1e-4) -> dict:
     rf = rv.astype(np.float64).ravel()
     dd = d.ravel()
     scale = float(np.abs(rf).max()) if rf.size else 0.0
-    big = np.abs(rf) > cancel_rel * scale
-    bad = (dd > ulp_max) & big
+    rel = np.abs(rf) / scale if scale else np.zeros(rf.shape, dtype=np.float64)
+    bu = band_usage(rel, dd, ulp_max, cancel_rel)
+    bad = (dd > ulp_max) & ~bu["in_band"]
     over = np.where(bad, dd, 0)
     denom = np.linalg.norm(gf) * np.linalg.norm(rf)
-    return dict(ndiff=int((dd > 0).sum()), n=int(dd.size),
+    return dict(ndiff=int((dd > 0).sum()), n=bu["n"],
                 maxulp=int(dd.max()) if dd.size else 0, over1=int((dd > 1).sum()),
                 n_bad=int(bad.sum()),
                 worst_bad_ulp=int(over.max()) if bad.any() else 0,
                 worst_bad_rel=float(np.abs(rf[bad]).max() / scale) if bad.any() else 0.0,
+                n_band=bu["n_band"], worst_off_rel=bu["worst_off_rel"],
                 cos=float(gf @ rf / denom if denom else 1.0),
                 meanrel=float(np.abs(gf - rf).mean() / np.abs(rf).mean()))
 

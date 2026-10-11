@@ -48,12 +48,66 @@ Result over 192 cases (`run.py --layers all --fixture dec8`):
 | F4 `out`      | 192 | 86 / 1024 | 85 | 182 | 52 (aggregate-gated) | 0.99999963 | 1.3e-4 |
 
 "gated max ULP" is the distance of the worst element **large enough for a ULP to mean
-something** (|ref| > 1e-4 of the tensor max). "raw max ULP" includes elements that cancelled to
-~1e-6 of the max; the gap between the two columns is the whole subject of the next section.
+something** (|ref| > 3e-5 of the tensor max, see the next section for why that is the number).
+"raw max ULP" includes elements that cancelled to ~1e-6 of the max; the gap between the two
+columns is the whole subject of the next section.
 
 The criteria, in words: no element above the cancellation band may exceed 1 ULP (2 for `act`),
 ≤2 % of elements may differ at all, and the §10.1-class aggregates (cos ≥ 0.9999,
 meanrel ≤ 1e-2) must hold. F4 is judged on aggregates only, for the reason measured below.
+
+## How wide the cancellation band is, and how it got set
+
+The band was `1e-4` because the first version needed *some* number and nothing printed one. It is
+now **3e-5**, sized against three measurements — the first two from `floor_probe.py`, the third
+printed by `run.py` at the end of every run:
+
+| what | worst >1-ULP offender, as a fraction of that tensor's max |
+|---|---|
+| reference's own reordered sums, `gate_pre` (192 cases × 3 reorderings) | 1.1e-6 |
+| reference's own reordered sums, `out` | 6.1e-6 |
+| this kernel, F1/F2/F3, all 192 cases | 8.2e-6 (`up_pre`; gate_pre 8.8e-7, act 9.7e-7, F3 out 2.1e-6) |
+
+A band has to clear all three or it forbids correct arithmetic: 3e-5 clears the worst by 3.7×,
+where 1e-4 cleared it by 12×. Not 1e-5 deliberately — that would leave the whole gate sitting
+1.2× above the worst element ever measured, so one unlucky cancellation on a new fixture would
+read as a kernel bug. Both probes now *report* their margin instead of trusting the constant:
+`floor_probe.py` prints band usage (elements inside the band and how many >1-ULP offenders the
+band excuses — **7 of 7** for `gate_pre`, **10 of 10** for `out`, i.e. the band exempts exactly
+the cancellations and nothing else), and `run.py` prints per output the count of elements inside
+the band and the tightest band those results would pass at:
+
+```
+    gate_pre                0       24        7   8.8e-07      [gated | raw | in-band | tightest]
+    up_pre                  0        8       10   8.2e-06
+    act                     0       24       70   9.7e-07
+    out(ref-act)            0        2        6   2.1e-06
+    out(kernel-act)         0      182        6   -            (aggregate-only: no band to size)
+```
+
+### F4's aggregate bands, measured — they were not measured before
+
+F4 has no per-element rule, so its three aggregates *are* the gate: cos ≥ 0.9999, meanrel ≤ 1e-3,
+ndiff ≤ 15 %. Nothing in the repo computed cos / meanrel / ndiff of a perturbed `out` against the
+pin, which is exactly what F4 compares, so `floor_probe.py` now does it over the same 192 × 8
+survey (the `--perturb` block prints them and the margin against the bands, read from `run.py`):
+
+| `act` perturbation | worst cos | worst meanrel | worst ndiff |
+|---|---|---|---|
+| this kernel's real chain, 192 cases | 0.99999963 | 1.3e-4 | 8.4 % |
+| 1 legal 1-ULP flip, worst of 1536 trials | 0.99999661 | **9.1e-4** | **29.1 %** |
+| 5 legal 1-ULP flips (F2 measures up to 5 per layer-step) | 0.99999615 | **2.0e-3** | **46.8 %** |
+
+So **1e-3 is marginal, not conservative** — and it is not even an upper bound on a legal chain: a
+correct kernel whose `act` differs from the pin by one element can put meanrel at 9.1e-4, and
+five such flips overshoot at 2.0e-3. The ndiff band is overshot by a single flip already. cos is
+the only one of the three with real slack (26×). The kernel passes (1.3e-4, 8.4 %) because its
+`act` flips are not the cancellation-sensitive ones, which is luck of the draw, not a property
+the band measures. Widening them is the right correction but it is a §10.1 decision, not a gate
+tweak, so the bands are **unchanged here** and flagged instead: either F4's meanrel/ndiff move to
+bound what a legal chain can do (~1e-2 / ~50 %), or F4 stops being judged against the pin and is
+judged as `down(kernel act)` vs `down(ref act)` under the same down kernel, which cancels the
+arithmetic sensitivity instead of gating around it.
 
 ## Why the per-element rule is scale-aware — `floor_probe.py`
 
@@ -143,7 +197,7 @@ gate to refuse each **where the bug is and nowhere else**.
 matters most, because it is the difference between matching HF and matching arithmetic. The
 first version of this table was vacuous: the negative runs reused the previous layer's weight
 files, so every injection "was caught" everywhere including where it was impossible. Now each
-injection declares where it may and may not show up.
+injection declares where it may and may not show up, and the declarations are mode-aware.
 
 ## Performance
 

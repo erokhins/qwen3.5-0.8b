@@ -38,35 +38,33 @@ sys.path.insert(0, str(ROOT / "prototype"))
 import bf16_ulp  # noqa: E402
 
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "prototype"))
-import bf16_ulp  # noqa: E402
+def _gate():
+    """The F4 aggregate bands live in `run.py`, because that is what gates them. This probe is
+    what SIZES them, so it reads them from there rather than keeping a second copy that can drift
+    into agreeing with nothing."""
+    import importlib.util
+    p = Path(__file__).resolve().parent / "run.py"
+    spec = importlib.util.spec_from_file_location("mlp_gate", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
-# The band `run.py` (and §10.1) exempts small elements with, and the number this probe exists to
-# keep honest. Read it as "the gate is currently written with this", not as a wish: `--band-scan`
-# prints the tightest value these measurements would still pass at.
-CANCEL_BAND = 1e-4
+# The band belongs to the gate, not to this probe: reading it from run.py means the probe can
+# never report margin against a number the gate no longer uses. Measured here and re-reported by
+# run.py: the reference's own reordered sums put their worst >1 ULP element at |ref|/max 1.1e-6
+# (gate_pre) and 6.1e-6 (out), and the kernel's own comparisons at 8.2e-6, which is what the
+# gate's 3e-5 is sized against (>= 3.6x of margin over both).
+CANCEL_BAND = _gate().CANCEL_REL
 
 
 def ulp_dist(a, b) -> np.ndarray:
     return bf16_ulp.ulp_dist(a, b)
 
 
-def band_stats(ref: np.ndarray, dd: np.ndarray, band: float = CANCEL_BAND) -> dict:
-    """How much of a comparison's >1-ULP distance actually needs the band, and how much slack
-    the band has. `worst_off_rel` is the largest |ref|/max|ref| over ALL offenders (not just the
-    single farthest one), i.e. the tightest band these numbers would pass at: an element passes
-    iff it is outside the band or within 1 ULP, so any band >= that value passes this case."""
-    scale = float(np.abs(ref).max())
-    rel = (np.abs(ref) / scale if scale else np.zeros(np.shape(ref))).ravel()
-    dd = np.asarray(dd).ravel()
-    if rel.size != dd.size:
-        raise ValueError("band_stats: ref has %d elements, distance has %d" % (rel.size, dd.size))
-    off = dd > 1
-    return dict(n=dd.size, n_band=int((rel <= band).sum()), n_off=int(off.sum()),
-                n_off_in_band=int((off & (rel <= band)).sum()),
-                worst_off_rel=float(rel[off].max()) if off.any() else 0.0)
+def rel_of(x: np.ndarray) -> np.ndarray:
+    """|x| / max|x| — the scale the band is written against (bf16_ulp.band_usage takes it)."""
+    scale = float(np.abs(x).max())
+    return np.abs(x) / scale if scale else np.zeros(np.shape(x))
 
 
 def blocked_sum(A: np.ndarray, x: np.ndarray, block: int = 128) -> np.ndarray:
@@ -153,9 +151,10 @@ def main() -> int:
                         np.einsum("ij,j->i", W.double(), x.astype(np.float64)).astype(np.float32))),
                 ]
                 scale = float(np.abs(refs[nm]).max())
+                relref = rel_of(refs[nm])
                 for vname, v in variants:
                     dd = ulp_dist(v, ref)
-                    bs = band_stats(refs[nm], dd)
+                    bs = bf16_ulp.band_usage(relref, dd, 1, CANCEL_BAND)
                     for key_ in ("n_band", "n_off", "n_off_in_band"):
                         h[key_] += bs[key_]
                     h["worst_off_rel"] = max(h["worst_off_rel"], bs["worst_off_rel"])
@@ -208,7 +207,8 @@ def main() -> int:
         rng = np.random.default_rng(7)
         worst = {"ulp": 0, "frac": 1.0, "where": None}
         surv = {"cases": 0, "cases_hit": 0, "trials": 0, "elems": 0, "over1": 0,
-                "over1_in_band": 0, "worst_off_rel": 0.0}
+                "over1_in_band": 0, "worst_off_rel": 0.0,
+                "worst_cos": 1.0, "worst_meanrel": 0.0, "worst_ndiff": 0.0}
         for l in layers:
             for step in steps:
                 p = "%s.L%02d.mlp." % (step, l)
@@ -219,8 +219,13 @@ def main() -> int:
                 Wd = key[pre % l + "down_proj.weight"]
                 orf = out_ref.float().reshape(-1).numpy().astype(np.float64)
                 oscale = float(np.abs(orf).max())
+                orel = rel_of(orf)
                 surv["cases"] += 1
                 case = {"over1": 0, "max": 0, "worst_off_rel": 0.0}
+                # F4 is judged on aggregates, so measure exactly those: what the worst trial of
+                # this case does to cos / meanrel / ndiff of `out` against the pin. Nothing else
+                # in the repo computes them for a perturbed `out`, which is what F4 gates.
+                agg = {"cos": 1.0, "meanrel": 0.0, "ndiff": 0.0}
                 for _ in range(args.trials):
                     idx = rng.choice(act.numel(), args.perturb, replace=False)
                     flat = act.view(-1).clone()
@@ -233,7 +238,13 @@ def main() -> int:
                         torch.bfloat16)
                     got = flat.reshape(act.shape) @ Wd.t()
                     dd = ulp_dist(got, out_ref)
-                    bs = band_stats(orf, dd)
+                    gf = got.float().reshape(-1).numpy().astype(np.float64)
+                    den = float(np.linalg.norm(gf) * np.linalg.norm(orf))
+                    agg["cos"] = min(agg["cos"], float(gf @ orf / den) if den else 1.0)
+                    agg["meanrel"] = max(agg["meanrel"], float(np.abs(gf - orf).mean()
+                                                               / np.abs(orf).mean()))
+                    agg["ndiff"] = max(agg["ndiff"], 100.0 * float((dd != 0).mean()))
+                    bs = bf16_ulp.band_usage(orel, dd, 1, CANCEL_BAND)
                     surv["trials"] += 1
                     surv["elems"] += bs["n"]
                     surv["over1"] += bs["n_off"]
@@ -247,12 +258,17 @@ def main() -> int:
                         worst = {"ulp": int(dd.max()),
                                  "frac": float(abs(orf[i]) / oscale),
                                  "where": "L%02d %s" % (l, step)}
+                surv["worst_cos"] = min(surv["worst_cos"], agg["cos"])
+                surv["worst_meanrel"] = max(surv["worst_meanrel"], agg["meanrel"])
+                surv["worst_ndiff"] = max(surv["worst_ndiff"], agg["ndiff"])
                 if case["over1"]:
                     surv["cases_hit"] += 1
                     print("   L%02d %s: %d >1 ULP out elements over %d trials x %d elements "
-                          "(max %d ULP, worst offender |ref|/max %.1e) from %d 1-ULP act flips"
+                          "(max %d ULP, worst offender |ref|/max %.1e) | cos %.8f meanrel "
+                          "%.2e ndiff %.2f%%  [%d 1-ULP flips]"
                           % (l, step, case["over1"], args.trials, dd.size, case["max"],
-                             case["worst_off_rel"], args.perturb))
+                             case["worst_off_rel"], agg["cos"], agg["meanrel"], agg["ndiff"],
+                             args.perturb))
         print("   survey: %d layer x step cases x %d trials = %d perturbed dots, %d elements"
               % (surv["cases"], args.trials, surv["trials"], surv["elems"]))
         print("   %d/%d cases produced at least one >1 ULP element; %d of %d offenders sit "
@@ -263,6 +279,15 @@ def main() -> int:
               "|ref|/max = %.1e over %d trials/case"
               % (worst["ulp"], worst["frac"], worst["where"], surv["worst_off_rel"],
                  args.trials))
+        g = _gate()
+        print("   F4 aggregates (cos / meanrel / ndiff of a perturbed `out` against the pin), "
+              "worst over the same survey: cos %.8f, meanrel %.2e, ndiff %.2f%%"
+              % (surv["worst_cos"], surv["worst_meanrel"], surv["worst_ndiff"]))
+        print("   gate bands: cos >= %.4f (%.0fx of slack in 1-cos), meanrel <= %.1e (%.0fx), "
+              "ndiff <= %.0f%% (%.1fx)"
+              % (g.F4_COS_MIN, (1 - g.F4_COS_MIN) / max(1 - surv["worst_cos"], 1e-16),
+                 g.F4_MEANREL_MAX, g.F4_MEANREL_MAX / max(surv["worst_meanrel"], 1e-300),
+                 g.F4_NDIFF_PCT_MAX, g.F4_NDIFF_PCT_MAX / max(surv["worst_ndiff"], 1e-300)))
     return 0
 
 

@@ -42,7 +42,7 @@ outputs BF16 unless the spec pins F32.
 | **G8 MTP** | §09.5: bit-exact loop with sequential verify + accept rate across the three readings of §09 | accept ≥ 0.30 and the §09 reading strictly best; speculative output and target state bit-identical to plain greedy when verify reuses the decode path |
 | **G-neg negative controls** | `speccheck/gates/run_negative.py` injects three plausible bugs (wrong `q`/`gate` de-interleave, conv window written before it is read, GDN state not persisted) and asserts the pins *stop* matching, and still match when clean | each injection must drop its canary below cos 0.999 |
 | **G9 perf** | decode tok/s on this box vs the §07.4 roofline (~135 tok/s); `-O2` build only | report; investigate below 60 % |
-| **F1–F4 MLP decode path** | `prototype/mlp_gemv/run.py`, against the MLP pins (`decode{N}.L{ii}.mlp.{in,gate_pre,up_pre,act,out}`). F1 `gate_pre`/`up_pre` (two independent dots), F2 `act` (the SwiGLU rounding policy), F3 `out` from the *reference* `act` (isolates `down_proj` from everything upstream), F4 `out` from the *kernel's* `act` (the chain a real token runs), plus a cross-check of `speccheck.layers.mlp` against the same pins | no element above 1e-4 of the tensor max may exceed 1 BF16 ULP (2 for `act`); ≤2 % of elements differ; G3i-class cos ≥ 0.9999, meanrel ≤ 1e-2. F4 is aggregate-only (cos ≥ 0.9999, meanrel ≤ 1e-3) — see below |
+| **F1–F4 MLP decode path** | `prototype/mlp_gemv/run.py`, against the MLP pins (`decode{N}.L{ii}.mlp.{in,gate_pre,up_pre,act,out}`). F1 `gate_pre`/`up_pre` (two independent dots), F2 `act` (the SwiGLU rounding policy), F3 `out` from the *reference* `act` (isolates `down_proj` from everything upstream), F4 `out` from the *kernel's* `act` (the chain a real token runs), plus a cross-check of `speccheck.layers.mlp` against the same pins | no element above 3e-5 of the tensor max may exceed 1 BF16 ULP (2 for `act`); ≤2 % of elements differ; G3i-class cos ≥ 0.9999, meanrel ≤ 1e-2. F4 is aggregate-only (cos ≥ 0.9999, meanrel ≤ 1e-3, ndiff ≤ 15 %) — see below |
 
 The MLP gate is the one place where a per-element ULP bound had to be derived rather than
 assumed, and `prototype/mlp_gemv/floor_probe.py` is where it comes from: reordering the
@@ -56,6 +56,21 @@ elements; worst 28 665 ULP). Most of those offenders are not small elements — 
 0.13 of the tensor max — so judging F4 per-element would judge the sensitivity of a 3584-term dot,
 not the kernel. `prototype/mlp_gemv/floor_probe.py --layers all` prints all of this, with the trial
 count on the line, because a worst-of-N is not a bound until N is next to it.
+
+Both numbers in that row are now measured rather than assumed. The **3e-5 cancellation band** is
+the tightest round value that clears every >1-ULP offender ever measured: 1.1e-6 (`gate_pre`) and
+6.1e-6 (`out`) from the reference's own reordered sums, 8.2e-6 from this kernel — 3.7× of margin,
+down from the 12× the original guessed 1e-4 left. `run.py` prints the kernel's own worst offender
+and the tightest band its results would pass at on every run, so the number cannot silently rot.
+The **F4 aggregates are the weak part of this gate, and are measured as marginal**: over the same
+192 × 8 perturbation survey, one legal 1-ULP `act` flip reaches meanrel 9.1e-4 against a 1e-3 band
+(five flips, which F2 says is legal, reach 2.0e-3) and 29 % ndiff against a 15 % band, while cos
+keeps 26× of slack. The kernel passes comfortably (worst meanrel 1.3e-4) because its `act` flips
+land on benign elements, not because the band bounds what a correct chain can do. Leaving that
+band alone is a deliberate choice — widening a band is not this gate's call to make — but it means
+F4 can reject a correct kernel, and the alternative formulation (judge `down(kernel act)` against
+`down(ref act)` under the same down kernel, which cancels the sensitivity instead of gating around
+it) is the open question for §10's owner.
 
 ## 10.2 Metrics, drift, and what drift does *not* mean
 

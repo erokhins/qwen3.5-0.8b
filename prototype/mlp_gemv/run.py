@@ -52,6 +52,21 @@ BIN = Path(__file__).resolve().parent / "mlp_gemv"
 WORK = Path("/tmp/mlp_gemv")
 PROBE_GBS = 237.0
 FF, HID = 3584, 1024
+# The cancellation band: below this fraction of the tensor max, a BF16 ULP distance is not
+# evidence of anything (see judge() and floor_probe.py). Measured, not chosen. The worst >1-ULP
+# offender over the reference's own reordered sums is at |ref|/max 1.1e-6 (gate_pre) and 6.1e-6
+# (out) across 192 layer x step cases x 3 reorderings, and the worst one this kernel produces is
+# 8.2e-6 (printed at the end of every run); 3e-5 clears both by >= 3.6x. It was 1e-4 from the
+# first version, which was a guess that happened to be 12x looser than the data required.
+# Tightening it further is a gate change and has to clear both numbers again.
+CANCEL_REL = 3e-5
+# F4 is the chain (down applied to the kernel's own act) and has no per-element rule — the
+# perturbation survey in floor_probe.py shows why. These aggregates ARE the gate, and the same
+# probe sizes them: it prints the worst cos / meanrel / ndiff a legal 1-ULP `act` difference can
+# produce, with the margin these three numbers leave.
+F4_COS_MIN = 0.9999
+F4_MEANREL_MAX = 1e-3
+F4_NDIFF_PCT_MAX = 15.0
 WPK = "model.language_model.layers.%d.mlp."    # checkpoint key prefix (plain ints, not %02d)
 # §01.7: the MLP is 0.5285 GB/token; at the probe bandwidth that is 2.230 ms/token.
 MLP_BYTES_PER_TOKEN = 24 * (2 * FF * HID + HID * FF) * 2
@@ -77,14 +92,17 @@ def read_bf16(path: Path, n: int) -> torch.Tensor:
 def compare(got: torch.Tensor, ref: torch.Tensor, **kw) -> dict:
     """BF16 ULP distance via the shared comparator (prototype/bf16_ulp.py — read its
     docstring before writing a new one) plus the §10.1 metrics."""
+    kw.setdefault("cancel_rel", CANCEL_REL)
     return bf16_ulp.report(got, ref, **kw)
 
 
 def fmt(c: dict) -> str:
     return ("ndiff %5d/%d (%.3f%%) max %d ULP | over-tol large elements: %d "
-            "(worst %d ULP at |ref|/max %.1e) | cos %.8f meanrel %.2e"
+            "(worst %d ULP at |ref|/max %.1e) | cos %.8f meanrel %.2e | in-band %d "
+            "tightest band %.1e"
             % (c["ndiff"], c["n"], 100.0 * c["ndiff"] / c["n"], c["maxulp"], c["n_bad"],
-               c["worst_bad_ulp"], c["worst_bad_rel"], c["cos"], c["meanrel"]))
+               c["worst_bad_ulp"], c["worst_bad_rel"], c["cos"], c["meanrel"],
+               c["n_band"], c["worst_off_rel"]))
 
 
 def judge(tag: str, c: dict, fails: list[str], worst: dict, ndiff_pct_max=2.0,
@@ -112,9 +130,16 @@ def judge(tag: str, c: dict, fails: list[str], worst: dict, ndiff_pct_max=2.0,
     """
     print("    %-22s %s" % (tag, fmt(c)))
     key = tag.split()[-1]
-    prev = worst.setdefault(key, [0, 0])      # [worst over large elements, raw worst]
+    # [worst over large elements, raw worst, elements inside the band, tightest band these
+    #  results pass at (per-element-gated outputs only)]
+    prev = worst.setdefault(key, [0, 0, 0, 0.0])
     prev[0] = max(prev[0], c["worst_bad_ulp"] if ulp_gate else 0)
     prev[1] = max(prev[1], c["maxulp"])
+    prev[2] = max(prev[2], c["n_band"])
+    # A comparison with no per-element ULP rule has no band to size; recording one there would
+    # invite someone to tighten a gate that never used it.
+    if ulp_gate:
+        prev[3] = max(prev[3], c["worst_off_rel"])
     if ulp_gate and c["n_bad"]:
         fails.append("%s: %d large element(s) differ by >%d ULP (worst %d ULP at |ref|/max %.1e)"
                      % (tag, c["n_bad"], ulp_max, c["worst_bad_ulp"], c["worst_bad_rel"]))
@@ -145,7 +170,10 @@ NEG_DESCRIPTIONS = {
     # Each of these is a plausible way to write this kernel wrong. The gate must refuse all of
     # them, or it is not verifying anything (speccheck/gates/run_negative.py set the precedent).
     "half": "accumulate only half of K: a wrong reduction length",
+    "tail": "drop the LAST word of K (8 of 1024 terms): an off-by-one bound",
     "trunc": "round toward zero instead of round-to-nearest-even",
+    "rowswap": "write each finished row into its neighbour's slot: right dots, wrong index",
+    "preswap": "stage gate into the up slot: `act` correct, both raw dumps each other's",
     "f32act": "do the SwiGLU entirely in F32, the literal A-07 reading (ulp_probe.py shows "
               "the reference rounds twice; this is the only one of the three the raw "
               "max-ULP-on-small-elements test would have missed)",
@@ -313,7 +341,8 @@ def main() -> int:
                         "--rows", str(args.rows)], "chain", quiet=True)
                 judge("%s F4 out(kernel-act)" % step,
                       compare(read_bf16(WORK / "out_chain.bin", HID), refs["out"]),
-                      fails, worst, ulp_gate=False, ndiff_pct_max=15.0, meanrel_max=1e-3)
+                      fails, worst, ulp_gate=False, ndiff_pct_max=F4_NDIFF_PCT_MAX,
+                      meanrel_max=F4_MEANREL_MAX, cos_min=F4_COS_MIN)
 
         # cross-check speccheck's own MLP against the reference on this layer's first step
         x = torch.from_numpy(np.load(d / ("%s.L%02d.mlp.in.npy" % (steps[0], l)))) \
@@ -472,16 +501,28 @@ def main() -> int:
                      MLP_BYTES_PER_TOKEN / PROBE_GBS / 1e6))
 
     print("\nworst BF16 ULP distance by output -- gated (large elements only) | raw (including"
-          " the cancelling elements floor_probe.py attributes to arithmetic, not error):")
-    for k, (bad, raw) in worst.items():
-        print("    %-20s %4d   %6d" % (k, bad, raw))
+          " the cancelling elements floor_probe.py attributes to arithmetic, not error) | the"
+          " most elements any one comparison put inside the %g band | the tightest band these"
+          " results would still pass at:" % CANCEL_REL)
+    band_slack = None
+    for k, (bad, raw, nband, minband) in worst.items():
+        print("    %-20s %4d   %6d   %6d   %s" % (k, bad, raw, nband,
+                                                  "%.1e" % minband if minband else "-"))
+        if minband:
+            band_slack = min(band_slack or 1e9, CANCEL_REL / minband)
+    if band_slack:
+        print("    band in use: |ref|/max <= %g, worst offender anywhere above it: %.1e -> %.0fx "
+              "of slack. floor_probe.py puts the reference's own reordering floor at 1.1e-6 "
+              "(gate_pre) and 6.1e-6 (out); a tighter band has to clear BOTH numbers."
+              % (CANCEL_REL, max(v[3] for v in worst.values()), band_slack))
     if fails:
         print("\nFAIL (%d)" % len(fails))
         for f in fails[:20]:
             print("  -", f)
         return 1
     print("PASS: the §03.3 MLP reproduces the reference operands. What that means here:")
-    print("  * F1/F2/F3 (each output from the REFERENCE operands): no element larger than 1e-4")
+    print("  * F1/F2/F3 (each output from the REFERENCE operands): no element larger than %g"
+          % CANCEL_REL)
     print("    of the tensor max differs by >1 BF16 ULP; <=2 % of elements differ at all; and")
     print("    the §10.1 class gates hold (cos >= 0.9999, meanrel <= 1e-2). floor_probe.py is")
     print("    what sets the 1-ULP-with-a-cancellation-band rule: reordering the reference's")
