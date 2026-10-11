@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Interactive chat on the HIP engine, with per-turn stats.
+#
+#   engine/chat.sh                      # REPL
+#   engine/chat.sh --prompt "..."       # one answer, then exit
+#   engine/chat.sh --max-new 32         # cap generation length
+#   engine/chat.sh --ignore-lock        # start even while the GPU lock is held
+#
+# This drives the COMPILED ENGINE — `engine/build/decode_run --session` — not the torch
+# CPU reference. The weights and the per-request state (GDN state + conv window + KV,
+# engine/state.h) live on the GPU for the whole session, so a turn is one decode_step per
+# token with no reload and no re-prefill of the transcript. `speccheck/chat.sh` is the
+# other implementation's driver and the one that validates specification/02..07.
+#
+# The tok/s and TTFT this prints are the engine's own wall clock on a box that is also
+# serving this session's tokens. They are NOT ledger numbers: bench/performance-status.md
+# §6 defines the clean window a number has to come from (zero subagents, exclusive,
+# blocking), and a chat session is none of those.
+#
+# One device, one holder: there is no thread knob here (the torch CPU original sets
+# OMP_NUM_THREADS because torch oversubscribes this box; the engine's parallelism is its
+# kernel block counts). What it does need is the one-device rule — the GPU is already
+# running flash_serve, and a measurement taken alongside a chat session is contaminated in
+# both directions. So chat.py takes tools/gpu_lock.sh for its lifetime and refuses to
+# start, or to keep going, while someone else holds it.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(dirname "$here")"
+py="$root/.venv/bin/python"
+
+if [[ ! -x "$py" ]]; then
+  echo "no venv at $py — create it first:" >&2
+  echo "  python3 -m venv .venv && .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu && .venv/bin/pip install transformers safetensors numpy" >&2
+  exit 1
+fi
+if [[ ! -d "$root/models/Qwen3.5-0.8B" ]]; then
+  echo "no checkpoint at $root/models/Qwen3.5-0.8B — get it with:" >&2
+  echo "  hf download Qwen/Qwen3.5-0.8B --local-dir models/Qwen3.5-0.8B" >&2
+  exit 1
+fi
+if [[ ! -x "$here/build/decode_run" ]]; then
+  echo "no engine binary at $here/build/decode_run — build it with:" >&2
+  echo "  bash engine/build.sh" >&2
+  exit 1
+fi
+
+exec "$py" "$here/chat.py" "$@"
