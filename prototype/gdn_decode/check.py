@@ -17,6 +17,19 @@ and keeps whichever reproduces the pinned beta — a wrong choice shows up immed
 gate failure rather than as a silent fudge factor.
 
     .venv/bin/python prototype/gdn_decode/check.py
+    .venv/bin/python prototype/gdn_decode/check.py --iters 200 \
+        --work-dir /tmp/gdn_in --out-dir /tmp/gdn_out
+
+The fixture this assembles is written to `--work-dir` and left in place, so the raw binary is
+runnable against it afterwards — which is what makes the timing rows in
+`bench/commit-review-2026-10-11.md` §4 reproducible as written:
+
+    prototype/gdn_decode/gdn_decode --mode all --dir <work-dir> --out <out-dir> --layers 18 \
+        --iters 200 --trials 5
+
+`gdn_decode` on its own is not: it reads `q_all.f32`/`S_all.f32`/… and has no fixture of its own, so
+`--dir`/`--out` must point at a directory this script filled (`--mode rec` is single-layer by
+construction and reads `q.f32`/`S.f32` from the same place).
 """
 from __future__ import annotations
 
@@ -143,11 +156,17 @@ def report(label: str, got: np.ndarray, ref: np.ndarray, tol: float, fails: list
 
 
 def main() -> int:
-    global ITERS
+    global ITERS, WORK, OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--iters", type=int, default=20)
+    # The binary takes its fixture by directory; naming the directories here is what lets a doc
+    # hand over a raw `gdn_decode …` command that actually runs (see the module docstring).
+    ap.add_argument("--work-dir", type=Path, default=WORK,
+                    help="where the assembled inputs go — the binary's --dir (default %(default)s)")
+    ap.add_argument("--out-dir", type=Path, default=OUT,
+                    help="where kernel output goes — the binary's --out (default %(default)s)")
     args = ap.parse_args()
-    ITERS = args.iters
+    ITERS, WORK, OUT = args.iters, args.work_dir, args.out_dir
     WORK.mkdir(parents=True, exist_ok=True)
     OUT.mkdir(parents=True, exist_ok=True)
     if not BIN.exists():
@@ -318,6 +337,16 @@ def main() -> int:
             print("  -", f)
         return 1
     print("PASS: all four GDN decode functions match the reference dumps")
+    print("\nFixture left assembled in %s (kernel output in %s). The timing rows re-run against it\n"
+          "without rebuilding anything — the same three commands the §4 hand-off list carries, and\n"
+          "`--mode rec` is one layer whatever --layers says (the binary forces L=1 there):"
+          % (WORK, OUT))
+    for cmd in ("%s --mode all --dir %s --out %s --layers %d --iters 200 --trials 5"
+                % (BIN, WORK, OUT, len(GDN_LAYERS)),
+                "%s --mode rec --dir %s --out %s --iters 200 --trials 5" % (BIN, WORK, OUT),
+                "%s --mode all --dir %s --out %s --layers %d --iters 1 --trials 20 --restore-each"
+                % (BIN, WORK, OUT, len(GDN_LAYERS))):
+        print("  " + cmd)
     return 0
 
 
