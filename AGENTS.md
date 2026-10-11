@@ -68,14 +68,25 @@ own serving — is contaminated, and a contaminated number is worse than no numb
 
 Therefore, as a hard rule:
 
-- **Subagents do not touch the GPU.** No HIP execution, no gate run that launches a kernel, no
-  negative test, no timing sweep, no `hipcc`-then-run. Workers write the kernel, the gate script and
-  the CPU-side reference work (pins, torch references, band sizing from dumps), and **hand off the
-  exact command lines** they could not run.
-- **The main agent runs every GPU command**, and only while **zero subagents are active**. That
-  includes correctness gates, not just performance numbers — a device gate that runs alongside other
-  agents can still be a valid correctness result, but it cannot be a trustworthy timing, and there
-  is no way to tell afterwards which it was.
+- **Subagents may run short correctness-only device gates.** A worker may execute a device check that
+  answers PASS/FAIL — a gate, a negative test, a parity diff, `--selftest`, one step of a loop — as long
+  as **all** of these hold:
+  - **under ~60 s wall.** If it does not fit, stop and hand the command to the main agent instead; a
+    long worker-held device run is what starves everyone else's tokens.
+  - **correctness only, never timing.** No bursts, no best-of-N, no warm loops, no sweeps, no `ms`
+    figure in its report. Contention cannot corrupt a deterministic result (these gates have no
+    atomics), but it corrupts every timing, and a contaminated number is worse than no number.
+  - **no number from a worker device run enters a timing doc.** `bench/performance-status.md` and any
+    `results.md` perf row are main-agent-only, because only the main agent runs with the box provably
+    exclusive.
+  - **it reports what it ran**: the exact command line, wall time, `tools/gpu_lock.sh util` at the time,
+    and an explicit "no timing taken". An unattributed device result is not a result.
+  - **the one-at-a-time rule still binds it**: it must not launch a device run while another subagent is
+    active. Same cap as everything else.
+- **The main agent still owns every measurement**: any timing, anything that enters the ledger, and any
+  gate that cannot finish inside a minute — run while **zero subagents are active**, blocking, never
+  backgrounded. The reason for the split is cost: three of today's five device bugs each needed a
+  stop/brief/resume round trip purely because the worker could not run its own one-second gate.
 - `tools/gpu_lock.sh` still applies (acquire/release by TAG, record `util`), but it is now the second
   line of defence, not the first: the first is that nothing else is running at all.
 - **One subagent at a time, and it must be STOPPED for the main agent to measure.** An idle-but-alive
