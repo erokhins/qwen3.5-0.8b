@@ -74,6 +74,15 @@ Therefore, as a hard rule:
   is no way to tell afterwards which it was.
 - `tools/gpu_lock.sh` still applies (acquire/release by TAG, record `util`), but it is now the second
   line of defence, not the first: the first is that nothing else is running at all.
+- **One subagent at a time, and it must be STOPPED for the main agent to measure.** An idle-but-alive
+  child still streams from the same endpoint, so "zero subagents active" means stopped/paused, not
+  merely quiet between steps. The working cycle is therefore: brief one worker → it does all code,
+  analysis and CPU-side verification → **stop it** → main agent runs the device commands it handed over,
+  in the foreground → resume it with the results. Budget for a worker's device-dependent steps being
+  deferred by construction.
+- **Division of labour.** The main agent steers: briefs, sequencing, gate-policy decisions, the device
+  pass, and commit hygiene. Subagents do the actual work — kernels, gates, references, review, docs —
+  including CPU test runs. The main agent does not implement while a worker could.
 - **Run device commands *blocking*, never backgrounded.** A foreground bash call suspends this session's
   token generation, so `flash_serve` — which busy-polls the iGPU and is the source of the interference —
   has nothing to emit for the duration. Backgrounded runs (`&`, `nohup`, `bg_wait`) keep the stream alive
