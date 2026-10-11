@@ -144,3 +144,149 @@ Priority commits first, then the rest that carry a measurement, a gate, or a num
 | `a72bbf5` (mlp F4 bands) | F4 judged by cos/meanrel with a measured legal floor; ndiff removed as blind for chains | `run.py:81-82`: `F4_COS_MIN=0.9999` ("measured legal worst 0.99999615 → 26×"), `F4_MEANREL_MAX=5e-3` ("measured legal worst 2.01e-3 → 2.5×"). Both moved **up** from 0.9999/1e-3, and the old `ndiff ≤ 15 %` rule was **deleted** because one legal 1-ULP act flip measured 29.1 %. See §2 | **OVERSTATED if read as "no band was moved"** — see §2 answer |
 | `f49df71`, `5536d71`, `a008805`, `ea2e175` (mlp negatives / probes / "measurement behind every tolerance") | 6 negatives with must-catch and must-NOT-catch; floor probe sizes the band | `NEG_KERNEL` entries with per-negative must/must-not sets asserted in `run.py`; `ulp_probe.py` has the `uint16` dead-branch trap fixed and a selftest; F4's negative `f32act` measures 4.14e-3, i.e. **inside** the new 5e-3 band | CONFIRMED; the F4 blind spot is real and is named in §2 |
 | `c12
+
+---
+
+## §2 — Band-tolerance history (re-derived 2026-10-11, worker)
+
+*Header note: of the three sections the truncation lost, §3 (message-vs-code detail) is in fact the
+verdict table in §1 above, which arrived complete — its "what the code actually does" column is that
+detail. Only §2 and §4 were genuinely missing, and both are below.*
+
+The question this section exists to answer: **was any band raised today to make something pass?**
+It is re-derived, not remembered, by a tool:
+
+```
+.venv/bin/python tools/band_history.py --since "2026-10-11 00:00"
+```
+
+`tools/band_history.py` walks every commit today that touched a gate file (`prototype/*/run.py`,
+`*/check.py`, `*/floor_probe.py`, `*/reference.py`, `speccheck/gates/*.py`), reads that revision's
+thresholds out of the file itself — both named constants and call-site thresholds (`ulp_max=`,
+`cancel_rel=`, `--floor`, inline `cos < …` comparisons) — and prints only the places where a value
+moved, with the commit that moved it. A threshold that first appears in a file created today is
+counted as **new**, not loosened; that distinction is the whole point. Every prototype gate in this
+repo was written today — `git ls-tree e0bb0f0 prototype/` is empty, i.e. all seven op directories
+(`gdn_decode`, `gdn_gated_norm`, `glue`, `attn_decode`, `proj_gemv`, `mlp_gemv`, `lm_head_gemv`)
+appeared on 2026-10-11 — and only `speccheck/gates/` predates it. Writing a band is not widening one. Read-only, no device.
+
+Its output at this HEAD, verbatim:
+
+```
+since 2026-10-11 00:00 | gate files touched: 12 | threshold constants first seen today: 8
+
+== pass 1: named threshold constants that MOVED ==
+  prototype/mlp_gemv/floor_probe.py  CANCEL_BAND       1e-4   -> (deleted)     ea2e175
+  prototype/mlp_gemv/run.py          F4_MEANREL_MAX    1e-3   -> 5e-3          RAISED (looser)  a72bbf5
+  prototype/mlp_gemv/run.py          F4_NDIFF_PCT_MAX  15.0   -> (deleted)     DELETED the criterion  a72bbf5
+```
+
+**Plain answer: one band was raised, and two criteria were deleted — all three inside
+`prototype/mlp_gemv`, and the raise was justified by a measured legal floor, not by a gate that
+needed to go green. Nothing moved anywhere else, including nothing in `speccheck/gates/`.**
+
+| commit (time) | file | threshold | before → after | direction |
+|---|---|---|---|---|
+| `ea2e175` 06:15 | `prototype/mlp_gemv/floor_probe.py` | `CANCEL_BAND` | `1e-4` → gone | the gate-side band became `CANCEL_REL = 3e-5` (§10.1 convention) — **tighter**, and the gate now prints the tightest band its own measurements would still pass, so a later loosening is visible |
+| `a72bbf5` 07:23 | `prototype/mlp_gemv/run.py` | `F4_MEANREL_MAX` | `1e-3` → `5e-3` | **raised** |
+| `a72bbf5` 07:23 | `prototype/mlp_gemv/run.py` | `F4_NDIFF_PCT_MAX` | `15.0` → gone | criterion deleted, not inflated |
+
+Everything else that looks like a band change today is line churn or a new file: `f49df71` moved
+lines around `ulp_max=2` without changing the number, and the eight constants first seen today
+(`glue`/`attn_decode`'s `CANCEL_REL = 3e-5`, `lm_head_gemv`'s `COS_MIN/MEANREL_MAX`, the projection
+gate's bands, `gdn_gated_norm`'s 1 % ndiff on `z`, …) arrived with the gates that use them. Nothing
+in `speccheck/gates/` — the only gate tree that predates today — moved at all.
+
+The half worth reading is what was **not** loosened, because that is the discipline this question is
+testing for:
+
+- `517f611` changed `specimpl.apply_rope` and turned G6 and the G3-smoke bands red; `d06b4e3`
+  **reverted the oracle**, it did not widen the two bands that caught the change. The bands encoded
+  real plumbing (G6 above) and behaved like a tripwire.
+- `573bf3b` corrected A-15 in `specification/ASSUMPTIONS.md` to match the measured G7 corpus floor
+  (0.8776): the *document* moved to the measurement, not the band to the code. G7's floor still has
+  no headroom — a standing risk, not a loosening.
+- Eight new gates shipped today with bands that cite a floor probe beside them; `glue` and
+  `attn_decode` both print "tightest band that would pass" so the margin is on the record, and
+  `gdn_gated_norm`'s `--mirror` now asserts its ndiff-0 claim live (that assertion was added in this
+  scrub, `4ff2485`).
+
+### The one real loosening: `a72bbf5` (mlp_gemv F4), and whether it was measurement or convenience
+
+Verdict: **measurement.** `prototype/mlp_gemv/results.md` §"F4's aggregate bands: measured, and then
+moved" carries the numbers, and they are reproducible with `floor_probe.py --perturb K --trials 8`
+over the same 192 layer × step cases × 8 fixed trials (1 536 perturbed dots, seed 7):
+
+| `act` → `out` chain, worst over 1 536 dots | worst cos | worst meanrel | worst ndiff |
+|---|---|---|---|
+| 1 legal 1-ULP flip | 0.99999661 | 9.12e-4 | 29.1 % |
+| 5 legal 1-ULP flips (F2 measures up to 5 per layer-step) | 0.99999615 | **2.01e-3** | **46.8 %** |
+| this kernel's real chain, same 192 cases | 0.99999963 | 1.25e-4 | 8.4 % |
+
+The old bands (cos ≥ 0.9999, meanrel ≤ 1e-3, ndiff ≤ 15 %) were **below the measured legal floor**:
+meanrel 1e-3 left an 8 % cushion on a single legal flip and would have rejected a kernel with five,
+and ndiff 15 % is under *half* the legal single-flip value. Those bands did not catch wrong kernels,
+they rejected correct ones. What `a72bbf5` then did is the disciplined version of a loosening:
+
+- **cos untouched** at 0.9999 — the strongest of the three, with 26× of slack in 1 − cos against the
+  measured legal worst.
+- **meanrel ≤ 5e-3** = 2.5× the measured worst, with the sample size recorded next to the number and
+  the instruction that "if this band is ever tightened, the thing to change is the survey size, not
+  the multiplier".
+- **ndiff deleted rather than inflated.** A band wide enough to admit 47 % ndiff (~50 %) states
+  nothing that cos and meanrel do not already state; keeping the criterion alive by widening it to
+  uselessness was the convenience option and was declined.
+- The gate was re-run after the move (`--layers all --fixture dec8 --no-time --tile 0 --negative`)
+  and all six negatives are still rejected where they are declared and nowhere else.
+
+**The blind spot is real and is named, and it is worth keeping named.** F4 is now a gross-error net
+with a floor of ~5e-3 meanrel, and one of its own six declared negatives — `f32act`, "do the SwiGLU
+entirely in F32", i.e. a *policy* bug and the literal A-07 reading, not a rounding accident — moves
+the chain by **4.14e-3, inside that floor**, so F4's runtime bands no longer reject it. Two things
+keep that from being a hole:
+
+1. on the shipped path the bug is caught at **F2 `act`** (40.4 % ndiff against a 2 % rule, a 20×
+   margin), which is also where the bug lives; and
+2. the negative suite still *requires* `f32act` to be caught at `out(chain)` — because `judge_neg()`
+   asks whether the observation violates the **per-element §10.1 criteria** (over-tolerance ULP
+   outside the cancellation band, ndiff > 2 %, cos < 0.9999, meanrel > 1e-2) rather than F4's loose
+   aggregates. At `out(chain)` `f32act` measures 303/1024 over-tolerance elements and ndiff 64.2 %,
+   so it is caught. Note the asymmetry rather than reading it as F4 being stricter than it looks: the
+   negative answers "did the bug reach the value the engine returns", not "would F4's band flag it".
+
+Residual risk this section adds to the books (not in the audit above): the gate's ability to reject a
+1-ULP-class epilogue **policy** bug now rests entirely on F2's per-element `act` rule. If that rule is
+ever relaxed with the same "chains are chaotic" argument that removed F4's ndiff — most likely during
+the MFma/ML-IP epilogue rewrite, which changes exactly this code — `f32act` becomes invisible to the
+whole gate. Any change to F2 must re-run `--negative f32act` and show it still rejected, citing this
+section.
+
+---
+
+## §4 — Device hand-off, in order
+
+Nothing in this list was run by this worker: GPU execution was out of bounds for the whole scrub.
+Preconditions, per `AGENTS.md`: **zero active subagents**, every command **blocking and foreground**
+(a backgrounded run keeps this session's token stream alive and contaminates itself), `gpu_lock.sh`
+acquired and released by TAG, `util` recorded and then discounted. Builds and the CPU checks need no
+lock and can run any time.
+
+| # | command | expected | failure criterion / what to do |
+|---|---|---|---|
+| 0 | `bash engine/build.sh` and each `prototype/*/build.sh` | silent success | `gdn_decode.hip.cpp` changed in `ddfd040`, so it must be rebuilt before 4 |
+| 1 | `.venv/bin/python speccheck/run_all.py` (**CPU only**) | `26 gates run, 0 failed` | green at every commit of this scrub; re-run after `engine/decode_step.cpp` lands or if `specimpl.py` changes |
+| 2 | `bash engine/build.sh && ./engine/loader_test --no-verify` | `335 tensors / 1.5457 GB resident`, tied `lm_head` aliased not copied, PASS, ≈7 s (`engine/README.md:126`) | this is the residency gate `engine/results.md`'s status line rests on (52 checks); re-run it here so the scrub's TU changes are covered on device. If the tensor count or the 1.5457 GB total moves, the §01.7 pin is wrong, not the loader — then run it without `--no-verify` for byte verification |
+| 3 | **E1** — `.venv/bin/python prototype/glue/run.py --threads 1024 --fixture dec8 --layers all --negative` | PASS at the same ndiff floor the gate measured at 256 threads (3/393216), F2/F4 clean | thread count changes the F32 summation order of `glue_add_norm`, so this is the first time the engine's reduction order runs. Anything above the recorded floor → `kernels_glue.cpp` must pin `<256>` (done in `6592a77`) and the E1 experiment has to be re-run at each candidate before the launcher moves |
+| 4 | **E2** — `.venv/bin/python prototype/proj_gemv/run.py --time --sweep` | cold **unpacked ≈ 2.99 ms / 66 %** of the read probe, cold **packed ≈ 3.27 ms / 60 %**, at `rows=8` | `PACK_X=false` was chosen on those two numbers, but they were taken on `prototype/proj_gemv`'s host at its own geometry, and unpacked `x` hands ≈48 cast launches/token (≈0.089 ms at the 1.85 µs floor) back to the engine — the ordering has never been measured on the engine's own launcher and cannot be until `decode_step` exists (`engine/results.md` E2). If packed-with-casts wins here, `false` is the wrong constant and `kernels_proj.cpp`'s comment must carry the engine's number, not the prototype's |
+| 5 | `prototype/gdn_decode/build.sh && prototype/gdn_decode/gdn_decode --mode all --iters 200 --trials 5` | ≈0.06 ms burst best for the four-layer chunk, plus rec-only and worst/spread columns | a burst of exactly `0.000 ms` = the timer, not the kernel — raise `--iters`; best > ~0.075 ms = L2 not resident or the run is contended → do **not** update the ledger from it; worst/best spread > 35 % = rerun with the box idle |
+| 6 | `prototype/gdn_decode/gdn_decode --mode rec --iters 200 --trials 5` | ≈0.01 ms; a couple of µs per rec launch | same guards; this is the column §07.3 counts 192× |
+| 7 | `prototype/gdn_decode/gdn_decode --mode all --iters 1 --trials 20 --restore-each` | the ≈1.34 ms/255 GB/s cold class, with a stated memcpy-included caveat | if this lands near the warm 0.06 ms, `--restore-each` is not forcing a reload — check the state array really is refilled between bursts before believing either number |
+| 8 | `.venv/bin/python prototype/gdn_decode/check.py --iters 200` | F2 conv **bit-exact** (max\|Δ\| 0), F3 rec **0/2048 differ** vs the pinned dump, F4 all 18 layers **within 1 BF16 ULP of the HF dump on every element**, worst-vs-mirror o 1.7e-7 / state 9.9e-8 — plus the new best/worst/spread columns and the §07.4 budget line | correctness half of the re-take; it must stay green while 5–7 are re-taken. `check.py` asserts nothing about bandwidth (unlike `lm_head_gemv`/`proj_gemv`), so a >240 GB/s line is a flag to read, not a failure |
+| 9 | `.venv/bin/python prototype/gdn_gated_norm/run.py --gate` (add `--time` for the burst row; it takes no `--fixture`/`--layers` — 18 layers × 8 `dec8` steps is what it does) | `DEVICE GATE PASS`; `gated_out` within 1 BF16 ULP of the pins with ndiff ≈0; each of the six located negatives moves `gated_out` and leaves `norm_pre_gate` alone (`w_f32`/`affine_uncast`/`single_cast`/`silu_rounded` at `norm_pre_gate` 0/294912) | the CPU half (`--mirror`) now asserts ndiff 0 live and passes (added in this scrub, `4ff2485`); the device gate is the half no reviewer has seen. A large ndiff here means the kernel's per-head reduction or cast order is wrong on device — **not** that the pins moved — and it is `engine/README.md`'s bit-identity claim that has to be walked back if so |
+| 10 | `prototype/mlp_gemv/build.sh && .venv/bin/python prototype/mlp_gemv/run.py --layers all --fixture dec8 --no-time --tile 0 --negative` | PASS, six negatives rejected where declared and nowhere else | re-run after `a72bbf5` moved F4's bands (§2): if `f32act` is no longer rejected at `out(chain)`, §2's "F2 `act` catches what F4 cannot" is false and the gate needs work — do not re-tighten F4 |
+| 11 | `prototype/lm_head_gemv/build.sh && .venv/bin/python prototype/lm_head_gemv/run.py` | PASS, ≈2.105 ms / 242.1 GB/s (102 % of the 237 GB/s read probe) | untouched by this scrub, but it is the biggest single line in the token budget. `run.py` fails an impossible bandwidth number by design, and the fixture trap in §10.5 (the bare `pre_final_hidden.npy`/`logits_last.npy` names do **not** pair) is why the run takes its pins by path |
+| 12 | `prototype/attn_decode/build.sh && .venv/bin/python prototype/attn_decode/run.py` | PASS | untouched by this scrub; run only to keep the ledger current |
+
+After 3–11, the rows to update from the results — not before: `bench/performance-status.md`'s two
+`gdn_decode` rows (0.062 ms/918 GB/s, 1.344 ms/255 GB/s), `bench/gate-audit.md` G2's device-gate line,
+and `engine/results.md`'s E1/E2 blocks (written in `88193ef`, still `NOT RUN AS OF THIS COMMIT`).
