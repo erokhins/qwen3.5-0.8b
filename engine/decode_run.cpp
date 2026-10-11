@@ -167,10 +167,10 @@ int main(int argc, char** argv) {
             std::fprintf(log, "# step input_token sampled_token top_logit prefix_len_before\n");
         }
 
-        // step -1 … P-1: the prompt (what a chunked `prefill.{h,cpp}` will eventually do in one
-        // pass), then the generation steps. They are the same call: README's hand-off note is that
-        // prefill is token-at-a-time through `decode_step` with no chunked variant, so a separate
-        // code path here would be a second implementation to keep honest.
+        // Steps 0 .. prompt_len-1 feed the prompt; the rest feed what the previous step produced.
+        // They are the same call: the README's hand-off note is that prefill is token-at-a-time
+        // through `decode_step` with no chunked variant, so a second code path here would be a second
+        // implementation to keep honest. `prefill.{h,cpp}` remains a throughput item, not this one.
         std::vector<float> logits;
         int fed = 0;
         int sampled = -1;

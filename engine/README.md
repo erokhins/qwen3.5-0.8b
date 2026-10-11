@@ -159,13 +159,16 @@ for OP in gdn_decode attn_decode glue proj_gemv mlp_gemv lm_head_gemv; do \
   bash prototype/$OP/build.sh; done                    # all six still build after the extraction
 ```
 
-Two of the gate's four sections need no device at all, and one needs the weights but launches
-nothing — all three are safe while anything else is running:
+Two of the gate's four sections need no device at all, and one launches no kernels but still moves
+bytes — the difference matters here, because a run that touches the pool while something else is
+being timed contaminates that timing:
 
 ```bash
-.venv/bin/python engine/gate.py --no-engine   # fixture pairing (0) + state sizes (c), no binary
-./engine/build/decode_run --sizes-only        # loads the checkpoint, runs check_weights, launches 0
-.venv/bin/python engine/gate.py --build       # the whole gate; the device pass, see below
+.venv/bin/python engine/gate.py --selftest      # no binary, no device, no allocation: four runs of
+.venv/bin/python engine/gate.py --no-engine     # this file against CPU stand-ins. Safe anywhere.
+./engine/build/decode_run --sizes-only          # NO kernel launches, but it loads the checkpoint:
+                                                # 2.4 GB of hipMalloc + H2D + the warm read pass.
+                                                # Run it in a GPU window, not beside a timing.
 ```
 
 ### Device — operator only, in a quiescent GPU pass (zero subagents, then `tools/gpu_lock.sh`)
