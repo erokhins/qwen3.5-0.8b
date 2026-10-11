@@ -13,12 +13,23 @@
 // the engine to accidentally depend on one. `prototype/*/run.py` set this pattern — the C++ emits, the
 // Python judges.
 //
+// Three ways to drive it, and the split between them is deliberate:
+//   run      `--ids … --steps N`      free generation: the engine feeds its own samples.
+//   replay   `--ids … --replay …`     each generation step is fed the CALLER's token, so a
+//                                     divergence shows up at one step instead of cascading
+//                                     (that is what `gate.py` uses for the 64-step forced pin;
+//                                     §07.5 does not end a replay — the caller owns the stream).
+//   session  `--session`              resident line protocol for `engine/chat.sh`: weights and
+//                                     `RequestState` stay alive across turns. See `session_loop`.
+//
 // Every number it prints about *time* is provisional by construction: see `bench/performance-status.md`
 // §6 for what a clean window takes to arrange, and `AGENTS.md` for why a worker must not arrange one.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -29,14 +40,23 @@
 
 namespace {
 
+// Slot count a `--session` allocates when `--cap` is not given. Not a limit the engine enforces:
+// the attention stage refuses above its own lane ceiling long before 4096 (`kernels_attn.cpp`'s
+// MAXSC, written up in `engine/results.md`), and 48 MiB of KV is nothing on this box.
+constexpr int64_t kSessionDefaultCap = 4096;
+
 struct Options {
     std::string model_dir = "models/Qwen3.5-0.8B";
     std::string out_dir;             // where logits/sampled dumps go; empty means do not write
     std::vector<int> prompt;         // the tokens fed before generation starts (the fixture prefill)
+    std::vector<int> feed;           // --replay: what to feed each GENERATION step, from outside
     int steps = 8;                   // decode steps after the prompt
     int64_t cap = 0;                 // 0 = derive from prompt+steps
     bool load_verify = false;        // the loader's SHA-256 pass; not this gate's concern
     bool sizes_only = false;         // check §00/§01 against the checkpoint and exit
+    bool session = false;            // resident line protocol for engine/chat.sh
+    bool no_stop = false;            // §07.5 stays unarmed in generation too (deep smoke runs only)
+    bool help = false;               // print_usage and exit 0, before anything is loaded
 };
 
 std::vector<int> parse_ids(const std::string& csv) {
@@ -64,6 +84,8 @@ Options parse_args(int argc, char** argv) {
             o.model_dir = next();
         } else if (a == "--ids") {
             o.prompt = parse_ids(next());
+        } else if (a == "--replay") {
+            o.feed = parse_ids(next());
         } else if (a == "--steps") {
             o.steps = std::atoi(next().c_str());
         } else if (a == "--out") {
@@ -74,17 +96,32 @@ Options parse_args(int argc, char** argv) {
             o.load_verify = true;
         } else if (a == "--sizes-only") {
             o.sizes_only = true;
+        } else if (a == "--session") {
+            o.session = true;
+        } else if (a == "--no-stop") {
+            o.no_stop = true;
+        } else if (a == "--help" || a == "-h") {
+            o.help = true;
         } else {
             throw std::runtime_error("unknown argument " + a);
         }
     }
-    if (!o.sizes_only && o.prompt.empty()) {
+    if (o.help) return o;   // --help answers before it complains about what is missing
+    if (!o.sizes_only && !o.session && o.prompt.empty()) {
         throw std::runtime_error(
             "decode_run needs --ids <comma-separated token ids> (the fixture's prefill_ids); "
-            "--sizes-only is the only mode that runs without them");
+            "--sizes-only and --session are the two modes that run without them");
     }
-    if (!o.sizes_only && o.steps < 0) {
+    if (!o.sizes_only && !o.session && o.steps < 0) {
         throw std::runtime_error("decode_run needs --steps >= 0");
+    }
+    // A replay must be able to answer every step it is asked for. Silently falling back to
+    // self-feeding after the list runs out would produce a run that is half forced and half
+    // free, which is the one thing this mode exists to avoid.
+    if (!o.feed.empty() && (int)o.feed.size() < o.steps) {
+        throw std::runtime_error("--replay needs at least --steps tokens (have "
+                                 + std::to_string(o.feed.size()) + ", steps "
+                                 + std::to_string(o.steps) + ")");
     }
     return o;
 }
@@ -95,6 +132,146 @@ void write_raw(const std::string& dir, const std::string& name, const std::vecto
     f.write(reinterpret_cast<const char*>(v.data()), (std::streamsize)(v.size() * sizeof(float)));
 }
 
+// ---- the session protocol: what `engine/chat.sh` drives -------------------------------------
+// One process, weights and `RequestState` resident, one command per line on stdin:
+//
+//   feed <id> <id>…   advance the state over the caller's tokens (a new turn's prompt), then
+//                     "FED n=<k> prefix_len=<P>". No stop check, exactly as a run's prompt
+//                     phase: the caller owns these tokens. It FIRST feeds the token the
+//                     previous step sampled but never consumed — the last token the caller was
+//                     given — so the transcript in the state is complete. A fresh request after
+//                     `reset` has nothing pending and feeds only the caller's tokens.
+//   gen <n>           generate at most n tokens, streaming "GEN <id> <pos>" as each one comes
+//                     out, then "END steps=<k> stop=<0|1>". §07.5 applies here: the stop id is
+//                     emitted and ends the turn.
+//   reset             §08.4 fresh request (zero S and the conv window, P=0) -> "RESET prefix_len=0"
+//   stats             re-emit the STATE line plus "PREFIX p=<P> sampled=<id>".
+//   quit              "BYE" and return.
+//
+// Why a mode rather than one process per turn: the load is 1.55 GB of `hipMalloc` + `hipMemcpy`
+// before the first token, and `RequestState` cannot cross a process boundary, so a per-turn
+// process would pay the load again AND re-feed the whole transcript. Resident is the only way
+// the per-turn time-to-first-token figure means what it says.
+//
+// Errors poison the session on purpose. A throw from `decode_step` happens partway through a
+// token — the layers run in §07.1 order and `prefix_len` advances only at the end — so the state
+// is half-advanced and no longer matches the caller's transcript. Refusing until `reset` is a
+// refusal; continuing would be the quiet-corruption case the brief asks this driver to avoid.
+void session_loop(const engine::WeightStore& store, engine::RequestState& st,
+                  engine::DecodeScratch& sc) {
+    std::printf("READY cap=%lld\n", (long long)st.cap);
+    std::fflush(stdout);
+    bool poisoned = false;
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        std::istringstream words(line);
+        std::string cmd;
+        words >> cmd;
+        if (cmd.empty()) continue;
+        if (cmd == "quit" || cmd == "bye") {
+            std::printf("BYE\n");
+            std::fflush(stdout);
+            return;
+        }
+        if (cmd == "reset") {
+            st.reset();
+            st.sampled_token = -1;
+            st.stopped = false;
+            poisoned = false;
+            std::printf("RESET prefix_len=0\n");
+            std::fflush(stdout);
+            continue;
+        }
+        if (poisoned) {
+            std::printf("ERROR session is poisoned by the failed step: send reset before the "
+                        "next feed or gen\n");
+            std::fflush(stdout);
+            continue;
+        }
+        // Arguments are validated OUTSIDE the step guard: a typo is the caller's problem and must
+        // not poison a session that is otherwise fine. Only a throw from `decode_step` does that.
+        if (cmd == "gen" && st.sampled_token < 0) {
+            std::printf("ERROR gen with no sampled token: feed this turn's prompt first\n");
+            std::fflush(stdout);
+            continue;
+        }
+        int budget = 0;
+        if (cmd == "gen" && !(words >> budget)) {
+            std::printf("ERROR gen needs a token count\n");
+            std::fflush(stdout);
+            continue;
+        }
+        try {
+            if (cmd == "feed") {
+                int n = 0;
+                // The pending sample first, if there is one: it is the last token the caller was
+                // shown and the state has not consumed it (see the invariant above). `decode_step`
+                // leaves `sampled_token` = whatever its own step argmaxed to, so feeding each
+                // token in turn leaves the state's next sample pending at the end — which is what
+                // `gen` emits first.
+                if (st.sampled_token >= 0) {
+                    decode_step(store, st, sc, st.sampled_token, nullptr);
+                    ++n;
+                }
+                long id = 0;
+                while (words >> id) {
+                    decode_step(store, st, sc, (int)id, nullptr);
+                    ++n;
+                }
+                std::printf("FED n=%d prefix_len=%d\n", n, st.prefix_len);
+            } else if (cmd == "gen") {
+                int emitted = 0;
+                bool stop = false;
+                int cur = st.sampled_token;
+                while (emitted < budget) {
+                    const int pos = st.prefix_len - 1;
+                    std::printf("GEN %d %d\n", cur, pos);
+                    std::fflush(stdout);
+                    ++emitted;
+                    if (cur == engine::kStopToken) {   // §07.5, generation phase
+                        stop = true;
+                        break;
+                    }
+                    const engine::StepResult r = decode_step(store, st, sc, cur, nullptr);
+                    cur = r.token;
+                }
+                st.sampled_token = stop ? cur : -1;
+                // Stop path: `cur` was emitted but never stepped, so it stays pending and the next
+                // `feed` steps it — the transcript in the state ends up complete, and the driver
+                // does not have to re-send the stop token.
+                // Budget path: the last emitted token WAS stepped, so `cur` is a sample nobody
+                // was ever shown. Dropping it is the difference between a state that matches the
+                // caller's transcript and one holding a token the user never saw; the driver
+                // closes the assistant turn instead (`last_stop != "eos"` in engine/chat.py).
+                st.stopped = stop;
+                std::printf("END steps=%d stop=%d prefix_len=%d\n", emitted, stop ? 1 : 0,
+                            st.prefix_len);
+            } else if (cmd == "stats") {
+                std::printf("PREFIX p=%d sampled=%d stopped=%d\n", st.prefix_len,
+                            st.sampled_token, st.stopped ? 1 : 0);
+            } else {
+                std::printf("ERROR unknown command '%s' (feed|gen|reset|stats|quit)\n",
+                            cmd.c_str());
+            }
+        } catch (const std::exception& e) {
+            poisoned = true;
+            std::printf("ERROR %s\n", e.what());
+        }
+        std::fflush(stdout);
+    }
+}
+
+void print_usage(FILE* out) {
+    std::fprintf(out,
+                 "usage: decode_run [--model DIR] [--ids ID,ID,...] [--steps N] [--out DIR]"
+                 " [--replay ID,ID,...] [--cap N] [--session] [--no-stop]"
+                 " [--load-verify] [--sizes-only]\n"
+                 "  --replay  feed each generation step the caller's token (teacher forcing; also"
+                 " leaves §07.5 unarmed)\n"
+                 "  --no-stop leave §07.5 unarmed in a free run too (depth smoke only)\n"
+                 "  --session resident feed/gen/reset/stats/quit protocol for engine/chat.sh\n");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -103,10 +280,12 @@ int main(int argc, char** argv) {
         o = parse_args(argc, argv);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "decode_run: %s\n", e.what());
-        std::fprintf(stderr,
-                     "usage: decode_run [--model DIR] [--ids ID,ID,...] [--steps N] [--out DIR]"
-                     " [--cap N] [--load-verify] [--sizes-only]\n");
+        print_usage(stderr);
         return 2;
+    }
+    if (o.help) {
+        print_usage(stdout);
+        return 0;
     }
 
     try {
@@ -130,8 +309,13 @@ int main(int argc, char** argv) {
         std::printf("check_weights: %s\n", bad.empty() ? "PASS" : ("FAIL — " + bad).c_str());
         if (!bad.empty()) return 1;
 
-        const int64_t cap = o.cap > 0 ? o.cap
-                                    : (int64_t)(o.prompt.size() + (o.steps > 0 ? o.steps : 1) + 1);
+        // A session allocates once, up front, and cannot know the transcript length yet; 4096
+        // slots is 48 MiB of a pool this model uses 4 % of (§08.1's 12 KiB/token). A run mode can
+        // derive the exact need from the prompt and the step budget instead.
+        const int64_t cap = o.cap > 0
+                                ? o.cap
+                                : (o.session ? kSessionDefaultCap
+                                             : (int64_t)(o.prompt.size() + (o.steps > 0 ? o.steps : 1) + 1));
         const engine::StateSizes sizes = engine::state_sizes(cap);
         std::printf("state: %s\n", sizes.describe().c_str());
         // Byte-exact, for `gate.py`. `describe()` prints MiB to three decimals, which is a fine
@@ -160,6 +344,13 @@ int main(int argc, char** argv) {
             return 1;
         }
 
+        if (o.session) {
+            session_loop(store, st, sc);
+            engine::free_scratch(sc);
+            engine::free_state(st);
+            return 0;
+        }
+
         std::FILE* log = nullptr;
         if (!o.out_dir.empty()) {
             log = std::fopen((o.out_dir + "/sampled.txt").c_str(), "w");
@@ -179,7 +370,16 @@ int main(int argc, char** argv) {
         const int total_steps = (int)o.prompt.size() + o.steps;
         for (int i = 0; i < total_steps; ++i) {
             const bool from_prompt = i < (int)o.prompt.size();
-            const int token = from_prompt ? o.prompt[i] : sampled;
+            // `--replay`: the caller owns the generation-phase tokens, exactly as it owns the
+            // prompt's. The engine still samples every step and prints that sample, so a step
+            // whose fed token and sampled token disagree is precisely the divergence the gate is
+            // looking for — and because the feeding is not self-propagating, that divergence
+            // cannot cascade into the steps after it. Without `--replay` the engine feeds itself,
+            // which is what a free run does and what A-18 says cannot be pinned past ~8 tokens.
+            const int token = from_prompt
+                                  ? o.prompt[i]
+                                  : (o.feed.empty() ? sampled
+                                                    : o.feed[i - (int)o.prompt.size()]);
             const int pos_before = st.prefix_len;
             const auto ts = std::chrono::steady_clock::now();
             const engine::StepResult r =
@@ -201,7 +401,19 @@ int main(int argc, char** argv) {
             // checks that all said something else. So: a prompt-phase match is printed and ignored;
             // only a generation-phase match ends the run. Do not "restore" the prompt-phase check.
             const bool stop_match = r.token == engine::kStopToken;
-            const bool stop_fired = stop_match && !from_prompt;
+            // §07.5 ends a FREE run. A replay is not free: the caller feeds the stream, and
+            // dec64f's own forced chain steps PAST the stop id (the reference samples it at
+            // generation step 24 and teacher forcing keeps going), so firing here would truncate
+            // the exact depth the fixture exists to test. `stop_match` is still printed and the
+            // gate still sees `stop=0` with `sampled=248046`, which is the same convention the
+            // prompt phase uses above.
+            //
+            // `--no-stop` is the same waiver for a free run, and exists for one reason: a smoke run
+            // that is supposed to reach a given depth. On dec8's prompt the model emits the stop id
+            // after 38 tokens, so `--smoke 300` would otherwise test 38 steps of state growth and
+            // call it 300. Nothing that claims parity uses this flag; the gate's parity path never
+            // sets it.
+            const bool stop_fired = stop_match && !from_prompt && o.feed.empty() && !o.no_stop;
             if (stop_fired) run_stopped = true;
 
             std::printf("%s %d | fed %7d | sampled %7d | top %.6f | P %d -> %d%s%s\n",
@@ -234,10 +446,10 @@ int main(int argc, char** argv) {
         // `stopped=` here is the RUN's §07.5 decision (generation phase only), which is what the gate
         // asserts on. `st.stopped` is decode_step's raw record — "some step argmaxed to the stop id,
         // in either phase" — so it can be true while this says 0, and on `dec8` it is.
-        std::printf("RESULT mode=run steps=%d ms_total=%.3f ms_per_step=%.3f last_sampled=%d"
+        std::printf("RESULT mode=%s steps=%d ms_total=%.3f ms_per_step=%.3f last_sampled=%d"
                     " prefix_len=%d stopped=%d\n",
-                    total_steps, step_ms, step_ms / n, sampled, st.prefix_len,
-                    run_stopped ? 1 : 0);
+                    o.feed.empty() ? "run" : "replay", total_steps, step_ms, step_ms / n, sampled,
+                    st.prefix_len, run_stopped ? 1 : 0);
         std::fflush(stdout);
         engine::free_scratch(sc);
         engine::free_state(st);
