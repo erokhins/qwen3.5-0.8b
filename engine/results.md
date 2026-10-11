@@ -462,10 +462,17 @@ So the dip is *not* summation order in the logits dot: two legal orders of the s
 upstream, and it is small in absolute terms — the whole-token deficit is about the size of one stage's
 entire G3i allowance (1e-4), which says the individual kernels are well inside their bands. The prime
 suspect is the prompt route: the engine fed the 17 prompt tokens one per step while the reference prefills
-them chunked (§04.4 vs §04.7), and the reference's *own* chunk-vs-recurrent self-check (G3) is published
-at cos ≥ 0.9999 — the same order as the engine's entire deficit. What would separate that from "the
-kernels are slightly off": `speccheck/run_chunkcheck.py --fixture dec8`, which prices the route inside the
-reference with no engine in the loop.
+them chunked (§04.4 vs §04.7), and that route is not free inside the reference either —
+`speccheck/gates/run_chunkcheck.py --fixture dec8`, run on CPU with no engine in the loop, prices the
+reference's own chunk-vs-recurrent divergence on this exact fixture: 36 comparisons over 18 GDN layers,
+per-layer state cos from 1.0000000 at `L00` down to **0.99992** at `L21`/`L22` (meanrel up to 1.77e-2),
+PASSing its own `--cos-min 0.9999`. That is the same order as the engine's whole logits deficit, so "the
+prompt route" is quantitatively adequate as the explanation for step 1 being the worst step — and it is a
+*legitimate* implementation difference, not an error: the reference does it to itself and gates it. What
+this does not do is prove the engine's upstream difference *is* only that route; separating the two needs
+the engine's own stage dumps against the per-step pins, which `decode_step` already has pointers for
+(`norm_out`, `q_rope`/`k_rope`/`gate_out`) and nothing currently compares. Bands unchanged either way, and
+step 1 stays a documented, non-failing observation.
 
 ## (2) The first throughput row, and the ~4 ms between it and the op-sum
 
