@@ -123,6 +123,13 @@ allocated, no launcher has been launched, and the §07.1 block order exists only
 # the same gate over all four fixtures (dec8 decode, prefix24dec8 decode, smoke decode, p300
 # prefill = 10.2 M elements), under two seconds on this box. Ends "MIRROR GATE: PASS".
 
+`.venv/bin/python engine/gate.py --selftest`
+# Proves the token gate DISCRIMINATES, with no engine and no device: it re-runs gate.py in
+# subprocesses against a CPU stand-in with three bugs injected — a wrong sampled id at a named step,
+# a swapped top-two logits, and 5 % logits noise that leaves the argmax alone — and requires each to
+# fail at the step it was injected at. Ends "SELFTEST PASS". `--dry-run` is the same stand-in without
+# the injections, and is what exercises sections (a)–(d)'s parsing before a GPU window exists.
+
 `.venv/bin/python engine/gate.py --no-engine`
 # Sections (0) and (c) of the token gate, with no binary and no device: it proves the dec8 fixture
 # pairs with itself (the §10.5 trap, as 26 assertions) and runs engine/state_sizes.py against the

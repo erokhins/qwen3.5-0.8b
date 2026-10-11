@@ -130,16 +130,18 @@ for the realization actually under comparison, not to move the threshold.
 
 ## Closed / no finding
 
-- **`engine/gate.py` exists (2026-10-11) and is auditable by construction, but has never run.** It is
-  the engine's own token gate — the `dec8` fixture in, 9 sampled ids and 8 logits vectors out — and
-  it holds no engine arithmetic: no torch, no mirror of a kernel, only §10's metric definitions,
-  `engine/state_sizes.py`, and the §03.4 argmax used to prove the fixture pairs with itself. Its band
-  is borrowed whole from §10 (ids exact per G7, logits `cos ≥ 0.9995` per G5, `meanrel ≤ 5 %` per
-  §10.2, ndiff/max-ULP excluded per F1–F4) rather than fitted, and it re-derives the token's launch
-  plan in Python instead of trusting the C++'s. What cannot be audited from the page is whether it
-  discriminates: that is exactly what a first device run answers. If it goes green on the first try the
-  gate is untested in the only sense that matters, and the same trick used elsewhere in this file —
-  inject a plausible bug and require it to be caught — applies.
+- **`engine/gate.py` exists (2026-10-11) and is auditable by construction, but has never seen the
+  engine.** It is the engine's own token gate — the `dec8` fixture in, 9 sampled ids and 8 logits
+  vectors out — and it holds no engine arithmetic: no torch, no mirror of a kernel, only §10's metric
+  definitions, `engine/state_sizes.py`, and the §03.4 argmax used to prove the fixture pairs with
+  itself. Its band is borrowed whole from §10 (ids exact per G7, logits `cos ≥ 0.9995` per G5,
+  `meanrel ≤ 5 %` per §10.2, ndiff/max-ULP excluded per F1–F4) rather than fitted, and it re-derives
+  the token's launch plan in Python instead of trusting the C++'s. Whether it *discriminates* is
+  partly answered on the CPU: `engine/gate.py --selftest` injects three bugs (wrong id at a named
+  step, top-two logits swapped, 5 % logits noise with the argmax left alone) and requires each to fail
+  at its own step — which is the `prototype/mlp_gemv/results.md` rule that a negative everyone would
+  catch is worth nothing. What that cannot say is whether the real engine lands inside the band; only
+  the device run does.
 - **Fixture pairing: clean.** `lm_head` self-checks live HF against `logits_last`; `glue.final_pair()`
   finds the bare-pin step by bit comparison; `attn.verify()` proves `pos = lvalid − 1` from the cache
   lanes; `proj`/`mlp`/`gdn` pins are step-prefixed and pairing fails loudly. The bare-name trap did not

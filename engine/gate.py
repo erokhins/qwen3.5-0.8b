@@ -2,9 +2,17 @@
 """Engine gate: does a greedy token come out right?
 
     .venv/bin/python engine/gate.py                 # everything; runs engine/build/decode_run
-    .venv/bin/python engine/gate.py --no-engine     # fixture + state arithmetic only, no device
+    .venv/bin/python engine/gate.py --no-engine     # fixture pairing + state sizes, zero device
+    .venv/bin/python engine/gate.py --selftest      # proves THIS gate discriminates: no engine, no device
+    .venv/bin/python engine/gate.py --dry-run       # every section against a CPU stand-in
     .venv/bin/python engine/gate.py --build         # run engine/build.sh first
     .venv/bin/python engine/gate.py --binary P --model DIR --work DIR
+
+`--selftest` re-runs this file in subprocesses against three injected bugs — a wrong sampled id, a
+swapped top-two logits, and 5 % logits noise that leaves the argmax alone — and requires each to fail
+at the step it was injected at, because a negative that every check would catch proves nothing
+(`prototype/mlp_gemv/results.md`). It is the only part of a gate that can be validated before the
+engine has ever run, and it is why a first device run need not double as a test of this file.
 
 Four sections, in the order the task fixed them plus one that has to come first:
 
@@ -117,13 +125,17 @@ def metrics(got: np.ndarray, ref: np.ndarray) -> dict:
     d = g - r
     order = np.argsort(r)[::-1]
     maxabs = float(np.max(np.abs(d)))
+    gap = float(r[order[0]] - r[order[1]])
     return {
         "cos": float(np.dot(g, r) / (np.linalg.norm(g) * np.linalg.norm(r))),
         "meanrel": float(np.mean(np.abs(d)) / np.mean(np.abs(r))),   # §10.2's definition
         "ndiff": int(np.count_nonzero(d)),
         "maxabs": maxabs,
-        "gap12": float(r[order[0]] - r[order[1]]),
-        "margin": float((r[order[0]] - r[order[1]]) / max(maxabs, 1e-30)),
+        "gap12": gap,
+        # How many times bigger the reference's own top-1/top-2 margin is than our worst element
+        # error — i.e. how much further the error would have had to grow to flip the token. Guarded:
+        # a bit-exact step has maxabs 0, and dividing by an epsilon there prints a ludicrous number.
+        "margin": (float("inf") if maxabs == 0.0 else gap / maxabs),
     }
 
 
@@ -247,6 +259,105 @@ def parse_run(text: str) -> dict:
     return out
 
 
+def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids: int = -1,
+            break_logits: int = -1, break_noise: int = -1) -> tuple[str, int]:
+    """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
+
+    Why this is in a gate: sections (a)-(d) parse a line protocol, read binary dumps, and do float
+    maths that has never once run against a real logits file. Discovering a typo there costs a
+    quiescent-GPU window, which is the scarcest thing in this repo (`AGENTS.md`). So the plumbing gets
+    exercised here, on the CPU, against input built from the same pins the checks will compare with —
+    which is exactly why it cannot be read as a result: it passes by construction. Anything it fails
+    is a bug in this file, not in the engine. (`--selftest` is what proves it can also FAIL.)
+
+    `break_ids`/`break_logits` inject one deliberate error at that generation step, the way
+    `prototype/*/run.py --negative` does: the injected bug has to make the gate fail *at that step*,
+    which is the property worth testing — a negative that every check would catch proves nothing
+    (`prototype/mlp_gemv/results.md` has that trap written down).
+    """
+    greedy = man["greedy_continuation"]
+    cfg = man["text_config"]
+    lines = []
+    cap = len(prompt_ids) + len(dec_logits) + 1
+    plan = launch_plan(cfg["num_hidden_layers"],
+                       sum(1 for t in cfg["layer_types"] if t == "linear_attention"),
+                       sum(1 for t in cfg["layer_types"] if t == "full_attention"))
+    lines.append(f"STATE cap={cap} gdn={ss_sizes()[0]} conv={ss_sizes()[1]}"
+                 f" kv={ss_sizes()[2] * cap} total={ss_sizes()[0] + ss_sizes()[1] + ss_sizes()[2] * cap}"
+                 f" per_token={ss_sizes()[2]}")
+    lines.append("LAUNCH " + " ".join(f"{k}={v}" for k, v in plan.items())
+                 + f" total={sum(plan.values())}")
+    for i, t in enumerate(prompt_ids):
+        # Only the LAST prompt step's sample is checked by section (a) — that is the one the fixture
+        # pins. The earlier ones are the engine's own business; here they echo the next prompt token.
+        sampled = greedy[0] if i == len(prompt_ids) - 1 else (prompt_ids[i + 1] if i + 1 < len(prompt_ids) else greedy[0])
+        lines.append(f"STEP kind=prompt index={i} input={t} sampled={sampled} top_logit=1"
+                     f" pos_before={i} pos_after={i + 1}")
+    for j in range(len(dec_logits)):
+        pos = len(prompt_ids) + j
+        sampled = greedy[j + 1]
+        logits = dec_logits[j]
+        if j == break_ids:
+            sampled = greedy[j + 1] + 1        # one wrong id, exactly where a real divergence starts
+        if j == break_logits:
+            # Flip the argmax: raise the runner-up past the top. This is the smallest logits-level
+            # failure that matters — a token chosen wrongly, not a vector that is merely noisy.
+            logits = logits.copy()
+            order = np.argsort(logits)[::-1]
+            logits[order[1]] = logits[order[0]] + 1.0
+        if j == break_noise:
+            # Aggregate corruption that LEAVES the argmax alone: 5 % relative noise puts cos at
+            # ≈ 1 − σ²/2 ≈ 0.9987, under G5's 0.9995 and over §10.2's 0.999 cascade floor. This is
+            # the case that asks whether the band has teeth of its own, separate from the token id.
+            rng = np.random.default_rng(4)   # fixed: the injection must be reproducible
+            logits = logits * (1.0 + 0.05 * rng.standard_normal(logits.shape)).astype(np.float32)
+        lines.append(f"STEP kind=decode index={pos} input={greedy[j]} sampled={sampled}"
+                     f" top_logit=1 pos_before={pos} pos_after={pos + 1}")
+        (work / f"logits{pos}.bin").write_bytes(logits.astype(np.float32).tobytes())
+    lines.append("RESULT mode=run steps=25 ms_total=0 ms_per_step=0 last_sampled="
+                 f"{greedy[-1]} prefix_len={cap - 1} stopped=0")
+    return "\n".join(lines), 0
+
+
+def ss_sizes() -> list:
+    """The three constant state figures, from engine/state_sizes.py (same source section (c) uses)."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        from engine import state_sizes as ss
+    return [ss.gdn_state, ss.conv_window, ss.kv_per_token]
+
+
+def selftest() -> int:
+    """Prove the gate discriminates, on the CPU, before anyone spends a GPU window on it.
+
+    Three runs: the clean dry run must pass; each injected bug must fail, and fail *at its own step*.
+    A negative that any check would catch is worth nothing (`prototype/mlp_gemv/results.md`), so the
+    assertion is about where the failure landed, not that one happened.
+    """
+    base = [sys.executable, str(Path(__file__).resolve())]
+    cases = [
+        ([], 0, None, "clean dry run"),
+        (["--break-ids", "3"], 1, "[FAIL] generation step 3 samples greedy_continuation[4]",
+         "wrong id injected at step 3"),
+        (["--break-logits", "2"], 1, "[FAIL] step 2: argmax agrees with the pin",
+         "top two logits swapped at step 2"),
+        (["--break-noise", "5"], 1, "[FAIL] step 5: cos >= 0.9995 (§10.1 G5)",
+         "5 % noise on step 5's logits (argmax untouched, aggregate wrong)"),
+    ]
+    bad = []
+    for extra, want_rc, want_in, what in cases:
+        p = subprocess.run(base + ["--dry-run"] + extra, capture_output=True, text=True)
+        ok = p.returncode == want_rc and (want_in is None or want_in in p.stdout)
+        where = "" if want_in is None else f" (looked for `{want_in}`: {want_in in p.stdout})"
+        print(f"  [{'PASS' if ok else 'FAIL'}] {what} — rc={p.returncode} want {want_rc}{where}")
+        if not ok:
+            print("      " + "\n      ".join(l for l in p.stdout.splitlines() if "FAIL" in l)[:400])
+            bad.append(what)
+    print("SELFTEST " + ("FAIL — " + "; ".join(bad) if bad else
+                        "PASS (the gate passes clean input and catches each injected bug at its"
+                        " injected step; this says nothing about the engine)"))
+    return 1 if bad else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", default=str(DEFAULT_BINARY))
@@ -254,8 +365,26 @@ def main() -> int:
     ap.add_argument("--work", default=str(WORK))
     ap.add_argument("--no-engine", action="store_true",
                     help="fixture pairing + state arithmetic only; starts no binary, touches no device")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="run every section except the engine itself, against a CPU stand-in that"
+                         " replays the pins; exercises this file's parsing and metrics. NOT a result.")
+    ap.add_argument("--break-ids", type=int, default=-1, metavar="STEP",
+                    help="with --dry-run: make that generation step sample a wrong id, and require"
+                         " the gate to catch it there")
+    ap.add_argument("--break-logits", type=int, default=-1, metavar="STEP",
+                    help="with --dry-run: swap that step's top two logits, and require the gate to"
+                         " catch it there")
+    ap.add_argument("--break-noise", type=int, default=-1, metavar="STEP",
+                    help="with --dry-run: put 5 % relative noise on that step's logits, which moves"
+                         " cos under the floor without changing the argmax")
+    ap.add_argument("--selftest", action="store_true",
+                    help="re-run this file in subprocesses: clean dry run must pass, each injected"
+                         " bug must fail at its own step")
     ap.add_argument("--build", action="store_true", help="run engine/build.sh first")
     args = ap.parse_args()
+
+    if args.selftest:
+        return selftest()
 
     if args.build:
         subprocess.run([str(ROOT / "engine" / "build.sh")], check=True)
@@ -274,17 +403,33 @@ def main() -> int:
     work.mkdir(parents=True, exist_ok=True)
     cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
            "--steps", str(n_decode), "--out", str(work)]
-    print("  $ " + " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    for line in proc.stdout.splitlines():
-        print("      " + line)
-    if proc.returncode != 0:
-        for line in proc.stderr.splitlines():
-            print("  !! " + line)
-        check(False, "decode_run exits 0", f"rc={proc.returncode}")
+    if args.dry_run:
+        stdout, rc = dry_run(man, prompt_ids, dec_logits, work, args.break_ids,
+                             args.break_logits, args.break_noise)
+        notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
+                     " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
+                     " run is not also the first time this file parses a STEP line. Section (d) is"
+                     " Python comparing with itself in this mode; only a real decode_run makes it a"
+                     " cross-check.")
+        if args.break_ids >= 0:
+            notes.append(f"injected: generation step {args.break_ids} sampled the wrong id")
+        if args.break_logits >= 0:
+            notes.append(f"injected: generation step {args.break_logits} had its top two logits"
+                         " swapped")
+        if args.break_noise >= 0:
+            notes.append(f"injected: generation step {args.break_noise} got 5 % relative noise"
+                         " (wrong in aggregate, argmax untouched)")
+    else:
+        print("  $ " + " ".join(cmd))
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        stdout, rc = proc.stdout, proc.returncode
+        for line in proc.stdout.splitlines():
+            print("      " + line)
+    if rc != 0:
+        check(False, "decode_run exits 0", f"rc={rc}")
         return report()
     check(True, "decode_run exits 0")
-    run = parse_run(proc.stdout)
+    run = parse_run(stdout)
     check(bool(run["steps"]), "one STEP line per token", f"{len(run['steps'])} lines")
 
     # ---- (a) sampled ids -----------------------------------------------------------------------
@@ -310,7 +455,7 @@ def main() -> int:
     check(positions == list(range(len(prompt_ids), len(prompt_ids) + n_decode)),
           f"positions run {len(prompt_ids)}..{len(prompt_ids) + n_decode - 1} (§02.4's P)",
           f"{positions}")
-    if proc.stdout.count("[STOP]") and greedy[-1] not in man["special_ids"].values():
+    if stdout.count("[STOP]") and greedy[-1] not in man["special_ids"].values():
         notes.append("engine hit the stop token but the manifest's continuation does not")
 
     # ---- (b) logits ------------------------------------------------------------------------------
@@ -331,10 +476,11 @@ def main() -> int:
             check(False, f"step {j}: vocabulary length", f"{eng.shape} vs {ref.shape}")
             continue
         m = metrics(eng, ref)
+        margin = ("exact" if m["margin"] == float("inf") else f"{m['margin']:.0f}×")
         check(True, f"step {j}: metrics",
               f"cos {m['cos']:.6f} meanrel {m['meanrel']:.4%} ndiff {m['ndiff']}/{ref.size}"
               f" maxabs {m['maxabs']:.4g} | ref top1−top2 gap {m['gap12']:.3f}"
-              f" = {m['margin']:.0f}× the largest element error")
+              f" = {margin} the largest element error")
         check(m["cos"] >= BAND["cos_hard"], f"step {j}: cos >= {BAND['cos_hard']} (§10.1 G5)")
         check(m["meanrel"] <= BAND["meanrel_hard"],
               f"step {j}: meanrel <= {BAND['meanrel_hard']:.0%} (§10.2)")
