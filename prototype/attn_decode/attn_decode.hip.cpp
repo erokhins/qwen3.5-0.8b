@@ -334,6 +334,11 @@ __global__ void attn_core(CoreArgs a) {
                                 : bf(a.vcache[((size_t)kv * a.cap + (size_t)j) * DH + d]);
             acc += wt * v;
         }
+        // The weights were already normalised and rounded (that IS the reference form: HF rounds
+        // the softmax output to the activation dtype before P·V), so the epilogue must not divide
+        // again. Hence the split restriction below: a per-block weight matrix normalised inside its
+        // own range cannot be re-merged into one row.
+        l = 1.0f;
     } else {
         for (int base = blo; base < bhi; base += tile) {
             const int nt = std::min(tile, bhi - base);
@@ -431,7 +436,9 @@ __global__ void rope_table(CoreArgs a) {
     const int d = threadIdx.x;
     if (d < ROT) {
         float c, s;
-        rope_cs((float)a.pos, d, c, s);
+        // The reference table is cat([cos(32), cos(32)]): dims 32..63 repeat 0..31 (§05.3 pairs
+        // (i, i+32)), so the frequency index is d % HR, not d.
+        rope_cs((float)a.pos, d % HR, c, s);
         a.rope_out[d] = fb(c);
         a.rope_out[ROT + d] = fb(s);
     }
@@ -552,6 +559,11 @@ int main(int argc, char** argv) {
     }
     if (neg == NEG_CARRY && split != 1) {
         fprintf(stderr, "--neg carry is only defined at --split 1 (one state per query row)\n");
+        return 1;
+    }
+    if (full && split != 1) {
+        fprintf(stderr, "--softmax full normalises the weight matrix inside one block, so it is"
+                        " the single-block reference form: --split must stay 1\n");
         return 1;
     }
     hipDeviceProp_t prop{};
