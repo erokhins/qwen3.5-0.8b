@@ -110,37 +110,60 @@ T* alloc(size_t n) {
     return p;
 }
 
-bool shape_is(const Weight& w, std::initializer_list<int64_t> dims) {
-    if (w.shape.size() != dims.size()) return false;
-    size_t i = 0;
-    for (int64_t d : dims)
-        if (w.shape[i++] != d) return false;
+// One expected weight: the leaf under `lm.layers.N.` (or a full name, for the two top-level entries),
+// the shape and dtype the SHARD HEADER says it has, with the rank stated explicitly.
+//
+// The rank is a field and not a convention because of a real failure: an earlier version of this
+// struct was `{leaf, d0, d1}` with "d1 == 0 means 1-D", which cannot express `conv1d.weight`. The
+// tempting repair — fold the depth-1 middle dim away and compare element counts — is the one thing a
+// shape checker must not do: a checker that squeezes a rank stops reporting what the store holds,
+// which is the only job it has. The checkpoint has exactly 18 rank-3 tensors, all of them
+// [6144,1,4] (`tools/weights_report.py`, and nothing else in 488 tensors is rank 3), so this one
+// entry is the whole reason the field exists.
+//
+// Every dims below was READ from the header, not derived from §00: BF16 [248320,1024] embedding,
+// [1024] norms, [3584,1024] gate/up, [1024,3584] down, [6144,1024] qkv, [2048,1024] z, [16,1024]
+// a/b, [6144,1,4] conv (BF16), [16] dt_bias (BF16), [16] A_log (F32), [128] gated-norm weight (F32),
+// [1024,2048] out_proj/o_proj, [4096,1024] q_proj, [512,1024] k/v_proj, [256] q_norm/k_norm. The 36
+// F32 tensors are 18×`A_log`[16] + 18×`norm.weight`[128] and nothing else.
+struct Expected {
+    const char* name;
+    int rank;
+    int64_t d0, d1, d2;
+    Dtype dtype;
+};
+
+// The comparison, in one place so the two callers cannot disagree about what a mismatch means: dtype
+// AND rank AND dims, element by element. Nothing here trims, squeezes or broadcasts.
+bool matches(const Weight& w, const Expected& e) {
+    if (w.dtype != e.dtype || w.shape.size() != static_cast<size_t>(e.rank)) return false;
+    const int64_t d[3] = {e.d0, e.d1, e.d2};
+    for (int i = 0; i < e.rank; ++i) {
+        if (w.shape[i] != d[i]) return false;
+    }
     return true;
 }
 
-std::string want(const char* name, const Weight& w, std::initializer_list<int64_t> dims,
-                 Dtype dtype) {
+std::string want(const std::string& name, const Weight& w, const Expected& e) {
+    if (matches(w, e)) return "";
+    const int64_t d[3] = {e.d0, e.d1, e.d2};
     std::ostringstream os;
-    if (!shape_is(w, dims) || w.dtype != dtype) {
-        os << name << ": expected " << dtype_name(dtype) << " [";
-        bool first = true;
-        for (int64_t d : dims) {
-            os << (first ? "" : ",") << d;
-            first = false;
-        }
-        os << "] but the store holds " << dtype_name(w.dtype) << " " << w.shape_string();
-        return os.str();
-    }
-    return "";
+    os << name << ": expected " << dtype_name(e.dtype) << " rank-" << e.rank << " [";
+    for (int i = 0; i < e.rank; ++i) os << (i ? "," : "") << d[i];
+    // Both sides print their rank, because "expected [6144,4] but the store holds 6144x1x4" reads
+    // like a formatting difference and is really the whole finding.
+    os << "] but the store holds " << dtype_name(w.dtype) << " rank-" << w.shape.size() << " "
+       << w.shape_string();
+    return os.str();
 }
 
-// One expected weight: the leaf under `lm.layers.N.`, its shape (d1 == 0 means 1-D) and its dtype.
-struct Expected {
-    const char* leaf;
-    int64_t d0;
-    int64_t d1;
-    Dtype dtype;
-};
+// The two weights this file widens, declared once and asserted twice: `check_weights` compares the
+// store against them, and `prepare_weight_adapters` refuses to flatten anything but that shape into
+// the layout the kernels index. A rank-3 [6144,1,4] collapsing to conv_kernel's flat [6144][4] is a
+// decision the engine makes, so it is stated where it is spent — the checker's job is to report the
+// store, not to make it look convenient.
+constexpr Expected kWantConvW{leaf::kConvW, 3, kConvChannels, 1, kConvKernel, Dtype::BF16};
+constexpr Expected kWantDtBias{leaf::kDtBias, 1, kNumValueHeads, 0, 0, Dtype::BF16};
 
 }  // namespace
 
@@ -226,29 +249,38 @@ void free_scratch(DecodeScratch& sc) {
 }
 
 void prepare_weight_adapters(const WeightStore& weights, DecodeScratch& sc) {
+    // The shape contract of the two widenings, asserted where the flattened result is consumed.
+    // `check_weights` already compares the store against these same two `Expected`s; the reason to
+    // check again here is that THIS is the code that would read out of bounds if the shape were wrong,
+    // and a second caller of `want()` costs nothing next to that.
     for (int layer = 0; layer < kNumLayers; ++layer) {
         if (is_full_attention(layer)) continue;
         const int slot = gdn_slot(layer);
+
         const Weight& dt = layer_weight(weights, layer, leaf::kDtBias);
-        if (dt.dtype != Dtype::BF16) {
-            throw std::runtime_error(std::string(layer_name<160>(layer, leaf::kDtBias)) +
-                                     ": this file widens it from BF16 (§01.6 keeps only A_log and "
-                                     "linear_attn.norm.weight in F32); the store says " +
-                                     dtype_name(dt.dtype) +
-                                     ". If the checkpoint changed, the widening is the thing to "
-                                     "delete, not the check.");
+        std::string bad = want(layer_name<160>(layer, leaf::kDtBias), dt, kWantDtBias);
+        if (!bad.empty()) {
+            throw std::runtime_error(bad +
+                                     " — `gates_kernel` takes dt_bias as 16 contiguous F32, which "
+                                     "this copies 1:1 after widening. If the checkpoint changed "
+                                     "dtype, the widening is the thing to delete, not the check "
+                                     "(§01.6 keeps exactly 36 tensors in F32: A_log and "
+                                     "linear_attn.norm.weight). dt_bias is not one of them.");
         }
         kernels::cast_bf16_to_f32((const uint16_t*)dt.device,
                                   sc.g_dt_bias + (size_t)slot * kNumValueHeads, kNumValueHeads);
 
         const Weight& cw = layer_weight(weights, layer, leaf::kConvW);
-        if (cw.dtype != Dtype::BF16) {
-            throw std::runtime_error(std::string(layer_name<160>(layer, leaf::kConvW)) +
-                                     ": this file widens it from BF16; the store says " +
-                                     dtype_name(cw.dtype));
+        bad = want(layer_name<160>(layer, leaf::kConvW), cw, kWantConvW);
+        if (!bad.empty()) {
+            throw std::runtime_error(bad +
+                                     " — conv_kernel indexes the weight as `C[c*K + j]`, i.e. the "
+                                     "flat [6144][4] that the depth-1 middle dimension of the "
+                                     "stored [6144,1,4] collapses to. A different rank is a "
+                                     "different tensor, not a reshape, so this refuses rather "
+                                     "than squeezing it into a shape that happens to fit.");
         }
-        // [6144, 1, 4] stored; conv_kernel indexes `C[c*K + j]`, i.e. it wants exactly the flat
-        // [6144][4] that the depth-1 middle dimension collapses to. Byte order untouched (§01).
+        // Byte order untouched (§01): this is a dtype widening of a contiguous row, not a reorder.
         kernels::cast_bf16_to_f32((const uint16_t*)cw.device,
                                   sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel,
                                   kConvChannels * kConvKernel);
@@ -472,7 +504,7 @@ LaunchCounts planned_launch_counts() {
 
 std::string check_weights(const WeightStore& weights) {
     const Weight& emb = weights.at(kEmbedding);
-    std::string bad = want(kEmbedding, emb, {kVocab, kHidden}, Dtype::BF16);
+    std::string bad = want(kEmbedding, emb, {kEmbedding, 2, kVocab, kHidden, 0, Dtype::BF16});
     if (!bad.empty()) return bad;
     // §01.1's tying, re-asserted where it is used: if `lm_head.weight` ever became its own tensor the
     // logits GEMV would read a different 485 MiB and nothing else here would notice.
@@ -480,7 +512,7 @@ std::string check_weights(const WeightStore& weights) {
     if (head.device != emb.device) {
         return "lm_head.weight is not aliased to lm.embed_tokens.weight — §01.1 says one blob";
     }
-    bad = want(kFinalNorm, weights.at(kFinalNorm), {kHidden}, Dtype::BF16);
+    bad = want(kFinalNorm, weights.at(kFinalNorm), {kFinalNorm, 1, kHidden, 0, 0, Dtype::BF16});
     if (!bad.empty()) return bad;
 
     // The nine weights a GDN block reads, and the six an attention block reads, as §01.2/§01.4 store
@@ -488,30 +520,33 @@ std::string check_weights(const WeightStore& weights) {
     // list with "overwrite the first six for attention layers" is how a check ends up verifying a
     // tensor the layer does not have.
     static const Expected kGdnBlock[] = {
-        {leaf::kInProjQkv, kQkvRows, kHidden, Dtype::BF16},
-        {leaf::kInProjZ, kValueDim, kHidden, Dtype::BF16},
-        {leaf::kInProjB, kNumValueHeads, kHidden, Dtype::BF16},
-        {leaf::kInProjA, kNumValueHeads, kHidden, Dtype::BF16},
-        {leaf::kConvW, kConvChannels, (int64_t)1 * kConvKernel, Dtype::BF16},   // [6144,1,4]
-        {leaf::kALog, kNumValueHeads, 0, Dtype::F32},
-        {leaf::kDtBias, kNumValueHeads, 0, Dtype::BF16},
-        {leaf::kGatedNorm, kDv, 0, Dtype::F32},
-        {leaf::kOutProj, kHidden, kValueDim, Dtype::BF16},
+        {leaf::kInProjQkv, 2, kQkvRows, kHidden, 0, Dtype::BF16},
+        {leaf::kInProjZ, 2, kValueDim, kHidden, 0, Dtype::BF16},
+        {leaf::kInProjB, 2, kNumValueHeads, kHidden, 0, Dtype::BF16},
+        {leaf::kInProjA, 2, kNumValueHeads, kHidden, 0, Dtype::BF16},
+        // The checkpoint's only rank-3 tensors: 18 of them, one per GDN layer, all [6144,1,4]. The
+        // depth-1 middle dimension is Conv1d's and it is flattened where `conv_kernel` consumes it
+        // (prepare_weight_adapters), NOT here.
+        kWantConvW,
+        {leaf::kALog, 1, kNumValueHeads, 0, 0, Dtype::F32},
+        kWantDtBias,
+        {leaf::kGatedNorm, 1, kDv, 0, 0, Dtype::F32},
+        {leaf::kOutProj, 2, kHidden, kValueDim, 0, Dtype::BF16},
     };
     static const Expected kAttnBlock[] = {
-        {leaf::kQProj, kQprojRows, kHidden, Dtype::BF16},
-        {leaf::kKProj, kKvProjRows, kHidden, Dtype::BF16},
-        {leaf::kVProj, kKvProjRows, kHidden, Dtype::BF16},
-        {leaf::kQNorm, kHeadDim, 0, Dtype::BF16},
-        {leaf::kKNorm, kHeadDim, 0, Dtype::BF16},
-        {leaf::kOProj, kHidden, kQwidth, Dtype::BF16},
+        {leaf::kQProj, 2, kQprojRows, kHidden, 0, Dtype::BF16},
+        {leaf::kKProj, 2, kKvProjRows, kHidden, 0, Dtype::BF16},
+        {leaf::kVProj, 2, kKvProjRows, kHidden, 0, Dtype::BF16},
+        {leaf::kQNorm, 1, kHeadDim, 0, 0, Dtype::BF16},
+        {leaf::kKNorm, 1, kHeadDim, 0, 0, Dtype::BF16},
+        {leaf::kOProj, 2, kHidden, kQwidth, 0, Dtype::BF16},
     };
     static const Expected kEveryLayer[] = {
-        {leaf::kInputNorm, kHidden, 0, Dtype::BF16},
-        {leaf::kPostAttnNorm, kHidden, 0, Dtype::BF16},
-        {leaf::kGateProj, kIntermediate, kHidden, Dtype::BF16},
-        {leaf::kUpProj, kIntermediate, kHidden, Dtype::BF16},
-        {leaf::kDownProj, kHidden, kIntermediate, Dtype::BF16},
+        {leaf::kInputNorm, 1, kHidden, 0, 0, Dtype::BF16},
+        {leaf::kPostAttnNorm, 1, kHidden, 0, 0, Dtype::BF16},
+        {leaf::kGateProj, 2, kIntermediate, kHidden, 0, Dtype::BF16},
+        {leaf::kUpProj, 2, kIntermediate, kHidden, 0, Dtype::BF16},
+        {leaf::kDownProj, 2, kHidden, kIntermediate, 0, Dtype::BF16},
     };
 
     for (int layer = 0; layer < kNumLayers; ++layer) {
@@ -523,11 +558,8 @@ std::string check_weights(const WeightStore& weights) {
         for (size_t li = 0; li < 2; ++li) {
             for (size_t i = 0; i < lens[li]; ++i) {
                 const Expected& e = lists[li][i];
-                const Weight& w = layer_weight(weights, layer, e.leaf);
-                const std::string msg =
-                    e.d1 == 0
-                        ? want(layer_name<160>(layer, e.leaf).c_str(), w, {e.d0}, e.dtype)
-                        : want(layer_name<160>(layer, e.leaf).c_str(), w, {e.d0, e.d1}, e.dtype);
+                const std::string name = layer_name<160>(layer, e.name);
+                const std::string msg = want(name, layer_weight(weights, layer, e.name), e);
                 if (!msg.empty()) return msg;
             }
         }
