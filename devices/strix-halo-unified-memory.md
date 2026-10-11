@@ -52,6 +52,20 @@ Three things this table is telling us:
    ~32 GB/s (single-threaded volatile store; a real loader would beat that), which is
    tempting — see the 32 GiB warning below.
 
+**The `hipMemcpy H2D / D2H = 76–82 / 63–70 GB/s` row is a bulk, one-transfer number** —
+`tools/bw_probe_hip.cpp:155-166` copies a whole buffer in a single `hipMemcpy` into a pinned
+host allocation, best-of-N. `engine/` measured **27.7 GB/s D2H** (18–28 GB/s over three runs)
+for the same 1.44 GiB moved as **335 chunked copies with a `hipDeviceSynchronize()` after
+each** (`engine/loader_test`'s verification path, `engine/results.md`). The gap is the copy
+pattern, not the bus: at 63 GB/s the bytes need 24.5 ms, the measured 55.8 ms leaves ≈ 93 µs
+per sync, and H2D in that same window still hit 76.7 GB/s — one direction at spec while the
+other is 2.3× down is not a bandwidth story. The numbers were taken at 95–99 % util
+(`flash_serve` polls the iGPU and is outside `tools/gpu_lock.sh`), so the row is not *falsified*,
+just unreconciled. **What would settle it:** same total bytes, three patterns — one bulk
+transfer, 335 chunks with a sync each, 335 chunks with one sync at the end — at util ≈ 0 and
+util ≈ 98 %. If bulk ≈ chunked-with-one-sync and only per-chunk-sync is slow, label this row
+"bulk, per-transfer"; if bulk itself falls with util, it needs a contention caveat.
+
 ## The two real limits
 
 > **Scope note.** This model uses ~4 % of the pool (`AGENTS.md`). Nothing in the current
