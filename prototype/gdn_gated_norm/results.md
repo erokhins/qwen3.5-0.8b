@@ -1,4 +1,4 @@
-# `gdn_gated_norm` — §04.5's gated RMSNorm, k = 1 (kernel + gate **compiled, never run on a device**)
+# `gdn_gated_norm` — §04.5's gated RMSNorm, k = 1 (kernel + gate **compiled; the first device run failed and the cause is not established**)
 
 Why this op exists as its own directory: the audit found that A-01's cast order for this norm is
 asserted at **no bit level anywhere** — the only comparison in the repo was `run_isolated.py`'s
@@ -6,10 +6,33 @@ asserted at **no bit level anywhere** — the only comparison in the repo was `r
 rounding-policy question in this model). That is the same failure mode as the rope bug, so this op
 gets its own bit-exact gate before the engine calls it.
 
-**Device status: never run.** `hipcc` compiles clean (`build.sh`, and `engine/kernels_gdn.cpp`
-compiles against the same header). Every number below is from the **CPU** mirror gate, which needs
-no device and is allowed under the GPU rule. The device half (`run.py --gate`) is in the hand-off
-list in `engine/README.md` and has never been executed.
+**Device status: run once, failed, cause not established.** `hipcc` compiles clean (`build.sh`, and
+`engine/kernels_gdn.cpp` compiles against the same header). Every bit-level number below comes from
+the **CPU** mirror gate, which needs no device and is allowed under the GPU rule. The device half
+(`run.py --gate`) has now been run by the operator and did not pass:
+
+```
+plan /tmp/.../plan.txt | jobs=144 | 16 blocks x 128 threads per job | neg=none
+RESULT mode=once jobs=144 neg=none
+  gated_out vs pins over 294912 elements: worst case ndiff 2048/2048, max ULP 49174, tightest band these results pass at 1.0e+00
+  c000: ndiff 2048/2048 maxulp 49174 n_bad 1905
+  c001: ndiff 2048/2048 maxulp 49174 n_bad 1952
+  c002: ndiff 2048/2048 maxulp 49170 n_bad 1942
+```
+
+Nothing aborted: the clean launch and all six negative launches printed
+`RESULT mode=once jobs=144`, and the output files are present at their full 4096 bytes. What three of
+those files held, on inspection, was 1727 zeros, 320 NaN and exactly one plausible element out of
+2048 — against pins of mean −0.007, std 0.109, absmax 2.391, no NaN anywhere. **The cause is not
+established.** The leading hypothesis is that the buffers were never written and the file is whatever
+the pool held (freshly touched `hipMalloc` pages read back as +0), which fits a completed launch and
+a completed copy-back, and which nothing above proves. §7 records what was ruled out, what was
+specifically *not* the cause despite being proposed as it, and what the gate now prints so the re-run
+classifies itself instead of needing a probe.
+
+One consequence worth stating while it is fresh: because that run's baseline was wrong in every case,
+the negatives' `OK` rows proved nothing — an injection "moved" `gated_out` by moving it away from
+garbage. `neg_probe.py` (§4) re-checks all six on the CPU against the pins, where they do hold up.
 
 What the first hand-off attempt did expose, before it reached a kernel: it aborted in the loader.
 
@@ -40,7 +63,7 @@ is derivable without allocating anything, and the CPU command for the whole chec
 
 Nothing about the kernel, its pins, or its bands changed: `--preflight` writes the same 144 rows × 6
 fields the gate writes, with only the name column moved; the CPU mirror still passes (144 cases, ndiff
-0) and the device half is still `NOT RUN`.
+0) and the device half has since been run once and failed — §7.
 
 ## 1. The finding: the pins put the affine in the activation dtype, and the oracle lands there too
 
@@ -143,43 +166,190 @@ the norm (gdn_decode `results.md` finding 2), so the cast is part of the referen
 own inputs (pins that are already BF16-valued) that cast is invisible, which is why there is no
 negative for it; the engine depends on it.
 
-`z` is taken as BF16 (it is `in_proj_z`'s rows, already an activation) and `w_norm` as F32 (§01.6:
-one of the 36 F32 tensors, `[128]`, shared by all 16 heads) — so the engine needs **no dtype
-adapter** to call this one.
+`o` is taken as F32 because that is what `prototype/gdn_decode`'s recurrence emits, and the kernel
+rounds it to the activation dtype first — HF's fused delta-rule read casts `o` back to bf16 before
+the norm (gdn_decode `results.md` finding 2), so the cast is part of the reference. On the gate's
+own inputs (pins that are already BF16-valued) that cast is invisible, which is why there is no
+negative for it; the engine depends on it.
 
-## 4. Negatives (six, declared, device half not yet run)
+`z` is taken as BF16 (it is `in_proj_z`'s rows, already an activation) and `w_norm` as **F32**, and
+that dtype is now read off the checkpoint rather than trusted:
+
+```bash
+.venv/bin/python tools/weights_report.py models/Qwen3.5-0.8B/model.safetensors-00001-of-00001.safetensors linear_attn.norm.weight
+# model.language_model.layers.0.linear_attn.norm.weight   F32   [128]   (×18 GDN layers)
+# bytes by dtype: {'BF16': 1618.6, 'F32': 6.4}   — the header's own histogram is 452 BF16 + 36 F32
+```
+
+§01.6 names this one of "the 36 F32 tensors", the header agrees for all 18 GDN layers, and
+`engine/loader.cpp` uploads file bytes verbatim and records the dtype the header gave (`slot.w.dtype
+= parse_dtype(p.t.dtype_str, …)`) — `WeightStore` performs no dtype conversion anywhere, so the engine
+needs **no dtype adapter** to call this op. `speccheck.specimpl.Weights` is the thing that holds model
+weights in BF16 (its own cast, on the Python side); the store is not, and treating the two as one
+claim is what §7 records.
+
+One measured detail the CPU probe turned up while it was replaying the norm: `o` is small on these
+pins. `mean(o²)` per value head has median **3.56e-7** and minimum 1.6e-13 across dec8's 144 cases,
+against §00.2's `eps = 1e-6` — so eps is about **281 % of the median head's variance**, not a
+rounding detail. That is why the `noeps` injection moves 286 378 of 294 912 elements (worst 1454 ULP)
+while the other four epilogue injections move 70 000–125 000: on nearly every head the eps term
+outvalues the variance it is added to. `neg_probe.py` prints these numbers.
+
+## 4. Negatives (six, declared; replayed on the CPU, still unverified on a device)
 
 `norm_pre_gate` is the dumped `BF16(n)` stage, which is what makes four of the six locatable
 rather than decorative: an epilogue bug must move `gated_out` and leave the stage alone.
 
-| `--neg` | bug | must move | must NOT move |
-|---|---|---|---|
-| `w_f32` | the A-01 literal reading: weight not cast to the activation dtype | `gated_out` | `norm_pre_gate` |
-| `affine_uncast` | `n·w` stays F32 instead of rounding | `gated_out` | `norm_pre_gate` |
-| `single_cast` | nothing rounds until the end (the tempting kernel) | `gated_out` | `norm_pre_gate` |
-| `silu_rounded` | `silu(z)` goes through a BF16 slot before multiplying | `gated_out` | `norm_pre_gate` |
-| `bf16acc` | the squared-sum accumulator is BF16 end to end | both | — |
-| `noeps` | eps dropped from the rsqrt | both | — |
+| `--neg` | bug | must move | must NOT move | CPU replay: gated_out moved | norm_pre_gate moved |
+|---|---|---|---|---|---|
+| `w_f32` | the A-01 literal reading: weight not cast to the activation dtype | `gated_out` | `norm_pre_gate` | **69 560** | 0 |
+| `affine_uncast` | `n·w` stays F32 instead of rounding | `gated_out` | `norm_pre_gate` | **74 864** | 0 |
+| `single_cast` | nothing rounds until the end (the tempting kernel) | `gated_out` | `norm_pre_gate` | **124 105** | 0 |
+| `silu_rounded` | `silu(z)` goes through a BF16 slot before multiplying | `gated_out` | `norm_pre_gate` | **79 896** | 0 |
+| `bf16acc` | the squared-sum accumulator is BF16 end to end | both | — | **24 817** | **29 307** |
+| `noeps` | eps dropped from the rsqrt | both | — | **286 378** | **287 803** |
+
+The two right-hand columns come from `neg_probe.py`, which replays the kernel's arithmetic — including
+the two-wavefront shuffle ladder a 128-thread block runs on this target — against the same 144 pins,
+on the CPU, so the six injections are checkable without a device:
+
+```bash
+.venv/bin/python prototype/gdn_gated_norm/neg_probe.py dec8
+# dec8 — 144 cases, 294912 elements compared per policy
+#   none            gated_out 0/294912  norm_pre_gate 0/294912  ndiff vs pin 4  worst ULP 1  clean reference
+#   w_f32           gated_out 69560     norm_pre_gate 0             ndiff 69562   worst 2   moves gated_out only, as declared
+#   affine_uncast   gated_out 74864     norm_pre_gate 0             ndiff 74862   worst 1   moves gated_out only, as declared
+#   single_cast     gated_out 124105    norm_pre_gate 0             ndiff 124105  worst 3   moves gated_out only, as declared
+#   silu_rounded    gated_out 79896     norm_pre_gate 0             ndiff 79900   worst 1   moves gated_out only, as declared
+#   bf16acc         gated_out 24817     norm_pre_gate 29307         ndiff 24821   worst 4   moves both stages, as declared
+#   noeps           gated_out 286378    norm_pre_gate 287803        ndiff 286378  worst 1454 moves both stages, as declared
+#   none [bf16_store world]   0 / 0   identical to the clean policy
+#   none [f32_as_bf16 world]  290991 / 0   DIFFERS from the clean policy: that world is broken
+#   w_f32  [bf16_store world] 0 / 0   identical to the clean policy: this injection cannot exist in that world
+```
+
+Four things that probe is the record for.
+
+1. **The clean emulation is 4 / 294 912 off the pins, worst 1 ULP.** That is the reduction-order
+   floor (`prototype/glue/floor_probe.py` measures 3–4 of 393 216 for the same reason), not a policy
+   error: the emulator uses a correctly-rounded reciprocal square root where the device calls
+   `rsqrtf`, and its summation tree is the device's rather than torch's.
+2. **Each of the four epilogue injections lands on the reading `mirror_probe.py` already refuses** —
+   `affine_uncast` 74 864 against that probe's 74 860, `silu_rounded` 79 896 against 79 900,
+   `single_cast` 124 105 against 124 108. The small offsets are the same reduction-order floor, and
+   the two probes agreeing to three significant figures is the cross-check.
+3. **`w_f32` is only an injection because the store holds F32.** If the pointer were `hip_bfloat16`,
+   `gn_bf(float(w[d]))` would be the identity and the row would move 0 elements — the gate would
+   report `MISCATCHED gated_out` for a kernel that was correct. The probe prints that world explicitly
+   (last line above) so the dependency is on the record rather than in a comment.
+4. **No two injections overlap.** The four epilogue rows differ from each other by 5 000–50 000
+   elements, and the two reduction rows are the only ones that touch `norm_pre_gate` — which is the
+   `mlp_gemv` rule (a bug must show up where the bug lives) checked rather than asserted.
 
 The wide-reduction mistake (normalising over 2048 instead of 128) cannot be injected in this block
 shape — one block holds one head — so that falsification lives on the Python side: `cases()` feeds
 `[16][128]` and a whole-row reduction cannot reproduce a per-head result (the `p300` row of §2 is
 the evidence).
 
+The device run of these six has been executed once and its verdicts do **not** count: that run's clean
+baseline was garbage in all 144 cases, so "moved gated_out 294 912/294 912" was a statement about the
+garbage, not about the injection (§7).
+
 ## 5. Band for the device gate
 
-`gated_out` will be compared at **max 1 BF16 ULP with ≤ 1 % of elements differing** — the band
+`gated_out` is compared at **max 1 BF16 ULP with ≤ 1 % of elements differing** — the band
 `prototype/gdn_decode/check.py` already uses for exactly this op class (an F32 norm whose pins are
 BF16-valued; reordering the mean-of-squares is legal and flips a few elements by 1 ULP —
-`prototype/glue/floor_probe.py` measures 3–4 of 393 216). `run.py --gate` prints the run's actual
-ndiff / max ULP / tightest band through `prototype/bf16_ulp.py` (whose selftest it runs first), so
-the band can be tightened the day it lands at 0 rather than being loosened.
+`prototype/glue/floor_probe.py` measures 3–4 of 393 216, and `neg_probe.py`'s clean row lands at
+exactly that floor). `run.py --gate` prints the run's actual ndiff / max ULP / tightest band through
+`prototype/bf16_ulp.py` (whose selftest it runs first), so the band can be tightened the day it lands
+at 0 rather than being loosened. **The band has not been exercised on a device yet** — the one run that
+happened failed far outside it for a reason unrelated to it (§7).
+
+The verdict logic is unchanged as of this writing, but the *report* around it grew, because the first
+run could not be read from its own log:
+
+* each failing case now carries `| zeros N nan M` (`bf16_ulp.zero_nan`), and the summary prints a
+  run-wide profile line — `ndiff 2048/2048, max ULP 49174` is the headline for both "the epilogue
+  never saw real values" and "the rounding is wrong", since a +0 against a pin of −2.39 is ~49 000
+  ULP; the counts tell them apart and the second sentence names which one to chase;
+* each negative line carries its own zeros/NaN pair, because "moved" alone cannot say whether the
+  injection moved a value or destroyed one;
+* the driver prefills every output buffer with a `0x3F3F` sentinel before the launch and prints a
+  `sentinel:` line (elements still holding it, first-16-bytes hash before and after) for the first
+  job, the last job and every job still holding it, plus a `write-back:` total — so "nothing was
+  written" and "a wrong thing was written" are different log lines, and an output-mapping bug that
+  wrote only the last job is visible;
+* the driver copies each resolved weight row back and range-checks it (`weights: … all finite,
+  |value| <= …`), which is the dtype question answered by observation instead of by reading the spec.
 
 ## 6. Not done
 
-* Device half never executed (`run.py --gate`, `--gate --time`): commands in `engine/README.md`, and
-  row 9 of `bench/commit-review-2026-10-11.md` §4 — whose first attempt died on the weight-name
-  mismatch described in the header. Fixed and CPU-guarded: `run.py --preflight` checks the plan
-  without a device.
-* `results.md` here carries no timing row for the same reason.
-* §04.5/A-01 correction in `specification/` is listed as a hand-off item, not done in this commit.
+* **The device gate has never passed.** It has been executed once and failed; the re-run command (with
+  the new driver, so it must be rebuilt) is in §7. `results.md` still carries no timing row, because
+  the only burst run so far happened while the outputs were garbage.
+* The §04.5/A-01 correction in `specification/` is a hand-off item, listed under "Open questions" in
+  `engine/results.md`, not done in this commit.
+* The negative verdicts are CPU-verified only (§4). Their device counterparts have run once, against a
+  broken baseline, and proved nothing.
+
+## 7. The first device run: what happened, and what was ruled out
+
+Run by the operator, 2026-10-11, on a rebuilt binary, after the naming fix (`8eace84`/`eb88914`) let
+the plan reach the store at all. It reached the kernels and failed every case:
+
+```
+RESULT mode=once jobs=144 neg=none
+  gated_out vs pins over 294912 elements: worst case ndiff 2048/2048, max ULP 49174, tightest band these results pass at 1.0e+00
+c000: ndiff 2048/2048 maxulp 49174 n_bad 1905
+c001: ndiff 2048/2048 maxulp 49174 n_bad 1952
+c002: ndiff 2048/2048 maxulp 49170 n_bad 1942
+```
+
+All six negative plans also printed their own `RESULT mode=once jobs=144`, and the output files exist
+at their full 4096 bytes. Inspection of three of them found **1727 zeros, 320 NaN and exactly one
+plausible element per 2048**, against pins with mean −0.007, std 0.109, absmax 2.391 and no NaN at
+all. **Cause not established.** The leading hypothesis is that the buffers were never written and the
+files carry whatever the allocator's pages held — consistent with a completed launch, a completed
+copy-back and a zero exit code, and unproven.
+
+What was ruled out, in the order the evidence arrived:
+
+* **"`WeightStore` holds every model weight in BF16, so `const float* w` is reading BF16 bytes as
+  F32."** It does not, for this tensor: the shard header stores all 18 `linear_attn.norm.weight` rows
+  as F32 [128] (452 BF16 + 36 F32 total — §01.6's 36 exactly), `loader.cpp` records the header's
+dtype and uploads the file bytes unchanged, and the driver aborts on anything that is not
+  F32/512 B/[128] and prints the dtype it found. Had the store held BF16, the run would have died on
+  plan line 1 with `… is BF16 [128] (256 B); §01.6 says …` and `run.py` would have raised
+  `binary failed (rc 1)` — it could not have produced 144 compared cases.
+* **The same claim, tested numerically rather than by reading code.** A BF16 store read through a BF16
+  pointer is *identical* to what this kernel computes: rounding the F32 row to BF16 and reading it
+  back is the same value, so no 49 000-ULP failure can come from that pair at all (`neg_probe.py`'s
+  `bf16_store` row: 0/294 912 differ). What does produce that order of failure is the reverse
+  confusion — a BF16 read of the F32 row, where lane d gets the d-th BF16 **half** of the F32 words:
+  **290 991 of 294 912 elements wrong, worst ULP 48 182, c000 = 160 exact zeros and no NaN**. That is
+  the shape of the reported symptom, which is the reason the dtype hypothesis was plausible and also
+  the reason the ordered change (make the kernel read BF16) would have *manufactured* it rather than
+  fixed it. The kernel keeps `const float* w`.
+* **NaN arriving through the arithmetic.** The gate feeds no NaN anywhere: across dec8's 144 cases the
+  `o`, `z` and pin tensors contain zero NaN bit patterns (`neg_probe.py` prints the counts), and
+  `a·g` cannot synthesise one from finite operands. So the NaNs in those files did not come from the
+  pins through this kernel.
+* **The throwaway probe's candidate-match numbers** (`POLICY 2004/2048`, `z-all-zero 1727/2048`,
+  `affine only 0/2048`) are **not evidence** and are not built on: against an output that is mostly
+  zeros, "matches the all-zero candidate for the 1727 elements that are zero" measures the zeros, not
+  a mechanism. They are recorded here only so that nobody re-derives them from the same files.
+
+Re-run, with the report lines above in place and the driver rebuilt (the driver changed, so a stale
+binary would tell us nothing):
+
+```bash
+cd prototype/gdn_gated_norm && ./build.sh && cd ../.. && .venv/bin/python prototype/gdn_gated_norm/run.py --gate --time
+```
+
+What each new line will say, if the hypothesis is right: `sentinel: … left 2048/2048 … NOT WRITTEN` and
+`write-back: 144/144 gated buffers never written` while `RESULT … unwritten=144`, with the output
+profile reading `zeros 0, NaN 0` because the sentinel (not +0) is then what the files carry. If
+instead the buffers *are* written and the comparison still fails, `sentinel:` reports `written`, the
+zeros/NaN profile shows what the kernel really produced, and `weights:` has already said whether the
+rows it read were affine weights at all.
