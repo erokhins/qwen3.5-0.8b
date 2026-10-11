@@ -250,8 +250,18 @@ def device_gate(with_time: bool) -> int:
             for c in cases:
                 g = read_out(c["nout"], 2048)
                 nm = read_out(c["nnorm"], 2048)
-                moved["gated_out"] += int((g != clean[c["name"]]["gated"]).sum())
-                moved["norm_pre_gate"] += int((nm != clean[c["name"]]["norm"]).sum())
+                # Bit patterns, not `!=`: NaN is not equal to itself, so a float compare charges
+                # every NaN position in the clean output as "moved" in every negative, whether the
+                # injection touched it or not. The first device run proved the size of that error --
+                # its clean output held 66 557 NaNs and `w_f32` reported exactly 66 557 moved, and
+                # the other five landed within 57 of it, i.e. all six negatives looked like they
+                # moved the same thing. Comparing the uint16 payloads makes an identical NaN pair
+                # compare equal, which is the claim `moved` is supposed to be making.
+                moved["gated_out"] += int((bf16_ulp.bf16_bits(g)
+                                           != bf16_ulp.bf16_bits(clean[c["name"]]["gated"])).sum())
+                moved["norm_pre_gate"] += int(
+                    (bf16_ulp.bf16_bits(nm)
+                     != bf16_ulp.bf16_bits(clean[c["name"]]["norm"])).sum())
                 z, na = bf16_ulp.zero_nan(g)
                 neg_zero += z
                 neg_nan += na
