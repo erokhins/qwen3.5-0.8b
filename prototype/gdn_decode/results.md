@@ -19,25 +19,34 @@ expected outputs from `decode1.*`. Nothing synthesized.
 
 | case | time | effective bandwidth |
 |---|---|---|
-| one layer (16 heads, 1 MiB state) | 0.0101 ms | — |
-| 18 layers, 18.0 MiB state (the real decode step) | **0.062 ms** | 918 GB/s **cache-resident** |
+| one layer (`rec` alone: 16 heads, 1 MiB state) | **0.0064 ms** | — |
+| 18 layers, 18.0 MiB state (the real decode step) | **0.0646 ms** (worst 0.0650, **spread 0.5 %**) | 876 GB/s **cache-resident** = 370 % of the probe |
 | same kernel, state tiled to 108 MiB (6× replicas) | 1.344 ms | **255 GB/s** = 108 % of the read probe |
 
-**Provenance warning on those three rows.** They were taken by the per-iteration
+**The first two rows are the re-take** — run 2026-10-11 in a foreground, zero-subagent window with the
+burst timer below, one `util` record, and `check.py` in the same window: **F1–F4 still PASS**, `o`
+within 1 BF16 ULP of the pinned dump on every element of all 18 layers, with **3 layers holding 1-ULP
+ties**. They replace the **0.062 ms / 918 GB/s** row this file carried, and `bench/performance-status.md`
+§1, §2 and §6 now quote 0.0646 ms. The re-take came in ~4 % *slower* than the figure it replaces, which
+is the direction a `min()` over a partly-zero event series is expected to move.
+
+**What those rows were before, kept on the record.** They came from the per-iteration
 `hipEventElapsedTime` loop this directory has now removed: the same timer `d81ff13` disowned
 (`hipEventElapsedTime` returns exactly 0.000 ms for sub-millisecond work on this iGPU, and the loop
 kept `min(best, ms)` with no `ms > 0` guard), with no `util` record and no repeat spread — contrary to
-`bench/performance-status.md` §5's own provenance rule, and `0.062` is carried straight into §6's
+`bench/performance-status.md` §5's own provenance rule, and `0.062` had been carried straight into §6's
 token sum. The timing path is now the burst steady_clock idiom (one warm-up, `--trials` bursts of
-`--iters` launches, best **and** worst printed), so these rows need a re-take before the ledger
-reuses them; commands in §"Re-take" below and in `bench/commit-review-2026-10-11.md` §4. Nothing has
-been re-measured by this change — the numbers above are exactly as provisional as they were.
+`--iters` launches, best **and** worst printed), which is what produced the numbers above.
 
-Two things the re-take should settle while it is at it: whether `--restore-each` (state copied back
-inside the timed burst) differs from the default burst by more than the copy's own time, and whether
-a number above the ~240 GB/s package ceiling is admissible here at all — `check.py` prints `% of the
-237 probe` and asserts nothing, unlike `lm_head_gemv/run.py` and `proj_gemv/run.py`, which fail on
-it. And one thing it **cannot** settle: the "state tiled to 108 MiB" row is not reproducible from
+Two things the re-take was asked to settle while it was at it, and where they stand: whether
+`--restore-each` (state copied back inside the timed burst) differs from the default burst by more than
+the copy's own time — **not run in that window, still open** — and whether a number above the ~240 GB/s
+package ceiling is admissible here at all (`check.py` prints `% of the 237 probe` and asserts nothing,
+unlike `lm_head_gemv/run.py` and `proj_gemv/run.py`, which fail on it) — **still open too**: 876 GB/s is
+above the package ceiling for the same reason 918 was, namely that 18 MiB of warm state is not coming
+from the package. That is what "cache-resident" in the row asserts; it is now stated in the bandwidth
+column instead of left for the reader to notice. And one thing this re-take **cannot** settle: the
+"state tiled to 108 MiB" row is not reproducible from
 the binary as it stands — the parser takes `mode|dir|out|iters|layers` (plus the two new timing
 flags) and has no tiling knob — so 255 GB/s is quoted from a build that no longer exists. Either
 re-add the tiling knob or retire that row from the table and from §1's ledger row for it.
@@ -45,9 +54,9 @@ re-add the tiling knob or retire that row from the table and from §1's ledger r
 ### Re-take (device; operator only, zero subagents, `tools/gpu_lock.sh`)
 
 ```bash
-prototype/gdn_decode/gdn_decode --mode all --iters 200 --trials 5   # warm: expect ~0.06 ms/launch
-prototype/gdn_decode/gdn_decode --mode rec --iters 200 --trials 5  # 1 layer: expect ~0.01 ms
-prototype/gdn_decode/gdn_decode --mode all --iters 200 --trials 5 --restore-each
+prototype/gdn_decode/gdn_decode --mode all --iters 200 --trials 5   # warm: 0.0646 ms best / 0.0650 worst
+prototype/gdn_decode/gdn_decode --mode rec --iters 200 --trials 5  # 1 layer: 0.0064 ms
+prototype/gdn_decode/gdn_decode --mode all --iters 200 --trials 5 --restore-each   # still not run
 .venv/bin/python prototype/gdn_decode/check.py --iters 200         # correctness + the timing line
 ```
 
