@@ -27,13 +27,24 @@ Three things in that table were surprises and all are now load-bearing:
 - **18 MiB of GDN state stays resident in the iGPU cache** across decode steps (918 GB/s
   warm vs 255 cold). The cache is not reported by `hipGetDeviceProperties` (it says 2 MiB
   L2), so this had to be found by tiling the working set.
-- **A per-layer MLP kernel runs at 84 % of the probe, not 102 %, and the row mapping is not
-  why.** `mlp_gemv` cold is 199 GB/s and sweeping rows/block 4→32 moves it by 4 %; warm, the
-  same sweep looks like a 60 % spread and the best config is a different one, because warm ranks
-  configs by cache residency (`prototype/mlp_gemv/results.md` has both tables). The likely cause
-  is block count: `down_proj` is 1024 rows, so rows/block 8 issues 128 blocks over 40 CUs where
-  `lm_head_gemv` issued 31040. Left as a named gap rather than optimised: closing it is worth
-  ~0.4 ms/token of the ~6.5 ms budget.
+- **A per-layer MLP kernel runs at 84 % of the probe, not 102 %, and the cause is not the row
+  mapping and not block count.** `mlp_gemv` cold is 199 GB/s and sweeping rows/block 4→32 moves
+  it by 4 %; warm, the same sweep looks like a 60 % spread and the best config is a different one,
+  because warm ranks configs by cache residency (`prototype/mlp_gemv/results.md` has both tables).
+  The obvious explanation was grid size — `down_proj` is 1024 rows, so rows/block 8 issues 128
+  blocks where `lm_head_gemv` issued 31040 — but it does not survive the arithmetic: the device
+  has **20 CUs** (`tools/device_query.cpp`; the 40 in `rocminfo` counts SIMDs, and this file used
+  to say 40), i.e. 20 × 2048 = 40960 resident threads, and 128 blocks × 256 threads = 32768 fits
+  in a single resident wave. So the 16 % gap is **unexplained**, and it is left as a named gap
+  rather than optimised: closing it is worth ~0.4 ms/token of the ~6.5 ms budget.
+- **Every number in this file is a measurement of a GPU that is not idle, and the published MLP
+  figure is conditional on that.** The box runs `flash_serve`, which is the server generating this
+  session's own tokens; it holds the iGPU at ~98 % utilisation from its polling loop whether or
+  not it is producing tokens, so utilisation alone does not distinguish a clean timing from a
+  contended one — in-flight concurrency does. The 2.650 ms below was taken with no other GPU work
+  in flight and reproduced to ±0.9 %; the same command with two gate processes running spread
+  2.61–3.59 ms and ranked the configs differently. Rule that follows: a number goes in this file
+  only if it was taken under `tools/gpu_lock.sh` **and** its repeat spread is stated with it.
 
 ## 2. Per-component budget: 65 % of a token has a real kernel
 
@@ -60,7 +71,7 @@ shapes — plus §05's attention itself.
 
 | assumption | value | risk |
 |---|---|---|
-| remaining GEMVs reach the same fraction of the probe the MLP did | ~200 GB/s (84 %) | **medium** — `lm_head` hit 102 % with 31040 blocks, the MLP lands at 84 % with 128–448; the remaining projections are 3456/1536/6144-row shapes, i.e. the MLP's end of that range, not `lm_head`'s |
+| remaining GEMVs reach the same fraction of the probe the MLP did | ~200 GB/s (84 %) | **medium** — `lm_head` hit 102 % with 31040 blocks, the MLP lands at 84 % with 128–448; the remaining projections are 3456/1536/6144-row shapes, i.e. the MLP's end of that range, not `lm_head`'s. Weighted down further because the MLP's own 16 % shortfall is unexplained (see §1), so there is no mechanism to say which side a new shape lands on |
 | launch floor | +0.36 ms (200 launches × 1.8 µs), partly hidden by overlap | **medium** for the small ops: a 0.09 GB attention projection at the 1.8 µs floor cannot overlap much |
 | weights already resident (no H2D per token) | assumed | low — H2D is 76–82 GB/s, so it would dominate if violated |
 | no fp32 upcast traffic for accumulation | assumed | low — now demonstrated: `mlp_gemv` accumulates in F32 registers and moves no extra bytes |
@@ -69,7 +80,7 @@ shapes — plus §05's attention itself.
 **Projected single-stream bf16 decode: ~6.8–7.3 ms/token = ~137–147 tok/s.** That is a revision
 *down* from the 145–153 this file used to carry, and the reason is the MLP row: the §07.4 roofline
 assumes every byte stream arrives at probe speed, and the two GEMV families with enough rows to
-fill 40 CUs disagree with each other by 18 %. 4.82 ms of the budget is now measured; the remaining
+fill 20 CUs disagree with each other by 18 %. 4.82 ms of the budget is now measured; the remaining
 1.99 ms of roofline (GDN + attention projections, norms) projects to ~2.0–2.4 ms of real time.
 §07.4's headline 151 tok/s is above the optimistic end of that range and should be treated as
 conditional on the block-count gap closing.
