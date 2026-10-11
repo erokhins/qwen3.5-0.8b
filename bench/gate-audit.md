@@ -1,0 +1,103 @@
+# Gate audit — 2026-10-11
+
+Adversarial read-only audit of all six graduated gates, asked one question: **is there a check that
+would let a wrong kernel pass?** Written down here rather than left in a transcript, because every
+finding below is a hole someone could fall into while the engine is being built on top of these gates.
+Merge verdict was **OK with notes**, with one item to close before the engine's token loop ships on
+`lm_head_gemv`'s gate.
+
+Dispositions are mine (supervisor). "Quiescent pass" = §5 item 0 of `performance-status.md`; those
+items need device runs and cannot be closed by a worker under the serialization rule.
+
+## Open — would let a wrong kernel pass
+
+### G1 `lm_head_gemv` has no per-element rule at all — **the engine must not ship on this gate**
+
+`prototype/lm_head_gemv/run.py` asserts argmax, `cos ≥ 0.999` and `meanrel ≤ 0.05`, and **prints**
+top-5 match and `max|d|` without asserting them. There is no `bf16_ulp` comparison, no ndiff rule,
+no floor probe and no negative suite in that directory. The band is the §10.1 *cascade* class
+(0.999 / 5 %) — roughly 36× the kernel's own measured residual against the pin (meanrel 0.00141) —
+while §10.1 designates G3i (0.9999 / 1e-2) as the class a kernel is signed off against.
+
+Two concrete wrong kernels pass it today, both named in the audit:
+
+- **row misplacement** — writing row *i* into row *i+1*'s slot, the same `rowswap` bug class that
+  `mlp_gemv` and `proj_gemv` declare as must-catch. Swapping two non-argmax rows changes 2 elements
+  of 248 320, leaves the argmax alone, meanrel ≈ 1e-5. Passes all three asserted checks.
+- **a dropped term in the reduction** — `mlp_gemv`'s measured `tail` (8 of 1024 terms dropped) gives
+  meanrel 9.8e-2, so a 1-term drop lands near 1.2e-2, inside the 0.05 band, with argmax and top-5
+  intact. Anything between 1.4e-3 and 5e-2 meanrel passes.
+
+This is the gate the engine's logits ship on, so it is the one hole in this list that matters for W6.
+**Cheapest closure:** assert top-5 equality and a `bf16_ulp` per-element rule with a band sized by a
+floor probe for a K=1024 dot at 248 320 rows (reuse `proj_gemv`'s K=1024 floor as a starting point
+but re-measure — it is a different row count and a different accumulator width), plus negatives for
+row misplacement, dropped tail and a `rowswap`, each with must-catch and must-NOT-catch declared.
+Worker can write all of it; the device run belongs to the quiescent pass.
+
+### G2 `specimpl.rmsnorm_gated` has no bit-level assertion anywhere — same failure mode as `apply_rope`
+
+`speccheck/specimpl.py:142-147` implements §04.5's gated RMSNorm with a cast order "pinned by A-01",
+and **nothing checks it at bit or ULP level**. `proj_gemv/operands.py` consumes `gdn.gated_out` as a
+raw pin and never recomputes it; `gdn_decode` stops at `o_pre_norm`; the only comparison of any
+gated-norm implementation anywhere is `speccheck/gates/run_isolated.py` at `cos ≥ 0.9999`. A 1-ULP
+cast-order policy error there is invisible to every gate — which is exactly how `apply_rope`'s wrong
+rope policy survived 26 green gates.
+
+`gdn_chunk_scan` (§04.7) has the same weakness: asserted only at cos bands (G3, chunk == recurrent).
+
+**Cheapest closure:** a bit-exact mirror of `rmsnorm_gated` against the pinned `gdn.gated_out` dumps
+inside `gdn_decode/check.py` — the pins already exist and that fixture already loads them. This is
+the same move `attn_decode/reference.py::verify` makes for rope: prove the helper against the pin
+before letting it stand in for one. **CPU-only, so a worker can close it today.**
+
+## Open — weaker than it looks
+
+### G3 `glue`'s norm ndiff band is a borrowed dot number, and it is the only detector of its target bug
+
+`prototype/glue/run.py` uses `NDIFF_PCT_MAX = 2.0`, which `glue/results.md` §7 already admits is "the
+inherited 2 %". It matters uniquely because of the trap the floor probe exposed: for a norm, a BF16
+subpartial is invisible to every max-ULP criterion (2.05 % of elements, all ≤ 1 ULP), so **ndiff is
+the only live detector**. Measured: legal floor 3 / 393 216 = 0.0008 %, the injected bug at 4.0 %
+aggregate — a ~2× margin, and a half-severity variant (one warp's partial instead of every thread's)
+sits under 2 % and passes everything.
+
+**Cheapest closure:** 2 % → 0.5 % in `glue` only (the floor sample supports ~600× on the legal side
+and still 8× under the negative), then re-run the negative suite. Constant change is CPU; the re-run
+is a quiescent-pass item.
+
+### G4 `gdn_decode`'s `state` vs HF dump is judged at `meanrel ≤ 5e-2`
+
+The loosest band in any graduated gate, and `results.md` does not print the measured value, so the
+check is effectively decorative at that width. Not exploitable today only because F3/F4 judge `state`
+against the spec mirror at 1e-5 / 1e-6 — that is what would actually catch a BF16-stored state, the
+bug this band would otherwise hide. Worth tightening to match the mirror, or deleting so it stops
+implying coverage.
+
+### G5 two bands are at ~1.3–2× over their own target bug
+
+`attn_decode`'s `q_rope` policy detector is a count with a 1.3× margin (F32-cos/sin misreading
+measures 52–97 of 2048 differing; limit is 41), and `proj_gemv`'s 2 % ndiff has no bite on the 16-row
+`in_proj_b`/`in_proj_a` pins (1 element = 6 %), where `n_bad` is doing the real work. Neither lets a
+wrong kernel through — the rope case is caught bit-exactly by `reference.py::verify` upstream — but
+both are counts that look stronger than they are. Recorded so nobody tightens the wrong one.
+
+## Closed / no finding
+
+- **Fixture pairing: clean.** `lm_head` self-checks live HF against `logits_last`; `glue.final_pair()`
+  finds the bare-pin step by bit comparison; `attn.verify()` proves `pos = lvalid − 1` from the cache
+  lanes; `proj`/`mlp`/`gdn` pins are step-prefixed and pairing fails loudly. The bare-name trap did not
+  bite any current gate.
+- **Bit-exactness theater: clean.** `attn_decode/reference.py` is validated against the pins before
+  the kernel runs, and long-cache cases are individually re-verified against `p300` pins, so the 277-lane
+  claims rest on pins and not on the helper.
+- **Negatives localize** in the four suites that have them: must-catch and must-NOT-catch both asserted,
+  injections load their own operands, and the two known-degenerate declarations (`attn slotk`/`slotv`)
+  are stated as limitations rather than fake must-catches.
+- **`lm_head_gemv` and `gdn_decode` have no negative suite at all** (vs mlp 6, proj 10, attn 12, glue 8).
+  For `gdn` this is mitigated by bands (1e-6, BF16 ≤ 1 ULP) that leave no room for vacuity; for
+  `lm_head` it compounds G1.
+- Cosmetic: `attn_decode/run.py`'s docstring claims `q_rope`/`k_rope`/`rope_cs` are bit-exact while
+  `EXACT_STAGES` deliberately bands them at the measured device-libm floor (p=64). A reader "fixing"
+  the code to match the docstring would produce a false FAIL on correct kernels. Docstring line, not a
+  kernel change.
