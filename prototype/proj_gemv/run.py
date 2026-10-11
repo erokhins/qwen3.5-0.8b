@@ -337,11 +337,20 @@ def run_negatives(args, d: Path, fails) -> None:
 @contextlib.contextmanager
 def gpu_lock(tag: str):
     """Timings need the box to themselves (bench/build-queue.md). Another agent may hold it and
-    waiting is normal; the release happens whatever this section does."""
+    waiting is normal; the release happens whatever this section does. Ownership is by tag, so
+    acquire and release pass the identical string. `util` is printed at both ends and a busy box
+    makes every number below provisional — a cold bandwidth figure measured while something else
+    owns the memory controller is not comparable to the ledger's."""
     subprocess.run([str(GPU_LOCK), "acquire", tag], check=True)
     try:
+        print("  gpu_lock held (%s); util at acquire: %s"
+              % (tag, subprocess.run([str(GPU_LOCK), "util"], capture_output=True,
+                                     text=True).stdout.strip()))
         yield
     finally:
+        print("  util at release: %s"
+              % subprocess.run([str(GPU_LOCK), "util"], capture_output=True,
+                               text=True).stdout.strip())
         subprocess.run([str(GPU_LOCK), "release", tag], check=False)
 
 

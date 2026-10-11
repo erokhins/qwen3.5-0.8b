@@ -501,9 +501,12 @@ int main(int argc, char** argv) {
             CK(hipEventElapsedTime(&ev, s, e));
             CK(hipEventDestroy(s));
             CK(hipEventDestroy(e));
-            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            if (ev > 0.f) ms = std::min(ms, (double)ev);
-            return ms;
+            double wall = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            // Wall-clock is the number. The event pair is printed alongside as a cross-check
+            // only: on this iGPU an event window around short work can read ~0 (trap #7), and a
+            // min() of the two lets a broken timer masquerade as an infinitely fast kernel -
+            // which is exactly how one shape here once reported 25433 GB/s.
+            return std::pair<double, double>(wall, (double)ev);
         };
         const int occ_x = x_packed ? 2048 : 4096;      // shared bytes for in=2048, widest case
         int occ = 0;
@@ -512,13 +515,18 @@ int main(int argc, char** argv) {
                            : (const void*)&proj_gemv<2048, false>, rpb * ws, 0));
         burst(1);                                      // warm: fresh pages run at ~35 GB/s
         const int reps = std::max(1, iters);
-        const double ms_plan = burst(reps) / reps;
+        const std::pair<double, double> t = burst(reps);
+        const double ms_plan = t.first / reps;
+        const double ev_plan = t.second / reps;
         const double ms_launch = ms_plan / (double)plan.jobs.size();
         const double gbs = plan_bytes / (ms_plan / 1e3) / 1e9;
+        const char* evnote = (ev_plan <= 0.0 || ev_plan > 1.5 * ms_plan || ev_plan < 0.67 * ms_plan)
+                                 ? " (events disagree: treat as unmeasured)" : "";
         printf("  rows/block %-3d %8.4f ms/plan %6.1f GB/s (%3.0f%% of the %.0f GB/s probe)"
-               " | %.1f MiB/plan, shared %d B/block, %d blocks/CU occupancy\n",
-               rpb, ms_plan, gbs, 100.0 * gbs / PROBE_GBS, PROBE_GBS, plan_bytes / 1048576.0,
-               occ_x, occ);
+               " | events %.4f ms/plan%s | %.1f MiB/plan, shared %d B/block, %d blocks/CU"
+               " occupancy\n",
+               rpb, ms_plan, gbs, 100.0 * gbs / PROBE_GBS, PROBE_GBS, ev_plan, evnote,
+               plan_bytes / 1048576.0, occ_x, occ);
         // One line per distinct (rows, in) in the plan: blocks and waves are the block-count
         // argument the ledger's §5 item 5 asks about (20 CUs, not the 40 rocminfo prints).
         for (size_t i = 0; i < plan.jobs.size(); ++i) {
