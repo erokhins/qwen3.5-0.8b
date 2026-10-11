@@ -112,8 +112,16 @@ matters. Each **row `p` of a prefill dump is a decode-shaped query at position `
   either, so the residual is not a 1-ULP transcendental disagreement: the surviving candidate is
   the kernel's own pre-rope reduction — the F32 mean in §05.2's RMSNorm, summed warp-tree here and
   by torch's reduction in the pins. Naming it properly needs `z` (post-norm, pre-rope) dumped from
-  the kernel and diffed against torch at that position; not done here, and `q_rope` at `p=64` should
-  be read as **1 element off for an unattributed reason**, not as an accepted floor.
+  the kernel and diffed against torch at that position; that is written up as item **(g)** of
+  `bench/performance-status.md` §5, the quiescent device pass, because it needs a device run and
+  neither this gate nor the probe can produce it. Until then `q_rope` at `p=64` is **1 element off for
+  an unattributed reason**, not an accepted floor.
+* **Do not "fix" the rope table by computing it in double precision.** The dumps carry F32 libm
+  results, not correctly-rounded ones: evaluating the same angle in F64 and rounding down to F32
+  misses 3 of 277 positions (`p = 180, 217, 241`, 2–11 elements each) that the plain F32 path
+  reproduces exactly (`speccheck/rope_table_probe.py`, run per layer). Higher precision moves the
+  table *away* from the pins. Any table produced here must be F32 `cosf`/`sinf` over the F32 angle
+  `p · theta^(-2i/64)`, exactly as §05.3 writes it.
 
 ## 5. Floors (`floor_probe.py`), each with its sample size
 

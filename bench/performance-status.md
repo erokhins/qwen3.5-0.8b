@@ -135,9 +135,23 @@ record as *not* the engine's performance.
    (a) `prototype/glue/run.py` full, (b) `prototype/proj_gemv/run.py --layers all --steps all
    --negative` + its cold sweep, (c) `prototype/mlp_gemv/run.py --layers all --fixture dec8
    --negative` + cold, (d) `prototype/attn_decode/run.py --long --negative`, (e) `engine/loader_test
-   --no-verify` for the startup number, (f) the engine's own gate and the first tok/s row. Record
+   --no-verify` for the startup number, (f) the engine's own gate and the first tok/s row, (g) the
+   position-64 pre-rope reduction attribution described below. Record
    `gpu_lock.sh util` at both ends of each and state the repeat spread; anything without both is
    provisional and says so.
+
+   (g) **position-64 pre-rope reduction attribution.** `prototype/attn_decode`'s kernel is 1 element
+   of `q_rope` off the pin at `p = 64` (2 at layer 11) and 0 off at the other 276 positions, while
+   `speccheck/rope_table_probe.py` shows torch's F32 table and a plain glibc `cosf`/`sinf` reproduce
+   the pin at 0-of-277 wrong — so the device table, not the reference, is the outlier, and no ±2 ULP
+   nudge of any single frequency index's cos or sin explains the difference. Leading candidate is the
+   kernel's **pre-rope F32 reduction**: the mean of squares in §05.2's RMSNorm, summed warp-tree here
+   and by torch's reduction in the pins. To close it: dump `z` (post-`q_norm`, pre-rope) for
+   `prefill064.L03` from the kernel and diff it element-by-element against `specimpl.rmsnorm_zc` on
+   the same pinned `q_proj.out` row. If `z` differs, a graduated kernel has a reduction-order bug to
+   fix; if `z` is identical, the residual is in the device's `cosf`/`sinf` and gets documented as a
+   device-libm boundary instead. Either way the footnote in `prototype/attn_decode/results.md` §4
+   ("unattributed") gets replaced by an answer.
 
 1. **Re-measure the projections on a quiet box.** They are the third of the token and they came in
    at 66 % under contention; both the headline 2.990 ms and the `rows/block` 32 finding (+8 %) need
