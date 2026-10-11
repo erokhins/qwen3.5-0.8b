@@ -295,6 +295,11 @@ run could not be read from its own log:
 
 ## 7. The first device run: what happened, and what was ruled out
 
+> **Closed by §8.** The buffers were written, the weights were the right dtype, and the kernel was
+> never at fault: `write_cases` manufactured the NaN itself. The account below is kept as it was
+> written at the time — including the hypothesis §8 refutes — because the reasoning in it is what
+> produced the diagnostics that made §8 visible.
+
 Run by the operator, 2026-10-11, on a rebuilt binary, after the naming fix (`8eace84`/`eb88914`) let
 the plan reach the store at all. It reached the kernels and failed every case:
 
@@ -334,7 +339,8 @@ dtype and uploads the file bytes unchanged, and the driver aborts on anything th
 * **NaN arriving through the arithmetic.** The gate feeds no NaN anywhere: across dec8's 144 cases the
   `o`, `z` and pin tensors contain zero NaN bit patterns (`neg_probe.py` prints the counts), and
   `a·g` cannot synthesise one from finite operands. So the NaNs in those files did not come from the
-  pins through this kernel.
+  pins through this kernel. *(True of the tensors, and the reason this bullet was kept; wrong about the
+  files — the gate manufactured 320 NaN per case on the way to disk. §8.)*
 * **The throwaway probe's candidate-match numbers** (`POLICY 2004/2048`, `z-all-zero 1727/2048`,
   `affine only 0/2048`) are **not evidence** and are not built on: against an output that is mostly
   zeros, "matches the all-zero candidate for the 1727 elements that are zero" measures the zeros, not
@@ -353,3 +359,87 @@ profile reading `zeros 0, NaN 0` because the sentinel (not +0) is then what the 
 instead the buffers *are* written and the comparison still fails, `sentinel:` reports `written`, the
 zeros/NaN profile shows what the kernel really produced, and `weights:` has already said whether the
 rows it read were affine weights at all.
+
+## 8. Resolution: the gate's own fixture writer manufactured the NaN
+
+§7's open cause is closed, and the kernel was never at fault. The second device run (rebuilt binary,
+`--gate --time`, rc 1) came back with the two lines that made the input path the only suspect left:
+
+```
+weights: 144 [128] F32 rows read back from the store, all finite, |value| <= 1.194
+write-back: 0/144 gated buffers never written, 0 partially written; 0 norm buffers never written
+output profile over 294912 elements: zeros 228249, NaN 66557 (0.0 % of the output is neither)
+```
+
+Every output buffer really was written, and the weight rows the store handed over are finite O(1) F32
+— so neither "the launch did not write" nor "the weight dtype is wrong" can be the story. The
+remaining suspect was the other two inputs, and that is where the bug was:
+
+```python
+o.numpy().astype(np.float32).tofile(of)      # fine: o is float32, astype copies
+z.to(torch.uint16).numpy().tofile(zf)        # BUG: this converts, it does not reinterpret
+```
+
+`mirror_probe.cases()` yields both `o` and `z` as `.float()`, so `.to(torch.uint16)` is a **numeric
+truncation of the activation values**: 0.195 → the integer 0, and −1.3 wraps to 0xFFFF. The kernel
+then read those integers back as BF16 payload, i.e. as +0 and NaN. Measured on case 0's `z`, which is
+exactly what the on-disk `c000.z.bin` contains:
+
+| writer | read back as BF16 |
+|---|---|
+| `z.to(torch.uint16)` (what shipped) | **1525 zeros, 320 NaN** — matches the file |
+| `z.to(torch.bfloat16).view(torch.uint16)` (the fix) | 0 zeros, 0 NaN |
+
+Every symptom in §7 follows from that one line, with no further mechanism:
+
+* **gated_out all zeros and NaN.** `g = z·σ(z)` runs on the destroyed `z`, and `ô = a·g`, so the output
+  is +0 wherever the truncated integer was 0 (|z| < 1, 77.4 % of lanes) and NaN wherever a negative z
+  wrapped into the all-ones exponent (22.6 %). That is why the NaN share was **not** a multiple of 128:
+  it is a per-lane property of z's signs, not a head-stride effect. The `o` side was untouched, which
+  is also why `norm_pre_gate` — the one stage that never reads `z` — came out clean.
+* **all six negatives "passed".** They were perturbing a tensor the writer had already destroyed; every
+  cast-order difference rounds to the same 0 or NaN. Their verdicts from that run carry no information
+  (as §7 warned), and the `ndiff 2048/2048, max ULP 49 174` headline was the fixture, not the kernel.
+* **the "66 557 NaN = `w_f32` moved 66 557" identity.** Not a clue about NaN positions: the negative
+  counter compared with `!=`, and NaN is not equal to itself, so every NaN element in the clean output
+  was charged as "moved" in every negative. The five others landing within 57 of the same number was
+  the same artifact. Fixed by comparing BF16 bit patterns (`f248aff`).
+* **the 252 `PARTIALLY WRITTEN` norm lines next to `0 norm buffers never written`.** Both were true and
+  neither said the right thing: the summary counted only *never*-written norm buffers and was silent
+  about partials, while the per-job line counted elements still holding the sentinel — and the sentinel
+  was 0x3F3F = 0.746, a perfectly ordinary value for `norm_pre_gate`, so one written lane collided
+  with the prefill. The sentinel is now 0x0101 (a BF16 denormal, ~1.8e-38, unwritable from O(1)
+  inputs), survivors print their `(h,d)`, and the summary counts partials for both buffers (`32ce26c`).
+* **why `--mirror` passed the whole time.** The CPU mirror consumes the tensors from `mirror_probe`
+  and never touches the files, so the broken artifact was invisible to it. Mirror green and device red
+  were consistent from the start; reading the mirror's ndiff 0 as evidence about the files was the error.
+
+Fixes, in landing order: `f248aff` bit-pattern `moved` counting; `3be849a` the bitcast writer plus
+`verify_cases`, which reads **every** file back after `write_cases` and asserts length, "no NaN where
+the pin has none", and element-by-element bit equality — so the gate can no longer compare a file it
+mangled against a pin it did not mangle; `32ce26c` the sentinel fixes. `run.py --selftest` proves the
+guard is not vacuous by writing one case both ways:
+
+```
+  bitcast write  -> accepted
+  numeric-cast   -> rejected: t000.z: 320 NaN in the file where the pin has none — a numeric cast
+                    (Tensor.to(uint16)) instead of a bitcast (.view(uint16)) is what does that
+FIXTURE SELFTEST: PASS
+```
+
+The lesson generalises past this op: **a gate that manufactures its own inputs has to verify the
+manufacturing**, because a mangled fixture and a mangled kernel produce the same red log and only one
+of them is fixable by changing the kernel. `--quick` speccheck stayed green throughout (26/26 before
+this work; nothing here touches `speccheck/`).
+
+Re-run with the writer fixed and the driver rebuilt:
+
+```bash
+cd prototype/gdn_gated_norm && ./build.sh && cd ../.. && .venv/bin/python prototype/gdn_gated_norm/run.py --gate --time
+```
+
+What a pass looks like: `fixture verified: 144 cases … bit-identical to the pins` (the new writer
+guard), `weights: … |value| <= ~1.2`, `write-back: gated 0/144 never written, 0 partial; norm 0/144
+never written, 0 partial`, `output profile … zeros 0, NaN 0`, `max ULP 1` with ndiff a handful of
+294 912 (§5's floor), then six negative lines inside a few percent of the `neg_probe.py` counts with
+the four epilogue injections at `norm_pre_gate 0/294912`, the burst row, and `DEVICE GATE PASS`.
