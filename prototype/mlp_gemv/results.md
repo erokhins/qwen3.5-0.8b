@@ -243,6 +243,21 @@ same configs within 4 % of each other:
 roofline. Replica 0's output still matches the reference at every config, which is what makes
 the 6× replication legal as a cache-defeat rather than a different program.
 
+> **That headline is provisional and due for a clean re-measure.** Two method faults were found in
+> the sweep that produced it, both now fixed: it burst `gateup` 30× and then `down` 30×, which is
+> not what a token does — gateup's 84 MiB stream is what evicts the down weights and the other way
+> round — and it validated only replica 0, the one slice even a kernel that read too little would
+> certainly touch. The cold check now runs `--mode mlp`, which **alternates** the two kernels
+> inside one burst (one burst iteration = one layer, bytes = both kernels' traffic) and validates
+> the **last** replica's `act` and `out`. A first run of the fixed method gave **2.594 ms/token at
+> rows/block 8 (203.8 GB/s, 86 % of the probe; last replica: act 1 element, out 0 elements
+> differing)**, but the box was not quiet for it — `tools/gpu_lock.sh util` read 93 % when the run
+> started and 25 % when it ended, with `flash_serve` resident throughout — so that is a sanity
+> check that the fixed method runs and lands near the old number, **not** a replacement for the
+> published figure. The headline stays 2.650 ms until someone re-measures on an idle box; the fix
+> can only move a number like this down (alternating evicts more, never less), and 2.650 → 2.594 is
+> inside the 2.66–2.69 spread three clean runs of the *old* method already showed.
+
 Repeatability, because it nearly produced a wrong number here: three clean back-to-back runs give
 2.686 / 2.672 / 2.663 ms. With **two gate processes on the GPU at once** the same command reports
 3.374 ms (66 % of probe) — the cold check is a bandwidth measurement and it cannot share the
@@ -295,6 +310,9 @@ floor, 3.4 % of this op's time. A split gate/up/down version would pay 72.
   count the same bytes the kernel reports). The first version launched 6 replicas of `gateup`
   back to back, so replicas 1–5 re-read replica 0's out-of-cache-but-still-cached bytes and
   reported 344 GB/s — above the probe, i.e. impossible, and caught only by the rule that says so.
+  The second version kept the burst per-kernel (all `gateup`, then all `down`), which is still a
+  different machine from the one a token runs on: `--mode mlp` is the fix. It also checks the
+  **last** replica rather than replica 0, because replica 0 is the slice even a short read hits.
 - **Sweeps and negative tests must load their own weights.** Both the config sweep and the
   negative tests inherited the last layer's weight files from the main loop; the sweep would have
   ranked configs against the wrong matrix and the negatives were vacuous. Cheap to check, ugly

@@ -32,6 +32,10 @@
  * Build: prototype/mlp_gemv/build.sh
  * Run:   ./mlp_gemv --mode gateup --x x.bin --wg Wg.bin --wu Wu.bin --out act.bin [--pre pre.bin]
  *        ./mlp_gemv --mode down   --x act.bin --wd Wd.bin --out out.bin
+ *        ./mlp_gemv --mode mlp    --x x.bin --act act.bin --wg Wg.bin --wu Wu.bin --wd Wd.bin \
+ *                                 --out out.bin --actout act_out.bin
+ *            the two kernels ALTERNATED in one burst, which is what a token does and what the
+ *            cold bandwidth check has to measure (see the accounting note at the burst).
  * Validate: prototype/mlp_gemv/run.py
  *
  * Files are raw little-endian: x.bin BF16 (in = file size / 2, must be 1024 or 3584),
@@ -229,7 +233,8 @@ static size_t filesize(const std::string& p) {
 }
 
 int main(int argc, char** argv) {
-    std::string mode = "gateup", xpath, wgpath, wupath, wdpath, opath, ppath, negname = "none";
+    std::string mode = "gateup", xpath, wgpath, wupath, wdpath, opath, ppath, apath, aopath,
+            negname = "none";
     int iters = 20;
     int rows_per_block = ROWS_PER_BLOCK;
     for (int i = 1; i < argc; ++i) {
@@ -242,6 +247,8 @@ int main(int argc, char** argv) {
         else if (a == "--wd") wdpath = next();
         else if (a == "--out") opath = next();
         else if (a == "--pre") ppath = next();
+        else if (a == "--act") apath = next();
+        else if (a == "--actout") aopath = next();
         else if (a == "--iters") iters = atoi(next().c_str());
         else if (a == "--rows") rows_per_block = atoi(next().c_str());
         else if (a == "--neg") negname = next();
@@ -265,12 +272,23 @@ int main(int argc, char** argv) {
     }
 
     const bool gateup = mode == "gateup";
+    const bool pair = mode == "mlp";   // gateup and down ALTERNATED, one layer of a real step
     const size_t xbytes = filesize(xpath);
     const int in = (int)(xbytes / 2);
-    const size_t wbytes = gateup ? filesize(wgpath) : filesize(wdpath);
+    const size_t wbytes = (gateup || pair) ? filesize(wgpath) : filesize(wdpath);
     const int rows = (int)(wbytes / (in * 2));
-    printf("mode %s | x in=%d | rows=%d | warpSize=%d | rows/block=%d | weights %.2f MiB\n",
-           mode.c_str(), in, rows, ws, rows_per_block, wbytes / 1048576.0);
+    // For --mode mlp the down kernel is fed the reference act (in = 3584), exactly as F3 does,
+    // so the pair measures the two dots and not whatever the epilogue just produced.
+    size_t abytes = 0;
+    int in2 = 0, rows2 = 0;
+    if (pair) {
+        abytes = filesize(apath);
+        in2 = (int)(abytes / 2);
+        rows2 = (int)(filesize(wdpath) / (in2 * 2));
+    }
+    printf("mode %s | x in=%d | rows=%d | warpSize=%d | rows/block=%d | weights %.2f MiB%s\n",
+           mode.c_str(), in, rows, ws, rows_per_block, wbytes / 1048576.0,
+           pair ? " (+down weights, pair burst)" : "");
 
     // x arrives as BF16 (the reference's own operands are BF16-valued). It is staged as F32
     // because every bf16 value is exact in fp32, so the products are identical and the
@@ -281,20 +299,29 @@ int main(int argc, char** argv) {
         const hip_bfloat16* p = reinterpret_cast<const hip_bfloat16*>(xraw.data());
         for (int i = 0; i < in; ++i) xhost[i] = float(p[i]);
     }
+    std::vector<float> ahost;
+    if (pair) {
+        auto araw = slurp(apath, abytes);
+        ahost.resize(in2);
+        const hip_bfloat16* p = reinterpret_cast<const hip_bfloat16*>(araw.data());
+        for (int i = 0; i < in2; ++i) ahost[i] = float(p[i]);
+    }
 
     // The engine's load path: pinned host copy, then one hipMemcpy per blob
     // (devices/strix-halo-unified-memory.md: hipMalloc + explicit copy, never managed).
     char* htmp = nullptr;
     CK(hipHostMalloc(&htmp, wbytes));
-    hip_bfloat16 *dw = nullptr, *dw2 = nullptr, *dout = nullptr, *dpre = nullptr;
+    hip_bfloat16 *dw = nullptr, *dw2 = nullptr, *dw3 = nullptr, *dout = nullptr, *dpre = nullptr,
+                 *dact = nullptr;
     float* dx = nullptr;
+    float* dx2 = nullptr;
     auto upload = [&](const std::string& path, hip_bfloat16** dst) {
         std::ifstream f(path, std::ios::binary);
         f.read(htmp, wbytes);
         CK(hipMalloc(dst, wbytes));
         CK(hipMemcpy(*dst, htmp, wbytes, hipMemcpyHostToDevice));
     };
-    if (gateup) {
+    if (gateup || pair) {
         upload(wgpath, &dw);
         const size_t b2 = filesize(wupath);
         if (b2 != wbytes) {
@@ -308,9 +335,21 @@ int main(int argc, char** argv) {
     } else {
         upload(wdpath, &dw);
     }
+    if (pair) {
+        const size_t b3 = filesize(wdpath);
+        CK(hipHostFree(htmp));
+        CK(hipHostMalloc(&htmp, b3));
+        std::ifstream f(wdpath, std::ios::binary);
+        f.read(htmp, b3);
+        CK(hipMalloc(&dw3, b3));
+        CK(hipMemcpy(dw3, htmp, b3, hipMemcpyHostToDevice));
+        CK(hipMalloc(&dx2, (size_t)in2 * sizeof(float)));
+        CK(hipMemcpy(dx2, ahost.data(), (size_t)in2 * sizeof(float), hipMemcpyHostToDevice));
+        CK(hipMalloc(&dact, (size_t)rows * 2));
+    }
     CK(hipMalloc(&dx, (size_t)in * sizeof(float)));
     CK(hipMemcpy(dx, xhost.data(), (size_t)in * sizeof(float), hipMemcpyHostToDevice));
-    CK(hipMalloc(&dout, (size_t)rows * 2));
+    CK(hipMalloc(&dout, (size_t)(pair ? rows2 : rows) * 2));
     if (gateup && !ppath.empty()) CK(hipMalloc(&dpre, 2 * (size_t)rows * 2));
 
     const int neg = negname == "none" ? NEG_NONE : negname == "half" ? NEG_HALF
@@ -326,7 +365,24 @@ int main(int argc, char** argv) {
 
     const int threads = rows_per_block * ws;
     const int blocks = (rows + rows_per_block - 1) / rows_per_block;
+    const int blocks2 = (rows2 + rows_per_block - 1) / rows_per_block;
     auto launch = [&]() {
+        if (pair) {          // one layer of a real decode step: gate/up, then down, alternated
+            if (in == HID)
+                mlp_gateup<HID><<<blocks, threads>>>(dw, dw2, dx, dact, nullptr, rows,
+                                                     rows_per_block, neg);
+            else {
+                fprintf(stderr, "mlp: in=%d not implemented\n", in);
+                exit(1);
+            }
+            if (in2 == FF)
+                mlp_down<FF><<<blocks2, threads>>>(dw3, dx2, dout, rows2, rows_per_block, neg);
+            else {
+                fprintf(stderr, "mlp: act in=%d not implemented\n", in2);
+                exit(1);
+            }
+            return;
+        }
         if (gateup) {
             if (in == HID)
                 mlp_gateup<HID><<<blocks, threads>>>(dw, dw2, dx, dout, dpre, rows,
@@ -355,10 +411,14 @@ int main(int argc, char** argv) {
     CK(hipDeviceSynchronize());
 
     // Traffic accounting: weights dominate; x is read once per block but is 2-7 KiB, and
-    // the intermediates are 2 KiB-7 KiB, so they are rounding error next to 22 MiB.
-    const double bytes = (double)wbytes * (gateup ? 2.0 : 1.0) + xbytes
-                         + (double)rows * 2.0
-                         + (gateup && !ppath.empty() ? 2.0 * rows * 2.0 : 0.0);
+    // the intermediates are 2 KiB-7 KiB, so they are rounding error next to 22 MiB. For the pair
+    // it is the sum of both kernels' traffic, and one burst iteration is one layer.
+    const size_t wdbytes = pair ? filesize(wdpath) : 0;
+    const double bytes = pair
+        ? (double)(2 * wbytes + wdbytes) + xbytes + abytes + (double)rows * 2.0
+          + (double)rows2 * 2.0
+        : (double)wbytes * (gateup ? 2.0 : 1.0) + xbytes + (double)rows * 2.0
+          + (gateup && !ppath.empty() ? 2.0 * rows * 2.0 : 0.0);
 
     double best = 1e30;
     auto wall0 = std::chrono::steady_clock::now();
@@ -425,11 +485,18 @@ int main(int argc, char** argv) {
     printf("RESULT mode=%s ms=%.4f gbs=%.1f rows=%d in=%d rows_per_block=%d\n", mode.c_str(),
            best, gbs, rows, in, rows_per_block);
 
-    std::vector<hip_bfloat16> hout(rows);
-    CK(hipMemcpy(hout.data(), dout, (size_t)rows * 2, hipMemcpyDeviceToHost));
+    std::vector<hip_bfloat16> hout(pair ? rows2 : rows);
+    CK(hipMemcpy(hout.data(), dout, (size_t)hout.size() * 2, hipMemcpyDeviceToHost));
     {
         FILE* f = fopen(opath.c_str(), "wb");
-        fwrite(hout.data(), 2, rows, f);
+        fwrite(hout.data(), 2, hout.size(), f);
+        fclose(f);
+    }
+    if (pair && !aopath.empty()) {
+        std::vector<hip_bfloat16> hact(rows);
+        CK(hipMemcpy(hact.data(), dact, (size_t)rows * 2, hipMemcpyDeviceToHost));
+        FILE* f = fopen(aopath.c_str(), "wb");
+        fwrite(hact.data(), 2, rows, f);
         fclose(f);
     }
     if (gateup && dpre) {
@@ -441,6 +508,9 @@ int main(int argc, char** argv) {
     }
     CK(hipFree(dw));
     if (dw2) CK(hipFree(dw2));
+    if (dw3) CK(hipFree(dw3));
+    if (dx2) CK(hipFree(dx2));
+    if (dact) CK(hipFree(dact));
     CK(hipFree(dx));
     CK(hipFree(dout));
     if (dpre) CK(hipFree(dpre));

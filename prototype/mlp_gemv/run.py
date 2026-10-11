@@ -85,8 +85,8 @@ def dump_bf16(t: torch.Tensor, path: Path) -> Path:
     return path
 
 
-def read_bf16(path: Path, n: int) -> torch.Tensor:
-    return torch.from_numpy(np.fromfile(path, dtype=np.uint16)[:n]).view(torch.bfloat16)
+def read_bf16(path: Path, n: int, skip: int = 0) -> torch.Tensor:
+    return torch.from_numpy(np.fromfile(path, dtype=np.uint16)[skip:skip + n]).view(torch.bfloat16)
 
 
 def compare(got: torch.Tensor, ref: torch.Tensor, **kw) -> dict:
@@ -488,12 +488,13 @@ def main() -> int:
         dump_bf16(Wu, WORK / "Wu_t.bin")
         dump_bf16(Wd, WORK / "Wd_t.bin")
         print("cold check: each weight replicated %dx (gateup working set %.0f MiB, down "
-              "%.0f MiB) - replica 0's output must still match, and the sweep is COLD because "
-              "warm every config looks fast" % (n, n * 2 * FF * HID * 2 / 1048576,
-                                               n * HID * FF * 2 / 1048576))
+              "%.0f MiB) - the LAST replica's output must still match, and the sweep is COLD "
+              "because warm every config looks fast" % (n, n * 2 * FF * HID * 2 / 1048576,
+                                                        n * HID * FF * 2 / 1048576))
         # Config choice has to be made COLD: warm, every config looks fast and the ranking is
         # just who fits in the iGPU cache better. Loop the rows/block configs against the tiled
-        # (cache-defeated) weights and keep the best per-layer time.
+        # (cache-defeated) weights and keep the best per-layer time. In a real token the two
+        # kernels alternate, so for --mode all the pair is what gets timed (see below).
         cfgs = ([int(v) for v in args.rows_sweep.split(",")] if args.rows_sweep
                 else [args.rows])
         best = None
@@ -501,7 +502,29 @@ def main() -> int:
             line = "  cold rows/block %-3d" % r
             per_layer = 0.0
             ok = True
-            if args.mode in ("gateup", "all"):
+            last = n - 1        # which replica to validate; see the note below
+            if args.mode == "all":
+                # A token ALTERNATES the two kernels: gateup's 88 MiB stream is what evicts the
+                # down weights and the other way round, so bursting one kernel and then the
+                # other measures two machines that no token runs on. `--mode mlp` alternates
+                # them inside the burst, one burst iteration = one layer.
+                t = kernel(["--mode", "mlp", "--x", str(WORK / "x.bin"),
+                            "--act", str(WORK / "act_ref.bin"), "--wg", str(WORK / "Wg_t.bin"),
+                            "--wu", str(WORK / "Wu_t.bin"), "--wd", str(WORK / "Wd_t.bin"),
+                            "--out", str(WORK / "out_t.bin"), "--actout", str(WORK / "act_t.bin"),
+                            "--iters", "30", "--rows", str(r)], "mlp", quiet=True)
+                # Validate the LAST replica, not replica 0. Replica 0's bytes are the ones even
+                # a kernel that read too little would certainly touch; the last replica is the
+                # one whose traffic a skipped or short read would drop.
+                c = compare(read_bf16(WORK / "act_t.bin", n * FF, last * FF), aref, ulp_max=2)
+                co = compare(read_bf16(WORK / "out_t.bin", n * HID, last * HID), oref)
+                line += (" pair %7.4f ms %6.1f GB/s (%.0f%% of probe) | replica %d/%d ndiff "
+                         "act %d out %d"
+                         % (float(t["ms"]), float(t["gbs"]), float(t["gbs"]) / PROBE_GBS * 100,
+                            last, n, c["ndiff"], co["ndiff"]))
+                per_layer = float(t["ms"]) / n
+                ok = not (c["n_bad"] or co["n_bad"] or c["cos"] < 0.9999 or co["cos"] < 0.9999)
+            if args.mode == "gateup":
                 t = kernel(["--mode", "gateup", "--x", str(WORK / "x.bin"),
                             "--wg", str(WORK / "Wg_t.bin"), "--wu", str(WORK / "Wu_t.bin"),
                             "--out", str(WORK / "act_t.bin"), "--iters", "30",
@@ -512,7 +535,7 @@ def main() -> int:
                             float(t["gbs"]) / PROBE_GBS * 100, c["ndiff"], c["maxulp"]))
                 per_layer += float(t["ms"]) / n
                 ok = not (c["n_bad"] or c["cos"] < 0.9999)
-            if args.mode in ("down", "all"):
+            if args.mode == "down":
                 t = kernel(["--mode", "down", "--x", str(WORK / "act_ref.bin"),
                             "--wd", str(WORK / "Wd_t.bin"), "--out", str(WORK / "out_t.bin"),
                             "--iters", "30", "--rows", str(r)], "down", quiet=True)
