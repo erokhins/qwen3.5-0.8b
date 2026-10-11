@@ -13,8 +13,20 @@ variants are fixed before the data is read; nothing here is tuned to pass.
 
 Result (results.md has the table): the pins carry BF16(n) → BF16( BF16(n)·BF16(w) ) →
 BF16( a·silu(z) ) — three BF16 boundaries, the affine in the activation dtype with the weight cast
-to it. A-01's "applies w_norm and silu(z) in F32" and `speccheck.specimpl.rmsnorm_gated`, which
-implements that reading, both miss 105 683 of 294 912 elements on dec8.
+to it, and `speccheck.specimpl.rmsnorm_gated` reproduces that exactly when it is called the way
+speccheck calls it: `Weights` casts every model weight to the activation dtype (specimpl.py:70-86,
+`keep_f32_scalars=False` by default), so the oracle receives BF16(w), never the raw F32 tensor.
+
+What the weight dtype alone moves, on the same 294 912 dec8 elements with identical `o`/`z`:
+
+    w in BF16, product rounded in BF16  (what speccheck does)      ndiff      0
+    w BF16-rounded, then widened to F32 (A-01's letter)            ndiff  74 860
+    w straight from the F32 checkpoint  (a dtype speccheck lacks)  ndiff 105 683
+
+An earlier revision of this probe handed the oracle the third of those — `w.float()` off the
+checkpoint — and reported its 105 683 as an oracle disagreement with the pins. That claim was
+retracted in `bench/gate-audit.md` (G2 amendment); the row is now the BF16-weight call and the file
+asserts it at ndiff 0, so the retraction is a live check rather than prose.
 
 Run: .venv/bin/python prototype/gdn_gated_norm/mirror_probe.py [fixture ...]
 """
@@ -39,27 +51,34 @@ bf = lambda t: t.to(torch.bfloat16)  # noqa: E731
 
 
 def variants(o: torch.Tensor, z: torch.Tensor, w: torch.Tensor):
-    """(label, BF16 result) per reading. o/z are BF16-valued F32, w is the F32 checkpoint weight."""
-    o = o.reshape(H_N, D_H)
-    z = z.reshape(H_N, D_H)
+    """(key, label, BF16 result) per reading.
+
+    o/z are BF16-valued F32; w is the F32 checkpoint tensor, so each row states the weight dtype it
+    uses: `w_bf` is the dtype `speccheck.Weights` holds model weights in, raw `wf` is a dtype the
+    model never produces and only exists here to show what that dtype costs.
+    """
+    o = o.reshape(-1, D_H)
+    z = z.reshape(-1, D_H)
     wf = w.float().reshape(D_H)
+    w_bf = bf(wf)
     silu_z = torch.nn.functional.silu(z)                  # F32, HF's z·σ(z) order
     n_f32 = o * torch.rsqrt(o.pow(2).mean(-1, keepdim=True) + EPS)
     n_bf = bf(n_f32)
-    yield ("POLICY (kernel): bf16(n) · bf16(w) rounds, then ·silu(z) rounds",
-           bf(bf(n_bf * bf(wf)).float() * silu_z))
-    yield ("A-01 literal: bf16(n), then *w and *silu(z) in F32 (specimpl's reading)",
+    yield ("kernel", "POLICY (kernel): bf16(n) · bf16(w) rounds, then ·silu(z) rounds",
+           bf(bf(n_bf * w_bf).float() * silu_z))
+    yield ("a01_f32_w", "A-01 literal, weight in raw F32 (not a dtype speccheck holds)",
            bf((n_bf.float() * wf) * silu_z))
-    yield ("single cast: f32 norm · w · silu(z), one cast at the end",
+    yield ("single_cast", "single cast: f32 norm · w · silu(z), one cast at the end",
            bf((n_f32 * wf) * silu_z))
-    yield ("affine stays F32, weight cast: bf16(n·bf16(w)) then ·silu(z)",
-           bf((n_bf.float() * bf(wf).float()).float() * silu_z))
-    yield ("gate rounded: silu(z) goes through a BF16 slot first",
-           bf(bf(n_bf * bf(wf)).float() * bf(silu_z).float()))
-    yield ("speccheck.specimpl.rmsnorm_gated (the oracle, unchanged)",
-           # Hand it BF16 inputs, the way the model calls it: its final `.to(o.dtype)` is what
-           # rounds the result, so passing F32 in would compare an unrounded tensor to the pins.
-           rmsnorm_gated(o.to(torch.bfloat16), z.to(torch.bfloat16), w.float()))
+    yield ("a01_bf16_w", "A-01 literal, weight pre-rounded to BF16: *bf16(w) in F32, one cast at the end",
+           bf((n_bf.float() * w_bf.float()) * silu_z))
+    yield ("gate_rounded", "gate rounded: silu(z) goes through a BF16 slot first",
+           bf(bf(n_bf * w_bf).float() * bf(silu_z).float()))
+    yield ("specimpl", "speccheck.specimpl.rmsnorm_gated, called as speccheck calls it (BF16 weight)",
+           # BF16 in for o and z the way the model calls it — its final `.to(o.dtype)` is what
+           # rounds the result, so passing F32 in would compare an unrounded tensor to the pins —
+           # and BF16 for w, which is how `Weights` stores it. This row is G2's oracle half.
+           rmsnorm_gated(o.to(torch.bfloat16), z.to(torch.bfloat16), w_bf))
 
 
 def cases(fixture: str, steps: list[str]):
@@ -79,15 +98,19 @@ def cases(fixture: str, steps: list[str]):
             except FileNotFoundError:
                 continue          # not a GDN layer (an attention layer has no linear_attn.*)
             w = ops.ckpt_tensor(ops.LAYER_PREFIX % l + "linear_attn.norm.weight")
+            # One D_H-wide row is one value head (§04.5 reduces per head, not over the flattened
+            # 2048), so a pin is whole tokens of H_N×D_H: H_N rows for a decode step, H_N×T for a
+            # prefill. Reshaping to (H_N, D_H) instead works for decode and dies on prefill.
+            assert o.numel() % (H_N * D_H) == 0, (fixture, l, st, o.shape)
             yield (o.reshape(-1, D_H).float(), z.reshape(-1, D_H).float(), w, g.reshape(-1))
 
 
 def sweep(fixture: str, steps: list[str]) -> dict:
-    """{variant label: dict(n_elements, ndiff, worst_case_ndiff, cases)}"""
+    """{variant key: dict(label, n_elements, ndiff, worst_case_ndiff, cases)}, keys in yield order."""
     out = {}
     for (o, z, w, ref) in cases(fixture, steps):
-        for name, got in variants(o, z, w):
-            r = out.setdefault(name, {"ndiff": 0, "n": 0, "worst": 0, "cases": 0})
+        for key, label, got in variants(o, z, w):
+            r = out.setdefault(key, {"label": label, "ndiff": 0, "n": 0, "worst": 0, "cases": 0})
             nd = int((got.reshape(-1) != ref).sum())
             r["ndiff"] += nd
             r["n"] += ref.numel()
@@ -112,19 +135,33 @@ def main(argv: list[str]) -> int:
         if not res:
             print("%-14s no pins found — skipped" % fixture)
             continue
-        names = list(res.keys())
-        n = res[names[0]]["n"]
+        keys = list(res.keys())
+        n = res[keys[0]]["n"]
         print("\n%s — %d cases, %d BF16 elements compared against gdn.gated_out" %
-              (fixture, res[names[0]]["cases"], n))
-        for name in names:
-            r = res[name]
+              (fixture, res[keys[0]]["cases"], n))
+        for key in keys:
+            r = res[key]
             print("  %-64s ndiff %7d / %d  worst case %4d  %s"
-                  % (name, r["ndiff"], r["n"], r["worst"],
+                  % (r["label"], r["ndiff"], r["n"], r["worst"],
                      "BIT-EXACT" if r["ndiff"] == 0 else "refused by the pins"))
-        exact = [nm for nm in names if res[nm]["ndiff"] == 0]
-        if exact != [names[0]]:
-            print("  FAIL: expected exactly one bit-exact reading, the kernel's; got %s" % exact)
+        # Two readings must be bit-exact, and they must be the same formula: the kernel's policy
+        # and the oracle called the way speccheck calls it. Any third tie is news, and the dtype
+        # ladder must stay ordered — the three reconciliation figures are a weight-dtype effect on
+        # identical inputs, so if the raw-F32 row ever stops being worse than the BF16-rounded one,
+        # that explanation is wrong and must not be repeated in a docstring.
+        exact = [k for k in keys if res[k]["ndiff"] == 0]
+        problems = []
+        if exact != ["kernel", "specimpl"]:
+            problems.append("expected exactly the kernel and the correctly-called oracle "
+                            "to be bit-exact; got %s" % [res[k]["label"] for k in exact])
+        if not 0 < res["a01_f32_w"]["ndiff"] > res["a01_bf16_w"]["ndiff"]:
+            problems.append("weight-dtype ladder is not ordered: raw F32 %d vs BF16-rounded %d"
+                            % (res["a01_f32_w"]["ndiff"], res["a01_bf16_w"]["ndiff"]))
+        for p in problems:
+            print("  FAIL: %s" % p)
             rc = 1
+        print("  weight-dtype ladder: bf16 weight %d  |  bf16-rounded-then-F32 %d  |  raw F32 %d"
+              % (res["specimpl"]["ndiff"], res["a01_bf16_w"]["ndiff"], res["a01_f32_w"]["ndiff"]))
     return rc
 
 

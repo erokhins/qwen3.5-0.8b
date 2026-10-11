@@ -6,10 +6,12 @@
     .venv/bin/python prototype/gdn_gated_norm/run.py --gate --time
 
 --mirror is the half that decides the arithmetic: it compares BF16 bit patterns of six readings of
-§04.5 against `gdn.gated_out` on four fixtures and requires that EXACTLY the reading the kernel
-implements is bit-exact. That is the whole reason this op exists as its own directory: A-01's cast
-order was asserted at no bit level anywhere (§10.2's bands are blind to it), and the oracle in
-speccheck implements the reading the pins refuse.
+§04.5 against `gdn.gated_out` on four fixtures and requires that the bit-exact set is exactly the
+kernel's reading plus `speccheck.specimpl.rmsnorm_gated` called the way speccheck calls it (the two
+are the same formula: the affine lands in the activation dtype because the weight arrives BF16).
+That is the whole reason this op exists as its own directory: A-01's cast order was asserted at no
+bit level anywhere (§10.2's bands are blind to it). A-01's letter — affine in F32 — is what the pins
+refuse, and how far it differs depends only on the weight dtype it is handed (results.md §1).
 
 --gate is the device half: the binary gets the same pins the mirror gets, must reproduce
 `gdn.gated_out`, and each of six injected bugs must move the stage it lives in and leave the other

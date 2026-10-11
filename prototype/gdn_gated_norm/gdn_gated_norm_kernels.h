@@ -10,9 +10,12 @@
  * the plausible cast orders and only this one reproduces `decode{N}.L{ii}.gdn.gated_out`
  * bit-for-bit — 0 of 294 912 elements differ over dec8 (18 GDN layers × 8 decode steps), and the
  * same on `prefix24dec8`, `smoke`, and 79 776 rows of `p300` prefill. §04.5/A-01 as written
- * ("applies w_norm and silu(z) in F32") puts the affine in F32 and misses 105 683 of those
- * elements; `speccheck.specimpl.rmsnorm_gated` implements that reading and is therefore not
- * bit-faithful either. Full write-up, including what the wrong readings cost: results.md.
+ * ("applies w_norm and silu(z) in F32") puts the affine in F32, and the pins refuse that reading:
+ * the same formula with the weight rounded to BF16 and then widened back to F32 misses 74 860 of
+ * those elements, with the raw F32 checkpoint weight 105 683. `speccheck.specimpl.rmsnorm_gated`
+ * agrees with this policy as speccheck calls it — the weight arrives BF16, so its `w * n` is a
+ * BF16 multiply — 0 of 294 912; that count is asserted by the probe. Full write-up, including what
+ * each weight dtype costs: results.md §1.
  *
  * `o` arrives F32 because that is what `prototype/gdn_decode`'s recurrence produces, and the
  * kernel rounds it to the activation dtype first: HF's fused delta-rule read casts `o` back to
