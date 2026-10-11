@@ -1,0 +1,525 @@
+#!/usr/bin/env python3
+"""Gate the projection GEMV family (§04.1, §04.5, §05.1, §05.6) at k = 1 against the W1 pins.
+
+Nothing here is synthesized. The operands are rebuilt from the pinned dumps by `operands.py` —
+which first proves the rebuild right (bit-exactly) and proves the wrong readings wrong — the
+weights come from the checkpoint, and the reference outputs are the pins
+`decode{N}.L{ii}.{in_proj_qkv,in_proj_z,in_proj_b,in_proj_a,out_proj,q_proj,k_proj,v_proj,o_proj}
+.out` (§10.5). For every layer and decode step each projection is launched the way the engine
+will launch it — one launch for {qkv, z, b, a}, one for {q, k, v}, one for out_proj/o_proj — and
+each output slice is compared against its own pin:
+
+    P1  input projections, from the reference's normed layer input   (§04.1 / §05.1 dots)
+    P2  out_proj / o_proj, from the REFERENCE block output           (§04.5 / §05.6 dots)
+    cross  the same projection through speccheck's torch CPU expression: a third path, and it
+           is bit-exact to the pin, so any disagreement belongs to the kernel
+
+Judgement goes through `prototype/bf16_ulp.py` inside the cancellation band that `floor_probe.py`
+measures for THESE K values (1024/2048, not 3584), plus the §10.1-class aggregates: no element
+above 1e-4 of the tensor max may exceed 1 BF16 ULP; at most max(2 % of elements, 1 element) may
+differ at all; cos >= 0.9999 and meanrel <= 1e-2.
+
+`--negative` injects seven kernel bugs and three wrong operands, each with a declared must-catch
+and must-not-catch block (the rule `mlp_gemv` learned: a negative that cannot fail is worse than
+none, and one that "catches" everywhere is measuring the wrong thing). Every injection writes and
+loads its own layer's weights and operands, so nothing leaks in from the main loop.
+
+`--time` takes `tools/gpu_lock.sh` and measures cold: each shape across every layer that has it
+(18 or 6 distinct weight blobs, tiled past the iGPU cache when the shape alone is too small to
+be cold), and the whole 48-launch token plan in the order a token runs it. `--sweep` adds the
+rows/block and x-packing sweeps. Both write outputs and correctness-check the timed config
+(prototype/README.md rule 2).
+
+    .venv/bin/python prototype/proj_gemv/run.py [--fixture dec8] [--layers all] [--steps all]
+                                               [--negative] [--time] [--sweep] [--rows 8]
+                                               [--iters 30] [--no-verify]
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "prototype"))
+import bf16_ulp  # noqa: E402
+from operands import (CKPT, attn_operand, dump_bf16, is_attn_layer, operands_for,  # noqa: E402
+                      pack_offsets, pin, projections_of, proj_weight, read_bf16, verify,
+                      wrong_normed_inputs)
+
+BIN = Path(__file__).resolve().parent / "proj_gemv"
+WORK = Path("/tmp/proj_gemv")
+GPU_LOCK = ROOT / "tools" / "gpu_lock.sh"
+PROBE_GBS = 237.0
+# What "reproduce" means, sized by floor_probe.py for K = 1024/2048: reordering the reference's
+# own F32 sum already moves ~1 element in 1e5 by >1 ULP at cancelling elements, so a 16-element
+# output (in_proj_b/a) gets a one-element allowance rather than a zero-element one.
+NDIFF_PCT_MAX, NDIFF_ABS_MIN = 2.0, 1
+COS_MIN, MEANREL_MAX = 0.9999, 1e-2
+# The cancellation band. `mlp_gemv` tightened its own from a guessed 1e-4 to a measured 3e-5;
+# this gate uses the same number and prints, at the end of every run, the tightest band these
+# results would pass at, so the margin is on the record instead of assumed.
+CANCEL_REL = 3e-5
+
+IN_PROJ_BLOCKS = ["in_proj_qkv.q", "in_proj_qkv.k", "in_proj_qkv.v", "in_proj_z", "in_proj_b",
+                  "in_proj_a"]
+ATTN_BLOCKS = ["q_proj", "k_proj", "v_proj"]
+
+# name -> (why it is plausible, which block type it is exercised on, which launches get the bug,
+#         must-catch blocks, must-not-catch blocks)
+NEG_KERNEL = {
+    "tail": ("drop the last word of K (off-by-one reduction length)", "gdn", "all",
+             IN_PROJ_BLOCKS + ["out_proj"], []),
+    "half": ("accumulate half of K", "gdn", "all", IN_PROJ_BLOCKS + ["out_proj"], []),
+    "trunc": ("round toward zero instead of RNE", "gdn", "all",
+              IN_PROJ_BLOCKS + ["out_proj"], []),
+    "rowswap": ("write each dot to the neighbouring output row", "gdn", "all",
+                IN_PROJ_BLOCKS + ["out_proj"], []),
+    "transpose": ("read the weight buffer transposed", "gdn", "all",
+                  IN_PROJ_BLOCKS + ["out_proj"], []),
+    "qhalf": ("q_proj rows written in the contiguous-half layout §05.1 forbids", "attn", "inproj",
+              ["q_proj"], ["k_proj", "v_proj"]),
+    "kvswap": ("k/v sections of a packed in_proj_qkv swapped (§04.1)", "gdn", "inproj",
+               ["in_proj_qkv.k", "in_proj_qkv.v"],
+               ["in_proj_qkv.q", "in_proj_z", "in_proj_b", "in_proj_a"]),
+}
+
+
+def compare(got, ref, **kw) -> dict:
+    kw.setdefault("cancel_rel", CANCEL_REL)
+    return bf16_ulp.report(got, ref, **kw)
+
+
+def fmt(c: dict) -> str:
+    return ("ndiff %5d/%d (%.3f%%) max %d ULP | over-tol large: %d (worst %d ULP at |ref|/max"
+            " %.1e) | cos %.8f meanrel %.2e | in-band %d (tightest band that would pass: %.1e)"
+            % (c["ndiff"], c["n"], 100.0 * c["ndiff"] / c["n"], c["maxulp"], c["n_bad"],
+               c["worst_bad_ulp"], c["worst_bad_rel"], c["cos"], c["meanrel"], c["n_band"],
+               c["worst_off_rel"]))
+
+
+def ndiff_limit(n: int) -> float:
+    return max(NDIFF_PCT_MAX * n / 100.0, NDIFF_ABS_MIN)
+
+
+def judge(tag: str, c: dict, fails: list[str], worst: dict) -> None:
+    print("    %-30s %s" % (tag, fmt(c)))
+    key = tag.split()[-1]
+    prev = worst.setdefault(key, [0, 0, 0, 0.0])
+    prev[0] = max(prev[0], c["worst_bad_ulp"])
+    prev[1] = max(prev[1], c["maxulp"])
+    prev[2] = max(prev[2], c["n_band"])
+    prev[3] = max(prev[3], c["worst_off_rel"])
+    if c["n_bad"]:
+        fails.append("%s: %d large element(s) differ by >1 ULP (worst %d ULP at |ref|/max %.1e)"
+                     % (tag, c["n_bad"], c["worst_bad_ulp"], c["worst_bad_rel"]))
+    if c["ndiff"] > ndiff_limit(c["n"]):
+        fails.append("%s: %d elements differ (limit %.1f)" % (tag, c["ndiff"],
+                                                             ndiff_limit(c["n"])))
+    if c["cos"] < COS_MIN or c["meanrel"] > MEANREL_MAX:
+        fails.append("%s: cos %.8f meanrel %.2e outside G3i/§10.1" % (tag, c["cos"],
+                                                                      c["meanrel"]))
+
+
+def judge_neg(c: dict) -> bool:
+    """True when the comparison violates the same criteria the clean gate applies."""
+    return bool(c["n_bad"] or c["ndiff"] > ndiff_limit(c["n"]) or c["cos"] < COS_MIN
+                or c["meanrel"] > MEANREL_MAX)
+
+
+def run_bin(args: list[str], label: str, quiet: bool = True) -> dict:
+    proc = subprocess.run([str(BIN)] + args, capture_output=True, text=True)
+    if proc.returncode:
+        sys.stdout.write(proc.stdout + proc.stderr)
+        raise SystemExit("kernel failed: %s" % label)
+    if not quiet:
+        for line in proc.stdout.splitlines():
+            print("      | " + line)
+    for line in proc.stdout.splitlines():
+        if line.startswith("RESULT"):
+            out = dict(kv.split("=", 1) for kv in line.split()[1:])
+            out["_rowsweep"] = " ".join(l.strip() for l in proc.stdout.splitlines()
+                                        if l.strip().startswith("rows/block"))
+            return out
+    raise SystemExit("no RESULT line:\n" + proc.stdout)
+
+
+# ------------------------------------------------------------------ plan construction
+def write_plan(path: Path, jobs) -> Path:
+    """One line per launch: NAME ROWS IN XFILE WFILE[,WFILE...] [OUTFILE]."""
+    with open(path, "w") as f:
+        for name, rows, in_dim, xfile, wfiles, outfile in jobs:
+            f.write("%s %d %d %s %s%s\n" % (name, rows, in_dim, xfile,
+                                            ",".join(str(w) for w in wfiles),
+                                            (" " + str(outfile)) if outfile else ""))
+    return path
+
+
+def pack_rows(pack) -> int:
+    return sum(n for _, n in pack)
+
+
+def sections_of(name: str, off: int, n: int):
+    """Named blocks to report on: the §04.1 q/k/v thirds of in_proj_qkv, else the pin's name."""
+    if name == "in_proj_qkv":
+        third = n // 3
+        return [("in_proj_qkv.q", off, third), ("in_proj_qkv.k", off + third, third),
+                ("in_proj_qkv.v", off + 2 * third, third)]
+    return [(name, off, n)]
+
+
+def layer_files(layer: int, d: Path, steps: list[str]) -> dict:
+    """This layer's weights and rebuilt operands, as raw BF16, written once per layer."""
+    names = projections_of(d, layer)
+    files = {"w": {n: dump_bf16(proj_weight(layer, n), WORK / ("L%02d_%s.bin" % (layer, n)))
+                   for n in names}, "xin": {}, "xout": {}}
+    for step in steps:
+        ops = operands_for(d, step, layer)
+        files["xin"][step] = dump_bf16(ops["x_in"], WORK / ("L%02d_%s_xin.bin" % (layer, step)))
+        files["xout"][step] = dump_bf16(ops["x_out"],
+                                       WORK / ("L%02d_%s_xout.bin" % (layer, step)))
+    return files
+
+
+def layer_jobs(layer: int, d: Path, steps, files, outdir: Path):
+    """The launches a real token issues in this layer: the packed input projection, then the
+    output projection. Returns (jobs, pack, out_name)."""
+    ops = operands_for(d, steps[0], layer)
+    pack, out_name = ops["pack"], ops["out_proj"]
+    jobs = []
+    for step in steps:
+        jobs.append(("%s.inproj" % step, pack_rows(pack), 1024, files["xin"][step],
+                     [files["w"][n] for n, _ in pack], outdir / ("%s.inproj.bin" % step)))
+        jobs.append(("%s.%s" % (step, out_name), 1024, 2048, files["xout"][step],
+                     [files["w"][out_name]], outdir / ("%s.%s.bin" % (step, out_name))))
+    return jobs, pack, out_name
+
+
+def blocks_after_run(layer: int, d: Path, step: str, pack, outdir: Path, out_name: str,
+                     want_out: bool = True):
+    """Which named output blocks the last run left outside tolerance. `want_out=False` for a plan
+    that only contained the input-projection launch (the two layout negatives), so a missing
+    output file is not mistaken for a clean block."""
+    offs = pack_offsets(pack)
+    caught = []
+    for name, n in pack:
+        off = offs[name][0]
+        whole = read_bf16(outdir / ("%s.inproj.bin" % step), pack_rows(pack))
+        ref = pin(d, "%s.L%02d.%s.out" % (step, layer, name))
+        for sname, soff, sn in sections_of(name, off, n):
+            if judge_neg(compare(whole[soff:soff + sn], ref[soff - off:soff - off + sn])):
+                caught.append(sname)
+    if not want_out:
+        return caught
+    whole = read_bf16(outdir / ("%s.%s.bin" % (step, out_name)), 1024)
+    if judge_neg(compare(whole, pin(d, "%s.L%02d.%s.out" % (step, layer, out_name)))):
+        caught.append(out_name)
+    return caught
+
+
+# ------------------------------------------------------------------ correctness
+def gate_correctness(args, d: Path, steps, layers, fails, worst, ncmp) -> None:
+    from speccheck.specimpl import Weights
+    w = Weights(CKPT)          # loads by the §01 names and re-checks every shape (G1)
+    outdir = WORK / "out"
+    outdir.mkdir(exist_ok=True)
+    for layer in layers:
+        files = layer_files(layer, d, steps)
+        jobs, pack, out_name = layer_jobs(layer, d, steps, files, outdir)
+        plan = write_plan(WORK / ("plan_L%02d.txt" % layer), jobs)
+        run_bin(["--mode", "once", "--plan", str(plan), "--rows", str(args.rows)],
+                "L%02d" % layer)
+        offs = pack_offsets(pack)
+        print("  L%02d %-4s pack %s + %s" % (layer, "attn" if is_attn_layer(d, layer) else "gdn",
+                                             ",".join(n for n, _ in pack), out_name))
+        xkey_pre = "self_attn" if is_attn_layer(d, layer) else "linear_attn"
+        for step in steps:
+            x_in = operands_for(d, step, layer)["x_in"].reshape(1, -1)
+            for name, n in pack:
+                off = offs[name][0]
+                whole = read_bf16(outdir / ("%s.inproj.bin" % step), pack_rows(pack))
+                ref = pin(d, "%s.L%02d.%s.out" % (step, layer, name))
+                judge("%s %s" % (step, name), compare(whole[off:off + n], ref), fails, worst)
+                ncmp.append(name)
+                # third path: speccheck's own torch CPU expression on the same operand
+                sc = x_in @ w.p["model.language_model.layers.%d.%s.%s.weight"
+                                % (layer, xkey_pre, name)].t()
+                if int((sc.reshape(-1) != ref).sum()):
+                    fails.append("L%02d %s %s: speccheck's own matmul is not bit-exact to the"
+                                 " pin - the operand rebuild or the pin pairing is wrong"
+                                 % (layer, step, name))
+            whole = read_bf16(outdir / ("%s.%s.bin" % (step, out_name)), 1024)
+            ref = pin(d, "%s.L%02d.%s.out" % (step, layer, out_name))
+            judge("%s %s" % (step, out_name), compare(whole, ref), fails, worst)
+            ncmp.append(out_name)
+
+
+# ------------------------------------------------------------------ negatives
+def run_negatives(args, d: Path, fails) -> None:
+    gdn = next(l for l in range(24) if not is_attn_layer(d, l))
+    attn = next(l for l in range(24) if is_attn_layer(d, l))
+    step = sorted(p.name.split(".")[0] for p in d.glob("decode*.L%02d.s_in.npy" % gdn))[0]
+    outdir = WORK / "neg"
+    outdir.mkdir(exist_ok=True)
+    print("\nnegative tests (rejected where declared, and nowhere else):")
+    cases = {"gdn": gdn, "attn": attn}
+    for name, (why, kind, scope, must, must_not) in NEG_KERNEL.items():
+        layer = cases[kind]
+        files = layer_files(layer, d, [step])
+        jobs, pack, out_name = layer_jobs(layer, d, [step], files, outdir)
+        if scope == "inproj":
+            jobs = [j for j in jobs if j[0].endswith(".inproj")]
+        plan = write_plan(WORK / ("plan_neg_%s.txt" % name), jobs)
+        run_bin(["--mode", "once", "--plan", str(plan), "--rows", str(args.rows), "--neg", name],
+                name)
+        caught = blocks_after_run(layer, d, step, pack, outdir, out_name,
+                                  want_out=scope == "all")
+        missing = [m for m in must if m not in caught]
+        wrong = [m for m in must_not if m in caught]
+        print("    --neg %-10s L%02d %-46s caught %-44s must-not: %s%s"
+              % (name, layer, why, ",".join(caught) or "NOTHING",
+                 ",".join("%s=%s" % (m, "clean" if m not in caught else "MOVED")
+                          for m in must_not) or "-",
+                 "" if not wrong else "  <-- " + ",".join(wrong)))
+        if missing:
+            fails.append("negative %s was NOT rejected at %s - the gate is vacuous"
+                         % (name, ",".join(missing)))
+        if wrong:
+            fails.append("negative %s moved %s, which it should not touch" % (name,
+                                                                              ",".join(wrong)))
+    # Operand negatives: same kernel, wrong INPUT tensor. Must move the launches that read it and
+    # must leave the one that reads the other operand alone.
+    for kind, layer in cases.items():
+        files = layer_files(layer, d, [step])
+        jobs, pack, out_name = layer_jobs(layer, d, [step], files, outdir)
+        if kind == "gdn":
+            variants = wrong_normed_inputs(d, step, layer)
+            where = "inproj"
+            must = IN_PROJ_BLOCKS
+            must_not = [out_name]
+        else:
+            variants = {"contiguous-half gate (§05.1)":
+                        attn_operand(d, step, layer, interleave="half")}
+            where = "outproj"
+            must = [out_name]
+            must_not = ATTN_BLOCKS
+        target = ".inproj" if where == "inproj" else "." + out_name
+        for label, xx in variants.items():
+            slug = re.sub(r"\W+", "_", label)[:24]
+            badx = dump_bf16(xx, WORK / ("L%02d_bad_%s.bin" % (layer, slug)))
+            j2 = [(nm, r, ind, badx if nm.endswith(target) else xf, wf, of) for nm, r, ind, xf,
+                  wf, of in jobs]
+            plan = write_plan(WORK / ("plan_neg_in_%s.txt" % slug), j2)
+            run_bin(["--mode", "once", "--plan", str(plan), "--rows", str(args.rows)], label)
+            caught = blocks_after_run(layer, d, step, pack, outdir, out_name)
+            missing = [m for m in must if m not in caught]
+            wrong = [m for m in must_not if m in caught]
+            print("    x=%-30s L%02d %-30s caught %-44s must-not: %s%s"
+                  % (label[:30], layer, "(wrong operand)", ",".join(caught) or "NOTHING",
+                     ",".join("%s=%s" % (m, "clean" if m not in caught else "MOVED")
+                              for m in must_not) or "-",
+                     "" if not wrong else "  <-- " + ",".join(wrong)))
+            if missing:
+                fails.append("wrong operand %s was NOT rejected at %s" % (label,
+                                                                          ",".join(missing)))
+            if wrong:
+                fails.append("wrong operand %s moved %s, which it should not touch"
+                             % (label, ",".join(wrong)))
+
+
+# ------------------------------------------------------------------ timing
+@contextlib.contextmanager
+def gpu_lock(tag: str):
+    """Timings need the box to themselves (bench/build-queue.md). Another agent may hold it and
+    waiting is normal; the release happens whatever this section does."""
+    subprocess.run([str(GPU_LOCK), "acquire", tag], check=True)
+    try:
+        yield
+    finally:
+        subprocess.run([str(GPU_LOCK), "release", tag], check=False)
+
+
+def families(d: Path, layers, step: str) -> dict:
+    """shape -> launches across every layer that has it, real weights, real operands. `PACK_*`
+    entries are the launches an engine would actually issue; the named ones are the shapes the
+    queue asks to report separately."""
+    fam: dict[str, dict] = {}
+    for layer in layers:
+        if not (d / ("%s.L%02d.s_in.npy" % (step, layer))).exists():
+            continue
+        files = layer_files(layer, d, [step])
+        ops = operands_for(d, step, layer)
+        pack, out_name = ops["pack"], ops["out_proj"]
+        key = "PACK_qkv" if out_name == "o_proj" else "PACK_inproj"
+        for entry, files_list in [(n, [files["w"][n]]) for n, _ in pack] + \
+                                 [(key, [files["w"][n] for n, _ in pack])]:
+            rows = pack_rows(pack) if entry == key else dict(pack)[entry]
+            f = fam.setdefault(entry, {"w": [], "x": [], "rows": rows, "in": 1024})
+            f["w"].append(files_list)
+            f["x"].append(files["xin"][step])
+        f = fam.setdefault(out_name, {"w": [], "x": [], "rows": 1024, "in": 2048})
+        f["w"].append([files["w"][out_name]])
+        f["x"].append(files["xout"][step])
+    return fam
+
+
+def time_families(args, d: Path, layers, step: str, fails) -> None:
+    print("\ncold per-shape timings (real weights from every layer that has the shape, %s;"
+          " tile = replicas deep, added when the shape alone is smaller than the iGPU cache)"
+          % step)
+    for name, f in sorted(families(d, layers, step).items()):
+        mib = sum(sum(Path(x).stat().st_size for x in ws) for ws in f["w"]) / 1048576.0
+        # 16-row shapes are launch cost, not bandwidth: no tile makes 0.6 MiB cold, and that is
+        # the point of folding them into the in_proj launch.
+        tile = 1 if mib < 1.0 else max(1, int(np.ceil(96.0 / mib)))
+        jobs = [("%s/%d" % (name, i), f["rows"], f["in"], f["x"][i], f["w"][i], None)
+                for i in range(len(f["w"]))]
+        plan = write_plan(WORK / ("plan_fam_%s.txt" % name), jobs)
+        t = run_bin(["--mode", "burst", "--plan", str(plan), "--rows", str(args.rows),
+                     "--iters", str(max(args.iters, 30)), "--tile", str(tile),
+                     "--write-out"], name)
+        line = ("  %-14s [%6d,%4d] x%-3d tile %-3d %8.2f us/launch %7.1f GB/s (%3.0f%% of probe)"
+                % (name, f["rows"], f["in"], len(jobs), tile, float(t["ms_per_launch"]) * 1e3,
+                   float(t["gbs"]), 100.0 * float(t["gbs"]) / PROBE_GBS))
+        print(line)
+        if args.sweep:
+            sw = run_bin(["--mode", "burst", "--plan", str(plan), "--rows-list",
+                          "1,2,4,8,16,32", "--iters", str(max(args.iters, 30)),
+                          "--tile", str(tile), "--write-out"], name)
+            pk = run_bin(["--mode", "burst", "--plan", str(plan), "--rows", str(args.rows),
+                          "--iters", str(max(args.iters, 30)), "--tile", str(tile),
+                          "--x-packed", "--write-out"], name)
+            print("       rows/block sweep: %s" % sw["_rowsweep"])
+            print("       x left BF16 in shared: %8.2f us/launch  %s"
+                  % (float(pk["ms_per_launch"]) * 1e3, pk["_rowsweep"]))
+        if float(t["gbs"]) > 240.0:
+            fails.append("%s cold reports %.1f GB/s, above the ~240 GB/s ceiling: work is being"
+                         " skipped or the working set is still cache-resident (raise --tile)"
+                         % (name, float(t["gbs"])))
+
+
+def time_token(args, d: Path, layers, step: str, fails) -> None:
+    outdir = WORK / "out"
+    jobs = []
+    for layer in layers:
+        if not (d / ("%s.L%02d.s_in.npy" % (step, layer))).exists():
+            continue
+        files = layer_files(layer, d, [step])
+        js, _, _ = layer_jobs(layer, d, [step], files, outdir)
+        jobs += js
+    plan = write_plan(WORK / "plan_token.txt", jobs)
+    print("\ncold token plan (%s): %d launches, every layer's packed input projection then its"
+          " output projection, in token order" % (step, len(jobs)))
+    t = run_bin(["--mode", "burst", "--plan", str(plan), "--rows", str(args.rows),
+                 "--iters", str(max(args.iters, 20))], "token")
+    print("  projections for one token: %.4f ms | %.1f GB/s | %.0f%% of the %.0f GB/s probe"
+          "  (roofline for 0.4677 GB: %.3f ms)"
+          % (float(t["ms_per_plan"]), float(t["gbs"]), 100.0 * float(t["gbs"]) / PROBE_GBS,
+             PROBE_GBS, 0.4677 / PROBE_GBS * 1e3))
+    if args.sweep:
+        run_bin(["--mode", "burst", "--plan", str(plan), "--rows-list", "2,4,8,16,32",
+                 "--iters", str(max(args.iters, 20))], "token sweep", quiet=False)
+        print("  x left BF16 in shared:")
+        run_bin(["--mode", "burst", "--plan", str(plan), "--rows-list", "2,4,8,16,32",
+                 "--iters", str(max(args.iters, 20)), "--x-packed"], "token sweep packed",
+                quiet=False)
+    if float(t["gbs"]) > 240.0:
+        fails.append("token plan %.1f GB/s above the ceiling" % float(t["gbs"]))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--fixture", default="dec8")
+    ap.add_argument("--layers", default="0,3,11,23", help="comma list, or 'all'")
+    ap.add_argument("--steps", default="all", help="comma list of decodeN, or 'all'")
+    ap.add_argument("--rows", type=int, default=8)
+    ap.add_argument("--iters", type=int, default=30)
+    ap.add_argument("--negative", action="store_true")
+    ap.add_argument("--time", action="store_true", help="cold timings (takes the GPU lock)")
+    ap.add_argument("--sweep", action="store_true", help="with --time: rows/block + x packing")
+    ap.add_argument("--no-verify", action="store_true",
+                    help="skip the operand-rebuild proof (it is the gate's own foundation)")
+    args = ap.parse_args()
+
+    d = ROOT / "data" / "refs" / args.fixture
+    if not d.exists():
+        raise SystemExit("no fixture %s" % d)
+    all_steps = sorted({p.name.split(".")[0] for p in d.glob("decode*.L00.s_in.npy")})
+    steps = all_steps if args.steps == "all" else args.steps.split(",")
+    if not steps:
+        raise SystemExit("%s has no decode steps; this kernel is the k=1 path" % d)
+    layers = list(range(24)) if args.layers == "all" else [int(x) for x in args.layers.split(",")]
+    if not BIN.exists():
+        subprocess.run(["bash", str(BIN.parent / "build.sh")], check=True)
+    if bf16_ulp.selftest():
+        raise SystemExit("bf16_ulp selftest failed - the gate cannot be trusted")
+    WORK.mkdir(parents=True, exist_ok=True)
+    print("fixture %s | %d layers x %d steps | rows/block %d | iters %d"
+          % (args.fixture, len(layers), len(steps), args.rows, args.iters))
+
+    fails: list[str] = []
+    worst: dict = {}
+    ncmp: list[str] = []
+
+    # 1. The gate's own foundation: the rebuilt operands reproduce the pins bit-exactly and the
+    #    wrong readings do not. Without this, every comparison below is against the wrong tensor.
+    if not args.no_verify:
+        print("\noperand rebuild (§03.2 norm, §04.5 gated norm, §05.6 output gate):")
+        nbad = 0
+        for layer in layers:
+            for step in steps:
+                for ok, line in verify(d, step, layer):
+                    if not ok:
+                        nbad += 1
+                        print("    FAIL L%02d %s: %s" % (layer, step, line))
+        print("    %d layers x %d steps checked, %d failures" % (len(layers), len(steps), nbad))
+        if nbad:
+            raise SystemExit("operand rebuild failed - stopping: a gate against the wrong tensor"
+                             " verifies nothing")
+
+    print("\nP1/P2 kernel output vs the pins:")
+    gate_correctness(args, d, steps, layers, fails, worst, ncmp)
+
+    if args.negative:
+        run_negatives(args, d, fails)
+
+    if args.time:
+        with gpu_lock("proj_gemv timing (run.py)"):
+            time_families(args, d, layers, steps[0], fails)
+            time_token(args, d, layers, steps[0], fails)
+
+    print("\nworst BF16 ULP by output -- gated (large elements only) | raw (also the cancelling"
+          " elements floor_probe.py attributes to arithmetic, not error) | most elements any one"
+          " comparison put inside the %g band | tightest band these results would still pass at:"
+          % CANCEL_REL)
+    slack = None
+    for k, (bad, raw, nband, minband) in sorted(worst.items()):
+        print("    %-16s gated %4d   raw %6d   in-band %7d   tightest passing band %s"
+              % (k, bad, raw, nband, "%.1e" % minband if minband else "-"))
+        if minband:
+            slack = min(slack or 1e9, CANCEL_REL / minband)
+    if slack:
+        print("    band in use |ref|/max <= %g; worst offender above the band anywhere: %.1e"
+              " -> %.1fx of slack. floor_probe.py puts the reference's own reordering floor"
+              " (the largest |ref|/max that still moves >1 ULP) at the numbers it prints; a"
+              " tighter band has to clear both." % (CANCEL_REL, max(v[3] for v in worst.values()),
+                                                   slack))
+    print("\n%d comparisons, %d failures" % (len(ncmp), len(fails)))
+    if fails:
+        print("FAIL")
+        for f in fails[:30]:
+            print("  -", f)
+        return 1
+    print("PASS: the projection family reproduces the reference's own operands.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
