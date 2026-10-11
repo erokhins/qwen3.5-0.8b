@@ -149,7 +149,7 @@ __global__ void __launch_bounds__(THREADS)
 glue_add_norm(const hip_bfloat16* __restrict__ s, const hip_bfloat16* __restrict__ delta,
               const hip_bfloat16* __restrict__ w, hip_bfloat16* __restrict__ s_out,
               hip_bfloat16* __restrict__ n_out, int neg) {
-    __shared__ float red[16];   // <= THREADS/warpSize warp partials (512/32 is the most)
+    __shared__ float red[32];   // >= THREADS/warpSize warp partials (1024/32 is the most)
     constexpr int PER = H / THREADS;
     const bool norm_delta = (neg == NEG_NORMDELTA) && delta != nullptr;
     const bool bf16_acc = (neg == NEG_BF16ACC);
@@ -206,7 +206,7 @@ template <int THREADS>
 __global__ void __launch_bounds__(THREADS)
 norm_only(const hip_bfloat16* __restrict__ s, const hip_bfloat16* __restrict__ w,
           hip_bfloat16* __restrict__ n_out) {
-    __shared__ float red[16];
+    __shared__ float red[32];
     constexpr int PER = H / THREADS;
     float v[PER];
     float acc = 0.f;
@@ -297,8 +297,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--chained only makes sense for timing; correctness runs feed pins\n");
         return 1;
     }
-    if (threads != 128 && threads != 256 && threads != 512) {
-        fprintf(stderr, "--threads must be 128, 256 or 512 (1024 must split evenly)\n");
+    if (threads != 128 && threads != 256 && threads != 512 && threads != 1024) {
+        fprintf(stderr, "--threads must be 128, 256, 512 or 1024 (H=1024 must split evenly)\n");
         return 1;
     }
 
@@ -424,17 +424,21 @@ int main(int argc, char** argv) {
             // of what fusion removes, so it must not be optimised away here.
             if (j.dd) {
                 if (th == 128) residual_add<128><<<1, 128>>>(s, j.dd, j.dsout);
+                else if (th == 256) residual_add<256><<<1, 256>>>(s, j.dd, j.dsout);
                 else if (th == 512) residual_add<512><<<1, 512>>>(s, j.dd, j.dsout);
-                else residual_add<256><<<1, 256>>>(s, j.dd, j.dsout);
+                else residual_add<1024><<<1, 1024>>>(s, j.dd, j.dsout);
             }
             const hip_bfloat16* src = j.dd ? j.dsout : s;
             if (th == 128) norm_only<128><<<1, 128>>>(src, j.dw, j.dnout);
+            else if (th == 256) norm_only<256><<<1, 256>>>(src, j.dw, j.dnout);
             else if (th == 512) norm_only<512><<<1, 512>>>(src, j.dw, j.dnout);
-            else norm_only<256><<<1, 256>>>(src, j.dw, j.dnout);
+            else norm_only<1024><<<1, 1024>>>(src, j.dw, j.dnout);
         } else if (th == 128) {
             glue_add_norm<128><<<1, 128>>>(s, j.dd, j.dw, so, j.dnout, eff);
         } else if (th == 512) {
             glue_add_norm<512><<<1, 512>>>(s, j.dd, j.dw, so, j.dnout, eff);
+        } else if (th == 1024) {
+            glue_add_norm<1024><<<1, 1024>>>(s, j.dd, j.dw, so, j.dnout, eff);
         } else {
             glue_add_norm<256><<<1, 256>>>(s, j.dd, j.dw, so, j.dnout, eff);
         }
