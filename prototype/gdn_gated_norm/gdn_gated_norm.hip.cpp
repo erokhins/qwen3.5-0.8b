@@ -121,6 +121,8 @@ int main(int argc, char** argv) {
     }
 
     std::vector<Job> jobs;
+    size_t w_rows = 0;
+    float w_absmax = 0.f;
     {
         std::ifstream pf(plan_path);
         if (!pf) {
@@ -160,6 +162,23 @@ int main(int argc, char** argv) {
                 return 1;
             }
             j.dw = (const float*)wt.device;
+            // The guard above proves the store *called* this F32 and 512 bytes; this proves the
+            // bytes are a §04.5 affine weight and not, say, denormal garbage reached through the
+            // wrong dtype. A norm weight is O(1) and finite in every layer, so a value outside that
+            // band means the pointer or the dtype is wrong, and it is worth saying here rather than
+            // reading it back out of 49 000-ULP output files.
+            std::vector<float> wbytes(128);
+            CK(hipMemcpy(wbytes.data(), wt.device, 128 * 4, hipMemcpyDeviceToHost));
+            for (const float v : wbytes) {
+                w_absmax = std::max(w_absmax, std::abs(v));
+                if (!(v == v) || std::abs(v) > 1e4f) {
+                    fprintf(stderr, "%s: %s resolves to a non-finite or O(1e4) value (%g); a"
+                                    " linear_attn.norm.weight row is O(1), so these are not the"
+                                    " bytes this op wants\n", j.name.c_str(), j.wname.c_str(), v);
+                    return 1;
+                }
+            }
+            ++w_rows;
             CK(hipMalloc((void**)&j.dout, 2048 * 2));
             j.dnorm = nullptr;
             if (j.nout != "-") CK(hipMalloc((void**)&j.dnorm, 2048 * 2));
@@ -172,6 +191,9 @@ int main(int argc, char** argv) {
     }
     printf("plan %s | jobs=%zu | 16 blocks x 128 threads per job | neg=%s\n", plan_path.c_str(),
            jobs.size(), negname.c_str());
+    printf("weights: %zu [128] F32 rows read back from the store, all finite, |value| <= %.4g"
+           " (an affine row is O(1): a BF16 misread of these bytes lands at 1e-38, not here)\n",
+           w_rows, w_absmax);
     if (neg != GN_NONE) printf("NEGATIVE TEST: injected bug = %s\n", negname.c_str());
 
     auto launch = [&](Job& j) {
