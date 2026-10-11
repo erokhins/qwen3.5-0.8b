@@ -21,16 +21,20 @@ namespace engine::kernels {
 
 // ---- §03.1 + §03.2: residual add fused with the zero-centred RMSNorm (prototype/glue).
 // `delta == nullptr` is the norm-only form (§03.2's first call of the stack, and the final norm);
-// `s_out == nullptr` skips writing the new residual. 1024 threads is the width the op's sweep
-// prefers (results.md there); H is 1024, so that is one element per thread.
+// `s_out == nullptr` skips writing the new residual. 256 threads is the width the op's gate ran at
+// (H/THREADS = 4 elements/thread, an 8-partial warp tree): the block width changes the F32 summation
+// order of the mean of squares, so the engine launches the gated width until the 1024 gate runs
+// (kernels_glue.cpp, and results.md experiment E1).
 void glue_add_norm(const uint16_t* s, const uint16_t* delta, const uint16_t* w,
                    uint16_t* s_out, uint16_t* n_out);
 
 // ---- §04.1 / §05.1: the projection GEMV family (prototype/proj_gemv).
 // `in` must be 1024 or 2048 — the only two widths the checkpoint has for these nine shapes, and
-// the only two the kernel is instantiated for. `x` stays BF16 (the kernel's PACK_X form: the
-// products are bit-identical to the F32-staged form, and it saves a cast per projection).
-void proj_gemv(const void* weight, const uint16_t* x, uint16_t* out, int rows, int in);
+// the only two the kernel is instantiated for. `x` is F32: the launcher instantiates PACK_X=false,
+// the gated and the measured-faster form, and that form stages `x` from `const float*` inside the
+// kernel (kernels_proj.cpp cites both numbers). Hand it a BF16 buffer and it will read BF16 memory
+// as floats, so decode_step must cast where its producer left BF16.
+void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int in);
 
 // ---- §03.3: gate+up+SwiGLU, then down (prototype/mlp_gemv). Both take the input widened to
 // F32; there is no BF16-staged form of these two kernels, so the caller casts (see the launch
@@ -81,6 +85,8 @@ void lm_head_full(const uint16_t* table, const float* h, float* logits, int voca
 void cast_bf16_to_f32(const uint16_t* src, float* dst, int n);
 void cast_f32_to_bf16(const float* src, uint16_t* dst, int n);
 // Three regions in ONE launch — this is what a per-layer GDN cast costs instead of three launches.
+// DECLARED ONLY: `kernels_cast.cpp` is not written, so none of these three has a definition yet and
+// no deferral below may be described as already handled by this one.
 void cast_bf16_to_f32_3(const uint16_t* s0, float* d0, int n0, const uint16_t* s1, float* d1,
                         int n1, const uint16_t* s2, float* d2, int n2);
 
