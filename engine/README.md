@@ -94,9 +94,11 @@ Two things to know before reading it:
 
 ## Hand-off — read this if you did not write it
 
-Nothing below marked **device** has ever been executed. No buffer in `state.cpp` has been
-allocated, no launcher has been launched, and the §07.1 block order exists only as comments in
-`kernels.h`. "Compiles clean, never run" is the state of the work, not an oversight.
+Nothing below marked **device** has ever been executed. No buffer in `state.cpp` has been allocated
+for a token, no launcher in `kernels_*.cpp` has been launched from the engine, and no logits vector
+has come back. The §07.1 block order now exists as code (`decode_step.cpp`), not only as comments —
+which is the difference between this hand-off and the last one: what is missing is a measurement, not
+an implementation. "Compiles clean, never run" is still the state of the work, not an oversight.
 
 ### CPU-only — safe to run while anything else is running
 
@@ -223,7 +225,7 @@ tools/gpu_lock.sh release "proj_gemv PACK_X A/B (E2)"
 # 3. THE TOKEN GATE — the first time any engine code except loader_test touches the device.
 #    One command; it builds nothing, runs engine/build/decode_run, and judges the result.
 tools/gpu_lock.sh acquire "engine decode_step token gate (W5b)" && tools/gpu_lock.sh util
-./engine/build.sh && .venv/bin/python engine/gate.py --build
+.venv/bin/python engine/gate.py --build      # builds first (--build), then runs the gate
 tools/gpu_lock.sh release "engine decode_step token gate (W5b)"
 # Expected on a first clean run:
 #   (0) fixture pairing  — 26 PASS lines, no FAIL. These are the reference's own invariants
