@@ -188,6 +188,16 @@ device once; what is still missing is the token result and every timing.
 # dumper. `engine/results.md` has the size table, why BF16 logits lose no bits here, and what the
 # fingerprint can and cannot see.
 
+`.venv/bin/python engine/pin_bits_probe.py` and `.venv/bin/python engine/curve_probe.py tmp/gate_dec64f.log`
+# The two claims about the deep fixture that would otherwise be taken on faith, as runnable checks.
+# pin_bits_probe round-trips EVERY pinned logit value of every step through torch's BF16 cast and proves
+# the bf16-bit storage in dec64f lost nothing (0 of 2.23 M in dec8, 0 of 16.14 M in dec64f moved) — i.e. it
+# is a storage decision, not a loosened tolerance. curve_probe parses the gate's own (e) table and reports
+# why the steps-26..34 excursion is scale rather than decay: corr(1-cos, 1/(S n2)) 0.769, corr with the step
+# index -0.033, and err x (S n2) at one level (0.1994 vs 0.2074, ratio 1.04) across the whole run — while
+# saying out loud that it cannot separate "the reference's state shrank" from "the engine lost its state",
+# which is the measurement still owed (engine/results.md). Both are torch/numpy CPU, no device, no timing.
+
 .venv/bin/python speccheck/run_all.py
 # CPU torch. Expected green as of the rope revert d06b4e3. Any failure is worth reporting; note
 # that this suite's rmsnorm_gated is bit-exact against the pins only when the weight arrives BF16,

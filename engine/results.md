@@ -644,8 +644,10 @@ report, deliberately not here, so nothing from a contaminated window can be mist
 Two decisions inside that table, both checked rather than assumed:
 
 - **BF16 logits are bit-lossless here, not a loosened tolerance.** The model is BF16, so its logits already
-  land on BF16 values: rounding the pins to BF16 and comparing gives max abs difference 0 and cos exactly
-  1.0 on the checked steps (`tmp/probe_bf16_logits.py`, a one-off). Halving the logit cost buys that for
+  land on BF16 values, and that is checked over the whole fixture rather than spot-checked:
+  `engine/pin_bits_probe.py` round-trips every pinned logit value of every step of both fixtures through
+  torch's own BF16 cast and reports **0 of 2 234 880 (dec8) and 0 of 16 140 800 (dec64f) values moved** —
+  `PIN BITS PASS`. Halving the logit cost buys that for
   free; a gate reading them widens `uint16 → float32` by the bit shift, never a numeric cast (§04.5's trap).
 - **The state fingerprint is moments, not content.** Full state content is 18.66 MiB/step = 1.15 GB for 64
   steps, so each step pins `n2 = Σx²`, `maxabs`, `mean` and `dn2 = Σ(x − x_prev)²` per layer per kind. What
@@ -706,7 +708,8 @@ excursions, and neither is "state carry-over decaying with position":
 
 ```bash
 # the arithmetic behind the second reading, over the gate's own (e) table
-.venv/bin/python tmp/probe_curve_scale.py
+.venv/bin/python engine/gate.py --fixture dec64f > tmp/gate_dec64f.log    # the device run, correctness
+.venv/bin/python engine/curve_probe.py tmp/gate_dec64f.log                 # CPU: parses that table
 ```
 
 - `corr(1−cos, 1/(S n2)) = 0.769`, and `err × (S n2)` has median **0.1994** over the 25 steps up to the
