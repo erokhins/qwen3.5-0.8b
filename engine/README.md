@@ -127,10 +127,13 @@ tools/gpu_lock.sh acquire "engine W5b GPU pass" && tools/gpu_lock.sh util
 
 # 2. §04.5 device gate (18 layers x 8 dec8 steps) + its six located negatives
 .venv/bin/python prototype/gdn_gated_norm/run.py --gate          # add --time for the burst row
-# expect: "DEVICE GATE PASS"; gated_out within 1 BF16 ULP of the pins with ndiff ~0 (the CPU
-# mirror is bit-exact, so a large ndiff here means the kernel's per-head reduction or its cast
-# order is wrong on device, NOT that the pins moved). Each negative must move gated_out and leave
-# norm_pre_gate alone; w_f32/affine_uncast/single_cast/silu_rounded with norm_pre_gate 0/294912.
+# PASSES as of the 2026-10-11 clean window: "DEVICE GATE PASS", gated_out worst case ndiff 1/2048 at
+# max ULP 1 (= the reduction-order floor neg_probe.py predicted before the run), zeros 0 / NaN 0, all six
+# negatives localising (w_f32/affine_uncast/single_cast/silu_rounded at norm_pre_gate 0/294912), burst
+# 0.4227 ms per 144-job plan = 2.936 us/launch at spread 1.4 %. A LARGE ndiff here (not 1/2048) means the
+# kernel's per-head reduction or its cast order is wrong on device, NOT that the pins moved. History:
+# the first two runs failed on the gate's own fixture writer, not the kernel —
+# prototype/gdn_gated_norm/results.md §7-§9, and the timing is bench/performance-status.md §6.
 
 tools/gpu_lock.sh release "engine W5b GPU pass"
 ```

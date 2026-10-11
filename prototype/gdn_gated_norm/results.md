@@ -195,7 +195,7 @@ rounding detail. That is why the `noeps` injection moves 286 378 of 294 912 elem
 while the other four epilogue injections move 70 000–125 000: on nearly every head the eps term
 outvalues the variance it is added to. `neg_probe.py` prints these numbers.
 
-## 4. Negatives (six, declared; replayed on the CPU, still unverified on a device)
+## 4. Negatives (six, declared; replayed on the CPU, and now verified on a device too)
 
 `norm_pre_gate` is the dumped `BF16(n)` stage, which is what makes four of the six locatable
 rather than decorative: an epilogue bug must move `gated_out` and leave the stage alone.
@@ -251,9 +251,9 @@ shape — one block holds one head — so that falsification lives on the Python
 `[16][128]` and a whole-row reduction cannot reproduce a per-head result (the `p300` row of §2 is
 the evidence).
 
-The device run of these six has been executed once and its verdicts do **not** count: that run's clean
-baseline was garbage in all 144 cases, so "moved gated_out 294 912/294 912" was a statement about the
-garbage, not about the injection (§7).
+The device run of these six has been executed and its verdicts **do** count now (§9); the earlier run's
+did not, because its clean baseline was garbage in all 144 cases, so "moved gated_out 294 912/294 912"
+was a statement about the garbage, not about the injection (§7).
 
 ## 5. Band for the device gate
 
@@ -263,8 +263,9 @@ BF16-valued; reordering the mean-of-squares is legal and flips a few elements by
 `prototype/glue/floor_probe.py` measures 3–4 of 393 216, and `neg_probe.py`'s clean row lands at
 exactly that floor). `run.py --gate` prints the run's actual ndiff / max ULP / tightest band through
 `prototype/bf16_ulp.py` (whose selftest it runs first), so the band can be tightened the day it lands
-at 0 rather than being loosened. **The band has not been exercised on a device yet** — the one run that
-happened failed far outside it for a reason unrelated to it (§7).
+at 0 rather than being loosened. **The band has now been exercised on a device and the run landed inside
+it** — worst case ndiff 1/2048 at max ULP 1, zeros 0 / NaN 0 (§9). The one earlier run failed far
+outside it for a reason unrelated to it (§7).
 
 The verdict logic is unchanged as of this writing, but the *report* around it grew, because the first
 run could not be read from its own log:
@@ -285,13 +286,12 @@ run could not be read from its own log:
 
 ## 6. Not done
 
-* **The device gate has never passed.** It has been executed once and failed; the re-run command (with
-  the new driver, so it must be rebuilt) is in §7. `results.md` still carries no timing row, because
-  the only burst run so far happened while the outputs were garbage.
+* ~~**The device gate has never passed.**~~ **Closed by §9: `DEVICE GATE PASS`, max ULP 1, ndiff
+  1/2048 worst case, six negatives localising, and a burst row (2.936 µs/launch, spread 1.4 %).**
 * The §04.5/A-01 correction in `specification/` is a hand-off item, listed under "Open questions" in
   `engine/results.md`, not done in this commit.
-* The negative verdicts are CPU-verified only (§4). Their device counterparts have run once, against a
-  broken baseline, and proved nothing.
+* ~~The negative verdicts are CPU-verified only (§4).~~ Their device counterparts have now run against a
+  verified baseline and all six localise (§9); the CPU replay in §4 is what predicted their sizes.
 
 ## 7. The first device run: what happened, and what was ruled out
 
@@ -443,3 +443,41 @@ guard), `weights: … |value| <= ~1.2`, `write-back: gated 0/144 never written, 
 never written, 0 partial`, `output profile … zeros 0, NaN 0`, `max ULP 1` with ndiff a handful of
 294 912 (§5's floor), then six negative lines inside a few percent of the `neg_probe.py` counts with
 the four epilogue injections at `norm_pre_gate 0/294912`, the burst row, and `DEVICE GATE PASS`.
+
+## 9. The device gate PASSES (2026-10-11, foreground zero-subagent window)
+
+`.venv/bin/python prototype/gdn_gated_norm/run.py --gate --time` after rebuilding the driver, in the
+same window that re-took `gdn_decode`'s timing row and settled E1/E2 for `engine/results.md`. Result,
+every line read off the run:
+
+| line | measured | what it was supposed to be |
+|---|---|---|
+| fixture guard | `fixture verified: 144 cases`, bit-identical to the pins | §8's writer guard, now doing its job |
+| weights | 144 `[128]` F32 rows, all finite, `\|value\| <= ~1.2` | §7's refuted dtype theory, again refuted |
+| write-back | gated 0/144 never written, norm 0/144 never written, 0 partial | §7's sentinel, now silent |
+| `gated_out` vs pins | worst case **ndiff 1/2048**, **max ULP 1**, zeros 0, NaN 0 | §5's band: max 1 ULP, ≤1 % differing |
+| six negatives | all six localise; the four epilogue ones at `norm_pre_gate 0/294912` | §4's `neg_probe.py` CPU counts |
+| burst | **0.4227 ms per 144-job plan = 2.936 µs/launch, spread 1.4 %** | first timing row this op has ever had |
+| verdict | `DEVICE GATE PASS` | — |
+
+**Why max ULP 1 is the floor and not luck.** `gdn_gated_norm` reduces a 128-element sum of squares in a
+two-ladder warp tree; the pins come from torch's reduction of the same 128 numbers. `neg_probe.py`'s
+clean row — the CPU mirror, which reproduces the kernel's order — already landed at exactly this floor,
+so a device run at ndiff 1/2048 with max ULP 1 is the op agreeing with its own reference and disagreeing
+with torch by one ULP on one element per worst case. The band was set from that prediction (§5) and the
+measurement landed inside it, which is the order this project wants: a floor sized before the run, then a
+run that confirms it. Do not read max ULP 1 as "one bad element" — the rest of the tensor is bit-exact.
+
+**What the timing row is worth.** 18 launches per token (one per GDN layer) × 2.936 µs = **≈0.053
+ms/token**, which is 0.66 % of the ~8.0 ms measured token — and it is pure launch cost, because this op's
+traffic is ~0.37 MB/token, i.e. ~1.6 µs of roofline. It sits in the same family as glue's 49 launches: the
+lever is a packed launch over the 18 layers or fusion into `rec_kernel`'s epilogue, not a better
+reduction. The 1.4 % burst spread is what makes 2.936 µs quotable at all — this is a launch-bound
+number, the class `bench/performance-status.md` §6 found bimodal for glue, so it needed its own spread.
+Ledger rows: `bench/performance-status.md` §1 and §6.
+
+**Open after this run, all of them inherited rather than new.** The §04.5/A-01 wording correction in
+`specification/` is still the spec owner's call (§6). And the fact that the first two attempts at this
+gate failed 144/144 on a fixture the gate itself mangled (§7, §8) is why the writer guard, the sentinel,
+the zeros/NaN profile and `--selftest` all stay: they are what made the failure legible enough to
+attribute to the harness in three commits instead of a week.
