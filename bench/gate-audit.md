@@ -44,6 +44,12 @@ gated-norm implementation anywhere is `speccheck/gates/run_isolated.py` at `cos 
 cast-order policy error there is invisible to every gate — which is exactly how `apply_rope`'s wrong
 rope policy survived 26 green gates.
 
+Update from the rope work: `apply_rope`'s F32 form is now *deliberate for this oracle* and documented
+in its docstring — the model's policy is the BF16 one (§05.3), and bit-exactness against the pins lives
+in `prototype/attn_decode`, where the inputs are the pins. Making the oracle bit-faithful to it cost
+three end-to-end gates (d06b4e3). That does not soften this item: `rmsnorm_gated` has the same blind
+spot, and §04.5 has no pinned-input gate anywhere to fall back on the way rope has one.
+
 `gdn_chunk_scan` (§04.7) has the same weakness: asserted only at cos bands (G3, chunk == recurrent).
 
 **Cheapest closure:** a bit-exact mirror of `rmsnorm_gated` against the pinned `gdn.gated_out` dumps
