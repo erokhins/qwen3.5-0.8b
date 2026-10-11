@@ -101,9 +101,19 @@ matters. Each **row `p` of a prefill dump is a decode-shaped query at position `
 - The kernel's appended key at `p` equals the prefill's own roped key lane bit-for-bit at every
   length, i.e. §05.7 + §05.3 agree with the prefill path up to 277 positions.
 - `rope_cs` differs from torch's table in **2 of 128 entries at position 64** and 0 of 128 at the
-  other 67 positions sampled; that moves 1 element of `q_rope` by 1 ULP at `p=64`. This is the
-  device libm versus torch, and it is a floor, not a bug — `floor_probe.py` F3b measures the rate
-  (2 of 14 848 entries, 0.0135 %, in 1 of 116 positions).
+  other 67 positions sampled; that moves 1 element of `q_rope` by 1 ULP at `p=64`. **Corrected
+  2026-10-11 after `speccheck/rope_table_probe.py`: this is not a floor and not a
+  reference-generation boundary.** That probe asks which producer's F32 table reproduces the pin's
+  `attn.q_rope` rope dims bit-for-bit, and the answer is torch F32 and a plain glibc `cosf`/`sinf`
+  at **0 wrong elements over 277 positions × 6 attention layers — including position 64**. The
+  device's own table is the outlier (1 wrong element at `p=64` in layers 3/7, 2 in layer 11). So
+  the pins are reachable; our device table is not what produced them. Worse, nudging *any single*
+  frequency index's cos or sin by up to 2 F32 ULP does **not** reproduce the pin from torch's table
+  either, so the residual is not a 1-ULP transcendental disagreement: the surviving candidate is
+  the kernel's own pre-rope reduction — the F32 mean in §05.2's RMSNorm, summed warp-tree here and
+  by torch's reduction in the pins. Naming it properly needs `z` (post-norm, pre-rope) dumped from
+  the kernel and diffed against torch at that position; not done here, and `q_rope` at `p=64` should
+  be read as **1 element off for an unattributed reason**, not as an accepted floor.
 
 ## 5. Floors (`floor_probe.py`), each with its sample size
 
@@ -113,7 +123,7 @@ matters. Each **row `p` of a prefill dump is a decode-shaped query at position `
 | F2 | softmax *policy*: streaming (max,sum) vs the pinned two-pass | 108 544 elements | 25.9 % differ, 4 491 large — a policy, excluded from the band |
 | F2b | softmax *order*: denominator summed forwards vs reversed, same policy | 108 544 elements | 2 differ (0.0018 %), **0 large**, band floor 0 |
 | F3 | rope transcendentals re-evaluated f64→f32 vs f32 | 416 cos values | 0 flip |
-| F3b | the device's own rope table vs torch's, read back from run.py's outputs | 116 positions, 14 848 entries | 2 differ (0.0135 %), all 1 ULP |
+| F3b | the device's own rope table vs torch's, read back from run.py's outputs | 116 positions, 14 848 entries | 2 differ (0.0135 %), all 1 ULP — but see §4: the *pin* agrees with torch, so this row is our device disagreeing, not the reference |
 | F4 | §05.6 sigmoid: torch's libm vs `1/(1+exp(-x))` in f64→f32 | 108 544 gate values → 108 544 outputs | 0 flip, band floor 0 |
 
 Reordering this op's reference arithmetic **needs no band at all** — the products are BF16-exact and
