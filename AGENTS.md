@@ -46,6 +46,8 @@ note. Do not implement a [FUTURE] item without an explicit request.
 | **max-ULP bands are blind to whole-tensor 1-ULP error, and ndiff is blind to chains** — a BF16 subpartial in a norm moves 2.05 % of elements by ≤1 ULP and passes any max-ULP bound, while a chained dot's *legal* ndiff is 29–47 % so ndiff there is meaningless. Use ndiff for stage-local near-exact ops (norms, residual adds, rope: their floor is 1 ULP with **no** cancellation band), and cos/meanrel aggregates for chains | `prototype/glue/floor_probe.py`, `prototype/mlp_gemv/results.md` (F4) |
 | §07.4's "skinny argmax is bandwidth-critical" was wrong for the GPU (fused gains ~1 %) — corrected in place | `specification/07-decode-step.md` §07.4, `prototype/lm_head_gemv/results.md` |
 | timings are best-of-N on an unpinned idle desktop; absolute ms moves a few %, ratios vs the probe are the stable number | `prototype/README.md` |
+| a GPU number taken while the main agent is streaming (or via a backgrounded run) is contended by the session's own tokens — run the command blocking, with zero subagents | `bench/performance-status.md` §6 |
+| `hipEventElapsedTime` can return exactly 0.000 ms for a 2.1 ms kernel, not only sub-ms ones; steady_clock burst is the only timer to trust | `bench/performance-status.md` §6, `d81ff13` |
 | a `.gitignore` line like `prototype/**/<op>` (meant for the built binary) matches the op **directory** too, so the whole `prototype/<op>/` sits untracked and only `README.md` gets committed — ignore the binary by exact path `prototype/<op>/<op>`, and check `git status --ignored` after adding an op | `.gitignore` (comment block above the two binary lines) |
 | a BF16 ULP comparator written on a `uint16` view has a **dead branch**: `np.where(x < 0, …)` is never true for `uint16`, so every negative value collapses to +0.0 and the gate passes vacuously. Correct: `np.where(bits & 0x8000, bits ^ 0xFFFF, bits ^ 0x8000)` | `prototype/bf16_ulp.py` (has a selftest — run it), `prototype/mlp_gemv/results.md` |
 | `hipEventElapsedTime` returns **exactly 0** for kernels below ~1 ms on this iGPU. Sub-millisecond timings must come from a burst (N launches, one sync, wall-clock/N); a zero is a broken timer, not a fast kernel | `prototype/mlp_gemv/results.md` |
@@ -72,6 +74,16 @@ Therefore, as a hard rule:
   is no way to tell afterwards which it was.
 - `tools/gpu_lock.sh` still applies (acquire/release by TAG, record `util`), but it is now the second
   line of defence, not the first: the first is that nothing else is running at all.
+- **Run device commands *blocking*, never backgrounded.** A foreground bash call suspends this session's
+  token generation, so `flash_serve` — which busy-polls the iGPU and is the source of the interference —
+  has nothing to emit for the duration. Backgrounded runs (`&`, `nohup`, `bg_wait`) keep the stream alive
+  and contend with themselves. Measured: with the turn blocked and zero subagents, the three GEMV
+  families repeated within ~2 % of ledger figures (`bench/performance-status.md` §6). Record `util`
+  anyway, then discount it: identical clean runs read 24–91 %.
+- **Bandwidth-bound timings repeat; dispatch-bound ones do not.** Launch-bound measurements (glue's
+  49-launch path) are bimodal on this box — best-of-N spreads of 158–269 % at 512 threads, and a best
+  that beat the contended historical number while being *worse*. Quote those at 256 threads and state
+  the spread, or characterise the bimodality before trusting a per-launch µs figure.
 - Consequence for planning: a worker's report will often be "gate written, not yet run". That is an
   acceptable state — schedule a GPU pass after the workers drain, run the commands they handed over,
   and feed failures back.
