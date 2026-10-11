@@ -224,5 +224,14 @@ M0 in progress:
   `./bench.sh --engine speccheck --mtp 1` prints both rows.
 - Gate suite is **26/26 PASS** via `speccheck/run_all.py`.
 
-Next: the HIP scaffold (`prototype/gdn_decode`, `prototype/lm_head_gemv`), each gated by
-G3i with state injection, then the first `mtp_layer` kernel and a re-measure of G8 speed.
+- **Three HIP kernels exist and each is gated against the pins.** `prototype/lm_head_gemv` (tied
+  logits GEMV, 242.1 GB/s = 102 % of the measured read probe), `prototype/gdn_decode` (S04.2–S04.4
+  decode step, all four functions, bit-exact conv), `prototype/mlp_gemv` (S03.3 gate+up+SwiGLU and
+  down, F1–F4 over 192 layer×step cases, 2.650 ms per token cold = 84 % of the probe).
+  `bench/performance-status.md` is the ledger: 4.82 ms of the ~6.5 ms/token budget has a real
+  kernel, and it is the place that says which numbers are measured and which are projected.
+
+Next: the projection GEMVs — `mlp_gemv`'s shape-generic kernel instantiated at the GDN and
+attention projection shapes (38 % of the token) — and the §05 gated full-attention decode step,
+then `engine/` (safetensors → `hipMalloc` + `hipMemcpy`, warm pages) so the first real tokens/s
+row can go into the ledger. `prototype/gdn_decode`, `prototype/lm_head_gemv` are done.
