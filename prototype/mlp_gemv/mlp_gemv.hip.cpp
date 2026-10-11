@@ -70,6 +70,10 @@
 #define NEG_HALF 1     // accumulate half of K: a wrong reduction length
 #define NEG_TRUNC 2    // round toward zero instead of round-to-nearest-even
 #define NEG_F32ACT 3   // do the SwiGLU entirely in F32 (the literal A-07 reading)
+#define NEG_SWAPROW 4  // write each finished row into its neighbour's slot (wrong output index)
+#define NEG_TAIL 5     // drop the LAST word of K: an off-by-one in the reduction bound
+#define NEG_PRESWAP 6  // stage gate into the up slot and vice versa in the --pre dump, leaving
+                       // `act` correct — the bug class the F1/F2 split exists to detect
 
 // Round-to-nearest-even, same as torch's cast to bf16. The product of two bf16 values must
 // round the same way the reference's bf16 multiply does, or `act` drifts by 1 ULP.
@@ -123,7 +127,10 @@ __global__ void mlp_gateup(const hip_bfloat16* __restrict__ Wg,
     // enough of them in flight to sit on the roofline at only 8 rows per block.
     const uint4* wg = reinterpret_cast<const uint4*>(Wg + (size_t)row * IN);
     const uint4* wu = reinterpret_cast<const uint4*>(Wu + (size_t)row * IN);
-    const int words = neg == NEG_HALF ? IN / 16 : IN / 8;      // NEG_HALF: half of K
+    // NEG_HALF: half of K. NEG_TAIL: the last word of K (8 of 1024 terms), which is the shape an
+    // off-by-one in `v < words` actually takes — small enough that only a gate with a real
+    // per-element rule notices, unlike NEG_HALF.
+    const int words = neg == NEG_HALF ? IN / 16 : (neg == NEG_TAIL ? IN / 8 - 1 : IN / 8);
     float ag = 0.f, au = 0.f;
 #pragma unroll
     for (int v = lane; v < words; v += ws) {
@@ -141,6 +148,9 @@ __global__ void mlp_gateup(const hip_bfloat16* __restrict__ Wg,
     au = reduce_row(au);
     if (lane != 0) return;
     hip_bfloat16 g = rnd(ag, neg), u = rnd(au, neg);
+    // NEG_SWAPROW: store the finished row one slot over. rows is a multiple of 3584/1024, so the
+    // neighbour always exists; what matters is that every other row is now somebody else's answer.
+    const int orow = neg == NEG_SWAPROW ? (row ^ 1) : row;
     // silu in F32 on the rounded gate, rounded back to BF16, THEN multiplied with the rounded
     // `up` and rounded again — three roundings, because HF's F.silu returns BF16 and the
     // product is a BF16 tensor op. Doing the whole thing in F32 (NEG_F32ACT, and the literal
@@ -150,17 +160,19 @@ __global__ void mlp_gateup(const hip_bfloat16* __restrict__ Wg,
     // first version a 2 ULP outlier at a large element (a tie in the product's BF16 rounding).
     if (neg == NEG_F32ACT) {              // the wrong reading, for the negative test only
         float a = (ag * (1.0f / (1.0f + expf(-ag)))) * au;
-        act[row] = rnd(a, neg);
-        if (pre) { pre[row] = g; pre[rows + row] = u; }
-        return;
+        act[orow] = rnd(a, neg);
+    } else {
+        float gf = bf(g);
+        float sg = bf(fb(gf * (1.0f / (1.0f + expf(-gf)))));
+        act[orow] = rnd(sg * bf(u), neg);
     }
-    float gf = bf(g);
-    float sg = bf(fb(gf * (1.0f / (1.0f + expf(-gf)))));
-    hip_bfloat16 a = rnd(sg * bf(u), neg);
-    act[row] = a;
     if (pre) {
-        pre[row] = g;
-        pre[rows + row] = u;
+        // NEG_PRESWAP: the two dots and the epilogue are all correct — only the staging of the
+        // raw dumps swapped, so `act` matches the reference and `gate_pre` is `up_pre`'s value.
+        // A gate that judged `act` alone would sign this off; the F1/F2 split is what catches it.
+        const bool sw = neg == NEG_PRESWAP;
+        pre[orow] = sw ? u : g;
+        pre[rows + orow] = sw ? g : u;
     }
 }
 
@@ -178,8 +190,9 @@ __global__ void mlp_down(const hip_bfloat16* __restrict__ W, const float* __rest
 
     const uint4* wrow = reinterpret_cast<const uint4*>(W + (size_t)row * IN);
     float acc = 0.f;
+    const int words = neg == NEG_HALF ? IN / 16 : (neg == NEG_TAIL ? IN / 8 - 1 : IN / 8);
 #pragma unroll
-    for (int v = lane; v < (neg == NEG_HALF ? IN / 16 : IN / 8); v += ws) {
+    for (int v = lane; v < words; v += ws) {
         uint4 u = wrow[v];
         const hip_bfloat16* p = reinterpret_cast<const hip_bfloat16*>(&u);
         const float* xp = &xs[v * 8];
@@ -187,7 +200,7 @@ __global__ void mlp_down(const hip_bfloat16* __restrict__ W, const float* __rest
         for (int j = 0; j < 8; ++j) acc += bf(p[j]) * xp[j];
     }
     acc = reduce_row(acc);
-    if (lane == 0) out[row] = rnd(acc, neg);
+    if (lane == 0) out[neg == NEG_SWAPROW ? (row ^ 1) : row] = rnd(acc, neg);
 }
 
 static std::vector<char> slurp(const std::string& p, size_t expect) {
@@ -301,9 +314,12 @@ int main(int argc, char** argv) {
     if (gateup && !ppath.empty()) CK(hipMalloc(&dpre, 2 * (size_t)rows * 2));
 
     const int neg = negname == "none" ? NEG_NONE : negname == "half" ? NEG_HALF
-                  : negname == "trunc" ? NEG_TRUNC : negname == "f32act" ? NEG_F32ACT : -1;
+                  : negname == "trunc" ? NEG_TRUNC : negname == "f32act" ? NEG_F32ACT
+                  : negname == "rowswap" ? NEG_SWAPROW : negname == "tail" ? NEG_TAIL
+                  : negname == "preswap" ? NEG_PRESWAP : -1;
     if (neg < 0) {
-        fprintf(stderr, "--neg must be none|half|trunc|f32act, got %s\n", negname.c_str());
+        fprintf(stderr, "--neg must be none|half|trunc|f32act|rowswap|tail|preswap, got %s\n",
+                negname.c_str());
         return 1;
     }
     if (neg != NEG_NONE) printf("NEGATIVE TEST: injected bug = %s\n", negname.c_str());

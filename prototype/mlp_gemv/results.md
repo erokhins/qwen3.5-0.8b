@@ -1,7 +1,7 @@
 # `mlp_gemv` — §03.3 MLP decode path (k = 1) in HIP
 
 Status: **gate PASS** — 192 layer×step cases (all 24 layers × 8 decode steps of `dec8`), plus
-the three negative injections, plus the cold bandwidth sweep. Binary: `mlp_gemv` (built by
+the six negative injections, plus the cold bandwidth sweep. Binary: `mlp_gemv` (built by
 `build.sh`), gate: `run.py`, floor measurement: `floor_probe.py`, rounding-policy probe:
 `ulp_probe.py`. Authoritative run: `run.py --layers all --fixture dec8 --iters 60 --rows-sweep
 4,8,16,32 --tile 6 --negative`.
@@ -185,13 +185,25 @@ but until the comparator was real, none of those ULP columns were evidence of an
 ## Negative tests — `run.py --negative`
 
 The `speccheck/gates/run_negative.py` convention: inject plausible wrong kernels and require the
-gate to refuse each **where the bug is and nowhere else**.
+gate to refuse each **where the bug is and nowhere else**. Five separable observations now take
+part, because three were too coarse to localise anything:
 
-| injection | the bug | caught at |
-|---|---|---|
-| `half` | accumulate half of K (wrong reduction length) | `gate_pre`, `act`, `out` |
-| `trunc` | round toward zero instead of RNE | `gate_pre`, `act`, `out` |
-| `f32act` | SwiGLU entirely in F32 (the literal A-07 reading) | `act`, `out` — and **must not** move `gate_pre` |
+| injection | the bug | must be caught at | must NOT move |
+|---|---|---|---|
+| `half` | accumulate half of K (wrong reduction length) | `gate_pre`, `up_pre`, `act`, `out(down)` | — |
+| `tail` | drop the **last word** of K: 8 of 1024 terms, the off-by-one a real kernel ships with | same four | — |
+| `trunc` | round toward zero instead of RNE | same four | — |
+| `rowswap` | every dot right, each finished row written into its neighbour's slot | same four | — |
+| `preswap` | gate staged into the `up` slot of the raw dump: `act` correct, each dump the other's value | `gate_pre`, `up_pre` | `act`, `out(down)`, `out(chain)` |
+| `f32act` | SwiGLU entirely in F32 (the literal A-07 reading) | `act`, `out(chain)` | `gate_pre`, `up_pre`, `out(down)` |
+
+`out(down)` is `mlp_down` carrying the injection, fed the **reference** act — F3's isolation, so a
+`mlp_down` bug cannot hide behind propagation and an upstream bug cannot fake one; the old version
+fed the injected act and so could not tell the two apart. `out(chain)` is the F4 form (injected
+act), which is how an epilogue bug reaches the returned value. `preswap` is the interesting one:
+it is invisible to any gate that looks only at `act`, and it is the exact reason F1 and F2 are
+different cases. `--mode down` skips the two injections that live in the epilogue rather than
+reporting them as failures — a run that never launched the buggy kernel cannot catch the bug.
 
 `f32act` is the one a naive "max ULP at any element" rule would have missed and the one that
 matters most, because it is the difference between matching HF and matching arithmetic. The

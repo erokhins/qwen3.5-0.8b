@@ -179,9 +179,39 @@ NEG_DESCRIPTIONS = {
               "max-ULP-on-small-elements test would have missed)",
 }
 
+# Which kernel the bug lives in. `--mode down` never launches the gateup kernel, so an epilogue
+# or staging bug there is not a failure of the gate — it is a bug the run cannot reach.
+NEG_KERNELS = {"half": ("gateup", "down"), "tail": ("gateup", "down"),
+               "trunc": ("gateup", "down"), "rowswap": ("gateup", "down"),
+               "f32act": ("gateup",), "preswap": ("gateup",)}
+
+# Judged on five separable observations:
+#   gate_pre / up_pre / act  the gateup kernel's own outputs (F1, F2)
+#   out(down)   mlp_down carrying the injection, fed the REFERENCE act — F3's isolation, so a
+#               mlp_down bug cannot hide behind propagation and an upstream bug cannot fake one
+#   out(chain)  mlp_down carrying the injection, fed the kernel's own act — the F4 form, i.e. how
+#               an epilogue bug reaches the value the engine returns
+MUST_CATCH = {
+    "half":    ("gate_pre", "up_pre", "act", "out(down)"),
+    "tail":    ("gate_pre", "up_pre", "act", "out(down)"),
+    "trunc":   ("gate_pre", "up_pre", "act", "out(down)"),
+    "rowswap": ("gate_pre", "up_pre", "act", "out(down)"),
+    "f32act":  ("act", "out(chain)"),
+    "preswap": ("gate_pre", "up_pre"),
+}
+MUST_NOT = {
+    "half": (), "tail": (), "trunc": (), "rowswap": (),
+    # An epilogue bug must not move a dot, and with the reference act it must not move `out`
+    # either: if it does, the down kernel is being judged on the epilogue's ticket.
+    "f32act": ("gate_pre", "up_pre", "out(down)"),
+    # A staging swap moves nothing but the two raw dumps — `act` and every `out` stay clean.
+    "preswap": ("act", "out(down)", "out(chain)"),
+}
+
 
 def run_negatives(args, d, steps, layers, fails) -> None:
-    """Inject each bug and assert the gate's own criteria reject it."""
+    """Inject each bug and assert the gate's own criteria reject it — where the bug is, and not
+    where it is not."""
     l0, st = layers[0], steps[0]
     p0 = "%s.L%02d.mlp." % (st, l0)
     # Its own weights, into its own files: the main loop leaves the LAST layer's weights in
@@ -194,33 +224,48 @@ def run_negatives(args, d, steps, layers, fails) -> None:
     refs = {k: torch.from_numpy(np.load(d / (p0 + k + ".npy"))).to(torch.bfloat16).reshape(-1)
             for k in ("gate_pre", "up_pre", "act", "out")}
     dump_bf16(x, WORK / "x.bin")
+    dump_bf16(refs["act"], WORK / "act_negref.bin")
+    modes = {"gateup", "down"} if args.mode == "all" else {args.mode}
     for neg, why in NEG_DESCRIPTIONS.items():
+        if not set(NEG_KERNELS[neg]) & modes:
+            print("    --neg %-8s skipped: the bug lives in %s and --mode %s never runs it"
+                  % (neg, "/".join(NEG_KERNELS[neg]), args.mode))
+            continue
         extra = ["--neg", neg]
-        ok_act = ok_gate = ok_out = False
-        if args.mode in ("gateup", "all"):
+        caught: list[str] = []
+        if "gateup" in modes:
             kernel(["--mode", "gateup", "--x", str(WORK / "x.bin"), "--wg", str(WORK / "Wg_n.bin"),
                     "--wu", str(WORK / "Wu_n.bin"), "--out", str(WORK / "nact.bin"),
                     "--pre", str(WORK / "npre.bin"), "--iters", "1"] + extra, "", quiet=True)
             pre_t = read_bf16(WORK / "npre.bin", 2 * FF)
-            ok_gate = judge_neg(compare(pre_t[:FF], refs["gate_pre"]))
-            ok_act = judge_neg(compare(read_bf16(WORK / "nact.bin", FF), refs["act"],
-                                       ulp_max=2))
-        act_src = WORK / "nact.bin" if args.mode in ("gateup", "all") else dump_bf16(
-            refs["act"], WORK / "nact_ref.bin")
-        kernel(["--mode", "down", "--x", str(act_src), "--wd", str(WORK / "Wd_n.bin"),
-                "--out", str(WORK / "nout.bin"), "--iters", "1"] + extra, "", quiet=True)
-        ok_out = judge_neg(compare(read_bf16(WORK / "nout.bin", HID), refs["out"]))
-        caught = [n for n, v in (("gate_pre", ok_gate), ("act", ok_act), ("out", ok_out)) if v]
-        # An injection has to be caught where the bug is, and must NOT appear where it is not:
-        # `f32act` is an epilogue bug, so if it moved `gate_pre` the gate would be measuring
-        # something other than what it claims (which is exactly how the first version of this
-        # function was wrong: it reused the previous layer's weights and "caught" everything).
-        must_catch = {"half": ("gate_pre", "act", "out"), "trunc": ("gate_pre", "act", "out"),
-                      "f32act": ("act", "out")}[neg]
-        must_not = {"half": (), "trunc": (), "f32act": ("gate_pre",)}[neg]
+            for nm, got, want, kw in (
+                    ("gate_pre", pre_t[:FF], refs["gate_pre"], {}),
+                    ("up_pre", pre_t[FF:], refs["up_pre"], {}),
+                    ("act", read_bf16(WORK / "nact.bin", FF), refs["act"], {"ulp_max": 2})):
+                if judge_neg(compare(got, want, **kw)):
+                    caught.append(nm)
+        # out(down): the reference act in, so the ONLY thing that can move `out` is the injected
+        # mlp_down. The old version fed the injected act here, which meant an upstream bug could
+        # "catch" a down-side test and a down-side bug could be attributed to the epilogue.
+        kernel(["--mode", "down", "--x", str(WORK / "act_negref.bin"),
+                "--wd", str(WORK / "Wd_n.bin"), "--out", str(WORK / "nout_down.bin"),
+                "--iters", "1"] + extra, "", quiet=True)
+        if judge_neg(compare(read_bf16(WORK / "nout_down.bin", HID), refs["out"])):
+            caught.append("out(down)")
+        if "gateup" in modes:
+            kernel(["--mode", "down", "--x", str(WORK / "nact.bin"),
+                    "--wd", str(WORK / "Wd_n.bin"), "--out", str(WORK / "nout.bin"),
+                    "--iters", "1"] + extra, "", quiet=True)
+            if judge_neg(compare(read_bf16(WORK / "nout.bin", HID), refs["out"])):
+                caught.append("out(chain)")
+        observable = ((["gate_pre", "up_pre", "act"] if "gateup" in modes else [])
+                      + ["out(down)"]
+                      + (["out(chain)"] if "gateup" in modes else []))
+        must_catch = [c for c in MUST_CATCH[neg] if c in observable]
+        must_not = [c for c in MUST_NOT[neg] if c in observable]
         missing = [c for c in must_catch if c not in caught]
         wrong = [c for c in must_not if c in caught]
-        print("    --neg %-8s %-56s caught: %-22s%s" % (
+        print("    --neg %-8s %-56s caught: %-34s%s" % (
             neg, why, ",".join(caught) or "NOTHING",
             "  <-- also moved " + ",".join(wrong) if wrong else ""))
         if missing:
@@ -530,12 +575,17 @@ def main() -> int:
     print("    that cancelled to ~1e-6 of the max, where one ULP is a large fraction of the")
     print("    value. A flat 'max 1 ULP' rule would forbid correctness.")
     print("  * F4 (chain: down applied to the KERNEL's act) is judged on aggregates only")
-    print("    (cos >= 0.9999, meanrel <= 1e-3): floor_probe.py shows a 1-ULP flip in `act`")
-    print("    -- the most a correct kernel with a different summation order may produce --")
-    print("    lands up to 142 ULP away in `out` at small elements. Per-element ULP there")
-    print("    measures arithmetic sensitivity, not the kernel.")
-    print("  * --negative injects three wrong kernels and requires each to be caught where the")
-    print("    bug is and nowhere else.")
+    print("    (cos >= %.4f, meanrel <= %.0e, ndiff <= %.0f %%): floor_probe.py shows a 1-ULP flip"
+          % (F4_COS_MIN, F4_MEANREL_MAX, F4_NDIFF_PCT_MAX))
+    print("    in `act` -- the most a correct kernel with a different summation order may produce")
+    print("    -- puts >1 ULP onto an `out` element in all 192 cases it surveyed (192 x 8 trials,")
+    print("    7483 offenders, worst 28665 ULP, most offenders NOT small elements). Per-element")
+    print("    ULP there measures arithmetic sensitivity, not the kernel. The same survey measures")
+    print("    these aggregates: worst legit meanrel 9.1e-4 for ONE flip (2.0e-3 at five), so the")
+    print("    %.0e band is marginal by construction, not conservative -- see results.md." %
+          F4_MEANREL_MAX)
+    print("  * --negative injects six wrong kernels and requires each to be caught where the")
+    print("    bug is and nowhere else (--mode down skips the two that live in the epilogue).")
     return 0
 
 
