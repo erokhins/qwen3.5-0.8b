@@ -11,6 +11,26 @@ compiles against the same header). Every number below is from the **CPU** mirror
 no device and is allowed under the GPU rule. The device half (`run.py --gate`) is in the hand-off
 list in `engine/README.md` and has never been executed.
 
+What the first hand-off attempt did expose, before it reached a kernel: it aborted in the loader.
+
+```
+terminate called after throwing an instance of 'std::out_of_range'
+  what():  WeightStore: no tensor named model.language_model.layers.0.linear_attn.norm.weight
+```
+
+The plan writer was naming the weight by its **checkpoint** key — the same key `mirror_probe.py`
+reads the file with — while `engine::WeightStore` is keyed on the **§02.5 normalised** name
+(`lm.layers.N.linear_attn.norm.weight`). `at()` refuses a name it does not hold rather than
+normalising what it is given, which is the right refusal (a store that tolerated both spellings would
+be answering for tensors it does not hold), so the producer was wrong and now converts through
+`prototype/weight_names.py`, the one Python mirror of `engine/loader.cpp::normalize_name`. The same
+module gives `run.py --gate` a **CPU** pre-flight: every name in a plan is checked against the store
+key set — 336 names, derived from `model.safetensors.index.json`, tied to `loader_test`'s 335 +
+tied-head count — before the binary is launched, so a naming mistake prints the offending name
+instead of dying with a C++ `std::out_of_range` in a subprocess. Nothing about the kernel, its pins,
+or its bands changed; the CPU mirror still passes (144 cases, ndiff 0) and the device half is still
+`NOT RUN`.
+
 ## 1. The finding: the pins put the affine in the activation dtype, and the oracle lands there too
 
 `mirror_probe.py` compares BF16 **bit patterns** of six readings of §04.5 against
@@ -146,6 +166,8 @@ the band can be tightened the day it lands at 0 rather than being loosened.
 
 ## 6. Not done
 
-* Device half never executed (`run.py --gate`, `--gate --time`): commands in `engine/README.md`.
+* Device half never executed (`run.py --gate`, `--gate --time`): commands in `engine/README.md`, and
+  row 9 of `bench/commit-review-2026-10-11.md` §4 — whose first attempt died on the weight-name
+  mismatch described in the header, now fixed and CPU-guarded.
 * `results.md` here carries no timing row for the same reason.
 * §04.5/A-01 correction in `specification/` is listed as a hand-off item, not done in this commit.

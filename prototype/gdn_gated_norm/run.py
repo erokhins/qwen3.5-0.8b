@@ -18,6 +18,14 @@ refuse, and how far it differs depends only on the weight dtype it is handed (re
 one alone. Run it under `tools/gpu_lock.sh` only if you want the timing row; the correctness half
 needs no lock (AGENTS.md).
 
+A plan names its weight the way `WeightStore` is keyed — the §02.5 engine name
+(`lm.layers.N.linear_attn.norm.weight`), never the checkpoint key `mirror_probe.py` reads the file
+with. Getting that wrong aborts the subprocess in `store.at()` with an uncaught `std::out_of_range`,
+which is how the first-ever device run of this gate died, so `write_cases()` builds every plan name
+through `weight_names.normalize_name` (the same §02.5 mirror the guard below checks against) and
+each plan is verified against the store's key set **before** the binary is launched: a bad name now
+prints the offending name on the CPU instead of a SIGABRT from a child process.
+
 Band for `gated_out`: max 1 BF16 ULP with ≤1 % of elements differing, which is the band
 prototype/gdn_decode/check.py already uses for this exact op class (an F32 norm whose pins are
 BF16-valued: reordering the mean-of-squares is legal and flips a handful of elements by 1 ULP —
@@ -43,8 +51,11 @@ for _p in (str(ROOT), str(ROOT / "prototype"), str(ROOT / "prototype" / "proj_ge
 import mirror_probe as mp  # noqa: E402
 import operands as ops  # noqa: E402
 import bf16_ulp  # noqa: E402
+import weight_names as wn  # noqa: E402
 
 BIN = Path(__file__).parent / "gdn_gated_norm"
+# Column of the weight name in a plan line: `NAME OFILE ZFILE WNAME OUT [NORM]`.
+WEIGHT_FIELD = 3
 STEPS = ["decode%d" % s for s in range(8)]
 FIXTURE = "dec8"
 
@@ -63,7 +74,14 @@ STAGES = ("gated_out", "norm_pre_gate")
 def mirror_only() -> int:
     print("== CPU mirror gate (no device): §04.5 cast order against gdn.gated_out ==")
     rc = mp.main([])
-    print("\nbf16_ulp selftest:", "PASS" if bf16_ulp.selftest() == 0 else "FAIL")
+    # Both selftests are part of the verdict, not commentary: bf16_ulp is what judges the bit
+    # distance and weight_names is what the plan guard and the plan writer both rely on.
+    ulp_ok = bf16_ulp.selftest() == 0
+    names_ok = wn.selftest() == 0
+    print("\nbf16_ulp selftest:", "PASS" if ulp_ok else "FAIL")
+    print("weight_names selftest:", "PASS" if names_ok else "FAIL")
+    if not (ulp_ok and names_ok):
+        rc |= 1
     print("MIRROR GATE:", "PASS" if rc == 0 else "FAIL")
     return rc
 
@@ -78,13 +96,19 @@ def write_cases(d: Path, fixture: str) -> list[dict]:
         of, zf = d / (name + ".o.f32"), d / (name + ".z.bin")
         o.numpy().astype(np.float32).tofile(of)
         z.to(torch.uint16).numpy().tofile(zf)
-        cases.append(dict(name=name, ofile=of, zfile=zf, weight=w, ref=ref, layer=None))
+        cases.append(dict(name=name, ofile=of, zfile=zf, weight=w, ref=ref, layer=None,
+                          wname=None))
     # map cases back to layers by re-reading the pin order (cases() iterates layer-major)
     idx = 0
     for l in range(24):
         for st in STEPS:
             if (fx / ("%s.L%02d.gdn.o_pre_norm.npy" % (st, l))).exists():
                 cases[idx]["layer"] = l
+                # The one place this gate turns a layer number into the weight the plan asks for.
+                # Derived through the §02.5 mirror from the checkpoint key `mirror_probe.py`
+                # already used, so producer and guard cannot drift apart.
+                cases[idx]["wname"] = wn.normalize_name(
+                    ops.LAYER_PREFIX % l + "linear_attn.norm.weight")[1]
                 idx += 1
     return cases
 
@@ -123,9 +147,9 @@ def device_gate(with_time: bool) -> int:
                 c["out"] = d / (c["name"] + ".gated.bin")
                 c["norm"] = d / (c["name"] + ".norm.bin")
                 f.write("%s %s %s %s %s %s\n" % (
-                    c["name"], c["ofile"], c["zfile"],
-                    ops.LAYER_PREFIX % c["layer"] + "linear_attn.norm.weight",
+                    c["name"], c["ofile"], c["zfile"], c["wname"],
                     c["out"], c["norm"]))
+        wn.check_plan(plan, WEIGHT_FIELD)
         print("\n-- clean run --")
         run_binary(plan, d)
         worst_ulp, worst_ndiff, n_el, tightest = 0, 0, 0, 0.0
@@ -154,9 +178,9 @@ def device_gate(with_time: bool) -> int:
                     c["nout"] = d / (c["name"] + ".%s.gated.bin" % neg)
                     c["nnorm"] = d / (c["name"] + ".%s.norm.bin" % neg)
                     f.write("%s %s %s %s %s %s\n" % (
-                        c["name"], c["ofile"], c["zfile"],
-                        ops.LAYER_PREFIX % c["layer"] + "linear_attn.norm.weight",
+                        c["name"], c["ofile"], c["zfile"], c["wname"],
                         c["nout"], c["nnorm"]))
+            wn.check_plan(plan_neg, WEIGHT_FIELD)
             run_binary(plan_neg, d, neg)
             moved = {s: 0 for s in STAGES}
             for c in cases:
