@@ -847,7 +847,8 @@ against itself in that window, an absolute floor there is not measuring what it 
 ```bash
 .venv/bin/python engine/gate.py --fixture dec64f > tmp/gate_dec64f.log   # device: correctness only, already run
 .venv/bin/python engine/route_price.py --fixture dec64f \
-        --engine-log tmp/gate_dec64f.log --out tmp/route_dec64f.json     # CPU: 5 m 32 s, 1 m 15 s user, no device
+        --engine-log tmp/gate_dec64f.log --out tmp/route_dec64f.json     # CPU: 5.3 s wall (1 m 15 s of
+                                                                         # CPU across torch threads)
 ```
 
 `engine/route_price.py` grew the deep mode for this: `--fixture` picks the forced fixture (default `dec8`, whose
@@ -990,7 +991,8 @@ The G5/G6 bands were **not** edited, and `engine/gate.py --fixture dec64f` still
    `engine 1−cos ≤ k × route 1−cos(j)` with the route column produced by `engine/route_price.py --fixture …` and
    cached next to the fixture, `k = 4`. dec64f then passes at all 64 steps (worst observed ratio 3.04) while a real
    bug — which would have to be *bigger* than the reference's own legal spread to hide — still fails. Cost: the gate
-   gains a CPU preprocessing step per fixture (5 m 32 s for 64 steps) and its fairness now depends on `specimpl`'s
+   gains a CPU preprocessing step per fixture — cheap, 5.3 s wall for the whole 64-step table — and its
+   fairness now depends on `specimpl`'s
    own route spread being representative; it is a spread between two forms of *specimpl*, against a pin made by *HF*.
 2. **Gate the decision, not the vector**: require per-step argmax agreement (plus the proven-tie exception of
    decision 1), and keep the logits comparison as reported evidence with the §10.2 margin statistic as the check —
@@ -1084,3 +1086,116 @@ justification live there, not in this file), `bf16_payload()` (RNE on the bits),
 tie set), `tie_verdict()` (the single predicate — (a) gates on it and (b)'s argmax line reuses its answer,
 so the two sections cannot disagree), `read_engine_logits()` (the engine's vectors are now read before (a),
 because a tie that cannot be proved must fail rather than be waived), and the two injection flags.
+
+
+# `dec64t`: a 64-step pin whose chain never reaches its own stop — the eos confound, measured
+
+`dec64f`'s 27–34 window is two things at once: the window where the reference's GDN state energy halves,
+and the window after the model has been driven past its own end of turn (stop id 248046 sampled at step
+24, then 248044/248045/248068/248069 at steps 26–34). Nothing measured on that fixture can separate them.
+So a second fixture, same pin policy, a prompt whose own greedy chain runs long by design.
+
+## Pre-flight: ask the reference first, and get the probe right before believing it
+
+`tools/stop_probe.py` renders the prompt exactly the way `tools/reference_dump.py` does
+(`apply_chat_template(..., add_generation_prompt=True, enable_thinking=False)`) and reports where the stop
+id first appears:
+
+```bash
+.venv/bin/python tools/stop_probe.py --max-new 300 \
+        --message "Count from 1 to 80, separating the numbers with commas."
+#   prompt: 27 tokens
+#   FIRST STOP (248046) AT STEP: none in 300
+#   first legacy stop 248044 (config eos, A-10) at step: none
+#   text: '1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, ... 75, '
+```
+
+**No stop in 300 tokens** — the 64-step window is nowhere near a crossing, and neither stop id (248046 nor
+the legacy 248044) appears anywhere in it. A trap on the way there, recorded because it nearly picked the
+wrong fixture: the probe's first version hand-rolled the decode loop and fed one token at a time **without
+`past_key_values`**, so every step saw a one-token context and *every* prompt — including this one — looked
+like a degenerate four-token loop. `model.generate` fixed it, and the same prompt counts correctly. A probe
+that mis-states the model is worse than no probe; the lesson is in that file's docstring.
+
+## The fixture and the two comparisons
+
+```bash
+.venv/bin/python tools/reference_dump.py --message "Count from 1 to 80, separating the numbers with commas." \
+        --decode 64 --tag dec64t --lean --deep-steps 63 --logits-bits bf16           # 5.6 s wall, CPU
+.venv/bin/python tools/reference_dump.py --message "Count from 1 to 80, separating the numbers with commas." \
+        --decode 64 --tag dec64t --lean --deep-steps 63 --logits-bits bf16 --verify data/refs/dec64t
+#   REPRODUCE PASS — every pinned byte and every pinned manifest value came back identical   (5.6 s)
+.venv/bin/python engine/gate.py --fixture dec64t > tmp/gate_dec64t.log               # device, correctness only
+.venv/bin/python engine/route_price.py --fixture dec64t --engine-log tmp/gate_dec64t.log
+```
+
+826 tensors + manifest, 57.1 MiB of pins (61 MB on disk) — the same budget as `dec64f`, same lean policy,
+same one-step full per-layer dump at step 63. The chain is `'1, 2, 3, … 19'`, boringly deterministic
+exactly as requested.
+
+| | `dec64f` (crosses at 24) | `dec64t` (no crossing in 300) |
+|---|---|---|
+| engine gate | FAIL — 10 band lines | **PASS — 546 checks, 0 fails**, ids 64/64 exact |
+| worst engine cos | 0.997844 (step 32) | **0.999759** (step 2) |
+| engine under G5 | 7 of 64 steps | **0 of 64** |
+| route-vs-route under G5 | 6 of 64 (worst 0.998286) | **0 of 64** (worst 0.999874) |
+| pinned `S n2` excursion | 2029 … 4457, **2.20×** | 3635 … 3940, **1.08×** |
+| `corr(1−cos, 1/(S n2))`, engine | 0.769 | **0.258** |
+| `corr(route 1−cos, 1/(S n2))`, routes | 0.787 | **0.298** |
+| `corr(1−cos, step)` | −0.033 | −0.191 |
+| `err × (S n2)` median | 0.2118 | 0.3704 |
+| exact ties in the pin | steps 17, 18 | none (the tie policy is not exercised) |
+| routes' argmax vs the pinned ids | 63/64 (the tie) | **64/64** |
+
+## The free run, which is the number that was never available before
+
+A teacher-forced chain never lets the engine's own divergence happen, so no fixture could ever state a
+free-run id agreement at depth. `dec64t` can, because its own chain does not stop:
+
+```bash
+./engine/build/decode_run --model models/Qwen3.5-0.8B --ids <dec64t prefill ids> --steps 64 --out tmp/freerun
+#   RESULT mode=run steps=91 … prefix_len=91 stopped=0        (§07.5 armed; no --no-stop waiver needed)
+```
+
+**The engine free-runs 64 of 64 steps with ids identical to the pinned chain — first mismatch: none.** The
+smallest decision margin over the 64 steps is the pin's top1−top2 gap at 12× the engine's largest element
+error (step 21: gap 2.875 vs maxabs 0.2326), so nothing was anywhere near flipping. Read this honestly: it
+does **not** soften A-18, whose 0.8776 agreement was measured between two legal forms of the reference on
+49 natural-text prompts × 24 tokens. A deterministic counting loop is the easy case — near-certain next
+token at every step — and it is one prompt, not a bound. What it buys is the closest thing this repo has to
+a free-run G7 at depth, and it says the chaos floor is a property of the prompt, not of the engine.
+
+## What this settles about the 27–34 excursion, and what it still cannot
+
+* **Settled: the dips are not depth, not the engine, and not the gate.** Ask the same engine for a 64-step
+  chain whose reference state energy stays inside 1.08× of itself and there is nothing to find — worst cos
+  0.999759, every id exact, free-running included.
+* **Settled, and this is the one that matters: the scale law was carried by the excursion.** On `dec64f` the
+  engine's 1−cos correlates with 1/(pinned `S n2`) at 0.769 and the two legal routes' spread does so at
+  0.787; on `dec64t`, where `S n2` barely moves, both correlations collapse to 0.258 and 0.298. The
+  correlation existed *because* there was a 2.2× energy excursion to correlate with — which is precisely
+  what "ill-conditioning, not drift" predicts and precisely what a carry-over bug would not produce.
+* **Not settled, and said plainly: a no-crossing fixture with a low-energy window does not exist yet.**
+  `dec64t` separates the crossing from the dips only if the two were independent, and the observation that
+  pushes against that is in the numbers: in `dec64f` the energy halves *while the reference is emitting its
+  own special tokens*, i.e. the crossing may be what *causes* the low energy rather than merely
+  co-occurring with it. `dec64t`'s energy is flat, so the test "no crossing + energy dip" is simply not
+  instantiated by either fixture. What would instantiate it, in rising order of cost: (a) keep probing for a
+  prompt that stays long *and* drives the state down — long prompts are not the scarce thing (with the probe
+  fixed, a 200-word Paris paragraph, the months-and-lengths list, a bicycle explanation and a prime-number
+  continuation all show **no stop within 120 tokens** as well); what has not been found is one whose `S n2`
+  goes low, and the counting chain was chosen for its determinism and is flat-energy, which is the hole;
+  (b) the engine-side per-step state fingerprint named twice already, which would at least let the low-energy
+  steps be judged on
+  `S n2` equality rather than on a logits cos; (c) accept option 1 of the band proposal (key the allowance
+  on the measured route spread), which needs no causal story at all — it only claims the engine is inside the
+  band the reference leaves open, and `dec64t` shows that allowance is never spent on a well-conditioned
+  chain (worst route 1−cos 1.26e-4 there vs 1.7e-3 in the excursion).
+* **One more number the band proposal should carry**: `err × (S n2)` is 0.2118 on `dec64f` and 0.3704 here,
+  so that product is *not* a constant across prompts — `engine/curve_probe.py`'s "constant across the whole
+  run" is a within-fixture statement, and reading it as an engine invariant would be a mistake.
+
+The band is still untouched, and `dec64f` is still red on its 10 band lines on purpose. Of the three options
+written up under "Decision 2", `dec64t` is direct evidence for option 1 and against leaving things as they
+are: a fixed absolute floor on the logits cos now demonstrably fires on steps where the reference cannot hold
+it against itself, and passes cleanly everywhere else.
