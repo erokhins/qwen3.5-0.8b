@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """What is a GDN prefill route worth on the LOGITS vector — measured inside the reference, with no engine?
 
+Two modes, because the question grew a second half:
+
+    .venv/bin/python engine/route_price.py                              # dec8, the 8-step table
+    .venv/bin/python engine/route_price.py --fixture dec64f \
+          --engine-log tmp/gate_dec64f.log                              # the whole forced chain, 64 steps
+    .venv/bin/python engine/route_price.py --fixture dec64f --engine-log ... \
+          --out tmp/route_dec64f.json                                   # same table as JSON
+
 Why this exists. `engine/logits_floor.py` prices one op (final norm + tied `lm_head`) with the reference's
 own `L23.s_out` held fixed, so its 0.99999862 is the floor for *reassociation-only change on the
 reference's own arithmetic at that one op*. It is not a floor for an end-to-end token-level logits vector,
@@ -13,9 +21,21 @@ logits vector at every step using `engine/gate.py::metrics`' F64 cos. Same weigh
 no device. If the spread between two legal reference forms is the same order as the engine's deviation from
 the pin, the engine's deviation needs no bug to explain it.
 
-Run:  .venv/bin/python engine/route_price.py            # ~90 s, torch CPU, ~2 GB RSS
+Why the deep mode exists. `engine/gate.py --fixture dec64f` FAILs on 7 steps whose logits `cos` sits under
+G5's 0.9995 (worst 0.997844 at step 32), and the only thing known about that window is that the reference's
+own GDN state energy halves inside it. Two readings survive that fact — the engine lost state there, or the
+comparison stopped being a fair one because the thing it compares against got small — and the question
+"how far apart are two LEGAL reference routes at those steps?" is the one that separates them. So the deep
+mode replays the fixture's own forced chain (the manifest's `greedy_continuation`, exactly the list the
+gate hands `decode_run --replay`) through both forms and prices them at every step. Deciding what the
+answer *means* for the band is the operator's call, not this script's: it prints the table and the verdict
+per step, and changes no band.
 
-Measured 2026-10-11, dec8, the same 8 continuation tokens fed to both forms, argmax agreement all True:
+Step numbering: the deep table uses `engine/gate.py`'s, i.e. step j is the step fed `greedy_continuation[j]`
+and compared with pinned `decode{j}.logits_last.npy`. (The 8-step table below predates that and is numbered
+from the prefill position, so its row 2 is the gate's step 0.)
+
+dec8, measured 2026-10-11, the same 8 continuation tokens fed to both forms, argmax agreement all True:
 
 | step (gate numbering) | 1-cos, route vs route | × the last-op floor | engine's own 1-cos vs the pin |
 |---|---|---|---|
@@ -33,21 +53,23 @@ The route spread is larger than the engine's entire deviation **at every step**,
 of its own legal forms, and the fair end-to-end floor is this table, not 0.99999862.
 """
 from __future__ import annotations
-import sys, json
+import argparse
+import json
+import sys
 from pathlib import Path
+import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "speccheck"))
+sys.path.insert(0, str(ROOT))
 from specimpl import Weights, Forward  # noqa: E402
+from engine import curve_probe, gate as egate  # noqa: E402  (the gate owns the pin readers and the (e) parser)
 
 torch.set_grad_enabled(False)
-FIX = ROOT / "data" / "refs" / "dec8"
-ids = json.loads((FIX / "manifest.json").read_text())["prefill_ids"]
-w = Weights(ROOT / "models" / "Qwen3.5-0.8B")
-print(f"dec8 prefill_ids: {len(ids)} tokens = {ids}")
 
 FLOOR = 1.38e-6  # engine/logits_floor.py: last-op floor, distance from 1
+G5 = 0.9995      # §10.1 G5, the hard floor engine/gate.py applies per step. Read here, never edited.
 
 
 def f64(t):
@@ -64,29 +86,189 @@ def meanrel(a, b):
     return float(((a - b).abs() / b.abs().clamp_min(1e-6)).mean().item())
 
 
-def run(form, cont):
-    """One prefill pass over the whole prompt, then the continuation token-at-a-time. Returns the logits
-    vector that predicts each next token: position len(ids)-1, then one per continuation token."""
-    f = Forward(w, gdn_form=form)
-    lg = [f.logits(f.prefill(torch.tensor(ids)))[-1]]
-    for tok in cont:
-        lg.append(f.logits(f.decode(tok))[-1])
-    return lg
+def price(w: Weights, prompt: list[int], feed: list[int]) -> tuple[list, list]:
+    """The prompt, then the forced feed list, through both legal GDN prefill forms.
+
+    Returns the two logits lists, index-aligned with `feed`: element j is the logits vector produced
+    after consuming `feed[j]`, which is exactly what the gate compares with `decode{j}.logits_last`.
+    The two runs differ in ONE thing — `gdn_form`, i.e. chunked §04.7 vs recurrent §04.4 for getting the
+    prompt into the GDN state. The decode path is the same recurrent code in both, and the feed list is
+    the reference's own tokens, so neither run can diverge from the other by picking a different token.
+    """
+    runs = {}
+    for form in ("chunk", "recurrent"):
+        f = Forward(w, gdn_form=form)
+        f.prefill(torch.tensor(prompt))
+        runs[form] = [f.logits(f.decode(tok))[-1] for tok in feed]
+    return runs["chunk"], runs["recurrent"]
 
 
-cont = Forward(w, gdn_form="chunk").greedy(ids, 8)
-print(f"chunk-form continuation: {cont}")
-chunk = run("chunk", cont)
-recur = run("recurrent", cont)
+def dec8_price(w: Weights) -> None:
+    """The published 8-step table: dec8's prompt plus its own greedy continuation."""
+    fix = ROOT / "data" / "refs" / "dec8"
+    ids = json.loads((fix / "manifest.json").read_text())["prefill_ids"]
+    print(f"dec8 prefill_ids: {len(ids)} tokens = {ids}")
 
-print("\nroute-vs-route on the logits vector (chunked prefill vs recurrent prefill, same tokens):")
-print("step  cos        meanrel      1-cos        x the last-op floor")
-for j in range(8):
-    c, mr = cos(recur[j], chunk[j]), meanrel(recur[j], chunk[j])
-    print(f"  {j + 1:>2}   {c:.6f}   {mr:.3e}   {1 - c:.3e}   {(1 - c) / FLOOR:>7.1f}x")
-print("\nengine observed vs the pinned dump, per step: "
-      "0.999886 0.999959 0.999963 0.999965 0.999965 0.999966 0.999968 0.999952")
-print("engine 1-cos per step: 1.14e-4 4.1e-5 3.7e-5 3.5e-5 3.5e-5 3.4e-5 3.2e-5 4.8e-5")
-print("last-op floor (engine/logits_floor.py): 0.99999862")
-print("argmax agreement between the two routes, per step:",
-      [int(torch.argmax(a)) == int(torch.argmax(b)) for a, b in zip(chunk, recur)])
+    def run(form, cont):
+        """One prefill pass over the whole prompt, then the continuation token-at-a-time. Returns the logits
+        vector that predicts each next token: position len(ids)-1, then one per continuation token."""
+        f = Forward(w, gdn_form=form)
+        lg = [f.logits(f.prefill(torch.tensor(ids)))[-1]]
+        for tok in cont:
+            lg.append(f.logits(f.decode(tok))[-1])
+        return lg
+
+    cont = Forward(w, gdn_form="chunk").greedy(ids, 8)
+    print(f"chunk-form continuation: {cont}")
+    chunk = run("chunk", cont)
+    recur = run("recurrent", cont)
+
+    print("\nroute-vs-route on the logits vector (chunked prefill vs recurrent prefill, same tokens):")
+    print("step  cos        meanrel      1-cos        x the last-op floor")
+    for j in range(8):
+        c, mr = cos(recur[j], chunk[j]), meanrel(recur[j], chunk[j])
+        print(f"  {j + 1:>2}   {c:.6f}   {mr:.3e}   {1 - c:.3e}   {(1 - c) / FLOOR:>7.1f}x")
+    print("\nengine observed vs the pinned dump, per step: "
+          "0.999886 0.999959 0.999963 0.999965 0.999965 0.999966 0.999968 0.999952")
+    print("engine 1-cos per step: 1.14e-4 4.1e-5 3.7e-5 3.5e-5 3.5e-5 3.4e-5 3.2e-5 4.8e-5")
+    print("last-op floor (engine/logits_floor.py): 0.99999862")
+    print("argmax agreement between the two routes, per step:",
+          [int(torch.argmax(a)) == int(torch.argmax(b)) for a, b in zip(chunk, recur)])
+
+
+def forced_price(w: Weights, fixture: str, engine_log: Path | None,
+                 out: Path | None = None, max_steps: int = 0) -> int:
+    """Every step of a forced fixture: two legal routes against each other, and (if a gate log is
+    supplied) the engine against the pin, on the same row.
+
+    `--max-steps` exists to make this script cheap enough to smoke-test: the full 64-step run is two
+    CPU forwards over the whole chain and takes minutes, and a typo in the table code should not cost
+    that to find.
+    """
+    egate.set_fixture(fixture)
+    man = json.loads((egate.REFS / "manifest.json").read_text())
+    prompt = man["prefill_ids"]
+    chain = man["greedy_continuation"]
+    feed = chain[:-1]                       # the same list engine/gate.py hands `decode_run --replay`
+    if max_steps:
+        feed = feed[:max_steps]
+    n = len(feed)
+    print(f"fixture {fixture}: prompt {len(prompt)} tokens, forced chain {n} steps")
+    print(f"feed list = greedy_continuation[:-1] = {feed}")
+    stop_steps = [j for j in range(n) if chain[j + 1] == egate.STOP_ID]
+    print(f"the pinned chain samples the stop id {egate.STOP_ID} at step(s) {stop_steps}"
+          " — everything after the first of those is the model being driven past its own end of turn")
+
+    chunk, recur = price(w, prompt, feed)
+
+    # Alignment check, so a mis-numbered table cannot be read as a result: if this replay is the same
+    # chain the fixture pinned, each route's own argmax must reproduce the pinned next id. A miss here
+    # is specimpl-vs-HF, not the engine — but it is worth seeing at depth.
+    pin_ids = chain[1:]
+    for form, runs in (("chunk", chunk), ("recurrent", recur)):
+        ok = [int(torch.argmax(a)) == int(b) for a, b in zip(runs, pin_ids)]
+        miss = [f"{j}: got {int(torch.argmax(runs[j]))} want {pin_ids[j]}"
+                for j in range(n) if not ok[j]]
+        print(f"  route {form:9s} argmax vs the pinned ids: {sum(ok)}/{n} agree"
+              + ("" if not miss else f" — misses {miss}"))
+
+    engine = {}
+    if engine_log is not None:
+        rows = curve_probe.parse(Path(engine_log))
+        engine = {r[0]: r[1] for r in rows}
+        print(f"  engine-vs-pin cos read from {engine_log} ({len(engine)} steps)")
+    else:
+        print("  no --engine-log given: the engine columns are empty (the device run is engine/gate.py's,"
+              " this script never touches the device)")
+
+    print("\nstep  fed      pin S n2   route cos   route 1-cos  route mrel  routes-argmax |"
+          " engine cos  engine 1-cos  verdict")
+    table = []
+    for j in range(n):
+        c = cos(recur[j], chunk[j])
+        mr = meanrel(recur[j], chunk[j])
+        same = int(torch.argmax(chunk[j])) == int(torch.argmax(recur[j]))
+        n2 = egate.fp_total(j, "state", 0)          # col 0 = n2 = sum x^2, summed over the GDN layers
+        ec = engine.get(j)
+        bad_route = c < G5
+        bad_eng = ec is not None and ec < G5
+        verdict = ("both legal routes under G5 too -> engine is inside legal spread" if bad_route and bad_eng
+                   else "OURS: engine under G5 where BOTH legal routes are clean" if bad_eng
+                   else "routes alone under G5; engine clean" if bad_route
+                   else "ok")
+        table.append({"step": j, "fed": feed[j], "pinned_sampled": pin_ids[j],
+                      "pin_s_n2": n2, "route_cos": c, "route_one_cos": 1.0 - c, "route_meanrel": mr,
+                      "routes_argmax_agree": bool(same),
+                      "engine_cos": ec, "engine_one_cos": None if ec is None else 1.0 - ec,
+                      "after_first_stop": bool(stop_steps) and j > stop_steps[0],
+                      "verdict": verdict})
+        r = table[-1]
+        print(f"{j:4d}  {feed[j]:8d}  {('%g' % n2) if n2 is not None else '-':>9}"
+              f"   {c:.6f}   {1 - c:.3e}   {mr:8.4%}   {'yes' if same else 'NO ':>4}"
+              f"        | "
+              + (f"{ec:.6f}   {1 - ec:.3e}    " if ec is not None else "     -           -      ")
+              + verdict)
+
+    print("\n== what the table says")
+    rc = np.array([r["route_cos"] for r in table])
+    n2 = np.array([r["pin_s_n2"] if r["pin_s_n2"] is not None else np.nan for r in table])
+    eng = np.array([r["engine_cos"] if r["engine_cos"] is not None else np.nan for r in table])
+    print(f"  route-vs-route: worst cos {rc.min():.6f} at step {int(rc.argmin())};"
+          f" median 1-cos {np.median(1 - rc):.3e}; {int((rc < G5).sum())} of {n} steps under G5 {G5}")
+    if np.isfinite(eng).any():
+        print(f"  engine-vs-pin:  worst cos {np.nanmin(eng):.6f} at step {int(np.nanargmin(eng))};"
+              f" median 1-cos {np.median(1 - eng):.3e}; {int(np.nansum(eng < G5))} of"
+              f" {n} steps under G5")
+        both = int(np.nansum((eng < G5) & (rc < G5)))
+        ours = int(np.nansum((eng < G5) & (rc >= G5)))
+        reading = ("the legal routes cover the engine everywhere it fails"
+                   if ours == 0 else
+                   "the engine fails at steps the two legal routes do not: those are ours")
+        print(f"  under-G5 steps: engine {int(np.nansum(eng < G5))}, route-vs-route"
+              f" {int((rc < G5).sum())}, BOTH {both}, engine-only {ours} -> {reading}")
+    print(f"  corr(route 1-cos, 1/(S n2)) = "
+          f"{np.corrcoef(1 - rc, 1.0 / n2)[0, 1]:.3f}"
+          f"   corr(route 1-cos, step) = {np.corrcoef(1 - rc, np.arange(n))[0, 1]:.3f}")
+    if np.isfinite(eng).any():
+        print(f"  corr(engine 1-cos, route 1-cos) = {np.corrcoef(1 - eng, 1 - rc)[0, 1]:.3f}"
+              "  (do the two independent things dip in the same place?)")
+    if stop_steps:
+        s0 = stop_steps[0]
+        below = [j for j in range(n) if rc[j] < G5]
+        print(f"  eos crossing: the pinned chain samples the stop id at step {s0}; route-under-G5 steps"
+              f" {below} sit {sum(j > s0 for j in below)} after it and {sum(j <= s0 for j in below)}"
+              " before it")
+        e_below = [r["step"] for r in table if r["engine_cos"] is not None and r["engine_cos"] < G5]
+        if e_below:
+            print(f"  engine-under-G5 steps {e_below}: {sum(j > s0 for j in e_below)} after the"
+              f" crossing, {sum(j <= s0 for j in e_below)} before it")
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"fixture": fixture, "stop_steps": stop_steps, "rows": table},
+                                  indent=1))
+        print(f"  wrote {out}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--fixture", default="dec8",
+                    help="dec8 (the published 8-step table) or a forced fixture, e.g. dec64f")
+    ap.add_argument("--engine-log", default=None,
+                    help="an `engine/gate.py --fixture X > log` log, whose (e) table supplies the"
+                         " engine-vs-pin cos column. Read-only; produced by a device run.")
+    ap.add_argument("--out", default=None, help="write the per-step table as JSON here")
+    ap.add_argument("--max-steps", type=int, default=0,
+                    help="price only the first N forced steps (a cheap way to test this script;"
+                         " the published tables come from the full chain)")
+    args = ap.parse_args()
+    w = Weights(ROOT / "models" / "Qwen3.5-0.8B")
+    if args.fixture == "dec8":
+        dec8_price(w)
+        return 0
+    return forced_price(w, args.fixture, args.engine_log,
+                        Path(args.out) if args.out else None, args.max_steps)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

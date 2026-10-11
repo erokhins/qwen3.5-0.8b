@@ -815,3 +815,182 @@ artefact), and printing by character count does not fix it — two bytes of an e
 replacement characters and then collapse to one, so the string can *shrink* while growing. The stable
 prefix is everything before a trailing replacement run; that is what streams, and the tail is flushed when
 the run ends. `Say hello in Spanish and add a friendly emoji.` now renders `👋`/`😊` intact.
+
+
+# Decision 2 of the deep gate: is the 27–34 excursion a bug? Measured by pricing the reference's own two legal routes at all 64 steps
+
+**Headline first, because the reading is what the decision turns on: G5's 0.9995 floor is crossed by two legal
+reference routes at 6 of the 7 steps where the engine crosses it, in the same window, with the same shape, with no
+engine anywhere in the measurement.** The remaining step (34) sits outside the legal spread and is small. Nothing in
+this section changes a band; what the band should be is written up at the end as a proposal with numbers, and the
+decision is the operator's.
+
+The question was live because the two available readings of the excursion could not be separated by
+`engine/curve_probe.py`: either the engine lost state there, or the comparison stopped being fair because the
+thing it is compared against got small (pinned `S n2` 4457 → 2029 across the window). The instrument that separates
+them needs no engine and no device — price the two **legal** GDN prompt forms (§04.7 chunked vs §04.4 recurrent,
+`speccheck/specimpl.py`'s `gdn_form`) against **each other** at every step. If the reference cannot hold 0.9995
+against itself in that window, an absolute floor there is not measuring what it is supposed to measure.
+
+```bash
+.venv/bin/python engine/gate.py --fixture dec64f > tmp/gate_dec64f.log   # device: correctness only, already run
+.venv/bin/python engine/route_price.py --fixture dec64f \
+        --engine-log tmp/gate_dec64f.log --out tmp/route_dec64f.json     # CPU: 5 m 32 s, 1 m 15 s user, no device
+```
+
+`engine/route_price.py` grew the deep mode for this: `--fixture` picks the forced fixture (default `dec8`, whose
+published 8-step table is unchanged), `--engine-log` reads the engine column out of a gate log's (e) table with
+`engine/curve_probe.py`'s own parser, `--max-steps` makes the script cheap enough to smoke-test, `--out` writes the
+same table as JSON. Step numbering is `engine/gate.py`'s: step j is fed `greedy_continuation[j]` and compared with
+pinned `decode{j}.logits_last.npy`. That the replay is the same chain the fixture pinned is checked, not assumed:
+each route's own argmax reproduces **63 of 64** pinned ids, and the one miss is step 17 — the tie, see below.
+
+## The table (all 64 forced steps)
+
+`route` = chunked-vs-recurrent prefill of the same prompt, then the same forced feed, same weights, F64 cos.
+`engine` = the device run's logits vs the pinned dump, from the gate log. `pin S n2` is the pinned GDN-state
+Σx² summed over the 18 GDN layers (gate's own `fp_total`), i.e. the reference's own state energy.
+
+```
+step  fed      pin S n2   route cos   route 1-cos  route mrel  routes-argmax | engine cos  engine 1-cos  verdict
+   0       760    3617.59   0.999947   5.262e-05    6.1065%    yes        | 0.999954   4.600e-05    ok
+   1      6511    3780.84   0.999930   6.989e-05    7.4005%    yes        | 0.999886   1.140e-04    ok
+   2       314     3878.2   0.999947   5.314e-05    5.4072%    yes        | 0.999961   3.900e-05    ok
+   3      9338    3945.67   0.999953   4.730e-05    6.1767%    yes        | 0.999909   9.100e-05    ok
+   4       369    3930.15   0.999944   5.628e-05   10.6376%    yes        | 0.999935   6.500e-05    ok
+   5      2972    4028.11   0.999898   1.025e-04   12.2847%    yes        | 0.999903   9.700e-05    ok
+   6     57590    4099.38   0.999892   1.080e-04    9.8529%    yes        | 0.999905   9.500e-05    ok
+   7    159034    4015.84   0.999965   3.523e-05    5.2822%    yes        | 0.999968   3.200e-05    ok
+   8       271    4017.01   0.999941   5.943e-05    8.5851%    yes        | 0.999933   6.700e-05    ok
+   9      2064    4083.95   0.999933   6.736e-05    9.5737%    yes        | 0.999957   4.300e-05    ok
+  10       369     4153.7   0.999958   4.214e-05    4.9654%    yes        | 0.999961   3.900e-05    ok
+  11       279    4142.52   0.999960   4.039e-05    6.3115%    yes        | 0.999960   4.000e-05    ok
+  12      7526     4181.1   0.999955   4.475e-05    5.9703%    yes        | 0.999955   4.500e-05    ok
+  13      3177    4313.25   0.999932   6.780e-05    8.3857%    yes        | 0.999933   6.700e-05    ok
+  14       303     4337.6   0.999959   4.123e-05    5.3379%    yes        | 0.999960   4.000e-05    ok
+  15      9338    4418.03   0.999951   4.855e-05    6.7242%    yes        | 0.999930   7.000e-05    ok
+  16       321    4403.62   0.999961   3.866e-05    4.7880%    yes        | 0.999953   4.700e-05    ok
+  17       279    4392.54   0.999946   5.362e-05    6.5239%    yes        | 0.999954   4.600e-05    ok
+  18      2018    4372.62   0.999965   3.521e-05    8.3567%    yes        | 0.999967   3.300e-05    ok
+  19      1379    4407.01   0.999966   3.361e-05    3.9885%    yes        | 0.999962   3.800e-05    ok
+  20     91188    4431.69   0.999963   3.681e-05    3.5549%    yes        | 0.999955   4.500e-05    ok
+  21      3177    4425.83   0.999941   5.857e-05   12.8059%    yes        | 0.999924   7.600e-05    ok
+  22       303    4399.84   0.999959   4.058e-05    4.8981%    yes        | 0.999929   7.100e-05    ok
+  23      4357    4456.66   0.999965   3.473e-05    3.5267%    yes        | 0.999961   3.900e-05    ok
+  24        13    4243.52   0.999973   2.708e-05    3.3631%    yes        | 0.999966   3.400e-05    ok
+  25    248046    3763.41   0.999868   1.317e-04   10.9149%    yes        | 0.999876   1.240e-04    ok
+  26       198    3545.89   0.999678   3.217e-04   16.8139%    yes        | 0.999637   3.630e-04    ok
+  27    248044     2028.8   0.998889   1.111e-03   39.2208%    yes        | 0.998987   1.013e-03    both legal routes under G5 too -> engine is inside legal spread
+  28    248045     2438.5   0.998286   1.714e-03   52.1793%    yes        | 0.998155   1.845e-03    both legal routes under G5 too -> engine is inside legal spread
+  29       198     2469.9   0.998448   1.552e-03   60.8427%    yes        | 0.998735   1.265e-03    both legal routes under G5 too -> engine is inside legal spread
+  30    248045    2555.04   0.999311   6.892e-04   25.1703%    yes        | 0.999032   9.680e-04    both legal routes under G5 too -> engine is inside legal spread
+  31     74455    2572.59   0.999414   5.865e-04   27.5526%    yes        | 0.999158   8.420e-04    both legal routes under G5 too -> engine is inside legal spread
+  32       198    2690.92   0.999290   7.098e-04   53.0646%    yes        | 0.997844   2.156e-03    both legal routes under G5 too -> engine is inside legal spread
+  33    248068    2747.64   0.999811   1.889e-04   17.1780%    yes        | 0.999706   2.940e-04    ok
+  34       271    2694.31   0.999602   3.985e-04   22.7190%    yes        | 0.998847   1.153e-03    OURS: engine under G5 where BOTH legal routes are clean
+  35    248069    2837.75   0.999846   1.535e-04   18.4310%    yes        | 0.999829   1.710e-04    ok
+  36       271    2930.67   0.999914   8.596e-05   12.6524%    yes        | 0.999830   1.700e-04    ok
+  37       760    3019.62   0.999947   5.326e-05    9.0078%    yes        | 0.999888   1.120e-04    ok
+  38      6511    3247.48   0.999918   8.226e-05   35.4117%    yes        | 0.999892   1.080e-04    ok
+  39       314    3373.87   0.999956   4.401e-05    4.2169%    yes        | 0.999962   3.800e-05    ok
+  40      9338    3469.84   0.999947   5.349e-05    7.2675%    yes        | 0.999929   7.100e-05    ok
+  41       369    3421.64   0.999952   4.831e-05    7.4608%    yes        | 0.999938   6.200e-05    ok
+  42      2972    3512.33   0.999870   1.298e-04   12.7377%    yes        | 0.999861   1.390e-04    ok
+  43     57590    3636.54   0.999905   9.464e-05   10.9381%    yes        | 0.999905   9.500e-05    ok
+  44    159034     3523.3   0.999972   2.778e-05   14.5854%    yes        | 0.999967   3.300e-05    ok
+  45       271    3537.67   0.999933   6.696e-05    9.9870%    yes        | 0.999925   7.500e-05    ok
+  46      2064     3596.6   0.999962   3.807e-05    4.1987%    yes        | 0.999951   4.900e-05    ok
+  47       369    3678.19   0.999966   3.427e-05    4.4259%    yes        | 0.999968   3.200e-05    ok
+  48       279    3663.61   0.999956   4.391e-05    4.8316%    yes        | 0.999962   3.800e-05    ok
+  49      7526    3707.42   0.999967   3.251e-05    3.0695%    yes        | 0.999966   3.400e-05    ok
+  50      3177    3831.51   0.999930   7.036e-05   10.8991%    yes        | 0.999927   7.300e-05    ok
+  51       303    3838.77   0.999947   5.297e-05    7.6778%    yes        | 0.999945   5.500e-05    ok
+  52      9338    3916.06   0.999950   5.006e-05    7.4304%    yes        | 0.999946   5.400e-05    ok
+  53       321     3892.6   0.999964   3.567e-05    4.8979%    yes        | 0.999951   4.900e-05    ok
+  54       279    3875.66   0.999960   3.975e-05    3.7670%    yes        | 0.999938   6.200e-05    ok
+  55      2018     3885.8   0.999970   2.999e-05    6.0432%    yes        | 0.999960   4.000e-05    ok
+  56      1379    3930.18   0.999969   3.096e-05    2.9472%    yes        | 0.999961   3.900e-05    ok
+  57     91188    3941.51   0.999973   2.728e-05    2.8966%    yes        | 0.999964   3.600e-05    ok
+  58      3177    3924.49   0.999957   4.344e-05    5.1409%    yes        | 0.999927   7.300e-05    ok
+  59       303    3913.19   0.999958   4.229e-05    4.6150%    yes        | 0.999947   5.300e-05    ok
+  60      4357    3949.04   0.999965   3.515e-05    4.1913%    yes        | 0.999954   4.600e-05    ok
+  61        13    3720.03   0.999971   2.917e-05    3.7484%    yes        | 0.999973   2.700e-05    ok
+  62     11751    3845.32   0.999965   3.479e-05    5.8180%    yes        | 0.999954   4.600e-05    ok
+  63       369    3896.42   0.999967   3.269e-05    4.4849%    yes        | 0.999964   3.600e-05    ok
+```
+
+## What the table says
+
+* **The legal routes go under the floor in the same window.** Route cos < 0.9995 at steps **27, 28, 29, 30, 31, 32**
+  (worst 0.998286 at step 28); the engine fails at 27, 28, 29, 30, 31, 32 **and 34**. Six of the engine's seven
+  under-floor steps are steps where two legal reference routes are also under it; the ratio
+  engine 1−cos / route 1−cos has **median 1.13** and its largest value is **3.04 at step 32**, the worst engine step.
+  Outside the window the route spread is 1−cos 2.7e-5..4.0e-5 (median 4.6e-5) and inside it 5.9e-4..1.7e-3, a
+  ~30× inflation of the legal spread.
+* **It is a property of the model's arithmetic, not of the engine.** `corr(route 1−cos, 1/(S n2)) = 0.787` — the
+  same scale law the engine was measured against (`corr(1−cos, 1/(S n2)) = 0.769`, `engine/curve_probe.py`) shows up
+  in a measurement that never touches the device — and `corr(route 1−cos, step index) = −0.057`, flat, i.e. this is
+  not drift with depth. `corr(engine 1−cos, route 1−cos) = 0.874`: the two independent things dip in the same place.
+* **The meanrel half of the band is worse than unmeetable — it is not a legal-route bound at all.** Two legal
+  reference forms exceed §10.2's 5 % meanrel ceiling at **44 of 64 steps**, median 7.0 %, worst 60.8 % (step 29),
+  including 38 steps whose cos is comfortably above G5. The engine's three meanrel failures (28, 29, 32, at
+  6.1 / 5.1 / 7.1 %) are inside a legal spread that reaches 52–61 % there.
+* **Argmax agrees everywhere.** The two legal routes pick the same id at **64/64** steps, including all seven
+  under-floor ones, and the engine's own id matches the pin at every step of the window. The excursion is a
+  whole-vector-magnitude phenomenon with the decision still comfortably made: at step 28 the pin's top1−top2 margin
+  is 2.062 against the engine's largest element error of 1.047 (2×), and at step 32 it is 13.750 against 0.711
+  (19×).
+* **Steps 17 and 18, the two id mismatches, are ties in the pin and the spec implementation agrees with the
+  engine.** Both routes miss the pinned id at exactly one step, step 17, and both pick **10407** — the id the engine
+  picked — while the HF pin's `argmax` returns the lowest of its two 17.25 values (2018). Two legal forms of the
+  reference disagree with the pin's tie-break the same way the engine does. That is decision 1's evidence, recorded
+  here because it fell out of this measurement rather than being looked for.
+* **Step 34 is the one step this instrument attributes to us**: engine 1−cos 1.153e-3 against a legal spread of
+  3.985e-4 there — 2.9× the spread, 2.3× the G5 deficit. It is also the step where the routes are only just inside
+  the floor (route cos 0.999602), so the honest size of it is "one step, worth one look with the state-moment
+  instrument named below, not worth a hunt".
+
+## What this does not settle
+
+Two things, and both are named rather than assumed away.
+
+1. **It does not prove the engine's state is fine.** It shows the symptom is not *attributable* to a bug by any
+   measurement in this repo, because the reference's own legal forms produce a larger version of the same dip at
+   6 of the 7 steps. The engine-side per-step state fingerprint (the four moments `decode_run` does not print yet)
+   is still the only instrument that can say "the engine's `S n2` equals the pinned `S n2`", and it is still
+   unwritten.
+2. **It does not separate scale from the eos crossing, and it cannot: this fixture has both at once.** The pinned
+   chain samples the stop id (248046) at **step 24**, and every under-floor step is after it — route-under-G5 steps
+   27–32 sit **6 after, 0 before**; the engine's seven sit **7 after, 0 before**. The post-crossing window is also
+   where the reference is emitting its own special tokens (248044, 248045, 248068, 248069 at steps 26–34), which is
+   a structurally different regime: a model driven past its own end of turn, on a prompt whose answer ended at
+   step 24, is being asked to continue something it had already finished. "ill-conditioned state" and "the model is
+   off-distribution past its own stop" make the same curve here, and `dec64f` cannot tell them apart. A second
+   fixture whose chain never crosses the stop id can; it is the next instrument, and it is cheap (dump + `--verify`,
+   CPU-only, then the same two commands above pointed at it).
+
+## The proposal, with numbers — band untouched, decision belongs to the operator
+
+The G5/G6 bands were **not** edited, and `engine/gate.py --fixture dec64f` still reports
+`ENGINE GATE FAIL — 15 failed`. Options, in the order I would rank them:
+
+1. **Key an allowance on the measured route spread, per fixture and per step.** Gate step j on
+   `engine 1−cos ≤ k × route 1−cos(j)` with the route column produced by `engine/route_price.py --fixture …` and
+   cached next to the fixture, `k = 4`. dec64f then passes at all 64 steps (worst observed ratio 3.04) while a real
+   bug — which would have to be *bigger* than the reference's own legal spread to hide — still fails. Cost: the gate
+   gains a CPU preprocessing step per fixture (5 m 32 s for 64 steps) and its fairness now depends on `specimpl`'s
+   own route spread being representative; it is a spread between two forms of *specimpl*, against a pin made by *HF*.
+2. **Gate the decision, not the vector**: require per-step argmax agreement (plus the proven-tie exception of
+   decision 1), and keep the logits comparison as reported evidence with the §10.2 margin statistic as the check —
+   `gap / maxabs >= 1` passes dec64f at every step except steps 17/18, where the pin's own gap is 0 by construction.
+   This is the cheapest honest option and it makes the gate say what it actually verifies: the engine picks the
+   reference's token. It also gives up any claim on the logits vector's shape, which is today's only defence against
+   a wrong-but-argmax-preserving error (e.g. a mis-scaled final norm, which is exactly the class the meanrel column
+   is there to catch).
+3. **Leave the bands and label the window**: keep 0.9995 hard, and carry a per-fixture list of steps that are known
+   to be inside legal spread (dec64f: 27–32 by the route table, 34 not) so the gate prints them as `TIE`-like
+   `SPREAD` lines that are reported and counted but do not arm. Zero new arithmetic, one more thing to keep in sync.
+
+Whatever is chosen, the 27–34 rows of `dec64f` are a poor thing to hang a band on, because they are simultaneously
+the low-energy window and the post-eos window; the no-crossing fixture (`dec64t`) should exist before the band is
+rewritten, and if the dips do not move with the energy curve there, item 1 needs re-measuring rather than adopting.
