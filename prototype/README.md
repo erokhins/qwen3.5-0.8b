@@ -8,13 +8,20 @@ only when its gate passes**, and a gate is a script, never an eyeball. Current c
 |---|---|---|
 | `lm_head_gemv/` | tied logits GEMV, bf16, 248320 × 1024 | **passes** §10.1 logits class at 242.1 GB/s (102 % of the read probe) — `lm_head_gemv/results.md` |
 | `gdn_decode/` | S04.2–S04.4 decode step: conv, gates, gated-delta recurrence, 18 layers | **passes** all four functions (bit-exact conv, 1e-7 vs the spec recurrence) — `gdn_decode/results.md` |
-| `mlp_gemv/` | S03.3 MLP decode path: gate+up+SwiGLU fused, then down, 24 layers | **passes** F1–F4 over 192 layer×step cases at 2.650 ms/token cold = 84 % of the read probe — `mlp_gemv/results.md` |
+| `mlp_gemv/` | S03.3 MLP decode path: gate+up+SwiGLU fused, then down, 24 layers | **passes** F1–F4 over 192 layer×step cases at 2.650 ms/token cold = 84 % of the read probe; cancellation band set by measurement (3e-5, 4× margin) and six localising negatives — `mlp_gemv/results.md` |
+| `proj_gemv/` | one templated BF16 GEMV for all nine projections (GDN `in_proj_{qkv,z,b,a}`/`out_proj`, attention `q/k/v/o_proj`), 48 launches/token | **passes** 912 comparisons at the same 3e-5 band with 6.8× slack, 0/11 negatives escaped; cold 2.990 ms/token = **66 %** of the probe (provisional — contended box) — `proj_gemv/results.md` |
 | `bf16_ulp.py` | shared BF16 ULP comparator + scale-aware report | used by `mlp_gemv`; **has a selftest, run it** — the naive `uint16` comparator it replaces is silently wrong for every negative number |
 
-Next in line: the gated full-attention decode step (§05, 5.5 % of token bytes) and the GDN /
-attention *projection* GEMVs — `mlp_gemv`'s `mlp_down<IN>` is the same shape-generic kernel and
-only needs its `(in, out)` instantiated to cover them; then wiring `engine/` to call these
-instead of simulating them.
+Next in line: the gated full-attention **core** (§05.2–§05.7 — per-head norm, partial rope, GQA
+read over the KV cache, output gate; its projections are already done in `proj_gemv`), the
+norm/gating/residual glue, and `engine/` (weights resident, then a token loop that calls these
+instead of simulating them).
+
+The idea that the projections were “the same shape-generic kernel, just instantiate it” turned out
+true for the arithmetic and misleading for the performance: one templated kernel covers all nine
+shapes, but they do **not** land at one fraction of the probe — 77 % for a 6144-row `in_proj_qkv`
+down to ~40 % for a 512-row `k_proj`, while `lm_head`'s 248320 rows hit 102 %. Row count does not
+order that, so treat per-shape measurement as required rather than extrapolating from a neighbour.
 
 ## HIP on ROCm 7.1 / gfx1151 — the things that bit us
 
