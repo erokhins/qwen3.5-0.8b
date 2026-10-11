@@ -1,30 +1,53 @@
 #!/usr/bin/env python3
 """Engine gate: does a greedy token come out right?
 
-    .venv/bin/python engine/gate.py                 # everything; runs engine/build/decode_run
+    .venv/bin/python engine/gate.py                 # dec8; runs engine/build/decode_run
+    .venv/bin/python engine/gate.py --fixture dec64f  # the 64-step FORCED pin (P1)
+    .venv/bin/python engine/gate.py --smoke 300     # free run, 300 tokens, smoke only
     .venv/bin/python engine/gate.py --no-engine     # fixture pairing + state sizes, zero device
     .venv/bin/python engine/gate.py --selftest      # proves THIS gate discriminates: no engine, no device
     .venv/bin/python engine/gate.py --dry-run       # every section against a CPU stand-in
     .venv/bin/python engine/gate.py --build         # run engine/build.sh first
     .venv/bin/python engine/gate.py --binary P --model DIR --work DIR
 
-`--selftest` re-runs this file in subprocesses against four injected bugs — a wrong sampled id, a
-swapped top-two logits, 5 % logits noise that leaves the argmax alone, and a §07.5 stop check firing
-during the prompt phase — and requires each to fail at the step it was injected at, because a negative
-that every check would catch proves nothing (`prototype/mlp_gemv/results.md`). It is the only part of
-a gate that can be validated before the engine has ever run, and it is why a first device run need not
-double as a test of this file.
+Two fixtures, because they prove different things and only one of them can be free-running:
 
-Four sections, in the order the task fixed them plus one that has to come first:
+  dec8     8 steps, the engine feeding ITSELF. Below A-18's chaos bound a correct engine produces
+           the reference's tokens by itself, so the chain can be re-derived rather than replayed.
+  dec64f   64 steps, REPLAYED: `decode_run --replay` feeds the REFERENCE's token at every step and
+           the engine's own sample is compared, not consumed. That is teacher forcing, and it is the
+           only way depth can be pinned at all: A-18 measures two legal bf16 continuations of the
+           same prompt agreeing only 0.8776 of the way over 49 prompts x 24 tokens, so a 64-token
+           FREE-run id match fails by construction for a correct engine. What depth actually tests
+           is state carry-over — GDN state, conv window, KV — 64 deep instead of 8.
+
+`--smoke N` is neither: a free run of N tokens that must not crash, must not emit a NaN, must stay
+inside its state, and must end by length or by the stop id. It is not a parity claim and it is not a
+timing; parity is claimed only over the forced pins.
+
+`--selftest` re-runs this file in subprocesses against injected bugs — a wrong sampled id, a swapped
+top-two logits, 5 % logits noise that leaves the argmax alone, a §07.5 stop check firing during the
+prompt phase, and a replay step fed the wrong token — and requires each to fail at the step it was
+injected at, because a negative that every check would catch proves nothing
+(`prototype/mlp_gemv/results.md`). It is the only part of a gate that can be validated before the
+engine has ever run, and it is why a first device run need not double as a test of this file.
+
+Sections, in the order the task fixed them plus the ones the deep fixture needed:
 
   (0) FIXTURE PAIRING, proved rather than assumed (§10.5). See `pairing_checks`.
-  (a) SAMPLED IDS — the engine's sample after the prompt's last token plus its 8 decode samples must
-      equal the manifest's `greedy_continuation`, exactly. §10.1 G7 requires token-for-token
-      exactness on `dec8`, and a token id is an integer: there is no band to argue about.
+  (a) SAMPLED IDS — the engine's sample after the prompt's last token plus its generation samples
+      must equal the manifest's `greedy_continuation`, exactly. §10.1 G7 requires token-for-token
+      exactness, and a token id is an integer: there is no band to argue about.
   (b) THE LOGITS — each step's logits against that step's pinned `logits_last.npy`, inside `BAND`.
   (c) STATE SIZES — the bytes the engine reports for its request state must equal what
       `engine/state_sizes.py` derives from `state.h`; that file is *run*, not re-typed.
   (d) LAUNCH PLAN — one token's launch bill, counted from §07 in Python and compared with the engine's.
+  (e) THE CURVE — the per-step logits and state-delta table across the whole forced run, with a drift
+      reading, because the point of depth is whether anything degrades with step count. It reports;
+      it does not invent a new band, and the reason is in the BAND comment below.
+  (f) FIXTURE INTEGRITY of the state deltas — the pinned fingerprints must be finite and the pinned KV
+      delta must be exactly 0 (the cache is append-only). A check on the dump, not the engine: it is
+      what caught a misaligned delta in `tools/reference_dump.py`'s first version of this code.
 
 Why this file contains no engine arithmetic. Its value is independence. A Python mirror of the
 kernels would check the engine against the engine, which is the failure `bench/gate-audit.md` exists
@@ -51,7 +74,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-REFS = ROOT / "data" / "refs" / "dec8"
+REFS = ROOT / "data" / "refs" / "dec8"   # replaced by main() from --fixture; see `set_fixture`
+SHALLOW_REFS = ROOT / "data" / "refs" / "dec8"   # the cross-check target for a deep fixture
 DEFAULT_BINARY = ROOT / "engine" / "build" / "decode_run"
 WORK = ROOT / "tmp" / "engine_gate"
 
@@ -59,6 +83,37 @@ WORK = ROOT / "tmp" / "engine_gate"
 # template text, and it is the same constant as `engine::kStopToken`. The `dec8` prompt is a rendered
 # chat template, so this id occurs INSIDE the prompt (index 8) as well as in a continuation.
 STOP_ID = 248046
+
+# A-18's measured bound, used as a policy line and not as a guess: below this many steps the engine
+# can be gated feeding ITSELF (dec8 does, and that is the stronger property — the chain is
+# re-derived, not replayed); above it a pin has to be teacher-forced, because two legal bf16
+# continuations of one prompt agree only 0.8776 of the way over 49 prompts x 24 tokens. So
+# `n_decode > FREE_RUN_BOUND` is exactly when this gate switches to `decode_run --replay`, and a
+# divergence then shows up at one step instead of cascading through the rest of the fixture.
+FREE_RUN_BOUND = 8
+
+
+def set_fixture(name: str) -> None:
+    """Point every pin read at `data/refs/<name>`. Module state rather than a parameter on nine
+    functions because `load_pin` is called from the pairing, curve and integrity checks alike."""
+    global REFS
+    REFS = ROOT / "data" / "refs" / name
+    if not (REFS / "manifest.json").exists():
+        raise SystemExit(f"gate: fixture {name!r} has no manifest at {REFS}/manifest.json"
+                         " — make it with tools/reference_dump.py (see engine/results.md)")
+
+
+def lane_ceiling() -> int:
+    """MAXSC — the largest lane count the gated attention stage can serve — read out of the kernel
+    header that enforces it, never retyped here. `kernels_attn.cpp` throws above it rather than
+    truncating, so a planned run over the ceiling is a guaranteed failure this gate can name up
+    front instead of a HIP message half way through a device window."""
+    path = ROOT / "prototype" / "attn_decode" / "attn_decode_kernels.h"
+    m = re.search(r"#define\s+MAXSC\s+(\d+)", path.read_text())
+    if not m:
+        raise SystemExit(f"gate: cannot read MAXSC from {path} — the lane ceiling is the"
+                         " kernel's to own, so this gate refuses to guess it")
+    return int(m.group(1))
 
 # ---- the band ----------------------------------------------------------------------------------
 # A token's logits vector is the end of a 24-layer cascade, so §10.1/§10.2 have already decided what
@@ -173,6 +228,136 @@ def metrics(got: np.ndarray, ref: np.ndarray) -> dict:
     }
 
 
+def load_fp(step: int, kind: str):
+    """One step's state fingerprint: [layer, 4] F64 with columns n2, maxabs, mean, dn2 (see
+    `tools/reference_dump.py:fp_row`). None when the fixture predates the pins — dec8 was made
+    before there were fingerprints, and everything that reads them degrades to reporting that
+    rather than failing."""
+    path = REFS / f"decode{step}.{kind}_fp.npy"
+    return np.load(path, allow_pickle=False) if path.exists() else None
+
+
+def fp_total(step: int, kind: str, col: int):
+    a = load_fp(step, kind)
+    return None if a is None else float(a[:, col].sum())
+
+
+# ---- (e) the curve ---------------------------------------------------------------------------
+def curve_checks(per_step: list, n_decode: int) -> None:
+    """The per-step table, and what it says about depth.
+
+    Reports; does not gate on a new threshold. G5's floor is already applied per step in (b) and
+    inventing a second figure for "how much drift is allowed by step 64" would be exactly the
+    taste-based band §10.1 F1–F4 warns about. What the table is FOR is the shape: a flat curve
+    says the extra depth bought nothing beyond dec8's 8 steps, a rising one says state carry-over
+    is decaying and names the step where it started. Either is a result; both are printed.
+    """
+    section("(e) the curve — logits and reference state deltas against step count")
+    have_fp = load_fp(0, "state") is not None
+    print("  step  fed        sampled    cos        meanrel   |  S n2      S dn2     conv n2"
+          "  conv dn2   kv dn2")
+    for j, m in enumerate(per_step):
+        if m is None:
+            continue
+        cells = []
+        for kind, col in (("state", 0), ("state", 3), ("conv", 0), ("conv", 3), ("kv", 3)):
+            v = fp_total(j, kind, col)
+            cells.append("-" if v is None else f"{v:.4g}")
+        print(f"  {j:4d}  {m['fed']:8d}  {m['sampled']:8d}  {m['cos']:.6f}  "
+              f"{m['meanrel']:8.4%}  |  " + "  ".join(f"{c:>9}" for c in cells)
+              + ("" if m["argmax_ok"] else "   <- ARGMAX DISAGREES"))
+    ok = [m for m in per_step if m is not None]
+    if len(ok) < 2:
+        notes.append("(e) has fewer than two steps to compare, so there is no curve to read.")
+        return
+    om = [1.0 - m["cos"] for m in ok]          # the useful orientation: 0 is perfect
+    head, tail = om[:FREE_RUN_BOUND], om[-FREE_RUN_BOUND:]
+    slope = float(np.polyfit(np.arange(len(om), dtype=np.float64), om, 1)[0])
+    worst = int(np.argmax(om))
+    print(f"  drift reading: 1-cos median over steps 0..{len(head) - 1} is "
+          f"{np.median(head):.3e}, over the last {len(tail)} steps {np.median(tail):.3e}"
+          f" (ratio {np.median(tail) / max(np.median(head), 1e-300):.2f}); least-squares slope"
+          f" {slope:+.3e} per step; worst step {worst} at cos {ok[worst]['cos']:.6f}"
+          f" ({ok[worst]['ndiff']}/{ok[worst]['n']} elements differing).")
+    print("  [info] read it as: flat means the depth bought nothing beyond dec8's 8 steps; a rise"
+              " means state carry-over is decaying and the step index names where. Neither is"
+              " gated — (b) already applies §10.1 G5 per step, and a second threshold for "
+              "\"how much drift by step 64\" would be the taste-based band §10.1 F1–F4 forbids.")
+    if not have_fp:
+        notes.append("(e) ran without state fingerprints: this fixture predates them (dec8 was"
+                     " pinned first). Re-make it with tools/reference_dump.py to get the state"
+                     " columns.")
+
+
+# ---- (f) fixture integrity of the state deltas ------------------------------------------------
+def fingerprint_checks(man: dict, n_decode: int) -> None:
+    """Are the pinned state deltas self-consistent? A check on the DUMP, not the engine.
+
+    The kv row's dn2 must be exactly 0: the reference's KV is append-only, so nothing already
+    written may move. That is not decoration — it is the check that caught a first version of
+    `fp_row` comparing a flattened prefix, which lined head 1 of a grown cache against the tail of
+    head 0 and reported dn2 3.0e3 on a cache that is bit-identical (verified separately).
+    """
+    section("(f) fixture integrity — the pinned state deltas must describe a real cache")
+    if load_fp(0, "state") is None:
+        notes.append("(f) skipped: this fixture carries no state fingerprints.")
+        return
+    cfg = man["text_config"]
+    gdn = [i for i, t in enumerate(cfg["layer_types"]) if t == "linear_attention"]
+    attn = [i for i, t in enumerate(cfg["layer_types"]) if t == "full_attention"]
+    rows = man.get("state_fingerprint", {}).get("rows_are_model_layers", {})
+    check(rows.get("state") == gdn and rows.get("conv") == gdn and rows.get("kv") == attn,
+          "fingerprint rows map to the §03.5 layer routing read from the manifest",
+          f"state {len(rows.get('state', []))} conv {len(rows.get('conv', []))}"
+          f" kv {len(rows.get('kv', []))} vs routing {len(gdn)}+{len(attn)}")
+    bad_kv, bad_finite = [], []
+    for s in range(n_decode):
+        for kind in ("state", "conv", "kv"):
+            a = load_fp(s, kind)
+            if a is None:
+                continue
+            if not np.isfinite(a).all():
+                bad_finite.append(f"decode{s}.{kind}")
+            if kind == "kv" and np.any(a[:, 3] != 0.0):
+                bad_kv.append(f"decode{s}: dn2 {a[:, 3].max():.3g}")
+    check(not bad_finite, "every fingerprint value is finite", bad_kv[:4])
+    check(not bad_kv, "the pinned KV delta is exactly 0 at every step (append-only cache)",
+          bad_kv[:4])
+    print(f"  [info] the S/conv delta columns are REPORTED, not gated: a moment-sum fingerprint"
+          f" catches a state that decayed, was zeroed, was scaled or was left behind, and cannot"
+          f" see a corruption that preserves the multiset of values. Full per-element state"
+          f" gating would cost 18 MiB per step, which is the 1.7 GB this fixture exists to avoid.")
+
+
+def deep_matches_shallow(n_decode: int) -> None:
+    """If this is a deep fixture made from the same prompt, its first steps must be BIT-identical
+    to dec8's. Two runs of the same reference on the same weights have one answer, so this is a
+    free cross-check between fixtures — and it also proves the bf16-bit storage of the deep pins
+    is lossless against dec8's f32 ones."""
+    if REFS == SHALLOW_REFS or not (SHALLOW_REFS / "manifest.json").exists():
+        return
+    section("(f2) the deep fixture must extend the shallow one, not merely resemble it")
+    deep_man = json.loads((REFS / "manifest.json").read_text())
+    shallow_man = json.loads((SHALLOW_REFS / "manifest.json").read_text())
+    if deep_man["prefill_ids"] != shallow_man["prefill_ids"]:
+        notes.append(f"{REFS.name} has a different prompt from dec8, so the overlap check does"
+                     " not apply.")
+        return
+    n_shallow = len(shallow_man["greedy_continuation"]) - 1
+    agree = []
+    for s in range(min(n_shallow, n_decode)):
+        deep = load_pin(f"decode{s}.logits_last.npy")
+        shallow = np.load(SHALLOW_REFS / f"decode{s}.logits_last.npy", allow_pickle=False)
+        if shallow.dtype == np.uint16:
+            shallow = (shallow.astype(np.uint32) << 16).view(np.float32)
+        agree.append(np.array_equal(deep, shallow))
+    check(all(agree) and bool(agree),
+          f"the first {len(agree)} steps of {REFS.name} are bit-identical to dec8's",
+          f"{sum(agree)}/{len(agree)} steps bit-equal (ids also equal:"
+          f" {deep_man['greedy_continuation'][:len(agree) + 1] == shallow_man['greedy_continuation'][:len(agree) + 1]})")
+
+
+
 # ---- (0) the fixture pairing -------------------------------------------------------------------
 def pairing_checks(man: dict) -> tuple[list, list, np.ndarray]:
     section("(0) fixture pairing — proved from the dumps (§10.5)")
@@ -200,13 +385,14 @@ def pairing_checks(man: dict) -> tuple[list, list, np.ndarray]:
           f"{argmax_low(prefill_logits)} vs {greedy[0]}")
     bare_inputs = load_pin("input_ids.npy").reshape(-1)
     check(int(bare_inputs[0]) == greedy[-2],
-          "bare input_ids.npy is decode7's input, NOT the prompt — recorded so it is never used as"
-          " one (§10.5's last-writer-wins trap)",
+          f"bare input_ids.npy is decode{len(greedy) - 2}'s input, NOT the prompt — recorded so it"
+          " is never used as one (§10.5's last-writer-wins trap)",
           f"{bare_inputs.astype(int).tolist()} == greedy_continuation[-2] == {greedy[-2]}")
     print(f"  [info] prompt ids come from the manifest's sources[0].ids; the prompt's own logits"
           f" come from the bare logits_last.npy, whose argmax was just proved to be"
-          f" greedy_continuation[0]. Pinned logits dtype: {dec_logits[0].dtype},"
-          f" shape {dec_logits[0].shape}.")
+          f" greedy_continuation[0]. Pinned logits read as {dec_logits[0].dtype},"
+          f" shape {dec_logits[0].shape}, stored as"
+          f" {man.get('logits_storage', 'f32 (pre-dates --logits-bits)')}.")
     stop_at = [i for i, t in enumerate(prompt_ids) if t == STOP_ID]
     print(f"  [info] the prompt itself contains the stop id {STOP_ID} at index {stop_at}, so a"
           " prompt-phase step can legitimately sample it. §07.5 is a generation-phase rule and such"
@@ -298,7 +484,8 @@ def parse_run(text: str) -> dict:
 
 
 def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids: int = -1,
-            break_logits: int = -1, break_noise: int = -1, break_prompt_stop: int = -1) -> tuple[
+            break_logits: int = -1, break_noise: int = -1, break_prompt_stop: int = -1,
+            replay: bool = False, break_feed: int = -1) -> tuple[
                 str, int]:
     """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
 
@@ -351,6 +538,12 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
         pos = len(prompt_ids) + j
         sampled = greedy[j + 1]
         logits = dec_logits[j]
+        # What this step is fed. In a replay that is the caller's list (the reference's own token);
+        # `--break-feed` is the driver feeding the wrong entry of it, an off-by-one in the replay
+        # list being a completely plausible way to get this wrong.
+        fed = greedy[j]
+        if j == break_feed:
+            fed = greedy[j] + 1
         if j == break_ids:
             sampled = greedy[j + 1] + 1        # one wrong id, exactly where a real divergence starts
         if j == break_logits:
@@ -365,11 +558,11 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             # the case that asks whether the band has teeth of its own, separate from the token id.
             rng = np.random.default_rng(4)   # fixed: the injection must be reproducible
             logits = logits * (1.0 + 0.05 * rng.standard_normal(logits.shape)).astype(np.float32)
-        lines.append(f"STEP kind=decode index={pos} input={greedy[j]} sampled={sampled}"
+        lines.append(f"STEP kind=decode index={pos} input={fed} sampled={sampled}"
                      f" top_logit=1 pos_before={pos} pos_after={pos + 1} stop=0")
         (work / f"logits{pos}.bin").write_bytes(logits.astype(np.float32).tobytes())
-    lines.append("RESULT mode=run steps=25 ms_total=0 ms_per_step=0 last_sampled="
-                 f"{greedy[-1]} prefix_len={cap - 1} stopped=0")
+    lines.append(f"RESULT mode={'replay' if replay else 'run'} steps=25 ms_total=0 ms_per_step=0"
+                 f" last_sampled={greedy[-1]} prefix_len={cap - 1} stopped=0")
     return "\n".join(lines), 0
 
 
@@ -380,14 +573,14 @@ def ss_sizes() -> list:
     return [ss.gdn_state, ss.conv_window, ss.kv_per_token]
 
 
-def selftest() -> int:
+def selftest(fixture: str = "dec8") -> int:
     """Prove the gate discriminates, on the CPU, before anyone spends a GPU window on it.
 
-    Four runs: the clean dry run must pass; each injected bug must fail, and fail *at its own step*.
-    A negative that any check would catch is worth nothing (`prototype/mlp_gemv/results.md`), so the
-    assertion is about where the failure landed, not that one happened.
+    Runs: the clean dry run must pass; each injected bug must fail, and fail *at its own step*.
+    A negative that any check would catch is worth nothing (`prototype/mlp_gemv/results.md`), so
+    the assertion is about where the failure landed, not that one happened.
     """
-    base = [sys.executable, str(Path(__file__).resolve())]
+    base = [sys.executable, str(Path(__file__).resolve()), "--fixture", fixture]
     cases = [
         ([], 0, None, "clean dry run"),
         (["--break-ids", "3"], 1, "[FAIL] generation step 3 samples greedy_continuation[4]",
@@ -404,6 +597,11 @@ def selftest() -> int:
           "that last step's §07.5 stop check HAD fired"],
          "the stop check fired at prompt index 6 (the first device run's bug: a 17-token prompt"
          " ended after 7 steps and generation never started)"),
+        # The forced driver's own failure mode: an off-by-one in the replay list. Everything else
+        # can stay perfect, so only the fed-token check can catch it.
+        (["--break-feed", "4"], 1,
+         "[FAIL] the tokens the engine fed itself are the ones the reference fed",
+         "generation step 4 was fed the wrong token (a replay list off by one)"),
     ]
     bad = []
     for extra, want_rc, want_in, what in cases:
@@ -423,11 +621,125 @@ def selftest() -> int:
     return 1 if bad else 0
 
 
+# ---- the smoke run ---------------------------------------------------------------------------
+def smoke_run(n_steps: int, args) -> int:
+    """`--smoke N`: a FREE run of N generated tokens. Not a parity claim, and not a timing.
+
+    What "smoke" has to mean to be worth a device window: it did not crash, no step produced a
+    NaN or an out-of-range id, the state stayed inside what was allocated, and the run ended by
+    its length budget or by the stop id — one of those two, not anything else. The forced pins
+    own depth and parity; this is the question they cannot ask, because a teacher-forced chain
+    never lets the engine's own divergence happen and a long context is exactly where a
+    carry-over bug that only shows up past the pin lives.
+    """
+    man = json.loads((REFS / "manifest.json").read_text())
+    prompt_ids = man["sources"][0]["ids"]
+    vocab = man["text_config"]["vocab_size"]
+    ceiling = lane_ceiling()
+    section(f"(smoke) free run of {n_steps} generated tokens on {REFS.name}'s prompt")
+    lanes = len(prompt_ids) + n_steps
+    check(lanes <= ceiling, f"the planned run fits the attention stage's lane ceiling",
+          f"{len(prompt_ids)} prompt + {n_steps} generated = {lanes} lanes vs MAXSC {ceiling}"
+          " (`kernels_attn.cpp` reads the ceiling from its own #define and throws rather than"
+          " truncating; the split-block §07.3 form that would raise it is a prefill item)")
+    work = Path(args.work)
+    work.mkdir(parents=True, exist_ok=True)
+    for stale in work.glob("logits*.bin"):
+        stale.unlink()
+    cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
+           "--steps", str(n_steps), "--out", str(work)]
+    if args.smoke_no_stop:
+        # Without this the run stops where the model decides to, which on this prompt is 38 tokens
+        # in — and a 300-token smoke that only grew the state 38 slots would be a 38-token smoke.
+        cmd.append("--no-stop")
+    print("  $ " + " ".join(cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        check(False, "decode_run exits 0", f"rc={proc.returncode}: "
+              + (proc.stderr.strip().splitlines() or [""])[-1])
+        return report()
+    check(True, "decode_run exits 0")
+    run = parse_run(proc.stdout)
+    prompt_steps = [s for s in run["steps"] if s["kind"] == "prompt"]
+    decode_steps = [s for s in run["steps"] if s["kind"] == "decode"]
+    result = run["result"]
+    stopped = result.get("stopped") == "1"
+    check(len(prompt_steps) == len(prompt_ids), "one step per prompt token",
+          f"{len(prompt_steps)} of {len(prompt_ids)}")
+    check(not [s for s in prompt_steps if s.get("stop") == "1"],
+          "no prompt-phase step fired §07.5", f"{len(prompt_steps)} prompt steps")
+    check(len(decode_steps) == n_steps or stopped,
+          "the run ended by its length budget or by the stop id, not by anything else",
+          f"{len(decode_steps)} generation steps, stopped={stopped}, RESULT={result}")
+    if args.smoke_no_stop:
+        check(not stopped and len(decode_steps) == n_steps,
+              "--no-stop: the run went the full length and §07.5 never fired",
+              f"{len(decode_steps)} steps, stopped={stopped}")
+        if stopped:
+            notes.append("--no-stop was passed but the run stopped anyway: the depth this smoke"
+                         " claims was not exercised.")
+    if stopped:
+        check(decode_steps and int(decode_steps[-1]["sampled"]) == STOP_ID
+              and decode_steps[-1].get("stop") == "1",
+              "a stopped run stopped ON the stop id, in the generation phase",
+              f"last step sampled={decode_steps[-1]['sampled'] if decode_steps else 'none'}"
+              f" stop={decode_steps[-1].get('stop') if decode_steps else '-'}")
+    ids = [int(s["sampled"]) for s in decode_steps]
+    bad = [i for i in ids if not 0 <= i < vocab]
+    check(not bad, f"every sampled id is a vocabulary id (0..{vocab - 1})", bad[:6])
+    top_bad = [s["top_logit"] for s in decode_steps if not re.fullmatch(r"-?\d+(\.\d+)?([eE][-+]?\d+)?", s["top_logit"])]
+    check(not top_bad, f"every step printed a finite top logit (nan/inf would land here)",
+          top_bad[:4])
+    # The full logits vectors are the only place a NaN can hide: a step whose argmax looks sane can
+    # still be one element away from an inf. ~1 MB per step, read then deleted.
+    nonfinite, missing, worst = [], [], None
+    for j in range(len(decode_steps)):
+        path = work / f"logits{len(prompt_steps) + j}.bin"
+        if not path.exists():
+            missing.append(path.name)
+            continue
+        eng = np.fromfile(path, dtype="<f4")
+        if eng.size != vocab:
+            missing.append(f"{path.name} has {eng.size} floats")
+            continue
+        if not np.isfinite(eng).all():
+            nonfinite.append(f"step {j}: {int((~np.isfinite(eng)).sum())} non-finite")
+        else:
+            mx = float(np.max(np.abs(eng)))
+            worst = mx if worst is None else max(worst, mx)
+    check(not missing, "one full logits dump per generation step", missing[:4])
+    check(not nonfinite, "no NaN or infinity in any logits vector", nonfinite[:4])
+    print(f"  [info] largest |logit| seen anywhere: {worst if worst is not None else 'n/a'}.")
+    cap = int(run["state"].get("cap", -1)) if run["state"] else -1
+    prefix = int(result.get("prefix_len", -1))
+    check(0 <= prefix <= cap <= 10 ** 9, "the state ended inside its allocation",
+          f"prefix_len={prefix} cap={cap} (§08.6 invariant: P must stay within the slots)")
+    written = sum(p.stat().st_size for p in work.glob("logits*.bin"))
+    for p in work.glob("logits*.bin"):
+        p.unlink()
+    notes.append(f"smoke run dumped and then deleted {written / (1024 * 1024):.0f} MiB of logits."
+                 " decode_run also printed its own ms line: a smoke run's timing is NOT a"
+                 " measurement and is deliberately not quoted here (bench/performance-status.md"
+                 " §6 owns what a clean window takes).")
+    return report()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", default=str(DEFAULT_BINARY))
     ap.add_argument("--model", default=str(ROOT / "models" / "Qwen3.5-0.8B"))
     ap.add_argument("--work", default=str(WORK))
+    ap.add_argument("--fixture", default="dec8",
+                    help="which data/refs/<name> to gate against: dec8 (8 free steps, the engine"
+                         " feeds itself) or dec64f (64 forced steps, replayed — see the header)")
+    ap.add_argument("--smoke", type=int, default=0, metavar="N",
+                    help="free-run N generated tokens and check only that nothing broke: no crash,"
+                         " no NaN, ids in range, state inside its allocation, ended by length or"
+                         " the stop id. No parity claim, no timing.")
+    ap.add_argument("--smoke-no-stop", action="store_true",
+                    help="with --smoke: leave §07.5 unarmed so the run really reaches N tokens"
+                         " (the model stops on this prompt after ~38, so without this a 300-token"
+                         " smoke is a 38-token smoke)")
     ap.add_argument("--no-engine", action="store_true",
                     help="fixture pairing + state arithmetic only; starts no binary, touches no device")
     ap.add_argument("--dry-run", action="store_true",
@@ -445,17 +757,28 @@ def main() -> int:
     ap.add_argument("--break-prompt-stop", type=int, default=-1, metavar="PROMPT_INDEX",
                     help="with --dry-run: fire the §07.5 stop check at that prompt step and end the"
                          " run there, which is the bug the first device run had")
+    ap.add_argument("--break-feed", type=int, default=-1, metavar="STEP",
+                    help="with --dry-run: feed that step the wrong token, which is an off-by-one"
+                         " in the replay list — the plausible way a forced driver breaks")
     ap.add_argument("--selftest", action="store_true",
                     help="re-run this file in subprocesses: clean dry run must pass, each injected"
                          " bug must fail at its own step")
     ap.add_argument("--build", action="store_true", help="run engine/build.sh first")
     args = ap.parse_args()
 
+    set_fixture(args.fixture)
+
     if args.selftest:
-        return selftest()
+        return selftest(args.fixture)
 
     if args.build:
         subprocess.run([str(ROOT / "engine" / "build.sh")], check=True)
+
+    if args.smoke:
+        if args.dry_run or args.no_engine:
+            raise SystemExit("gate: --smoke runs the engine; it is not a --dry-run or --no-engine"
+                             " thing (there is no stand-in for 'nothing crashed')")
+        return smoke_run(args.smoke, args)
 
     man = json.loads((REFS / "manifest.json").read_text())
     prompt_ids, dec_logits, dec_inputs = pairing_checks(man)
@@ -464,6 +787,8 @@ def main() -> int:
 
     if args.no_engine:
         state_checks(None)
+        fingerprint_checks(man, n_decode)
+        deep_matches_shallow(n_decode)
         return report()
 
     section("(run) decode_run — one decode_step per token: the prompt, then generation")
@@ -477,13 +802,31 @@ def main() -> int:
     # judging, and a missing dump has to read as missing.
     for stale in work.glob("logits*.bin"):
         stale.unlink()
-    for stale in work.glob("logits*.bin"):
-        stale.unlink()
+    # A replay above A-18's bound, a free run below it: see FREE_RUN_BOUND's comment. `--replay`
+    # also tells `decode_run` not to let §07.5 end the run, because dec64f's own chain samples the
+    # stop id at generation step 24 and teacher forcing feeds it straight back in.
+    replay = n_decode > FREE_RUN_BOUND
+    lanes = len(prompt_ids) + n_decode
+    ceiling = lane_ceiling()
+    check(lanes <= ceiling, "the planned run fits the attention stage's lane ceiling",
+          f"{len(prompt_ids)} prompt + {n_decode} generation = {lanes} lanes vs MAXSC {ceiling}"
+          " (read from `prototype/attn_decode/attn_decode_kernels.h`; `kernels_attn.cpp` throws"
+          " above it rather than truncating)")
     cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
            "--steps", str(n_decode), "--out", str(work)]
+    if replay:
+        cmd += ["--replay", ",".join(str(t) for t in greedy[:-1])]
+    feeding = ("REPLAY — the reference's own token is fed at every step, because this fixture is"
+               f" deeper than A-18's {FREE_RUN_BOUND}-token bound and a self-fed run past that"
+               " could not be pinned (a divergence then shows at one step, not in all of them)"
+               if replay else
+               "SELF-FED — the engine feeds its own sample, which is the stronger claim: the"
+               " chain is re-derived rather than replayed")
+    print("  feeding: " + feeding)
     if args.dry_run:
         stdout, rc = dry_run(man, prompt_ids, dec_logits, work, args.break_ids,
-                             args.break_logits, args.break_noise, args.break_prompt_stop)
+                             args.break_logits, args.break_noise, args.break_prompt_stop,
+                             replay, args.break_feed)
         notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
                      " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
                      " run is not also the first time this file parses a STEP line. Section (d) is"
@@ -564,6 +907,18 @@ def main() -> int:
     check(fed == greedy[:-1],
           "the tokens the engine fed itself are the ones the reference fed (the engine feeds itself,"
           " so this is the chain being re-derived, not replayed)", f"{fed}")
+    if replay:
+        # Same check, different meaning, so it is said out loud: here the fed list is what THIS gate
+        # handed `decode_run --replay`, so it proves the delivery. What proves the model is the
+        # `sampled=` values above — the engine's own argmax at each step, compared with the
+        # reference's and deliberately not fed back.
+        check(not [s for s in decode_steps if s.get("stop") == "1"],
+              "no generation step ended a replay run (§07.5 is a free-run rule)",
+              f"{len(decode_steps)} replayed steps")
+        where = [j for j, s in enumerate(decode_steps) if int(s["sampled"]) == STOP_ID]
+        print(f"  [info] the pinned chain samples the stop id {STOP_ID} at generation step(s)"
+              f" {where if where else 'none'}; teacher forcing feeds that token straight back in,"
+              " so the engine prints it and keeps going — that is why a replay does not arm §07.5.")
     positions = [int(s["pos_before"]) for s in decode_steps]
     check(positions == list(range(len(prompt_ids), len(prompt_ids) + n_decode)),
           f"positions run {len(prompt_ids)}..{len(prompt_ids) + n_decode - 1} (§02.4's P)",
@@ -579,6 +934,8 @@ def main() -> int:
     print(f"  reported: cos vs {BAND['cos_report']} (G6 decode logits); ndiff and max ULP are "
           "reported but not gated (§10.1 F1–F4: a chained dot's legal ndiff is 29–47 %, and a "
           "max-ULP bound is blind to a whole-tensor 1-ULP shift)")
+    per_step: list = [None] * n_decode
+    under_g6: list = []
     for j in range(n_decode):
         path = work / f"logits{len(prompt_ids) + j}.bin"
         if not path.exists():
@@ -591,6 +948,12 @@ def main() -> int:
             continue
         m = metrics(eng, ref)
         margin = ("exact" if m["margin"] == float("inf") else f"{m['margin']:.0f}×")
+        argmax_ok = argmax_low(eng) == argmax_low(ref)
+        fed = int(decode_steps[j]["input"]) if j < len(decode_steps) else int(dec_inputs[j][0])
+        sampled = (int(decode_steps[j]["sampled"]) if j < len(decode_steps)
+                   else argmax_low(ref))
+        per_step[j] = {"cos": m["cos"], "meanrel": m["meanrel"], "ndiff": m["ndiff"],
+                       "n": ref.size, "argmax_ok": argmax_ok, "fed": fed, "sampled": sampled}
         check(True, f"step {j}: metrics",
               f"cos {m['cos']:.6f} meanrel {m['meanrel']:.4%} ndiff {m['ndiff']}/{ref.size}"
               f" maxabs {m['maxabs']:.4g} | ref top1−top2 gap {m['gap12']:.3f}"
@@ -598,21 +961,24 @@ def main() -> int:
         check(m["cos"] >= BAND["cos_hard"], f"step {j}: cos >= {BAND['cos_hard']} (§10.1 G5)")
         check(m["meanrel"] <= BAND["meanrel_hard"],
               f"step {j}: meanrel <= {BAND['meanrel_hard']:.0%} (§10.2)")
-        check(argmax_low(eng) == argmax_low(ref), f"step {j}: argmax agrees with the pin",
-              f"{argmax_low(eng)}")
+        check(argmax_ok, f"step {j}: argmax agrees with the pin", f"{argmax_low(eng)}")
         if m["cos"] < BAND["cos_report"]:
-            notes.append(f"step {j}: cos {m['cos']:.6f} is under G6's decode-logits figure "
-                         f"{BAND['cos_report']} (still above the G5 floor that is gated). G6 is"
-                         " ADVISORY here by decision, not an open question: an end-to-end token"
-                         " carries the whole 24-layer cascade, so it is not judged by a figure"
-                         " belonging to a narrower comparison — see the BAND comment above, and"
-                         " the two measured floors in engine/results.md: last-op reassociation"
-                         " 0.99999862 (engine/logits_floor.py) and end-to-end two-legal-routes"
-                         " 1-cos 4.7e-5..1.9e-4 (engine/route_price.py), which brackets this step.")
-        else:
-            print(f"  [info] step {j}: cos {m['cos']:.6f} clears G6's {BAND['cos_report']}")
+            under_g6.append(f"{j}:{m['cos']:.6f}")
+    if under_g6:
+        notes.append(f"{len(under_g6)} of {n_decode} steps sit under G6's decode-logits figure "
+                     f"{BAND['cos_report']} (step:cos — " + ", ".join(under_g6[:12])
+                     + (" …" if len(under_g6) > 12 else "") + "). G6 is ADVISORY here by decision,"
+                     " not an open question: an end-to-end token carries the whole 24-layer"
+                     " cascade, so it is not judged by a figure belonging to a narrower"
+                     " comparison — see the BAND comment above and the two measured floors in"
+                     " engine/results.md: last-op reassociation 0.99999862"
+                     " (engine/logits_floor.py) and end-to-end two-legal-routes 1-cos"
+                     " 4.7e-5..1.9e-4 (engine/route_price.py).")
 
     state_checks(run["state"])
+    curve_checks(per_step, n_decode)
+    fingerprint_checks(man, n_decode)
+    deep_matches_shallow(n_decode)
 
     # ---- (d) launch plan ------------------------------------------------------------------------
     section("(d) the launch plan — §07's structure, counted in Python")
