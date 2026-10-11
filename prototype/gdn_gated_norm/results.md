@@ -47,7 +47,8 @@ Three consequences, none of them mine to decide:
    then applies `w_norm` and `silu(z)` in F32" puts the affine in F32; the dumps put it in BF16
    with the weight cast first (§04.5's "multiply by `w_norm`" says nothing about dtype, and is
    only right under a BF16 weight). §04.5/A-01 correction in place, naming the old claim, is a
-   hand-off item (see §6 and `engine/README.md` hand-off item 6) — not done in this commit.
+   hand-off item (see §6 and the §04.5 bullet under "Open questions" in `engine/results.md`) — not
+   done in this commit.
 2. **`speccheck.specimpl.rmsnorm_gated` is bit-faithful: 0 of 294 912 differ.** An earlier revision
    of this file reported "105 683 (35.8 %) differ, and 0 of them ever failed a gate"; that figure
    was **this probe's own bug**, not the model's. The probe handed the oracle `w.float()` — the raw
