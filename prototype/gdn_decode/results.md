@@ -23,6 +23,34 @@ expected outputs from `decode1.*`. Nothing synthesized.
 | 18 layers, 18.0 MiB state (the real decode step) | **0.062 ms** | 918 GB/s **cache-resident** |
 | same kernel, state tiled to 108 MiB (6× replicas) | 1.344 ms | **255 GB/s** = 108 % of the read probe |
 
+**Provenance warning on those three rows.** They were taken by the per-iteration
+`hipEventElapsedTime` loop this directory has now removed: the same timer `d81ff13` disowned
+(`hipEventElapsedTime` returns exactly 0.000 ms for sub-millisecond work on this iGPU, and the loop
+kept `min(best, ms)` with no `ms > 0` guard), with no `util` record and no repeat spread — contrary to
+`bench/performance-status.md` §5's own provenance rule, and `0.062` is carried straight into §6's
+token sum. The timing path is now the burst steady_clock idiom (one warm-up, `--trials` bursts of
+`--iters` launches, best **and** worst printed), so these rows need a re-take before the ledger
+reuses them; commands in §"Re-take" below and in `bench/commit-review-2026-10-11.md` §4. Nothing has
+been re-measured by this change — the numbers above are exactly as provisional as they were.
+
+Two things the re-take should settle while it is at it: whether `--restore-each` (state copied back
+inside the timed burst) differs from the default burst by more than the copy's own time, and whether
+a number above the ~240 GB/s package ceiling is admissible here at all — `check.py` prints `% of the
+237 probe` and asserts nothing, unlike `lm_head_gemv/run.py` and `proj_gemv/run.py`, which fail on
+it. And one thing it **cannot** settle: the "state tiled to 108 MiB" row is not reproducible from
+the binary as it stands — the parser takes `mode|dir|out|iters|layers` (plus the two new timing
+flags) and has no tiling knob — so 255 GB/s is quoted from a build that no longer exists. Either
+re-add the tiling knob or retire that row from the table and from §1's ledger row for it.
+
+### Re-take (device; operator only, zero subagents, `tools/gpu_lock.sh`)
+
+```bash
+prototype/gdn_decode/gdn_decode --mode all --iters 200 --trials 5   # warm: expect ~0.06 ms/launch
+prototype/gdn_decode/gdn_decode --mode rec --iters 200 --trials 5  # 1 layer: expect ~0.01 ms
+prototype/gdn_decode/gdn_decode --mode all --iters 200 --trials 5 --restore-each
+.venv/bin/python prototype/gdn_decode/check.py --iters 200         # correctness + the timing line
+```
+
 So the kernel runs at the LPDDR roofline when the state is cold and ~4× that when it is
 warm — which it is in a decode loop, because 18 MiB of state is touched every step and the
 iGPU's cache (not reported by `hipGetDeviceProperties`, which says 2 MiB L2) holds it.

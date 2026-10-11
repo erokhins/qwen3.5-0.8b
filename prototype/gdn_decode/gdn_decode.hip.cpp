@@ -31,6 +31,10 @@
  * stay resident in the iGPU's cache, so the extra pass is cheaper than it looks.
  *
  * Build: prototype/gdn_decode/build.sh    Gate: .venv/bin/python prototype/gdn_decode/check.py
+ *
+ * TIMING in `rec`/`all` uses a burst of launches with ONE sync and steady_clock wall time — see the
+ * comment at the burst for why the old per-iteration hipEventElapsedTime loop is gone, and what
+ * `--restore-each` is for.
  */
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
@@ -79,7 +83,7 @@ static void dump_f32(const std::string& p, const void* dptr, size_t n) {
 
 int main(int argc, char** argv) {
     std::string mode, dir, out;
-    int iters = 20, nlayers = 18;
+    int iters = 20, nlayers = 18, trials = 3, restore_each = 0;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() { return std::string(argv[++i]); };
@@ -87,6 +91,8 @@ int main(int argc, char** argv) {
         else if (a == "--dir") dir = next();
         else if (a == "--out") out = next();
         else if (a == "--iters") iters = atoi(next().c_str());
+        else if (a == "--trials") trials = atoi(next().c_str());
+        else if (a == "--restore-each") restore_each = 1;
         else if (a == "--layers") nlayers = atoi(next().c_str());
         else { fprintf(stderr, "unknown arg %s\n", a.c_str()); return 1; }
     }
@@ -157,8 +163,8 @@ int main(int argc, char** argv) {
         CK(hipMemcpy(dbt, beta.data(), (size_t)L * NH * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dS, S.data(), ns * 4, hipMemcpyHostToDevice));
 
-        // The kernel mutates S in place, so every timed iteration must restore it first:
-        // keep a pristine copy and copy it back outside the timed region.
+        // The kernel mutates S in place, so keep a pristine copy: the burst timing restores from it,
+        // outside the timed region (see the TIMING block for why).
         float* dS0;
         CK(hipMalloc(&dS0, ns * 4));
         CK(hipMemcpy(dS0, S.data(), ns * 4, hipMemcpyHostToDevice));
@@ -170,24 +176,69 @@ int main(int argc, char** argv) {
         dump_f32(out + "/o.f32", do_, nq);
         dump_f32(out + "/S_new.f32", dS, ns);
 
-        double best = 1e30;
-        for (int i = 0; i < iters; ++i) {
-            CK(hipMemcpy(dS, dS0, ns * 4, hipMemcpyDeviceToDevice));
-            hipEvent_t s, e;
-            CK(hipEventCreate(&s)); CK(hipEventCreate(&e));
-            CK(hipEventRecord(s));
-            launch();
-            CK(hipEventRecord(e));
-            CK(hipEventSynchronize(e));
-            float ms = 0.f;
-            CK(hipEventElapsedTime(&ms, s, e));
-            best = std::min(best, (double)ms);
-            CK(hipEventDestroy(s)); CK(hipEventDestroy(e));
+        // TIMING — a burst of launches, ONE sync, steady_clock wall time divided by the launch
+        // count. This used to be a per-iteration hipEventElapsedTime loop with
+        // `best = std::min(best, (double)ms)` and no `ms > 0` guard, which is the exact timer
+        // d81ff13 and ledger §6 disowned: on this iGPU the event timer returns exactly 0.000 ms for
+        // sub-millisecond work, so a zero became the best row and the GB/s next to it was inf or
+        // 918. Same idiom as prototype/glue and prototype/attn_decode now: one warm-up burst (first
+        // touch of fresh pages runs ~7x slow, devices/), then `--trials` bursts of `--iters`
+        // launches, best AND worst printed so the number carries its own spread instead of posing
+        // as a point measurement.
+        //
+        // Why the state restore sits OUTSIDE the timed burst: copying the state back is
+        // 2·ns·4 bytes of extra traffic (+66 % at 18 layers), so timing it would measure the copy,
+        // not the recurrence. A burst therefore runs `iters` SUCCESSIVE recurrences over an evolving
+        // S rather than replaying one step. That is what a token stream actually does — the engine
+        // never restores either — and the kernel has no value-dependent control flow, so the bytes
+        // moved are the same whatever S holds; with the same q/k/v every launch, S converges to a
+        // bounded fixed point instead of decaying to zero. `--restore-each` puts the restore back
+        // inside the burst if anyone wants to check that claim on the device: the two rows should
+        // differ by about the copy's own time, and if they differ wildly the burst row is not
+        // measuring what it says it is.
+        const int l2_kb = [] {
+            int kb = 0;
+            (void)hipDeviceGetAttribute(&kb, hipDeviceAttributeL2CacheSize, 0);
+            return kb;
+        }();
+        auto burst = [&](int n) {
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < n; ++i) {
+                if (restore_each) CK(hipMemcpy(dS, dS0, ns * 4, hipMemcpyDeviceToDevice));
+                launch();
+            }
+            CK(hipDeviceSynchronize());
+            const auto t1 = std::chrono::steady_clock::now();
+            return std::chrono::duration<double, std::milli>(t1 - t0).count();
+        };
+        // The correctness launch above already moved S, so restore before warming too.
+        CK(hipMemcpy(dS, dS0, ns * 4, hipMemcpyDeviceToDevice));
+        burst(1);                                   // warm: pages and clocks
+        double best = 1e30, worst = 0.0;
+        for (int t = 0; t < std::max(1, trials); ++t) {
+            CK(hipMemcpy(dS, dS0, ns * 4, hipMemcpyDeviceToDevice));   // each trial starts pinned
+            const double ms = burst(iters) / std::max(1, iters);
+            if (!(ms > 0.0)) {
+                fprintf(stderr, "burst %d measured 0.000 ms: timer not resolving, not a fast kernel\n", t);
+                return 1;
+            }
+            best = std::min(best, ms);
+            worst = std::max(worst, ms);
         }
         double bytes = 3.0 * ns * 4 + 4.0 * nq * 4;   // two S reads + one write, plus q/k/v/o
-        printf("RESULT mode=%s layers=%d ms=%.4f gbs=%.1f state_MiB=%.1f pct_of_237=%.1f\n",
-               mode.c_str(), L, best, bytes / (best / 1e3) / 1e9, ns * 4 / 1048576.0,
-               bytes / (best / 1e3) / 237e9 * 100.0);
+        const double gbs = bytes / (best / 1e3) / 1e9;
+        printf("RESULT mode=%s layers=%d iters=%d trials=%d restore=%s ms=%.4f worst=%.4f "
+               "spread_pct=%.1f gbs=%.1f state_MiB=%.1f pct_of_237=%.1f ws_KiB=%.0f l2_KiB=%d\n",
+               mode.c_str(), L, iters, std::max(1, trials), restore_each ? "each" : "burst", best,
+               worst, 100.0 * (worst - best) / best, gbs, ns * 4 / 1048576.0,
+               bytes / (best / 1e3) / 237e9 * 100.0, bytes / 1024.0, l2_kb);
+        // Printed, not asserted: whether a >237 GB/s row is skipped work (the repo's standing rule)
+        // or a state that stayed resident decides how the ledger may use it. The attribute cannot
+        // answer it on this box — `hipDeviceGetAttribute(L2CacheSize)` says 2 MiB while tiling shows
+        // ~54 MiB resident (performance-status.md §1) — so this is a hint, and the tile sweep is the
+        // measurement. Deciding the band is the ledger's call, not the kernel's.
+        printf("NOTE working set %.0f KiB; L2 attribute says %d KiB (this box under-reports it — "
+               "tiling, not the attribute, is the authority on residency)\n", bytes / 1024.0, l2_kb);
         return 0;
     }
     fprintf(stderr, "mode must be gates|conv|rec|all\n");

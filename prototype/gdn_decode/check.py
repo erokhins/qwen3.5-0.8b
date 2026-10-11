@@ -98,9 +98,13 @@ def run(mode: str, layers: int = 18) -> dict:
         print(proc.stdout, proc.stderr)
         raise SystemExit("%s failed" % mode)
     fields = {}
+    notes = []
     for line in proc.stdout.splitlines():
         if line.startswith("RESULT"):
             fields = dict(kv.split("=", 1) for kv in line.split()[1:])
+        elif line.startswith("NOTE"):
+            notes.append(line)
+    fields["_notes"] = notes
     return fields
 
 
@@ -296,8 +300,13 @@ def main() -> int:
                      "is bf16-valued, so >1 ULP is a kernel bug" % bad_ulp)
     if worst_S_hf > 5e-2:
         fails.append("all-layers vs HF dump: state %.3g" % worst_S_hf)
-    print("  timing %s ms over %s MiB of state -> %s GB/s (%s%% of the 237 probe)"
-          % (res["ms"], res["state_MiB"], res["gbs"], res["pct_of_237"]))
+    print("  timing %s ms (best of %s trials of %s launches, worst %s, spread %s %%; restore=%s) "
+          "over %s MiB of state -> %s GB/s (%s%% of the 237 probe)"
+          % (res["ms"], res.get("trials", "?"), res.get("iters", "?"), res.get("worst", "?"),
+             res.get("spread_pct", "?"), res.get("restore", "?"),
+             res["state_MiB"], res["gbs"], res["pct_of_237"]))
+    for note in res.get("_notes", []):
+        print("  %s" % note)
     state_ms = float(res["ms"])
     print("  token budget: state traffic alone would cost %.3f ms of the ~6.6 ms roofline token"
           % state_ms)
