@@ -141,6 +141,16 @@ device once; what is still missing is the token result and every timing.
 # the same gate over all four fixtures (dec8 decode, prefix24dec8 decode, smoke decode, p300
 # prefill = 10.2 M elements), under two seconds on this box. Ends "MIRROR GATE: PASS".
 
+`.venv/bin/python engine/logits_floor.py`
+# What cos a step's logits vector is legally allowed to sit at, measured from the reference instead of
+# argued about. Rebuilds each dec8 step's logits from the reference's own inputs (`decode{s}.L23.s_out` +
+# `lm.norm.weight` + the tied table — the rebuild reproducing the pin at cos 0.999999999 is itself a
+# per-step pairing proof with no last-writer-wins bare name in it), then moves only what an engine may
+# legally move: K permuted, split-K partials forward and reversed, the norm's mean of squares re-ordered,
+# and finally no BF16 rounding of the output, which is what `lm_head_full` legitimately does and the pin
+# does not. Floor comes out at 0.99999862, set almost entirely by the reference's own output rounding —
+# summation order alone is worth ~1e-9. ~11 s and ~1 GB of RAM, no device, no engine binary.
+
 `.venv/bin/python engine/gate.py --selftest`
 # Proves the token gate DISCRIMINATES, with no engine and no device: it re-runs gate.py in
 # subprocesses against a CPU stand-in with four bugs injected — a wrong sampled id at a named step, a
