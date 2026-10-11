@@ -283,11 +283,12 @@ def main() -> int:
         print("   F4 aggregates (cos / meanrel / ndiff of a perturbed `out` against the pin), "
               "worst over the same survey: cos %.8f, meanrel %.2e, ndiff %.2f%%"
               % (surv["worst_cos"], surv["worst_meanrel"], surv["worst_ndiff"]))
-        print("   gate bands: cos >= %.4f (%.0fx of slack in 1-cos), meanrel <= %.1e (%.0fx), "
-              "ndiff <= %.0f%% (%.1fx)"
+        print("   gate bands, which live in run.py: F4 is judged on cos and meanrel ONLY. ndiff is "
+              "NOT a criterion there -- the line above measures what a legal chain does to it, and "
+              "a band wide enough to admit that carries nothing cos and meanrel do not already "
+              "carry: cos >= %.4f (%.0fx of slack in 1-cos), meanrel <= %.1e (%.0fx of margin)"
               % (g.F4_COS_MIN, (1 - g.F4_COS_MIN) / max(1 - surv["worst_cos"], 1e-16),
-                 g.F4_MEANREL_MAX, g.F4_MEANREL_MAX / max(surv["worst_meanrel"], 1e-300),
-                 g.F4_NDIFF_PCT_MAX, g.F4_NDIFF_PCT_MAX / max(surv["worst_ndiff"], 1e-300)))
+                 g.F4_MEANREL_MAX, g.F4_MEANREL_MAX / max(surv["worst_meanrel"], 1e-300)))
     return 0
 
 

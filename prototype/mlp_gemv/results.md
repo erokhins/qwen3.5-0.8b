@@ -6,6 +6,10 @@ the six negative injections, plus the cold bandwidth sweep. Binary: `mlp_gemv` (
 `ulp_probe.py`. Authoritative run: `run.py --layers all --fixture dec8 --iters 60 --rows-sweep
 4,8,16,32 --tile 6 --negative`.
 
+F4's aggregate bands were re-set from measurement since the first version of this file: meanrel
+1e-3 → **5e-3** and **ndiff dropped** (see “F4's aggregate bands”). The six negative injections were
+re-run after the band moved; all six are still rejected where they are declared.
+
 This is the second third of the token's bytes: the MLP streams 24 × 22.02 MiB = **0.5285 GB per
 token** (§03 / `bench/performance-status.md`), second only to `lm_head` (0.5085 GB) and well
 ahead of the GDN state traffic.
@@ -54,7 +58,8 @@ columns is the whole subject of the next section.
 
 The criteria, in words: no element above the cancellation band may exceed 1 ULP (2 for `act`),
 ≤2 % of elements may differ at all, and the §10.1-class aggregates (cos ≥ 0.9999,
-meanrel ≤ 1e-2) must hold. F4 is judged on aggregates only, for the reason measured below.
+meanrel ≤ 1e-2) must hold. F4 is judged on cos and meanrel only — no per-element rule, and no
+ndiff rule either — for the reasons measured below.
 
 ## How wide the cancellation band is, and how it got set
 
@@ -85,29 +90,55 @@ the band and the tightest band those results would pass at:
     out(kernel-act)         0      182        6   -            (aggregate-only: no band to size)
 ```
 
-### F4's aggregate bands, measured — they were not measured before
+### F4's aggregate bands: measured, and then moved
 
-F4 has no per-element rule, so its three aggregates *are* the gate: cos ≥ 0.9999, meanrel ≤ 1e-3,
-ndiff ≤ 15 %. Nothing in the repo computed cos / meanrel / ndiff of a perturbed `out` against the
-pin, which is exactly what F4 compares, so `floor_probe.py` now does it over the same 192 × 8
-survey (the `--perturb` block prints them and the margin against the bands, read from `run.py`):
+F4 has no per-element rule, so its aggregates *are* the gate. They used to be cos ≥ 0.9999,
+meanrel ≤ 1e-3, ndiff ≤ 15 %, and none of those three had a measurement behind it. Nothing in the
+repo computed cos / meanrel / ndiff of a perturbed `out` against the pin — which is exactly what F4
+compares — so `floor_probe.py` does it, over the same 192 layer × step cases × 8 fixed trials
+(1 536 perturbed dots per survey, seed 7) at `--perturb 1` and `--perturb 5`; five flips is what F2
+measures as legal per layer-step. Measured worst of a **legal** chain, next to what this kernel
+actually produces over the same 192 cases:
 
-| `act` perturbation | worst cos | worst meanrel | worst ndiff |
+| `act` → `out` chain (192 cases × 8 trials = 1 536 dots) | worst cos | worst meanrel | worst ndiff |
 |---|---|---|---|
-| this kernel's real chain, 192 cases | 0.99999963 | 1.3e-4 | 8.4 % |
-| 1 legal 1-ULP flip, worst of 1536 trials | 0.99999661 | **9.1e-4** | **29.1 %** |
-| 5 legal 1-ULP flips (F2 measures up to 5 per layer-step) | 0.99999615 | **2.0e-3** | **46.8 %** |
+| 1 legal 1-ULP flip | 0.99999661 | 9.12e-4 | 29.1 % |
+| 5 legal 1-ULP flips | 0.99999615 | **2.01e-3** | **46.8 %** |
+| this kernel's real chain, 192 cases | 0.99999963 | 1.25e-4 | 8.4 % |
 
-So **1e-3 is marginal, not conservative** — and it is not even an upper bound on a legal chain: a
-correct kernel whose `act` differs from the pin by one element can put meanrel at 9.1e-4, and
-five such flips overshoot at 2.0e-3. The ndiff band is overshot by a single flip already. cos is
-the only one of the three with real slack (26×). The kernel passes (1.3e-4, 8.4 %) because its
-`act` flips are not the cancellation-sensitive ones, which is luck of the draw, not a property
-the band measures. Widening them is the right correction but it is a §10.1 decision, not a gate
-tweak, so the bands are **unchanged here** and flagged instead: either F4's meanrel/ndiff move to
-bound what a legal chain can do (~1e-2 / ~50 %), or F4 stops being judged against the pin and is
-judged as `down(kernel act)` vs `down(ref act)` under the same down kernel, which cancels the
-arithmetic sensitivity instead of gating around it.
+**The bands are now cos ≥ 0.9999 and meanrel ≤ 5e-3, and ndiff is gone.** Each is set off that
+table, and the sample size sits next to it in §10.1 for the same reason:
+
+- **meanrel ≤ 5e-3** — 2.5× over the 2.01e-3 measured worst. The cushion is that wide because
+  2.01e-3 is a *sample* worst from 1 536 perturbations, not an upper bound: a different summation
+  order, different layers, or a fixture with more cancellation can land higher, and a band that a
+  correct kernel can cross is worse than no band, because the first time it fires someone loosens
+  it without measuring. If this band is ever tightened, the thing to change is the survey size, not
+  the multiplier.
+- **cos ≥ 0.9999** — unchanged; the measured legal worst leaves 26× of slack in 1 − cos, and it is
+  the strongest of the three criteria it used to be judged by.
+- **ndiff: removed, not widened.** A single legal 1-ULP flip puts 29.1 % of `out` at a different
+  BF16 value, five flips put 46.8 %, so the 15 % band would have failed correct kernels — this
+  kernel survived it at 8.4 % only because its `act` flips land on benign elements, which is luck,
+  not something the band bounded. A band wide enough to admit 47 % (~50 %) states nothing that cos
+  and meanrel do not already state, so the criterion was dropped rather than inflated. Its role —
+  noticing that the chain moved — is carried by the two that remain.
+
+What the surviving band can and cannot detect is worth stating plainly, because "aggregate-only"
+hides it: **F4 is a gross-error net with a floor of ~5e-3 in meanrel.** Four of the six negative
+injections put the chain far above that floor (`out(chain)` meanrel against the pin, layer 0 /
+`decode0`): `trunc` 1.04e-2, `tail` 9.83e-2, `half` 7.42e-1, `rowswap` 1.37e+0 — so the net does
+still catch gross errors. The one that does not is `f32act`, whose chain signature is **4.14e-3,
+below the floor**: a 1-ULP epilogue rounding change is precisely the legal-sized perturbation F4
+refuses to judge element-wise. `f32act` is rejected at F2 `act` instead — 40.4 % of `act` differs
+against a 2 % rule, a 20× margin — which is also where the bug lives, so the gate as a whole loses
+nothing; but nobody should claim F4's meanrel is what catches it. The whole gate was re-run after
+the band moved (`--layers all --fixture dec8 --no-time --tile 0 --negative`, PASS, all six rejected
+where declared and nowhere else).
+
+The alternative formulation — judge `down(kernel act)` against `down(ref act)` under the same down
+kernel, cancelling the arithmetic sensitivity instead of gating around it — is still the cleaner
+shape and remains open. The bands above make it unnecessary for a kernel that behaves like this one.
 
 ## Why the per-element rule is scale-aware — `floor_probe.py`
 
@@ -130,7 +161,9 @@ correct kernel, and the probe is what says so rather than an argument:
   band** — the largest one is at 1.3e-1 of the tensor max, an element that is 13 % of the output
   and not a cancellation at all. So this is not F4 being judged loosely, it is F4 being unjudgeable
   per element: one legal 1-ULP flip anywhere in a 3584-term dot can move a *large* output element
-  by tens of thousands of ULP. Hence cos (≥ 0.9999) and meanrel (≤ 1e-3) there, and nothing else.
+  by tens of thousands of ULP. Hence cos (≥ 0.9999) and meanrel (≤ 5e-3) there, and nothing else —
+  ndiff was the third rule and is gone for the same reason (a legal chain measures 29–47 %; see the
+  F4 section above).
   The earlier version of this bullet quoted "up to 142 ULP", which was the worst over an unstated
   1–4 trials per case: the loop stopped at each case's first positive trial (and its `break` was
   dead code, so the coverage looked wider than it was). Fixed-size trials and N on the line moved
@@ -204,6 +237,30 @@ act), which is how an epilogue bug reaches the returned value. `preswap` is the 
 it is invisible to any gate that looks only at `act`, and it is the exact reason F1 and F2 are
 different cases. `--mode down` skips the two injections that live in the epilogue rather than
 reporting them as failures — a run that never launched the buggy kernel cannot catch the bug.
+
+The verdict comes from `judge_neg()`, which asks whether an observation violates the **per-element**
+criteria (over-tolerance ULP outside the cancellation band, ndiff > 2 %, cos < 0.9999,
+meanrel > 1e-2) rather than F4's looser aggregate bands: the question at `out(chain)` is "did the
+bug reach the value the engine returns", not "would F4's band catch it". Those columns are worth
+recording, because they say how far each bug sits from the line (`out(chain)` against the pin,
+layer 0 / `decode0`):
+
+| injection | over-tol elements | ndiff | cos | meanrel |
+|---|---|---|---|---|
+| `half` | 1022 / 1024 | 100.0 % | 0.75670431 | 7.42e-1 |
+| `tail` | 971 / 1024 | 98.2 % | 0.99502812 | 9.83e-2 |
+| `trunc` | 656 / 1024 | 90.8 % | 0.99998553 | 1.04e-2 |
+| `rowswap` | 1021 / 1024 | 100.0 % | −0.02176629 | 1.37e+0 |
+| `preswap` | 0 | 0.6 % | 0.99999998 | 9.45e-6 |
+| `f32act` | 303 / 1024 | 64.2 % | 0.99999113 | 4.14e-3 |
+| clean chain (for reference) | 0 | 0.6 % | 0.99999998 | 9.45e-6 |
+
+`preswap` is the `must NOT move` case working: its `out(chain)` row is the clean chain's numbers,
+byte for byte, because a staging swap in the raw dump cannot reach a dot. `f32act` is the row to
+read carefully: 303 over-tolerance elements prove the epilogue bug does reach `out`, but its
+meanrel (4.14e-3) sits **under** F4's own 5e-3 floor and its cos clears 0.9999, so F4 alone would
+not have rejected it — F2 `act` (40.4 % of elements differ, against a 2 % rule) is what does. That
+is the honest form of "the gate catches `f32act`", and §10.1 says it the same way.
 
 `f32act` is the one a naive "max ULP at any element" rule would have missed and the one that
 matters most, because it is the difference between matching HF and matching arithmetic. The

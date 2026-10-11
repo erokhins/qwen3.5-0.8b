@@ -61,12 +61,25 @@ FF, HID = 3584, 1024
 # Tightening it further is a gate change and has to clear both numbers again.
 CANCEL_REL = 3e-5
 # F4 is the chain (down applied to the kernel's own act) and has no per-element rule — the
-# perturbation survey in floor_probe.py shows why. These aggregates ARE the gate, and the same
-# probe sizes them: it prints the worst cos / meanrel / ndiff a legal 1-ULP `act` difference can
-# produce, with the margin these three numbers leave.
-F4_COS_MIN = 0.9999
-F4_MEANREL_MAX = 1e-3
-F4_NDIFF_PCT_MAX = 15.0
+# perturbation survey in floor_probe.py shows why (a legal 1-ULP `act` flip puts >1 ULP onto an
+# `out` element in all 192 layer x step cases it surveyed). So F4 is judged on aggregates ONLY and
+# these two numbers ARE the gate. Both are measured, not argued: `floor_probe.py --perturb N
+# --trials 8` over 192 cases x 8 trials = 1 536 perturbed dots says the worst a LEGAL chain can
+# do is cos 0.99999661 / meanrel 9.12e-4 with one 1-ULP `act` flip, and cos 0.99999615 /
+# meanrel 2.01e-3 with five (F2 measures up to 5 legal flips per layer-step). meanrel gets 2.5x
+# over the worse of those because 2.01e-3 is a SAMPLE worst, not an upper bound — if this ever
+# needs more room, enlarge the survey rather than the multiplier.
+#
+# ndiff is not here any more. It was <= 15 %, and one legal flip measures 29.1 % (five: 46.8 %),
+# so that band rejected correct kernels; a band wide enough to accept them (~50 %) would carry no
+# information cos and meanrel do not already carry, so it was removed rather than inflated.
+#
+# What this band can and cannot detect: it is a gross-error net with a floor of ~5e-3. `--negative
+# f32act` moves the chain to meanrel 4.14e-3, i.e. BELOW that floor, and is rejected at F2 `act`
+# instead (40.4 % ndiff against a 2 % rule). Gross errors are still caught here: `trunc` 1.0e-2,
+# `tail` 9.8e-2, `half` 7.4e-1, `rowswap` 1.4e+0 (all `out(chain)` meanrel, layer 0 decode0).
+F4_COS_MIN = 0.9999      # measured legal worst 0.99999615 -> 26x of slack in 1 - cos
+F4_MEANREL_MAX = 5e-3    # measured legal worst 2.01e-3 -> 2.5x
 WPK = "model.language_model.layers.%d.mlp."    # checkpoint key prefix (plain ints, not %02d)
 # §01.7: the MLP is 0.5285 GB/token; at the probe bandwidth that is 2.230 ms/token.
 MLP_BYTES_PER_TOKEN = 24 * (2 * FF * HID + HID * FF) * 2
@@ -126,7 +139,9 @@ def judge(tag: str, c: dict, fails: list[str], worst: dict, ndiff_pct_max=2.0,
     `ulp_gate=False` is for the F4 chain: its input is the kernel's `act`, which legitimately
     differs from the reference's by 1 ULP, and floor_probe.py shows a 1-ULP input flip can
     land hundreds of ULP away in the output at small elements. Judging ULP there would be
-    judging arithmetic sensitivity, not the kernel.
+    judging arithmetic sensitivity, not the kernel. `ndiff_pct_max=None` goes with it: a legal
+    chain measures 29-47 % differing elements (measured, same survey), so cos and meanrel — sized
+    by that same measurement, see the F4_* constants — are F4's only criteria.
     """
     print("    %-22s %s" % (tag, fmt(c)))
     key = tag.split()[-1]
@@ -143,7 +158,7 @@ def judge(tag: str, c: dict, fails: list[str], worst: dict, ndiff_pct_max=2.0,
     if ulp_gate and c["n_bad"]:
         fails.append("%s: %d large element(s) differ by >%d ULP (worst %d ULP at |ref|/max %.1e)"
                      % (tag, c["n_bad"], ulp_max, c["worst_bad_ulp"], c["worst_bad_rel"]))
-    if 100.0 * c["ndiff"] / c["n"] > ndiff_pct_max:
+    if ndiff_pct_max is not None and 100.0 * c["ndiff"] / c["n"] > ndiff_pct_max:
         fails.append("%s: %.3f%% of elements differ (limit %.3f%%)"
                      % (tag, 100.0 * c["ndiff"] / c["n"], ndiff_pct_max))
     if c["cos"] < cos_min or c["meanrel"] > meanrel_max:
@@ -386,7 +401,7 @@ def main() -> int:
                         "--rows", str(args.rows)], "chain", quiet=True)
                 judge("%s F4 out(kernel-act)" % step,
                       compare(read_bf16(WORK / "out_chain.bin", HID), refs["out"]),
-                      fails, worst, ulp_gate=False, ndiff_pct_max=F4_NDIFF_PCT_MAX,
+                      fails, worst, ulp_gate=False, ndiff_pct_max=None,
                       meanrel_max=F4_MEANREL_MAX, cos_min=F4_COS_MIN)
 
         # cross-check speccheck's own MLP against the reference on this layer's first step
@@ -598,15 +613,21 @@ def main() -> int:
     print("    that cancelled to ~1e-6 of the max, where one ULP is a large fraction of the")
     print("    value. A flat 'max 1 ULP' rule would forbid correctness.")
     print("  * F4 (chain: down applied to the KERNEL's act) is judged on aggregates only")
-    print("    (cos >= %.4f, meanrel <= %.0e, ndiff <= %.0f %%): floor_probe.py shows a 1-ULP flip"
-          % (F4_COS_MIN, F4_MEANREL_MAX, F4_NDIFF_PCT_MAX))
-    print("    in `act` -- the most a correct kernel with a different summation order may produce")
-    print("    -- puts >1 ULP onto an `out` element in all 192 cases it surveyed (192 x 8 trials,")
-    print("    7483 offenders, worst 28665 ULP, most offenders NOT small elements). Per-element")
-    print("    ULP there measures arithmetic sensitivity, not the kernel. The same survey measures")
-    print("    these aggregates: worst legit meanrel 9.1e-4 for ONE flip (2.0e-3 at five), so the")
-    print("    %.0e band is marginal by construction, not conservative -- see results.md." %
-          F4_MEANREL_MAX)
+    print("    (cos >= %.4f, meanrel <= %.0e, NO ndiff rule): a 1-ULP flip in `act` -- the most"
+          % (F4_COS_MIN, F4_MEANREL_MAX))
+    print("    a correct kernel with a different summation order may produce -- puts >1 ULP onto")
+    print("    an `out` element in all 192 cases floor_probe.py surveyed (192 x 8 trials, 7483")
+    print("    offenders, worst 28665 ULP, most of them NOT small elements), so per-element ULP")
+    print("    there measures arithmetic sensitivity, not the kernel. The same 1536-dot survey")
+    print("    measures what a LEGAL chain reaches: worst cos 0.99999615 / meanrel 2.01e-3 at five")
+    print("    legal flips (0.99999661 / 9.12e-4 at one), ndiff 29-47 %. meanrel is banded at")
+    print("    %.0e, 2.5x over that measured worst; ndiff was DROPPED, not inflated -- a band"
+          % F4_MEANREL_MAX)
+    print("    wide enough to admit a legal chain (~50 %) carries no information that cos and")
+    print("    meanrel do not already carry. F4 is therefore a gross-error net with a floor of")
+    print("    ~5e-3: --negative f32act moves the chain by 4.14e-3, under that floor, and is")
+    print("    caught at F2 `act` instead; trunc/tail/half/rowswap move it 1.0e-2..1.4e+0 and")
+    print("    are caught here too. Measurements: results.md and specification/10 §10.1.")
     print("  * --negative injects six wrong kernels and requires each to be caught where the")
     print("    bug is and nowhere else (--mode down skips the two that live in the epilogue).")
     return 0

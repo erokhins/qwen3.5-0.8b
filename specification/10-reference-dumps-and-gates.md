@@ -42,7 +42,7 @@ outputs BF16 unless the spec pins F32.
 | **G8 MTP** | §09.5: bit-exact loop with sequential verify + accept rate across the three readings of §09 | accept ≥ 0.30 and the §09 reading strictly best; speculative output and target state bit-identical to plain greedy when verify reuses the decode path |
 | **G-neg negative controls** | `speccheck/gates/run_negative.py` injects three plausible bugs (wrong `q`/`gate` de-interleave, conv window written before it is read, GDN state not persisted) and asserts the pins *stop* matching, and still match when clean | each injection must drop its canary below cos 0.999 |
 | **G9 perf** | decode tok/s on this box vs the §07.4 roofline (~135 tok/s); `-O2` build only | report; investigate below 60 % |
-| **F1–F4 MLP decode path** | `prototype/mlp_gemv/run.py`, against the MLP pins (`decode{N}.L{ii}.mlp.{in,gate_pre,up_pre,act,out}`). F1 `gate_pre`/`up_pre` (two independent dots), F2 `act` (the SwiGLU rounding policy), F3 `out` from the *reference* `act` (isolates `down_proj` from everything upstream), F4 `out` from the *kernel's* `act` (the chain a real token runs), plus a cross-check of `speccheck.layers.mlp` against the same pins | no element above 3e-5 of the tensor max may exceed 1 BF16 ULP (2 for `act`); ≤2 % of elements differ; G3i-class cos ≥ 0.9999, meanrel ≤ 1e-2. F4 is aggregate-only (cos ≥ 0.9999, meanrel ≤ 1e-3, ndiff ≤ 15 %) — see below |
+| **F1–F4 MLP decode path** | `prototype/mlp_gemv/run.py`, against the MLP pins (`decode{N}.L{ii}.mlp.{in,gate_pre,up_pre,act,out}`). F1 `gate_pre`/`up_pre` (two independent dots), F2 `act` (the SwiGLU rounding policy), F3 `out` from the *reference* `act` (isolates `down_proj` from everything upstream), F4 `out` from the *kernel's* `act` (the chain a real token runs), plus a cross-check of `speccheck.layers.mlp` against the same pins | no element above 3e-5 of the tensor max may exceed 1 BF16 ULP (2 for `act`); ≤2 % of elements differ; G3i-class cos ≥ 0.9999, meanrel ≤ 1e-2. F4 is aggregate-only — cos ≥ 0.9999, meanrel ≤ 5e-3, and **no ndiff rule**, because a legal chain measures 29–47 % differing elements — see below |
 
 The MLP gate is the one place where a per-element ULP bound had to be derived rather than
 assumed, and `prototype/mlp_gemv/floor_probe.py` is where it comes from: reordering the
@@ -62,15 +62,48 @@ the tightest round value that clears every >1-ULP offender ever measured: 1.1e-6
 6.1e-6 (`out`) from the reference's own reordered sums, 8.2e-6 from this kernel — 3.7× of margin,
 down from the 12× the original guessed 1e-4 left. `run.py` prints the kernel's own worst offender
 and the tightest band its results would pass at on every run, so the number cannot silently rot.
-The **F4 aggregates are the weak part of this gate, and are measured as marginal**: over the same
-192 × 8 perturbation survey, one legal 1-ULP `act` flip reaches meanrel 9.1e-4 against a 1e-3 band
-(five flips, which F2 says is legal, reach 2.0e-3) and 29 % ndiff against a 15 % band, while cos
-keeps 26× of slack. The kernel passes comfortably (worst meanrel 1.3e-4) because its `act` flips
-land on benign elements, not because the band bounds what a correct chain can do. Leaving that
-band alone is a deliberate choice — widening a band is not this gate's call to make — but it means
-F4 can reject a correct kernel, and the alternative formulation (judge `down(kernel act)` against
-`down(ref act)` under the same down kernel, which cancels the sensitivity instead of gating around
-it) is the open question for §10's owner.
+The **F4 aggregates are now sized by that same survey instead of argued into place**. Over the same
+192 layer × step cases × 8 fixed trials (1 536 perturbed dots, one RNG seed, `--perturb` at 1 and
+at 5 — five flips is what F2 measures as legal per layer-step), the worst a *legal* chain reaches,
+next to what this kernel actually does over the same 192 cases:
+
+| `act` → `out` chain | worst cos | worst meanrel | worst ndiff |
+|---|---|---|---|
+| 1 legal 1-ULP flip | 0.99999661 | 9.12e-4 | 29.1 % |
+| 5 legal 1-ULP flips | 0.99999615 | **2.01e-3** | **46.8 %** |
+| this kernel's real chain, 192 cases | 0.99999963 | 1.25e-4 | 8.4 % |
+
+F4's bands are therefore **cos ≥ 0.9999** (the measured legal worst leaves 26× of slack in
+1 − cos) and **meanrel ≤ 5e-3** (2.5× over the measured legal worst). The cushion is generous on
+purpose: 2.01e-3 is a *sample* worst out of 1 536 perturbations, not an upper bound, so the way to
+tighten this band later is to enlarge the survey, not to shrink the multiplier. `run.py` prints both
+the band and the measurement that produced it, and `floor_probe.py` re-measures the margin on every
+run because it reads the bands out of `run.py` rather than copying them.
+
+**ndiff is no longer an F4 criterion, and that is a measurement rather than a tidy-up.** A single
+legal 1-ULP flip puts 29.1 % of `out` at a different BF16 value; five flips put 46.8 % there. The
+old ≤ 15 % band could therefore have rejected a correct chain — this kernel survived it at 8.4 %
+only because its `act` flips happen to land on benign elements, which is luck of the draw and not a
+property the band bounded. A band wide enough to admit 47 % would state nothing that cos and meanrel do not
+already state, so it was removed instead of inflated.
+
+What F4 is now, stated as a detection floor: a **gross-error net with a floor of ~5e-3** in meanrel.
+The six negative injections say where that floor sits. Four of them move the chain far above it —
+`trunc` 1.04e-2, `tail` 9.83e-2, `half` 7.42e-1, `rowswap` 1.37e+0 (meanrel of `out(chain)`
+against the pin, layer 0 / `decode0`) — so the net demonstrably still catches gross errors. One
+does not: `f32act`'s chain signature is **4.14e-3, below that floor**, which is what one should
+expect — a 1-ULP epilogue rounding change *is* the legal-sized perturbation F4 refuses to judge per
+element. It is rejected at F2 `act` instead (40.4 % of `act` differs, against the 2 % rule: 20× of
+margin), which is also where the bug lives. Read "aggregate-only" as a statement about which
+aggregate covers what: per-element ULP at F4 is impossible, ndiff there carries nothing, meanrel is
+a gross-error net, and the rounding policy is discriminated by F2, not by F4. All six injections
+were re-run after the band moved and every one is still rejected where it is declared
+(`run.py --layers all --fixture dec8 --no-time --tile 0 --negative`).
+
+The alternative formulation — judge `down(kernel act)` against `down(ref act)` under the same down
+kernel, which cancels the arithmetic sensitivity instead of gating around it — stays available for
+a kernel whose `act` needs more room than 5e-3 can hold; with the bands above it is not needed
+today.
 
 ## 10.2 Metrics, drift, and what drift does *not* mean
 
