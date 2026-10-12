@@ -29,12 +29,16 @@ class WeightStore;
 // next to the buffers' use, because which kernel wants which dtype is the reason each one exists.
 //
 // P4 split the buffers into two families, and the difference is visible in the sizes:
-//   * the ROW family — embed, s_a, s_b, norm, norm_f32, delta, mlp_act, mlp_act_f32 — is
-//     `[wave_rows, H]` (or `[wave_rows, I]`). A prefill wave (§08.2) fills one row per token and a
-//     decode step uses row 0, which is why decode is unchanged by their being taller.
-//   * the MIXER temporaries — block_out, the `g_*` GDN rows, the `a_*` attention rows — stay one row
-//     wide. The mixer is still per token (P5/P6/P7 batch it), so a wave reuses them token by token
-//     inside a layer, and giving them a token axis they do not use would be 8 MB of silence.
+//   * the ROW family — embed, s_a, s_b, norm, norm_f32, delta, mlp_act, mlp_act_f32, and since P5
+//     also the projections' inputs and outputs (block_out, the `g_*` rows a projection writes, the
+//     `a_*` rows a projection writes) — is `[wave_rows, H]` (or `[wave_rows, I]`, `[wave_rows,
+//     6144]`, …). A prefill wave (§08.2) fills one row per token and a decode step uses row 0, which
+//     is why decode is unchanged by their being taller.
+//   * what is left one row wide is the MIXER's own internals — the conv window's `conv_new`, the
+//     post-conv `g_u`, the recurrence's `g_o`, its `g_g`/`g_beta`, and the attention stage buffers
+//     `a_*_rope`/`a_gate`/`a_pre`/`a_gated`. Those are produced and consumed inside one token's mixer
+//     call; the GDN scan and the attention row are still per token (P6/P7/P8 batch them), so giving
+//     these a token axis would be scratch they never use.
 constexpr int kMaxWaveRows = 512;   // plan §2.1; decode_step.cpp explains why 512 and not 1024
                                     // `allocate_scratch` accepts less, and `decode_run --wave-rows 1`
                                     // deliberately asks for the least: a prompt fed one token per wave
@@ -56,18 +60,18 @@ struct DecodeScratch {
                                     // mlp_gateup — one cast launch per wave, not per token
     uint16_t* embed = nullptr;      // [wave_rows][1024] E[y], the residual layer 0 starts from
     uint16_t* delta = nullptr;      // [wave_rows][1024] a block's or the MLP's residual addend
-    uint16_t* block_out = nullptr;  // [2048] gated_out / gated, i.e. the 2048-wide proj operand
-    float* block_out_f32 = nullptr;  // [2048] the same, widened, for out_proj / o_proj
+    uint16_t* block_out = nullptr;  // [wave_rows][2048] gated_out / gated, i.e. the 2048-wide proj operand
+    float* block_out_f32 = nullptr;  // [wave_rows][2048] the same, widened, for out_proj / o_proj
 
     // GDN (§07.2). `raw`/`u` are 6144 wide because in_proj_qkv is [q|k|v]; `a`/`b`/`g`/`beta` are the
     // 16 value heads. `conv_new` is the rolled window — see the conv note in decode_step.cpp.
-    uint16_t* g_raw = nullptr;      // [6144] in_proj_qkv out, BF16 as the GEMV wrote it
-    float* g_raw_f32 = nullptr;     // [6144]
-    uint16_t* g_z = nullptr;        // [2048] in_proj_z out, stays BF16 (§04.5 reads it as BF16)
-    uint16_t* g_a = nullptr;        // [16]   in_proj_a out
-    uint16_t* g_b = nullptr;        // [16]   in_proj_b out
-    float* g_a_f32 = nullptr;       // [16]
-    float* g_b_f32 = nullptr;       // [16]
+    uint16_t* g_raw = nullptr;      // [wave_rows][6144] in_proj_qkv out, BF16 as the GEMV wrote it
+    float* g_raw_f32 = nullptr;     // [wave_rows][6144]
+    uint16_t* g_z = nullptr;        // [wave_rows][2048] in_proj_z out, stays BF16 (§04.5 reads it as BF16)
+    uint16_t* g_a = nullptr;        // [wave_rows][16]   in_proj_a out
+    uint16_t* g_b = nullptr;        // [wave_rows][16]   in_proj_b out
+    float* g_a_f32 = nullptr;       // [wave_rows][16]
+    float* g_b_f32 = nullptr;       // [wave_rows][16]
     float* g_dt_bias = nullptr;     // [kNumGdnLayers][16]: dt_bias is BF16 in the store (§01.6
                                     // keeps only A_log and linear_attn.norm.weight F32) and
                                     // gates_kernel reads `const float*`, so it is widened ONCE,
@@ -82,9 +86,9 @@ struct DecodeScratch {
 
     // Attention (§07.3). The three stage buffers are required, not optional — `kernels_attn.cpp`
     // says why (the cache append lives behind the same null check as one of them).
-    uint16_t* a_q = nullptr;        // [4096] q_proj out: [8 heads][q 256 | gate 256], §05.1
-    uint16_t* a_k = nullptr;        // [512]
-    uint16_t* a_v = nullptr;        // [512]
+    uint16_t* a_q = nullptr;        // [wave_rows][4096] q_proj out: [8 heads][q 256 | gate 256], §05.1
+    uint16_t* a_k = nullptr;        // [wave_rows][512]
+    uint16_t* a_v = nullptr;        // [wave_rows][512]
     uint16_t* a_q_rope = nullptr;   // [2048]
     uint16_t* a_k_rope = nullptr;   // [512]
     uint16_t* a_gate = nullptr;     // [2048] the de-interleaved output gate, §05.6
@@ -150,10 +154,10 @@ constexpr int kStopToken = 248046;
 void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
                        int token);
 
-// The wave body (P4): the SAME §07.1 order over `n` consecutive tokens, with the two families that
-// are legal to batch batched and the mixer left per token. `submit_token_body` is this with n = 1,
-// so there is still exactly one implementation of the order — the n = 1 launch sequence is the one
-// the decode ledger was measured on, launch for launch.
+// The wave body (P4, extended by P5): the SAME §07.1 order over `n` consecutive tokens, with the
+// families that are legal to batch batched and the mixer left per token. `submit_token_body` is this
+// with n = 1, so there is still exactly one implementation of the order — the n = 1 launch sequence is
+// the one the decode ledger was measured on, launch for launch.
 //
 // The batching is layer-major, which is the only way it can be: per layer, all `n` tokens' mixers
 // run in position order (the GDN recurrence and the causal KV append need that order and keep it),
@@ -162,10 +166,14 @@ void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScrat
 // is — and each layer's scan still visits the tokens in ascending position, so the state a layer
 // hands to the next one is the same state the per-token order produced.
 //
-// What is batched, and what is NOT yet: glue (row-indexed, `prototype/glue --batched`) and the MLP
-// (`--tokens`) are; projections, GDN and attention are still per token (P5/P6/P7/P8). The token-batched
-// forms are bit-identical to the per-token ones on device (612 352 elements, 0 differing in glue;
-// 23 040 per layer in the MLP), which is the reason this is allowed to touch the legal route at all.
+// What is batched, and what is NOT yet: glue (row-indexed, `prototype/glue --batched`), the MLP
+// (`--tokens`) and the nine projections (`prototype/proj_gemv --tokens`) are; the GDN conv/gates/rec
+// and the attention row are still per token (P6/P7/P8). The batched forms are bit-identical to the
+// per-token ones on device (612 352 elements, 0 differing in glue; 23 040 per layer in the MLP;
+// 138 400 per fixture in the projections), which is the reason this is allowed to touch the legal
+// route at all. Projections are the family whose reduction is a long dot over `hidden`/`heads`, so
+// unlike the other two this one COULD legitimately have moved bits; the per-op gate is what rules it
+// out (`prototype/proj_gemv/results.md`, P5 section).
 //
 // `n` may not exceed `sc.wave_rows`; `prefill_wave` splits at that bound so a caller never has to.
 // Positions are `st.prefix_len .. st.prefix_len + n - 1`, and `prefix_len` advances by `n` at the

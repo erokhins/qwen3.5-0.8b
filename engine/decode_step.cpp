@@ -13,10 +13,13 @@
 //   * no dtype conversion written by hand. Every widening goes through `kernels_cast.cpp` so the
 //     rounding is one named thing (RNE, same as torch's) instead of eighteen local casts.
 //
-// The wave body's launch plan is the per-token plan with the two batchable families collapsed.
+// The wave body's launch plan is the per-token plan with the batchable families collapsed — glue and
+// the MLP's two halves (P4), and the nine projections (P5, §06.2's "one GEMM per projection").
 // `planned_launch_counts()` below derives the n = 1 row of that table, and `gate.py` re-derives
 // every row from §07 in Python and fails on a mismatch, so this comment and the code cannot drift
-// apart quietly.
+// apart quietly. Each collapsed family bills the SAME 49/114/48 launches for a body of 295 tokens as
+// for a body of one — one launch per op per body, whatever its width — which is why this table is the
+// plan for both paths and `gate.py` section (h) can judge a wave against it unchanged.
 //
 //   glue   1 norm-only (layer 0's input norm) + 2 × 24 fused add+norm = 49   (§03.2, = glue's own
 //          gated 49-launch token plan; the final norm is the last of them, not an extra launch)
@@ -188,22 +191,33 @@ DecodeScratch allocate_scratch(int wave_rows) {
     // scratch rather than with a second code path.
     const int h = (int64_t)wave_rows * kHidden;
     const int i = (int64_t)wave_rows * kIntermediate;
+    // P5's side of the same argument: the nine projections read a [wave_rows, in] tile and write a
+    // [wave_rows, rows] tile, so their inputs and outputs are row-family buffers too. At
+    // kMaxWaveRows = 512 that is ~31 MiB on top of P4's ~18 MiB of scratch per request — against a
+    // 1.55 GB checkpoint and a ~34 GiB pool, which AGENTS.md is explicit is not the constraint for
+    // this model. The mixer's own internals (g_u, g_o, g_g, g_beta, conv_new, the a_* stage buffers)
+    // stay one row wide: see the two-family note in decode_step.h.
+    const int qkv = (int64_t)wave_rows * kQkvRows;
+    const int vdim = (int64_t)wave_rows * kValueDim;
+    const int qprj = (int64_t)wave_rows * kQprojRows;
+    const int kprj = (int64_t)wave_rows * kKvProjRows;
+    const int vheads = (int64_t)wave_rows * kNumValueHeads;
     sc.s_a = alloc<uint16_t>(h);
     sc.s_b = alloc<uint16_t>(h);
     sc.norm = alloc<uint16_t>(h);
     sc.norm_f32 = alloc<float>(h);
     sc.embed = alloc<uint16_t>(h);
     sc.delta = alloc<uint16_t>(h);
-    sc.block_out = alloc<uint16_t>(kValueDim);
-    sc.block_out_f32 = alloc<float>(kValueDim);
+    sc.block_out = alloc<uint16_t>(vdim);
+    sc.block_out_f32 = alloc<float>(vdim);
 
-    sc.g_raw = alloc<uint16_t>(kQkvRows);
-    sc.g_raw_f32 = alloc<float>(kQkvRows);
-    sc.g_z = alloc<uint16_t>(kValueDim);
-    sc.g_a = alloc<uint16_t>(kNumValueHeads);
-    sc.g_b = alloc<uint16_t>(kNumValueHeads);
-    sc.g_a_f32 = alloc<float>(kNumValueHeads);
-    sc.g_b_f32 = alloc<float>(kNumValueHeads);
+    sc.g_raw = alloc<uint16_t>(qkv);
+    sc.g_raw_f32 = alloc<float>(qkv);
+    sc.g_z = alloc<uint16_t>(vdim);
+    sc.g_a = alloc<uint16_t>(vheads);
+    sc.g_b = alloc<uint16_t>(vheads);
+    sc.g_a_f32 = alloc<float>(vheads);
+    sc.g_b_f32 = alloc<float>(vheads);
     sc.g_dt_bias = alloc<float>(kNumGdnLayers * kNumValueHeads);
     sc.g_conv_w = alloc<float>(kNumGdnLayers * kConvChannels * kConvKernel);
     sc.g_g = alloc<float>(kNumValueHeads);
@@ -212,9 +226,9 @@ DecodeScratch allocate_scratch(int wave_rows) {
     sc.g_o = alloc<float>(kValueDim);
     sc.conv_new = alloc<float>(kConvWindow * kConvChannels);
 
-    sc.a_q = alloc<uint16_t>(kQprojRows);
-    sc.a_k = alloc<uint16_t>(kKvProjRows);
-    sc.a_v = alloc<uint16_t>(kKvProjRows);
+    sc.a_q = alloc<uint16_t>(qprj);
+    sc.a_k = alloc<uint16_t>(kprj);
+    sc.a_v = alloc<uint16_t>(kprj);
     sc.a_q_rope = alloc<uint16_t>(kNumQueryHeads * kHeadDim);
     sc.a_k_rope = alloc<uint16_t>(kKvProjRows);
     sc.a_gate = alloc<uint16_t>(kNumQueryHeads * kHeadDim);
@@ -386,31 +400,54 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // for the tile, which is the part of "48 casts/token" that batching removes.
         kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
 
+        const bool attn_layer = is_full_attention(layer);
+
+        // ---- the mixer's INPUT projections: ONE launch each for the whole wave (P5, §06.2's "one
+        // GEMM per projection"). Each reads the [n, H] norm tile and writes a [n, rows] tile that the
+        // token loop below reads row t of. Hoisting them out of the token loop is all of P5, and at
+        // n == 1 it is the same launch in the same place in the order. The 16-row b/a GEMVs stay
+        // separate launches: `proj_gemv` has a packed multi-weight form and using it is the
+        // ≈0.12 ms/token deferral `engine/results.md` names, which is a plan change, not this one.
+        if (attn_layer) {
+            // §05.1. q_proj's 4096 rows stay interleaved [q|gate] per head because that is the stored
+            // layout (§10.5 measured the split reading at cos −0.14), and the block de-interleaves it.
+            kernels::proj_gemv(layer_dev(weights, layer, leaf::kQProj), sc.norm_f32, sc.a_q,
+                               kQprojRows, kHidden, n);
+            kernels::proj_gemv(layer_dev(weights, layer, leaf::kKProj), sc.norm_f32, sc.a_k,
+                               kKvProjRows, kHidden, n);
+            kernels::proj_gemv(layer_dev(weights, layer, leaf::kVProj), sc.norm_f32, sc.a_v,
+                               kKvProjRows, kHidden, n);
+        } else {
+            // §04.1: four projections off the tile.
+            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjQkv), sc.norm_f32, sc.g_raw,
+                               kQkvRows, kHidden, n);
+            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjZ), sc.norm_f32, sc.g_z,
+                               kValueDim, kHidden, n);
+            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjB), sc.norm_f32, sc.g_b,
+                               kNumValueHeads, kHidden, n);
+            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjA), sc.norm_f32, sc.g_a,
+                               kNumValueHeads, kHidden, n);
+            // One launch for the three widenings this LAYER needs, not three per token: 6144 + 16 + 16
+            // elements for every row of the tile at once.
+            kernels::cast_bf16_to_f32_3(sc.g_raw, sc.g_raw_f32, n * kQkvRows,
+                                        sc.g_a, sc.g_a_f32, n * kNumValueHeads,
+                                        sc.g_b, sc.g_b_f32, n * kNumValueHeads);
+        }
+
         // ---- the mixer, once per token, in position order (§08.2). The token loop is why
         // the wave is layer-major: the GDN recurrence, the conv roll and the causal KV append
         // all need ascending positions WITHIN a layer, and nothing in the mixer needs another
         // token's mixer output — that is what lets the launches around it batch. At n == 1 this
-        // is the decode path's loop body, same order, same launches.
+        // is the decode path's loop body, same order, same launches. What the mixer now reads is
+        // row t of the tiles the launches above filled (P5); its own scratch stays one row wide.
         for (int t = 0; t < n; ++t) {
             const int pos = pos0 + t;                          // §02.4: P of this token
-            const float* x_row = sc.norm_f32 + (size_t)t * kHidden;
-            uint16_t* delta = sc.delta + (size_t)t * kHidden;  // this token's addend
             // ---------------- the mixer: §07.2 or §07.3, by layer type (§03.5 routing) ----------
-            if (is_full_attention(layer)) {
-                // §05.1. One GEMV per projection: q_proj's 4096 rows stay interleaved [q|gate] per head
-                // because that is the stored layout (§10.5 measured the split reading at cos −0.14), and
-                // the block de-interleaves it itself.
-                kernels::proj_gemv(layer_dev(weights, layer, leaf::kQProj), x_row, sc.a_q,
-                                   kQprojRows, kHidden);
-                kernels::proj_gemv(layer_dev(weights, layer, leaf::kKProj), x_row, sc.a_k,
-                                   kKvProjRows, kHidden);
-                kernels::proj_gemv(layer_dev(weights, layer, leaf::kVProj), x_row, sc.a_v,
-                                   kKvProjRows, kHidden);
-
+            if (attn_layer) {
                 kernels::AttnLayerArgs a{};
-                a.q_proj_out = sc.a_q;
-                a.k_proj_out = sc.a_k;
-                a.v_proj_out = sc.a_v;
+                a.q_proj_out = sc.a_q + (size_t)t * kQprojRows;
+                a.k_proj_out = sc.a_k + (size_t)t * kKvProjRows;
+                a.v_proj_out = sc.a_v + (size_t)t * kKvProjRows;
                 a.q_norm = (const uint16_t*)layer_dev(weights, layer, leaf::kQNorm);
                 a.k_norm = (const uint16_t*)layer_dev(weights, layer, leaf::kKNorm);
                 a.k_cache = st.kv_keys_layer(layer);
@@ -427,25 +464,12 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 a.gate_out = sc.a_gate;
                 kernels::attn_decode_layer(a);
 
-                kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32, kQwidth);
-                kernels::proj_gemv(layer_dev(weights, layer, leaf::kOProj), sc.block_out_f32, delta,
-                                   kHidden, kQwidth);
+                kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32 + (size_t)t * kValueDim,
+                                          kQwidth);
             } else {
                 const int slot = gdn_slot(layer);
-                // §04.1: four projections off one row. The 16-row b/a GEMVs are tiny (32 KiB each) and
-                // stay separate: `proj_gemv` has a packed multi-weight form, and using it is the
-                // ≈0.12 ms/token deferral `engine/results.md` names.
-                kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjQkv), x_row, sc.g_raw,
-                                   kQkvRows, kHidden);
-                kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjZ), x_row, sc.g_z,
-                                   kValueDim, kHidden);
-                kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjB), x_row, sc.g_b,
-                                   kNumValueHeads, kHidden);
-                kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjA), x_row, sc.g_a,
-                                   kNumValueHeads, kHidden);
-                // One launch for the three widenings this layer needs (6144 + 16 + 16 elements).
-                kernels::cast_bf16_to_f32_3(sc.g_raw, sc.g_raw_f32, kQkvRows, sc.g_a, sc.g_a_f32,
-                                            kNumValueHeads, sc.g_b, sc.g_b_f32, kNumValueHeads);
+                const uint16_t* raw_row = sc.g_raw + (size_t)t * kQkvRows;
+                float* raw_f32_row = sc.g_raw_f32 + (size_t)t * kQkvRows;
 
                 // §04.2 / §07.2: the conv reads the OLD window and the roll appends the PRE-CONV raw,
                 // so `new_win` cannot be the window itself — conv_kernel's `win`/`new_win` are both
@@ -454,7 +478,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 // 18 × 73 728 B/token ≈ 0.006 ms of traffic, ≈0.033 ms of launch cost. Cheaper than
                 // double-buffering 1.27 MiB of state per request, which is the alternative §08.2's
                 // "in-place ring update" wording invites; results.md carries it as a named cost.
-                kernels::gdn_conv(sc.g_raw_f32, st.conv_window_layer(layer),
+                kernels::gdn_conv(raw_f32_row, st.conv_window_layer(layer),
                                   sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel, sc.g_u,
                                   sc.conv_new);
                 ENGINE_CK(hipMemcpyAsync(st.conv_window_layer(layer), sc.conv_new,
@@ -463,7 +487,8 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
 
                 // §04.3 gates, then §04.4's recurrence. `A_log` is one of the 36 tensors the checkpoint
                 // stores F32 (§01.6), so it goes to the kernel as-is; dt_bias came through the adapter.
-                kernels::gdn_gates(sc.g_a_f32, sc.g_b_f32,
+                kernels::gdn_gates(sc.g_a_f32 + (size_t)t * kNumValueHeads,
+                                   sc.g_b_f32 + (size_t)t * kNumValueHeads,
                                    (const float*)layer_dev(weights, layer, leaf::kALog),
                                    sc.g_dt_bias + (size_t)slot * kNumValueHeads, sc.g_g, sc.g_beta);
                 // q, k, v are the three 2048-wide slices of the conv output (§04.1's [q|k|v]); rec_kernel
@@ -475,15 +500,22 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 // left it, `z` is still BF16 (it is an activation, §04.1), and the norm weight is one of
                 // the 36 F32 ones — the kernel rounds it to BF16 itself, which is what the pins carry
                 // (`prototype/gdn_gated_norm/results.md` §1).
-                kernels::gdn_gated_norm(sc.g_o, sc.g_z,
+                kernels::gdn_gated_norm(sc.g_o, sc.g_z + (size_t)t * kValueDim,
                                         (const float*)layer_dev(weights, layer, leaf::kGatedNorm),
-                                        sc.block_out, nullptr);
-                kernels::cast_bf16_to_f32(sc.block_out, sc.block_out_f32, kValueDim);
-                kernels::proj_gemv(layer_dev(weights, layer, leaf::kOutProj), sc.block_out_f32,
-                                   delta, kHidden, kValueDim);
+                                        sc.block_out + (size_t)t * kValueDim, nullptr);
+                kernels::cast_bf16_to_f32(sc.block_out + (size_t)t * kValueDim,
+                                          sc.block_out_f32 + (size_t)t * kValueDim, kValueDim);
             }
 
         }  // for t: the mixer
+
+        // ---- the mixer's OUTPUT projection, one launch over the [n, 2048] tile the loop just
+        // filled (P5). The two layer types write the same scratch and the same width — `kQwidth` and
+        // `kValueDim` are both 2048 — so this is one call site, and it is the §03.2 addend that
+        // `add_norm` below consumes for every row of the wave.
+        kernels::proj_gemv(layer_dev(weights, layer, attn_layer ? leaf::kOProj : leaf::kOutProj),
+                           sc.block_out_f32, sc.delta, kHidden,
+                           attn_layer ? kQwidth : kValueDim, n);
 
         // ---- §03.2 add #1: the mixer's output onto the residual, and the post-attention norm.
         add_norm(sc.delta, layer_dev(weights, layer, leaf::kPostAttnNorm));

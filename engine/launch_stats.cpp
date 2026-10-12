@@ -25,6 +25,10 @@ Family& glue() {
     static Family f;
     return f;
 }
+Family& proj() {
+    static Family f;
+    return f;
+}
 Family& mlp_gateup() {
     static Family f;
     return f;
@@ -37,6 +41,7 @@ Family& mlp_down() {
 std::string describe_run() {
     std::ostringstream os;
     os << "LAUNCHSTAT family=glue " << glue().describe() << "\n"
+       << "LAUNCHSTAT family=proj " << proj().describe() << "\n"
        << "LAUNCHSTAT family=mlp_gateup " << mlp_gateup().describe() << "\n"
        << "LAUNCHSTAT family=mlp_down " << mlp_down().describe();
     return os.str();

@@ -17,9 +17,9 @@
 // is not a proof. The gate's negative is `decode_run --wave-rows 1`, a run that really is one row at
 // a time, and the assertion is that it looks EXACTLY like the dead-code case.
 //
-// WHAT IS IN SCOPE: the two families P4 batches (glue, and the MLP's two halves) — the launch bill of
-// the rest of a token is `planned_launch_counts()`'s, which is a derivation from §07 rather than an
-// observation, and `gate.py` section (d) already polices that one.
+// WHAT IS IN SCOPE: the families that can batch — glue and the MLP's two halves (P4), and the nine
+// projections (P5). The launch bill of the rest of a token is `planned_launch_counts()`'s, which is a
+// derivation from §07 rather than an observation, and `gate.py` section (d) polices that one.
 //
 // Always on, not behind a switch: counting is three integer ops per launch against a measured 1.85 µs
 // dispatch floor (`tools/launch_overhead_hip.cpp`), and an instrument that can be turned off is an
@@ -32,7 +32,9 @@
 namespace engine::launchstats {
 
 // One launcher family, as observed on the host. `rows` means the launcher's row/token width
-// argument: for glue it is the tile rows of `glue_add_norm_rows`, for the MLP it is its `tokens`.
+// argument: for glue it is the tile rows of `glue_add_norm_rows`, for the MLP it is its `tokens`, and
+// for the projections it is the wave width handed to `proj_gemv` — NOT that signature's `rows`, which
+// counts one projection's output rows and is a different axis entirely.
 struct Family {
     long long calls = 0;           // launches actually submitted
     long long calls_batched = 0;   // of those, the ones with rows > 1 — the batched form ran
@@ -49,8 +51,9 @@ struct Family {
     std::string describe() const;
 };
 
-// The three families, one accessor each so a launcher states which one it is feeding.
+// The four families, one accessor each so a launcher states which one it is feeding.
 Family& glue();
+Family& proj();
 Family& mlp_gateup();
 Family& mlp_down();
 

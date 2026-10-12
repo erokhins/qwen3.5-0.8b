@@ -44,7 +44,16 @@ void glue_add_norm_rows(const uint16_t* s, const uint16_t* delta, const uint16_t
 // the gated form and the measured-faster one (kernels_proj.cpp cites both numbers; engine/results.md
 // E2 closed the A/B in a clean window). Hand it a BF16 buffer and it will read BF16 memory
 // as floats, so decode_step must cast where its producer left BF16.
-void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int in);
+//
+// `tokens` is P5's token-batched form (§06.2's "one GEMM per projection"): `x` is then a
+// [tokens, in] tile and `out` a [tokens, rows] tile, and each weight row is read once per token tile
+// instead of once per token. `tokens == 1` issues the SAME kernel at a tile width of 1, i.e. exactly
+// the launch the decode ledger was measured on — one arithmetic, two tile widths, which is why this
+// family has no second kernel the way the MLP pair does. The two widths are bit-identical per output
+// element: `prototype/proj_gemv/run.py --tokens p64` requires it (138 400 elements per fixture,
+// 0 differing) and `gate.py` section (h) requires that a wave is the side that batched.
+void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int in,
+               int tokens = 1);
 
 // ---- §03.3: gate+up+SwiGLU, then down (prototype/mlp_gemv). Both take the input widened to
 // F32; there is no BF16-staged form of these two kernels, so the caller casts (see the launch
