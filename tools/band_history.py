@@ -230,6 +230,21 @@ KWARG = re.compile(r"(cancel_rel|ulp_max|meanrel_max|cos_min|ndiff_pct_max|cance
 INLINE = re.compile(r"(cos >=|cos <|meanrel <=|meanrel >)\s*([0-9]*\.?[0-9]+(?:e-?\d+)?)")
 
 
+def current_recorded(file, key, root=ROOT, history=None):
+    """The newest recorded value for one key, or None if it has never been recorded.
+
+    For a generator that writes a value it did not type: the file may be absent (deleted deliberately
+    before a re-price) while the ledger still knows what the value WAS, and a record whose `old` is a
+    guess is a ledger line that cannot be audited.
+    """
+    try:
+        records = read_history(Path(history) if history else Path(root) / HISTORY_REL)
+    except BandHistoryError:
+        return None
+    found = newest_values(records).get((str(file), str(key)))
+    return None if found is None else found[0]
+
+
 @dataclass
 class BandProblem:
     file: str
