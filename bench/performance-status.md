@@ -477,3 +477,24 @@ Board-level conclusion, stated once: **no op family is more than 2.5 % off its p
 number**, so the ledger's per-op rows are stable; the engine's 11.92 ms/token is not explained by any
 single op being slower than the board says, and the two named residues (4.1 ms of launch structure
 per §2's correction, and attention's context term) are where the work is.
+
+### Cold weight-restore (2026-10-12, zero subagents, foreground, lock `main-cold-restore`)
+
+| measurement | best of 5 | median | worst | spread | source |
+|---|---|---|---|---|---|
+| cold weight-restore: text weights made resident in a fresh process (device pool empty, host page cache warm) | **454.4 ms** | 510.2 ms | 804.4 ms | **77.0 %** | `tools/cold_restore.sh --runs 5` → `engine/build/loader_test --no-verify` |
+
+`gpu util` read 86 % at acquire and 16 % at release; discounted per the standing rule, the gate on
+validity is zero subagents plus a blocking foreground call.
+
+Phases of the best run: cold H2D **85.2 ms**, pinned staging **59.4 ms**, first GPU read pass over the
+fresh pages **8.8 ms**; the remaining ~300 ms is header parse, device slab allocation and file → pinned
+staging. The 77 % spread is one outlier (run 2: 804 ms, with its warm read pass at 42 ms instead of
+~8.5 ms), which is the page-fault behaviour `devices/strix-halo-unified-memory.md` already describes for
+a first pass over fresh pages.
+
+What this number is for: it is a **once-per-process** cost, not a per-token one — 454 ms against an
+11.92 ms/token steady state, so a cold start is ~38 tokens' worth of generation and no spread in this
+row changes anything downstream. It closes the last `cold weight-restore` debt from
+`bench/gate-audit.md`, and it is the number that bounds any future "restart the engine per request"
+idea: at 454 ms it is affordable exactly zero times inside a conversation.
