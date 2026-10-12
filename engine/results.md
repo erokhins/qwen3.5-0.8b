@@ -2561,9 +2561,13 @@ No tolerance, band or allowance was touched, and no fixture was re-pinned.
 `prototype/gdn_gated_norm/run.py --gate` (unchanged 18-layer decode gate: worst `ndiff 1/2048`,
 max ULP 1, six negatives localised). `prototype/gdn_gated_norm/run.py --tokens p64 --layers 1,2`
 (self-locking, so run with the lock released) → `WAVE GATE PASS`. `engine/gate.py --selftest` (CPU)
-including the new `--break-gdn-one-row` case. `engine/gate.py --fixture {dec8, dec64f, dec64t,
-mt32f, dec300f, p128, chunk64b}`: all green except `chunk64b`'s four pre-existing lines; 3 / 7 / 7 /
-10 / 18 / 7 / 7 s wall, `util` 47–57 %. **No timing taken, and none of these is a duration.**
+including the new `--break-gdn-one-row` case. Then `engine/build.sh` was re-run — the earlier gate logs
+were produced by a binary built before the last `gdn_gated_norm_kernels.h` edit, so every fixture below
+was re-run against the committed tree rather than cited — and `engine/gate.py --fixture {dec8, dec64f,
+dec64t, mt32f, dec300f, p128, chunk64b}`: all green except `chunk64b`'s four pre-existing lines, which
+`diff`s byte-for-byte against the before-log's four; 2 / 6 / 7 / 11 / 18 / 7 / 7 s process wall,
+`util` 47–58 %. Check counts 161 / 643 / 640 / 384 / 1149 / 190 / 363, failures 0 except `chunk64b`'s 4.
+**No timing taken, and none of these is a duration.**
 
 **Not run by a worker, by rule:** every timing, including the per-wave launch-collapse benefit
 (18 window copies per wave instead of 18 per token) and the wave-width cost of the three wide kernels.
