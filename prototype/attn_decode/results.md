@@ -116,6 +116,85 @@ matters. Each **row `p` of a prefill dump is a decode-shaped query at position `
   `bench/performance-status.md` §5, the quiescent device pass, because it needs a device run and
   neither this gate nor the probe can produce it. Until then `q_rope` at `p=64` is **1 element off for
   an unattributed reason**, not an accepted floor.
+* **Closed 2026-10-12: the `p=64` residual is the rope table's `cos[3]`, not the norm's reduction.**
+  `prototype/attn_decode/prerope_probe.py` settles it from both ends; no kernel, band or gate moved.
+  It did not need the `z` dump §5(g) proposed, because `z` is already visible in the bits the gate
+  writes: §05.3 passes the dims past `ROT_DIM` straight through (`q_rope[d] == z[d]` for d ≥ 64), so a
+  difference in the norm's reduction must show in those 192 pass-through dims, while a rope-table
+  difference cannot touch them. Reading the gate's own stage dumps (`prerope_probe.py --device-root
+  /tmp/attn_decode/out_long`, one `run.py --long` per layer, since `run.py` builds long cases for the
+  first layer asked for rather than all of them):
+
+      L3   q_rope vs pin 1 wrong (rope dims 1, pass-through 0) | table 2 of 128 differ | CPU z + device table vs device q_rope: 0 wrong
+      L7   1 wrong (rope 1, pass-through 0)     L11  2 wrong (rope 2, pass-through 0)
+      L15  0 wrong                              L19  3 wrong (rope 3, pass-through 0)
+      L23  2 wrong (rope 2, pass-through 0)
+      cos[3]: device 0.0140380859, torch 0.0140991211, -1 BF16 step   (identical in its duplicate cos[35])
+
+  The pass-through dims are clean at all six layers, so the device's post-norm `z` is **bit-identical
+  to the pin's** — the reduction order is exonerated by the device's own bits. And the CPU path handed
+  the device's measured table reproduces the device's `q_rope` **bit-for-bit, 0 of 2048 wrong at every
+  layer**: one frequency's cosine, one BF16 step low, is the whole residual.
+
+  The CPU sweep rules the reduction out independently. Re-permuting the reference's own sum of squares
+  on the pinned rows — including `block_sum`'s exact warp tree, the order the kernel really uses —
+  moves **0 elements at p=64 in all six layers**, though legal orders do move 20–207 elements at
+  19–184 *other* positions, so reassociation carries a real but scattered 1-ULP floor that the device
+  did not exhibit here. One F32 ULP on `r = rsqrtf(mean+eps)` moves 48 elements at 44 scattered
+  positions and again nothing at p=64. And of the 128 single-frequency, one-BF16-ULP table
+  perturbations at p=64, **exactly one** reproduces the measured signature (`cos[3] −1 ULP` →
+  {L03:1, L07:1, L11:2, L15:0, L19:3, L23:2}, rope dims only). **The function, not the reduction.**
+
+  Two corrections to this section. The signature is **1/1/2/0/3/2 across the six attention layers**,
+  not "1 element, 2 at layer 11": the earlier note had only the layers the gate had happened to run,
+  and layer 19 is worse than layer 11. And the F3a sentence *"nudging any single frequency index's cos
+  or sin by up to 2 F32 ULP does not reproduce the pin"* could not have worked — the pins round the
+  table to BF16 before it multiplies anything, so an F32-domain nudge of 1–2 ULP is invisible and that
+  search was vacuous; the nudge belongs after the BF16 round (`prerope_probe.py::bf16_ulp`). So
+  `p=64` is the device's `cosf` disagreeing with glibc's at one angle by one BF16 step: a device-libm
+  boundary in the class `EXACT_STAGES` deliberately bands and gate-audit G5 records, now with a name
+  instead of "unattributed". Reproduce with
+  `.venv/bin/python prototype/attn_decode/prerope_probe.py` (CPU, ~1.5 s) and
+  `... --device-root /tmp/attn_decode/out_long --layers 3,7,11,15,19,23` after a `--long` run.
+* **Closed 2026-10-12: the `p=64` residual is the rope table's `cos[3]`, not the norm's reduction.**
+  `prototype/attn_decode/prerope_probe.py` settles it from both ends; no kernel, band or gate moved.
+  It did not need the `z` dump §5(g) proposed, because `z` is already visible in the bits the gate
+  writes: §05.3 passes the dims past `ROT_DIM` straight through (`q_rope[d] == z[d]` for d ≥ 64), so a
+  difference in the norm's reduction must show up in those 192 pass-through dims, while a rope-table
+  difference cannot touch them. Reading the gate's own stage dumps
+  (`prerope_probe.py --device-root /tmp/attn_decode/out_long`, one `--long` run per layer — `run.py`
+  takes long cases at the first layer asked for, not all of them):
+
+      L3   q_rope vs pin: 1 wrong (rope dims 1, pass-through 0) | table: 2 of 128 differ | CPU z + device table vs device q_rope: 0 wrong
+      L7   ... 1 wrong (rope 1, pass-through 0)      L11  ... 2 wrong (rope 2, pass-through 0)
+      L15  ... 0 wrong                               L19  ... 3 wrong (rope 3, pass-through 0)
+      L23  ... 2 wrong (rope 2, pass-through 0)
+      cos[3]: device 0.0140380859, torch 0.0140991211, -1 BF16 steps   (same in its duplicate cos[35])
+
+  The pass-through dims are clean at all six layers, so the device's post-norm `z` is **bit-identical
+  to the pin's** — the reduction order is exonerated by the device's own bits. And the CPU path handed
+  the device's measured table reproduces the device's `q_rope` **bit-for-bit, 0 of 2048 wrong at every
+  layer**: one frequency's cosine, one BF16 step low, is the entire residual.
+
+  The CPU sweep rules the reduction out independently of that. Re-permuting the reference's own sum of
+  squares on the pinned rows — including `block_sum`'s exact warp tree, which is what the kernel
+  computes — moves **0 elements at p=64 in all six layers**, though legal orders do move 20–207
+  elements at 19–184 *other* positions, so reassociation has a real but scattered 1-ULP floor that the
+  device did not exhibit here; one F32 ULP on `r = rsqrtf(mean+eps)` moves 48 elements at 44 scattered
+  positions and again nothing at p=64; and of the 128 single-frequency one-BF16-ULP table
+  perturbations at p=64, **exactly one** reproduces the measured signature (`cos[3] −1 ULP` →
+  {L03:1, L07:1, L11:2, L15:0, L19:3, L23:2}, rope dims only). So: **the function, not the reduction.**
+
+  Two corrections to this section. The signature is **1/1/2/0/3/2 over all six attention layers**, not
+  "1 element, 2 at layer 11" — the earlier note only had the layers the gate had happened to run, and
+  §5(g)'s "(2 at layer 11)" understates layer 19. And the F3a sentence *"nudging any single frequency
+  index's cos or sin by up to 2 F32 ULP does not reproduce the pin"* could not have worked: the pins
+  round the table to BF16 before it multiplies anything, so an F32-domain nudge of 1–2 ULP is invisible
+  and the search was vacuous; the nudge has to be applied to the BF16 value (`prerope_probe.py`'s
+  `bf16_ulp`). What `p=64` actually is: the device's `cosf` disagreeing with glibc's at one angle, one
+  BF16 step — a device-libm boundary in the class `EXACT_STAGES` deliberately bands and gate-audit G5
+  records, now with a name instead of "unattributed".
+
 * **Do not "fix" the rope table by computing it in double precision.** The dumps carry F32 libm
   results, not correctly-rounded ones: evaluating the same angle in F64 and rounding down to F32
   misses 3 of 277 positions (`p = 180, 217, 241`, 2–11 elements each) that the plain F32 path

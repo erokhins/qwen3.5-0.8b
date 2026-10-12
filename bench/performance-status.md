@@ -205,6 +205,18 @@ record as *not* the engine's performance.
    device-libm boundary instead. Either way the footnote in `prototype/attn_decode/results.md` §4
    ("unattributed") gets replaced by an answer.
 
+   **Answered 2026-10-12, and it is the function.** The `z` dump turned out to be unnecessary: §05.3
+   copies the dims past `ROT_DIM` straight out of `z`, so the gate's existing `q_rope` stage already
+   carries a 192-dim-per-head witness for the norm. In that witness the device is clean at every
+   attention layer at `p=64`, the device's own `rope_cs` dump differs from torch's table in exactly 2
+   of 128 entries (`cos[3]` and its duplicate, one BF16 step low), and the CPU path handed that table
+   reproduces the device's `q_rope` bit-for-bit at all six layers. `prototype/attn_decode/prerope_probe.py`
+   also re-permutes §05.2's sum of squares on the pinned rows — including the kernel's exact warp tree
+   — and finds it moves 0 elements at `p=64` while moving 20–207 elsewhere, so the reduction is
+   exonerated twice over. Full numbers, the two corrections to `results.md` §4 that came out of it, and
+   the reproduction commands: `prototype/attn_decode/results.md` §4. No timing was taken for this and
+   nothing here is a bandwidth or latency figure.
+
 1. **Re-measure the projections on a quiet box.** They are the third of the token and they came in
    at 66 % under contention; both the headline 2.990 ms and the `rows/block` 32 finding (+8 %) need
    a clean run with util near 0 at both ends of the lock before they are quoted anywhere else.
