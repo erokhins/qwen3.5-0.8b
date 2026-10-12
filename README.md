@@ -152,13 +152,21 @@ Conventions inherited from the old project:
   management, MTP. Plus a dumper that pins HF-transformers reference tensors.
 - **M1 — per-op parity.** each op matched against the reference dumps within a
   documented tolerance, wired as a `ctest` gate suite.
+  **Met** — every op family has its own scripted device gate against the pinned dumps
+  (`prototype/<op>/run.py`), not a `ctest` suite; the bands and their floors are recorded per op.
 - **M2 — end-to-end greedy parity.** identical greedy tokens on a pinned prompt
   set, single-stream decode, reported in tok/s on this box.
+  **Met 2026-10-12** — `engine/gate.py`: `dec8` 8/8 ids exact (94 checks), `dec64t` 0 fails over 546
+  checks with 64/64 ids exact and 64/64 identical on a free run; **83.9 tok/s** (11.919 ms/token at a
+  25-lane context, `bench/performance-status.md` §6).
 - **M3 — useful.** quantized blobs (reuse the GGUF-import lessons), MTP
   speculative decode, minimal HTTP/serving shim.
+  **Descoped 2026-10-12 by scope ruling** — quantization, MTP and any serving shim are dropped for
+  this project; the work that replaced them is `bench/plan-2026-10-12.md` (fixture breadth, prefill §06,
+  single-stream performance at a 4k context).
 - **M4 — scale-up (only after M2).** add the MoE block and a second engine
   model at `models/Qwen3.6-35B-A3B`, which needs no subsystem beyond what
-  M0–M3 already implements.
+  M0–M3 already implements. **[FUTURE]** — not scheduled; see `AGENTS.md` scope note.
 
 ## Status
 
