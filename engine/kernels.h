@@ -100,33 +100,50 @@ void gdn_gated_norm(const float* o, const uint16_t* z, const float* w_norm, uint
                     uint16_t* norm_out, int tokens = 1);
 
 // ---- §05.1-§05.7: the whole attention block between the projections and o_proj
-// (prototype/attn_decode, fused launch plan). One launch below the lane staging, two above it.
-// `lvalid` is the number of cache lanes this query may read (prefix_len + 1 during decode).
+// (prototype/attn_decode). ONE QUERY ROW runs the fused launch plan: one launch below the lane
+// staging, two above it. A WAVE of query rows runs the staged plan instead — one prep launch that
+// stages every row and appends every row's cache lane, then the core (plus the merge above the
+// staging) — because row t reads the lanes rows 0..t-1 appended and that ordering needs a launch
+// boundary. `lvalid` is the number of cache lanes the FIRST query row may read (prefix_len + 1 during
+// decode); row `t` of a body of `nrows` rows may read `lvalid + t`, which is §06.3's causal mask.
 //
-// TWO FORMS, chosen by the launcher per row and by necessity only (§07.3). `lvalid <= MAXSC` takes
-// the one-pass softmax, which is bit-exact with the pins and is the route every priced fixture rides.
-// A longer row cannot be one-pass at all — that form normalises the weight matrix inside one block —
-// so it takes the op's split-K online form with `split = ceil(lvalid / MAXSC)` blocks per query head
-// plus one merge launch, and it needs `part` to put the partials in (see `attn_part_floats`). The
+// TWO FORMS, chosen by the launcher per ROW and by necessity only (§07.3). A row of `lanes <= MAXSC`
+// takes the one-pass softmax, which is bit-exact with the pins and is the route every priced fixture
+// rides. A longer row cannot be one-pass at all — that form normalises the weight matrix inside one
+// block — so it takes the op's split-K online form with `split = ceil(lanes / MAXSC)` blocks per query
+// head plus one merge launch, and it needs `part` to put the partials in (see `attn_part_floats`). The
+// split is taken from the WIDEST row of the body, so a wave can mix both forms in one grid: each row
+// picks its own route and the extra lane blocks of a short row return before they touch anything. The
 // lane ceiling is therefore `MAXSC × kAttnMaxSplit`, both constants living in `kernels_attn.cpp` where
 // they are enforced, and past it the launcher throws instead of writing past a stage.
 struct AttnLayerArgs {
     const uint16_t *q_proj_out, *k_proj_out, *v_proj_out, *q_norm, *k_norm;
     uint16_t *k_cache, *v_cache;            // [2][cap][256], appended at `pos` in place
     int cap, pos, lvalid;
-    uint16_t *attn_out_pre_gate, *gated;    // [8][256] each; `gated` is o_proj's operand
-    uint16_t *q_rope, *k_rope, *gate_out;   // stage dumps (may be null)
-    float *part;                            // [8][split][258] split-K (max,sum,acc) partials; null
-                                            // below the staging, REQUIRED above it — the launcher
+    // P8 (§06.3): the number of QUERY ROWS this call serves, one per wave token, at positions
+    // `pos .. pos+nrows-1` and lane counts `lvalid .. lvalid+nrows-1`. `nrows = 1` — a generation
+    // step, and every pre-P8 caller — is the fused single-launch form, same grid and same bits as
+    // before. Above one row the launcher switches to the staged plan, because a fused wave would have
+    // row t read cache lanes that rows 0..t-1 are appending in blocks with no ordering between them
+    // (`prototype/attn_decode/attn_decode_kernels.h`'s `attn_prep` note). The three stage buffers and
+    // the two outputs are therefore [nrows][...] tiles, and the wave's q/k/v projections are read as
+    // rows of the tiles P5's GEMVs wrote.
+    int nrows = 1;
+    uint16_t *attn_out_pre_gate, *gated;    // [nrows][8][256] each; `gated` is o_proj's operand
+    uint16_t *q_rope, *k_rope, *gate_out;   // the §05.2/§05.3 stage tiles, [nrows][...] each. NOT
+                                            // optional: they carry the §05.7 append, and for a wave
+                                            // they are also the core's INPUT (§05.1-§05.7 staging)
+    float *part;                            // [nrows][8][split][258] split-K (max,sum,acc) partials;
+                                            // null below the staging, REQUIRED above it — the launcher
                                             // refuses rather than drop a row's partials on the floor
 };
 void attn_decode_layer(const AttnLayerArgs& a);
 
-// How many F32 elements `AttnLayerArgs::part` must hold: one (max, sum, acc[head_dim]) tuple per
-// query head per split block, at the maximum split the engine serves. Defined in `kernels_attn.cpp`,
-// because the head width and the split cap are that op's constants and `decode_step` should not have
-// to know either one to size its scratch.
-std::size_t attn_part_floats();
+// How many F32 elements `AttnLayerArgs::part` must hold for a body of `rows` query rows: one (max,
+// sum, acc[head_dim]) tuple per query head per split block, at the maximum split the engine serves.
+// Defined in `kernels_attn.cpp`, because the head width and the split cap are that op's constants and
+// `decode_step` should not have to know either one to size its scratch.
+std::size_t attn_part_floats(int rows = 1);
 
 // ---- §03.4: the tied logits GEMV (prototype/lm_head_gemv), full-logit form. The fused-argmax
 // form exists but resolves ties to the highest id, and §03.4 fixes ties to the lowest, so the

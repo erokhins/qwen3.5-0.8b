@@ -1,25 +1,31 @@
-// Launcher for prototype/attn_decode: one whole attention layer per launch (two, above the lane
-// staging), in the FUSED launch plan. Its own TU — attn_decode defines N_Q, N_KV, DH, ROT,
+// Launcher for prototype/attn_decode: one attention layer per body — one query row through the fused
+// form (two launches above the lane staging), or a whole prefill wave through the staged form (P8,
+// §06.3: prep + core, plus combine above the staging). Its own TU — attn_decode defines N_Q, N_KV, DH, ROT,
 // THREADS, TILE, MAXSC, SCALE, EPS, FULL_MASK and its own bf/fb/rbf/block_sum, every one of which
 // collides with another op's spelling if these files are merged.
 //
 // Three configuration choices, each made by a gate rather than here:
 //
-//   * `fused=1` — the core recomputes its own head norm + rope and appends to the cache inline,
-//     instead of `attn_prep` staging them. The op's gate runs `staged` as its headline plan and
-//     requires `fused` to agree with it BIT FOR BIT (`run.py`'s cross-check fails the gate if the
-//     two launch plans differ at all), so the fused form is gated against the same pins, and it is
-//     the one-launch form W5 wants at these cache lengths.
+//   * `fused=1` for ONE query row, `fused=0` for a wave. The op's gate runs `staged` as its headline
+//     plan and requires `fused` to agree with it BIT FOR BIT (`run.py`'s cross-check fails the gate if
+//     the two launch plans differ at all), so the fused form is gated against the same pins, and it is
+//     the one-launch form W5 wants at these cache lengths. A wave cannot use it: in the fused form each
+//     core block appends only its own row's lane, and a wave's row t scores the lanes rows 0..t-1
+//     appended, with no grid-wide barrier to order the two — see the launch plan below. Note that the
+//     staged plan is not just one flag flipped: its core READS the staged q/k, so the launcher has to
+//     point the core's input pointers at what `attn_prep` wrote, and null its output pointers so the
+//     core does not re-append what prep already appended in order.
 //   * `full`/`split` are chosen per row by necessity and nothing else — see the lane geometry below.
-//     One-pass (`full=1, split=1`) wherever a row fits the staging, because it is bit-exact with the
+//     One-pass (`split = 1`) wherever a row fits the staging, because it is bit-exact with the
 //     pins and it is the route every priced fixture rides: §07.3's decision, and the reason
-//     `full=0` is only ever reached by being forced. The blocked `(max,sum)` form cannot reproduce the
+//     a split is only ever reached by being forced. The blocked `(max,sum)` form cannot reproduce the
 //     pins at any tile size — §05.5 rounds the *normalised* weight and a streaming row cannot round a
 //     weight it has not divided yet — measured on the dec8 pins: one-pass 0 of 98 304 elements
 //     differ, blocked 25 745. Its own band is §07.3's pre-authorized one, gated in
 //     `prototype/attn_decode/run.py` (results.md §10), and it is the form that can be split.
 //   * `score_f32=0` — the score is rounded through BF16 before the scale, which is the form the pins
 //     carry (see G6's history in `bench/gate-audit.md`: the band that hid this was an audit finding).
+#include "engine/launch_stats.h"
 #include "kernels.h"
 
 #include <hip/hip_bfloat16.h>
@@ -77,11 +83,15 @@ hip_bfloat16* bf16(const uint16_t* p) {
 }
 }  // namespace
 
-std::size_t attn_part_floats() {
+std::size_t attn_part_floats(int rows) {
     // `attn_core`'s own partial layout: one `(max, sum, acc[DH])` tuple per (query head, split
-    // block), F32 — `a.part + (head*split + blockIdx.y)*(DH + 2)` in the kernel. Sized for
-    // `kAttnMaxSplit`, which is what makes the lane ceiling allocatable instead of hopeful.
-    return static_cast<size_t>(N_Q) * kAttnMaxSplit * (DH + 2);
+    // block), F32 — `a.part + ((qrow*N_Q + head)*split + blockIdx.y)*(DH + 2)` in the kernel. Sized
+    // for `kAttnMaxSplit`, which is what makes the lane ceiling allocatable instead of hopeful, and
+    // for `rows` query rows because P8 put a whole wave through one launch: at `kMaxWaveRows` = 512
+    // that is 512 x 8 x 8 x 258 F32 = 33.8 MB, which is the largest number in the scratch and is
+    // ~1 % of this model's whole footprint (`AGENTS.md`'s budget table). It is written only by rows
+    // above the staging, so a request that never goes past 512 lanes never touches it.
+    return static_cast<size_t>(rows) * N_Q * kAttnMaxSplit * (DH + 2);
 }
 
 void attn_decode_layer(const AttnLayerArgs& a) {
@@ -95,39 +105,58 @@ void attn_decode_layer(const AttnLayerArgs& a) {
             "q_rope is null, and the §05.7 cache append lives behind that same test, so nulling "
             "them to 'skip the dump' silently skips writing K and V into the cache.");
     }
-    if (a.lvalid < 0 || a.pos < 0 || a.pos >= a.cap || a.lvalid > a.cap) {
-        throw std::runtime_error("attn_decode_layer: pos=" + std::to_string(a.pos) +
-                                 " lvalid=" + std::to_string(a.lvalid) +
-                                 " does not fit cap=" + std::to_string(a.cap));
+    if (a.nrows < 1) {
+        throw std::runtime_error("attn_decode_layer: nrows=" + std::to_string(a.nrows) +
+                                 "; a body has at least one query row (a wave of zero tokens is"
+                                 " `submit_wave_body`'s to refuse, and it does)");
+    }
+    // The wave's rows advance one position and one visible lane each (§06.3), so the WIDEST row is the
+    // last one and every lane decision below is taken from it. `pos` is row 0's position.
+    const int rows = a.nrows;
+    const int lanes_last = a.lvalid + rows - 1;
+    if (a.lvalid < 0 || a.pos < 0 || a.pos + rows - 1 >= a.cap || lanes_last > a.cap) {
+        throw std::runtime_error("attn_decode_layer: pos=" + std::to_string(a.pos) + ".." +
+                                 std::to_string(a.pos + rows - 1) + " lvalid=" +
+                                 std::to_string(a.lvalid) + ".." + std::to_string(lanes_last) +
+                                 " (nrows=" + std::to_string(rows) + ") does not fit cap=" +
+                                 std::to_string(a.cap));
     }
 
     // ---- the form, chosen by necessity (§07.3) ------------------------------------------------
-    // One-pass below the staging and split-K streaming above it, never the other way round. The
-    // one-pass form is bit-exact with the pins, so a row that fits it must use it: that is what keeps
-    // every priced fixture's route — and therefore every shipped margin — untouched by this launcher.
-    // Above the staging there is no choice to make, only a way to be wrong: `full=1` with a row
-    // longer than `MAXSC` would have `attn_core` write past `sc[]`, so the split is forced and
-    // `part` becomes a required buffer rather than an optional one.
-    const bool split_lane = a.lvalid > MAXSC;
-    const int split = split_lane ? split_for(a.lvalid) : 1;
+    // `split_for(lanes_last)` is 1 whenever the widest row fits the staging and >= 2 whenever it does
+    // not, which is the only guarantee `blocks_for_row` needs to route each ROW on its own: a row that
+    // fits takes exactly one block and the pins' bits, a row above the staging streams across `split`
+    // blocks and `attn_combine` merges them. `full` is therefore no longer a per-launch choice (P7
+    // spelled it `split_lane ? 0 : 1`); for a single row the two spellings pick the same branch of
+    // `attn_core` at every lane count, which is what keeps `wide520f`'s route and shipped margin
+    // untouched, and for a wave it is what lets a straddling wave mix the two forms in one grid instead
+    // of pushing the short rows onto the streaming form they do not need.
+    // What would still be mis-normalisation is a row WIDER than the staging served by ONE block, and
+    // `split >= 2` whenever `lanes_last > MAXSC` is what makes that unreachable — so the one-pass
+    // branch of `attn_core` can never be handed more than `MAXSC` lanes.
+    const bool split_lane = lanes_last > MAXSC;
+    const int split = split_for(lanes_last);
     if (split_lane) {
         if (split > kAttnMaxSplit) {
-            throw std::runtime_error("attn_decode_layer: lvalid=" + std::to_string(a.lvalid) +
-                                     " needs split=" + std::to_string(split) +
+            throw std::runtime_error("attn_decode_layer: widest row is " +
+                                     std::to_string(lanes_last) + " lanes (nrows=" +
+                                     std::to_string(rows) + "), needs split=" +
+                                     std::to_string(split) +
                                      ", more blocks than the engine's kAttnMaxSplit=" +
                                      std::to_string(kAttnMaxSplit) + " (lane ceiling " +
                                      std::to_string(MAXSC * kAttnMaxSplit) + " = staging MAXSC " +
                                      std::to_string(MAXSC) + " x split). Raising it means raising the"
-                                     " `part` scratch too — `attn_part_floats()` sizes it, and"
+                                     " `part` scratch too — `attn_part_floats(rows)` sizes it, and"
                                      " `engine/gate.py::lane_ceiling()` reads both constants rather"
                                      " than trusting a number");
         }
         if (a.part == nullptr) {
-            throw std::runtime_error("attn_decode_layer: lvalid=" + std::to_string(a.lvalid) +
-                                     " exceeds the one-pass staging (MAXSC=" +
-                                     std::to_string(MAXSC) + ") and needs the split-K online form"
-                                     " (§07.3), which has nowhere to put its partials: `part` is"
-                                     " null. Allocate it — `attn_part_floats()` says how big.");
+            throw std::runtime_error("attn_decode_layer: widest row is " +
+                                     std::to_string(lanes_last) + " lanes, which exceeds the"
+                                     " one-pass staging (MAXSC=" + std::to_string(MAXSC) +
+                                     ") and needs the split-K online form (§07.3), which has"
+                                     " nowhere to put its partials: `part` is null. Allocate it —"
+                                     " `attn_part_floats(rows)` says how big.");
         }
     }
 
@@ -150,35 +179,90 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     c.gate_out = bf16(a.gate_out);
     // rope_out is the cos||sin table the gate dumps to prove the in-kernel transcendentals; the
     // engine has no use for it. `stale` is NEG_CARRY plumbing (an injected bug this launcher never
-    // injects); `part` is the split-K partial staging, null whenever one block covers the row.
+    // injects); `part` is the split-K partial staging, null whenever one block covers every row.
     c.rope_out = nullptr;
     c.part = split_lane ? a.part : nullptr;
     c.stale = nullptr;
     c.cap = a.cap;
     c.pos = a.pos;
     c.lvalid = a.lvalid;
+    c.nrows = rows;
     c.split = split;
     c.neg = NEG_NONE;
-    c.full = split_lane ? 0 : 1;
-    c.score_f32 = 0;
+    c.full = 1;
+    // `fused` is the plan, not the row's lane width: 1 means the core stages its own q/k and appends
+    // (§05.2-§05.3, §05.7 inline), 0 means it reads what `attn_prep` already staged and appended. It is
+    // set per LAUNCH below, because that is the only thing that differs between the two plans; the
+    // value here is the one-row plan's, which every caller gets unless it asked for a wave.
     c.fused = 1;
+    c.score_f32 = 0;
     // One cache lane per warp, capped by the block's warp count — `attn_decode.hip.cpp:226`
     // (`tile = std::min(TILE, nw)`), where nw is THREADS/warpSize. On this wave32 part that is 8.
     c.tile = std::min(TILE, THREADS / warp_width());
 
-    // 8 query-head blocks, `split` deep in y. At split 1 that is the single lane of y the launcher
-    // shipped before P7; above it `stage_head`'s `blockIdx.y != 0` early-out is what makes the extra
-    // blocks safe to run concurrently — exactly one of them writes the stage buffers and performs the
-    // §05.7 append, and none of them reads the appended lane back out of the cache (the core takes
-    // lane `pos` from shared memory, which every block computed for itself), so there is no
-    // cross-block dependency to order.
-    attn_core<<<dim3(N_Q, split), THREADS>>>(c);
-    if (split > 1) {
-        // The merge: `(max,sum,acc)` per block → one row, then §05.6's gate. Same algebra as the
-        // tile loop, same lifetime (A-17: it never leaves this launch). This is the one extra launch
-        // the long-context form costs per attention layer.
-        attn_combine<<<N_Q, THREADS>>>(c);
+    // ---- the launch plan ------------------------------------------------------------------------
+    // TWO PLANS, and the thing that chooses between them is the row count, because that is what changes
+    // the dependency structure — not the lane geometry, which is the same on both sides.
+    //
+    // ONE ROW (every generation step, and `decode_run --wave-rows 1`): the FUSED plan exactly as P7
+    // shipped it — one `attn_core` launch of 8 query-head blocks, `split` deep in y, which recomputes
+    // its own head norm + rope (§05.2-§05.3) and does the §05.7 append inline. At split 1 that is the
+    // single lane of y the launcher shipped before P7; above it `stage_head`'s `blockIdx.y != 0`
+    // early-out is what makes the extra blocks safe to run concurrently — exactly one of them writes
+    // the stage buffers and performs the §05.7 append, and none of them reads the appended lane back out
+    // of the cache (the core takes lane `pos` from shared memory, which every block computed for
+    // itself), so there is no cross-block dependency to order.
+    //
+    // A WAVE (P8, §06.3): the STAGED plan, because the dependency a single row does not have is exactly
+    // the one a wave cannot leave to chance. Row t scores the lanes rows 0..t-1 appended, and in the
+    // fused plan each core block appends only its own row's lane, with nothing between the two grid
+    // axes to say which ran first — a race that passes on a short prompt and corrupts a long one. So
+    // `attn_prep` stages every row's norm, rope, gate and §05.7 append at that row's own position in a
+    // launch that has finished before the core starts, and the core READS the staged q/k (`fused = 0`)
+    // instead of recomputing them. Two launches per attention layer per wave, where one per token used
+    // to be the bill: §06.4 says count them, and `engine/gate.py` (h) does.
+    //
+    // THE STAGED PLAN HAS READ POINTERS AS WELL AS WRITE POINTERS, AND GETTING ONLY THE WRITE SIDE RIGHT
+    // IS WHAT HUNG THE DEVICE. In the staged branch `attn_core` takes its q and k from `CoreArgs::qrope`
+    // /`krope`, not from `qg`/`kg`; the fused branch never reads those two fields, so a launcher that
+    // flips `fused` to 0 and leaves them null has wave row `qrow` dereferencing a null base at byte
+    // `ROW_H * qrow * 2` — the two fault dumps this produced named 0x3000 and 0x1000, i.e. rows 3 and 1.
+    // The driver reports it asynchronously (`Memory Fault Error ... kernel: attn_core(CoreArgs)`) while
+    // the host sits in a stream sync busy-polling a queue that will never drain: ~10 cores, no logits
+    // written, which is how a null pointer spent an afternoon looking like a kernel deadlock. So the
+    // core's inputs come from the same buffers `attn_prep` writes, and its `*_out` pointers are
+    // deliberately left null: `stage_head`'s early-out is the only thing that suppresses an append, and
+    // a wave's core must not append (prep already did, at each row's own slot, in a launch that has
+    // already finished — which is where this differs from the prototype host on purpose: it leaves the
+    // core's `*_out` set (`attn_decode.hip.cpp:370`), so its wave core re-stages and re-appends the same
+    // bytes prep already wrote, a write against other rows' reads that is harmless only because the values
+    // match. `attn_prep` is the staging kernel and does not read `fused`; `attn_combine` reads only
+    // `part`/`aout`/`gout`/`qg`, all of which `c` carries.
+    if (rows == 1) {
+        attn_core<<<dim3(N_Q, split), THREADS>>>(c);
+    } else {
+        attn_prep<<<dim3(N_Q + N_KV, rows), THREADS>>>(c);
+        CoreArgs core = c;
+        core.fused = 0;                 // read the staged rows instead of recomputing them
+        core.qrope = bf16(a.q_rope);    // what `attn_prep` wrote at ROW_H * qrow
+        core.krope = bf16(a.k_rope);    // what it wrote at ROW_KV * qrow, and appended
+        core.qrope_out = nullptr;       // no staging, no gate dump, no append from this launch
+        core.krope_out = nullptr;
+        core.gate_out = nullptr;
+        attn_core<<<dim3(N_Q, split, rows), THREADS>>>(core);
     }
+    if (split > 1) {
+        // The merge: `(max,sum,acc)` per (row, lane block) → one row, then §05.6's gate. Same algebra
+        // as the tile loop, same lifetime (A-17: it never leaves this launch). A row the staging fits
+        // is skipped here — its single core block already finished it — which is what lets a wave carry
+        // one-pass and streaming rows in the same grid.
+        attn_combine<<<dim3(N_Q, rows), THREADS>>>(c);
+    }
+    // One site per attention layer per body, whatever number of kernels that site submitted: the point
+    // the gate has to see is the wave going through once instead of once per token, and the 1-to-3
+    // kernel factor is lane depth, which is the same on both sides of the A/B. `launch_stats.h` owns
+    // the wording; `gate.py`'s `launch_plan()["attn"]` is the same number from §07.
+    launchstats::attn().record(rows);
 }
 
 }  // namespace engine::kernels
