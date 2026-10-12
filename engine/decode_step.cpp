@@ -239,16 +239,19 @@ DecodeScratch allocate_scratch(int wave_rows) {
     sc.a_q = alloc<uint16_t>(qprj);
     sc.a_k = alloc<uint16_t>(kprj);
     sc.a_v = alloc<uint16_t>(kprj);
-    sc.a_q_rope = alloc<uint16_t>(kNumQueryHeads * kHeadDim);
-    sc.a_k_rope = alloc<uint16_t>(kKvProjRows);
-    sc.a_gate = alloc<uint16_t>(kNumQueryHeads * kHeadDim);
-    sc.a_pre = alloc<uint16_t>(kNumQueryHeads * kHeadDim);
-    sc.a_gated = alloc<uint16_t>(kNumQueryHeads * kHeadDim);
+    // P8 (§06.3): the attention stage and output tiles are wave-sized, because one attention site now
+    // serves every row of the body. At n = 1 these are the same buffers, same contents, same order.
+    sc.a_q_rope = alloc<uint16_t>((size_t)wave_rows * kNumQueryHeads * kHeadDim);
+    sc.a_k_rope = alloc<uint16_t>((size_t)wave_rows * kKvProjRows);
+    sc.a_gate = alloc<uint16_t>((size_t)wave_rows * kNumQueryHeads * kHeadDim);
+    sc.a_pre = alloc<uint16_t>((size_t)wave_rows * kNumQueryHeads * kHeadDim);
+    sc.a_gated = alloc<uint16_t>((size_t)wave_rows * kNumQueryHeads * kHeadDim);
     // The split-K online softmax's partial staging (§07.3, P7). One buffer per request, sized by the
     // attention launcher itself — it owns the head width and the split cap, and this file should not
-    // have to. 64.5 KiB at the full ceiling, which AGENTS.md is right about: this model uses 4 % of
-    // the pool, so the lane ceiling is bought with scratch rather than with a second code path.
-    sc.a_part = alloc<float>(kernels::attn_part_floats());
+    // have to. With P8 it is sized for a whole wave of rows, which is 33.8 MB at the full ceiling
+    // instead of 64.5 KiB: AGENTS.md is right about the budget (this model uses 4 % of the pool), and
+    // a wave whose widest row is over the staging has nowhere else to put `rows x 8 x split` partials.
+    sc.a_part = alloc<float>(kernels::attn_part_floats(wave_rows));
 
     sc.mlp_act = alloc<uint16_t>(i);
     sc.mlp_act_f32 = alloc<float>(i);
@@ -452,13 +455,15 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                                         sc.g_b, sc.g_b_f32, n * kNumValueHeads);
         }
 
-        // ---- the mixer, once per token, in position order (§08.2). The token loop is why
-        // the wave is layer-major: the GDN recurrence and the causal KV append both need ascending
-        // positions WITHIN a layer, and nothing in the mixer needs another token's mixer output —
-        // that is what lets the launches around it batch. At n == 1 this is the decode path's loop
-        // body, same order, same launches. What the mixer now reads is row t of the tiles the
-        // launches around it filled (P5's projections, P6's conv and gates); its own stage is row t
-        // of a wave-sized tile.
+        // ---- the mixer. What has always ordered it is §08.2's ascending positions WITHIN a layer, and
+        // that is still all any of it needs: nothing in a mixer needs another token's mixer output, which
+        // is what lets the launches around it batch. What changed in P8 is which mixers still need a loop
+        // at all: the causal KV append's ordering moved INTO the attention site (one `attn_prep` launch
+        // stages every row's append at its own position, then one core launch reads them), so the only
+        // per-token loop left is §04.4's recurrence, which is a scan and cannot be one launch (§06.2's
+        // chunked alternative is §04.7, i.e. P9's conditional package). At n == 1 both branches are the
+        // decode path's loop body: same launches, same order, same bits. What the mixers read is row t of
+        // the tiles the launches around them filled (P5's projections, P6's conv and gates).
         //
         // ---- P6: §04.2's conv and §04.3's gates go ONCE per GDN layer for the whole wave. The conv
         // reads the [n, 6144] F32 tile P5's `in_proj_qkv` just wrote and the layer's carried window,
@@ -489,42 +494,48 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                                sc.g_dt_bias + (size_t)slot * kNumValueHeads,
                                sc.g_g, sc.g_beta, n);
         }
-        for (int t = 0; t < n; ++t) {
-            const int pos = pos0 + t;                          // §02.4: P of this token
-            // ---------------- the mixer: §07.2 or §07.3, by layer type (§03.5 routing) ----------
-            if (attn_layer) {
-                kernels::AttnLayerArgs a{};
-                a.q_proj_out = sc.a_q + (size_t)t * kQprojRows;
-                a.k_proj_out = sc.a_k + (size_t)t * kKvProjRows;
-                a.v_proj_out = sc.a_v + (size_t)t * kKvProjRows;
-                a.q_norm = (const uint16_t*)layer_dev(weights, layer, leaf::kQNorm);
-                a.k_norm = (const uint16_t*)layer_dev(weights, layer, leaf::kKNorm);
-                a.k_cache = st.kv_keys_layer(layer);
-                a.v_cache = st.kv_values_layer(layer);
-                a.cap = (int)st.cap;
-                a.pos = pos;
-                a.lvalid = pos + 1;   // §07.3: during decode the softmax runs over P+1 lanes
-                a.attn_out_pre_gate = sc.a_pre;
-                a.gated = sc.a_gated;
-                // The three stage buffers are mandatory (see kernels_attn.cpp): the fused plan writes
-                // the §05.7 cache append behind the same null check as these dumps.
-                a.q_rope = sc.a_q_rope;
-                a.k_rope = sc.a_k_rope;
-                a.gate_out = sc.a_gate;
-                // The split-K partials (§07.3): unused by a row that fits the one-pass staging, and
-                // required by one that does not — the launcher refuses rather than lose a partial.
-                a.part = sc.a_part;
-                kernels::attn_decode_layer(a);
-
-                kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32 + (size_t)t * kValueDim,
-                                          kQwidth);
-            } else {
-                // §04.4's recurrence, and this is the one GDN launch that stays per token: it is a
-                // sequential scan, so token t cannot start before t−1 finished writing S (§04.4,
-                // and §06.2's alternative is the chunked form of §04.7, which is P9's conditional
-                // package and not this one). q, k, v are the three 2048-wide slices of row t of the
-                // conv's output tile (§04.1's [q|k|v]); rec_kernel indexes its own slice as
-                // [head][dim], so the pointers are just offsets into that row.
+        // ---- the mixer. Attention (§05.3-§05.5) is now ONE site per attention layer for the whole
+        // wave (P8, §06.3); the GDN recurrence (§04.4) stays one launch per token per GDN layer, because
+        // it is a sequential scan and token t cannot start before t−1 finished writing S. What has not
+        // changed is what each row computes: row t of an attention wave sits at position pos0+t and
+        // attends pos0+t+1 lanes, exactly the per-token call this replaced, and `prototype/attn_decode`
+        // §11 gates that a wave of rows is BIT-IDENTICAL to those rows launched one at a time. At
+        // n == 1 this is the same single fused launch in the same place in the order.
+        if (attn_layer) {
+            kernels::AttnLayerArgs a{};
+            a.q_proj_out = sc.a_q;              // [n][4096]: the tiles P5's three GEMVs just wrote
+            a.k_proj_out = sc.a_k;              // [n][512]
+            a.v_proj_out = sc.a_v;              // [n][512]
+            a.q_norm = (const uint16_t*)layer_dev(weights, layer, leaf::kQNorm);
+            a.k_norm = (const uint16_t*)layer_dev(weights, layer, leaf::kKNorm);
+            a.k_cache = st.kv_keys_layer(layer);
+            a.v_cache = st.kv_values_layer(layer);
+            a.cap = (int)st.cap;
+            a.pos = pos0;                       // row 0's position; row t's is pos0+t (§06.3)
+            a.lvalid = pos0 + 1;                // and it attends pos0+t+1 lanes (§07.3's rule, per row)
+            a.nrows = n;
+            a.attn_out_pre_gate = sc.a_pre;     // [n][2048]
+            a.gated = sc.a_gated;               // [n][2048]
+            // The three stage buffers are mandatory (see kernels_attn.cpp): the §05.7 cache append
+            // lives behind the same null check as one of them. For a wave, `attn_prep` writes all n
+            // rows' appends in one launch that completes before any row reads the cache — which is the
+            // only ordering a wave needs, and the reason a wave cannot stay on the fused plan.
+            a.q_rope = sc.a_q_rope;
+            a.k_rope = sc.a_k_rope;
+            a.gate_out = sc.a_gate;
+            // The split-K partials (§07.3): unused by rows that fit the one-pass staging, and required
+            // by any that does not — the launcher refuses rather than lose a partial.
+            a.part = sc.a_part;
+            kernels::attn_decode_layer(a);
+            // One widening over the whole [n][2048] tile, for the same reason P5 packed the casts
+            // around the projections: it is elementwise, so a wider call is the same bits in fewer
+            // submissions (and `cast` is not a launchstats family, so nothing has to re-derive it).
+            kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32, (size_t)n * kQwidth);
+        } else {
+            for (int t = 0; t < n; ++t) {
+                // §04.4's recurrence. q, k, v are the three 2048-wide slices of row t of the conv's
+                // output tile (§04.1's [q|k|v]); rec_kernel indexes its own slice as [head][dim], so
+                // the pointers are just offsets into that row.
                 kernels::gdn_rec(sc.g_u + (size_t)t * kQkvRows,
                                  sc.g_u + (size_t)t * kQkvRows + kValueDim,
                                  sc.g_u + (size_t)t * kQkvRows + 2 * kValueDim,
@@ -532,8 +543,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                                  sc.g_beta + (size_t)t * kNumValueHeads,
                                  st.gdn_state_layer(layer), sc.g_o + (size_t)t * kValueDim);
             }
-
-        }  // for t: the mixer
+        }  // the mixer
 
         // ---- §04.5 over the whole tile, P6's third batched launch. `o` arrives F32 as the
         // recurrence left it (row t of the tile, one block per (token, head)), `z` is still BF16 (it

@@ -38,11 +38,11 @@ class WeightStore;
 //   the whole `u` tile; the gated norm reads the whole `o` tile), which is exactly the test the split
 //   uses.
 //   * what is left one row wide is what no launch writes in bulk: the conv window's `conv_new` (a
-//     K−1-row window, not a row family) and the attention stage buffers `a_*_rope`/`a_gate`/`a_pre`/
-//     `a_gated`, which belong to an attention block that is still one token wide. P7 split that
-//     block's LANE axis (above the staging it is `split` blocks per query head, with `a_part` holding
-//     their partials), which is a different axis and does not make any of these taller; giving the
-//     attention block a token axis is P8. The GDN recurrence is per token too, but it reads and
+//     K−1-row window, not a row family). Everything the attention block touches is a row family now:
+//     P7 split that block's LANE axis (above the staging it is `split` blocks per query head, with
+//     `a_part` holding their partials), and P8 gave it the TOKEN axis (§06.3: one site per attention
+//     layer per body, so `a_*_rope`/`a_gate`/`a_pre`/`a_gated` are `[wave_rows]` tiles and `a_part` is
+//     sized for a whole wave of rows). The GDN recurrence is per token too, but it reads and
 //     writes ROWS of the tall tiles above rather than its own scratch, so it did not keep a one-row
 //     buffer with it.
 constexpr int kMaxWaveRows = 512;   // plan §2.1; decode_step.cpp explains why 512 and not 1024
@@ -91,22 +91,25 @@ struct DecodeScratch {
     float* conv_new = nullptr;      // [kConvWindow][kConvChannels]
 
     // Attention (§07.3). The three stage buffers are required, not optional — `kernels_attn.cpp`
-    // says why (the cache append lives behind the same null check as one of them).
+    // says why (the cache append lives behind the same null check as one of them). From P8 they are
+    // wave tiles: one attention site serves every row of the body (§06.3), so row t of each is token
+    // t's. At wave_rows = 1 they are the shapes they always were.
     uint16_t* a_q = nullptr;        // [wave_rows][4096] q_proj out: [8 heads][q 256 | gate 256], §05.1
     uint16_t* a_k = nullptr;        // [wave_rows][512]
     uint16_t* a_v = nullptr;        // [wave_rows][512]
-    uint16_t* a_q_rope = nullptr;   // [2048]
-    uint16_t* a_k_rope = nullptr;   // [512]
-    uint16_t* a_gate = nullptr;     // [2048] the de-interleaved output gate, §05.6
-    uint16_t* a_pre = nullptr;      // [2048] attn_out_pre_gate, §05.5
-    uint16_t* a_gated = nullptr;    // [2048] pre * σ(gate), o_proj's operand
+    uint16_t* a_q_rope = nullptr;   // [wave_rows][2048]
+    uint16_t* a_k_rope = nullptr;   // [wave_rows][512]
+    uint16_t* a_gate = nullptr;     // [wave_rows][2048] the de-interleaved output gate, §05.6
+    uint16_t* a_pre = nullptr;      // [wave_rows][2048] attn_out_pre_gate, §05.5
+    uint16_t* a_gated = nullptr;    // [wave_rows][2048] pre * σ(gate), o_proj's operand
     // The split-K online softmax's partials (§07.3, P7): one (max, sum, acc) tuple per query head per
     // lane block, only ever written by a row too long for the one-pass staging. It lives here rather
     // than in `RequestState` because it is not §08.1 state — nothing survives the launch that wrote
     // it, and `(g)`'s fingerprints must keep meaning "model state" — and it is ONE buffer for the
     // whole request because the engine submits in stream order: `attn_combine` reads a row of `part`
-    // before the next attention layer is allowed to overwrite it.
-    float* a_part = nullptr;        // [8][kAttnMaxSplit][258] F32, sized by attn_part_floats()
+    // before the next attention layer is allowed to overwrite it. `kernels_attn.cpp` sizes it for a
+    // whole wave of rows, since from P8 a wave is what a site serves.
+    float* a_part = nullptr;        // [wave_rows][8][kAttnMaxSplit][258] F32, attn_part_floats(wave_rows)
 
     // MLP (§03.3). `act` is the F32 intermediate `down_proj` wants, `mlp_act` the BF16 one the
     // gate is pinned against; both exist because the two kernels disagree about the dtype.
