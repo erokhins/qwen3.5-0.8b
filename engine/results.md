@@ -2470,3 +2470,104 @@ names, not this one. (3) The per-row pin judging for the batched form lives in t
 own equivalence is carried by the logits `cmp` and the five-fixture margins. (4) GDN conv/gates/rec and the
 attention row are still one token at a time inside the wave — P6/P7's, and (h)'s counters will show them the
 same way once they batch.
+
+## Q5 / P6: the GDN mixer's three token-parallel launches batch over the wave, and the carried conv window is proven
+
+P5 left the mixer itself running one token at a time inside `submit_wave_body`: conv, gates, recurrence
+and gated norm, four launches per GDN layer per token, 72 per token, plus a D2D copy of the layer's
+conv window per token. Three of those four are token-parallel — the conv is causal *within* the tile
+and reads the window the last wave left, the gates are per (token, head), and §04.5's norm is per
+(token, head) — so they now go **once per GDN layer per wave**, and the window copy goes once per wave
+instead of once per token: 18 copies per wave where a 295-token wave used to pay 5 310. The fourth,
+`rec_kernel` (§04.4's scan), stays per token by design; giving it a width is P9's chunked form.
+
+`gdn_conv/gdn_gates/gdn_gated_norm` take a `tokens` argument (`engine/kernels.h`), the kernels live in
+`prototype/gdn_decode/gdn_decode_kernels.h` and
+`prototype/gdn_gated_norm/gdn_gated_norm_kernels.h` and are gated there, and `g_u`/`g_o`/`g_g`/`g_beta`
+moved from one-row scratch into the wave row family (`decode_step.h`'s note says which buffers are in
+which family and why `conv_new` is in neither). At `tokens == 1` every one of the three is the same
+grid it was, which is why the decode path's five fixtures are bit-identical below.
+
+**Counted, like P4/P5.** `engine/launch_stats.{h,cpp}` gained `gdn_conv`, `gdn_gates` and
+`gdn_gated_norm` — one launch per GDN layer per body whatever the body's width, so section (h)'s
+existing per-body arithmetic prices a wave of them with no new formula. `gdn_rec` is deliberately
+absent: its launcher has no row width, and a family that can only ever report `rows=1` is a check that
+cannot fail. On `dec64f` (17-token prompt + 64 steps): batched side `calls=1170, calls_batched=18,
+rows_total=1458, rows_max=17`; one-row side `1458 / 0 / 1458 / 1`; carry side (below)
+`1224 / 72 / 1458 / 5`. Fewer launches, identical work — `rows_total` equal on every side.
+
+**The window is now carried across a wave boundary in a shipped gate.** That is the one thing a
+512-row wave cannot show: every shipped fixture is a single wave, so the window is read once at the
+zeros a request starts on and written once, and every bug in the carry is invisible. Section (h) now
+runs a **third side at `--wave-rows 5`** and requires (a) its counters to match §07's arithmetic for
+waves of 5, (b) the three GDN families to report `rows_max=5` there — so a window really was carried —
+and (c) its logits to be **byte-identical** to the single-wave run. It is not vacuous by construction:
+the check refuses a side that produced one wave.
+
+| fixture | interior wave boundaries crossed at `--wave-rows 5` | logits A/B against the one-wave side |
+|---|---|---|
+| `dec64f` | 3 (4 waves over a 17-token prompt) | 81 files, 80 455 680 B, **0 differing** |
+| `dec64t` | 5 (6 waves / 27) | 91 files, 90 388 480 B, **0 differing** |
+| `mt32f` | 46 (47 waves / 232) | 264 files, 262 225 920 B, **0 differing** |
+| `p128` | 25 (26 waves / 128) | 136 files, 135 086 080 B, **0 differing** |
+| `dec300f` | 58 (59 waves / 295) | 423 files, 420 157 440 B, **0 differing** |
+
+5 is chosen because it divides none of the fixtures' prompt lengths, so the prompt end lands mid-chunk
+rather than on a boundary the wide run already covers. Per-op, the same claim is made at kernel level in
+`prototype/gdn_decode/check.py --tokens`, which compares the window's *contents* to `raw[T−3..T−1]` and
+shows that a zero-padded carry moves exactly rows 0–2 of the following wave.
+
+**Five fixtures, margin preflight (§6.0), before against after** (`tools/margin_delta.py`):
+
+| fixture | checks before → after | worst cos step | filled | before → after | worst meanrel | filled |
+|---|---|---|---|---|---|---|
+| `dec8` | 124 → **161** | 7 (flat G5) | 0.0647 | **x1.0000** | 7 (flat G5) | 0.1460 → **x1.0000** |
+| `dec64f` | 606 → **643** | 32 | 0.8676 | **x1.0000** | 54 | 0.7962 → **x1.0000** |
+| `dec64t` | 603 → **640** | 54 | 0.9982 | **x1.0000** | 4 | 0.9789 → **x1.0000** |
+| `dec300f` | 1112 → **1149** | 86 | 0.9992 | **x1.0000** | 72 | 0.9997 → **x1.0000** |
+| `mt32f` | 347 → **384** | 19 | 0.9973 | **x1.0000** | 3 | 0.9594 → **x1.0000** |
+
+Every margin is x1.0000 at the same binding step and the same deficit to five significant figures: the
+wide GDN launches produce the per-token launches' bits, not approximations of them. The check count
+rose by 37 per fixture — the three GDN families' counters on three sides, their six explicit
+batched/one-row shape checks, the carry side's own counters and anti-vacuity check, and the byte A/B.
+`p128` (153 → 190) and the pre-existing `chunk64b` failures (the prompt-end sample `1596` vs the pin's
+`760`, and step 0's tie) are unchanged: same four lines before and after, so nothing here made them
+better or worse.
+
+**(g) did not move either.** Every conv/state distance line in every fixture log is identical before
+and after, including the comparable one — the engine's end-of-prompt window against the pin's newest
+`k_conv−1` columns:
+
+| fixture | engine-vs-pin conv WINDOW, worst `n2` ratio | worst mean \|Δ\|/RMS |
+|---|---|---|
+| `dec64f` | 0.996817 (row 1, layer 1) | 8.386e−05 (row 6, layer 8) |
+| `dec64t` | 0.996833 (row 7, layer 9) | 1.496e−04 (row 8, layer 10) |
+| `mt32f` | 0.998001 (row 7, layer 9) | 8.203e−05 (row 8, layer 10) |
+| `p128` | 1.003849 (row 15, layer 20) | 1.597e−04 (row 8, layer 10) |
+| `chunk64b` | 0.996663 (row 6, layer 8) | 1.432e−04 (row 10, layer 13) |
+
+`p128` — the plan's end-condition fixture, and the one with a comparable `conv_fp` — was run through the
+same preflight: worst cos step 7 against the flat G5 floor, filled 0.1137 → **x1.0000**, meanrel 0.2119 →
+**x1.0000**; `chunk64b`'s margins are x1.0000 too, which is what "the four failures are not ours" looks
+like in this table.
+
+No tolerance, band or allowance was touched, and no fixture was re-pinned.
+
+**What a worker ran on the device (correctness only, no timing taken).**
+`prototype/gdn_decode/check.py --tokens p64 --layers 1,2` and `--tokens p300 --layers 1` (under
+`tools/gpu_lock.sh`, `util` 47–93 % at the time), plus the shipped decode-step gate `check.py`
+(`PASS: all four GDN decode functions match the reference dumps`) and
+`prototype/gdn_gated_norm/run.py --gate` (unchanged 18-layer decode gate: worst `ndiff 1/2048`,
+max ULP 1, six negatives localised). `prototype/gdn_gated_norm/run.py --tokens p64 --layers 1,2`
+(self-locking, so run with the lock released) → `WAVE GATE PASS`. `engine/gate.py --selftest` (CPU)
+including the new `--break-gdn-one-row` case. `engine/gate.py --fixture {dec8, dec64f, dec64t,
+mt32f, dec300f, p128, chunk64b}`: all green except `chunk64b`'s four pre-existing lines; 3 / 7 / 7 /
+10 / 18 / 7 / 7 s wall, `util` 47–57 %. **No timing taken, and none of these is a duration.**
+
+**Not run by a worker, by rule:** every timing, including the per-wave launch-collapse benefit
+(18 window copies per wave instead of 18 per token) and the wave-width cost of the three wide kernels.
+The commands for that pass are the two `decode_run --wave-rows {512,1}` sides and
+`prototype/gdn_decode/gdn_decode --mode conv --tokens …`, all in `engine/results.md` above and the ops'
+own files. Still open after P6: `rec_kernel`'s per-token scan (P9's conditional package) and the
+attention block, which is still one token wide (P7/P8).
