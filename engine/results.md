@@ -2967,10 +2967,14 @@ all). What makes it *not* cheap-and-provable is that nothing in the tree has mor
 >4096-lane check needs a new pin (P3-class work, and D-2 says a new fixture prices its own margin), and
 the cheap self-consistency substitute — same rows at two wave widths, byte for byte — is not valid above
 the staging: `split` comes from the wave's widest row, so a row can be handed more lane blocks than it
-needs and its `(max,sum)` grouping differs from the same row run alone. For waves starting on a multiple
-of 512 (every shipped fixture, and plan §2.1's alignment) the two agree, which is exactly why `(h)`'s
-byte-identity half is sound today and why it must not be stretched to a long off-alignment prompt without
-becoming a band check. That is a fact about the design, recorded rather than fixed.
+needs and its `(max,sum)` grouping differs from the same row run alone. The precise condition is a
+straddle: agreement holds while a wave's lane span contains no multiple of `MAXSC` strictly inside it above
+the staging, which is why 64-aligned waves from position 0 (§2.1's rule) always agree — 512 and 1024 land on
+wave *endpoints*, never in the middle — and why the 525-lane row checked in `engine/results.md` matches
+across three wave widths. A wave that starts off that alignment (a session prompt resumed at a ragged
+prefix) and straddles, say, 1024 inside itself hands its lower rows a 3-deep grouping where they would
+have used 2, and must be judged against its pin, never against another wave width — which is §2.6's
+standing rule said out loud. That is a fact about the design, recorded rather than fixed.
 
 **What a worker ran on the device** (correctness only, **no timing taken**; each inside its own
 `tools/gpu_lock.sh acquire`/`release` pair, and the gate does not self-lock):

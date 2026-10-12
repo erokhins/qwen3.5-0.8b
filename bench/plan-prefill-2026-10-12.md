@@ -333,13 +333,16 @@ asked is whether the 8 should become 16. **Answer: not yet, and here is the arit
 - **Why “provable” is the blocker, not cost.** Above 4096 the engine can only be checked against itself —
   there is no pin past 524 lanes (`wide520f`) and making one is P3-class work plus its own priced route
   allowance (D-2), not a worker’s call. The cheap-looking self-check, “same rows at two `--wave-rows`,
-  byte-for-byte”, is exactly the check that is **not** valid above the staging: `split` is taken from a
-  wave’s widest row (`split_for(lanes_last)`), so a row can be handed more lane blocks than it needs and
-  its `(max, sum)` merge groups differently than the same row run alone. For waves that start on a
-  multiple of 512 — every shipped fixture, and §2.1’s own alignment — each row’s need equals the wave’s,
-  and section (h)’s byte-identity A/B is sound. A wave that straddles a 512 boundary inside itself (a long
-  session prompt starting off that alignment) is a legal different rounding route, and must be judged
-  against its pin, never against another wave width — which is §2.6’s standing rule said out loud.
+  byte-for-byte”, is **not** generally valid above the staging: `split` is taken from a wave’s widest row
+  (`split_for(lanes_last)`), so a row can be handed more lane blocks than it needs and its `(max, sum)`
+  merge groups differently than the same row run alone. The precise condition is a **straddle** — the two
+  agree while a wave’s lane span contains no multiple of `MAXSC` strictly inside it above the staging.
+  That is why 64-aligned waves from position 0 (§2.1’s rule, and every shipped fixture) always agree:
+  `MAXSC` multiples land on wave endpoints, never in the middle, and it is why the 525-lane row priced in
+  `engine/results.md` is byte-identical across `--wave-rows 512 / 5 / 1`. A wave that starts off that
+  alignment (a session prompt resumed at a ragged prefix) and straddles, say, 1024 inside itself hands its
+  lower rows a 3-deep grouping where they would have used 2, and must be judged against its pin, never
+  against another wave width — which is §2.6’s standing rule said out loud.
 
 So: the ceiling stays at 4096, the constants stay where they are obeyed, and a lift is a *fixture* task
 (>4096-lane pin + its allowance) rather than a one-line constant change. If the 4k TTFT row in §5 turns
