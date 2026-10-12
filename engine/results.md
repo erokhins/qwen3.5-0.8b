@@ -2575,3 +2575,143 @@ The commands for that pass are the two `decode_run --wave-rows {512,1}` sides an
 `prototype/gdn_decode/gdn_decode --mode conv --tokens …`, all in `engine/results.md` above and the ops'
 own files. Still open after P6: `rec_kernel`'s per-token scan (P9's conditional package) and the
 attention block, which is still one token wide (P7/P8).
+
+## Q5 / P6b: D-7 is refuted — the prefill row was pinned all along, and one red line cannot be satisfied
+
+**One sentence:** the bare `logits_last.npy` is the prefill row on every `--decode N` fixture, so
+`chunk64b`'s four red lines were never a missing pin — one of them is an exact BF16 tie the shipped
+policy already covers but was never asked about (D-8, now fixed), one is a pinned winner 2 BF16 ULP
+ahead of the runner-up against an engine element error larger than that margin, which no legal bf16
+route can satisfy as shipped (D-9, left red on purpose), and `wide520f`'s two are the 512-lane ceiling
+that P7 exists to remove; **nothing was re-pinned, no band or margin was touched, and the engine's
+prefill is not wrong for a ragged prompt end.**
+
+**Why the pin is the prefill row.** `tools/reference_dump.py::Recorder.pin` never prefixes
+`logits_last.npy`, and it refuses to let `--logit-steps` drop it — its own comment says §06.5's `y0`
+needs it, and a fixture without it is unpairable. Every manifest in `data/refs/` declares
+`logits_last: {step: "prefill"}`, and section (0)'s pairing check PASSes on both disputed fixtures:
+`argmax(bare logits_last.npy) == greedy_continuation[0]`, 760 vs 760 on `chunk64b`. §10.5's
+last-writer-wins trap is real but belongs to `input_ids` and `pre_final_hidden`, which the decode hooks
+re-pin unprefixed; `logits_last` is written once, prefill-side. So the prescribed remedy — re-pin under
+a distinct name, or skip `y0` loudly — had no premise: a skip would have skipped a pin that exists and
+passes, which is the silent skip this file refuses everywhere else.
+
+**`chunk64b`'s four lines, decomposed.**
+
+| the line | what it actually is | disposition |
+|---|---|---|
+| `the prompt's last token samples greedy_continuation[0]` — 1596 vs 760 | the pinned prefill row is an **exact 2-way BF16 tie**: ids 760 and 1596 both 19.875, payload `0x419f`. The engine's own logit at 1596 is 19.815098, which rounds back to `0x419f`. This is D-1's TIE POLICY case exactly — but §06.5's row was judged by a bare `== greedy[0]` that never called `tie_verdict`, the only judged step with that treatment | **D-8, fixed**: `y0` now goes through `tie_verdict(PREFILL_ROW, …)`. The line reads PASS with a TIE above it |
+| `generation step 0 samples greedy_continuation[1]` — 20619 vs 8337 | the pin puts 8337 at 15.625 and 20619 at 15.500 — a gap of 0.125 = **2 BF16 ULP** at that magnitude — while the engine's maxabs at that step is **0.2509**. Its logits pass the band (cos 0.999919, deficit 8.059e−05 against G5's 5e−04, meanrel 1.199 %) | **D-9, left red**: an admitting rule needs a sized denominator (D-6's family). Recorded in `EXPECTED_RED`, not skipped, not tolerated |
+| `all 30 generated ids match, in order` | the consequence of step 0 — one shifted sample mismatches the whole order-sensitive list (`unmatched steps [0]`, every other id equal) | follows step 0 |
+| `step 0: argmax agrees with the pin` | same as line 2, seen from section (b) | follows step 0 |
+
+The FAIL line that produced D-7 was itself a bug and is fixed separately: section (b) printed *"the pin
+is tied but the engine's id is not one of the tied ids"* for **every** unadmitted argmax failure, tied or
+not — an assertion the code never evaluated, on the step whose pin has a single winner by 2 ULP. It now
+prints what was measured (top1/top2 and their values, the gap in BF16 ULP, the engine's values at both,
+and whether its element error exceeds the margin), and `--selftest` requires the negation of the old
+string on an untied step. A gate line that asserts an unchecked fact is worse than a silent gate: this
+one bought a whole wrong diagnosis.
+
+**The engine's prefill is not wrong.** Against the pins (`tmp/` probe over the gate's own dumps, not a
+gate check): prefill row cos **0.999893** (deficit 1.07e−04, meanrel 1.57 %), step 0 cos 0.999919, step 1
+cos 0.999908 — every one inside §10.1 G5's 5e−04 floor; 29 of the 30 pinned generation samples reproduce
+exactly, and the 30th is step 0 above. The only token that differs after the prompt is one the reference
+had not decided, and the one before it is a proved tie. This is the same conclusion §10.4 and A-18 reach
+from the other direction: bf16 token equality dies at a near-tie, and a near-tie at 2 ULP is inside the
+legal error budget of any route.
+
+**`wide520f` never reaches `y0`.** Its two failures are `the planned run fits the attention stage's
+lane ceiling` (500 prompt + 24 generation = **524 lanes vs `MAXSC = 512`**) and the `decode_run exits 0
+— rc=1` that follows from `kernels_attn.cpp` refusing lane 513. That is P7's package, not a fixture
+defect and not an expected-red line: the fixture is inert until the split-K route lands, exactly as P3
+recorded. **Seven green is therefore today's ceiling**, and the eight-fixture table below is the agreed
+acceptance shape: seven PASS, `chunk64b` red on its three recorded lines, `wide520f` pending P7.
+
+**Eight fixtures, re-run against this tree** (`engine/build.sh` re-run first; correctness only, **no
+timing taken** — the `ms/step` the gate prints is a by-product and is not a measurement, and these ran
+with the GPU busy serving this session, `util` recorded as read and discounted as usual):
+
+| fixture | checks | verdict | wall | `util` at run |
+|---|---|---|---|---|
+| `dec8` | 161 | PASS | 2 s | 93 % |
+| `dec64f` | 643 | PASS — 2 steps reported TIE (17, 18) | 7 s | 95 % |
+| `dec64t` | 640 | PASS | 7 s | 95 % |
+| `dec300f` | 1149 | PASS | 19 s | 93 % |
+| `mt32f` | 384 | PASS | 11 s | 95 % |
+| `p128` | 190 | PASS | 7 s | 93 % |
+| `chunk64b` | 365 (was 363) | **3 FAIL, all three on the D-9 list** — `[expected-red] chunk64b: 3 of 3`; y0 now PASSes with a TIE | 7 s | 93 % |
+| `wide520f` | 78 | 2 FAIL — lane ceiling, P7's work, y0 never ran | 2 s | 93 % |
+
+`chunk64b`'s count moved 363/4 → 365/3: +2 checks (the prefill row's tie-policy check and its id-line
+admission), −1 failure (the y0 line). No other fixture's count moved, and the seven PASSes are the same
+counts P6 shipped.
+
+**(g) conv_fp, engine against pin, before P6 against now.** The pre-P6 logs are the P5-era pass the P6
+section diffed; the after side is the table above. Every engine-vs-pin line is the **same string** in
+both logs, including the comparable one (the pin's newest `k_conv−1` columns):
+
+| fixture | raw-extent line (`conv`) | comparable line (`conv WINDOW`) | before → after |
+|---|---|---|---|
+| `dec64f` | n2 0.725211 (r13), mean 5.241e−03 (r1) | n2 **0.996817** (r1), maxabs 0.125 (r5), mean 8.386e−05 (r6) | **identical, 0 delta** |
+| `dec64t` | n2 0.695949 (r0), mean 7.361e−03 (r2) | n2 **0.996833** (r7), maxabs 0.125 (r12), mean 1.496e−04 (r8) | **identical, 0 delta** |
+| `dec300f` | n2 0.731207 (r12), mean 4.247e−03 (r1) | — (no comparable `conv_fp` at this pin extent) | **identical, 0 delta** |
+| `mt32f` | n2 0.694237 (r0), mean 4.040e−03 (r2) | n2 **0.998001** (r7), maxabs 0.125 (r13), mean 8.203e−05 (r8) | **identical, 0 delta** |
+| `p128` | n2 0.716034 (r2), mean 3.833e−03 (r8) | n2 **1.003849** (r15), maxabs 0.125 (r16), mean 1.597e−04 (r8) | no pre-P6 device log; values match P6's committed row |
+| `chunk64b` | n2 0.645951 (r2), mean 3.891e−03 (r3) | n2 **0.996663** (r6), maxabs 0.125 (r16), mean 1.432e−04 (r10) | no pre-P6 device log; values match P6's committed row |
+| `dec8` | — (pinned before fingerprints existed) | — | nothing to compare |
+| `wide520f` | — (never reaches `(g)`: `decode_run` exits at the lane ceiling) | — | nothing to compare |
+
+So P6's numerics claim survives re-examination from the side the P6 section did not cover: `p128` and
+`chunk64b` had no pre-P6 device log, and their post-P6 conv-window distances are exactly what P6
+committed; the four fixtures that do have both logs moved by nothing at all.
+
+**(h) the GDN counters, now for all eight fixtures** — batched side / one-row side / carry side at
+`--wave-rows 5`. The claim is `rows_total` **equal on all three sides** (fewer launches, identical work)
+and `rows_max` = the wave width where a wave really was carried:
+
+| fixture | batched (`--wave-rows 512`) | one-row (`--wave-rows 1`) | carry (`--wave-rows 5`) | `rows_total` equal |
+|---|---|---|---|---|
+| `dec8` | 162 / 18 / 450 / 17 | 450 / 0 / 450 / 1 | 216 / 72 / 450 / 5 | **450** |
+| `dec64f` | 1170 / 18 / 1458 / 17 | 1458 / 0 / 1458 / 1 | 1224 / 72 / 1458 / 5 | **1458** |
+| `dec64t` | 1170 / 18 / 1638 / 27 | 1638 / 0 / 1638 / 1 | 1260 / 108 / 1638 / 5 | **1638** |
+| `dec300f` | 2322 / 18 / 7614 / 295 | 7614 / 0 / 7614 / 1 | 3366 / 1062 / 7614 / 5 | **7614** |
+| `mt32f` | 594 / 18 / 4752 / 232 | 4752 / 0 / 4752 / 1 | 1422 / 846 / 4752 / 5 | **4752** |
+| `p128` | 162 / 18 / 2448 / 128 | 2448 / 0 / 2448 / 1 | 612 / 468 / 2448 / 5 | **2448** |
+| `chunk64b` | 558 / 18 / 2700 / 120 | 2700 / 0 / 2700 / 1 | 972 / 432 / 2700 / 5 | **2700** |
+| `wide520f` | — no counters: the run dies before any launch | — | — | not reached |
+
+`p128` and `chunk64b` are the two rows P6's table did not have. All three GDN families
+(`gdn_conv`, `gdn_gates`, `gdn_gated_norm`) report identical quadruples per fixture, which is what the
+row above compresses into one column.
+
+**Coverage holes this pass found, named rather than papered over.**
+
+* **Only `chunk64b` exercises a tied prefill row.** The other seven have single winners at `y0` with
+  gaps from 0.5 (wide520f) to 5.25 (dec8), so `--y0-alt` — the admitting half of D-8 — can only be
+  exercised on that one fixture. `--selftest` prints a `[SKIP]` naming the fixture that can run it,
+  rather than pretending coverage.
+* **A pinned tie at `y0` is luck, not design.** P3 pinned `chunk64b` for the 64-chunk carry; nobody chose
+  it for its tie. If D-8's admitting path is to stay covered, a future fixture needs a prompt end the
+  reference genuinely does not decide, and that is a dumper decision, not a gate one.
+* **`wide520f` cannot be gated at all until P7**, so the >512-lane boundary P3 pinned for remains
+  unexercised on device — unchanged from P3's own note.
+* **The gate never compares the prefill row's logits vector to the pin**, only its argmax. Section (b)
+  starts at the first decode step. The cos figures quoted above came from a probe over the dumps, so they
+  are not regression-protected. Whether `y0`'s vector should be judged (and at which floor — the prefill
+  row has no predecessor to cascade from) is a band question for the main agent, not a change to make
+  from here.
+
+**What a worker ran on the device (correctness only, no timing taken).** `engine/build.sh`, then
+`engine/gate.py --fixture {dec8, dec64f, dec64t, mt32f, p128, chunk64b, dec300f, wide520f}`, each inside
+its own `tools/gpu_lock.sh acquire q5p6b` / `release q5p6b` pair (the gate does **not** self-lock), `util`
+93–95 % throughout, walls 2/7/7/19/11/7/7/2 s — **counts, never durations, and none of these is a
+duration.** CPU-side: `engine/gate.py --selftest --fixture {dec8, chunk64b}` (both SELFTEST PASS, 22 s on
+`chunk64b`), including the two new cases `--break-y0` (must FAIL, all fixtures) and `--y0-alt` (must be
+ADMITTED, `chunk64b` only), and the updated `--break-logits 2` needles.
+
+**Handed to the main agent.** The eight gate commands above are also the timing pass's starting point;
+nothing here needs a re-run for correctness. If a margin preflight for `p128`/`chunk64b` is wanted
+against a true pre-P6 binary, that needs a `ccbfbff` worktree build (the two fixtures have no pre-P6
+device log), which is a main-agent device-window decision. `speccheck/` was not touched and was not run:
+nothing in this pass can reach `speccheck/specimpl.py` or a gate file other than `engine/gate.py`.
