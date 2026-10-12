@@ -1925,19 +1925,30 @@ def wave_expect(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int
     return out
 
 
-def wave_launchstat_lines(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int) -> list:
+def wave_launchstat_lines(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int,
+                          family_rows: dict | None = None) -> list:
     """`wave_expect()` formatted as the `LAUNCHSTAT` lines the engine prints. Stand-in only — a real
     run's counters come from the launchers — but produced from the same function the check compares
-    against, so the dry-run plumbing cannot drift from the device one."""
-    return [f"LAUNCHSTAT family={fam} calls={c['calls']} calls_batched={c['calls_batched']}"
-            f" rows_total={c['rows_total']} rows_max={c['rows_max']}"
-            for fam, c in wave_expect(counts, prompt_len, decode_steps, wave_rows).items()]
+    against, so the dry-run plumbing cannot drift from the device one.
+
+    `family_rows` names families whose observed width differs from the side's wave width, which is how
+    `--break-wave` and `--break-gdn-one-row` write the counters of a body that silently ran one row at
+    a time while still asking for (and echoing) a wide wave."""
+    out = []
+    for fam, c in wave_expect(counts, prompt_len, decode_steps, wave_rows).items():
+        if family_rows and fam in family_rows:
+            c = wave_expect({fam: counts[fam]}, prompt_len, decode_steps,
+                            family_rows[fam])[fam]
+        out.append(f"LAUNCHSTAT family={fam} calls={c['calls']} calls_batched={c['calls_batched']}"
+                   f" rows_total={c['rows_total']} rows_max={c['rows_max']}")
+    return out
 
 
 def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: dict,
                         work: Path, wave_rows: int, break_wave: bool = False,
-                        break_ab_logits: int = -1) -> dict:
-    """The two sides of section (h), on the CPU, for `--dry-run` / `--selftest`.
+                        break_ab_logits: int = -1, carry_rows: int = 0,
+                        break_gdn_one_row: bool = False) -> dict:
+    """The sides of section (h), on the CPU, for `--dry-run` / `--selftest`.
 
     Like section (d) in dry-run mode this is Python comparing with itself — said out loud in the note
     the caller appends — and its job is to prove the CHECKER discriminates, not the engine. The logits
@@ -1945,10 +1956,16 @@ def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: d
     numbers; `--break-ab-logits` differs one file on the one-row side to prove the byte comparison
     bites, and `--break-wave` writes one-row counters for a multi-row wave to prove the launch
     comparison bites — each aimed at one half, so neither injection can satisfy itself.
+
+    `carry_rows` > 0 adds P6's third side: the same prompt run in waves that small, so the prompt end
+    falls mid-chunk and the conv window has to be carried across a wave boundary. Its logits are
+    identical to the wide side's by construction here, which is why the injection that matters for it
+    is `--break-gdn-one-row` (the wide GDN launches never happened), not a logits perturbation.
     """
     greedy = man["greedy_continuation"]
 
-    def side(name: str, requested_rows: int, observed_rows: int, perturbs: bool) -> dict:
+    def side(name: str, requested_rows: int, observed_rows: int, perturbs: bool,
+             only_one_row: dict | None = None) -> dict:
         out_dir = work / name
         out_dir.mkdir(parents=True, exist_ok=True)
         for stale in out_dir.glob("logits*.bin"):
@@ -1986,7 +2003,8 @@ def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: d
             (out_dir / f"logits{pos}.bin").write_bytes(
                 np.arange(64, dtype=np.float32).tobytes())
             perturb(pos)
-        lines += wave_launchstat_lines(counts, len(prompt_ids), len(dec_logits), observed_rows)
+        lines += wave_launchstat_lines(counts, len(prompt_ids), len(dec_logits), observed_rows,
+                                       only_one_row)
         lines.append(f"RESULT mode=run steps={len(prompt_ids) + len(dec_logits)} ms_total=0"
                      f" ms_per_step=0 last_sampled={greedy[-1]}"
                      f" prefix_len={len(prompt_ids) + len(dec_logits)} stopped=0")
@@ -1995,10 +2013,17 @@ def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: d
 
     # `break_wave` is the refactor: the driver still asked for (and echoes) a wide wave, but the body
     # submitted one row at a time, so only the counters change. That is exactly the state of an engine
-    # whose batched kernels are never reached.
-    return {"batched": side("ab_batched", wave_rows, 1 if break_wave else wave_rows,
-                             perturbs=False),
-            "perrow": side("ab_perrow", 1, 1, perturbs=True)}
+    # whose batched kernels are never reached. `break_gdn_one_row` is the same bug aimed at ONE family
+    # — the three GDN sites — so the GDN checks are seen to bite on their own instead of hiding behind
+    # glue's, which is the locality rule `prototype/mlp_gemv/results.md` insists on.
+    gdn_one_row = {f: 1 for f in counts if f.startswith("gdn_")} if break_gdn_one_row else None
+    sides = {"batched": side("ab_batched", wave_rows, 1 if break_wave else wave_rows,
+                              perturbs=False,
+                              only_one_row=None if break_wave else gdn_one_row),
+             "perrow": side("ab_perrow", 1, 1, perturbs=True)}
+    if carry_rows > 1:
+        sides["carry"] = side("ab_carry", carry_rows, carry_rows, perturbs=False)
+    return sides
 
 
 def compare_dump_dirs(a: Path, b: Path) -> tuple:
@@ -2022,24 +2047,28 @@ def compare_dump_dirs(a: Path, b: Path) -> tuple:
 
 def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_steps: int,
                          wave_rows: int, *, stand_in: bool) -> None:
-    """Section (h). `sides` is what `batched_ab_stand_in` returns, or the same shape built from two
-    real `decode_run` runs; one judging function, so the negative exercises the code that judges the
-    engine."""
-    section("(h) the batched path — counted launches, not inferred outputs (§08.2, P4b/P5)")
+    """Section (h). `sides` is what `batched_ab_stand_in` returns, or the same shape built from real
+    `decode_run` runs; one judging function, so the negative exercises the code that judges the
+    engine. Two sides (`batched`, `perrow`) is P4b/P5's shape; a third (`carry`, P6) is judged by the
+    same rules and compared for bit-identity against the wide side."""
+    section("(h) the batched path — counted launches, not inferred outputs (§08.2, P4b/P5/P6)")
     batched, perrow = sides["batched"], sides["perrow"]
+    judged = [("batched", batched), ("one-row", perrow)]
+    if "carry" in sides:
+        judged.append(("carry", sides["carry"]))
 
     # The knob first: if `--wave-rows` were ignored, every count below would be an accident. The
     # engine echoes the scratch width it actually allocated, on the PREFILL line.
-    for label, side in (("batched", batched), ("one-row", perrow)):
+    for label, side in judged:
         echoed = side["run"].get("prefill", {}).get("wave_rows")
         check(echoed is not None and str(echoed) == str(side["requested_wave_rows"]),
               f"decode_run honoured --wave-rows on the {label} side",
               f"PREFILL wave_rows={echoed}, the command asked"
               f" {side['requested_wave_rows']}")
 
-    want = {"batched": wave_expect(counts, prompt_len, decode_steps, wave_rows),
-            "one-row": wave_expect(counts, prompt_len, decode_steps, 1)}
-    for label, side in (("batched", batched), ("one-row", perrow)):
+    want = {label: wave_expect(counts, prompt_len, decode_steps, side["requested_wave_rows"])
+            for label, side in judged}
+    for label, side in judged:
         got = side["run"].get("launchstat", {})
         check(bool(got), f"the {label} run reported observed launch counters",
               "no LAUNCHSTAT line: the counters are compiled out or the driver stopped printing"
@@ -2093,14 +2122,40 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
           f"proj calls_batched={rpj.get('calls_batched')} rows_max={rpj.get('rows_max')}"
           " — both must be 0 and 1, or the side named `one-row` was not one token at a time")
 
+    # P6's half, in the same shape again: the three GDN sites the wave now issues once per layer
+    # (conv §04.2, gates §04.3, gated norm §04.5). They are the launches whose batching could have
+    # moved bits — the conv reads a carried window and the norm reduces over a head — so "the wave
+    # batched the mixer" is again a claim the outputs cannot make. `gdn_rec` (§04.4's scan) is absent
+    # from this family list on purpose: it has no width to report, so counting it would be a check that
+    # cannot fail (`engine/launch_stats.h`).
+    for fam, what in (("gdn_conv", "conv (§04.2)"), ("gdn_gates", "gates (§04.3)"),
+                      ("gdn_gated_norm", "gated norm (§04.5)")):
+        b = batched["run"].get("launchstat", {}).get(fam, {})
+        check(b.get("calls_batched", 0) > 0 and b.get("rows_max", 0) == min(prompt_len, wave_rows),
+              f"the batched side issues TOKEN-BATCHED {what} launches",
+              f"{fam} calls={b.get('calls')} calls_batched={b.get('calls_batched')}"
+              f" rows_max={b.get('rows_max')}, expected rows_max={min(prompt_len, wave_rows)} for a"
+              f" {prompt_len}-token prompt. rows_max=1 here means the mixer still runs one token per"
+              f" launch and P6's wide {fam} kernel is dead code")
+        r = perrow["run"].get("launchstat", {}).get(fam, {})
+        check(r.get("calls_batched", -1) == 0 and r.get("rows_max", -1) == 1,
+              f"the one-row side issues ONE-ROW {what} launches",
+              f"{fam} calls_batched={r.get('calls_batched')} rows_max={r.get('rows_max')}"
+              " — both must be 0 and 1")
+
     # Same work, fewer launches. `rows_total` wave-independent is the half that says the launch
-    # delta is batching rather than skipped work.
+    # delta is batching rather than skipped work. Every side is compared against the wide one, so a
+    # third (--wave-rows 5) side is held to the same "not less work" rule as the one-row side.
     for family in sorted(counts):
         b_total = batched["run"].get("launchstat", {}).get(family, {}).get("rows_total")
-        r_total = perrow["run"].get("launchstat", {}).get(family, {}).get("rows_total")
-        check(b_total == r_total and b_total is not None,
-              f"both sides cover the same {family} rows (fewer launches, not less work)",
-              f"rows_total {b_total} vs {r_total}")
+        for label, side in judged:
+            if label == "batched":
+                continue
+            o_total = side["run"].get("launchstat", {}).get(family, {}).get("rows_total")
+            check(b_total == o_total and b_total is not None,
+                  f"the {label} side covers the same {family} rows as the batched side"
+                  " (fewer launches, not less work)",
+                  f"rows_total {b_total} vs {o_total}")
     b_calls = sum(c.get("calls", 0) for c in batched["run"].get("launchstat", {}).values())
     r_calls = sum(c.get("calls", 0) for c in perrow["run"].get("launchstat", {}).values())
     # The delta belongs to the PROMPT wave, so that is what gets compared. Generation steps are one
@@ -2115,11 +2170,11 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
     waves_r = len(wave_row_sizes(prompt_len, 1))
     wave_ratio = (r_wave / b_wave) if b_wave else 0.0
     check(b_wave > 0 and r_wave > b_wave and r_wave * waves_b == b_wave * waves_r,
-          "the batched run issues materially fewer glue+proj+MLP launches for the prompt wave",
-          f"prompt wave: {b_wave} glue+proj+MLP launches across {waves_b} wave(s) vs {r_wave} across"
-          f" {waves_r} — {wave_ratio:.0f}x fewer for a {prompt_len}-token prompt. The whole run is"
-          f" {b_calls} vs {r_calls}: {decode_steps} generation steps are one token wide however the"
-          " prompt is batched")
+          "the batched run issues materially fewer batchable launches for the prompt wave",
+          f"prompt wave: {b_wave} glue+proj+MLP+GDN launches across {waves_b} wave(s) vs {r_wave}"
+          f" across {waves_r} — {wave_ratio:.0f}x fewer for a {prompt_len}-token prompt. The whole"
+          f" run is {b_calls} vs {r_calls}: {decode_steps} generation steps are one token wide"
+          " however the prompt is batched")
 
     # And the outputs must not have moved: that is the half the fixtures could not supply, because
     # they only ever saw one of these two runs.
@@ -2133,13 +2188,50 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
     check(not differing and nfiles > 0, "both sides write bit-identical logits",
           f"{nfiles} files, {nbytes} bytes compared, {len(differing)} differing"
           + (f": {differing[:5]}" if differing else ""))
+
+    # ---- P6: the conv window CARRIED across wave boundaries (§2.4's end condition, A-04's `T > 1`).
+    # This is the check the wide run cannot make for itself: at `--wave-rows 512` a shipped fixture is
+    # ONE wave, so the window is read once, at the zeros §08.2 starts a request with, and written once.
+    # Every bug in the carry — zero-padding where the window belongs, a window read after the launch
+    # instead of before, new_win taken from the post-conv `u` instead of the pre-conv `raw` — is
+    # invisible on a single-wave prompt and blindingly visible here, because each of the
+    # ceil(T/5)−1 interior boundaries re-reads what the previous wave left. These are the logits of a
+    # prompt ended mid-chunk, so if this passes the window is right, not merely plausible.
+    if "carry" in sides:
+        carry = sides["carry"]
+        c_rows = carry["requested_wave_rows"]
+        sizes = wave_row_sizes(prompt_len, c_rows)
+        check(len(sizes) > 1, "the carried-window side really splits the prompt into several waves",
+              f"--wave-rows {c_rows} on a {prompt_len}-token prompt gives {len(sizes)} wave(s). One"
+              " wave would make this whole side vacuous — there would be no interior boundary to carry"
+              " across, which is the case the wide run already covers")
+        cl = carry["run"].get("launchstat", {})
+        for fam, what in (("gdn_conv", "conv (§04.2)"), ("gdn_gates", "gates (§04.3)"),
+                          ("gdn_gated_norm", "gated norm (§04.5)")):
+            c = cl.get(fam, {})
+            check(c.get("calls_batched", 0) > 0
+                  and c.get("rows_max", 0) == min(prompt_len, c_rows),
+                  f"the carried-window side issues wide {what} launches (so a window really was"
+                  " carried between waves)",
+                  f"{fam} {c}, expected rows_max={min(prompt_len, c_rows)} on every interior wave")
+        nk, nb, diff = compare_dump_dirs(batched["dir"], carry["dir"])
+        check(not diff and nk > 0,
+              f"the {len(sizes)}-wave side writes bit-identical logits to the one-wave side"
+              " — the carried conv window is exact (A-04's T>1 end condition)",
+              f"{nk} files, {nb} bytes compared, {len(diff)} differing"
+              + (f": {diff[:5]}" if diff else "")
+              + ". A difference here is the window, not rounding: both sides read the same weights in"
+                " the same order and every other family is already proven bit-identical above")
+        notes.append(f"conv window carried across {len(sizes) - 1} interior wave boundary(ies) at"
+                     f" --wave-rows {c_rows}, logits bit-identical to the single-wave run"
+                     f" ({nk} files). This is A-04's `T > 1` clause tested rather than assumed.")
     if stand_in:
         notes.append("section (h) in dry-run mode is the gate's own arithmetic compared with itself"
                      " (the stand-in emits both sides), exactly as section (d) is: it proves the"
                      " checker bites, never anything about the engine.")
     notes.append(
-        f"P4b+P5 launch count on {REFS.name}: the {prompt_len}-token prompt wave issued {b_wave}"
-        f" glue+proj+MLP launches batched vs {r_wave} with --wave-rows 1 ({wave_ratio:.0f}x fewer);"
+        f"P4b+P5+P6 launch count on {REFS.name}: the {prompt_len}-token prompt wave issued {b_wave}"
+        f" batchable launches vs {r_wave} with --wave-rows 1 ({wave_ratio:.0f}x fewer);"
         " the whole run, " f"{b_calls} vs {r_calls}, because {decode_steps} generation steps are one"
         " token wide either way. Counts, never durations — the timing pass is the main agent's"
         " (bench/performance-status.md §6) and the command is in engine/results.md.")
@@ -2148,9 +2240,10 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
 
 
 def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: bool,
-                   work: Path, wave_rows: int) -> dict:
+                   work: Path, wave_rows: int, carry_rows: int = 0) -> dict:
     """Run this fixture's prompt twice for section (h): once at the scratch's full wave width, once
-    with `decode_run --wave-rows 1`.
+    with `decode_run --wave-rows 1`. `carry_rows` (P6) adds a third run in small waves, which is the
+    only shape in which the conv window has to be carried from one wave to the next.
 
     Same flags as the main run apart from `--wave-rows` and `--out`, plus `--prefill-logits all` on
     BOTH sides — under §06.5's default there would be one logits vector per side to compare instead of
@@ -2173,7 +2266,10 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
               f"rc={proc.returncode}" + (" " + proc.stderr.strip()[-300:] if proc.stderr.strip() else ""))
         return {"requested_wave_rows": rows, "dir": out_dir, "run": parse_run(proc.stdout)}
 
-    return {"batched": side("ab_batched", wave_rows), "perrow": side("ab_perrow", 1)}
+    out = {"batched": side("ab_batched", wave_rows), "perrow": side("ab_perrow", 1)}
+    if carry_rows > 1:
+        out["carry"] = side("ab_carry", carry_rows)
+    return out
 
 
 
@@ -2715,27 +2811,55 @@ def selftest(fixture: str = "dec8") -> int:
          ["[FAIL] batched side: glue launches match the wave arithmetic",
           "[FAIL] batched side: proj launches match the wave arithmetic",
           "[FAIL] batched side: mlp_gateup launches match the wave arithmetic",
+          "[FAIL] batched side: gdn_conv launches match the wave arithmetic",
           "[FAIL] the batched side issues ROW-BATCHED glue launches",
           "[FAIL] the batched side issues TOKEN-BATCHED MLP launches",
           "[FAIL] the batched side issues TOKEN-BATCHED projection launches",
-          "[FAIL] the batched run issues materially fewer glue+proj+MLP launches",
+          "[FAIL] the batched side issues TOKEN-BATCHED conv (§04.2) launches",
+          "[FAIL] the batched run issues materially fewer batchable launches",
           "![FAIL] one-row side: glue launches match the wave arithmetic",
           "![FAIL] one-row side: proj launches match the wave arithmetic",
           "![FAIL] the one-row side issues ONE-ROW projection launches",
           "![FAIL] both sides sample the same token ids",
           "![FAIL] both sides write bit-identical logits",
-          "![FAIL] both sides cover the same glue rows",
-          "![FAIL] both sides cover the same proj rows"],
-         "a wide wave that submitted one row per launch (P4's and P5's batched kernels never" 
+          "![FAIL] the one-row side covers the same glue rows as the batched side",
+          "![FAIL] the one-row side covers the same proj rows as the batched side",
+          "![FAIL] the carried-window side"],
+         "a wide wave that submitted one row per launch (P4's, P5's and P6's batched kernels never"
          " reached). Only the launch half may notice: sampled ids and logits are bit-identical either"
-         " way, so the identity half must stay green, `both sides cover the same proj rows` must stay"
-         " green (batching moves rows between launches, it does not add or remove work), and the"
-         " `--wave-rows 1` side must be untouched"),
+         " way, so the identity half must stay green, `the one-row side covers the same proj rows as"
+         " the batched side` must stay green (batching moves rows between launches, it does not add or"
+         " remove work), the `--wave-rows 1` side must be untouched, and the carried-window side must"
+         " be unaffected — it was never asked to batch at the wide width"),
+        (["--break-gdn-one-row"], 1,
+         ["[FAIL] batched side: gdn_conv launches match the wave arithmetic",
+          "[FAIL] batched side: gdn_gates launches match the wave arithmetic",
+          "[FAIL] batched side: gdn_gated_norm launches match the wave arithmetic",
+          "[FAIL] the batched side issues TOKEN-BATCHED conv (§04.2) launches",
+          "[FAIL] the batched side issues TOKEN-BATCHED gates (§04.3) launches",
+          "[FAIL] the batched side issues TOKEN-BATCHED gated norm (§04.5) launches",
+          "![FAIL] batched side: glue launches match the wave arithmetic",
+          "![FAIL] batched side: proj launches match the wave arithmetic",
+          "![FAIL] batched side: mlp_gateup launches match the wave arithmetic",
+          "![FAIL] the batched side issues ROW-BATCHED glue launches",
+          "![FAIL] the batched side issues TOKEN-BATCHED projection launches",
+          "![FAIL] the one-row side: gdn_conv launches match the wave arithmetic",
+          "![FAIL] the one-row side issues ONE-ROW conv (§04.2) launches",
+          "![FAIL] both sides write bit-identical logits",
+          "![FAIL] both sides sample the same token ids",
+          "![FAIL] the one-row side covers the same gdn_conv rows as the batched side",
+          "![FAIL] the carried-window side"],
+         "P6's aimed negative: the three wide GDN launches silently degenerated to one row per token"
+         " while glue/proj/MLP stayed batched. It must be caught by the launch half, by the GDN checks"
+         " specifically — every other family's check stays green, so none of them is quietly carrying"
+         " this proof — and by nothing on the one-row side, which is correct by construction. The ids"
+         " and logits of such a run are identical to the correct one, which is the whole reason this"
+         " section counts submissions instead of reading outputs"),
         (["--break-ab-logits", str(ab_pos)], 1,
          [f"[FAIL] both sides write bit-identical logits", "1 differing: ['logits%d.bin']" % ab_pos,
           "![FAIL] the batched side issues ROW-BATCHED glue launches",
           "![FAIL] the batched side issues TOKEN-BATCHED projection launches",
-          "![FAIL] the batched run issues materially fewer glue+proj+MLP launches",
+          "![FAIL] the batched run issues materially fewer batchable launches",
           "![FAIL] both sides sample the same token ids"],
          f"position {ab_pos}'s logits differ by one byte on the one-row side: the byte comparison must"
          " bite and name that one file, while every launch count stays correct (the locality rule"
@@ -3000,6 +3124,13 @@ def main() -> int:
                          "per-token glue/MLP looks like from the outside. The launch half must FAIL and "
                          "the bit-identity half must stay green — the outputs cannot see this bug, "
                          "which is the entire reason section (h) counts launches")
+    ap.add_argument("--break-gdn-one-row", action="store_true",
+                    help="with --dry-run: the wide GDN conv/gates/gated-norm launches never happened"
+                         " — the run asks for (and echoes) a wide wave, but those three families"
+                         " report one row per launch while glue/proj/MLP stay batched. Only the"
+                         " launch half may notice: the ids and logits are identical either way. This"
+                         " is P6's addition to the pair that keeps either half of section (h) from"
+                         " going vacuous, aimed at one family so the GDN checks are seen to bite")
     ap.add_argument("--break-ab-logits", type=int, default=-1, metavar="POS",
                     help="with --dry-run: differ run position POS's logits on the one-row side of "
                          "section (h), so the byte-comparison half is proved to bite and to name the "
@@ -3399,16 +3530,31 @@ def main() -> int:
     # ---- (h) the batched-path proof --------------------------------------------------------------
     # Runs on every device gate, because that is the only way a later refactor that quietly drops back
     # to per-row launches fails something. The counters come from the launchers (`engine/launch_stats.h`)
-    # and the two sides differ only in `--wave-rows`, so this is the one place in the tree that can tell
+    # and the sides differ only in `--wave-rows`, so this is the one place in the tree that can tell
     # "batching cost nothing" from "batching never ran" — the outputs cannot.
     counts = {"glue": want["glue"], "proj": want["proj"],
-              "mlp_gateup": want["mlp"] // 2, "mlp_down": want["mlp"] // 2}
+              "mlp_gateup": want["mlp"] // 2, "mlp_down": want["mlp"] // 2,
+              # P6's three token-parallel GDN sites. Each bills ONE launch per GDN layer per body at
+              # any width — the same per-body shape as glue/proj/MLP — so `wave_expect` can price a
+              # wave of them unchanged. `gdn_rec` (§04.4's scan) is absent on purpose: its launcher has
+              # no width to report, and a family that can only ever read rows=1 is a check that cannot
+              # fail (`engine/launch_stats.h` says the same).
+              "gdn_conv": want["gdn"] // 4, "gdn_gates": want["gdn"] // 4,
+              "gdn_gated_norm": want["gdn"] // 4}
     wave_rows = wave_row_ceiling()
+    # P6's third side: a prompt cut into waves of 5, so a 46-token prompt crosses nine interior wave
+    # boundaries and every one of them has to hand the conv window to the next. 5 is small enough to
+    # force that on every shipped fixture and is not a divisor of any of their lengths (64, 27, 46,
+    # 128, 300) — a side that divided evenly would put the prompt end on a boundary and test the case
+    # the wide run already tests.
+    carry_rows = 5
     if args.dry_run:
         sides = batched_ab_stand_in(man, prompt_ids, dec_logits, counts, work, wave_rows,
-                                    args.break_wave, args.break_ab_logits)
+                                    args.break_wave, args.break_ab_logits, carry_rows,
+                                    args.break_gdn_one_row)
     else:
-        sides = run_batched_ab(args, prompt_ids, n_decode, greedy, replay, work, wave_rows)
+        sides = run_batched_ab(args, prompt_ids, n_decode, greedy, replay, work, wave_rows,
+                               carry_rows)
     batched_proof_checks(sides, counts, len(prompt_ids), n_decode, wave_rows,
                          stand_in=args.dry_run)
     return report()
