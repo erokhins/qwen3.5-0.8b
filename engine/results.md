@@ -1199,3 +1199,128 @@ The band is still untouched, and `dec64f` is still red on its 10 band lines on p
 written up under "Decision 2", `dec64t` is direct evidence for option 1 and against leaving things as they
 are: a fixed absolute floor on the logits cos now demonstrably fires on steps where the reference cannot hold
 it against itself, and passes cleanly everywhere else.
+
+
+# Q1 of `bench/plan-2026-10-12`: band option 1 is in force — the margin is 3.50 because it is a measurement, and what that costs
+
+The operator's decision on "Decision 2" above was **option 1**: judge step *j* against the reference's own
+measured route spread at step *j*, not against an absolute floor the reference cannot hold against itself.
+`5d26bb5` implements it (`engine/gate.py`'s BAND + ROUTE ALLOWANCE blocks, `engine/route_allowance.py`,
+the `--engine-log`/`--out` growth in `engine/route_price.py`); `68c4e9d` is the unrelated driver fix from
+the same session, noted at the end. **Both deep fixtures now PASS**: `dec64f` with 2 steps admitted as
+proved ties, `dec64t` with nothing admitted at all.
+
+The rule, at step *j*:
+
+```
+1 - cos(engine_j, pin_j)  <=  3.50  x  route_1cos(j)        (shape)
+meanrel(engine_j, pin_j)  <=  0.42  x  route_meanrel(j)     (scale)
+```
+
+`route_*(j)` is `engine/route_price.py`'s chunked-vs-recurrent spread for that fixture, cached in
+`data/refs/<fixture>/route_allowance.json` with the prompt/feed/specimpl hashes `load_allowance` re-checks,
+so a stale spread fails the gate instead of silently becoming the band.
+
+## The derivation, re-derived from the shipped files
+
+`margin` is not chosen. It is `max over the priced fixture set of (engine deficit / route spread)`, rounded
+**up** at two decimals — the tightest constant that admits every step ever measured, with no safety factor.
+`engine/route_allowance.py` computes it and **refuses to write** a file whose measurement does not reproduce
+the constant in `engine/gate.py`'s BAND, which is what makes the number re-checkable rather than merely
+quoted. Re-deriving it from the two shipped allowance files (their `engine_*_when_priced` columns over their
+`route_*` columns, 128 steps total):
+
+| | `dec64f` | `dec64t` | sets the margin? |
+|---|---|---|---|
+| worst engine-deficit / route-spread, cos | **3.0368** at step 32 (2.1555e-3 over 7.0982e-4) | **3.4939** at step 54 (2.3281e-4 over 6.6635e-5) | `dec64t` step 54 → ceil2 = **3.50** |
+| worst engine / route, meanrel | 0.3344 at step 54 (1.2596 % over 3.7670 %) | 0.4111 at step 4 (2.0331 % over 4.9452 %) | `dec64t` step 4 → ceil2 = **0.42** |
+| steps the flat §10.1 G5 floor would have failed | 7 (27–32, 34) | 0 | — |
+| steps the two legal routes themselves fail G5 on | 6 (27–32) | 0 | — |
+
+Two things fall out of that table and both belong on the record.
+
+1. **The proposal in `results.md` guessed k = 4; the measurement says 3.50** — and 3.50 is *not* set by the
+   ill-conditioned `dec64f` excursion but by an ordinary, well-conditioned step of `dec64t`. Say the
+   inconvenient half plainly: a margin of **3.0 or below leaves `dec64f` step 32 and `dec64t` step 54 RED**,
+   and there is no headroom factor hiding that. The constant is a measured property of this engine at these
+   two fixtures, so if the engine gets worse the constant moves, and moving it is a visible three-place edit
+   (BAND, this comment, every cached file's `margin` field — `load_allowance` fails the gate when a file
+   disagrees with the code).
+2. **The `meanrel` column got the same treatment rather than being demoted to reported-only**, because cos
+   is scale-invariant: a mis-scaled final norm — exactly the class §10.2's meanrel ceiling exists for —
+   scores cos 1.000000. Reported-only would have handed that failure class back, which is the hole option 2
+   was rejected for. At 0.42 the meanrel line is not simply looser either: it is **tighter than the flat 5 %
+   ceiling at 52 of `dec64t`'s and 48 of `dec64f`'s steps** (tightest 1.5836 % and 1.2166 %), and it opens
+   only where two legal routes have already blown through 5 % themselves (their median is 8.11 % /
+   7.27 %, worst 26.6 % / 60.8 % — the flat ceiling was exceeded by legal reference forms at 44 of 64 steps
+   on `dec64f`). Same argument as the cos half, one column over.
+
+## Why this is a sharpening and not a loosening — the property that makes it defensible
+
+The allowance follows the reference's own conditioning, so **outside a low-energy window it is tighter than
+the floor it replaces**:
+
+| | all-steps cos cap vs the flat 5e-4 | tightest cap | widest cap |
+|---|---|---|---|
+| `dec64t` | **64 of 64 steps tighter** | 1.2274e-4 (step 41) — 4.1× the floor | 4.4043e-4 (step 0) — still under 5e-4 |
+| `dec64f` | **54 of 64 steps tighter** | 9.4788e-05 (step 24) — 5.3× the floor | 5.9983e-3 (step 28) — 12× the floor, inside the excursion |
+
+`dec64t` is the clean case to read: its widest route spread anywhere is 1.2584e-4, so **every** step of it is
+judged at `3.5 × 1.26e-4 ≈ 4.4e-4 < 5e-4`, i.e. more strictly than flat G5 was, on a fixture where the engine
+never needed an inch of allowance (worst deficit 2.4099e-4). The excursion steps of `dec64f` are where the
+band opens, and they are exactly the steps where two legal forms of the reference open it wider still. A band
+that is tight where the reference is tight and loose only where the reference is provably loose is a different
+instrument from a loosened floor.
+
+What still binds underneath it, unchanged and hard: **token identity (G7) exact per step**, the per-step
+**argmax** (the two legal routes agree with each other 64/64 on both fixtures), and the tie policy's proof.
+The allowance is a statement about the logits *vector*, never about the token.
+
+And the discriminator still works, which is the only thing that separates this from relabelling:
+`engine/gate.py --selftest --fixture dec64t` injects noise on **step 41** — the step whose allowance is
+tightest — sized to 1.5× that allowance and still **inside** the flat §10.1 G5 floor, and requires the gate to
+FAIL there. That is a failure class the old absolute band could not see at all, and the selftest now proves
+the new band sees it. `--break-allow` also refuses a step where 1.5× the allowance would not fit under the
+flat floor, so the negative cannot quietly degrade into the ordinary noise test.
+
+## The tripwire this derivation carries (written down because a new fixture can move it)
+
+`margin` is a **global max over the priced fixture set**. Therefore a newly priced fixture whose
+engine-deficit/route-spread ratio exceeds 3.4939 does not just price itself — it **raises the constant and
+loosens the gate for every existing fixture**. `engine/route_allowance.py` makes that loud rather than
+silent: it refuses a run that names only a subset of the fixtures carrying an allowance file (`stale_dir`),
+and it refuses to write when the derived constant differs from the one in `engine/gate.py`. The standing rule
+for the queue, operator's call, recorded here so nobody meets it as a surprise:
+
+> A new fixture whose ratio exceeds 3.4939 is a **finding, not a re-pricing**. Stop and report the step, the
+> fixture and the ratio. The answer is either a per-fixture margin (a real change to the rule) or something
+> true about that fixture; silently bumping 3.50 is neither.
+
+## What was not chosen, and why it is on the record
+
+* **Option 2 — gate the decision, not the vector** (per-step argmax only; logits demoted to reported
+  evidence). Cheapest and honest about what the gate really verifies, but it gives up any claim on the
+  vector's shape, i.e. the whole wrong-but-argmax-preserving class. The argmax rule is a hard gate *here*
+  too, unchanged — it is just not the only thing this gate checks.
+* **Option 3 — keep 0.9995 hard and label the window** (a per-fixture list of steps reported as `SPREAD`
+  but not armed). REJECTED, and the reason is the whole reason: **an exempted step is judged by NOTHING**, so
+  a real bug landing on an exempted step passes silently — and the list is hand-maintained from a measurement
+  that can move. Under the allowance there is no exempted step and no list to keep in sync: every step is
+  judged, by a number measured at that step.
+
+## What the pass does not buy
+
+* The spread is between two forms of **`specimpl`** (chunked §04.7 vs recurrent §04.4) against a pin made by
+  **HF**. That is inherited from the instrument, and it means the allowance measures the GDN route choice
+  inside one Python reference, not every legal implementation route. It is the only end-to-end instrument
+  this repo has, and it is used as such, with its bias named.
+* `dec8` is **not priced** — `route_price.py` prints its 8-step table but no allowance file was written, so
+  its 8 steps are judged by the flat floors and every step line says `flat G5`. Pricing it is outstanding,
+  and would have to be re-derived against the whole priced set (see the tripwire).
+* The engine-side per-step state fingerprint is still unwritten, so "the engine's `S n2` equals the pinned
+  `S n2`" remains unmeasurable at depth. Decision 2's open question 1 is untouched by this commit.
+
+*Also from this session, unrelated to the band:* `68c4e9d` makes `decode_run` create its `--out` directory
+before loading weights. The failure it retires was losing a device window to `cannot open
+tmp/…/sampled.txt` after 1.55 GB of `hipMalloc` + `hipMemcpy` and a full run — now a bad path fails in
+milliseconds, and the refusal is printed before any step runs.
