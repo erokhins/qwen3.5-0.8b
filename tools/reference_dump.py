@@ -34,6 +34,22 @@ Flags:
                    ~1.7 GB (dec8 costs 25.9 MB per step); `--lean` is what buys depth.
   --deep-steps L   which decode steps keep the full dump under `--lean`: "63", "0,63", "all"
                    (default "all", which with `--lean` filters nothing).
+  --logit-steps L  which decode steps keep their own `logits_last` under `--lean`, in the same step
+                   vocabulary as --deep-steps: "0,1,2", "12,13", "all" (default: every step, which is
+                   what every fixture pinned before this flag has). The reason it exists is size
+                   arithmetic: one BF16 logits vector is 0.4738 MiB, so 128 steps of logits are
+                   60.6 MiB, which is the whole ~60 MB budget by itself — that is why `dec300f` had
+                   to ship `--deep-steps none` and so lost the `(g)` fingerprint-ruler proof. Dropping
+                   the logits nobody gates at those steps buys the space back for a full dump somewhere.
+                   A dropped step is DECLARED, never merely missing: every dropped step is named in the
+                   manifest's `logits_declared_absent`, one entry per step (not a count, a range or a
+                   ratio), and `engine/gate.py` section (0) skips exactly those steps and still exits 1
+                   on a logits file that simply vanished — §10.5 lives on the difference between "this
+                   pin chose not to carry it" and "this pin lost it". A fixture with declared gaps is
+                   pairable under `gate.py --no-engine` and is REFUSED by a device run, because sections
+                   (b)/(e) judge every pinned step against that step's pin and silently dropping steps is
+                   how a gate goes quiet. Interactions with --deep-steps are checked, not hoped about:
+                   see --help of this flag's error messages, raised before the model is even loaded.
   --logits-bits B  f32 (default, every existing fixture) | bf16. bf16 stores `logits_last`
                    as the BF16 bit pattern (uint16, bitcast — §10.5) instead of widened F32,
                    which halves the widest pin. Bit-lossless here, not approximately: these
@@ -96,6 +112,14 @@ def parse_args():
     p.add_argument("--deep-steps", default="all",
                    help='with --lean: which decode steps keep the full per-layer dump, '
                         'e.g. "63" or "0,63" or "all"')
+    p.add_argument("--logit-steps", default="all", metavar="L",
+                   help='with --lean: which decode steps keep their `logits_last`, e.g. "0,1,2" or '
+                        '"12,13" or "all" (the default, which is what every existing fixture was pinned '
+                        'with). Every step NOT listed is declared in the manifest as an intentional gap '
+                        'and is the only kind of missing logits `engine/gate.py` will skip; --deep-steps '
+                        'steps must appear here too (a full dump whose logits were dropped cannot be '
+                        'judged by section (b)), "none" is refused (no step left for G7 to judge), and '
+                        'a step beyond --decode is refused (nothing ran there)')
     p.add_argument("--logits-bits", default="f32", choices=["f32", "bf16"],
                    help="store logits_last as F32 (every existing fixture) or as BF16 bits")
     p.add_argument("--verify", default=None, metavar="DIR",
@@ -117,18 +141,93 @@ def is_per_layer_pin(name: str) -> bool:
     return name.startswith("L") or ".L" in name
 
 
-def parse_step_list(spec: str) -> set[str] | None:
-    """`--deep-steps` as step tags. "all" (and the default) means do not filter at all, which
-    is every fixture that existed before `--lean` and must stay byte-identical. "none" keeps no full
-    dump anywhere: logits + ids + fingerprints only, which is what a 128-step fixture has to do to fit
-    the budget (one full step is 26 MiB, 18 MiB of it the GDN state, and 128 steps of bf16 logits are
-    already 61 MiB — see `engine/results.md`, the breadth section)."""
+def step_tags(spec: str, flag: str, n_decode: int) -> set[str] | None:
+    """One step-list flag as step tags, checked against the chain this run actually pins.
+
+    `--deep-steps` and `--logit-steps` are the same kind of object — the set of decode steps that keep
+    something while the rest drop it — so they parse here and get the same bounds. "all" (and the
+    default) means do not filter at all, which is every fixture that existed before `--lean` and must
+    stay byte-identical. Neither flag takes a range or a ratio: the lists are comma-separated step
+    indices only, so that what lands in the manifest is a LIST OF STEPS and never a policy like "keep
+    one in eight", which is a weaker gate wearing a knob (`engine/gate.py` reads the declared gaps
+    per step, and `bench/plan-prefill-2026-10-12.md` §5.1 is where that rule is written down).
+
+    `"none"` means the empty set. What it MEANS differs per flag, so it is checked by the caller: for
+    `--deep-steps` it is how `dec300f` fits the budget (one full step is 26 MiB, 18 MiB of it the GDN
+    state, and 128 steps of bf16 logits are already 61 MiB — see `engine/results.md`, the breadth
+    section); for `--logit-steps` it is refused, because a fixture with no per-step logits has no
+    step left for §10 G7 to judge.
+    """
     spec = spec.strip()
     if spec in ("", "all"):
         return None
-    if spec == "none":
-        return set()
-    return {f"decode{int(s)}" for s in spec.split(",") if s.strip() != ""}
+    steps = []
+    for part in spec.split(","):
+        part = part.strip()
+        if part == "":
+            continue
+        if part == "none":
+            return set()
+        try:
+            step = int(part)
+        except ValueError:
+            raise SystemExit(
+                f"{flag}: {part!r} is not a step index. {spec!r}: the step lists take"
+                " comma-separated indices (\"0,1,2\"), not ranges and not expressions") from None
+        if step < 0:
+            raise SystemExit(f"{flag}: step {step} is negative")
+        if step >= n_decode:
+            bound = (f"--decode {n_decode} runs no decode steps at all" if n_decode == 0 else
+                     f"--decode {n_decode} runs steps 0..{n_decode - 1}, so there is nothing to keep"
+                     " at this step")
+            raise SystemExit(f"{flag}: step {step} is outside the forced chain this run pins ({bound})")
+        steps.append(step)
+    return {f"decode{s}" for s in steps}
+
+
+def check_pin_policy(args, logit_steps: set[str] | None) -> None:
+    """Refuse a pin policy that could not be gated, and refuse it before the model is loaded.
+
+    All three refusals are one failure in different clothes: a policy that quietly removes the thing a
+    gate judges, which leaves a fixture that cannot fail and therefore proves nothing.
+
+    * `--logit-steps` without `--lean` — the filter lives inside the lean policy, so without `--lean`
+      the flag would be a silent no-op. (`--deep-steps` has that wart today; it is left alone rather
+      than redefined under a fixture that was made with it, but the new flag does not inherit it.)
+    * `--logit-steps none` — no per-step logits at all means no sampled-id check (§10 G7) and no
+      logits band (section (b)) at any step: the fingerprints alone would be a state gate pretending
+      to be a token gate.
+    * a `--deep-steps` step that is not also in `--logit-steps` — the deep step is the expensive one,
+      the step `(g)`'s fingerprint ruler is proved at, and dropping ITS logits would leave the single
+      full dump of the run with nothing for section (b) to judge. If the intent was to save the
+      logits, drop the deep step instead and say so in the recipe.
+    """
+    if logit_steps is None:
+        if args.lean:
+            return
+        if str(args.logit_steps).strip() not in ("", "all"):
+            raise SystemExit(
+                f"--logit-steps {args.logit_steps!r} without --lean: the step filter is part of the"
+                " lean pin policy, so with the full policy every step keeps its logits and this flag"
+                " would do nothing. Pass --lean, or drop the flag.")
+        return
+    if not logit_steps:
+        raise SystemExit(
+            "--logit-steps none would pin no step's logits at all: §10 G7's sampled-id check and"
+            " gate section (b) then have nothing to judge at any step, which is a pin that cannot"
+            " fail. Keep at least the steps whose tokens matter (a deep step must be among them).")
+    if not args.lean:
+        return
+    deep = step_tags(args.deep_steps, "--deep-steps", args.decode)
+    if deep is None:
+        return
+    orphaned = sorted(deep - logit_steps, key=lambda t: int(t[len("decode"):]))
+    if orphaned:
+        raise SystemExit(
+            f"--deep-steps and --logit-steps disagree: {', '.join(orphaned)} keep the full per-layer"
+            " dump but not their `logits_last`, so the one expensive step of the run would carry no"
+            " logits for section (b) to judge. Either add those steps to --logit-steps or drop them"
+            " from --deep-steps.")
 
 
 def cache_state_tensors(layer, attr: str) -> list[torch.Tensor]:
@@ -169,13 +268,18 @@ class Recorder:
     and fingerprint arrays are what a deep fixture is FOR and are always kept.
     """
 
-    def __init__(self, keep_steps: set[str] | None = None, logits_bits: str = "f32"):
+    def __init__(self, keep_steps: set[str] | None = None, logits_bits: str = "f32",
+                 keep_logits_steps: set[str] | None = None):
         self.tensors: dict[str, torch.Tensor] = {}
         self.meta: dict[str, dict] = {}
         self.step = "prefill"
         self.gdn_i = 0
         self.attn_i = 0
         self.keep_steps = keep_steps
+        # `--logit-steps`: the same step-tag vocabulary as `keep_steps`, filtering the ONE per-step
+        # tensor that section (b) judges instead of the per-layer operands. Dropped steps are declared
+        # in the manifest by the caller (`logits_declared_absent`), never left merely missing.
+        self.keep_logits_steps = keep_logits_steps
         self.logits_bits = logits_bits
         # fingerprint bookkeeping: the previous step's state, per (family, layer row), on the
         # host. ~20 MB for the whole model; it is what makes the delta column a DELTA.
@@ -196,6 +300,12 @@ class Recorder:
         # so a future hook cannot pin its way past the policy.
         if (self.keep_steps is not None and is_per_layer_pin(name)
                 and self.step not in self.keep_steps):
+            return
+        # `--logit-steps` filters the logits pin only, and never the prefill one: the bare
+        # `logits_last` is §06.5's `y0` and the anchor §10.5's pairing is proved against, so a
+        # fixture without it is not a lean fixture, it is an unpairable one.
+        if (logits and self.keep_logits_steps is not None
+                and self.step != "prefill" and self.step not in self.keep_logits_steps):
             return
         if self.step != "prefill" and name.startswith("L"):
             name = f"{self.step}.{name}"      # keep decode-step pins separate from prefill pins
@@ -380,6 +490,18 @@ def dump_cache(cache, rec: Recorder, tag: str):
 
 def main():
     args = parse_args()
+    # The step lists are parsed and checked against `--decode` here, before the model is loaded: a pin
+    # policy that could not be gated is refused in the first second of the run, not after a minute of
+    # reference forwards have produced a fixture nobody can use.
+    deep_steps = step_tags(args.deep_steps, "--deep-steps", args.decode) if args.lean else None
+    logit_steps = (step_tags(args.logit_steps, "--logit-steps", args.decode)
+                   if args.lean else None)
+    check_pin_policy(args, logit_steps)
+    # Per step, never as a count: `engine/gate.py` section (0) may skip a step's logits only because
+    # this fixture named that step, and a fixture declaring "3 gaps" would be a licence for any 3.
+    logits_declared_absent = ([] if logit_steps is None else
+                              [f"decode{s}" for s in range(args.decode)
+                               if f"decode{s}" not in logit_steps])
     torch.manual_seed(args.seed)
     out = Path(args.out) if args.out else ROOT / "data" / "refs" / args.tag
     verify_dir = Path(args.verify) if args.verify else None
@@ -408,8 +530,8 @@ def main():
     attn_layers = [i for i, l in enumerate(layers) if hasattr(l, "self_attn")]
     print(f"loaded in {time.time()-t0:.1f}s | {len(layers)} layers | gdn {gdn_layers} | attn {attn_layers}")
 
-    rec = Recorder(keep_steps=(parse_step_list(args.deep_steps) if args.lean else None),
-                   logits_bits=args.logits_bits)
+    rec = Recorder(keep_steps=deep_steps, logits_bits=args.logits_bits,
+                   keep_logits_steps=logit_steps)
     install_patches(M, rec, gdn_layers, attn_layers)
 
     def reset_counters(_m, _inp):
@@ -597,6 +719,11 @@ def main():
                           ("no step (logits + ids + fingerprints only)" if not rec.keep_steps
                            else ", ".join(sorted(rec.keep_steps))))),
         "logits_storage": args.logits_bits,
+        # Every decode step whose `logits_last` this run chose NOT to pin, named one per step. This is
+        # what lets `engine/gate.py` section (0) skip a step instead of exiting 1 on it: an undeclared
+        # missing file stays fatal, so "the pin chose not to carry it" and "the pin lost it" stay two
+        # different sentences (§10.5). Empty for every fixture that keeps all its logits.
+        "logits_declared_absent": logits_declared_absent,
         "state_fingerprint": {
             "columns": ["n2=sum x^2", "maxabs", "mean", "dn2=sum (x - previous step)^2 over the "
                         "already-written extent, so a kv_fp dn2 of 0.0 is the expected value "
@@ -657,6 +784,11 @@ def main():
           f" {logits_b / mib:.1f} MiB stored as {args.logits_bits}, state fingerprints"
           f" {fp_b / 1024:.1f} KiB, per-layer+cache+ids"
           f" {(sum(nbytes.values()) - logits_b - fp_b) / mib:.1f} MiB")
+    if logits_declared_absent:
+        print(f"  {len(logits_declared_absent)} step(s) declared without logits — named per step in"
+              f" the manifest's logits_declared_absent: {', '.join(logits_declared_absent)}"
+              " (pairable by gate.py --no-engine; a device run is refused until sections (b)/(e) can"
+              " judge a gapped fixture)")
     if verify_dir is not None:
         rc = verify_against(verify_dir, out)
         if args.keep_temp:
