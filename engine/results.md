@@ -2954,6 +2954,11 @@ sequence (`tools/margin_delta.py /tmp/p8/before /tmp/p8b/after …`):
 
 Every one of the five originals is bit-identical to its pre-P8 run (`x1.0000`, same binding steps, same
 worst-deficit bits), and so are the two boundary fixtures whose decode steps are still one row wide.
+Stronger than the ratios: md5 over the `[PASS]/[expected-red] step N: metrics|argmax` lines of each log is
+identical before and after, per fixture (`dec8` 8 lines `ef085ecf1fc1`, `dec64f` 64 `0d5ab66c533c`,
+`dec64t` 64 `a06450d0c939`, `mt32f` 32 `77f94ec2bb2a`, `dec300f` 128 `e31ebb993c8f`, `p128` 8
+`68666617aa9a`, `wide520f` 24 `50e7fc5fa70d`, `chunk64b` 30 `288d4468fe5a`) — every deciding number, tie
+label and token id in all eight logs is the same byte of text.
 `p128`'s prompt wave is now **6 attention sites / 12 kernel launches where the per-token form issued 768
 single-row launches** (`attn calls=54 calls_batched=6 rows_total=816 rows_max=128`), which is the §06.3
 claim counted rather than inferred. Nothing was re-pinned, no band moved, no `EXPECTED_RED` entry changed;
@@ -2984,11 +2989,17 @@ engine/build.sh                                                  # clean
 engine/gate.py --fixture p128                    # 197 PASS / 0 FAIL, ~7 s
 engine/gate.py --fixture {dec8,dec64f,dec64t,mt32f,dec300f}      # 168/650/647/391/1156, 0 FAIL
 engine/gate.py --fixture {wide520f,chunk64b}     # 327 PASS; 372 PASS + the 3 expected reds
-engine/gate.py --selftest --fixture {dec8,dec64f}   # SELFTEST PASS both (incl. --break-attn-one-row;
-                                                   # dec64f also exercises the tie/route/state injections)
-engine/build/decode_run --ids 1,2,3,4 --steps 1 --wave-rows {1,4}   # the A/B and the re-break
-tools/margin_delta.py /tmp/p8/before /tmp/p8b/after …             # CPU: x1.0000 everywhere
+engine/gate.py --selftest --fixture {dec8,dec64f}                  # SELFTEST PASS both
+decode_run --ids 1,2,3,4 --steps 1 --wave-rows {4,1}               # the A/B; also the re-break repro
+decode_run --ids <wide520f prompt + 25 greedy> --steps 0 --wave-rows {512,500,300,5,1}   # mixed grid
+tools/margin_delta.py /tmp/p8/before /tmp/p8b/after <8 fixtures>   # CPU: x1.0000 everywhere
 ```
+
+The re-break is not a permanent knob and does not need one: delete the two `core.qrope`/`core.krope` lines
+from `engine/kernels_attn.cpp`'s wave branch, rebuild, and the 4-row command above faults in about a
+second and then needs a kill. The 525-id list for the mixed-grid runs is `wide520f`'s `prefill_ids` plus
+the first 25 of its `greedy_continuation`, written out with one `json.load` — no fixture was added to make
+them.
 
 `util` read 2–92 % across those runs and is reported as read; it is not a measurement input. Timings were
 deliberately not taken: the launch-count claim is a counter, and the TTFT/attention curve rows are the
