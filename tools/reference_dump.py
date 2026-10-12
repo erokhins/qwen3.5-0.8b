@@ -704,6 +704,18 @@ def main():
         raise SystemExit(rc)
 
 
+# Files that legitimately sit in a fixture directory without being products of a reference run.
+# `route_allowance.json` is written by `engine/route_allowance.py` out of a gate log plus a
+# `route_price.py` table, so a fresh dumper run cannot reproduce it and `--verify` must not demand it;
+# its own provenance (prompt/feed/specimpl hashes and the margin it was priced under) is checked by
+# `engine/gate.py:load_allowance`, which FAILS the gate when it disagrees. Exempting it here is not
+# waiving a check, it is pointing at the file that owns it — and it has to be named rather than ignored,
+# because a priced fixture would otherwise never pass §10.5's reproduction gate again (measured on
+# 2026-10-12: `--verify data/refs/dec64t` printed "missing from the fresh run: route_allowance.json"
+# and exited 1 with all 826 model tensors byte-identical).
+CARRIED_NOT_PINNED = ("route_allowance.json",)
+
+
 def verify_against(pin: Path, fresh: Path) -> int:
     """§10.5's reproduction check.
 
@@ -719,7 +731,10 @@ def verify_against(pin: Path, fresh: Path) -> int:
       * manifest keys only in the fresh run, same reason. A pinned key whose value CHANGED, or
         that went missing, is a failure.
     """
-    want = sorted(p.name for p in pin.iterdir() if p.is_file())
+    want = sorted(p.name for p in pin.iterdir() if p.is_file()
+                  and p.name not in CARRIED_NOT_PINNED)
+    carried = sorted(p.name for p in pin.iterdir() if p.is_file()
+                     and p.name in CARRIED_NOT_PINNED)
     got = sorted(p.name for p in fresh.iterdir() if p.is_file())
     missing = [n for n in want if n not in got]
     extra = [n for n in got if n not in want]
@@ -737,6 +752,9 @@ def verify_against(pin: Path, fresh: Path) -> int:
     if extra:
         print(f"  note, only in the fresh run (newer dumper, not fixture drift): {len(extra)} — "
               + ", ".join(extra[:6]) + (" …" if len(extra) > 6 else ""))
+    if carried:
+        print(f"  carried, not a product of this run (engine/gate.py checks that one): "
+              + ", ".join(carried))
     if man_bad:
         print(f"  manifest values that did not reproduce: {len(man_bad)} — "
               + ", ".join(man_bad[:10]) + (" …" if len(man_bad) > 10 else ""))
