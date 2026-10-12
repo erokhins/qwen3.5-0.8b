@@ -2719,3 +2719,139 @@ nothing here needs a re-run for correctness. If a margin preflight for `p128`/`c
 against a true pre-P6 binary, that needs a `ccbfbff` worktree build (the two fixtures have no pre-P6
 device log), which is a main-agent device-window decision. `speccheck/` was not touched and was not run:
 nothing in this pass can reach `speccheck/specimpl.py` or a gate file other than `engine/gate.py`.
+
+
+## Q5 / P7: the `MAXSC` wall is gone — attention takes the streaming form above the staging, and the
+## first >512-lane fixture prices its own margin
+
+**What the wall was.** `attn_decode_layer` threw on `lvalid > MAXSC` (512), and `engine/gate.py` refused
+the same arithmetic in its own preflight, so `wide520f` — 500 prompt + 24 generated = **524 lanes** —
+exited 1 before a single STEP line. Its y0, id, logits, `(g)` and `(h)` rows had never been judged at all.
+§07.3 had already decided the replacement and the prototype had already shipped it: `attn_core`'s streaming
+`(max,sum)` branch (`prototype/attn_decode/attn_decode_kernels.h:282-305`) and `attn_combine` (`:324`),
+the split-K merge with the same rescaling algebra. **P7 is selection, not arithmetic: no kernel line
+changed.**
+
+**The rule the launcher applies now.** Per row, by necessity and nothing else:
+
+| lanes in the row | form | why |
+|---|---|---|
+| `lvalid ≤ MAXSC` | `full=1, split=1`, grid `(N_Q, 1)` | §07.3's decision, bit-exact with the pins, and the route every priced fixture rides. One-pass is the default, never the fallback. |
+| `lvalid > MAXSC` | `full=0`, `split = ceil(lvalid / MAXSC)`, grid `(N_Q, split)` + the merge launch | there is no other way to be correct: `full=1` past the staging would make `attn_core` write past `sc[]` |
+
+`ceil` is load-bearing in both directions: it is what guarantees no block is handed more lanes than the
+staging width the split was derived from (`ceil(n / ceil(n/s)) ≤ s`), and it is what keeps a 513-lane row
+at `split = 2` instead of paying for a split it does not need. One-pass cannot be split at any tile size —
+it normalises the weight matrix inside one block (§05.5), which is why the prototype refuses
+`--softmax full --split > 1` outright — so the second row of that table is not a tuning choice.
+
+**The ceiling is now a product, and each factor lives where it is obeyed.** The op owns the staging width
+(`MAXSC`, a `#define` in `attn_decode_kernels.h`, read by `#include`); the launcher owns the blocks per
+row (`kAttnMaxSplit = 8` in `engine/kernels_attn.cpp`), because that constant exists to size an allocation,
+not just to refuse. Ceiling = **512 × 8 = 4096 lanes**, which is deliberately the same number as
+`decode_run`'s `kSessionDefaultCap`: the attention route now covers exactly the context the engine hands
+out by default, and past it `attn_decode_layer` throws rather than writing past a stage. That is a real
+boundary, stated plainly: an 8k request is refused today. §07.3's "the engine's shape" sentence covers
+both halves now, and raising the cap means raising `attn_part_floats()` with it — which is why the split cap
+lives in the file that sizes the scratch.
+
+**The partial scratch is reduction state, so it is scratch.** `attn_part_floats()` =
+`N_Q × kAttnMaxSplit × (DH + 2)` F32 = 8 × 8 × 258 × 4 B = **64.5 KiB per in-flight token**, allocated once
+in `DecodeScratch` (`a_part`) and freed with it, never per step. It is *not* §08.1 state and does not go in
+`RequestState`: `(max, sum, Σ w·v)` for one query row is born and dies inside one attention call, exactly
+the A-17 argument `c_dummy` is built on, and the size difference is the punchline — 64.5 KiB against
+`RequestState`'s measured 18.66 MiB. The cost of getting it wrong is silent: `attn_core` with `split > 1`
+writes **only** `part`, so a launcher that set the flag and passed a null buffer would produce a quiet
+no-op instead of an error. Hence the second refusal, `part == nullptr` on a forced-split row.
+
+**Proof the online route actually ran, at engine level.** Three independent things, none of them a timing:
+
+1. `wide520f`'s 12 steps above the staging (decode12…decode23, 513…524 lanes) went from *never executed* to
+   *judged and exact*: all 24 generated ids match the pins in order, 0 steps needed the tie policy, and the
+   worst logits deficit over the whole chain is 1.14e-04 at step 17.
+2. A launcher that skipped the split could not produce that result at all. There is no other way to serve
+   513 lanes: `full=1` there is undefined behaviour on a 512-float shared stage, and `part` is the only
+   output the streaming branch has — if `attn_combine` were not launched, `a_pre`/`a_gated` would keep the
+   previous layer's scratch and every token after the crossing would be wrong. The route cannot be dead
+   code while the fixture is green.
+3. The prototype's own anti-vacuity (its results.md §10) is a *failing* check, not a printf: an
+   `--softmax online` run whose reduction stages come back bit-identical to the pins exits 1, and this run
+   moved **67 of 68 cases** against the pins on at least one softmax stage (the 68th is a single-lane row,
+   where there is nothing to merge). `--negative` proves the same thing from the other side: `nomax` exists
+   only in the online branch and is injected at the run's own split size.
+
+**`wide520f`, before and after** (device, correctness only, no timing taken):
+
+| | before P7 | after P7 |
+|---|---|---|
+| preflight | refused: 524 lanes vs staging 512 | `PASS` — "524 lanes vs staging MAXSC 512 x kAttnMaxSplit 8 = 4096 lanes" |
+| `decode_run` | rc=1, no dumps | rc=0, 524 steps' dumps judged |
+| verdict | 78 PASS / **2 FAIL** | **320 PASS / 0 FAIL** |
+| route allowance | none possible | its own, derived (below) |
+
+**The shipped fixtures did not move — which is the D-2 condition, tested rather than asserted.** None of
+them ever crossed 512 lanes, so none of them can see the new branch; the way to show that is to re-run all
+of them and diff. Same check counts (`dec8` 161, `dec64f` 643, `dec64t` 640, `mt32f` 384, `dec300f` 1149,
+`p128` 190, `chunk64b` 365 PASS / 3 FAIL), and `tools/margin_delta.py` before-vs-after reads **x1.0000**
+filled ratio with the same binding steps and the same worst-deficit bits on every one — `dec300f` step 86
+still 4.6322e-04 of its 4.6358e-04 allowance, the tightest margin on the tree. Stronger than the ratios:
+md5 over every step's metrics / argmax / `(g)` state-fingerprint line is byte-identical before and after,
+per fixture. No fixture was re-pinned, no `BAND` constant in `engine/gate.py` moved, and `--selftest`
+(33 injections) is green.
+
+**`wide520f` priced its own margin, per D-2** — never a hand-written number:
+
+```
+engine/route_price.py --fixture wide520f --engine-log <gate log> --out tmp/route_wide520f.json
+engine/route_allowance.py --table tmp/route_wide520f.json
+```
+
+worst engine/route 1-cos ratio **2.11916 at step 17** → `margin 2.12`; worst meanrel ratio **0.38352 at
+step 14** → `margin_rel 0.39`; both `event: applied` in `bench/band-history.jsonl` under decision **D-2**
+("every fixture prices its own margin"). `route_price.py` also reports 24/24 argmax agreement for *both*
+legal reference forms against the pinned chain, and 0 of 24 steps under G5 on either side, so the
+allowance is admitting a spread, not pardoning a divergence. It lands at 2.12 against D-3's already-priced
+envelope for the online-softmax axis (≤ 0.41 added, `M_wide ≤ 2.40`) — a consistency check on the
+derivation, not the reason for it. The four priced fixtures are named by the tool as "not touched by this
+run, and structurally cannot be", and no existing margin grew, so §6.2's stop condition never fired.
+Binding step is 17 at 0.9996 of its own cap: the self-reference of a derived margin, which the tool's own
+docstring names, now visible on a green run.
+
+**Section `(h)`: attention is not a row-batching site, and the counter would not have caught anything
+here.** `(h)` counts *token rows per launch* for the four families that can batch over the wave
+(`glue/proj/mlp/gdn`), and the harness's own `attn(rows)` placeholder says the attention launcher does not
+batch over token rows — that is P8. P7 cut a different axis: `split` divides the **lane** axis inside one
+query row, so there is no row width to report and the `(h)` schema would be a lie if it printed one. The
+reason `(h)` exists at all — an *optional* batching path that could be dead code because the per-row path
+produces identical bits — cannot arise here: the split is mandatory above 512 and produces deliberately
+different bits, so its absence is a wall, not a silent no-op. `(h)` is therefore unchanged and still green
+(its `wide520f`/`chunk64b` rows pass, all seven counters over the four families `glue`/`proj`/`mlp`/`gdn`
+still matching the wave arithmetic on all three sides); the lane ceiling is enforced by
+`lane_geometry()`, which greps both factors out of the files that obey them, and by the launcher's throw.
+The lane-ceiling check is also not the anti-vacuity proof — it proves a *capacity* bound, not a route; the
+route's own proof is the falsifiability of that table above and the prototype's failing anti-vacuity check.
+
+**What a worker ran on the device** (correctness only, no timing taken; each inside its own
+`tools/gpu_lock.sh acquire q5p7` / `release q5p7` pair, the gate does not self-lock, and
+`prototype/attn_decode/run.py` self-locks so the lock was released before it):
+
+```
+engine/build.sh                                              # clean
+prototype/attn_decode/run.py --softmax online --split 2 --long --negative   # 1380 comparisons, 0 fail
+prototype/attn_decode/run.py --softmax online --split 4 --long --negative   # 1380 comparisons, 0 fail
+prototype/attn_decode/run.py --long --negative                              # 1764, 0 fail (pinned route)
+engine/gate.py --fixture wide520f                # 78/2 before P7, 320/0 after, util 50-58 %, ~18 s
+engine/gate.py --fixture {dec8,dec64f,dec64t,mt32f,dec300f,p128,chunk64b}   # counts unchanged
+engine/gate.py --selftest --fixture dec8         # SELFTEST PASS
+```
+
+`util` read 49–58 % on those runs and is reported as read. No `ms/step`, no bandwidth, no burst: the
+decode-vs-context row §07.4 needs is the main agent's, in a window with zero subagents
+(`bench/performance-status.md` §6). The gate prints `decode_run reported 2.353 ms/step` on `wide520f` as
+a by-product; it is not a measurement and does not enter the ledger.
+
+**Handed to the main agent.** (1) The timing row, on the two commands §07.4 names — `wide520f` now runs,
+which is the whole point of the package. (2) If the 4096-lane ceiling should move, the two coupled knobs
+are `kAttnMaxSplit` and `attn_part_floats()`, and `gate.py::lane_geometry()` follows them automatically.
+(3) `chunk64b`'s three D-9 lines are untouched by P7 and remain the tree's only red. (4) `speccheck/` was
+neither touched nor run: nothing here can reach `specimpl.py` or a spec gate.
