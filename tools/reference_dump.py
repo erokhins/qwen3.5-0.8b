@@ -13,6 +13,12 @@ Flags:
   --tag NAME       run tag used in the default output dir
   --prompt STR     raw prompt, repeatable        (concatenated as one sequence)
   --message STR    chat message, repeatable      (rendered with the chat template)
+  --turn R:TEXT    a whole transcript, one `role:text` per occurrence, rendered as ONE prompt
+                   (the multi-turn case `--message` cannot express; mutually exclusive with it and
+                   with --prompt). Same renderer as tools/stop_probe.py: tools/chat_render.py.
+  --first-stop VAL what tools/stop_probe.py answered for this prompt — an index, or "none in N".
+                   Recorded verbatim in the manifest (§10.5 provenance: a deep fixture must state
+                   whether its chain reaches its own stop inside the pinned window).
   --no-chat        do not append the no-think chat template rendering
   --decode N       greedy continuation steps after prefill (default 1). Each step feeds the
                    reference's OWN argmax back in, i.e. it is a forced (teacher-forced) chain,
@@ -43,6 +49,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -51,6 +58,8 @@ import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from chat_render import parse_turn, render_transcript   # noqa: E402
 
 # Special-token literals (built to keep them out of shell/tool quoting).
 LT, GT, BAR = chr(60), chr(62), chr(124)
@@ -68,6 +77,11 @@ def parse_args():
     p.add_argument("--tag", default="default")
     p.add_argument("--prompt", action="append", default=[])
     p.add_argument("--message", action="append", default=[])
+    p.add_argument("--turn", action="append", default=[], metavar="ROLE:TEXT",
+                   help="render a whole transcript as one prompt (multi-turn fixture)")
+    p.add_argument("--first-stop", default=None, metavar="VAL",
+                   help="first stop-id index from tools/stop_probe.py, or 'none in N'; recorded"
+                        " in the manifest")
     p.add_argument("--no-chat", action="store_true")
     p.add_argument("--decode", type=int, default=1)
     p.add_argument("--no-layer-io", action="store_true")
@@ -103,10 +117,15 @@ def is_per_layer_pin(name: str) -> bool:
 
 def parse_step_list(spec: str) -> set[str] | None:
     """`--deep-steps` as step tags. "all" (and the default) means do not filter at all, which
-    is every fixture that existed before `--lean` and must stay byte-identical."""
+    is every fixture that existed before `--lean` and must stay byte-identical. "none" keeps no full
+    dump anywhere: logits + ids + fingerprints only, which is what a 128-step fixture has to do to fit
+    the budget (one full step is 26 MiB, 18 MiB of it the GDN state, and 128 steps of bf16 logits are
+    already 61 MiB — see `engine/results.md`, the breadth section)."""
     spec = spec.strip()
     if spec in ("", "all"):
         return None
+    if spec == "none":
+        return set()
     return {f"decode{int(s)}" for s in spec.split(",") if s.strip() != ""}
 
 
@@ -538,13 +557,21 @@ def main():
         seqs.append(tok(p, add_special_tokens=False)["input_ids"])
         sources.append(("raw", p))
     for mtext in args.message:
-        rendered = tok.apply_chat_template([{"role": "user", "content": mtext}],
-                                           add_generation_prompt=True, tokenize=False,
-                                           enable_thinking=False)
-        if isinstance(rendered, list):
-            rendered = "".join(rendered)
+        rendered = render_transcript(tok, [{"role": "user", "content": mtext}], thinking=False)
         seqs.append(tok(rendered, add_special_tokens=False)["input_ids"])
         sources.append(("chat", mtext))
+    if args.turn:
+        # One transcript, one sequence. `--turn` replaces `--message`/`--prompt` rather than joining
+        # them: a second chat header appended to a transcript would be a different fixture than the
+        # transcript that was probed, which is the whole thing this flag has to get right.
+        if args.message or args.prompt:
+            raise SystemExit("--turn renders the whole prompt; do not also pass --message/--prompt"
+                             " (make the extra text one of the turns instead)")
+        messages = [parse_turn(t) for t in args.turn]
+        rendered = render_transcript(tok, messages, thinking=False)
+        seqs.append(tok(rendered, add_special_tokens=False)["input_ids"])
+        sources.append(("chat_transcript",
+                        "  ||  ".join(f"{m['role']}: {m['content']}" for m in messages)))
     if not seqs:
         seqs.append(tok("The capital of France is", add_special_tokens=False)["input_ids"])
         sources.append(("raw", "The capital of France is"))
@@ -604,8 +631,9 @@ def main():
                         "(decode_run --replay), never against its own output."),
         "pin_policy": ("full" if not args.lean else
                        "lean: per-layer and cache operands only at "
-                       + ("all steps" if rec.keep_steps is None
-                          else ", ".join(sorted(rec.keep_steps)))),
+                       + ("all steps" if rec.keep_steps is None else
+                          ("no step (logits + ids + fingerprints only)" if not rec.keep_steps
+                           else ", ".join(sorted(rec.keep_steps))))),
         "logits_storage": args.logits_bits,
         "state_fingerprint": {
             "columns": ["n2=sum x^2", "maxabs", "mean", "dn2=sum (x - previous step)^2 over the "
@@ -618,6 +646,18 @@ def main():
                     "KV/window layout (KV §08.5 vs state.h) is not a false failure",
         },
         "sources": [{"kind": k, "text": txt, "ids": ids} for (k, txt), ids in zip(sources, seqs)],
+        # §10.5 provenance for a deep fixture: the standing rule is that the prompt must be probed to
+        # run past the pinned window, and a claim about that belongs with the fixture, not only in a
+        # results file. Value is `tools/stop_probe.py`'s answer verbatim (an index, or "none in N"),
+        # so it can be re-checked by running that probe with the same --message/--turn and --max-new.
+        "stop_probe": None if args.first_stop is None else {
+            "first_stop": args.first_stop,
+            "stop_id": int(tok.convert_tokens_to_ids(IM_END)),
+            "note": "index of the FIRST generated token equal to the stop id, counted from the first"
+                    " generated token; 'none in N' means no stop id in N generated tokens. Prompt-"
+                    " phase occurrences (the transcript carries one per closed turn) are not stops —"
+                    " engine/gate.py's §07.5 note is the same distinction on the engine's side.",
+        },
         "prefill_ids": input_ids[0].tolist(), "greedy_continuation": gen,
         "greedy_text": tok.decode(gen),
         "special_ids": {n: tok.convert_tokens_to_ids(n) for n in [IM_END, IM_START, ENDOFTEXT, THINK_START, THINK_END]},
@@ -644,6 +684,13 @@ def main():
     logits_b = sum(v for n, v in nbytes.items() if n.endswith("logits_last"))
     fp_b = sum(v for n, v in nbytes.items() if n.endswith(("state_fp", "conv_fp", "kv_fp")))
     print(f"wrote {len(rec.tensors)} tensors + manifest.json to {out}")
+    if manifest.get("stop_probe"):
+        print(f"  stop probe recorded: first stop id {manifest['stop_probe']['stop_id']}"
+              f" at {manifest['stop_probe']['first_stop']}")
+    elif args.lean:
+        print("  WARNING: a lean (deep) fixture with no recorded --first-stop: the standing rule is"
+              " to pre-flight the prompt with tools/stop_probe.py and record the answer. Nothing"
+              " here can tell a prompt that runs 300 tokens from one that stops at 12.")
     print(f"  total {sum(nbytes.values()) / mib:.1f} MiB of pins — logits"
           f" {logits_b / mib:.1f} MiB stored as {args.logits_bits}, state fingerprints"
           f" {fp_b / 1024:.1f} KiB, per-layer+cache+ids"
