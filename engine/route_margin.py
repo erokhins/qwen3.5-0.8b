@@ -57,7 +57,7 @@ exact zeros into a max would understate the multiplier, which is a loosening.
 WHY THE WIDTH IS REBOUND RATHER THAN PLUMBED. `specimpl.gdn` calls `gdn_chunk_scan(qn, kn, v, g, beta,
 S)` and leaves `C` at its default, so a second width would otherwise mean editing `speccheck/specimpl.py`.
 This script refuses to: `engine/gate.py:allowance_inputs` pins specimpl's sha256 into every priced
-fixture, so an oracle edit would invalidate all five cached allowances at once (and the oracle is not
+fixture, so an oracle edit would invalidate all four cached allowances at once (and the oracle is not
 this task's object). The rebind lives in this process only, is counted so a silent no-op is impossible,
 and `--check-patch` asserts it reproduces route a BIT-EXACTLY when asked for the shipped width — the
 falsifiable half of "the rebind is the only thing that moved".

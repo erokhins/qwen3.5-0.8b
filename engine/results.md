@@ -1908,7 +1908,7 @@ in the gitignored `data/` like every other regenerable fixture.
 
 ---
 
-# D-3 — the route margin cannot be made engine-independent, and the reason is a reference-side baseline
+## D-3 — the route margin cannot be made engine-independent, and the reason is a reference-side baseline
 
 Task: `bench/plan-2026-10-12.md` Q4b / decision **D-3** — stop fitting the margin to the engine's own errors,
 calibrate the multiplier from **legal reference-side routes alone**, and if that multiplier turns out smaller
@@ -1944,7 +1944,8 @@ the failure D-3 exists to catch.
 
 Two constraints decided how this is built. First, **`speccheck/specimpl.py` may not be edited**:
 `engine/gate.py:allowance_inputs` pins the oracle's sha256 into every priced fixture, so an oracle edit would
-invalidate all five cached `route_allowance.json` files at once. The width is therefore rebound **in this
+invalidate all four cached `route_allowance.json` files at once (`dec8` is not priced — it runs on the flat
+floors — so five fixtures are gated and four are priced). The width is therefore rebound **in this
 process only**, as a module-attribute swap on `specimpl.gdn_chunk_scan`, and the rebind is counted so a silent
 no-op cannot pass; `--check-patch` runs route a through the rebind at the shipped width and requires it
 **bit-identical** to the unpatched route a. It is, on every fixture. Second, **a width that does not repartition
