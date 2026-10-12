@@ -1924,7 +1924,7 @@ def parse_run(text: str) -> dict:
 #
 #   * the same prompt runs twice, once at the scratch's full wave width and once at
 #     `decode_run --wave-rows 1`, which makes `prefill_wave` split the prompt into waves of one token
-#     and therefore makes every glue/MLP submission take the single-row form;
+#     and therefore makes every glue/MLP/proj/GDN/attention submission take the single-row form;
 #   * the batched side must issue row/token-batched launches and the one-row side must not, while
 #     BOTH cover exactly the same rows — same work, fewer launches, not less work;
 #   * and the two runs must be byte-identical in their dumps, which is what converts the x1.000
@@ -1935,6 +1935,9 @@ def parse_run(text: str) -> dict:
 # the launch half to FAIL while the identity half stays green — the proof that the identity half alone
 # cannot see this, which is the whole reason this section exists. A negative that every check catches
 # proves nothing (`prototype/mlp_gemv/results.md`); this one is caught by exactly one of the halves.
+# P5, P6 and P8 each added an aimed-at-one-family version of that injection (`--break-wave`,
+# `--break-gdn-one-row`, `--break-attn-one-row`) for the same locality reason: if the projection, GDN
+# and attention checks all fire together on every injection, no one of them is known to bite on its own.
 
 def wave_row_ceiling() -> int:
     """`kMaxWaveRows` — how many rows the wave scratch is tall — read from `engine/decode_step.h`,
@@ -2015,7 +2018,8 @@ def wave_launchstat_lines(counts: dict, prompt_len: int, decode_steps: int, wave
 def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: dict,
                         work: Path, wave_rows: int, break_wave: bool = False,
                         break_ab_logits: int = -1, carry_rows: int = 0,
-                        break_gdn_one_row: bool = False) -> dict:
+                        break_gdn_one_row: bool = False,
+                        break_attn_one_row: bool = False) -> dict:
     """The sides of section (h), on the CPU, for `--dry-run` / `--selftest`.
 
     Like section (d) in dry-run mode this is Python comparing with itself — said out loud in the note
@@ -2029,6 +2033,10 @@ def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: d
     falls mid-chunk and the conv window has to be carried across a wave boundary. Its logits are
     identical to the wide side's by construction here, which is why the injection that matters for it
     is `--break-gdn-one-row` (the wide GDN launches never happened), not a logits perturbation.
+
+    `break_attn_one_row` aims the same bug at P8's site alone: the attention layer of a wide wave
+    submitting one query row per launch. Same reasoning as the GDN injection — a wave that quietly ran
+    one row at a time produces identical bits, so only the counters can see it.
     """
     greedy = man["greedy_continuation"]
 
@@ -2085,6 +2093,11 @@ def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: d
     # — the three GDN sites — so the GDN checks are seen to bite on their own instead of hiding behind
     # glue's, which is the locality rule `prototype/mlp_gemv/results.md` insists on.
     gdn_one_row = {f: 1 for f in counts if f.startswith("gdn_")} if break_gdn_one_row else None
+    if break_attn_one_row:
+        # Merged rather than replacing: `--selftest` runs each injection alone, but nothing should make
+        # the two mutually exclusive by accident.
+        attn_one_row = {"attn": 1}
+        gdn_one_row = {**(gdn_one_row or {}), **attn_one_row}
     sides = {"batched": side("ab_batched", wave_rows, 1 if break_wave else wave_rows,
                               perturbs=False,
                               only_one_row=None if break_wave else gdn_one_row),
@@ -2211,6 +2224,28 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
               f"{fam} calls_batched={r.get('calls_batched')} rows_max={r.get('rows_max')}"
               " — both must be 0 and 1")
 
+    # P8's half, in the same shape a fourth time: the attention site (§05.1-§05.7 over the whole wave).
+    # It is the family whose batching had the most room to move bits — a wave's row t reads cache lanes
+    # another row appended, so the ordering is a real dependency rather than an accident of layout — and
+    # it is the family the prototype had to prove separately for that reason (`prototype/attn_decode`
+    # §11: a wave is bit-identical to its rows run one at a time). Counted as SITES, one per attention
+    # layer per body, because how many kernels a site submits is lane depth, not wave width: see
+    # `engine/launch_stats.h`. `--break-attn-one-row` is the aimed negative.
+    at = batched["run"].get("launchstat", {}).get("attn", {})
+    check(at.get("calls_batched", 0) > 0
+          and at.get("rows_max", 0) == min(prompt_len, wave_rows),
+          "the batched side issues MULTI-ROW attention launches (one site per attention layer,"
+          " not one per token)",
+          f"attn calls={at.get('calls')} calls_batched={at.get('calls_batched')}"
+          f" rows_max={at.get('rows_max')}, expected rows_max={min(prompt_len, wave_rows)} for a"
+          f" {prompt_len}-token prompt. rows_max=1 here means the wave's queries still go through"
+          " attention one row per launch, and P8's staged wave form is dead code")
+    rat = perrow["run"].get("launchstat", {}).get("attn", {})
+    check(rat.get("calls_batched", -1) == 0 and rat.get("rows_max", -1) == 1,
+          "the one-row side issues ONE-ROW attention launches",
+          f"attn calls_batched={rat.get('calls_batched')} rows_max={rat.get('rows_max')}"
+          " — both must be 0 and 1")
+
     # Same work, fewer launches. `rows_total` wave-independent is the half that says the launch
     # delta is batching rather than skipped work. Every side is compared against the wide one, so a
     # third (--wave-rows 5) side is held to the same "not less work" rule as the one-row side.
@@ -2298,7 +2333,7 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
                      " (the stand-in emits both sides), exactly as section (d) is: it proves the"
                      " checker bites, never anything about the engine.")
     notes.append(
-        f"P4b+P5+P6 launch count on {REFS.name}: the {prompt_len}-token prompt wave issued {b_wave}"
+        f"P4b+P5+P6+P8 launch count on {REFS.name}: the {prompt_len}-token prompt wave issued {b_wave}"
         f" batchable launches vs {r_wave} with --wave-rows 1 ({wave_ratio:.0f}x fewer);"
         " the whole run, " f"{b_calls} vs {r_calls}, because {decode_steps} generation steps are one"
         " token wide either way. Counts, never durations — the timing pass is the main agent's"
@@ -2967,6 +3002,28 @@ def selftest(fixture: str = "dec8") -> int:
          " this proof — and by nothing on the one-row side, which is correct by construction. The ids"
          " and logits of such a run are identical to the correct one, which is the whole reason this"
          " section counts submissions instead of reading outputs"),
+        (["--break-attn-one-row"], 1,
+         ["[FAIL] batched side: attn launches match the wave arithmetic",
+          "[FAIL] the batched side issues MULTI-ROW attention launches",
+          "![FAIL] batched side: glue launches match the wave arithmetic",
+          "![FAIL] batched side: proj launches match the wave arithmetic",
+          "![FAIL] batched side: mlp_gateup launches match the wave arithmetic",
+          "![FAIL] batched side: gdn_conv launches match the wave arithmetic",
+          "![FAIL] the batched side issues ROW-BATCHED glue launches",
+          "![FAIL] the batched side issues TOKEN-BATCHED projection launches",
+          "![FAIL] the batched side issues TOKEN-BATCHED conv (§04.2) launches",
+          "![FAIL] the one-row side: attn launches match the wave arithmetic",
+          "![FAIL] the one-row side issues ONE-ROW attention launches",
+          "![FAIL] both sides write bit-identical logits",
+          "![FAIL] both sides sample the same token ids",
+          "![FAIL] the one-row side covers the same attn rows as the batched side",
+          "![FAIL] the carried-window side"],
+         "P8's aimed negative: the attention layer of a wide wave went back to one query row per"
+         " launch while every other family stayed batched. Only the launch half may notice, and only"
+         " the attention checks may say so — glue/proj/MLP/GDN stay green, so the GDN injection is not"
+         " quietly carrying this proof either (§10.1's locality rule). Bits cannot see it at all:"
+         " `prototype/attn_decode` §11 measures a wave of queries to be bit-identical to those same"
+         " rows launched singly, which is exactly why the identity half must stay green here"),
         (["--break-ab-logits", str(ab_pos)], 1,
          [f"[FAIL] both sides write bit-identical logits", "1 differing: ['logits%d.bin']" % ab_pos,
           "![FAIL] the batched side issues ROW-BATCHED glue launches",
@@ -3242,6 +3299,13 @@ def main() -> int:
                          " launch half may notice: the ids and logits are identical either way. This"
                          " is P6's addition to the pair that keeps either half of section (h) from"
                          " going vacuous, aimed at one family so the GDN checks are seen to bite")
+    ap.add_argument("--break-attn-one-row", action="store_true",
+                    help="with --dry-run: the attention layer of a wide wave went back to one query"
+                         " row per launch (P8's staged wave form never ran) while every other family"
+                         " stays batched. The wave's rows produce identical bits either way — that is"
+                         " what `prototype/attn_decode` §11 proves — so only the counters can see it,"
+                         " and this is the injection that shows the attention half of section (h) is"
+                         " not a check that cannot fail")
     ap.add_argument("--break-ab-logits", type=int, default=-1, metavar="POS",
                     help="with --dry-run: differ run position POS's logits on the one-row side of "
                          "section (h), so the byte-comparison half is proved to bite and to name the "
@@ -3685,7 +3749,13 @@ def main() -> int:
               # no width to report, and a family that can only ever read rows=1 is a check that cannot
               # fail (`engine/launch_stats.h` says the same).
               "gdn_conv": want["gdn"] // 4, "gdn_gates": want["gdn"] // 4,
-              "gdn_gated_norm": want["gdn"] // 4}
+              "gdn_gated_norm": want["gdn"] // 4,
+              # P8's attention site. One per attention layer per body at any width — the same per-body
+              # shape as the four above, which is why `wave_expect` prices it unchanged — where the body
+              # is a wave of n rows or a single generation step. It counts SITES, not the 1-3 kernels a
+              # site submits; `engine/launch_stats.h` explains why counting kernels would make the
+              # expected number a function of context length instead of of wave width.
+              "attn": want["attn"]}
     wave_rows = wave_row_ceiling()
     # P6's third side: a prompt cut into waves of 5, so a 46-token prompt crosses nine interior wave
     # boundaries and every one of them has to hand the conv window to the next. 5 is small enough to
@@ -3696,7 +3766,7 @@ def main() -> int:
     if args.dry_run:
         sides = batched_ab_stand_in(man, prompt_ids, dec_logits, counts, work, wave_rows,
                                     args.break_wave, args.break_ab_logits, carry_rows,
-                                    args.break_gdn_one_row)
+                                    args.break_gdn_one_row, args.break_attn_one_row)
     else:
         sides = run_batched_ab(args, prompt_ids, n_decode, greedy, replay, work, wave_rows,
                                carry_rows)

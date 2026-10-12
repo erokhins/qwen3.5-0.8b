@@ -18,12 +18,23 @@
 // a time, and the assertion is that it looks EXACTLY like the dead-code case.
 //
 // WHAT IS IN SCOPE: the families that can batch — glue and the MLP's two halves (P4), the nine
-// projections (P5), and the three token-parallel GDN sites (P6: conv §04.2, gates §04.3, gated norm
-// §04.5). `gdn_rec` (§04.4) is deliberately NOT a family: the recurrence is a sequential scan over
-// tokens, so its launcher has no row width to report and a counter that can only ever read `rows=1`
-// is a check that cannot fail. Giving it a width is P9's chunked scan, a separate conditional
-// package. The launch bill of the rest of a token is `planned_launch_counts()`'s, which is a
-// derivation from §07 rather than an observation, and `gate.py` section (d) polices that one.
+// projections (P5), the three token-parallel GDN sites (P6: conv §04.2, gates §04.3, gated norm
+// §04.5), and the attention site (P8: §05.1-§05.7 over a whole wave, one site per attention layer).
+// `gdn_rec` (§04.4) is deliberately NOT a family: the recurrence is a sequential scan over tokens, so
+// its launcher has no row width to report and a counter that can only ever read `rows=1` is a check
+// that cannot fail. Giving it a width is P9's chunked scan, a separate conditional package. The launch
+// bill of the rest of a token is `planned_launch_counts()`'s, which is a derivation from §07 rather
+// than an observation, and `gate.py` section (d) polices that one.
+//
+// THE ATTENTION FAMILY COUNTS SITES, NOT KERNELS. One `record` per attention layer per body, because
+// what that site submits depends on the lane geometry the body happens to have: one fused launch for a
+// row under the staging, two above it (core + combine), three for a wave (prep + core, plus combine if
+// any row is above the staging). Counting kernels would make the family's expected value a function of
+// lane depth, and the whole point of the A/B is that the two sides differ ONLY in wave width — a
+// counter that also moved with context length could not tell "batched" from "short prompt". Counting
+// sites keeps the expected number exactly §07's per-body bill (`launch_plan()["attn"]`), which is what
+// `gate.py::wave_expect` prices, and the collapse it must show is one site per wave instead of one per
+// token. `kernels_attn.cpp` records at the end of the site, so a launcher that threw is not counted.
 //
 // Always on, not behind a switch: counting is three integer ops per launch against a measured 1.85 µs
 // dispatch floor (`tools/launch_overhead_hip.cpp`), and an instrument that can be turned off is an
@@ -38,9 +49,10 @@ namespace engine::launchstats {
 // One launcher family, as observed on the host. `rows` means the launcher's row/token width
 // argument: for glue it is the tile rows of `glue_add_norm_rows`, for the MLP it is its `tokens`, for
 // the projections it is the wave width handed to `proj_gemv` — NOT that signature's `rows`, which
-// counts one projection's output rows and is a different axis entirely — and for the GDN trio it is
-// the wave width handed to `gdn_conv` / `gdn_gates` / `gdn_gated_norm`, i.e. tokens, since each of
-// those is one launch per GDN layer per wave whatever the width.
+// counts one projection's output rows and is a different axis entirely — for the GDN trio it is the
+// wave width handed to `gdn_conv` / `gdn_gates` / `gdn_gated_norm`, i.e. tokens, since each of those is
+// one launch per GDN layer per wave whatever the width, and for attention it is the number of query
+// rows the site served (`AttnLayerArgs::nrows`).
 struct Family {
     long long calls = 0;           // launches actually submitted
     long long calls_batched = 0;   // of those, the ones with rows > 1 — the batched form ran
@@ -57,7 +69,7 @@ struct Family {
     std::string describe() const;
 };
 
-// The seven families, one accessor each so a launcher states which one it is feeding.
+// The eight families, one accessor each so a launcher states which one it is feeding.
 Family& glue();
 Family& proj();
 Family& mlp_gateup();
@@ -65,6 +77,8 @@ Family& mlp_down();
 Family& gdn_conv();         // §04.2 windowed causal conv, one launch per GDN layer per wave
 Family& gdn_gates();        // §04.3 decay/write gates, ditto
 Family& gdn_gated_norm();   // §04.5 gated RMSNorm, ditto
+Family& attn();             // §05.1-§05.7, ONE SITE per attention layer per body (see the header note:
+                            // sites, not kernels — the site submits 1-3 launches by lane depth)
 
 // One `LAUNCHSTAT family=<name> <describe()>` line per family, as a single string (no trailing
 // newline). `decode_run` prints it before its `RESULT` line, so the last line of a run stays the

@@ -49,6 +49,10 @@ Family& gdn_gated_norm() {
     static Family f;
     return f;
 }
+Family& attn() {
+    static Family f;
+    return f;
+}
 
 std::string describe_run() {
     std::ostringstream os;
@@ -58,7 +62,8 @@ std::string describe_run() {
        << "LAUNCHSTAT family=mlp_down " << mlp_down().describe() << "\n"
        << "LAUNCHSTAT family=gdn_conv " << gdn_conv().describe() << "\n"
        << "LAUNCHSTAT family=gdn_gates " << gdn_gates().describe() << "\n"
-       << "LAUNCHSTAT family=gdn_gated_norm " << gdn_gated_norm().describe();
+       << "LAUNCHSTAT family=gdn_gated_norm " << gdn_gated_norm().describe() << "\n"
+       << "LAUNCHSTAT family=attn " << attn().describe();
     return os.str();
 }
 
