@@ -28,10 +28,12 @@ timing; parity is claimed only over the forced pins.
 `--selftest` re-runs this file in subprocesses against injected bugs — a wrong sampled id, a swapped
 top-two logits, 5 % logits noise that leaves the argmax alone, a §07.5 stop check firing during the
 prompt phase, a replay step fed the wrong token, and — at a step the pin ties — the engine landing on
-an untied id (must FAIL) and on the pin's other tied id (must PASS as TIE) — and requires each to fail
-at the step it was injected at, because a negative that every check would catch proves nothing
-(`prototype/mlp_gemv/results.md`). It is the only part of a gate that can be validated before the
-engine has ever run, and it is why a first device run need not double as a test of this file.
+an untied id (must FAIL), on the pin's other tied id (must PASS as TIE), and on the pin's own top-1
+with its logit 1 BF16 ULP off the tied payload (must PASS, because a step where engine and pin agree
+is an ordinary match: D-1) — and requires each to fail at the step it was injected at, because a
+negative that every check would catch proves nothing (`prototype/mlp_gemv/results.md`). It is the only
+part of a gate that can be validated before the engine has ever run, and it is why a first device run
+need not double as a test of this file.
 
 Sections, in the order the task fixed them plus the ones the deep fixture needed:
 
@@ -39,9 +41,10 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
   (a) SAMPLED IDS — the engine's sample after the prompt's last token plus its generation samples
       must equal the manifest's `greedy_continuation`, exactly. §10.1 G7 requires token-for-token
       exactness, and a token id is an integer: there is no band to argue about. The ONE exception is a
-      step where the pin itself is an exact tie, which has no defined argmax to agree with; that is a
-      named, proved exception (TIE POLICY, next to the band rationale) and every use of it is printed
-      as a TIE line and counted in the summary, never waived quietly.
+      step where the pin itself is an exact tie AND the engine picked one of the other tied ids, which
+      leaves an argmax with no defined winner to agree with; that is a named, proved exception (TIE
+      POLICY, next to the band rationale), every use of it is printed as a TIE line and counted in the
+      summary, and a step where the engine reproduced the pin's own id is never one of its uses.
   (b) THE LOGITS — each step's logits against that step's pinned `logits_last.npy`, inside the band
       rule printed for that step: the measured ROUTE ALLOWANCE where `engine/route_allowance.py` has
       priced this fixture, the flat published §10 floors where it has not. The rule in force is named on
@@ -178,8 +181,9 @@ BAND = {
     "cos_hard": 0.9995,      # §10.1 G5 — the flat floor, in force where no route allowance is priced
     "meanrel_hard": 0.05,    # §10.2 cascade ceiling — same fallback rule
     "cos_report": 0.9999,    # §10.1 G6, decode logits
-    "route_margin": 3.50,    # cos: engine deficit / measured route spread. DERIVED, see below.
-    "route_margin_rel": 0.42,  # meanrel: the same ratio on the meanrel column. DERIVED, see below.
+    "route_margin": 3.50,    # cos: FALLBACK margin, used only for a cached allowance that carries no
+                             # margin of its own (the pre-D-2 global scheme). See ROUTE ALLOWANCE below.
+    "route_margin_rel": 0.42,  # meanrel: the same fallback.
 }
 
 # ROUTE ALLOWANCE — the logits band is keyed on the reference's own measured route spread, per fixture
@@ -213,25 +217,38 @@ BAND = {
 # `load_allowance` checks) that a freshly computed one would not.
 #
 # The margins are DERIVED, not chosen — that is the entire difference between this and a relabelled band.
-# Definition: `margin` = max over the priced fixtures of (engine deficit at step j / route spread at
-# step j), i.e. the tightest constant that admits every step ever measured, rounded UP at two decimals
-# (`engine/route_allowance.py` computes it and refuses to write a file whose max exceeds the constant
-# below). Measured on the 2026-10-12 gate runs, both fixtures, 64 steps each (128 steps, and every
-# deficit read at full precision out of the gate log's (b) lines, not off its six-decimal cos):
+# Definition, PER FIXTURE (D-2, 2026-10-12, which retired the single global constant): `margin` for one
+# fixture = max over THAT fixture's steps of (engine deficit / route spread), i.e. the tightest constant
+# that admits every step that fixture was measured on, rounded UP at two decimals by
+# `engine/route_allowance.py` and stored in the fixture's own file. Why per-fixture: while the margin was
+# one global max, `dec300f`'s pricing would have moved the constant every other fixture is judged by — its
+# worst ratio is 7.98 at step 86 while its route spread is *tighter* than the 64-step fixtures' (median
+# route 1-cos 4.07e-5 against `dec64t`'s 6.71e-5), so pricing it globally meant 3.50 → 7.99 for everybody.
+# Unpriced it sat on the flat floor with 3.7e-6 of headroom at step 86, and the 4k work is a perturbation.
+# Keying per fixture means the derivation cannot read another fixture's rows — `--selftest` in that tool
+# asserts exactly that, and asserts it is falsifiable by checking a global max would have answered
+# differently. Measured, and re-derived from the shipped allowance files rather than from memory:
 #
-#     cos      dec64f  worst 3.0368 at step 32: deficit 2.1555e-3 over a spread of 7.0982e-4  -> 3.04
-#     cos      dec64t  worst 3.4939 at step 54: deficit 2.3281e-4 over a spread of 6.6635e-5  -> 3.50 <- sets it
-#     meanrel  dec64f  worst 0.3344 at step 54: 1.2596 % over a spread of 3.7670 %            -> 0.34
-#     meanrel  dec64t  worst 0.4111 at  step 4: 2.0331 % over a spread of 4.9452 %            -> 0.42 <- sets it
+#     fixture   margin / margin_rel   own worst cos ratio        own worst meanrel ratio   steps
+#     dec64f    3.50 / 0.42           3.0368 at step 32          0.3344 at step 54         64
+#     dec64t    3.50 / 0.42           3.4939 at step 54          0.4111 at step 4          64
+#     dec300f   7.99 / 0.72           7.9837 at step 86          0.7198 at step 72         128
+#     mt32f     2.93 / 0.24           2.9221 at step 19          0.2303 at step 3          32
 #
-# Say it plainly, including the inconvenient half: the proposal in `results.md` guessed k = 4 and the
-# measurement says 3.50 — and 3.50 is set not by the ill-conditioned `dec64f` excursion but by an ordinary
-# well-conditioned step of `dec64t`, which is worth knowing. A margin of 3.0 or less leaves `dec64f`
-# step 32 (3.0368) and `dec64t` step 54 (3.4939) RED, and there is no headroom factor hiding that: the
-# constant is a measured property of this engine at these two fixtures. If the engine gets worse the
-# constant has to move, and moving it is a visible edit — this comment, `BAND`, and the `margin` field of
-# every cached file have to agree, `load_allowance` fails the gate when a file disagrees, and
-# `route_allowance.py` refuses to write a file whose measurement does not reproduce the constant.
+# `dec64t`, `dec300f` and `mt32f` are carrying their own derivations. `dec64f` carries 3.50/0.42 while its
+# own derivation is 3.04/0.34: those two files were written under the global rule and D-2 recorded keeping
+# them, so their `margin_basis` field is absent and `load_allowance` says out loud that the margin in force
+# is one the fixture did not set for itself. Re-pricing `dec64f` REFUSES until somebody deletes its file
+# deliberately, which is how "keep 3.50" stays a decision on the record rather than drift.
+#
+# Say the inconvenient halves plainly. (1) A margin of 3.0 or less leaves `dec64f` step 32 (3.0368) and
+# `dec64t` step 54 (3.4939) RED — the constant is a measured property of this engine, not a taste call.
+# (2) A margin defined as `max(engine deficit / route spread)` puts that fixture's worst step exactly on
+# the boundary BY CONSTRUCTION — `dec300f` step 86 now sits at 7.984 against a 7.99 cap, i.e. the rule is
+# calibrated to the very errors it is meant to tolerate. That mild self-reference is known and NOT fixed
+# here: D-3 (plan §3) / Q4b schedules an engine-independent multiplier from legal-route disagreement alone,
+# and if that number comes out smaller than the engine needs, it is a finding about the engine, not a
+# licence to loosen. Per-fixture keying removed the cross-fixture leak, not the self-reference.
 #
 # What it costs and what it buys, in both directions. Outside the excursion the allowance is TIGHTER than
 # the floor it replaces — on `dec64t` all 64 steps get a cos cap under §10.1's 5e-4 (tightest 1.2274e-4,
@@ -262,17 +279,32 @@ BAND = {
 #     that can move. Under the allowance there is no exempted step and no list to keep in sync: every
 #     step is judged, by a number measured at that step.
 #
-# Staleness is designed to be loud. Each cached file records the prompt-id hash, the forced-feed hash,
-# the `speccheck/specimpl.py` hash and the margins it was priced under, because those four are what the
-# measurement was made from; `load_allowance` FAILS the gate if any of them disagrees with the fixture in
-# front of it, so a re-pinned fixture or a changed reference cannot leave a stale band behind. A fixture
-# with NO cached file — `dec8` today, whose route table `route_price.py` only prints — falls back to the
-# flat published floors and prints `flat G5` on every step line, so the fallback is visible rather than
-# assumed.
+# Staleness is designed to be loud. Each cached file names the fixture it was priced for and records the
+# prompt-id hash, the forced-feed hash, the `speccheck/specimpl.py` hash and the step count, because those
+# are what the measurement was made from; `load_allowance` FAILS the gate if any of them disagrees with the
+# fixture in front of it, so a re-pinned fixture or a changed reference cannot leave a stale band behind.
+# It also checks the file against itself: every step's cap must equal the file's own margin times that step's
+# spread, and the margin must admit the engine deficits recorded in the same file, so a hand-edited number
+# fails instead of quietly becoming the band. A fixture with NO cached file — `dec8` today, whose route table
+# `route_price.py` only prints — falls back to the flat published floors and prints `flat G5` on every step
+# line, so the fallback is visible rather than assumed.
 
 # TIE POLICY — an exact tie in the pin is a named, proved exception to "ids exact per step", and it
 # is the strictest thing available, not a concession. DECIDED 2026-10-12 by the operator; the band
 # above is untouched by it, and the two are not the same question.
+#
+# SCOPE, and it is the part that was wrong first (D-1, 2026-10-12): the policy is an EXCEPTION, so it
+# applies only where the engine needs excusing — i.e. where the engine's id is NOT the pin's top-1 id.
+# A step where engine and pin picked the same id is an ordinary exact match and must not consult the
+# tie rule at all; `mt32f` step 11 proved why. There the pin ties 24.25 (payload 0x41c2) between ids
+# [4016, 15048], the engine picked 4016 — the PIN'S OWN top-1 — and the step was nevertheless RED,
+# because the predicate as first written also demanded the engine's F32 at the pin's top-1 round back
+# to the pinned payload, and it rounded 1 ULP high (24.391083 -> 0x41c3). G7 was satisfied outright at
+# that step; a tied step was being judged MORE strictly than an untied one, by a half-ULP band this
+# file's own comment declines to invent. `tie_verdict` now returns three kinds — "no-tie", "match"
+# (policy not consulted, the tie still noted on the log), "tie" (the clauses below armed) — and section
+# (a) only arms a check on the third. `--selftest --fixture dec64f` (or `--dry-run --tie-same-ulp 17`) is
+# the regression: same id, logit 1 ULP off the payload, must be GREEN.
 #
 # Why an exception is admissible at all: `argmax` over an exact tie is not defined by the mathematics
 # (§03.4 pins ties to the lowest id, which is a *tie-BREAK* — an arbitrary choice among values the
@@ -281,22 +313,26 @@ BAND = {
 # 19.75 (ids 1379, 64704) — 2 ways tied at both. That the engine's other choice is not a numerics
 # failure is shown independently by `engine/route_price.py`: both legal specimpl routes also pick
 # 10407 at step 17, i.e. two legal forms of the reference disagree with the pin's tie-break exactly
-# as the engine does.
+# as the engine does. Those two steps are what the policy is FOR, and they still resolve through it.
 #
-# Why the predicate is what it is. The exception is admissible only if the tie is PROVABLE FROM THE
-# PIN, and the proof has to live in the space the tie exists in: the pin's BF16 payload. So:
+# Why the predicate is what it is, at a step the policy is actually invoked at. The exception is
+# admissible only if the tie is PROVABLE FROM THE PIN, and the proof has to live in the space the tie
+# exists in: the pin's BF16 payload. So:
 #   1. >= 2 ids share the exact maximum **on the BF16 payload**, read through `load_pin`'s own
 #      bit-shift widening (§10.5: a bitcast, never a numeric cast) — never by a float `isclose`;
 #   2. the engine's sampled id is one of the tied ids;
-#   3. RNE(the engine's F32 logit at the pin's top-1 id) equals the pinned BF16 payload, i.e. the
-#      engine's own arithmetic kept the pinned winner inside the pinned value's own BF16 bin.
-# Clause 3 in the engine's F32 space instead would be a category error, not strictness: `lm_head`'s
-# FULL form writes an F32 accumulator with no BF16 rounding
+#   3. RNE(the engine's F32 logit AT THE ENGINE'S OWN CHOSEN ID) equals the shared tied payload, i.e.
+#      the engine's arithmetic kept the value the model called tied inside its own BF16 bin. All the
+#      tied ids share one payload — that is what a payload tie IS — so this is one check, and it is
+#      made at the id the engine actually stands on, not at the one the pin's tie-break happened to
+#      name. (Checking at the pin's top-1 was D-1's other half of the same mistake: at `dec64f` step 17
+#      the engine's value at 10407 is 17.237261 -> 0x418a, at 2018 it is 17.194519 -> 0x418a; both
+#      hold there, which is why the old wording survived two fixtures.)
+# Clause 3 in raw F32 space instead of payload space would be a category error, not strictness:
+# `lm_head`'s FULL form writes an F32 accumulator with no BF16 rounding
 # (`prototype/lm_head_gemv/lm_head_gemv_kernels.h:64`), so an F32-equals-BF16 test can only pass by
-# luck — measured, step 17 gives engine 17.19451904 against pinned 17.25 (payload 0x418a, which the
-# engine's value RNE-rounds back to), step 18 gives 19.76797104 against 19.75 (0x419e). And clause 3
-# is not vacuous in payload space either: only 48 317 of 248 320 logits at step 17 (19 %) land in
-# their pinned BF16 bin, so it constrains real behaviour.
+# luck. And clause 3 is not vacuous in payload space either: only 48 317 of 248 320 logits at step 17
+# (19 %) land in their pinned BF16 bin, so it constrains real behaviour.
 #
 # What it deliberately does NOT do: it does not compare the engine's value at the *other* tied ids
 # against a tolerance. At 17.25 one BF16 ULP is 0.125, so "within one ULP" would be a brand-new band
@@ -304,16 +340,20 @@ BAND = {
 # id is therefore PRINTED (F32 and payload) and not gated, so a human can see whether the engine saw
 # them as near-tied. If that ever looks load-bearing, size it with a floor probe and promote it then.
 #
-# A tie must never pass silently: every admissible step is reported as TIE with the tied ids, the tied
-# value and the engine's per-id values, and counted in the summary line. An engine that picks a THIRD,
-# untied id at a tied step fails loudly, and `--selftest` proves it does, in both directions: the
-# untied injection must FAIL and the other-tied-id injection must PASS as TIE.
-TIE_POLICY = ("exact tie in the pin (>= 2 ids share the max on the BF16 payload); the engine's id is"
-              " one of them and the pin's top-1 stayed inside its own BF16 bin")
+# A tie must never pass silently: every step the policy actually resolves is reported as TIE with the
+# tied ids, the tied value and the engine's per-id values, and counted in the summary line; a tied step
+# the engine matched outright is printed as an ordinary-match note, so the tie is still visible. An
+# engine that picks a THIRD, untied id at a tied step fails loudly, and `--selftest` proves all three
+# directions: the untied injection FAILS, the other-tied-id injection PASSES as TIE, and the
+# same-id-with-a-1-ULP-off-logit injection PASSES as the ordinary match it is.
+TIE_POLICY = ("exact tie in the pin (>= 2 ids share the max on the BF16 payload), the engine picked an"
+              " id other than the pin's top-1, that id is one of the tied ones, and the engine's own"
+              " logit at it rounds back to the shared tied payload")
 
 fails: list[str] = []
 notes: list[str] = []
 ties: list[str] = []        # one entry per generation step resolved by the tie policy; counted in report()
+tie_notes: list[str] = []   # tied steps the engine matched outright: printed, NOT policy decisions (D-1)
 
 
 def check(ok: bool, name: str, detail: object = "") -> bool:
@@ -364,6 +404,27 @@ def bf16_payload(x) -> np.ndarray:
     return ((u + 0x7FFF + lsb) >> 16).astype(np.uint16)
 
 
+def bf16_bump(vec: np.ndarray, index: int) -> np.ndarray:
+    """A copy of `vec` with element `index` moved to the NEXT BF16 value up, on the bits.
+
+    The smallest change that leaves the argmax alone while moving the value out of its own BF16 bin,
+    which is what the D-1 selftest injection needs: an engine whose F32 logit at the id it chose rounds
+    1 ULP above the pinned payload (`mt32f` step 11). Steps up in payload space, and refuses a negative
+    rather than silently stepping it DOWN — payload order is numeric order only for non-negatives.
+    """
+    out = np.array(vec, dtype=np.float32, copy=True).reshape(-1)
+    x = float(out[index])
+    if not np.isfinite(x) or x < 0:
+        raise SystemExit(f"gate: the ULP bump only knows how to step a non-negative value up"
+                         f" (asked for index {index}, value {x!r})")
+    payload = int(bf16_payload(x)[0]) + 1
+    out[index] = np.array([payload << 16], dtype=np.uint32).view(np.float32)[0]
+    if not float(out[index]) > x:      # a bit trick that went sideways is worse than no injection
+        raise SystemExit(f"gate: the ULP bump at index {index} moved {x!r} to"
+                         f" {float(out[index])!r}, which is not one BF16 ULP up")
+    return out.reshape(np.shape(vec))
+
+
 def pin_tie(step: int):
     """The exact-maximum tie set of one pinned logits dump, or None if that step has a plain winner.
 
@@ -392,16 +453,31 @@ def pin_tie(step: int):
             "top1": ids[0], "payload_is_stored": stored}
 
 
-def tie_verdict(step: int, eng, sampled: int) -> tuple[bool, str]:
-    """Decide one generation step under the tie policy: (admissible, the line to print).
+def tie_verdict(step: int, eng, sampled: int) -> tuple[str, bool, str]:
+    """Decide one generation step against the tie policy: `(kind, admissible, the line to print)`.
 
     The single predicate for the whole file — section (a) gates on it and section (b) reuses the answer
-    for its argmax line — so exactly one place decides what an engine may do at a tied step. It fails
-    closed: no tie in the pin, or no engine logits vector to check, means not admissible.
+    for its argmax line — so exactly one place decides what an engine may do at a tied step. Three
+    kinds, because the policy is an exception and an exception is only needed by an engine that deviated
+    from the pin (D-1, see the TIE POLICY block):
+
+      "no-tie" — the pin has a single winner here, so the policy has nothing to say and
+                 section (a) does not even print; `admissible` is False because nothing was admitted.
+      "match"  — the engine's id IS the pin's top-1 id. That is G7 satisfied outright: an ordinary
+                 exact match, the rule is not consulted, and the line only records that the step
+                 happened to be tied. Still not `admissible`, because there was nothing to admit.
+      "tie"    — the engine picked some other id at a tied step. Only now do the clauses apply, and
+                 the predicate fails closed: no engine logits vector, an id outside the tied set, or a
+                 logit that does not round back to the shared tied payload all mean not admissible.
     """
     tie = pin_tie(step)
     if tie is None:
-        return False, ""
+        return "no-tie", False, ""
+    if sampled == tie["top1"]:
+        return "match", False, (
+            f"step {step}: the pin is an exact {len(tie['ids'])}-way tie at {tie['value']!r}"
+            f" (payload 0x{tie['payload']:04x}) among ids {tie['ids']}, and the engine picked the"
+            f" pinned top-1 {tie['top1']} — an ordinary id match, so the tie policy is not consulted")
 
     def shown(i: int) -> str:
         if eng is None:
@@ -413,17 +489,16 @@ def tie_verdict(step: int, eng, sampled: int) -> tuple[bool, str]:
             f" {len(tie['ids'])} ways among ids {tie['ids']}; engine's value at each tied id:"
             f" " + ", ".join(shown(i) for i in tie["ids"]))
     if eng is None:
-        return False, head + " | NOT ADMISSIBLE: no engine logits vector, so the tie cannot be proved"
-    in_tie = sampled in tie["ids"]
-    p1 = tie["top1"]
-    got1 = int(bf16_payload(float(eng[p1]))[0])
-    held = got1 == tie["payload"]
-    return (in_tie and held), (head + f" | engine id {sampled}"
-                                 + (" is one of the tied ids" if in_tie
-                                    else " is NOT one of the tied ids")
-                                 + f"; engine's logit at pinned top-1 {p1} = {float(eng[p1]):.8g} ->"
-                                   f" bf16 0x{got1:04x} {'==' if held else '!='} pinned"
-                                   f" 0x{tie['payload']:04x}")
+        return "tie", False, head + " | NOT ADMISSIBLE: no engine logits vector, so the tie cannot be proved"
+    if sampled not in tie["ids"]:
+        return "tie", False, (head + f" | engine id {sampled} is NOT one of the tied ids"
+                              " | NOT ADMISSIBLE")
+    got = int(bf16_payload(float(eng[sampled]))[0])
+    held = got == tie["payload"]
+    return ("tie", held, head + f" | engine id {sampled} is one of the tied ids; engine's logit at"
+                                f" that id = {float(eng[sampled]):.8g} -> bf16 0x{got:04x}"
+            + f" {'==' if held else '!='} the shared tied payload 0x{tie['payload']:04x}"
+            + ("" if held else " | NOT ADMISSIBLE"))
 
 
 def read_engine_logits(work: Path, n_decode: int, prompt_len: int, vocab: int) -> list:
@@ -531,6 +606,28 @@ def allowance_inputs(n_steps: int) -> dict:
                 (ROOT / "speccheck" / "specimpl.py").read_bytes()).hexdigest()}
 
 
+def allowance_margins(doc) -> tuple[float, float, str]:
+    """(cos margin, meanrel margin, and where they came from) for one cached allowance file.
+
+    PER-FIXTURE since D-2 (2026-10-12): the file states its own margins, because the derivation is a max
+    over that fixture's own steps and nothing else — so a fixture that measures a wide engine/route ratio
+    (`dec300f`: 7.98 at step 86, on a route spread *tighter* than the 64-step fixtures) cannot loosen the
+    gate for anybody else. `BAND["route_margin"]`/`route_margin_rel` are the documented FALLBACK for a
+    file written under the old global scheme, which carried no margins of its own; when they are used the
+    caller says so out loud rather than applying them silently.
+    """
+    if doc.get("margin") is not None and doc.get("margin_rel") is not None:
+        if doc.get("margin_basis"):
+            return (float(doc["margin"]), float(doc["margin_rel"]),
+                    "this fixture's own, derived from its own steps by engine/route_allowance.py")
+        return (float(doc["margin"]), float(doc["margin_rel"]),
+                "carried in this file from the retired global-max scheme (no `margin_basis`): the"
+                " number binds, but it was a max over several fixtures, so it may be looser than this"
+                " fixture's own derivation — see derivation.worst_ratio_by_fixture")
+    return (BAND["route_margin"], BAND["route_margin_rel"],
+            "the documented global fallback: this file carries no margins at all")
+
+
 def read_allowance_doc():
     """The cached file's raw contents, or None if there is none. Reads only — `load_allowance` judges."""
     path = REFS / ALLOWANCE_FILE
@@ -544,13 +641,18 @@ def read_allowance_doc():
 
 
 def allowance_problems(doc, n_steps: int) -> list:
-    """Every reason this cached file must not be trusted for this fixture at this margin. Empty = use it."""
+    """Every reason this cached file must not be trusted for this fixture. Empty list = use it.
+
+    Four groups, in the order a reader needs them: it is the right fixture's file; its provenance still
+    matches the pins and the reference in front of it; its margins are self-consistent with the caps they
+    produced and with the engine deficits recorded beside them; and it covers the steps being judged.
+    """
     bad = []
-    for key, want in (("margin", BAND["route_margin"]), ("margin_rel", BAND["route_margin_rel"])):
-        got = doc.get(key)
-        if got is None or float(got) != want:
-            bad.append(f"{key}={got} but the gate carries {want} — the margin in force lives in "
-                       "engine/gate.py's BAND, and a file priced under another one is a different band")
+    if doc.get("fixture") != REFS.name:
+        bad.append(f"fixture={doc.get('fixture')!r} but this is {REFS.name!r} — a per-fixture margin read"
+                   " by the wrong fixture is exactly the mix-up per-fixture keying makes possible, so a"
+                   " file has to name the fixture it was priced for")
+    margin, margin_rel, _whence = allowance_margins(doc)
     want_inputs = allowance_inputs(n_steps)
     got_inputs = doc.get("inputs", {})
     for field, want in want_inputs.items():
@@ -559,6 +661,23 @@ def allowance_problems(doc, n_steps: int) -> list:
                        " pins or the reference moved under this cached spread; re-price it with"
                        " engine/route_allowance.py")
     steps = doc.get("steps", [])
+    for r in steps:
+        j = int(r["step"])
+        for col, m in (("one_cos", margin), ("meanrel", margin_rel)):
+            spread, cap = float(r[f"route_{col}"]), float(r[f"allowance_{col}"])
+            if abs(cap - m * spread) > 1e-9 * max(abs(cap), 1e-30):
+                bad.append(f"step {j}: allowance_{col}={cap:.6e} is not margin x route_{col}"
+                           f" = {m:.2f} x {spread:.6e} — the margin in force and the caps it produced"
+                           " have to be the same numbers, so a hand-edited cap is a band nobody measured")
+            # The margin must at least admit the engine this same file was priced against. That is not a
+            # claim about TODAY's engine — (b)'s band check judges that — only that the file cannot
+            # contradict itself: a margin below its own recorded ratios was edited after the fact.
+            eng = r.get(f"engine_{col}_when_priced")
+            if eng is not None and float(eng) / spread > m:
+                bad.append(f"step {j}: the engine measured when this file was priced was"
+                           f" {float(eng) / spread:.3f}x the route spread, over this file's own margin"
+                           f" {m:.2f} — it could not have passed the day it was written, so the margin"
+                           " or the spread was edited after the fact")
     priced = {int(r["step"]) for r in steps}
     missing = [j for j in range(n_steps) if j not in priced]
     if missing:
@@ -568,7 +687,7 @@ def allowance_problems(doc, n_steps: int) -> list:
 
 
 def load_allowance(n_steps: int):
-    """The per-step allowance for this fixture as `{margin, margin_rel, steps}`, or None.
+    """The per-step allowance for this fixture as `{margin, margin_rel, margin_source, steps}`, or None.
 
     None means "judge by the flat published floors", which is the STRICTER fallback and is always
     announced per step, never assumed. A file that is present but does not match what it is being read
@@ -581,17 +700,19 @@ def load_allowance(n_steps: int):
                      " §10.1 G5 / §10.2 floors. Price it (CPU, ~5 s per fixture, no device):"
                      " `engine/route_price.py --fixture " + REFS.name + " --engine-log <gate log>"
                      " --out tmp/route_" + REFS.name + ".json` then `engine/route_allowance.py --table"
-                     " tmp/route_" + REFS.name + "[.json for each priced fixture]`.")
+                     " tmp/route_" + REFS.name + ".json` — one fixture per run is enough now that a"
+                     " margin is derived from that fixture alone (D-2).")
         return None
     bad = allowance_problems(doc, n_steps)
     check(not bad, f"{ALLOWANCE_FILE} is valid for {REFS.name}", bad[:4])
     if bad:
         return None
     gen = doc.get("generated", {})
+    margin, margin_rel, whence = allowance_margins(doc)
     print(f"  allowance: {ALLOWANCE_FILE} — priced {gen.get('date', 'date unknown')} by"
-          f" `{gen.get('command', 'command unknown')}`; margins cos {doc['margin']:.2f} / meanrel"
-          f" {doc['margin_rel']:.2f}")
-    return {"margin": float(doc["margin"]), "margin_rel": float(doc["margin_rel"]),
+          f" `{gen.get('command', 'command unknown')}`; margins cos {margin:.2f} / meanrel"
+          f" {margin_rel:.2f} ({whence})")
+    return {"margin": margin, "margin_rel": margin_rel, "margin_source": whence,
             "steps": {int(r["step"]): r for r in doc["steps"]}}
 
 
@@ -600,18 +721,23 @@ def rule_for_step(allowance, j: int) -> tuple:
 
     Named on every step because a reader of a gate log must never have to guess why a step passed, and
     the two rules give different answers at the same step: the allowance is tighter than the flat floor
-    most places and looser in the low-energy window.
+    most places and looser in the low-energy window. The margin quoted here is THIS FIXTURE's own, taken
+    from its own allowance file (D-2), because that is the only margin whose derivation looked at these
+    steps.
     """
     if allowance is None:
         return (1.0 - BAND["cos_hard"], BAND["meanrel_hard"],
                 f"flat G5 (cos deficit <= {1 - BAND['cos_hard']:.4e}, meanrel <="
                 f" {BAND['meanrel_hard']:.0%}) — no route allowance priced for {REFS.name}")
     row = allowance["steps"][j]
+    spread = float(row["route_one_cos"])
+    spread_rel = float(row["route_meanrel"])
     return (float(row["allowance_one_cos"]), float(row["allowance_meanrel"]),
-            f"route allowance (spread={float(row['route_one_cos']):.4e},"
-            f" margin={allowance['margin']:.2f} -> cos deficit <="
-            f" {float(row['allowance_one_cos']):.4e}; meanrel spread={float(row['route_meanrel']):.4%},"
-            f" margin={allowance['margin_rel']:.2f} -> <= {float(row['allowance_meanrel']):.4%})")
+            f"route allowance for {REFS.name} (this step's measured spread={spread:.4e},"
+            f" {REFS.name}'s own margin={allowance['margin']:.2f} -> cos deficit <="
+            f" {float(row['allowance_one_cos']):.4e}; meanrel spread={spread_rel:.4%},"
+            f" margin_rel={allowance['margin_rel']:.2f} -> <="
+            f" {float(row['allowance_meanrel']):.4%})")
 
 
 def _counterfactual(value: float, flat_cap: float, flat_name: str) -> str:
@@ -641,6 +767,18 @@ def allowance_row(j: int):
         if int(row["step"]) == j:
             return row
     return None
+
+
+def relative_noise(vec: np.ndarray, fraction: float = 0.05) -> np.ndarray:
+    """Aggregate corruption that LEAVES the argmax alone: `fraction` multiplicative Gaussian noise.
+
+    At 5 % this puts cos at ≈ 1 − σ²/2 ≈ 0.9987 — under G5's 0.9995 and over §10.2's 0.999 cascade
+    floor. This is the case that asks whether the band has teeth of its own, separate from the token id.
+    Shared by the injection and by `selftest`, which has to know what deficit the injection actually
+    produces before it can claim the band will catch it.
+    """
+    rng = np.random.default_rng(4)          # fixed: the injection must be reproducible
+    return (vec * (1.0 + fraction * rng.standard_normal(vec.shape))).astype(np.float32)
 
 
 def allowance_noise(vec: np.ndarray, j: int, factor: float) -> np.ndarray:
@@ -934,7 +1072,7 @@ def parse_run(text: str) -> dict:
 def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids: int = -1,
             break_logits: int = -1, break_noise: int = -1, break_prompt_stop: int = -1,
             replay: bool = False, break_feed: int = -1, break_tie: int = -1,
-            tie_alt: int = -1, break_allow: int = -1) -> tuple[
+            tie_alt: int = -1, break_allow: int = -1, tie_same_ulp: int = -1) -> tuple[
                 str, int]:
     """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
 
@@ -1004,6 +1142,13 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             # The other direction, which is the property the policy buys: the engine's id is the
             # pin's OTHER tied id, and the gate must admit that as a TIE rather than fail it.
             sampled = tie_other(j)
+        if j == tie_same_ulp:
+            # D-1's regression, in the direction the old predicate got wrong: the engine keeps the
+            # pin's own top-1 id — so G7 is satisfied and the policy must not be consulted at all —
+            # and its F32 logit there sits one BF16 ULP above the pinned payload, which is exactly
+            # what the old clause-3-at-the-pin's-top-1 refused (`mt32f` step 11). `pin_tie` refusing an
+            # untied step is what stops this degrading into a plain noise injection.
+            logits = bf16_bump(logits, pin_tie(j)["top1"])
         if j == break_logits:
             # Flip the argmax: raise the runner-up past the top. This is the smallest logits-level
             # failure that matters — a token chosen wrongly, not a vector that is merely noisy.
@@ -1012,10 +1157,9 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             logits[order[1]] = logits[order[0]] + 1.0
         if j == break_noise:
             # Aggregate corruption that LEAVES the argmax alone: 5 % relative noise puts cos at
-            # ≈ 1 − σ²/2 ≈ 0.9987, under G5's 0.9995 and over §10.2's 0.999 cascade floor. This is
-            # the case that asks whether the band has teeth of its own, separate from the token id.
-            rng = np.random.default_rng(4)   # fixed: the injection must be reproducible
-            logits = logits * (1.0 + 0.05 * rng.standard_normal(logits.shape)).astype(np.float32)
+            # ≈ 1 − σ²/2 ≈ 0.9987, under G5's 0.9995 and over §10.2's 0.999 cascade floor. This is the
+            # case that asks whether the band has teeth of its own, separate from the token id.
+            logits = relative_noise(logits)
         if j == break_allow:
             # The same class — argmax untouched, aggregate wrong — sized against THIS step's measured
             # route allowance instead of against the flat floor: a deficit over the allowance that still
@@ -1045,14 +1189,19 @@ def selftest(fixture: str = "dec8") -> int:
     A negative that any check would catch is worth nothing (`prototype/mlp_gemv/results.md`), so
     the assertion is about where the failure landed, not that one happened.
 
-    The tie policy gets two cases, because a policy with only a refusal test is indistinguishable from
-    the policy that refuses everything: the engine on the pin's OTHER tied id must PASS as a TIE, and
-    the engine on an untied third id must FAIL. Both are aimed at a step the fixture really has a tie
-    at, and both are skipped out loud if this fixture has none.
+    The tie policy gets three cases, because a policy with only a refusal test is indistinguishable from
+    the policy that refuses everything: the engine on the pin's OTHER tied id must PASS as a TIE, the
+    engine on an untied third id must FAIL, and the engine that keeps the pin's own top-1 while its logit
+    sits 1 BF16 ULP off the tied payload must PASS as the ordinary match it is (D-1, the `mt32f` step 11
+    shape). All three are aimed at a step the fixture really has a tie at, and all are skipped out loud if
+    this fixture has none.
 
     The route allowance gets one: a step's logits deficit pushed past its own measured route spread
     while still inside the flat §10.1 G5 floor — i.e. a failure the band this allowance replaced could
-    not have seen. Skipped out loud on a fixture with no priced allowance (dec8 today).
+    not have seen. Skipped out loud on a fixture with no priced allowance (dec8 today). The plain 5 %
+    noise case is likewise skipped out loud when a fixture's OWN allowance at that step is wider than
+    the noise's deficit, because then the band admits the injection and expecting a FAIL there would be
+    a claim about the flat floor, not about the rule in force.
     """
     base = [sys.executable, str(Path(__file__).resolve()), "--fixture", fixture]
     # The cos band line is NAMED by the rule that produced it, so the needle has to know which rule this
@@ -1062,14 +1211,23 @@ def selftest(fixture: str = "dec8") -> int:
     allow_step = break_allow_step()
     cos_fail_5 = (f"[FAIL] step 5: cos deficit" if allow_step is not None
                   else f"[FAIL] step 5: cos >= {BAND['cos_hard']} (§10.1 G5)")
+    # The 5 % noise injection is sized against the FLAT §10.1 G5 floor, so on a fixture whose OWN
+    # allowance at step 5 is wider than what that noise produces it is not a negative at all — the band
+    # admits the deficit because two legal reference forms are further apart than that at the step. The
+    # honest response is to say so and skip, exactly as `--break-allow` refuses a step where its own
+    # injection would not discriminate; the allowance-sized case below asks the same question at the
+    # right size for this fixture.
+    noise_pin = load_pin("decode5.logits_last.npy").reshape(-1)
+    noise_deficit = 1.0 - metrics(relative_noise(noise_pin), noise_pin)["cos"]
+    noise_row = allowance_row(5)
+    noise_cap = None if noise_row is None else float(noise_row["allowance_one_cos"])
+    noise_caught = noise_cap is None or noise_deficit > noise_cap
     cases = [
         ([], 0, None, "clean dry run"),
         (["--break-ids", "3"], 1, "[FAIL] generation step 3 samples greedy_continuation[4]",
          "wrong id injected at step 3"),
         (["--break-logits", "2"], 1, "[FAIL] step 2: argmax agrees with the pin",
          "top two logits swapped at step 2"),
-        (["--break-noise", "5"], 1, cos_fail_5,
-         "5 % noise on step 5's logits (argmax untouched, aggregate wrong)"),
         # The bug the engine actually shipped with, replayed in the stand-in: id 248046 sampled at
         # prompt index 6 ended a 17-token prompt after 7 steps. Both new checks have to name it.
         (["--break-prompt-stop", "6"], 1,
@@ -1084,6 +1242,17 @@ def selftest(fixture: str = "dec8") -> int:
          "[FAIL] the tokens the engine fed itself are the ones the reference fed",
          "generation step 4 was fed the wrong token (a replay list off by one)"),
     ]
+    if noise_caught:
+        size = ("" if noise_cap is None else
+                f" — deficit {noise_deficit:.3e} over this step's own cap {noise_cap:.3e}")
+        cases.append((["--break-noise", "5"], 1, cos_fail_5,
+                      "5 % noise on step 5's logits (argmax untouched, aggregate wrong) — must FAIL"
+                      f" under the rule in force{size}"))
+    else:
+        print(f"  [SKIP] 5 % noise at step 5: it produces a deficit of {noise_deficit:.3e}, inside this"
+              f" fixture's own allowance at that step ({noise_cap:.3e}), so the band legitimately admits"
+              " it — two legal reference routes are further apart than that there. `--break-allow` asks"
+              " the same question at this fixture's own size.")
     # The tie policy, both directions, at the first step this fixture actually has a tie at — an
     # injection aimed at a step that is not tied would be caught by every check no matter what the
     # policy does, which is the vacuous-negative trap `prototype/mlp_gemv/results.md` names. dec8 has
@@ -1093,7 +1262,8 @@ def selftest(fixture: str = "dec8") -> int:
     tie_step = next((j for j in range(len(man["greedy_continuation"]) - 1) if pin_tie(j)), None)
     if tie_step is None:
         print(f"  [SKIP] tie injections: no exact tie anywhere in {fixture}'s pinned logits."
-              " Run `--selftest --fixture dec64f` to exercise the tie policy (steps 17 and 18).")
+              " Run `--selftest --fixture dec64f` (ties at 17 and 18) or"
+              " `--selftest --fixture mt32f` (ties at 11) to exercise the tie policy.")
     else:
         cases += [
             (["--tie-alt", str(tie_step)], 0,
@@ -1104,6 +1274,15 @@ def selftest(fixture: str = "dec8") -> int:
              [f"[FAIL] generation step {tie_step}: exact tie in the pin",
               "is NOT one of the tied ids"],
              f"engine sampled an UNTIED id at tied step {tie_step} — must fail loudly"),
+            # D-1's regression. The old predicate consulted the tie rule whenever the PIN was tied, so a
+            # step where the engine reproduced the pin's own id could still go red on a half-ULP payload
+            # question (`mt32f` step 11: engine 24.391083 rounds 0x41c3, pin 0x41c2, both ids 4016).
+            # This injection reproduces that shape and requires GREEN.
+            (["--tie-same-ulp", str(tie_step)], 0,
+             "the tie policy is not consulted",
+             f"engine kept the pin's own top-1 {pin_tie(tie_step)['top1']} at tied step {tie_step} with"
+             " its logit one BF16 ULP above the tied payload (the mt32f step 11 shape) — must PASS as"
+             " an ordinary id match, rule not consulted"),
         ]
     # The route allowance has to still bite, and bite where the old flat band could not: noise sized to
     # exceed this step's own measured spread while staying inside §10.1's flat 5e-4 deficit. Aimed at the
@@ -1295,6 +1474,13 @@ def main() -> int:
                     help="with --dry-run: at a tied step, sample the pin's OTHER tied id — what the"
                          " engine really does at dec64f steps 17/18 — and require the gate to admit"
                          " it as a TIE instead of failing it")
+    ap.add_argument("--tie-same-ulp", type=int, default=-1, metavar="STEP",
+                    help="with --dry-run: at a step where the PIN is tied, keep the pin's own top-1 id"
+                         " (so the ids match) but put the engine's F32 logit there one BF16 ULP above"
+                         " the pinned payload — the `mt32f` step 11 shape. The step must PASS: an"
+                         " engine that reproduced the pin's id is not invoking the tie exception, so"
+                         " the rule must not be consulted (D-1). Refuses an untied step, for the same"
+                         " reason as --break-tie")
     ap.add_argument("--selftest", action="store_true",
                     help="re-run this file in subprocesses: clean dry run must pass, each injected"
                          " bug must fail at its own step")
@@ -1362,7 +1548,7 @@ def main() -> int:
         stdout, rc = dry_run(man, prompt_ids, dec_logits, work, args.break_ids,
                              args.break_logits, args.break_noise, args.break_prompt_stop,
                              replay, args.break_feed, args.break_tie, args.tie_alt,
-                             args.break_allow)
+                             args.break_allow, args.tie_same_ulp)
         notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
                      " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
                      " run is not also the first time this file parses a STEP line. Section (d) is"
@@ -1389,6 +1575,10 @@ def main() -> int:
         if args.tie_alt >= 0:
             notes.append(f"injected: generation step {args.tie_alt} sampled the pin's other tied id"
                          " — the case the tie policy exists to admit")
+        if args.tie_same_ulp >= 0:
+            notes.append(f"injected: generation step {args.tie_same_ulp} kept the pin's own top-1 id"
+                         " with its logit one BF16 ULP above the tied payload — an ordinary match, so"
+                         " the tie policy must not be consulted (D-1)")
     else:
         print("  $ " + " ".join(cmd))
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -1453,12 +1643,20 @@ def main() -> int:
     # argmax line reuses, so the two sections cannot disagree about what a tied step means.
     tie_ok: dict[int, bool] = {}
     for j in range(min(n_decode, len(got_ids))):
-        admissible, line = tie_verdict(j, eng_logits[j][0], got_ids[j])
-        if not line:
+        kind, admissible, line = tie_verdict(j, eng_logits[j][0], got_ids[j])
+        if kind == "no-tie":
             continue                       # the ordinary case: the pin has a single winner here
+        if kind == "match":
+            # D-1: engine and pin picked the same id, so G7 is satisfied outright and there is no
+            # exception to grant. The line is printed so a reader can still see the pin was tied here,
+            # but nothing is armed and nothing is counted as a use of the policy.
+            tie_notes.append(f"step {j} -> {got_ids[j]}")
+            print("  [info] " + line)
+            continue
         ties.append(f"step {j} -> {got_ids[j]}")
-        check(admissible, f"generation step {j}: exact tie in the pin, tested against the tie policy",
-              line)
+        check(admissible,
+              f"generation step {j}: exact tie in the pin and the engine picked a different id"
+              " — tested against the tie policy", line)
         tie_ok[j] = admissible
     for j, (g, w) in enumerate(zip(got_ids, greedy[1:])):
         by_tie = g != w and tie_ok.get(j, False)
@@ -1498,10 +1696,13 @@ def main() -> int:
     # ---- (b) logits ------------------------------------------------------------------------------
     section("(b) logits vs the pinned dumps — the rule in force is named on every step")
     print(f"  where an allowance is priced, the rule is cos deficit <= margin x the step's measured"
-          f" route spread and meanrel <= margin_rel x it (margins {BAND['route_margin']:.2f} /"
-          f" {BAND['route_margin_rel']:.2f}, DERIVED — see the ROUTE ALLOWANCE comment). Where it is"
-          f" not priced, the flat published floors apply: cos >= {BAND['cos_hard']} (G5"
-          f" incremental==batch), meanrel <= {BAND['meanrel_hard']:.0%} (§10.2 cascade ceiling).")
+          f" route spread and meanrel <= margin_rel x it, and the margins are THIS FIXTURE's own — read"
+          f" from its own {ALLOWANCE_FILE} and derived from its own steps only, so pricing another"
+          f" fixture cannot move them (D-2; the fallback in BAND is"
+          f" {BAND['route_margin']:.2f} / {BAND['route_margin_rel']:.2f}, used only by a file priced"
+          f" before per-fixture keying). Where nothing is priced, the flat published floors apply:"
+          f" cos >= {BAND['cos_hard']} (G5 incremental==batch), meanrel <="
+          f" {BAND['meanrel_hard']:.0%} (§10.2 cascade ceiling).")
     print(f"  reported: cos vs {BAND['cos_report']} (G6 decode logits); ndiff and max ULP are "
           "reported but not gated (§10.1 F1–F4: a chained dot's legal ndiff is 29–47 %, and a "
           "max-ULP bound is blind to a whole-tensor 1-ULP shift)")
@@ -1569,8 +1770,9 @@ def main() -> int:
         notes.append(f"all {len(ratios)} of {n_decode} steps judged by the route allowance; the"
                      f" allowance is TIGHTER than the flat §10.1 G5 floor at {tighter} of them. Worst"
                      f" step {worst_j}: deficit = {worst_r:.3f}x its own measured route spread"
-                     f" (margin in force {BAND['route_margin']:.2f}, derived from the same ratio"
-                     " across every priced fixture — engine/route_allowance.py).")
+                     f" (this fixture's margin in force {allowance['margin']:.2f}, derived as the max"
+                     f" ratio inside {REFS.name} alone — engine/route_allowance.py; no other fixture"
+                     " can move it, and no step of this fixture sits outside it by construction).")
     if under_g6:
         notes.append(f"{len(under_g6)} of {n_decode} steps sit under G6's decode-logits figure "
                      f"{BAND['cos_report']} (step:cos — " + ", ".join(under_g6[:12])
@@ -1617,6 +1819,10 @@ def report() -> int:
     if ties:
         print(f"  [TIE] {len(ties)} generation step(s) were exact ties in the pin and were decided by"
               f" the tie policy: " + ", ".join(ties))
+    if tie_notes:
+        print(f"  [TIE-NOTE] {len(tie_notes)} step(s) had an exact tie in the pin that the engine"
+              " matched outright — ordinary id matches, tie policy not consulted (D-1):"
+              " " + ", ".join(tie_notes))
     if fails:
         print(f"ENGINE GATE FAIL — {len(fails)} failed"
               + (f" ({len(ties)} step(s) reported TIE and not counted as failures)" if ties else ""))
