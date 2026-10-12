@@ -24,9 +24,12 @@
 //
 // Every number it prints about *time* is provisional by construction: see `bench/performance-status.md`
 // §6 for what a clean window takes to arrange, and `AGENTS.md` for why a worker must not arrange one.
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -34,6 +37,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <hip/hip_runtime.h>
 
 #include "engine/decode_step.h"
 #include "engine/loader.h"
@@ -57,6 +62,7 @@ struct Options {
     bool sizes_only = false;         // check §00/§01 against the checkpoint and exit
     bool session = false;            // resident line protocol for engine/chat.sh
     bool no_stop = false;            // §07.5 stays unarmed in generation too (deep smoke runs only)
+    bool state_fp = false;           // emit the §08.6 state fingerprints (see the `--state-fp` block)
     bool help = false;               // print_usage and exit 0, before anything is loaded
 };
 
@@ -101,6 +107,8 @@ Options parse_args(int argc, char** argv) {
             o.session = true;
         } else if (a == "--no-stop") {
             o.no_stop = true;
+        } else if (a == "--state-fp") {
+            o.state_fp = true;
         } else if (a == "--help" || a == "-h") {
             o.help = true;
         } else {
@@ -115,6 +123,14 @@ Options parse_args(int argc, char** argv) {
     }
     if (!o.sizes_only && !o.session && o.steps < 0) {
         throw std::runtime_error("decode_run needs --steps >= 0");
+    }
+    if (o.state_fp && (o.session || o.sizes_only)) {
+        // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
+        // caller's, and a resident process cannot know which one a gate wants — and --sizes-only
+        // allocates no state at all. Refusing is the honest answer; printing nothing would be the
+        // quiet one.
+        throw std::runtime_error("--state-fp fingerprints a run's end conditions; --session and"
+                                 " --sizes-only have none");
     }
     // A replay must be able to answer every step it is asked for. Silently falling back to
     // self-feeding after the list runs out would produce a run that is half forced and half
@@ -265,12 +281,196 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
 void print_usage(FILE* out) {
     std::fprintf(out,
                  "usage: decode_run [--model DIR] [--ids ID,ID,...] [--steps N] [--out DIR]"
-                 " [--replay ID,ID,...] [--cap N] [--session] [--no-stop]"
+                 " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
                  " [--load-verify] [--sizes-only]\n"
                  "  --replay  feed each generation step the caller's token (teacher forcing; also"
                  " leaves §07.5 unarmed)\n"
                  "  --no-stop leave §07.5 unarmed in a free run too (depth smoke only)\n"
+                 "  --state-fp D2H the §08 state at the end of the prompt and at the end of the run"
+                 " and print one STATEFP row per pinned fingerprint row (judged by engine/gate.py"
+                 " section (g))\n"
                  "  --session resident feed/gen/reset/stats/quit protocol for engine/chat.sh\n");
+}
+
+// ---- `--state-fp`: the §08 state, made observable ----------------------------------------------
+//
+// WHY. G5 (§10) is "prefill `T` then decode `D` equals one prefill of `T+D` (states, logits,
+// sampled ids)", and §08.6's four invariants are what "states" means. Until now none of it was
+// checkable, because the engine never looked at its own state — `gate.py` could gate ids and logits
+// and nothing else (Finding F4 of the prefill plan is the same observation). This block D2Hs the
+// §08.1 tuple at the two end conditions a fixture has — after the last prompt token, and after the
+// last generation step — and prints one row per pinned fingerprint row.
+//
+// WHAT THE COLUMNS MEAN, and which code owns them. `tools/state_fp.py::fp_row` is the definition:
+// [Σx², max|x|, mean x, Δ²], the parts of one logical state pooled as one multiset, Δ² taken
+// part-wise over the common extent of the append axis, and no previous state meaning Δ² = Σx²
+// (§08.4 zeroes a fresh request). The fixtures' `state_fp` / `conv_fp` / `kv_fp` arrays were pinned
+// with that function, so this block is a mirror of it, not an independent definition — and
+// `engine/gate.py` section (g) exists to prove the mirror held (its identity case recomputes the
+// pinned arrays with `fp_row` itself and requires bit-equality).
+//
+// THE ONE DELIBERATE DIFFERENCE: accumulation happens in F64, where `fp_row`'s is F32 (the pins were
+// made that way and must not move, §10.5). Sums of 2^21 squares then differ by ~1e-7 relative, which
+// is a floor on the `n2` and `mean` columns of every engine-vs-pin comparison here and is printed as
+// such rather than folded into a band. `maxabs` is exact. Reproducing torch's F32 reduction order in
+// C++ was rejected: it buys bit-identity with the pins at the cost of a second implementation of a
+// reduction order, and bit-identity is not what this path is for.
+//
+// WHAT IT DELIBERATELY DOES NOT DO: judge. This driver knows nothing about the fixtures — that
+// ignorance is the split the file header argues for — so it prints and `gate.py` decides, including
+// how far the engine's state is allowed to be from the dump's (a route-distance question, D-3/D-5
+// territory, not this file's to answer).
+
+// BF16 bits -> F64, by the bit shift. Exact (BF16 is a prefix of F64), and the same widening
+// `gate.py:load_pin` and `fp_row`'s `.to(torch.float32)` do.
+inline double bf16_to_f64(uint16_t bits) {
+    const uint32_t u = (uint32_t)bits << 16;
+    float f;
+    memcpy(&f, &u, sizeof(f));
+    return (double)f;
+}
+
+// One D2H of the §08.1 tuple. The KV is compacted to the WRITTEN lanes: the allocation runs to
+// `cap`, slots `prefix_len..cap-1` have never been written, and pooling uninitialised slots into a
+// moment sum would make the fingerprint meaningless.
+struct HostState {
+    std::vector<float> gdn;       // [18][16][128][128]
+    std::vector<float> conv;      // [18][3][6144], row 0 oldest (§07.2's roll order)
+    std::vector<uint16_t> keys;   // [6][2][lanes][256] BF16 bits, post-k_norm post-rope
+    std::vector<uint16_t> values;  // [6][2][lanes][256] BF16 bits, raw v
+    int64_t lanes = 0;            // prefix_len when this snapshot was taken
+};
+
+void d2h(void* dst, const void* src, size_t bytes) {
+    const hipError_t e = hipMemcpy(dst, src, bytes, hipMemcpyDeviceToHost);
+    if (e != hipSuccess) {
+        throw std::runtime_error(std::string("--state-fp device-to-host copy failed: ")
+                                 + hipGetErrorString(e));
+    }
+}
+
+HostState download_state(const engine::RequestState& st) {
+    const engine::StateSizes s = st.sizes();
+    HostState h;
+    h.lanes = st.prefix_len;
+    h.gdn.resize(s.gdn_state_bytes / sizeof(float));
+    h.conv.resize(s.conv_window_bytes / sizeof(float));
+    const size_t src_stride = (size_t)engine::kNumKvHeads * (size_t)st.cap * engine::kHeadDim;
+    const size_t dst_stride = (size_t)engine::kNumKvHeads * (size_t)h.lanes * engine::kHeadDim;
+    h.keys.resize((size_t)engine::kNumAttnLayers * dst_stride);
+    h.values.resize((size_t)engine::kNumAttnLayers * dst_stride);
+    d2h(h.gdn.data(), st.gdn_state, s.gdn_state_bytes);
+    d2h(h.conv.data(), st.conv_window, s.conv_window_bytes);
+    // One copy per (layer, K-or-V, head) so each head row lands contiguous at the compacted stride.
+    // §08.5's head-major layout is what makes the common-extent Δ² below a contiguous compare.
+    for (int l = 0; l < engine::kNumAttnLayers; ++l) {
+        for (int which = 0; which < 2; ++which) {
+            const uint16_t* src = (which ? st.kv_values : st.kv_keys) + (size_t)l * src_stride;
+            uint16_t* dst = (which ? h.values.data() : h.keys.data()) + (size_t)l * dst_stride;
+            for (int hd = 0; hd < engine::kNumKvHeads; ++hd) {
+                d2h(dst + (size_t)hd * h.lanes * engine::kHeadDim,
+                    src + (size_t)hd * st.cap * engine::kHeadDim,
+                    (size_t)h.lanes * engine::kHeadDim * sizeof(uint16_t));
+            }
+        }
+    }
+    return h;
+}
+
+// `fp_row`'s pooled row. `dn2` accumulates only where a previous state reaches, which is the
+// part-wise common-extent rule: an appended lane is not a rewritten one.
+struct FpPool {
+    double n2 = 0.0, sum = 0.0, maxabs = 0.0, dn2 = 0.0;
+    size_t n = 0;
+
+    void add(double x, double d) {
+        n2 += x * x;
+        sum += x;
+        const double a = std::fabs(x);
+        if (a > maxabs) maxabs = a;
+        dn2 += d;
+        ++n;
+    }
+    void f32(const float* x, size_t count, const float* prev, size_t dn_count) {
+        for (size_t i = 0; i < count; ++i) {
+            const double v = (double)x[i];
+            const double d = (prev && i < dn_count) ? v - (double)prev[i] : 0.0;
+            add(v, d * d);
+        }
+    }
+    void bf16(const uint16_t* x, size_t count, const uint16_t* prev, size_t dn_count) {
+        for (size_t i = 0; i < count; ++i) {
+            const double v = bf16_to_f64(x[i]);
+            const double d = (prev && i < dn_count) ? v - bf16_to_f64(prev[i]) : 0.0;
+            add(v, d * d);
+        }
+    }
+};
+
+// `%.17g` round-trips a double exactly, so the gate reads the number that was accumulated here and
+// not a rounded copy of it. `no_prev` is §08.4's convention: with nothing to compare against, Δ² is
+// the state itself, so the first row's dn2 equals its n2 — the same convention the pins carry.
+void print_fp_row(const char* phase, const char* family, int row, int layer, size_t n,
+                  const FpPool& fp, bool no_prev) {
+    std::printf("STATEFP phase=%s family=%s row=%d layer=%d n=%zu n2=%.17g maxabs=%.17g"
+                " mean=%.17g dn2=%.17g\n",
+                phase, family, row, layer, n, fp.n2, fp.maxabs,
+                fp.n ? fp.sum / (double)fp.n : 0.0, no_prev ? fp.n2 : fp.dn2);
+}
+
+void emit_state_fp(const char* phase, const HostState& cur, const HostState* prev) {
+    std::vector<int> gdn_layers, attn_layers;
+    for (int l = 0; l < engine::kNumLayers; ++l) {
+        (engine::is_full_attention(l) ? attn_layers : gdn_layers).push_back(l);
+    }
+    std::printf("STATEFP phase=%s prefix=%lld\n", phase, (long long)cur.lanes);
+
+    for (size_t r = 0; r < gdn_layers.size(); ++r) {
+        const size_t n = (size_t)engine::kNumValueHeads * engine::kDk * engine::kDv;
+        FpPool s;
+        s.f32(cur.gdn.data() + r * n, n, prev ? prev->gdn.data() + r * n : nullptr, n);
+        print_fp_row(phase, "state", (int)r, gdn_layers[r], n, s, prev == nullptr);
+
+        // The conv row is the engine's §08.2 window: k_conv−1 = 3 rows of 6144, row 0 oldest. It is
+        // NOT the same extent as the pinned `conv_fp` row, which pools the REFERENCE's conv buffer —
+        // A-04 names why (`causal_conv1d_update` cats `[conv_state, x]`, so HF's buffer is k_conv = 4
+        // columns and the engine keeps the newest 3 of them). Printing `cols=3` here is what makes
+        // that gap visible in the log instead of looking like a state error; (g) prices it.
+        const size_t cn = (size_t)engine::kConvWindow * engine::kConvChannels;
+        FpPool c;
+        c.f32(cur.conv.data() + r * cn, cn, prev ? prev->conv.data() + r * cn : nullptr, cn);
+        std::printf("STATEFP phase=%s family=conv row=%d layer=%d cols=%d ", phase, (int)r,
+                    gdn_layers[r], engine::kConvWindow);
+        std::printf("n=%zu n2=%.17g maxabs=%.17g mean=%.17g dn2=%.17g\n", cn, c.n2, c.maxabs,
+                    c.n ? c.sum / (double)c.n : 0.0, prev == nullptr ? c.n2 : c.dn2);
+    }
+
+    const size_t cur_head = (size_t)cur.lanes * engine::kHeadDim;
+    for (size_t r = 0; r < attn_layers.size(); ++r) {
+        // One row per attention layer with K and V pooled together, exactly as `fp_row` is called
+        // with parts=[keys, values]; the Δ² stays part-wise (K against K, V against V) and over the
+        // common lane extent only, which is what lets a step append a lane for free.
+        const size_t prev_head = prev ? (size_t)prev->lanes * engine::kHeadDim : 0;
+        const size_t common_head =
+            prev ? (size_t)std::min(cur.lanes, prev->lanes) * engine::kHeadDim : 0;
+        const uint16_t* krow = cur.keys.data() + r * 2 * cur_head;
+        const uint16_t* vrow = cur.values.data() + r * 2 * cur_head;
+        const uint16_t* pkrow = prev ? prev->keys.data() + r * 2 * prev_head : nullptr;
+        const uint16_t* pvrow = prev ? prev->values.data() + r * 2 * prev_head : nullptr;
+        FpPool kv;
+        for (int hd = 0; hd < engine::kNumKvHeads; ++hd) {
+            kv.bf16(krow + (size_t)hd * cur_head, cur_head,
+                    pkrow ? pkrow + (size_t)hd * prev_head : nullptr, common_head);
+            kv.bf16(vrow + (size_t)hd * cur_head, cur_head,
+                    pvrow ? pvrow + (size_t)hd * prev_head : nullptr, common_head);
+        }
+        std::printf("STATEFP phase=%s family=kv row=%d layer=%d lanes=%lld ", phase, (int)r,
+                    attn_layers[r], (long long)cur.lanes);
+        std::printf("n=%zu n2=%.17g maxabs=%.17g mean=%.17g dn2=%.17g\n", 4 * cur_head, kv.n2,
+                    kv.maxabs, kv.n ? kv.sum / (double)kv.n : 0.0,
+                    prev == nullptr ? kv.n2 : kv.dn2);
+    }
+    std::fflush(stdout);
 }
 
 }  // namespace
@@ -383,7 +583,19 @@ int main(int argc, char** argv) {
         bool run_stopped = false;   // §07.5 reached in the GENERATION phase; see the rule below
         double step_ms = 0.0;
         const int total_steps = (int)o.prompt.size() + o.steps;
+        // `--state-fp` observes the two end conditions rather than deriving them: the prompt-end
+        // snapshot is taken at the phase boundary — after the last prompt token's step, before the
+        // first generation step — which is where §08.4's "after the last prompt token" actually is,
+        // and the run-end snapshot after the loop, wherever the run really ended (a §07.5 stop
+        // included). Both are D2Hs of live state, outside every timed region.
+        HostState prompt_end;
+        bool prompt_end_seen = false;
         for (int i = 0; i < total_steps; ++i) {
+            if (o.state_fp && !prompt_end_seen && i == (int)o.prompt.size()) {
+                prompt_end = download_state(st);
+                emit_state_fp("prefill", prompt_end, nullptr);
+                prompt_end_seen = true;
+            }
             const bool from_prompt = i < (int)o.prompt.size();
             // `--replay`: the caller owns the generation-phase tokens, exactly as it owns the
             // prompt's. The engine still samples every step and prints that sample, so a step
@@ -456,6 +668,23 @@ int main(int argc, char** argv) {
             fed++;
         }
         if (log) std::fclose(log);
+
+        if (o.state_fp) {
+            if (prompt_end_seen) {
+                const HostState run_end = download_state(st);
+                emit_state_fp("end", run_end, &prompt_end);
+            } else {
+                // The loop never left the prompt: `--steps 0`, or a run that broke early. There is
+                // then one state and it is both end conditions, so it is emitted once as the prompt
+                // end and the reason is printed instead of a second identical row.
+                std::printf("STATEFP phase=prefill note=%s\n",
+                            fed == (int)o.prompt.size()
+                                ? "no_generation_steps_ran"
+                                : "run_ended_inside_the_prompt");
+                prompt_end = download_state(st);
+                emit_state_fp("prefill", prompt_end, nullptr);
+            }
+        }
 
         const int n = fed > 0 ? fed : 1;
         // `stopped=` here is the RUN's §07.5 decision (generation phase only), which is what the gate
