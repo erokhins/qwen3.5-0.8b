@@ -20,8 +20,8 @@ appeared. Read §6 for current numbers and §1–§3 for how each op behaves in 
 |---|---|---|---|---|
 | `lm_head_gemv` bf16 GEMV, 248320 × 1024 | 485.0 MB | **2.105 ms** | 242.1 GB/s | **102 %** |
 | `mlp_gemv` MLP, 24 layers, cold weights | 528.5 MB | **2.650 ms** | 199.4 GB/s | **84 %** |
-| `proj_gemv` all 9 projections × 24 layers, 48 launches, cold | 445.7 MB | **2.990 ms** † | 156.3 GB/s | **66 %** † |
-| `proj_gemv` best config seen (rows/block 32, same conditions) | 445.7 MB | 2.785 ms † | 167.8 GB/s | 71 % † |
+| `proj_gemv` all 9 projections × 24 layers, 48 launches, cold | 445.7 MB | **2.990 ms** † → clean re-takes: **3.039 ms** (2026-10-11), **3.081 ms** (2026-10-12) | 156.3 → **150.1 GB/s** | **66 % → 63–64 %** — the clean number is the lower one |
+| `proj_gemv` best config seen (rows/block 32, same conditions) | 445.7 MB | 2.785 ms † **never reproduced clean** | 167.8 GB/s | **71 % is a contended-box figure.** The clean E2 A/B at rows/block 32 gave unpacked **65.1 %** vs packed 58.0 % — see §6 |
 | `glue` residual+RMSNorm, fused, 49 launches/token | ~0.5 MB | **0.1336–0.1360 ms** † — **superseded: §6 re-take is 0.1499 ms @512 t / 0.1851 @256, and the row is bimodal (spread up to 269 %)**, so quote it at 256 threads with the spread | 2.73–2.78 µs/launch | launch-bound: roofline is 0.0021 ms |
 | same, unfused (48 adds + 49 norms = 97 launches) | ~0.5 MB | 0.2131–0.2155 ms † | 2.20–2.22 µs/launch | fusion buys 0.0795 ms/token |
 | `attn_decode` §05 core, 6 layers, one launch each | ~0.4 MB at 25 lanes | ~0.011 ms (launch floor arithmetic, not timed) — **superseded**: measured in situ at **2.301 µs per lane per token**, i.e. 5.34 GB/s effective at 327 lanes | **5.34 GB/s** at 327 lanes | **2.3 % of the probe — dispatch-bound, not bandwidth-bound**; bit-exact to 277 lanes |
@@ -70,9 +70,19 @@ Weights re-derived from the safetensors headers, grouped as §01.7 (decimal GB, 
 |---|---|---|---|---|
 | `lm_head` / `embed_tokens` (tied) | 0.5086 | 2.146 ms | **2.105 ms** | **kernel exists, 102 % of roofline** |
 | MLP, 24 layers (gate/up/down) | 0.5285 | 2.230 ms | **2.650 ms** | **kernel exists, 84 % of roofline** |
-| GDN `in_proj`/`out_proj` + conv, 18 layers | 0.3796 | 1.602 ms | — † | **kernel exists** (`proj_gemv`), see † |
-| full attention `qkv`/`o`, 6 layers | 0.0881 | 0.372 ms | — † | **kernel exists** (`proj_gemv`), see † |
-| **the two above together, measured as one 48-launch plan** | 0.4677 | 1.973 ms | **2.990 ms** † | **66 % of the probe** |
+| GDN `in_proj`/`out_proj` + conv, 18 layers | 0.3796 | 1.602 ms | **not measured on its own** — see the split note below | kernel exists (`proj_gemv`); **81 % of the projection bytes** |
+| full attention `qkv`/`o`, 6 layers | 0.0881 | 0.372 ms | **not measured on its own** — see the split note below | kernel exists (`proj_gemv`); **19 % of the projection bytes** |
+| **the two above together, measured as one 48-launch plan** | 0.4677 | 1.973 ms | **3.081 ms** (2026-10-12 re-take; 3.039 ms on 2026-10-11) | **63–64 % of the probe** — §6 |
+
+**Split note (2026-10-12).** These two rows said `— †` because no run has ever timed the GDN and
+attention projections as separate plans, and they still have not: `prototype/proj_gemv` has no
+subset selector, so the only measured plan is the whole 48-launch set. Do **not** fill them by adding
+up the per-shape table in `prototype/proj_gemv/results.md` — that sweep takes the best tile *per shape*
+(`PACK_inproj` 92.68 µs, `q_proj` 58.31, `o_proj` 36.11, `k_proj` 11.23 …) and its GDN+attention sum
+is **3.54 ms**, which is 15 % *worse* than the shipped 48-launch plan at 3.081 ms. That gap is itself
+a finding, not a rounding error: **best-config-per-shape is not the shipped plan**, so per-shape numbers
+cannot be recombined into a plan total. Closing these two rows properly needs a `--only gdn|attn`
+selector in `proj_gemv` and one timing run each — cheap, and queued.
 | MTP draft layer (only when drafting) | 0.0409 | 0.173 ms | — | not written |
 | norms and small tensors | ~0.005 | 0.021 ms | — | not written |
 | GDN state traffic (18 layers, warm) | 0.054 | 0.228 ms cold | **0.0646 ms** | **kernel exists** |
@@ -105,10 +115,11 @@ per-shape results run from 77 % of the probe (`in_proj_qkv` packed) down to 39 %
 5 % for the 16-row `in_proj_b`/`in_proj_a`. The wide shapes behave like `lm_head`; the narrow ones
 behave like nothing measured before, and that is what moved the projection below.
 
-† **The projection and glue numbers are provisional.** Both were taken while something else worked on
-the GPU without the lock — `glue`'s two windows read 94 %→75 % and 98 %→35 % `util`, and an earlier
-one 17 %→60 % — so they are floors, not measurements, and the quiescent pass in §5 item 0 re-takes
-them. Rows in `glue`'s own sweep with 9–331 % spread are marked not-quotable in its `results.md`
+† **The projection and glue numbers below are the original contended ones.** Both were taken while
+something else worked on the GPU without the lock — `glue`'s two windows read 94 %→75 % and 98 %→35 %
+`util`, and an earlier one 17 %→60 % — so they are floors, not measurements. **§6 now supersedes both**
+(2026-10-11 and 2026-10-12 clean re-takes: projections 3.039 → 3.081 ms at 63–64 %; glue fused 0.1496 ms
+at 512 threads), and the 66 % these rows claim is 63–64 % measured clean. Rows in `glue`'s own sweep with 9–331 % spread are marked not-quotable in its `results.md`
 rather than quietly dropped. One real knob came out of the contended data anyway, because it is a
 *ratio*: µs/launch depends on block width — 2.776 / 3.06 / 3.75 / 5.30 µs at 1024 / 512 / 256 / 128
 threads, which means the 1.85 µs launch floor from the probe is a floor for a narrow block only, and
@@ -140,10 +151,13 @@ The two small ops confirm that framing rather than changing it: `glue` at 0.137 
 what a launch-count item should return), and `attn_decode` is ~11 µs/token of dispatch at short
 context. Neither moves the projection. What moves it is the 66 %.
 
-The one lever that is already visible: `rows/block` 32 measured 8 % better than the shipped default
-of 8 on the projections (2.785 vs 2.990 ms), which is ~0.2 ms/token — worth more than anything else
-known, and currently an open decision rather than a change, because it was measured on a contended
-box.
+The one lever that is already visible: ~~`rows/block` 32 measured 8 % better than the shipped default
+of 8 on the projections (2.785 vs 2.990 ms), which is ~0.2 ms/token~~ **resolved by the clean E2 A/B in
+§6: at rows/block 32, unpacked beats packed (0.0528 ms/launch = 65.1 % vs 0.0593 = 58.0 %), and the
+2.785 ms / 71 % figure never reproduced on a clean box.** `PACK_X=false` is therefore the shipped and
+confirmed choice, and the rows/block 32 gain is **not** ~0.2 ms/token — it is inside the noise of the
+63–64 % ceiling. The narrow-shape deficit (39–49 % for `k_proj`/`v_proj`/`o_proj`/`out_proj`, 5 % for the
+16-row `in_proj_a`/`in_proj_b`) is what caps the family, and it is a shape problem, not a tile problem.
 
 ## 4. What *is* measured end-to-end today (and is not the engine)
 
