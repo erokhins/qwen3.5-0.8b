@@ -272,14 +272,14 @@ reproduces every row of every pin bit-exactly with torch's own matmul, and each 
 | claim | `p64` (T = 46) | `p300` (T = 277) |
 |---|---|---|
 | **bit-identity vs the k=1 kernel** (tile row *t* must BE the k=1 kernel's answer for token *t*, sampled tokens `0,1,T/2,T−2,T−1`, every projection of the layer) | **138 400 elements compared, 0 differ** (4 layers) | **138 400 elements compared, 0 differ** (4 layers) |
-| the pins, per row: worst row of every block | `ndiff ≤ 13/6144` (0.21 %), max 11 ULP, **0 large elements over tolerance**, `cos ≥ 0.99999997`, `meanrel ≤ 2.7e−05` | same shape: `ndiff ≤ 0.3 %`, 0 large elements over tolerance, `cos = 1.0` to 8 dp, `meanrel ≤ 2.7e−05` |
+| the pins, per row: worst row of every block | `cos ≥ 0.99999997`, `meanrel ≤ 8.56e−06`, `ndiff ≤ 0.293 %` on the wide shapes, **zero large elements over tolerance** anywhere | `cos ≥ 0.99999998`, `meanrel ≤ 9.92e−06`, `ndiff ≤ 0.391 %` wide, **6.25 % = 1 element of 16** on `in_proj_a`/`b` at 1 ULP (the granularity trap above), 0 large over tolerance |
 | the identity check can fail: `--neg tail` on the tile run only | 408 843 / 425 408 (L00) and 258–266 k of 282 624 (attn layers) tile elements moved | 2 466 286 / 2 561 696, and 1.56–1.60 M / 1 701 888 |
 
-The ULP outliers are the same population the k=1 gate already excuses — a handful of elements per row,
-at `|ref|/max` of 1e−6 or less (cancellation, `floor_probe.py`), zero of them large — so **batching
-moved nothing**: the batched rows are the k=1 bits, and the k=1 bits are what the pins reproduce. The
-per-row pin numbers above are therefore the *kernel-vs-reference* distance, not a batching distance;
-the batching distance is the 0 in the first row.
+The ULP outliers are the same population the k=1 gate already excuses — a handful of elements per row, at
+`|ref|/max` of 1e−6 or less (cancellation, `floor_probe.py`), the raw maximum reaching 193 ULP at such
+elements while **no large element anywhere exceeds the band** — so **batching moved nothing**: the batched rows
+are the k=1 bits, and the k=1 bits are what the pins reproduce. The per-row pin numbers above are therefore the
+*kernel-vs-reference* distance, not a batching distance; the batching distance is the 0 in the first row.
 
 ### rows = 1 stayed green, and stayed green through the new kernel
 
