@@ -26,6 +26,15 @@ that fails everywhere is measuring nothing). `--long` adds the prefill-derived l
 which are the only pinned data in the repo with more than ~25 lanes. `--cross` re-checks the two
 launch plans against each other bit-for-bit.
 
+`--softmax online` is the route the ENGINE takes above the score staging (§07.3, and the engine's
+launcher selects it at `lanes > MAXSC`), and it is judged differently, by a band §07.3 pre-authorized
+rather than one this gate invented: see `ONLINE_*` below for what is held, what is demoted to a
+reported number, and the anti-vacuity that stops an online-labelled run from silently being the
+two-pass form. The two commands P7 re-gates are:
+
+    .venv/bin/python prototype/attn_decode/run.py --softmax online --split 2 --long --negative
+    .venv/bin/python prototype/attn_decode/run.py --softmax online --split 4 --long --negative
+
     .venv/bin/python prototype/attn_decode/run.py [--fixture dec8] [--layers all] [--steps all]
                                                  [--launch staged|fused] [--split N]
                                                  [--softmax online|full] [--long] [--negative]
@@ -34,6 +43,7 @@ launch plans against each other bit-for-bit.
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -65,6 +75,54 @@ CANCEL_REL = 2e-4
 NDIFF_PCT_MAX, NDIFF_ABS_MIN = 2.0, 1
 COS_MIN, MEANREL_MAX = 0.9999, 1e-2
 LONG_ROWS = [0, 1, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65, 127, 128, 129, 191, 255, 256, 257, 276]
+
+# Cache lanes one streaming tile covers, read out of the kernel that uses it (the same pattern
+# `engine/gate.py` uses for MAXSC: the constant belongs to the file that enforces it, and a copy here
+# would drift). `attn_core` scores `TILE` lanes per pass of its tile loop, so a block that streams
+# `ceil(lvalid / split)` lanes runs ceil(lvalid / split / TILE) tiles — and one tile is not a
+# streaming reduction at all, which is what the negative harness has to respect.
+KERNEL_TILE = int(re.search(r"#define\s+TILE\s+(\d+)",
+                            (Path(__file__).resolve().parent
+                             / "attn_decode_kernels.h").read_text()).group(1))
+
+# The two stages the softmax reduction produces. Nothing else this gate judges is touched by the
+# reduction ORDER: q_rope/k_rope/rope_cs are rope norm+transcendentals, gate_vec is a de-interleave,
+# cache_keys/cache_values/v_append are copies and index math.
+SOFTMAX_STAGES = {"attn_pre_gate", "gated"}
+
+# §07.3's PRE-AUTHORIZED band for the online (blocked `(max,sum)`) route — cited, not invented. The
+# spec's sentence: "When that path is built it must be gated on a cos/meanrel band — §10 G6's
+# thresholds are already of that shape — and not on agreement with the pins, which it cannot reach."
+# §10 G6 (specification/10-reference-dumps-and-gates.md:40) states that shape as `sampled ids exact;
+# decode logits cos >= 0.9999`, and this file's COS_MIN/MEANREL_MAX already ARE those published
+# numbers (0.9999 / 1e-2, §10.1), so the band introduces no new constant. What changes is which TEST
+# a stage is held to, and only for the two stages in SOFTMAX_STAGES:
+#
+#   held    cos >= COS_MIN and meanrel <= MEANREL_MAX against the pins (aggregate agreement)
+#   exact   unchanged, and bit-exact at every length: the copies, the de-interleave, the rope stages
+#   demoted ndiff and the 1-ULP large-element count, i.e. PIN AGREEMENT. §07.3 measured why they are
+#           unreachable at any tile size — §05.5 rounds the *normalised* weight before P·V and a
+#           streaming row cannot round a weight it has not divided yet — so holding a split-K row to
+#           them would fail correct code. Measured here, and unchanged by P7's re-run: 26.2 % of
+#           `attn_pre_gate` differs, 6.2 % of those large, worst-case cos 0.99999134, meanrel <= 1.8e-3
+#           (results.md §3). Those counts are still PRINTED for every online run; they are demoted
+#           from a verdict to a number on the record, which is not the same thing as dropped.
+#
+# The ids half of G6 is discharged one level up, by `engine/gate.py` section (a) on the only
+# >512-lane fixture (`wide520f`): this op has no tokens to sample.
+#
+# Anti-vacuity travels with the band, because a loosened test that the wrong branch could satisfy is
+# no test at all. Two of them, both mechanical:
+#   1. `--neg nomax` (A-17's un-rescaled running max) exists ONLY in the online branch of
+#      `attn_core`, so injecting it under the run's OWN knobs must move the output; under `--softmax
+#      full` it is inert. `run_negatives` now injects it at the run's `--split`, so it proves the
+#      streaming accumulation ran in the split blocks, not just at split 1.
+#   2. An `--softmax online` run whose reduction stages are bit-identical to the pins on every case
+#      is not the online route (it moved 26 % of them for §07.3). Checked and printed as the
+#      `anti-vacuity` line; a run that moved nothing FAILS.
+# The merge itself cannot go unobserved either: with `split > 1` the core writes ONLY the `part`
+# buffer, so if `attn_combine` did not run the output would be uninitialised memory and no aggregate
+# could come near 0.9999.
 
 # Which stages are pure index math and copies (must be BIT-EXACT: one wrong element is a bug) and
 # which are floats produced by a reduction or a transcendental (judged by the §10.1 criteria, with
@@ -143,9 +201,16 @@ def ndiff_limit(n: int) -> float:
     return max(NDIFF_PCT_MAX * n / 100.0, NDIFF_ABS_MIN)
 
 
-def judge(tag: str, c: dict, fails: list[str], worst: dict, exact=False) -> None:
+def judge(tag: str, c: dict, fails: list[str], worst: dict, exact=False,
+          pin_agreement=True) -> None:
     """`exact` stages are index math and roundings, not reductions: one element out of place is a
-    bug, not arithmetic noise, so they get a zero-element allowance instead of the §10.1 one."""
+    bug, not arithmetic noise, so they get a zero-element allowance instead of the §10.1 one.
+
+    `pin_agreement=False` is §07.3's online route (see the ONLINE band note at COS_MIN): the stage is
+    a reduction in an order the pins cannot have, so ndiff and the 1-ULP large-element count are
+    REPORTED and only the aggregate pair is judged. Every other call — the pinned form, and every
+    non-reduction stage of the online form — is judged by all three as it always was.
+    """
     key = tag.split()[-1]
     prev = worst.setdefault(key, [0, 0, 0, 0.0, 0])
     prev[0] = max(prev[0], c["ndiff"])
@@ -158,12 +223,13 @@ def judge(tag: str, c: dict, fails: list[str], worst: dict, exact=False) -> None
             fails.append("%s: %d of %d elements differ (this stage is exact arithmetic)"
                          % (tag, c["ndiff"], c["n"]))
         return
-    if c["n_bad"]:
-        fails.append("%s: %d large element(s) differ by >1 ULP (worst %d ULP at |ref|/max %.1e)"
-                     % (tag, c["n_bad"], c["worst_bad_ulp"], c["worst_bad_rel"]))
-    if c["ndiff"] > ndiff_limit(c["n"]):
-        fails.append("%s: %d elements differ (limit %.1f)" % (tag, c["ndiff"], ndiff_limit(
-            c["n"])))
+    if pin_agreement:
+        if c["n_bad"]:
+            fails.append("%s: %d large element(s) differ by >1 ULP (worst %d ULP at |ref|/max %.1e)"
+                         % (tag, c["n_bad"], c["worst_bad_ulp"], c["worst_bad_rel"]))
+        if c["ndiff"] > ndiff_limit(c["n"]):
+            fails.append("%s: %d elements differ (limit %.1f)" % (tag, c["ndiff"], ndiff_limit(
+                c["n"])))
     if c["cos"] < COS_MIN or c["meanrel"] > MEANREL_MAX:
         fails.append("%s: cos %.8f meanrel %.2e outside G3i/§10.1" % (tag, c["cos"],
                                                                       c["meanrel"]))
@@ -224,8 +290,15 @@ def stages_for(case: dict, outdir: Path) -> list[tuple]:
     ]
 
 
-def gate_cases(cases, outroot: Path, tag: str, fails, worst, ncmp, extra=(), quiet=True):
-    """Run one plan and judge every stage of every case; returns the raw reports per stage."""
+def gate_cases(cases, outroot: Path, tag: str, fails, worst, ncmp, extra=(), quiet=True,
+               online_route=False, band=None):
+    """Run one plan and judge every stage of every case; returns the raw reports per stage.
+
+    `online_route` is §07.3's split-K/streaming form under test: it relaxes pin agreement for
+    `SOFTMAX_STAGES` only (the `pin_agreement` argument to `judge`), and `band` — a dict owned by the
+    caller — collects the aggregate numbers that band is made of, plus whether ANY case moved, which
+    is the anti-vacuity that keeps an online-labelled run from being the two-pass form in disguise.
+    """
     lines = [R.write_case(c, WORK / "in", outroot / c["name"]) for c in cases]
     plan = write_plan(WORK / ("plan_%s.txt" % tag), lines)
     run_bin(["--mode", "once", "--plan", str(plan)] + list(extra), tag, quiet=quiet)
@@ -234,16 +307,26 @@ def gate_cases(cases, outroot: Path, tag: str, fails, worst, ncmp, extra=(), qui
         row = []
         for name, got, ref in stages_for(c, outroot / c["name"]):
             rep = compare(got, ref)
-            judge("%s %s" % (c["name"], name), rep, fails, worst, exact=(name in EXACT_STAGES))
+            band_stage = online_route and name in SOFTMAX_STAGES
+            judge("%s %s" % (c["name"], name), rep, fails, worst, exact=(name in EXACT_STAGES),
+                  pin_agreement=not band_stage)
             per.setdefault(name, []).append(rep)
             ncmp.append("%s.%s" % (c["name"], name))
+            if band is not None and band_stage:
+                # [worst cos, max meanrel, differing elements, elements, cases that moved]
+                b = band.setdefault(name, [1.0, 0.0, 0, 0, 0])
+                b[0] = min(b[0], rep["cos"])
+                b[1] = max(b[1], rep["meanrel"])
+                b[2] += rep["ndiff"]
+                b[3] += rep["n"]
+                b[4] += 1 if rep["ndiff"] else 0
             row.append("%s %d/%d" % (name, rep["ndiff"], rep["n"]))
         print("  %-16s pos %3d lvalid %3d cap %3d | %s" % (c["name"], c["pos"], c["lvalid"],
                                                           c["cap"], " ".join(row)))
     return per
 
 
-def cross_variant(label, knobs, cases, base, alt, fails, ncmp, gate_it=True):
+def cross_variant(label, knobs, cases, base, alt, fails, ncmp, gate_it=True, online_route=False):
     """Re-run the same cases under a different launch plan / softmax form / split, and report what
     moved. Two different questions get answered here:
 
@@ -284,8 +367,11 @@ def cross_variant(label, knobs, cases, base, alt, fails, ncmp, gate_it=True):
     for name, (nd, mx, cs, mr, n, bad) in sorted(agg.items()):
         # The same §10.1 judgement the gate uses: a >1 ULP element only counts when it is a large
         # element (|ref| above the band). Raw max ULP across a whole tensor is exactly what the band
-        # exists to excuse — a cancelling element a few BF16 steps off is arithmetic, not error.
-        flag = "" if (bad == 0 and cs >= COS_MIN and mr <= MEANREL_MAX) else (
+        # exists to excuse — a cancelling element a few BF16 steps off is arithmetic, not error. The
+        # one exception is the online route's own reduction stages, which `judge` relaxes the same way
+        # for the same reason (see the ONLINE band note at COS_MIN).
+        pin_ok = bad == 0 or (online_route and name in SOFTMAX_STAGES)
+        flag = "" if (pin_ok and cs >= COS_MIN and mr <= MEANREL_MAX) else (
             "   <-- OUTSIDE GATE" if gate_it else "   (reported: a different policy, not a bug)")
         print("  %-16s %-14s %7d/%d differ (%.2f%%) max %5d ULP (large-element %d)  cos %.8f"
               "  meanrel %.2e%s" % (label, name, nd, n, 100.0 * nd / n, mx, bad, cs, mr, flag))
@@ -333,6 +419,10 @@ def main() -> int:
     fails: list[str] = []
     worst: dict = {}
     ncmp: list[str] = []
+    # The route under test, and the aggregate column the online band is judged on (None otherwise).
+    online_route = args.softmax == "online"
+    band: dict[str, list] = {} if online_route else None
+    n_cases_run = 0
     cases = [R.decode_case(d, s, l) for l in layers for s in steps]
 
     # 1. The gate's own foundation. Without this every comparison below is against the wrong
@@ -353,10 +443,13 @@ def main() -> int:
                              " verifies nothing")
 
     # 2. The gate.
-    print("\nkernel stages vs the pins (%s, split %d, softmax %s):"
-          % (args.launch, args.split, args.softmax))
+    print("\nkernel stages vs the pins (%s, split %d, softmax %s%s):"
+          % (args.launch, args.split, args.softmax,
+             " — online route: the two softmax stages are judged on §07.3's pre-authorized"
+             " cos/meanrel band, pin agreement reported not judged" if online_route else ""))
     gate_cases(cases, WORK / "out", "%s_%s_%d" % (args.launch, args.softmax, args.split), fails,
-               worst, ncmp, extra=knobs)
+               worst, ncmp, extra=knobs, online_route=online_route, band=band)
+    n_cases_run += len(cases)
 
     # 3. The other knobs. The two launch plans must agree BIT FOR BIT (one of them recomputes the
     #    stages the other stages, that is all); a different reduction ORDER cannot, so the streaming
@@ -367,7 +460,8 @@ def main() -> int:
         base, alt = WORK / "out", WORK / "out_cross"
         other = "online" if args.softmax == "full" else "full"
         bits = cross_variant("fused", ["--launch", "fused", "--split", str(args.split),
-                                       "--softmax", args.softmax], cases, base, alt, fails, ncmp)
+                                       "--softmax", args.softmax], cases, base, alt, fails, ncmp,
+                             online_route=online_route)
         if bits:
             fails.append("the fused launch plan does not agree with the staged one bit-for-bit"
                          " (%d elements of %d differ across the whole output files) - one of the"
@@ -399,7 +493,33 @@ def main() -> int:
             for ok, line in R.verify(dl, c):
                 if not ok:
                     fails.append("verify %s: %s" % (c["name"], line))
-        gate_cases(lc, WORK / "out_long", "long", fails, worst, ncmp, extra=knobs)
+        gate_cases(lc, WORK / "out_long", "long", fails, worst, ncmp, extra=knobs,
+                   online_route=online_route, band=band)
+        n_cases_run += len(lc)
+
+    # 4b. The online band, on the record in one place: the numbers §07.3 pre-authorized the route to
+    #     be judged by, and the anti-vacuity that says the streaming branch is the one that ran.
+    if online_route:
+        print("\n§07.3 online band (G6's shape, held against the pins; ndiff/1-ULP pin agreement"
+              " demoted to a reported number because §05.5's normalised-weight round makes the pins"
+              " unreachable at any tile size):")
+        moved = 0
+        for name, (cs, mr, nd, n, nc) in sorted(band.items()):
+            print("    %-14s worst cos %.8f >= %.4f | max meanrel %.2e <= %.0e | %d/%d differ from"
+                  " the pin (%.1f %%, reported, not judged) | %d case(s) moved"
+                  % (name, cs, COS_MIN, mr, MEANREL_MAX, nd, n, 100.0 * nd / n, nc))
+            moved = max(moved, nc)
+        if moved == 0:
+            fails.append("anti-vacuity: --softmax online --split %d produced output bit-identical to"
+                         " the pins on EVERY case, which is what the two-pass form does (0 of 98 304"
+                         " differ, results.md §3) and the online form provably cannot (§07.3 measured"
+                         " 26 %% of elements moved). The streaming branch did not run"
+                         % args.split)
+        else:
+            print("    anti-vacuity: the online branch ran — %d of %d case(s) moved against the pins"
+                  " on at least one softmax stage (a two-pass run moves none). `--negative` proves it"
+                  " again from the other side: `nomax` exists only in the online branch and is"
+                  " injected at this run's own split" % (moved, n_cases_run))
 
     # 5. Negatives.
     if args.negative:
@@ -429,6 +549,38 @@ def main() -> int:
     return 0
 
 
+def neg_cases(args, d: Path, layer: int, split: int) -> list[dict]:
+    """The two cases one negative is injected into, WIDE ENOUGH for that split to have a streaming
+    reduction at all.
+
+    `nomax` is invisible inside a single tile: with one tile per block the subtraction constant cancels
+    in the final divide, so the un-rescaled running max leaves the bits untouched. A block streams
+    `ceil(lvalid / split)` lanes in tiles of `KERNEL_TILE`, and the two decode cases are 18/19 lanes —
+    three tiles at split 1, one tile at split 4. Above split 2 the long-cache rows of `--long-fixture`
+    are therefore the only pinned data wide enough, and they are used instead. A negative that cannot
+    fail because the harness handed it one tile is the vacuous test this file's own rule forbids.
+    """
+    steps = sorted({p.name.split(".")[0] for p in d.glob("decode*.L%02d.*.npy" % layer)})[:2]
+    cases = [R.decode_case(d, s, layer) for s in steps]
+
+    def streams(lvalid: int) -> bool:
+        return (lvalid + split - 1) // split > KERNEL_TILE
+
+    if any(streams(c["lvalid"]) for c in cases):
+        return cases
+    dl = ROOT / "data" / "refs" / args.long_fixture
+    if not dl.exists():
+        raise SystemExit("--negative at --split %d needs pinned rows wider than %d lanes so a block"
+                         " streams more than one tile, and %s (the only such data in the repo) is"
+                         " missing — run with --long-fixture pointing at one"
+                         % (split, split * KERNEL_TILE, dl))
+    wide = [r for r in LONG_ROWS if streams(r + 1)]      # a row r attends lanes 0..r
+    if not wide:
+        raise SystemExit("--negative at --split %d needs rows wider than %d lanes; %s has none"
+                         % (split, split * KERNEL_TILE, dl))
+    return R.prefill_cases(dl, layer, wide[:2])
+
+
 def run_negatives(args, d: Path, fails) -> None:
     """Inject one bug at a time and ask which stages' BITS moved, against a clean run under the
     identical knobs. Comparing against the pins instead would fold the softmax-policy gap into every
@@ -438,11 +590,16 @@ def run_negatives(args, d: Path, fails) -> None:
     Two cases per negative: `carry` needs a previous query to leak out of, and one case would let
     every other injection pass by doing nothing."""
     layer = R.ATTN_LAYERS[0]
-    steps = sorted({p.name.split(".")[0] for p in d.glob("decode*.L%02d.*.npy" % layer)})[:2]
-    cases = [R.decode_case(d, s, layer) for s in steps]
     print("\nnegative tests (rejected where declared, and nowhere else):")
     for name, (why, form, must, must_not) in NEG_KERNEL.items():
-        knobs = ["--launch", args.launch, "--split", "1",
+        # Injected at THIS run's split, not at a forced 1. That is what makes `nomax` the
+        # anti-vacuity for a split row: the un-rescaled running max lives inside the online tile loop
+        # each split block runs, so an injection that moves nothing at --split 4 means the split
+        # blocks never ran the streaming accumulation. `carry` is the one exception the host itself
+        # imposes — one softmax state per query row is undefined across split blocks.
+        neg_split = 1 if name == "carry" else args.split
+        cases = neg_cases(args, d, layer, neg_split)
+        knobs = ["--launch", args.launch, "--split", str(neg_split),
                  "--softmax", args.softmax if form == "pinned" else "online"]
         dirs = {}
         for tag, extra in (("clean", []), ("neg", ["--neg", name])):

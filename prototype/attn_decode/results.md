@@ -257,7 +257,9 @@ case with a pinned second token — W5's multi-token harness, not this gate.
 - **fused vs staged launch: bit-identical on every stage** (the fused core recomputes its own
   §05.2/§05.3 and appends inline; same bits, one fewer launch). Any difference would mean one of
   the two is wrong, so it is a hard failure in `run.py`.
-- `--split 4` under the streaming form: same gate criteria as the single-block row (3rd row above).
+- `--split 4` under the streaming form: same numbers as the single-block row (3rd row above) — but
+  since P7 the *criteria* differ by route, not by knob: §10 records what the streaming route is held
+  to and why, and `--split 1` under `--softmax online` is judged the same way.
 - `--score-f32` (skip the BF16 score rounding): reported by `reference.verify` as indistinguishable.
 
 ## 8. For W5 — launch shape
@@ -299,3 +301,82 @@ heads × lanes, plus ~14 KB of stage writes), which at 237 GB/s is **~2.5 µs of
   most deceptive failure this project has produced), and `--softmax full` with `--split > 1` was
   silently normalising per block. All three are now refused or fixed; the second is worth rereading
   because "cos = 1.0000, meanrel = 0.7" is what a wrong normalisation looks like.
+
+## 10. P7 (2026-10-13): the online route becomes an engine route, and gets the band §07.3 pre-authorized
+
+Plan `bench/plan-prefill-2026-10-12.md` §3/P7 moves the engine above the score staging: when a row has
+more lanes than `MAXSC`, `engine/kernels_attn.cpp` now selects `full=0 --split ceil(lanes/MAXSC)`
+instead of refusing the token. **No kernel changed for it** — `attn_core`'s streaming branch,
+`attn_combine`'s `(max,sum)` merge and the `part` geometry were already gated here in `--mode once`
+shape; what was missing was an engine that asked for them, and a gate that could tell the online
+route's output from the pinned form's without asking the impossible of it.
+
+**The judging rule, and where its authority comes from.** §07.3, verbatim: *"When that path is built it
+must be gated on a **cos/meanrel band** — §10 G6's thresholds are already of that shape — and not on
+agreement with the pins, which it cannot reach."* So `run.py --softmax online` now holds, for the two
+stages the reduction produces (`attn_pre_gate`, `gated`):
+
+- **held:** `cos >= 0.9999` and `meanrel <= 1e-2` against the pins — `COS_MIN`/`MEANREL_MAX`, the §10.1
+  numbers this file already used. **No new constant was introduced anywhere.**
+- **demoted to a reported number:** `ndiff` and the 1-ULP large-element count — i.e. pin agreement,
+  which §3 measured unreachable at any tile size (26.2 % differ, 6.2 % large). They are still printed
+  for every case and in the band summary; they just no longer decide a verdict that would fail correct
+  code.
+- **untouched:** every other stage (`q_rope`, `k_rope`, `rope_cs`, `gate_vec`, `cache_keys`,
+  `cache_values`, `v_append`) is still required bit-exact, at every length, online or not — the softmax
+  form cannot move a copy or a rope. And `--softmax full` — the route all five priced fixtures ride —
+  is judged exactly as before, by all three tests, and still reproduces the pins at **0 ndiff**.
+- The ids half of G6 (`sampled ids exact`) is discharged one level up, by `engine/gate.py` section (a)
+  on `wide520f`. This op has no tokens to sample, and saying so is better than pretending the cos
+  covers it.
+
+**Anti-vacuity — the band is only safe if an online-labelled run cannot secretly be the two-pass form.**
+Two mechanical checks, both firing:
+
+1. A run whose softmax stages are bit-identical to the pins on *every* case is not streaming. Measured:
+   **67 of 68 cases moved** (`attn_pre_gate` 34 883/139 264 = 25.0 %, `gated` 31 670/139 264 = 22.7 %).
+   The one that did not move is `prefill000` — a single lane, where the two forms are the same
+   arithmetic. It is reported on the gate's own `anti-vacuity` line and a zero would FAIL.
+2. `--neg nomax` (A-17's un-rescaled running max) exists **only** in the online branch and is now
+   injected at the run's own `--split`, so it proves the split blocks ran the streaming accumulation.
+   The merge cannot go unobserved either: above `split 1` the core writes only `part`, so a missing
+   `attn_combine` leaves uninitialised memory where the output should be and no aggregate comes near
+   0.9999.
+
+**A trap that check found, and it is this directory's own harness, not the kernel.** `nomax` is invisible
+inside a *single* tile — within one tile the subtraction constant cancels in the final divide — and a
+split block streams `ceil(lvalid/split)` lanes in tiles of `TILE`. The two decode cases the negative
+harness used are 18/19 lanes: three tiles at split 1, **one tile at split 4**, where the injection
+legitimately moved nothing and `--neg nomax` declared `caught NOTHING`. A negative that cannot fail
+because of the case width handed to it is exactly the vacuous test `results.md` §6 forbids, so
+`neg_cases()` now switches to the long-cache rows of `--long-fixture` above the split the decode cases
+can carry (and `KERNEL_TILE` is read out of `attn_decode_kernels.h`, the way `engine/gate.py` reads
+`MAXSC`).
+
+**Re-taken on device, correctness only, `util` 8–9 % as read, no timing taken.** Each command
+1380 stage comparisons, 0 failures, ~5 s wall (`--long` = the 20 `p300` rows up to 277 lanes,
+`--negative` = all 12):
+
+```
+.venv/bin/python prototype/attn_decode/run.py --softmax online --split 2 --long --negative   # PASS
+.venv/bin/python prototype/attn_decode/run.py --softmax online --split 4 --long --negative   # PASS
+.venv/bin/python prototype/attn_decode/run.py --long --negative                              # PASS (1764 cmp, the pinned route, unchanged)
+```
+
+| stage | worst cos (floor 0.9999) | max meanrel (ceiling 1e-2) | elements differing from the pin | judged on |
+|---|---|---|---|---|
+| `attn_pre_gate` | 0.99999134 | 1.58e-03 | 34 883/139 264 (25.0 %) | cos + meanrel |
+| `gated` | 0.99999282 | 1.82e-03 | 31 670/139 264 (22.7 %) | cos + meanrel |
+| the other seven stages | 1.00000000 | 0 | 0 | bit-exact, unchanged |
+
+Identical at `--split 2` and `--split 4`, and identical to the §3 row from 2026-10-11 — the split does
+not add error on top of the streaming form, which is what §3's third row claimed and what this re-run
+re-measures at engine-shaped lane counts. `fused` vs `staged` remains bit-identical at both splits.
+
+**What this is not.** It is not a band move in the ledger's sense: no `BAND` constant, no fixture
+margin, and nothing in `bench/band-history.jsonl` came from this section (the one entry the numbers
+touch is G6's own 0.9999, which was already published and already this file's `COS_MIN`). The engine's
+logits rule for `wide520f` is priced from `wide520f`'s own steps per D-2, not from this table. And the
+one-pass route below 512 lanes is still the pinned route: the split exists only where a row does not
+fit the staging, which is the blast-radius rule plan §3 states and `engine/results.md` proves with
+five fixtures whose numbers did not move.
