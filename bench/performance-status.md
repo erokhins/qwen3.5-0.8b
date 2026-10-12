@@ -73,21 +73,13 @@ Weights re-derived from the safetensors headers, grouped as §01.7 (decimal GB, 
 | GDN `in_proj`/`out_proj` + conv, 18 layers | 0.3796 | 1.602 ms | **not measured on its own** — see the split note below | kernel exists (`proj_gemv`); **81 % of the projection bytes** |
 | full attention `qkv`/`o`, 6 layers | 0.0881 | 0.372 ms | **not measured on its own** — see the split note below | kernel exists (`proj_gemv`); **19 % of the projection bytes** |
 | **the two above together, measured as one 48-launch plan** | 0.4677 | 1.973 ms | **3.081 ms** (2026-10-12 re-take; 3.039 ms on 2026-10-11) | **63–64 % of the probe** — §6 |
-
-**Split note (2026-10-12).** These two rows said `— †` because no run has ever timed the GDN and
-attention projections as separate plans, and they still have not: `prototype/proj_gemv` has no
-subset selector, so the only measured plan is the whole 48-launch set. Do **not** fill them by adding
-up the per-shape table in `prototype/proj_gemv/results.md` — that sweep takes the best tile *per shape*
-(`PACK_inproj` 92.68 µs, `q_proj` 58.31, `o_proj` 36.11, `k_proj` 11.23 …) and its GDN+attention sum
-is **3.54 ms**, which is 15 % *worse* than the shipped 48-launch plan at 3.081 ms. That gap is itself
-a finding, not a rounding error: **best-config-per-shape is not the shipped plan**, so per-shape numbers
-cannot be recombined into a plan total. Closing these two rows properly needs a `--only gdn|attn`
-selector in `proj_gemv` and one timing run each — cheap, and queued.
-| MTP draft layer (only when drafting) | 0.0409 | 0.173 ms | — | not written |
-| norms and small tensors | ~0.005 | 0.021 ms | — | not written |
-| GDN state traffic (18 layers, warm) | 0.054 | 0.228 ms cold | **0.0646 ms** | **kernel exists** |
+| MTP draft layer (only when drafting) | 0.0409 | 0.173 ms | — | not written (§09 MTP exists in the torch oracle only) |
+| norms and small tensors | ~0.005 | 0.021 ms | **0.150 ms** (`glue` fused, 49 launches, 512 t) | **kernel exists** — 98 % launch overhead, 3 % roofline |
+| GDN state traffic (18 layers, warm) | 0.054 | 0.228 ms cold | **0.0648 ms** | **kernel exists** — 883 GB/s, cache-resident |
 | §04.5 gated norm (18 layers) | ~0.0004 | 0.0016 ms | **0.053 ms** | **kernel exists** — launch-bound, 18 × 2.94 µs |
-| **total per token** | **1.605** | **6.52 ms** | **7.81 ms** of summed op time; **the engine measures 11.919 ms/token** — see the correction below | |
+| §05 attention core over the KV cache | context-dependent (~0.31 MB at 25 lanes) | ~0.001 ms at 25 lanes; ~0.11 ms at 4k | **2.014 µs per lane per token** (§6 fit) | **kernel exists — 6.10 GB/s effective, 2.6 % of the probe**; dispatch-bound |
+| **sum of the separately-measured parts** | **1.605** | **6.52 ms roofline** | **7.81 ms summed** | **97 % of the token's bytes are covered by a measured kernel**; worst family 63 %, best 101 % |
+| **what the engine actually costs** | **1.605 + KV** | — | **11.919 ms/token** at a 25-lane context (83.9 tok/s), **12.614 ms** at 327 lanes | **the sum is not the engine: +4.1 ms/token of launch structure and per-step sync**, of which 1.27 ms is priced in `engine/results.md` and ~2.5 ms is explicitly unattributed |
 
 > **Correction, 2026-10-12.** This table is the sum of separately-measured op times, and the engine
 > now measures **11.919 ms/token** end to end at a 25-lane context (§6). Two things follow. First,
@@ -96,6 +88,17 @@ selector in `proj_gemv` and one timing run each — cheap, and queued.
 > of that as plan structure and leaves ~2.5 ms explicitly unattributed. Second, the summed figure is
 > not an upper bound on anything: the engine's per-launch cost is paid in series, which the table's
 > "measured" column cannot see because each op was timed in a burst of its own.
+
+**Split note on the two projection rows (2026-10-12).** They carried `— †` because no run has ever
+timed the GDN and attention projections as separate plans, and they still have not:
+`prototype/proj_gemv` has no subset selector, so the only measured plan is the whole 48-launch set. Do
+**not** fill those two rows by adding up the per-shape table in `prototype/proj_gemv/results.md` — that
+sweep takes the best tile *per shape* (`PACK_inproj` 92.68 µs, `q_proj` 58.31, `o_proj` 36.11, `k_proj`
+11.23 …) and its GDN+attention sum is **3.54 ms**, i.e. 15 % *worse* than the shipped 48-launch plan at
+3.081 ms. That gap is a finding, not a rounding error: **best-config-per-shape is not the shipped
+plan**, so per-shape numbers cannot be recombined into a plan total. Closing those two rows properly
+needs a `--only gdn|attn` selector in `proj_gemv` and one clean timing run each — cheap, and queued in
+`bench/plan-2026-10-12.md`.
 
 So **1.5588 / 1.605 = 97 %** of the token's bytes are now covered by a kernel that has been
 measured on this box — `lm_head`, the MLP, every projection, the GDN recurrence, and the norms.
