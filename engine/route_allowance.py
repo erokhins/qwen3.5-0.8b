@@ -19,6 +19,13 @@ that silently re-ran the reference would (a) cost minutes nobody budgeted and (b
 provenance that makes a cached allowance safe — the command, the date, and the hashes this file records
 and the gate re-checks.
 
+AND IT KEEPS THE BAND LEDGER. A margin derived here is a band value that changed with nobody editing a
+file, so this tool appends its own lines to `bench/band-history.jsonl` (`tools/band_history.py`) for
+every margin it writes — and for every re-pricing it REFUSES, as `event: refused`, which records the
+attempt without moving the current value. `engine/gate.py` refuses to run when a margin and its ledger
+line disagree, so a fixture's band cannot drift silently. `--dry-run` writes nothing, so it records
+nothing; so does an `--out-root` the shipped gate does not read.
+
 WHY THE MARGIN IS DERIVED AND NOT CHOSEN. The rule, at step *j* of one fixture, is
 `engine 1-cos(j) <= margin x route 1-cos(j)` (and the same shape for meanrel), where `route 1-cos(j)` is
 the measured disagreement between the reference's own two legal GDN prompt forms at that step. If
@@ -68,6 +75,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from engine import gate as egate      # the fallback margins and the input hashes live in the gate, not here
+from tools import band_history        # the ledger this tool writes its own derived margins into
+
+DEFAULT_OUT_ROOT = ROOT / "data" / "refs"
 
 # What a file written by this version declares about where its margin came from. A file written before
 # per-fixture keying has no `margin_basis`, and `engine/gate.py:allowance_margins` says so when it prints
@@ -214,6 +224,61 @@ def write_one(doc: dict, margins: dict, out_root: Path, dry: bool) -> Path:
     return out
 
 
+def margin_reason(fx: str, m: dict, which: str) -> str:
+    """Why this fixture's margin is what it is, in the words the ledger wants.
+
+    The ledger refuses a boilerplate reason, and it should: the derivation IS the justification, so
+    the line quotes it — the fixture, its own worst engine/route ratio, and the step that set it.
+    """
+    if which == "cos":
+        raw, step = m["raw_max_cos_ratio"], m["raw_max_cos_ratio_step"]
+    else:
+        raw, step = m["raw_max_meanrel_ratio"], m["raw_max_meanrel_ratio_step"]
+    return (f"derived by engine/route_allowance.py from {fx}'s own {m['n_ratios']} steps: worst"
+            f" engine/{'route 1-cos' if which == 'cos' else 'route meanrel'} ratio {raw:.5f} at step"
+            f" {step}, rounded up at two decimals (ceil2) — the tightest constant that admits every"
+            " step this fixture was measured on, and no other fixture's rows can move it")
+
+
+def log_band_history(fx: str, m: dict, stored, refused: bool) -> None:
+    """Append this run's derived margins to `bench/band-history.jsonl` — including the refusals.
+
+    A margin derived here is a band value that changed without anybody editing a file, so the generator
+    records it rather than trusting a human to remember to. Two cases write no line, and both say so:
+    a re-price that returns the SAME margin (nothing moved, and the ledger refuses a line claiming it
+    did), and — for a refusal — there is no such case, since a refusal is by definition a disagreement.
+    A REFUSAL is recorded as `event: refused`: it changes nothing (and `band_history.check` ignores it
+    when deciding the current value), but an attempted loosening that was caught is exactly the thing
+    worth finding in the log later.
+    """
+    rel = f"data/refs/{fx}/{egate.ALLOWANCE_FILE}"
+    for which, key in (("cos", "margin"), ("meanrel", "margin_rel")):
+        idx = 0 if key == "margin" else 1
+        derived_v = m[key]
+        if refused:
+            band_history.record(file=rel, key=key, old=stored[idx], new=derived_v,
+                                event="refused", decision="D-2", by="engine/route_allowance.py",
+                                reason=(f"re-price REFUSED by engine/route_allowance.py: this"
+                                        f" measurement derives {derived_v:.2f} for {fx}'s {key} but"
+                                        f" the file on disk carries {stored[idx]:.2f}, so nothing was"
+                                        " written and no band moved; re-pricing one fixture must never"
+                                        " move a margin by itself"))
+            continue
+        # With no file on disk the previous value comes from the ledger, not from the absent file: the
+        # documented way to change a margin is to delete its file deliberately first, and a line that
+        # recorded that as `absent -> 3.04` would hide what the fixture was actually being judged by.
+        prev_v = stored[idx] if stored is not None else band_history.current_recorded(rel, key)
+        if prev_v is not None and float(prev_v) == float(derived_v):
+            # Re-pricing a fixture and getting the same margin back is not a band move, and the ledger
+            # refuses a line that claims one (old == new). Say that here instead of raising it later.
+            print(f"  band history: {fx} {key} stays {derived_v:.2f} — no band moved, nothing"
+                  " recorded")
+            continue
+        band_history.record(file=rel, key=key, old=(prev_v if prev_v is not None else "absent"),
+                            new=derived_v, event="applied", decision="D-2",
+                            by="engine/route_allowance.py", reason=margin_reason(fx, m, which))
+
+
 def selftest() -> int:
     """Prove the per-fixture property on synthetic ratios, with no device, no fixture and nothing written.
 
@@ -323,20 +388,21 @@ def main() -> int:
               f" at step {m['raw_max_meanrel_ratio_step']}")
 
     print("\nmargins, each derived from its own fixture alone (D-2):")
-    problems = []
+    problems, refused_fx, storeds = [], [], {}
     for doc in tables:
         fx = doc["fixture"]
         m = derived[fx]
         line = (f"  {fx:<9} cos {m['margin']:.2f} / meanrel {m['margin_rel']:.2f}"
                 f"   (fallback in engine/gate.py BAND:"
                 f" {egate.BAND['route_margin']:.2f}/{egate.BAND['route_margin_rel']:.2f})")
-        stored = stored_margin(fx, out_root)
+        stored = storeds[fx] = stored_margin(fx, out_root)
         if stored is None:
             print(line + "   [new file]")
             continue
         line += f"   (already stored: {stored[0]:.2f}/{stored[1]:.2f})"
         print(line)
         if (stored[0], stored[1]) != (m["margin"], m["margin_rel"]):
+            refused_fx.append(fx)
             direction = ("looser" if m["margin"] > stored[0] or m["margin_rel"] > stored[1]
                          else "tighter")
             problems.append(
@@ -355,7 +421,26 @@ def main() -> int:
               " those margins is derived from its own fixture's rows, so naming a subset of fixtures"
               " here no longer risks re-deriving anybody else's constant.")
 
+    # The ledger: a margin written here is a band value that moved without anybody editing a file, so
+    # this tool records it — and so a refusal, which is a caught attempt at exactly that, is on the
+    # record too. Skipped for `--dry-run` (nothing happened) and for an `--out-root` the gate does not
+    # read (recording a margin the shipped gate cannot see would put a story in the ledger, not a fact).
+    def log():
+        if args.dry_run:
+            return
+        if Path(args.out_root).resolve() != DEFAULT_OUT_ROOT:
+            print(f"  band history NOT recorded: --out-root {args.out_root} is not the tree the gate"
+                  f" reads ({DEFAULT_OUT_ROOT}), so there is no band here for the ledger to describe.")
+            return
+        for fx in refused_fx:
+            log_band_history(fx, derived[fx], storeds[fx], refused=True)
+        if refused_fx:
+            print(f"  recorded {len(refused_fx)} refused re-pricing(s) in"
+                  f" {band_history.HISTORY_REL} as event=refused — no band moved, so no band check"
+                  " treats them as current.")
+
     if problems:
+        log()
         print("\nREFUSED — nothing was written:")
         for p in problems:
             print("  * " + p)
@@ -363,6 +448,9 @@ def main() -> int:
 
     for doc in tables:
         write_one(doc, derived[doc["fixture"]], out_root, args.dry_run)
+        if not args.dry_run:      # a --dry-run derived nothing and wrote nothing, so it records nothing
+            log_band_history(doc["fixture"], derived[doc["fixture"]], storeds[doc["fixture"]],
+                             refused=False)
     print("\nOK — every margin written is the max ratio inside its own fixture, rounded up at 2 dp.")
     return 0
 
