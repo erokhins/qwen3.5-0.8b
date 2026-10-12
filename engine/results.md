@@ -2254,3 +2254,127 @@ What P2 does **not** do: nothing is batched. The wave calls the same kernels per
 same launches — the win is the removed T−1 `lm_head`s and syncs and the fact that P4–P6 now have somewhere
 to land. The honest open item is a protocol detail: `PREFIX … stopped=` no longer shows a per-prompt-token
 stop observation, since under `last` those rows are never priced.
+
+## Q5 / P4 + P4b: the batched kernels are proven to run, and batching cost exactly nothing numerically
+
+P4 landed in three pieces — `46d95c0` (glue: `blockIdx.x` is the row), `eb089a4` (token-batched gateup/down),
+`48d469a` (the engine side: `[T_w]` wave scratch plus the batched call sites) — and the five fixtures came
+back with worst per-step deficits **bit-identical** to the pre-P4 binary (`dec64f` 2.1555e-03 @32, `dec64t`
+2.4099e-04 @2, `dec300f` 4.6322e-04 @86, `mt32f` 3.7257e-04 @19, every ratio **x1.000**). That is the
+desired numerical result, and it is also worthless as evidence of execution: a wave that quietly fell back to
+one row per launch reproduces those numbers exactly. **P4b's job was the missing proof, and the answer is
+yes — the batched kernels run.** The proof is a counter, not an inference from outputs.
+
+**The instrument** (`engine/launch_stats.{h,cpp}`) counts *launches as the host submits them*, at the four
+call sites in `kernels_glue.cpp` / `kernels_mlp.cpp` that can batch, and prints one line per family before
+`RESULT`:
+
+```
+LAUNCHSTAT family=glue        calls=6321 calls_batched=49   rows_total=20727 rows_max=295
+LAUNCHSTAT family=mlp_gateup  calls=3096 calls_batched=24   rows_total=10152 rows_max=295
+```
+
+`calls_batched` only moves on a launch that carried more than one row, `rows_max` is the widest launch seen.
+`--wave-rows N` (new, validated `1..kMaxWaveRows`, echoed back as `PREFILL … wave_rows=`) is the discriminating
+knob: the same binary, same kernels, same scratch, one row at a time. `engine/gate.py` section **(h)** runs
+both sides of the A/B with `--prefill-logits all`, re-derives the launch plan from §07's arithmetic
+(`wave_expect`) and requires the counters to match it exactly, requires `rows_max > 1` on the batched side and
+`rows_max == 1`/`calls_batched == 0` on the one-row side, requires `rows_total` equal on both sides (fewer
+launches, *not less work*), requires identical sampled ids, and requires the two logits dumps to be
+`cmp`-identical. Two injections in `--selftest` (`--break-wave`, `--break-ab-logits`) prove each half bites:
+a refactor that drops to per-row launches fails the gate, and so does a difference that shows up only in the
+logits.
+
+**The A/B, counted** (`dec300f`, 295-token prompt + 128 steps; wave_rows 512 vs 1):
+
+| | batched wave | `--wave-rows 1` | the count, not a duration |
+|---|---|---|---|
+| prompt-wave glue+MLP launches | **97** | **28 615** | **295× fewer** for a 295-token prompt |
+| whole run, three families | 12 513 | 41 031 | the 128 generation steps are one token wide either way |
+| glue, whole run | 6321 calls, 49 batched, rows_max 295 | 20 727 calls, 0 batched, rows_max 1 | `rows_total` 20 727 both sides |
+| `mlp_gateup` / `mlp_down`, whole run | 3096 each, 24 batched, rows_max 295 | 10 152 each, 0 batched, rows_max 1 | `rows_total` 10 152 both sides |
+| sampled ids / logits | 423 rows | 423 rows | ids equal, **423 files, 420 157 440 bytes, 0 differing** |
+
+`mt32f` (232-token prompt): 97 prompt-wave launches batched vs **22 504** one-row, **232×**; 264 logits
+files, 262 225 920 bytes, bit-identical. And it is not a long-prompt effect — the ratio is the prompt
+length on every fixture, because a wave costs 97 glue+MLP launches however wide it is: `dec8` 97 vs
+1649 (17×, 25 files identical), `dec64t` 97 vs 1649 (17×, 81 files), `dec64f` 97 vs 2619 (27×, 91
+files). So the same arithmetic arrives in 97 submissions instead of 28 615, and the bits it arrives
+with are the same bits.
+
+Five fixtures after the instrumentation, unchanged verdicts and unchanged margins: **119 / 601 / 598 / 1107 /
+342** checks, zero failures (the +21 per fixture is section (h)). The §6.0 margin preflight still binds at the
+same steps with the same ratios — `dec64f` step 32 = 3.037 of a 3.50 cap, `dec64t` step 54 = 3.494/3.50,
+`dec300f` step 86 = 7.984/7.99, `mt32f` step 19 = 2.922/2.93 — i.e. P4 consumed no route allowance anywhere.
+
+### P4b per-op: the prototype-side stage the WIP commit owed
+
+The engine's launcher and the prototype's are the same instantiation, which is what makes the prototype stage
+the engine's per-op gate: `kernels_mlp.cpp` launches `mlp_gateup_tokens<1024, 4>` / `mlp_down_tokens<3584, 2>`
+with `kRowsPerBlock = ROWS_PER_BLOCK = 8` and 256 threads, and the prototype host picks `tpb = in == HID ? 4 :
+2` with the same `rows_per_block` and `grid(rows/8, ceil(tokens/tpb))`. Same for glue: one launch per call,
+`blockIdx.x` the row, 256 threads.
+
+| stage | fixture | result |
+|---|---|---|
+| `glue/run.py --batched` | `p64` | **PASS**, 784 comparisons 0 failures. Tile plan 7 launches vs 322 per-row; `g1_s`/`g2_s` bit-exact (0/47 104 per layer); every norm within 1 ULP with 0 large elements over tolerance; **tile vs one launch per row: 612 352 elements, 0 differ**; the `--neg plainw` falsification still moves only `g1_n` |
+| `glue/run.py --batched` | `p300` | **PASS**, 784 comparisons 0 failures. Tile plan 7 launches vs 1939; `g1_s`/`g2_s` bit-exact (0/283 648 per layer); **tile vs per-row: 3 687 424 elements, 0 differ** |
+| `mlp_gemv/run.py --tokens` | `p64` | **PASS**. `stage R` exact; F1 `gate_pre` ≤ 1 ULP (worst 3/3584); F1 `up_pre` ≤ 2 ULP with every outlier inside the 3e-05 band; F2 `act` ≤ 2 ULP, worst 4/3584 (L00), 0 large elements over tolerance at all four layers; F3 ≤ 1 ULP; F4 (`out` from *our* `act`) up to 6.25 % ndiff, worst large element 44 ULP at 1.7e-03 of the tensor max — the same shape the decode-stage gate reports; **batched vs `k=1` on sampled tokens: 23 040 elements, 0 differ at every layer** |
+| `mlp_gemv/run.py --tokens` | `p300` | **FAIL, one check, not caused by batching** — see below |
+| rows=1 stays green | `dec8` | both gates' decode-stage (rows=1) halves pass bit-for-bit inside the same runs, and `--negative`'s six injected bugs are still each caught where the bug lives and nowhere else |
+
+**The one red line, measured and reported rather than tuned.** `mlp_gemv/run.py --tokens p300` fails
+`L03 r032 F2 act: 1 large element(s) differ by >2 ULP (worst 3 ULP at |ref|/max 7.8e-03)`. Three controls,
+all with the gate's own comparator:
+
+1. **the pin is correctly paired** — torch rebuilding `act` from the pin's own `gate_pre`/`up_pre` matches the
+   pinned `act` at that row in all 3584 elements (the gate's stage R), so §10.5's last-writer-wins trap is
+   not in play;
+2. **batching is exonerated** — the shipped single-token kernel run on exactly that row produces the identical
+   3 elements, same 3-ULP outlier, and 0 elements differ between the tile's row and the single-token row;
+3. **the outlier is the propagated consequence of a legal input flip** — at `idx 1650` the kernel's
+   `gate_pre` is **1 ULP** from the pin (legal under F1, whose band is 1 ULP) and `up_pre` is exact, and
+   `act = round(round(silu(g)) · u)`, so a legal input ULP can arrive as 3. The row's other two deviations
+   have the same shape (2 ULP with a 1-ULP `up_pre`; 1 ULP inside the cancellation band).
+
+So this is a floor-survey question, not a kernel question: F2's 2-ULP `act` band was sized by
+`floor_probe.py` on the *decode* population, and this is the first time ~1.1 M prefill elements have been
+put through it. Per plan §6.1 the honest fix is a number inside a band, so **nothing was touched**: no band,
+no margin, no `route_allowance.py`, no re-pin. Handing the decision up: either the prefill population joins
+the floor survey (which may legitimately move F2's `act` tolerance for prefill pins, and nothing else), or
+`p300`'s MLP stage is judged by the aggregate rules only. Until then that one command is red, and
+`engine/results.md` says so here rather than in a TODO.
+
+### What a worker ran on the device, and what it did not
+
+Correctness-only, each under 60 s wall, one at a time, under `tools/gpu_lock.sh`, **no timing taken** and no
+number here belongs in `bench/performance-status.md`. Util was the usual contended 92–94 % at acquire and
+7–36 % at release; per `bench/performance-status.md` §6 it is recorded and discounted.
+
+```
+tools/gpu_lock.sh acquire … ; python engine/gate.py --fixture {dec8,dec64f,dec64t,dec300f,mt32f}   # 119/601/598/1107/342, 0 failures
+python prototype/glue/run.py --batched p64      # 4.0 s, rc 0
+python prototype/glue/run.py --batched p300     # 4.1 s, rc 0
+python prototype/mlp_gemv/run.py --tokens p64  --no-time --tile 0   # 14.3 s, rc 0
+python prototype/mlp_gemv/run.py --tokens p300 --no-time --tile 0   # 15.6 s, rc 1 (the one line above)
+python prototype/mlp_gemv/run.py --negative    --no-time --tile 0   # 10.8 s, rc 0
+```
+
+Two things worth keeping. `mlp_gemv/run.py --no-time` **does not** suppress the cold-check burst, because that
+block is gated by `--tile`, not by `--no-time` — a first pass at these gates ran the tile path and printed ms
+figures; they are not reported anywhere and are not ledger material, and the correctness-only form is
+`--no-time --tile 0`. And the two probes that produced the three controls above are throwaways under `/tmp`
+(reproduce with `prototype/mlp_gemv/run.py --tokens p300` plus a single-row `--mode gateup` call on
+`L03.mlp.in` row 32); they are not in the tree because nothing about them needs to persist.
+
+**Not run by a worker, by rule:** any timing, the TTFT curve, and every number that would enter the ledger
+(`bench/performance-status.md` §6). The command for the main agent's timing pass is the same
+`engine/build/decode_run … --wave-rows {512,1}` pair used above, run blocking with zero subagents; the launch
+counts above are counts precisely so that they stay valid whatever that pass measures.
+
+**Open after P4b.** (1) The `p300` F2 decision above. (2) GDN conv/gates and the nine projections are still
+one row at a time inside the wave — P5/P6, and (h)'s counters will show them the same way. (3) Generation is
+still one token per wave by construction, so the whole-run ratio (12 513 vs 41 031) is much flatter than the
+prompt ratio; shortening it is P9's argument, not this one. (4) `wide520f` still cannot exercise a wave: the
+512-lane attention ceiling is P7, and `kMaxWaveRows = 512` is a scratch-sizing constant, not the attention
+cap — the two are unrelated and both are named.
