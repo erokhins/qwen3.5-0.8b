@@ -7,7 +7,9 @@
 //   * no host round-trip inside the token. §07.1 / `results.md`: "no host round-trip per op", and the
 //     step is submitted as one stream of launches on the default stream with a single sync at the
 //     logits. The one exception is deliberate and named: the conv-window roll-back copy (§08.2 note
-//     below) and the logits D2H, both of which are memcpys, not waits.
+//     below) and the logits D2H, both of which are memcpys, not waits. The body/finish split below
+//     does not weaken this, it makes it structural: `submit_token_body` contains no readback at all,
+//     which is what lets `engine/prefill.cpp` queue a whole wave of them before waiting.
 //   * no dtype conversion written by hand. Every widening goes through `kernels_cast.cpp` so the
 //     rounding is one named thing (RNE, same as torch's) instead of eighteen local casts.
 //
@@ -289,22 +291,25 @@ void prepare_weight_adapters(const WeightStore& weights, DecodeScratch& sc) {
     sc.adapters_ready = true;
 }
 
-// ---- the step --------------------------------------------------------------------------------
-StepResult decode_step(const WeightStore& weights, RequestState& st, DecodeScratch& sc, int token,
-                       std::vector<float>* logits) {
+// ---- the body -------------------------------------------------------------------------------
+// The §07.1 order, in §07.1's order, with no readback anywhere in it. `decode_step` at the bottom of
+// this file is this function plus `finish_token`; `prefill_wave` is the only caller that separates
+// them (T bodies, then one finish over the last row — §06.5).
+void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
+                       int token) {
     if (!sc.adapters_ready) {
         throw std::runtime_error(
-            "decode_step: prepare_weight_adapters() has not been called on this scratch, so "
+            "submit_token_body: prepare_weight_adapters() has not been called on this scratch, so "
             "gates_kernel would read dt_bias and conv_kernel would read conv1d.weight as "
             "uninitialised memory.");
     }
     if (token < 0 || token >= kVocab) {
-        throw std::runtime_error("decode_step: token " + std::to_string(token) +
+        throw std::runtime_error("submit_token_body: token " + std::to_string(token) +
                                  " is outside [0, vocab)");
     }
     const int pos = st.prefix_len;   // §02.4: P is the 0-based position of the token being fed
     if (pos < 0 || (int64_t)pos >= st.cap) {
-        throw std::runtime_error("decode_step: position " + std::to_string(pos) +
+        throw std::runtime_error("submit_token_body: position " + std::to_string(pos) +
                                  " is not inside the allocated context (cap " +
                                  std::to_string(st.cap) + "); §07.5's end-of-context stop is the"
                                  " caller's, not this function's");
@@ -449,8 +454,25 @@ StepResult decode_step(const WeightStore& weights, RequestState& st, DecodeScrat
         add_norm(sc.delta, next_norm);
     }
 
+    // The launches are all submitted and the final normed row is sitting in `sc.norm` for whoever
+    // wants to price it. The position advances here, not in the tail, because the NEXT body reads
+    // `st.prefix_len` as its own `pos` — that is what makes a wave of bodies legal to queue.
+    st.prefix_len = pos + 1;
+    const std::string broken = st.check_invariants();
+    if (!broken.empty()) {
+        throw std::runtime_error("submit_token_body: §08.6 invariant broken after the token: " +
+                                 broken);
+    }
+}
+
+// ---- the tail -------------------------------------------------------------------------------
+// One `lm_head_full`, ONE blocking D2H (the sync of the token), and §03.4's argmax. Reads the row
+// `submit_token_body` left in `sc.norm`; see the declaration in `decode_step.h` for why that
+// ordering is a contract rather than an accident.
+StepResult finish_token(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
+                        std::vector<float>* logits) {
     // ---- §03.4: logits = RMSnorm_final(x) · Eᵀ. `sc.norm` already holds RMSnorm_final(x): the
-    // last glue call above wrote it as a side effect of the layer-23 residual add.
+    // last glue call of the body wrote it as a side effect of the layer-23 residual add.
     kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, kHidden);
     kernels::lm_head_full((const uint16_t*)weights.at(kHead).device, sc.norm_f32, sc.logits,
                           kVocab);
@@ -467,18 +489,24 @@ StepResult decode_step(const WeightStore& weights, RequestState& st, DecodeScrat
     const float host_logit = host_logits[best];   // read before the vector is moved out
     if (logits) *logits = std::move(host_logits);
 
-    st.prefix_len = pos + 1;
     st.sampled_token = best;
-    if (best == kStopToken) st.stopped = true;   // §07.5 / A-10
+    if (best == kStopToken) st.stopped = true;   // §07.5 / A-10 — the raw match, phase-blind: the
+                                                 // caller owns whether it ends anything
 
-    const std::string broken = st.check_invariants();
-    if (!broken.empty()) {
-        throw std::runtime_error("decode_step: §08.6 invariant broken after the step: " + broken);
-    }
     StepResult out;
     out.token = best;
     out.top_logit = host_logit;
     return out;
+}
+
+// ---- the step -------------------------------------------------------------------------------
+// §07.1 is one order and it has one implementation: a step is its body and then its tail, which is
+// the same two call sites, in the same order, that were one function before the wave needed them
+// apart. Same launches, same sync count (one, in the tail).
+StepResult decode_step(const WeightStore& weights, RequestState& st, DecodeScratch& sc, int token,
+                       std::vector<float>* logits) {
+    submit_token_body(weights, st, sc, token);
+    return finish_token(weights, st, sc, logits);
 }
 
 std::string LaunchCounts::describe() const {

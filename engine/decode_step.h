@@ -93,24 +93,62 @@ struct StepResult {
 };
 
 // §07.5: greedy decoding stops at id 248046 (the end-of-turn token, A-10), at end of context, or at
-// the caller's budget. `decode_step` sets `stopped` whenever a step's argmax IS that id — in either
-// phase, because it is not told which — so whether the match ENDS a run is the caller's decision, and
-// for the token loop it is generation-phase only: a prompt-phase sample is discarded, so a match
-// there is a diagnostic, not a stop. `decode_run.cpp` owns that rule and says why.
+// the caller's budget. `finish_token` sets `stopped` whenever its argmax IS that id — in either phase,
+// because it is not told which — so whether the match ENDS a run is the caller's decision, and for the
+// prompt phase (a prefill wave, `engine/prefill.h`) it never is: a prompt-phase sample is discarded, so
+// a match there is a diagnostic, not a stop. `decode_run.cpp` owns that rule and says why.
 constexpr int kStopToken = 248046;
 
-// One token through the whole stack: input norm → 24 blocks (GDN §07.2 or attention §07.3 by layer
-// type, each followed by the MLP §03.3 and the fused add+norm) → the final norm falling out of the
-// last glue call → lm_head → host argmax. Submits ~423 launches and syncs once, at the logits.
+// ---- the token, in two pieces ---------------------------------------------------------------
 //
-// `st` is mutated in place: its GDN state, conv window and KV cache advance, `prefix_len` increments,
-// and `sampled_token`/`stopped` are set (§07.5). Throws std::runtime_error on a HIP failure, on a
-// position the gated kernels cannot serve (attention's MAXSC, §07.3 in kernels_attn.cpp), or if
+// The §07.1 order lives in TWO functions, and `decode_step` below is their composition. The split is
+// not decoration: a prefill wave (§06.1, `engine/prefill.h`) has to submit T tokens back to back and
+// price only the last one, which is §06.5's "only `logits[T-1]` is ever used". With the tail welded
+// on, a wave that called `decode_step` per token would pay T `lm_head_full`s, T 1 MB vocabulary D2Hs
+// and T syncs to throw T-1 of them away — the single largest piece of waste §1.2 names. So the seam
+// is cut here, once, arithmetic-free, and P4/P5/P6 reuse it: they batch the launches *inside*
+// `submit_token_body`, and the wave's one-finish shape does not change when they do.
+//
+// WHO SPLITS THEM: `prefill_wave` (`engine/prefill.cpp`) is the only caller that calls the two
+// apart, and it does so T-bodies-then-one-finish. Every other caller uses `decode_step`, which is
+// defined as body-then-finish, so there is still exactly ONE implementation of the §07.1 order.
+
+// The body: `x = E[y]` → input norm → 24 blocks (GDN §07.2 or attention §07.3 by layer type, each
+// followed by the MLP §03.3 and the fused add+norm) → the final norm falling out of the last glue
+// call. Submits 423 of the token's 424 launches (`planned_launch_counts()` derives the bill; the
+// 424th is the `lm_head_full` that belongs to the tail) and WAITS FOR NONE OF THEM: no logits, no
+// D2H, no sync, no argmax, so bodies can be queued back to back on one stream.
+//
+// It still advances the state, because the next token's position depends on it: `pos` is
+// `st.prefix_len` on entry and `st.prefix_len` is `pos + 1` on exit, the GDN state and conv window
+// move, and lane `pos` of the KV is written (§08.6's invariants are re-checked before it returns).
+// What it does NOT touch is `sampled_token`/`stopped` — there is no sample until `finish_token` —
+// and it leaves the normed final row in `sc.norm` for `finish_token` to read.
+//
+// Throws std::runtime_error on a HIP failure, on a position the gated kernels cannot serve
+// (attention's MAXSC, §07.3 in kernels_attn.cpp), on a token outside [0, vocab), or if
 // `prepare_weight_adapters` has not been called on this scratch.
+void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
+                       int token);
+
+// The tail: `lm_head_full` over the normed row the last `submit_token_body` left in `sc.norm`, then
+// exactly ONE blocking D2H of the vocabulary (this is the sync of the token, and the only one), then
+// §03.4's host argmax — a strict `>` scan, so ties go to the LOWEST id. Sets `st.sampled_token`,
+// and `st.stopped` when that id is `kStopToken` (§07.5's raw match, any phase: the caller decides
+// whether it ENDS anything, and for a prefill wave it never does).
 //
-// `logits` may be null; when it is not, the full vocabulary comes back in it (≈1 MB D2H per token,
-// which is the price §03.4's tie rule and this gate both accept). The step always syncs, because the
-// argmax is taken on the host.
+// THE CONTRACT, stated because the wave is what leans on it: this prices the row `sc.norm` holds
+// *now*, i.e. the one the most recent `submit_token_body` wrote — the scratch is one row wide, so
+// the pair must be called body→finish and a wave must finish after its LAST body. `logits` may be
+// null; when it is not, the full vocabulary comes back in it (≈1 MB, which is the price §03.4's tie
+// rule and this gate both accept). Nothing here reads the state or the weights' shapes again.
+StepResult finish_token(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
+                        std::vector<float>* logits = nullptr);
+
+// One greedy decode step (§07.1): `submit_token_body` then `finish_token`, which is the whole
+// definition. Same launches, same order, one sync (in the tail) as when this was one function.
+// `st` is mutated in place: GDN state, conv window and KV advance, `prefix_len` increments, and
+// `sampled_token`/`stopped` are set (§07.5).
 StepResult decode_step(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
                        int token, std::vector<float>* logits = nullptr);
 
