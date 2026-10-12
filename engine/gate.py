@@ -3758,15 +3758,15 @@ def decision_margin(ref: np.ndarray, eng, m: dict) -> str:
 # must be SIZED — the legal element error at that position, plus a route spread, the way D-3/D-5/D-6
 # sized their bands. Not a skip, not a silent tolerance, not a re-price.
 #
-# `wide520f`'s two lines are a different kind of red: they are not a known engine defect and not a band
-# question, they are one constant. 500 prompt + 24 generation = 524 lanes, the one-pass attention stage
-# serves 512 (`MAXSC`, `prototype/attn_decode/attn_decode_kernels.h:32`), so `gate.py`'s own lane preflight
-# refuses the run and `decode_run` exits 1 before a single STEP line — which is also why `wide520f`'s y0,
-# id, logits, `(g)` and `(h)` rows have never been judged at all. They are listed here so that *this*
-# package's success criterion is visible in the same reporting: P7 selects the prototype's split-K
-# online-softmax form above the staging (§07.3), the ceiling goes away, and these two lines must HEAL. If
-# only one heals, or they heal while something else is red, `[NEW-FAILURE]` / "did NOT fail this run" below
-# says so. Deleting this entry is part of P7's own cleanup once the fixture is green, not a shortcut past it.
+# `wide520f` was on this list for exactly one commit and is not any more, which is worth recording because
+# the trip came out of the ceiling this package removed: 500 prompt + 24 generation = 524 lanes, the
+# one-pass attention stage served 512 (`MAXSC`, `prototype/attn_decode/attn_decode_kernels.h:32`), so the
+# lane preflight refused the run and `decode_run` exited 1 before a single STEP line — which is also why
+# `wide520f`'s y0, id, logits, `(g)` and `(h)` rows had never been judged at all. P7 (§07.3) made the
+# engine take the prototype's split-K online form above the staging, and the two lines healed whole,
+# observed with the entry still in place: `[expected-red] wide520f: all 2 recorded line(s) did NOT fail
+# this run — healed`, on a run of 320 checks with 0 failures. That reporting line is the reason a heal on
+# a fully green fixture is visible at all: without it a healed fixture and an unread list look identical.
 EXPECTED_RED: dict = {
     "chunk64b": {
         "why": ("step 0's pinned winner is 2 BF16 ULP ahead of the runner-up while the engine's legal"
@@ -3777,17 +3777,6 @@ EXPECTED_RED: dict = {
             # The order-sensitive id list is the consequence of step 0, not a second bug: one wrong token
             # anywhere shifts every later id, so the whole chain mismatches.
             "all 30 generated ids match, in order — exactly, or as a tie proved from the pin",
-        ],
-    },
-    "wide520f": {
-        "why": ("MAXSC = 512 ceiling — removed by P7 (§07.3's split-K online-softmax form is the"
-                " engine's route above the staging). Until it lands, the run cannot start, so none of"
-                " this fixture's parity rows have ever been judged"),
-        "checks": [
-            "the planned run fits the attention stage's lane ceiling",
-            # The `rc=1` is the consequence of the refusal above, not a second bug: the preflight fires
-            # before `decode_run` is invoked, and the run path then has no dumps to judge.
-            "decode_run exits 0",
         ],
     },
 }
@@ -3805,6 +3794,16 @@ def report() -> int:
         print(f"  [TIE-NOTE] {len(tie_notes)} step(s) had an exact tie in the pin that the engine"
               " matched outright — ordinary id matches, tie policy not consulted (D-1):"
               " " + ", ".join(tie_notes))
+    rec = EXPECTED_RED.get(REFS.name)
+    if not fails and rec is not None:
+        # The heal case D-9's reporting needs as much as the red case: a line goes on this list because it
+        # is red for a named reason, and a fixture that becomes fully GREEN prints no label at all, so the
+        # heal would be invisible — and an invisible heal is indistinguishable from a list that was never
+        # read. Note only; it cannot make a red fixture green and it does not touch the exit code. When the
+        # reason behind a heal is gone for good, the entry comes out of the list (P7 removed `wide520f`'
+        # that way, after seeing this line print with the entry still in place).
+        print(f"  [expected-red] {REFS.name}: all {len(rec['checks'])} recorded line(s) did NOT fail"
+              " this run — healed. Re-read why they were red before believing green: " + rec["why"])
     if fails:
         print(f"ENGINE GATE FAIL — {len(fails)} failed"
               + (f" ({len(ties)} step(s) reported TIE and not counted as failures)" if ties else ""))
