@@ -61,6 +61,7 @@ enum GdnNeg {
     GN_SILU_ROUNDED,   // silu(z) goes through a BF16 slot before the multiply
     GN_BF16ACC,        // squared-sum accumulated through BF16 slots
     GN_NOEPS,          // rsqrt(mean(o²)) without eps
+    GN_ROW_ZERO,       // P6: every token reads row 0's o/z — a tiled kernel that forgot `t`
 };
 
 __device__ __forceinline__ float gn_bf(float f) { return float(hip_bfloat16(f)); }
@@ -87,20 +88,38 @@ __device__ __forceinline__ float gn_block_sum(float v, float* red, bool bf16_tre
 }
 
 /*
- * o:  [heads][d_v] F32  (the recurrence's output; rounded to the activation dtype here)
- * z:  [heads][d_v] BF16 (in_proj_z's rows, §04.1 — no cast needed, it is already an activation)
+ * o:  [tokens][heads][d_v] F32  (the recurrence's output; rounded to the activation dtype here)
+ * z:  [tokens][heads][d_v] BF16 (in_proj_z's rows, §04.1 — no cast needed, it is already an activation)
  * w:  [d_v] F32         (linear_attn.norm.weight, §01.6: one of the 36 F32 tensors)
- * out:[heads][d_v] BF16 (gated_out, which is out_proj's operand)
+ * out:[tokens][heads][d_v] BF16 (gated_out, which is out_proj's operand)
  * norm_out: optional BF16(n) stage dump, `-` on the plan line to skip
+ *
+ * `tokens` is P6 (the prefill wave, §06.2): one block per (token, value head) with the head index
+ * innermost, so `tokens == 1` degenerates to exactly the `<<<GN_HEADS, GN_D_V>>>` launch this op
+ * shipped with — same grid, same 128-thread per-head reduction, same bits — and a wave is that block
+ * tiled down the token axis. The norm is per (token, head), so there is no reduction to reorder and
+ * the two widths owe each other bit-for-bit; `run.py --tokens` requires it rather than assuming it.
+ * `GN_ROW_ZERO` is the bug this shape can have that a wide run could otherwise hide: index the
+ * inputs by row 0 while still writing row t. Its locality claim — every row but row 0 moves — is
+ * what makes it a negative and not a decoration.
  */
 __global__ void gdn_gated_norm(const float* __restrict__ o, const hip_bfloat16* __restrict__ z,
                                const float* __restrict__ w, hip_bfloat16* __restrict__ out,
-                               hip_bfloat16* __restrict__ norm_out, int neg) {
+                               hip_bfloat16* __restrict__ norm_out, int neg, int tokens) {
     __shared__ float red[32];
-    const int h = blockIdx.x, d = threadIdx.x;
+    const int h = blockIdx.x % GN_HEADS, d = threadIdx.x;
+    const int t = (int)(blockIdx.x / GN_HEADS);
+    const size_t off = ((size_t)t * GN_HEADS + h) * GN_D_V + d;
+    // GN_ROW_ZERO moves the INPUT row only, so the kernel still writes row t of the output. That is
+    // the tile bug worth an injection — a wide kernel that forgot to advance the read pointer while
+    // advancing the write one — and it is the version with a locality claim a value comparison can see
+    // (row 0 exact, every other row wrong). Index the output by row 0 as well and the launch instead
+    // shows up in the driver's write-back sentinel, which proves a different thing.
+    const size_t in_off = ((size_t)((neg == GN_ROW_ZERO) ? 0 : t) * GN_HEADS + h) * GN_D_V + d;
+    (void)tokens;                    // the grid carries it; the bounds are the launcher's to check
     const bool acc_bf16 = (neg == GN_BF16ACC);
 
-    const float x = gn_bf(o[h * GN_D_V + d]);       // activation-dtype cast, see the header
+    const float x = gn_bf(o[in_off]);                       // activation-dtype cast, see the header
     float acc = x * x;
     if (acc_bf16) acc = gn_bf(acc);
     const float sum = gn_block_sum(acc, red, acc_bf16);
@@ -109,7 +128,7 @@ __global__ void gdn_gated_norm(const float* __restrict__ o, const hip_bfloat16* 
 
     const float n_f32 = x * r;
     const float n = (neg == GN_SINGLE_CAST) ? n_f32 : gn_bf(n_f32);
-    if (norm_out) norm_out[h * GN_D_V + d] = hip_bfloat16(n_f32);
+    if (norm_out) norm_out[off] = hip_bfloat16(n_f32);
 
     const float wv = w[d];
     float a;
@@ -122,8 +141,8 @@ __global__ void gdn_gated_norm(const float* __restrict__ o, const hip_bfloat16* 
         a = (neg == GN_AFFINE_UNCAST) ? p : gn_bf(p);
     }
 
-    const float zf = float(z[h * GN_D_V + d]);
+    const float zf = float(z[in_off]);
     float g = zf * (1.0f / (1.0f + expf(-zf)));               // HF's order: z·σ(z), F32
     if (neg == GN_SILU_ROUNDED) g = gn_bf(g);
-    out[h * GN_D_V + d] = hip_bfloat16(a * g);
+    out[off] = hip_bfloat16(a * g);
 }

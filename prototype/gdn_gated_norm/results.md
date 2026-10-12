@@ -481,3 +481,37 @@ Ledger rows: `bench/performance-status.md` §1 and §6.
 gate failed 144/144 on a fixture the gate itself mangled (§7, §8) is why the writer guard, the sentinel,
 the zeros/NaN profile and `--selftest` all stay: they are what made the failure legible enough to
 attribute to the harness in three commits instead of a week.
+
+## 10. P6: the same op over a wave of tokens (plan §4 P6)
+
+`gdn_gated_norm(o, z, w, out, norm_out, neg, tokens)` now launches `16·tokens` blocks, one per
+(token, value head), with the head index innermost — so `tokens == 1` is exactly the `<<<16, 128>>>`
+launch §9 gated, same grid and same per-head 128-thread reduction, and a wave is that block tiled
+down the token axis. The norm is per (token, head), so there is no reduction to reorder and no
+legitimate way for the wide form to differ from the narrow one; the gate requires that rather than
+assuming it. The plan line gained an optional 7th field (`… [NORMFILE] [TOKENS]`, default 1), and every
+device buffer, memset and readback is sized from it instead of from the literal 2048 — a fixed 2048
+readback would have made a 46-row job look written when only its first row was.
+
+New injection: **`GN_ROW_ZERO` moves the input row only** — every token reads row 0's `o`/`z` while the
+kernel still writes row `t`. That is the tile bug worth injecting (a wide kernel that forgot to advance
+the read pointer), and unlike "index the output by row 0 too", it leaves the write-back sentinel clean
+and gives a locality claim a value comparison can see. The earlier version indexed both by row 0; the
+driver caught it as `L00 left 92160/94208 first@2048 (t1,h0,d0) PARTIALLY WRITTEN`, which is the
+sentinel doing its job but not a claim about the arithmetic.
+
+Gate: `run.py --tokens p64 --layers N` (T=46; run on device, foreground, `gpu_lock.sh util` 47–93 %
+at the time; **correctness only, no timing taken**). Results for `--layers 2`:
+
+| claim | result |
+|---|---|
+| tile `gated_out` vs the pinned `gdn.gated_out`, 2 × 94 208 elements | **1 element differs per tile, max 1 ULP, `n_bad 0`** — the same floor §9 measured on the decode fixture, i.e. the wide form did not move it |
+| write-back sentinel | `unwritten 0, partial 0` for gated and norm on every job |
+| `tokens == 1`, launched per row, vs the same rows of the tile | **92/92 bit-identical** (uint16 payload compare, so NaN pairs count as equal) |
+| the six arithmetic negatives | each moves **every row** of both tiles and only its own stage (`norm_pre_gate 0` for the four epilogue ones) |
+| `row_zero` | **45/46 rows move per tile, row 0 stays exact** — the injection appears exactly where it lives |
+
+The round-trip guard of §8 applies to the tile writer too: this gate writes both files through
+`write_f32_raw`/`write_bf16_raw` and reads them back and `SystemExit`s if a tile file is not what was
+written, because on a 46-row tile a `.to(torch.uint16)` mistake is 94 % garbage rather than one case's
+worth — the failure §7 was, at 46× the size.

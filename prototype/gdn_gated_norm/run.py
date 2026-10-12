@@ -401,6 +401,155 @@ def device_gate(with_time: bool) -> int:
     return 1 if fails else 0
 
 
+# ---- P6: the wave form of §04.5 ---------------------------------------------------------------
+
+def tokens_gate(fx: str, nlayers: int) -> int:
+    """§04.5 over a tile of `T` token-rows, against the PREFILL pins, plus the two claims only a tile
+    can make: that a wave reproduces the single-row launch bit for bit, and that `row_zero` — every
+    token reading row 0's inputs, the bug a tiled kernel can hide — moves every row but the first.
+
+    The decode fixture this file has always used prices one (step, layer) at a time, so it cannot see
+    the token index at all: a kernel that ignored `t` and read row 0 would pass every case in
+    `--gate`, because each case *is* row 0 of its own tile. Same class of gap as
+    `prototype/mlp_gemv/results.md`'s vacuous negative.
+    """
+    ref_dir = ROOT / "data" / "refs" / fx
+    if not ref_dir.is_dir():
+        raise SystemExit("no such prefill fixture: %s" % ref_dir)
+    fails: list[str] = []
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        rows = []
+        for l in range(24):
+            if len(rows) >= nlayers:
+                break
+            op, zp, gp = (ref_dir / ("L%02d.gdn.o_pre_norm.npy" % l),
+                          ref_dir / ("L%02d.in_proj_z.out.npy" % l),
+                          ref_dir / ("L%02d.gdn.gated_out.npy" % l))
+            if not (op.exists() and zp.exists() and gp.exists()):
+                continue
+            name = "L%02d" % l
+            o = torch.from_numpy(np.load(op).astype(np.float32))
+            z = torch.from_numpy(np.load(zp).astype(np.float32))
+            ref = torch.from_numpy(np.load(gp).astype(np.float32))
+            T = int(o.shape[0] // (2048 // 128)) if o.ndim == 1 else int(o.shape[1])
+            o = o.reshape(T, 16, 128).reshape(T * 2048)
+            z = z.reshape(T, 16, 128).reshape(T * 2048)
+            ref = ref.reshape(T * 2048)
+            of, zf = d / (name + ".o.f32"), d / (name + ".z.bin")
+            write_f32_raw(o, of)
+            write_bf16_raw(z.to(torch.bfloat16), zf)
+            # The round trip the tile writer must survive: see results.md §8 — a `.to(torch.uint16)`
+            # here writes garbage that reads back as +0 and NaN, and on a 46-row tile that garbage is
+            # 94 % of the file instead of one case's worth.
+            back_z = torch.from_numpy(np.fromfile(zf, dtype=np.uint16)).view(torch.bfloat16)
+            back_o = torch.from_numpy(np.fromfile(of, dtype=np.float32))
+            if not torch.equal(back_z.view(torch.uint16), z.to(torch.bfloat16).view(torch.uint16)):
+                raise SystemExit("%s: the BF16 tile file does not read back as written" % name)
+            if not torch.equal(back_o, o):
+                raise SystemExit("%s: the F32 tile file does not read back as written" % name)
+            rows.append(dict(name=name, tokens=T, ofile=of, zfile=zf, ref=ref,
+                             wname=wn.normalize_name(
+                                 ops.LAYER_PREFIX % l + "linear_attn.norm.weight")[1]))
+        if not rows:
+            raise SystemExit("no GDN tile pins in %s" % ref_dir)
+        T = rows[0]["tokens"]
+        print("== device gate, wave form: %d GDN layers × %d token-rows (%s) =="
+              % (len(rows), T, fx))
+        for r in rows:
+            r["out"] = d / (r["name"] + ".gated.bin")
+            r["norm"] = d / (r["name"] + ".norm.bin")
+        plan = write_plan(d / "plan.txt", [(r["name"], r["ofile"], r["zfile"], r["wname"],
+                                           r["out"], r["norm"], r["tokens"]) for r in rows])
+        print("\n-- the tile against the pinned gated_out --")
+        run_binary(plan, d)
+        clean = {}
+        worst_ulp = 0
+        for r in rows:
+            got = read_out(r["out"], r["tokens"] * 2048)
+            clean[r["name"]] = dict(gated=got, norm=read_out(r["norm"], r["tokens"] * 2048))
+            rep = bf16_ulp.report(got.float(), r["ref"].float(), ulp_max=1, cancel_rel=1e-4)
+            worst_ulp = max(worst_ulp, rep["maxulp"])
+            print("  %s gated_out vs pin: %d/%d differ, max %d ULP, n_bad %d -> %s"
+                  % (r["name"], rep["ndiff"], rep["n"], rep["maxulp"], rep["n_bad"],
+                     "ok" if not rep["n_bad"] and rep["ndiff"] <= 0.01 * rep["n"] else "FAIL"))
+            if rep["n_bad"] or rep["ndiff"] > 0.01 * rep["n"]:
+                fails.append("%s: gated_out tile differs from the pins (%d/%d, max %d ULP)"
+                             % (r["name"], rep["ndiff"], rep["n"], rep["maxulp"]))
+
+        print("\n-- T=1 launches must be bit-identical to the wide one, row for row --")
+        one_rows, one_plan_rows = [], []
+        for r in rows:
+            o = torch.from_numpy(np.fromfile(r["ofile"], dtype=np.float32)).reshape(r["tokens"], 2048)
+            z = torch.from_numpy(np.fromfile(r["zfile"], dtype=np.uint16)).view(
+                torch.bfloat16).reshape(r["tokens"], 2048)
+            for t in range(r["tokens"]):
+                of1, zf1 = d / ("%s.r%d.o.f32" % (r["name"], t)), d / ("%s.r%d.z.bin" % (r["name"], t))
+                write_f32_raw(o[t], of1)
+                write_bf16_raw(z[t], zf1)
+                o2 = d / ("%s.r%d.gated.bin" % (r["name"], t))
+                one_rows.append((r["name"], t, o2))
+                one_plan_rows.append(("%s.r%d" % (r["name"], t), of1, zf1, r["wname"], o2, "-", 1))
+        write_plan(d / "plan_one.txt", one_plan_rows)
+        run_binary(d / "plan_one.txt", d)
+        bad = []
+        for name, t, path in one_rows:
+            tile_row = clean[name]["gated"][t * 2048:(t + 1) * 2048].view(torch.uint16)
+            row = read_out(path, 2048).view(torch.uint16)
+            if not torch.equal(tile_row, row):
+                bad.append("%s row %d" % (name, t))
+        print("  %d single-row launches vs the same rows of the tile: %s%s"
+              % (len(one_rows), "bit-identical" if not bad else "DIFFERS at " + ", ".join(bad[:6]),
+                 "" if not bad else " — the wide launch moved bits, which P6 may not do"))
+        if bad:
+            fails.append("tokens=1 is not bit-identical to the tile at %s" % ", ".join(bad[:6]))
+
+        print("\n-- negatives, each required to appear only where it lives --")
+        tokens_of = {r["name"]: r["tokens"] for r in rows}
+        for neg, must, must_not in NEGATIVES + [("row_zero", ["gated_out"], [])]:
+            for r in rows:
+                r["nout"] = d / ("%s.%s.gated.bin" % (r["name"], neg))
+                r["nnorm"] = d / ("%s.%s.norm.bin" % (r["name"], neg))
+            write_plan(d / ("plan_%s.txt" % neg),
+                       [(r["name"], r["ofile"], r["zfile"], r["wname"], r["nout"], r["nnorm"],
+                         r["tokens"]) for r in rows])
+            run_binary(d / ("plan_%s.txt" % neg), d, neg)
+            moved = {s: 0 for s in STAGES}
+            per_layer_rows = {}
+            for r in rows:
+                g = read_out(r["nout"], r["tokens"] * 2048)
+                nm = read_out(r["nnorm"], r["tokens"] * 2048)
+                bits_g = bf16_ulp.bf16_bits(g) != bf16_ulp.bf16_bits(clean[r["name"]]["gated"])
+                rt = [t for t in range(r["tokens"])
+                      if int(bits_g[t * 2048:(t + 1) * 2048].sum())]
+                per_layer_rows[r["name"]] = rt
+                moved["gated_out"] += len(rt) * 2048
+                bits_n = bf16_ulp.bf16_bits(nm) != bf16_ulp.bf16_bits(clean[r["name"]]["norm"])
+                moved["norm_pre_gate"] += int(bits_n.sum())
+            # The six arithmetic injections are whole-op bugs, so on a tile every row must move; the
+            # new one is the opposite case and its whole point is that row 0 is the one row it cannot
+            # touch. Same locality rule as `prototype/mlp_gemv/results.md`: a negative that moves
+            # everything proves nothing about where the bug is.
+            bad = [s for s in must if moved[s] == 0] + [s for s in must_not if moved[s] > 0]
+            if neg == "row_zero":
+                bad += [n for n, rt in per_layer_rows.items() if 0 in rt]
+                bad += [n for n, rt in per_layer_rows.items() if len(rt) != tokens_of[n] - 1]
+                where = ", ".join("%s:%d/%d rows" % (n, len(rt), tokens_of[n])
+                                  for n, rt in per_layer_rows.items())
+            else:
+                bad += [n for n, rt in per_layer_rows.items() if len(rt) != tokens_of[n]]
+                where = "%d rows moved in every tile" % sum(len(rt) for rt in per_layer_rows.values())
+            print("  %-14s gated_out rows moved %6d, norm_pre_gate %6d — %s -> %s"
+                  % (neg, moved["gated_out"], moved["norm_pre_gate"], where,
+                     "ok" if not bad else "MISCATCHED " + ",".join(bad)))
+            if bad:
+                fails.append("negative %s mislocalised on the tile: %s" % (neg, bad))
+    print("\n" + ("WAVE GATE FAILED:\n  " + "\n  ".join(fails) if fails
+                  else "WAVE GATE PASS: the tile reproduces the pinned gated_out, T=1 is bit-identical"
+                       " to it row for row, and every injection stayed where it was put."))
+    return 1 if fails else 0
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--mirror", action="store_true", help="CPU-only cast-order gate (no GPU)")
@@ -410,8 +559,13 @@ if __name__ == "__main__":
                     help="CPU-only: build the real plan and resolve its weight names, launch nothing")
     ap.add_argument("--gate", action="store_true", help="device gate (needs the GPU idle)")
     ap.add_argument("--time", action="store_true", help="with --gate: burst timing too")
+    ap.add_argument("--tokens", metavar="FIXTURE", default="",
+                    help="P6 device gate: run §04.5 over a prefill tile (p64 or p300) instead of the"
+                         " one-row decode cases. Self-acquires tools/gpu_lock.sh like --gate does.")
+    ap.add_argument("--layers", type=int, default=2,
+                    help="with --tokens: how many GDN layers to price (default 2)")
     a = ap.parse_args()
-    if not (a.mirror or a.preflight or a.gate or a.selftest):
+    if not (a.mirror or a.preflight or a.gate or a.selftest or a.tokens):
         ap.print_help()
         raise SystemExit(2)
     rc = 0
@@ -423,4 +577,6 @@ if __name__ == "__main__":
         rc |= preflight()
     if a.gate:
         rc |= device_gate(a.time)
+    if a.tokens:
+        rc |= tokens_gate(a.tokens, a.layers)
     raise SystemExit(rc)

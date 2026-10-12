@@ -10,13 +10,14 @@
  * Device gate: .venv/bin/python prototype/gdn_gated_norm/run.py --gate
  *
  * PLAN is a text file, one launch per line:
- *     NAME OFILE ZFILE WNAME OUTFILE [NORMFILE]
- * OFILE is raw little-endian F32, 2048 elements (the recurrence's output; the gate writes the
- * `gdn.o_pre_norm` pin, which is BF16-valued, widened). ZFILE is raw BF16, 2048 elements
- * (`in_proj_z.out`). WNAME is an ENGINE NORMALISED weight name resolved through the loader
- * (`lm.layers.N.linear_attn.norm.weight`, F32 [128] per §01.6). OUTFILE receives the 2048 BF16
- * results; NORMFILE, if given, receives BF16(n) — the pre-gate stage the negatives are localised
- * against. `-` skips a write.
+ *     NAME OFILE ZFILE WNAME OUTFILE [NORMFILE] [TOKENS]
+ * OFILE is raw little-endian F32, 2048·TOKENS elements (the recurrence's output; the gate writes the
+ * `gdn.o_pre_norm` pin, which is BF16-valued, widened) laid out [token][head][dim]. ZFILE is raw
+ * BF16, 2048·TOKENS elements (`in_proj_z.out`). WNAME is an ENGINE NORMALISED weight name resolved
+ * through the loader (`lm.layers.N.linear_attn.norm.weight`, F32 [128] per §01.6). OUTFILE receives
+ * the 2048·TOKENS BF16 results; NORMFILE, if given, receives BF16(n) — the pre-gate stage the
+ * negatives are localised against. `-` skips a write. TOKENS is P6's wave width and defaults to 1,
+ * so a plan written before it still parses and still means one decode step.
  *
  * `--mode once` is the correctness path, and it reports on itself: every output buffer is prefilled
  * with a 0x0101 sentinel before the launch, and a `sentinel:` line prints for the first job, the last
@@ -113,14 +114,15 @@ static size_t sentinel_left(const hip_bfloat16* host, size_t n, int* first = nul
 
 struct Job {
     std::string name, ofile, zfile, wname, out, nout;
+    int tok = 1;                     // P6: rows of [tok][16][128] in this job (1 = one decode step)
     const float* do_ = nullptr;
     const hip_bfloat16* dz = nullptr;
     const float* dw = nullptr;
     hip_bfloat16 *dout = nullptr, *dnorm = nullptr;
     uint64_t pre_hash = 0;   // fnv1a64 of the first 16 sentinel bytes, taken after the prefill
+    size_t nel() const { return (size_t)2048 * tok; }        // elements of o / z / out / norm
     size_t bytes() const {
-        return (size_t)2048 * 4 + (size_t)2048 * 2 + 128 * 4 + (size_t)2048 * 2
-               + (nout == "-" ? 0 : (size_t)2048 * 2);
+        return nel() * 4 + nel() * 2 + 128 * 4 + nel() * 2 + (nout == "-" ? 0 : nel() * 2);
     }
 };
 
@@ -145,14 +147,17 @@ int main(int argc, char** argv) {
                   : negname == "affine_uncast" ? GN_AFFINE_UNCAST
                   : negname == "single_cast" ? GN_SINGLE_CAST
                   : negname == "silu_rounded" ? GN_SILU_ROUNDED
-                  : negname == "bf16acc" ? GN_BF16ACC : negname == "noeps" ? GN_NOEPS : -1;
+                  : negname == "bf16acc" ? GN_BF16ACC : negname == "noeps" ? GN_NOEPS
+                  : negname == "row_zero" ? GN_ROW_ZERO : -1;
     if (neg < 0) {
         fprintf(stderr, "--neg must be none|w_f32|affine_uncast|single_cast|silu_rounded"
                         "|bf16acc|noeps\n");
         return 1;
     }
     if (plan_path.empty() || (mode != "once" && mode != "burst")) {
-        fprintf(stderr, "usage: gdn_gated_norm --mode once|burst --plan PLAN [--neg NAME]\n");
+        fprintf(stderr, "usage: gdn_gated_norm --mode once|burst --plan PLAN [--neg NAME]\n"
+                        "  --neg none|w_f32|affine_uncast|single_cast|silu_rounded|bf16acc|noeps"
+                        "|row_zero\n");
         return 1;
     }
 
@@ -192,10 +197,19 @@ int main(int argc, char** argv) {
             }
             j.nout = "-";
             ls >> j.nout;
+            // P6's optional 7th field: the token count of this job's tile. Absent means 1, which is
+            // what every plan this gate wrote before P6 says, so the old plan files still parse and
+            // still mean one decode step.
+            ls >> j.tok;
+            if (j.tok < 1) {
+                fprintf(stderr, "%s: tokens must be >= 1 (got %d)\n", j.name.c_str(), j.tok);
+                return 1;
+            }
             const std::vector<char> oraw = slurp(j.ofile), zraw = slurp(j.zfile);
-            if (oraw.size() != 2048 * 4 || zraw.size() != 2048 * 2) {
-                fprintf(stderr, "%s: o must be 2048 F32 and z 2048 BF16 (%zu / %zu bytes)\n",
-                        j.name.c_str(), oraw.size(), zraw.size());
+            if (oraw.size() != (size_t)j.tok * 2048 * 4 || zraw.size() != (size_t)j.tok * 2048 * 2) {
+                fprintf(stderr, "%s: o must be %d F32 and z %d BF16 for %d tokens (%zu / %zu"
+                                " bytes)\n", j.name.c_str(), j.tok * 2048, j.tok * 2048, j.tok,
+                        oraw.size(), zraw.size());
                 return 1;
             }
             CK(hipMalloc((void**)&j.do_, oraw.size()));
@@ -228,9 +242,9 @@ int main(int argc, char** argv) {
                 }
             }
             ++w_rows;
-            CK(hipMalloc((void**)&j.dout, 2048 * 2));
+            CK(hipMalloc((void**)&j.dout, j.nel() * 2));
             j.dnorm = nullptr;
-            if (j.nout != "-") CK(hipMalloc((void**)&j.dnorm, 2048 * 2));
+            if (j.nout != "-") CK(hipMalloc((void**)&j.dnorm, j.nel() * 2));
             jobs.push_back(j);
         }
     }
@@ -238,15 +252,22 @@ int main(int argc, char** argv) {
         fprintf(stderr, "plan %s has no jobs\n", plan_path.c_str());
         return 1;
     }
-    printf("plan %s | jobs=%zu | 16 blocks x 128 threads per job | neg=%s\n", plan_path.c_str(),
-           jobs.size(), negname.c_str());
+    size_t tok_total = 0;
+    size_t nel_max = 0;      // widest job's element count: the readback scratch below
+    for (const Job& j : jobs) { tok_total += (size_t)j.tok; nel_max = std::max(nel_max, j.nel()); }
+    printf("plan %s | jobs=%zu | tokens=%zu | 16 blocks x 128 threads per token-row, so"
+           " 16·tokens blocks per job | neg=%s\n", plan_path.c_str(), jobs.size(), tok_total,
+           negname.c_str());
     printf("weights: %zu [128] F32 rows read back from the store, all finite, |value| <= %.4g"
            " (an affine row is O(1): a BF16 misread of these bytes lands at 1e-38, not here)\n",
            w_rows, w_absmax);
     if (neg != GN_NONE) printf("NEGATIVE TEST: injected bug = %s\n", negname.c_str());
 
     auto launch = [&](Job& j) {
-        gdn_gated_norm<<<GN_HEADS, GN_D_V>>>(j.do_, j.dz, j.dw, j.dout, j.dnorm, neg);
+        // One block per (token, value head); j.tok == 1 is the `<<<GN_HEADS, GN_D_V>>>` launch this
+        // driver has always made, and the arithmetic per element is unchanged by the extra argument.
+        gdn_gated_norm<<<GN_HEADS * j.tok, GN_D_V>>>(j.do_, j.dz, j.dw, j.dout, j.dnorm, neg,
+                                                     j.tok);
         CK(hipGetLastError());
     };
 
@@ -258,53 +279,56 @@ int main(int argc, char** argv) {
         // back zero-filled. With a 0x3F3F prefill, "nothing was written" and "something wrong was
         // written" are different sentences on the first re-run instead of a second probe.
         for (auto& j : jobs) {
-            CK(hipMemset(j.dout, GN_SENTINEL & 0xFF, 2048 * 2));   // both bytes, so 0x3F3F
-            if (j.dnorm) CK(hipMemset(j.dnorm, GN_SENTINEL & 0xFF, 2048 * 2));
+            CK(hipMemset(j.dout, GN_SENTINEL & 0xFF, j.nel() * 2));   // both bytes, so 0x3F3F
+            if (j.dnorm) CK(hipMemset(j.dnorm, GN_SENTINEL & 0xFF, j.nel() * 2));
             std::vector<unsigned char> pre(16);
             CK(hipMemcpy(pre.data(), (void*)j.dout, 16, hipMemcpyDeviceToHost));
             j.pre_hash = fnv1a64(pre.data(), 16);
         }
         for (auto& j : jobs) launch(j);
         CK(hipDeviceSynchronize());
-        std::vector<hip_bfloat16> host(2048);
+        std::vector<hip_bfloat16> host(nel_max);
         size_t unwritten = 0, partial = 0, norm_unwritten = 0, norm_partial = 0;
         const size_t last = jobs.size() - 1;
         for (size_t i = 0; i < jobs.size(); ++i) {
             Job& j = jobs[i];
-            CK(hipMemcpy(host.data(), (void*)j.dout, 2048 * 2, hipMemcpyDeviceToHost));
+            const size_t n = j.nel();
+            CK(hipMemcpy(host.data(), (void*)j.dout, n * 2, hipMemcpyDeviceToHost));
             int first = -1;
-            const size_t left = sentinel_left(host.data(), 2048, &first);
+            const size_t left = sentinel_left(host.data(), n, &first);
             const uint64_t post = fnv1a64(host.data(), 16);
-            unwritten += (left == 2048);
-            partial += (left > 0 && left < 2048);
+            unwritten += (left == n);
+            partial += (left > 0 && left < n);
             // Per-job line for every offender, plus the first and last job: "only the last job was
             // written" is an output-mapping bug and those two lines are what show it.
             if (left || i == 0 || i == last) {
-                char where[48];
+                char where[64];
                 if (first < 0) snprintf(where, sizeof where, "first@none");
-                else snprintf(where, sizeof where, "first@%d (h%d,d%d)", first, first / GN_D_V,
+                else snprintf(where, sizeof where, "first@%d (t%d,h%d,d%d)", first,
+                              first / (GN_HEADS * GN_D_V), (first / GN_D_V) % GN_HEADS,
                               first % GN_D_V);
-                printf("sentinel: %s left %4zu/2048 %s  first16 fnv %016llx -> %016llx  %s\n",
-                       j.name.c_str(), left, where, (unsigned long long)j.pre_hash,
+                printf("sentinel: %s left %4zu/%zu %s  first16 fnv %016llx -> %016llx  %s\n",
+                       j.name.c_str(), left, n, where, (unsigned long long)j.pre_hash,
                        (unsigned long long)post,
-                       left == 2048 ? "NOT WRITTEN" : left ? "PARTIALLY WRITTEN" : "written");
+                       left == n ? "NOT WRITTEN" : left ? "PARTIALLY WRITTEN" : "written");
             }
-            spit(j.out, host.data(), 2048 * 2);
+            spit(j.out, host.data(), n * 2);
             if (j.nout != "-") {
-                CK(hipMemcpy(host.data(), (void*)j.dnorm, 2048 * 2, hipMemcpyDeviceToHost));
+                CK(hipMemcpy(host.data(), (void*)j.dnorm, n * 2, hipMemcpyDeviceToHost));
                 int nfirst = -1;
-                const size_t nleft = sentinel_left(host.data(), 2048, &nfirst);
-                norm_unwritten += (nleft == 2048);
-                norm_partial += (nleft > 0 && nleft < 2048);
+                const size_t nleft = sentinel_left(host.data(), n, &nfirst);
+                norm_unwritten += (nleft == n);
+                norm_partial += (nleft > 0 && nleft < n);
                 if (nleft) {
-                    char nwhere[48];
+                    char nwhere[64];
                     if (nfirst < 0) snprintf(nwhere, sizeof nwhere, "first@none");
-                    else snprintf(nwhere, sizeof nwhere, "first@%d (h%d,d%d)", nfirst,
-                                  nfirst / GN_D_V, nfirst % GN_D_V);
-                    printf("sentinel: %s norm left %zu/2048 %s (%s)\n", j.name.c_str(), nleft,
-                           nwhere, nleft == 2048 ? "NOT WRITTEN" : "PARTIALLY WRITTEN");
+                    else snprintf(nwhere, sizeof nwhere, "first@%d (t%d,h%d,d%d)", nfirst,
+                                  nfirst / (GN_HEADS * GN_D_V), (nfirst / GN_D_V) % GN_HEADS,
+                                  nfirst % GN_D_V);
+                    printf("sentinel: %s norm left %zu/%zu %s (%s)\n", j.name.c_str(), nleft, n,
+                           nwhere, nleft == n ? "NOT WRITTEN" : "PARTIALLY WRITTEN");
                 }
-                spit(j.nout, host.data(), 2048 * 2);
+                spit(j.nout, host.data(), n * 2);
             }
         }
         // Both buffers get both counts. The first version printed only "norm buffers never written"
