@@ -1324,3 +1324,196 @@ for the queue, operator's call, recorded here so nobody meets it as a surprise:
 before loading weights. The failure it retires was losing a device window to `cannot open
 tmp/…/sampled.txt` after 1.55 GB of `hipMalloc` + `hipMemcpy` and a full run — now a bad path fails in
 milliseconds, and the refusal is printed before any step runs.
+
+
+# Q2 of `bench/plan-2026-10-12`: engine G7 at breadth — 423 lanes, a two-turn transcript, and a free run that would not diverge
+
+Three things were asked for: a long-context forced pin, a multi-turn pin, and a free-run divergence depth
+measured on prose instead of on a counting chain. All three were made, gated, and two of them are green;
+one is red on a **gate-semantics question that is not mine to decide**, and pricing the long-context fixture
+**tripped the margin tripwire** written up in the section above, so nothing was priced and nothing was
+bumped. All device work here is correctness-only, under the `<60 s` worker allowance, and **no timing is
+quoted anywhere in this section** — `decode_run` prints its own `ms_per_step` and none of it is repeated.
+
+| fixture | prompt | forced steps | lanes vs `MAXSC` 512 | on disk | pin policy | gate |
+|---|---|---|---|---|---|---|
+| `dec300f` | 295-token prose (continue a letter) | **128** | **423** | 61.5 MiB (649 files) | lean, `--deep-steps none` | **PASS** — 1058 checks, 128/128 ids |
+| `mt32f` | 232-token transcript, user/assistant/user | 32 | 264 | 48.2 MiB (667 files) | lean, full operands at step 31 | **FAIL on 1 line** — the tie policy, at a step where the engine matched the pin's own id; 32/32 ids exact |
+
+## The pre-flight, and making them
+
+```bash
+.venv/bin/python tools/stop_probe.py --max-new 300 --message "<the letter prompt>"
+#   prompt: 295 tokens; stop ids (248046, 248044) appear at prompt index [286] — prompt-phase, not a stop
+#   FIRST STOP (248046) AT STEP: 253      first legacy stop 248044 at step: 255
+.venv/bin/python tools/reference_dump.py --message "<the letter prompt>" --decode 128 --tag dec300f \
+        --lean --deep-steps none --logits-bits bf16 \
+        --first-stop "253 (probed to 300 generated tokens; legacy stop 248044 at 255)"     # ~15 s, CPU
+.venv/bin/python tools/reference_dump.py <same args> --verify data/refs/dec300f
+#   REPRODUCE PASS — every pinned byte and every pinned manifest value came back identical
+```
+
+Three tools grew knobs to make this possible, each committed separately (`tools/chat_render.py`,
+`reference_dump --turn/--first-stop/--deep-steps none`, and the `--verify` fix below):
+
+* **`--first-stop` records the probe's answer in the manifest**, which the standing rule asks for and
+  nothing used to enforce; a lean fixture pinned without it now prints a warning out loud.
+* **`--deep-steps none`** (no full per-layer dump at any step) is what keeps a 128-step fixture inside the
+  ~60 MB budget, and the reason it had to be added is arithmetic, not taste: 128 steps × 0.473 MiB of
+  BF16 logits = **60.6 MiB is the floor by itself**, while one full step costs 26.4 MiB of which 18 MiB is
+  the GDN state. So this fixture has *zero* full per-layer steps, where `dec64f`/`dec64t` have one. State
+  carry at depth is carried here by the fingerprints, as it is in those fixtures — it is a pin-policy
+  trade, stated rather than hidden.
+* `tools/reference_dump.py --verify` had to be fixed first: it **failed on every priced fixture** because
+  `route_allowance.json` sits in the fixture directory and a dumper run cannot reproduce it — measured on
+  `dec64t`, `REPRODUCE FAIL … missing from the fresh run: route_allowance.json` with all 826 model tensors
+  byte-identical. It is now carried-and-named, not compared; its own provenance is `gate.py:load_allowance`.
+
+## `dec300f`: what 423 lanes changed, and what they did not
+
+**The engine holds G7 at 423 lanes**: 128 replayed steps, **128/128 ids exact**, and the pinned KV delta
+exactly 0 at every one of them (`(f)` PASS), which is the append-only invariant tested at the widest
+context this repo has run. Nothing about the curve looks like decay of the kind depth was feared to bring.
+
+| reading (from `engine/gate.py --fixture dec300f` and `engine/curve_probe.py`) | value | comparison |
+|---|---|---|
+| worst engine cos | **0.999537 at step 86** | vs the flat G5 floor 0.9995 — **3.7e-6 of headroom left** |
+| median engine 1−cos | 7.00e-5 | `dec64t` 9.49e-5, `dec64f` 5.86e-5 → no worse in absolute terms |
+| drift with step index | slope **+3.07e-7/step**, `corr(1−cos, step) = +0.205`, median-first-8 6.50e-5 vs last-8 8.55e-5 (ratio 1.31) | first positive drift anywhere: `dec64f` −0.033, `dec64t` −0.191 |
+| `corr(1−cos, 1/(S n2))` | **−0.142** | no scale law; pinned `S n2` spans 4483–5188 (1.16×), so there is no low-energy window here either |
+| decision margins (ref top1−top2 ÷ engine maxabs) | median 26×, **minimum 1× at step 30** (gap 0.250, engine maxabs 0.2773) and 2× at step 85 | two near-misses in 128 steps, zero flips |
+| steps under G6's advisory 0.9999 | 32 of 128 | G6 stays advisory by decision, unchanged here |
+
+The drift line deserves its caveat: step index and lane count are the *same variable* in a forced run —
+every step adds a lane — so +3.07e-7/step cannot separate "attention error grows with context" from
+"state carry decays". Naming the instrument that could (for the third time): the engine's own per-step
+state moments next to the pinned ones, still unwritten.
+
+## The tripwire fired on `dec300f`, so nothing was priced and the margin did not move
+
+`engine/route_price.py --fixture dec300f --engine-log …` (CPU, ~4 min, no device) says the reference's two
+legal prompt forms are **closer together on this fixture than on either 64-step one** — route 1−cos median
+**4.07e-5** vs `dec64t`'s 6.71e-5 and `dec64f`'s 4.93e-5 — 0 of 128 steps under G5 on either side, and both
+routes reproduce the pinned ids 128/128. The engine's deficits, though, do not shrink with them:
+
+```
+engine deficit / route 1-cos   : median 1.628, p90 2.92, MAX 7.9837 at step 86
+        steps over the 3.4939 ceiling: 72 (3.648), 86 (7.984), 89 (3.908), 97 (3.895)
+engine meanrel / route meanrel : median 0.246, MAX 0.7198 at step 72 — 16 of 128 steps over 0.42
+```
+
+Pricing `dec300f` would therefore derive `margin = 7.99`, `margin_rel = 0.72` — i.e. **more than double the
+constant for every fixture at once**, which is exactly the failure mode the Q1 section names as a tripwire.
+`engine/route_allowance.py` refuses to write a file whose measurement disagrees with the constant in
+`engine/gate.py`, and the instruction was explicit: **report it, do not bump it.** So: no allowance file was
+written, `BAND` is untouched, `dec300f` is judged by the flat §10.1 G5 / §10.2 floors (visible as
+`rule: flat G5` on all 128 step lines), and it **passes on that basis** — with 3.7e-6 to spare at step 86.
+
+Why the ratio grows with context, as a finding rather than a re-pricing: the route instrument prices *one
+choice* — how a prompt gets into the GDN state — and on a long prose prompt that choice matters less, so the
+instrument tightens. The engine's end-to-end deficit is not that choice; it is the 24-layer cascade plus an
+attention path that grows with lanes. An allowance keyed on the GDN route spread therefore under-sizes a
+legitimate deficit once the context is long, and the three possible responses are all operator calls, none
+taken here: a per-fixture margin; an instrument that prices the spread at the context in question rather than
+at one prompt; or leave long-context fixtures unpriced under the flat floor (today's state, and the flat
+floor held). Step 86 by itself is a legitimate object of interest — engine 4.632e-4 where the two legal
+routes are 5.802e-5 apart, pinned `S dn2` 131.9 against a run median around 50, argmax still safe at 12×,
+one isolated step between neighbours at 9.9e-5 — but it is inside the published floor and it is not a
+gate-tuning decision dressed up as a measurement.
+
+## `mt32f`: the two-turn pin, and the expectation stated before it was run
+
+The transcript is user → assistant → user: a three-paragraph bicycle question, **the reference's own answer
+to it** (generated, then cut at its own end of turn — read out of the probe log rather than invented), and a
+follow-up asking the same about a motorcycle. 232 tokens, containing stop id **248046 three times** (prompt
+indices 29, 190, 223) plus the think-boundary pair at the tail — all prompt-phase, none of them stops, which
+is the §07.5 phase rule exercised harder than any fixture before it. The probe answer (`none in 96`, i.e. no
+stop in the whole generated window) is recorded in the manifest.
+
+**The expectation, stated before the run rather than after it:** turn 2 is pinned by *forced decoding of the
+reference in the same multi-turn form* — the engine is replayed against the reference's own 32 tokens. It is
+**not** a free-run comparison, and the reason is the same A-18 bound that governs every other depth question:
+a self-fed turn-2 chain measures the chaos floor, not the carry, and a divergence there would be uninformative.
+What the fixture is for is the thing nothing tested before it: the KV cache and the 18 GDN states carrying
+across a turn boundary, 232 → 264 lanes, through a prompt whose specials would have stopped an earlier engine
+if §07.5 were still armed in the prompt phase.
+
+**Result: all 32 ids exact, every band line inside the flat floors** (worst cos 0.999627, worst meanrel
+2.25 %), and **one FAIL**, which is a policy question, not a numerics one:
+
+```
+step 11: the pin is an exact tie — 24.25 (payload 0x41c2) shared by ids [4016, 15048].
+The engine sampled 4016, which is the PIN'S OWN top-1 id: G7 is satisfied outright.
+Clause 3 of the tie policy nevertheless fails — the engine's F32 logit at 4016 is 24.391083,
+which rounds to 0x41c3 (24.5), not the pinned 0x41c2 (24.25).
+```
+
+So the tie policy — whose whole purpose is to *admit* an engine that chose one of the tied ids — here
+*refuses* an engine that chose the pinned id. The candidate fix (operator's call, not taken): clause 3
+applies only when the engine's id is a tied id **other than** the pin's top-1, because an engine that
+reproduced the pin's id is not invoking an exception and needs no excuse; as written, a tied step is judged
+more strictly than an untied one, and the strictness is a half-ULP band that the policy's own comment
+declines to invent. `engine/gate.py` was not edited and `mt32f` is left red, with the other 290 checks green.
+
+**The `feed`/`gen` invariant, checked separately** (device, 7 s, correctness only): feed the 232-token
+transcript, then `gen 32` — the session's GEN list came back **32/32 identical to
+`greedy_continuation[0:32]`**, i.e. the pending-sample bookkeeping `engine/chat.sh` depends on is exactly
+right across a two-turn boundary. Note the alignment difference while it is on the page: the session's
+`gen[i]` pairs with `greedy_continuation[i]`, while run mode's `kind=decode` sample at step *s* pairs with
+`greedy_continuation[s+1]` (§10.5's `argmax(decode{s}.logits_last) == greedy[s+1]`). Compared against the
+wrong index the same run reads 0/128 — the off-by-one that reported a false 1/64 on `dec64t`.
+
+## Item 3: the free run did not diverge in 128 prose tokens, and that is a fact about the prompt
+
+```bash
+./engine/build/decode_run --model models/Qwen3.5-0.8B --ids <dec300f prefill_ids> --steps 128
+#   RESULT mode=run steps=423 … stopped=0        (§07.5 armed; no waiver, no stop)
+#   decode[s] vs greedy_continuation[s+1] : 128/128 agree — first mismatch: none
+#   decode[s] vs greedy_continuation[s]   :   0/128 agree   <- the wrong alignment, for contrast
+```
+
+No divergence in 128 tokens, on prose, free-running. It needs an explanation rather than a cheer, and the
+explanation is already measured: **this prompt's decisions are not close calls.** The reference's own
+top1−top2 margin is a median of 26× the engine's largest element error, and the two steps that were near
+(step 30 at 1×, step 85 at 2×) are two out of 128 and both still landed on the right side. The same
+instrument tells us the reference is nearly deterministic along *both* legal routes here — chunked and
+recurrent agree with the pin 128/128 and with each other at every step. A-18's 0.8776 is a mean over 49
+natural prompts × 24 tokens; if token decisions were independent coin flips at that rate, a 128-token match
+would have probability ~1e-7 — but the flips are not flipped on a fluent letter in a style the model finds
+easy, and a chain that survives two 2×-margin steps is not luck so much as a low-entropy continuation.
+
+So the honest framing: `dec64t` (a counting chain, 64/64) and `dec300f` (prose, 128/128) are both prompts
+whose next token is near-certain, and the repo still has **no measurement of the divergence depth of an
+engine on a prompt whose next token is genuinely uncertain** — which is what A-18 actually measured, and
+what a corpus run (`tools/corpus_agreement.py` exists for the reference) would give. That is the natural
+next item and it is not this one.
+
+## What this pass left open, named
+
+1. **`mt32f` is red pending a decision** on tie-policy clause 3 above. Nothing about its numerics is in doubt.
+2. **Nothing was priced.** Pricing `dec300f` would move the global margin from 3.50 to 7.99; `mt32f` and any
+   future fixture carry the same risk until the per-fixture-vs-global question is answered.
+3. **`dec300f` has no full per-layer operands at depth** (budget arithmetic, above) — if a per-kernel gate at
+   400 lanes is ever wanted, it needs either a bigger budget or a knob that dumps operands without the
+   18 MiB state.
+4. **The engine-side per-step state fingerprint is still unwritten**, and it is the missing instrument for
+   both new questions: step 86's 8× and the +3.07e-7/step drift.
+5. No second short prose fixture (`prose64f`) was made: `dec300f`'s prompt already runs past 128 tokens and
+   serves both jobs, and a second unpriced prose pin would add tripwire exposure without adding a question.
+6. **423 lanes passed; 512 was not crossed.** Crossing `MAXSC` is Q5's work, and the lane-ceiling check in
+   `gate.py` will refuse it before the kernel does.
+
+### The device passes a worker ran (correctness only, no timing taken)
+
+Lock held by this worker twice; `tools/gpu_lock.sh util` read **92 %** at the first acquire and **91 %** at
+the second (discounted per `AGENTS.md`; the serving engine that renders this text is the load). Wall times
+are the whole command including the 1.55 GB load:
+
+```
+engine/gate.py --fixture dec64f     2 s   PASS (2 steps reported TIE)
+engine/gate.py --fixture dec64t     2 s   PASS
+engine/gate.py --fixture dec300f    7 s   PASS
+engine/gate.py --fixture mt32f      4 s   FAIL — 1 line (tie policy); 290 checks green
+decode_run --ids <dec300f prompt> --steps 128      5 s   free run, 423 steps, stopped=0
+tmp/q2_session.py mt32f 32                        7 s   feed+gen parity, 32/32
+```

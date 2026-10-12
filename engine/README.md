@@ -371,6 +371,34 @@ tools/gpu_lock.sh release "engine deep token gate"
 #   nothing else; prefix_len 317 vs cap 318 is the tightest §08.6 has ever been here.
 ```
 
+The same gate at breadth — a 128-step forced pin at 423 lanes, and a two-turn transcript (device, seconds
+each; run by a worker under the `<60 s` correctness allowance, so results are in `results.md` and their
+timing is quoted nowhere):
+
+```bash
+tools/gpu_lock.sh acquire "engine Q2 breadth gates"
+.venv/bin/python engine/gate.py --fixture dec300f   # 295-token prose prompt + 128 replayed steps = 423
+                                                    # lanes vs MAXSC 512; PASS, judged by the flat floors
+.venv/bin/python engine/gate.py --fixture mt32f     # user/assistant/user transcript, 232 tokens + 32
+                                                    # replayed steps; FAILs on ONE line — the tie policy
+                                                    # arming at a step where the engine matched the pin's
+                                                    # own id (engine/results.md, Q2 section: an open
+                                                    # gate-semantics question for the operator, not a
+                                                    # numerics failure — all 32 ids are exact)
+tools/gpu_lock.sh release "engine Q2 breadth gates"
+# The two things a forced pin cannot test, both from `decode_run` directly:
+#   FREE RUN (where does the engine's own chain leave the reference's?):
+#     ./engine/build/decode_run --ids <manifest prefill_ids> --steps 128
+#   ALIGNMENT, and this is a trap that ate a whole morning: §10.5 pins
+#   `argmax(decode{s}.logits_last) == greedy_continuation[s+1]`, so a `kind=decode` sample at step s
+#   pairs with `greedy_continuation[s+1]`, never `[s]`. Compared against `[0:]` the whole 128-token
+#   free run reads 0/128 and dec64t's read 1/64 — a divergence that does not exist.
+#   SESSION CARRY (the `feed`/`gen` invariants `chat.sh` found by running):
+#     printf 'feed <transcript ids>\ngen 32\nquit\n' | ./engine/build/decode_run --session
+#   There the GEN list starts at `greedy_continuation[0]` (the pending sample from the last fed token
+#   is emitted first), one index away from run mode's alignment — `engine/results.md`, Q2 section.
+```
+
 `engine/chat.sh` — the engine's own REPL (device, holds the GPU lock for its whole life):
 
 ```bash
