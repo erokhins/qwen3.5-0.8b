@@ -2855,3 +2855,144 @@ which is the whole point of the package. (2) If the 4096-lane ceiling should mov
 are `kAttnMaxSplit` and `attn_part_floats()`, and `gate.py::lane_geometry()` follows them automatically.
 (3) `chunk64b`'s three D-9 lines are untouched by P7 and remain the tree's only red. (4) `speccheck/` was
 neither touched nor run: nothing here can reach `specimpl.py` or a spec gate.
+
+---
+
+## Q5 / P8 (engine half, P8b): attention leaves the token loop — one site per attention layer for
+## the whole wave, and the null read pointer that looked like a device hang
+
+**What landed.** `submit_wave_body`'s mixer no longer loops tokens for attention: `if (attn_layer)`
+calls `kernels::attn_decode_layer` once with `nrows = n`, and only the GDN recurrence stays a
+per-token loop, because a sequential scan cannot be hoisted and attention can (§06.3, plan §2.3). The
+`[n][2048]` widening over `a_gated` is the same elementwise argument P5 used around the projections. The
+stage buffers `a_q_rope`/`a_k_rope`/`a_gate`/`a_pre`/`a_gated` became `[wave_rows]` tiles and `a_part` is
+`attn_part_floats(wave_rows)` — 32.25 MiB at `kMaxWaveRows`, 64.5 KiB at 1 — because at a wave the
+partial staging is one row family like every other one. `decode_step.h`'s two-family note now says what
+is genuinely still one row wide (`conv_new`), which P8's own comment had left stale.
+
+**The launcher chooses a plan by row count, not by lane depth.** One row → the fused single `attn_core`
+launch P7 shipped, bit-for-bit where it was. A wave → `attn_prep` (norm, rope, gate extract **and the
+§05.7 append** for every row at its own position), then `attn_core` with `fused = 0`, then `attn_combine`
+when the widest row needs more than one lane block. That is `prototype/attn_decode` §11's conclusion,
+not a preference: in the fused form each core block appends only its own row's lane and blocks across the
+row axis have no ordering, so a fused wave is "a race that usually works — the worst kind". A row's lane
+route is its own (`blocks_for_row`), so one grid legitimately carries one-pass rows and streaming rows
+together; `split` still comes from the wave's widest row and is capped by `kAttnMaxSplit` so `part`
+cannot be written past.
+
+**The hang, and what it actually was: a null read pointer, not a deadlock.** The parked wiring
+(`stash@{0}`, decision log D-10) hung on `p128` — `gate.py --fixture p128` busy-polling ~10 cores for
+7 minutes with zero logits files written — and its own `--wave-rows 4` repro had left a device dump:
+`Memory Fault Error … kernel: attn_core(CoreArgs)`, `grid=[2048,1,4]`, `faulting addr: 0x3000`. Three
+device runs, each under a minute, settled it:
+
+1. **Re-break (positive control).** Delete two lines from the launcher — `core.qrope`/`core.krope` left
+   null while `core.fused = 0` — rebuild, run the 4-row wave. Reproduced: `attn_core(CoreArgs)` faults
+   at `0x1000`, grid `[2048,1,4]`, one logits file missing, and the process still needed killing at 45 s
+   *after* printing `decode_run FAILED: hip: an illegal memory access` at `decode_step.cpp`'s D2H.
+   The address is the index: in the staged branch `attn_core` reads `a.qrope[ROW_H * qrow + …]`, so a
+   null base plus `ROW_H * qrow * 2` bytes names the row — `0x1000` is row 1, the parked run's `0x3000`
+   is row 3, and row 0 would have faulted at 0 (also unmapped). **The hanging launch is the wave's
+   `attn_core` (`dim3(N_Q, split, nrows)`); the hanging index is `qrow` in `CoreArgs::qrope`.** It reads
+   as a hang because the fault is reported asynchronously while the host sits in a stream sync polling a
+   queue that will never drain; a faulted context makes teardown spin too, so it never exits by itself.
+2. **The stash as preserved does not hang.** `stash@{0}` had already been cut down to a diagnostic that
+   left `c.fused = 1` for waves while still launching prep. Run at the real size — a 128-row wave,
+   `p128`'s own 128 ids — it exits 0 in ~1 s and its `logits127.bin` is **byte-identical** to the fixed
+   staged plan's. So the wave geometry, the tall tiles and the per-row blocking were never the problem;
+   the fault lived entirely in the staged branch's unread inputs. (That form is not a fix either: its
+   core re-appends each row's lane behind `stage_head`'s `blockIdx.y != 0` test while other rows are
+   reading those lanes, so it is correct by value only because prep already wrote the same bytes, and it
+   pays the staging and throws the saving away.)
+3. **Fix, A/B on one wave.** Same four ids, `--wave-rows 4` vs `--wave-rows 1`: logits bit-identical
+   row for row, and the counters move the way §06.4 demands —
+   `family=attn calls=12 calls_batched=6 rows_total=30 rows_max=4` against
+   `calls=30 calls_batched=0 rows_total=30 rows_max=1`. Same rows covered, quarter of the sites.
+
+**Why no existing gate could see it.** `prototype/attn_decode`'s host sets both halves of the staged
+contract in the same block (`attn_decode.hip.cpp:363` writes, `:368` reads), so the op's `--wave` stage
+has never launched a staged core without staged inputs. The engine's `CoreArgs c{}` zero-initialises
+`qrope`/`krope`, the fused branch — the only branch the engine had until P8 — never reads those fields,
+and `attn_prep` does not read `fused`, so nothing anywhere complained until a wave flipped the plan bit.
+A wave-only path with a wrong argument list is invisible to every one-row gate, and on this device it
+presents as a hang rather than a clean failure.
+
+**`(h)` now counts attention as a fifth batchable family, in sites.** `count_launch("attn", …)` reports
+one unit per *site*, with the blocks-per-launch figure in the slot `rows_per_launch()` reads, so
+`rows_max` is wave width and `rows_total` stays wave-independent (counting the real 8–10 blocks per launch
+would have made `rows_total 816 vs 816` mean different things for different families; `launch_stats.h`
+says so). The checks are the usual set: the batched side must show `rows_max == min(prompt_len,
+wave_rows)` and the one-row side `0` and `1` (2), `rows_total` parity against each narrow side (2), and the
+per-family wave-arithmetic entry on all three sides (3) — **7 new checks per fixture**, which is the audit
+trail that the family is judged rather than mentioned.
+
+**The aimed negative, and the limit of what an A/B injection can say here.** `--break-attn-one-row` forces
+the attention family alone back to one row per launch on the batched side while every other family still
+batches, so the new checks are seen to bite on their own instead of passing on glue's counts (§10.1's
+locality rule). It is a *counter* injection, and that is not timidity: a wave-only **value** bug cannot be
+expressed in this harness at all, because patching a wrong row into the prompt wave changes `y0`, which
+changes the sampled token, which makes every generated step differ — so the only divergence an A/B
+injection can produce in attention is the site-level one. The value claim ("a wave's rows are bit-identical
+to those rows launched one at a time") is therefore carried by `prototype/attn_decode` §11's direct
+measurement — 0 of 2 397 450 elements — and by the eight fixtures' x1.0000 below, not by an injection.
+`gate.py --selftest` runs the injection through the same judge as the engine: **SELFTEST PASS**,
+`--break-attn-one-row` included.
+
+**Blast radius: zero bits, measured.** All eight fixtures, before-vs-after on the same machine and
+sequence (`tools/margin_delta.py /tmp/p8/before /tmp/p8b/after …`):
+
+| fixture | checks before → after | verdict | worst allowance filled |
+|---|---|---|---|
+| `dec8` | 161 → **168** | PASS | x1.0000 |
+| `dec64f` | 643 → **650** | PASS (2 TIE) | x1.0000 |
+| `dec64t` | 640 → **647** | PASS | x1.0000 |
+| `mt32f` | 384 → **391** | PASS | x1.0000 |
+| `dec300f` | 1149 → **1156** | PASS | x1.0000 (step 86, 4.6322e-04 of 4.6358e-04) |
+| `p128` | 190 → **197** | PASS | x1.0000 |
+| `wide520f` | 320 → **327** | PASS | x1.0000 |
+| `chunk64b` | 365 → **372** | FAIL = the 3 expected-red D-9 lines, unchanged | x1.0000 |
+
+Every one of the five originals is bit-identical to its pre-P8 run (`x1.0000`, same binding steps, same
+worst-deficit bits), and so are the two boundary fixtures whose decode steps are still one row wide.
+`p128`'s prompt wave is now **6 attention sites / 12 kernel launches where the per-token form issued 768
+single-row launches** (`attn calls=54 calls_batched=6 rows_total=816 rows_max=128`), which is the §06.3
+claim counted rather than inferred. Nothing was re-pinned, no band moved, no `EXPECTED_RED` entry changed;
+`chunk64b`'s three D-9 lines are the tree's only red and are the same three.
+
+**The 4096-lane ceiling was left alone, on purpose.** Raising `kAttnMaxSplit` from 8 to 16 is one line and
+costs 32 MiB/request of `part` scratch — trivial against this box, and the arithmetic is written up in
+`bench/plan-prefill-2026-10-12.md` §3.1 together with the two constants that must move together
+(`kAttnMaxSplit` and `decode_run`'s `kSessionDefaultCap`, which is what makes the ceiling reachable at
+all). What makes it *not* cheap-and-provable is that nothing in the tree has more than 524 lanes, so a
+>4096-lane check needs a new pin (P3-class work, and D-2 says a new fixture prices its own margin), and
+the cheap self-consistency substitute — same rows at two wave widths, byte for byte — is not valid above
+the staging: `split` comes from the wave's widest row, so a row can be handed more lane blocks than it
+needs and its `(max,sum)` grouping differs from the same row run alone. For waves starting on a multiple
+of 512 (every shipped fixture, and plan §2.1's alignment) the two agree, which is exactly why `(h)`'s
+byte-identity half is sound today and why it must not be stretched to a long off-alignment prompt without
+becoming a band check. That is a fact about the design, recorded rather than fixed.
+
+**What a worker ran on the device** (correctness only, **no timing taken**; each inside its own
+`tools/gpu_lock.sh acquire`/`release` pair, and the gate does not self-lock):
+
+```
+engine/build.sh                                                  # clean
+engine/gate.py --fixture p128                    # 197 PASS / 0 FAIL, ~7 s
+engine/gate.py --fixture {dec8,dec64f,dec64t,mt32f,dec300f}      # 168/650/647/391/1156, 0 FAIL
+engine/gate.py --fixture {wide520f,chunk64b}     # 327 PASS; 372 PASS + the 3 expected reds
+engine/gate.py --selftest --fixture {dec8,dec64f}   # SELFTEST PASS both (incl. --break-attn-one-row;
+                                                   # dec64f also exercises the tie/route/state injections)
+engine/build/decode_run --ids 1,2,3,4 --steps 1 --wave-rows {1,4}   # the A/B and the re-break
+tools/margin_delta.py /tmp/p8/before /tmp/p8b/after …             # CPU: x1.0000 everywhere
+```
+
+`util` read 2–92 % across those runs and is reported as read; it is not a measurement input. Timings were
+deliberately not taken: the launch-count claim is a counter, and the TTFT/attention curve rows are the
+main agent's, in a window with zero subagents (`AGENTS.md`, `bench/performance-status.md` §6).
+
+**Handed to the main agent.** (1) The timing rows P8 was supposed to earn: `p128`/`dec300f` TTFT before
+(P5's numbers) and after, and the attention curve plan §5.2 names — this worker took no timings by rule.
+(2) `stash@{0}` is now dead weight and its own message is a misdiagnosis ("kernel deadlock"); it can be
+dropped once these commits land. (3) If the 4k-context TTFT row is ever wanted, `bench/plan-prefill-2026-
+10-12.md` §3.1 is the ceiling debt: a >4096-lane pin first, then `kAttnMaxSplit` and `kSessionDefaultCap`
+together. (4) `speccheck/` was neither touched nor run: nothing here reaches `specimpl.py` or a spec gate.
