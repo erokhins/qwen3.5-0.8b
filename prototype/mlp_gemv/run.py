@@ -299,6 +299,114 @@ def judge_neg(c: dict) -> bool:
                 or c["meanrel"] > 1e-2)
 
 
+def worst_over_rows(got: torch.Tensor, ref: torch.Tensor, **kw) -> dict:
+    """Judge a [rows, dim] tile one row at a time and return the worst row's comparison.
+
+    Per row rather than over the flattened tile because the cancellation band and the 2 % ndiff
+    rule are relative to the tensor being judged: flattened, one loud token could hide a quiet
+    one, and the F1–F4 rules were sized per token by floor_probe.py. `kw` (e.g. ulp_max=2 for
+    `act`) is passed through unchanged, so the batched stage judges with exactly the decode
+    stage's rules.
+    """
+    bad = None
+    for i in range(got.shape[0]):
+        c = compare(got[i], ref[i], **kw)
+        if bad is None or (c["n_bad"], c["ndiff"], c["maxulp"], -c["cos"], -c["meanrel"]) > (
+                bad["n_bad"], bad["ndiff"], bad["maxulp"], -bad["cos"], -bad["meanrel"]):
+            bad = c
+            bad["row"] = i
+    return bad
+
+
+def run_tokens(args, layers, fails, worst) -> None:
+    """P4: the token-batched MLP, gated against the prefill pins and against the k=1 kernel.
+
+    Two claims, in order of how much the engine depends on them:
+
+    1. **bit-identity vs the shipped single-token kernel.** The batched kernel re-reads each
+       weight row once per TILE of tokens instead of once per token; if that changed any
+       output bit the legal route would move and every margin `route_allowance.py` priced would
+       be stale. So for sampled tokens the k=1 kernel's answer must BE the batched kernel's row,
+       bit for bit.
+    2. **the pins.** F1/F2/F3/F4 on the whole [T, dim] tile, same rules, judged per row.
+    """
+    dp = ROOT / "data" / "refs" / args.tokens
+    if not dp.exists():
+        raise SystemExit("no prefill fixture %s (try p64)" % dp)
+    T0 = int(np.load(dp / ("L%02d.mlp.in.npy" % layers[0])).shape[1])
+    print("\ntoken-batched stage on %s: %d tokens x layers %s (shared-memory tile, not registers,"
+          " is what bounds the batch)" % (dp.name, T0, layers))
+    sample = sorted({0, 1, T0 // 2, max(0, T0 - 2), T0 - 1})
+    for l in layers:
+        pre = "L%02d.mlp." % l
+        Wg = dump_bf16(ckpt_tensor(WPK % l + "gate_proj.weight"), WORK / "Wg_b.bin")
+        Wu = dump_bf16(ckpt_tensor(WPK % l + "up_proj.weight"), WORK / "Wu_b.bin")
+        Wd = dump_bf16(ckpt_tensor(WPK % l + "down_proj.weight"), WORK / "Wd_b.bin")
+        xref = torch.from_numpy(np.load(dp / (pre + "in.npy"))).to(torch.bfloat16).reshape(-1, HID)
+        refs = {k: torch.from_numpy(np.load(dp / (pre + k + ".npy"))).to(torch.bfloat16)
+                .reshape(-1, FF if k in ("gate_pre", "up_pre", "act") else HID)
+                for k in ("gate_pre", "up_pre", "act", "out")}
+        T = xref.shape[0]
+        print("\nL%02d  x %s | refs gate_pre/up_pre/act %s, out %s"
+              % (l, tuple(xref.shape), tuple(refs["act"].shape), tuple(refs["out"].shape)))
+        # stage R for the tile: the pins must be self-consistent as a tile under the REFERENCE's
+        # rounding policy — gate/up round to BF16, silu rounds again, the product rounds a third
+        # time (mlp_gemv.hip.cpp's header, and NEG_F32ACT measures what the one-rounding reading
+        # costs: 26 % of `act` moves by 1 ULP). Without this the batched kernel could be gated
+        # against a mispaired file (§10.5).
+        mirror = (torch.nn.functional.silu(refs["gate_pre"].float()).to(torch.bfloat16)
+                  * refs["up_pre"]).to(torch.bfloat16)
+        dump_bf16(xref, WORK / "x_tile.bin")
+        dump_bf16(refs["act"], WORK / "act_tile.bin")
+        kernel(["--mode", "gateup", "--x", str(WORK / "x_tile.bin"), "--in", str(HID),
+                "--tokens", str(T), "--wg", str(Wg), "--wu", str(Wu),
+                "--out", str(WORK / "act_batched.bin"), "--pre", str(WORK / "pre_batched.bin"),
+                "--iters", "1"], "gateup x%d" % T, quiet=True)
+        kernel(["--mode", "down", "--x", str(WORK / "act_tile.bin"), "--in", str(FF),
+                "--tokens", str(T), "--wd", str(Wd), "--out", str(WORK / "out_batched.bin"),
+                "--iters", "1"], "down x%d (ref act)" % T, quiet=True)
+        kernel(["--mode", "down", "--x", str(WORK / "act_batched.bin"), "--in", str(FF),
+                "--tokens", str(T), "--wd", str(Wd), "--out", str(WORK / "out_chain.bin"),
+                "--iters", "1"], "down x%d (kernel act)" % T, quiet=True)
+        pre_t = read_bf16(WORK / "pre_batched.bin", 2 * FF * T).reshape(T, 2 * FF)
+        act_b = read_bf16(WORK / "act_batched.bin", FF * T).reshape(T, FF)
+        out_b = read_bf16(WORK / "out_batched.bin", HID * T).reshape(T, HID)
+        chain_b = read_bf16(WORK / "out_chain.bin", HID * T).reshape(T, HID)
+
+        for tag, got, ref, ckw, jkw in (
+                ("stage R act", mirror, refs["act"], {"ulp_max": 2}, {"ulp_max": 2}),
+                ("F1 gate_pre", pre_t[:, :FF], refs["gate_pre"], {}, {}),
+                ("F1 up_pre", pre_t[:, FF:], refs["up_pre"], {}, {}),
+                ("F2 act", act_b, refs["act"], {"ulp_max": 2}, {"ulp_max": 2}),
+                ("F3 out(ref-act)", out_b, refs["out"], {}, {}),
+                ("F4 out(kernel-act)", chain_b, refs["out"], {},
+                 {"ulp_gate": False, "ndiff_pct_max": None, "meanrel_max": F4_MEANREL_MAX,
+                  "cos_min": F4_COS_MIN})):
+            c = worst_over_rows(got, ref, **ckw)
+            judge("L%02d r%03d %s" % (l, c["row"], tag), c, fails, worst, **jkw)
+
+        # claim 1: the k=1 kernel's answer for a token IS the batched kernel's row for that token
+        bad_bits = 0
+        for t in sample:
+            dump_bf16(xref[t:t + 1], WORK / "x_one.bin")
+            kernel(["--mode", "gateup", "--x", str(WORK / "x_one.bin"), "--wg", str(Wg),
+                    "--wu", str(Wu), "--out", str(WORK / "act_one.bin"), "--iters", "1"],
+                   "", quiet=True)
+            dump_bf16(read_bf16(WORK / "act_one.bin", FF), WORK / "act_one_f.bin")
+            kernel(["--mode", "down", "--x", str(WORK / "act_one_f.bin"), "--wd", str(Wd),
+                    "--out", str(WORK / "out_one.bin"), "--iters", "1"], "", quiet=True)
+            for nm, one, many in (("act", read_bf16(WORK / "act_one.bin", FF), act_b[t]),
+                                  ("out", read_bf16(WORK / "out_one.bin", HID), chain_b[t])):
+                n = int((one != many).sum())
+                bad_bits += n
+                if n:
+                    fails.append("L%02d token %d: the %d-token kernel's `%s` row differs from the"
+                                 " single-token kernel in %d elements — batching changed the"
+                                 " arithmetic" % (l, t, T, nm, n))
+        print("    bit-identity vs the k=1 kernel: tokens %s, `act` + `out`, %d elements"
+              " compared, %d differ" % (sample, len(sample) * (FF + HID), bad_bits))
+
+
 def main() -> int:
 
     ap = argparse.ArgumentParser(description=__doc__,
@@ -309,6 +417,11 @@ def main() -> int:
     ap.add_argument("--layers", default="0,3,11,23", help="comma list, or 'all'")
     ap.add_argument("--iters", type=int, default=30)
     ap.add_argument("--rows", type=int, default=8, help="rows per block (sweep this)")
+    ap.add_argument("--tokens", default=None, metavar="FIXTURE",
+                    help="P4 stage: run the token-batched gateup/down over this PREFILL fixture's"
+                         " L{ll}.mlp.* pins (p64/p300), require F1-F4 to hold per row, and"
+                         " require the batched rows to be BIT-IDENTICAL to the k=1 kernel run"
+                         " token by token. Multi-token arithmetic is otherwise untested.")
     ap.add_argument("--rows-sweep", default=None,
                     help="comma list, e.g. 1,2,4,8,16: timed AND correctness-checked each")
     ap.add_argument("--tile", type=int, default=6,
@@ -417,6 +530,9 @@ def main() -> int:
     if args.negative:
         print("\nnegative tests (each must be rejected):")
         run_negatives(args, d, steps, layers, fails)
+
+    if args.tokens:
+        run_tokens(args, layers, fails, worst)
 
     if not args.no_time:
         print()

@@ -32,6 +32,11 @@
  * Build: prototype/mlp_gemv/build.sh
  * Run:   ./mlp_gemv --mode gateup --x x.bin --wg Wg.bin --wu Wu.bin --out act.bin [--pre pre.bin]
  *        ./mlp_gemv --mode down   --x act.bin --wd Wd.bin --out out.bin
+ *        ./mlp_gemv --mode gateup --x xtile.bin --in 1024 --tokens T --wg Wg.bin --wu Wu.bin \
+ *                                 --out act_tile.bin [--pre pre_tile.bin]
+ *            P4: the token-batched form. --in gives the per-token width so the x file can hold T
+ *            tokens ([T, in] BF16); outputs are [T, rows] (and --pre [T, 2, rows]). T=1 without
+ *            --in is the shipped single-token kernel, same launch shape.
  *        ./mlp_gemv --mode mlp    --x x.bin --act act.bin --wg Wg.bin --wu Wu.bin --wd Wd.bin \
  *                                 --out out.bin --actout act_out.bin
  *            the two kernels ALTERNATED in one burst, which is what a token does and what the
@@ -95,6 +100,8 @@ int main(int argc, char** argv) {
             negname = "none";
     int iters = 20;
     int rows_per_block = ROWS_PER_BLOCK;
+    int tok_in = 0, tok_n = 1;      // P4: the token-batched form (--in gives the width, so the
+                                    // x file can hold several tokens; without --in this is k=1)
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() { return std::string(argv[++i]); };
@@ -109,6 +116,8 @@ int main(int argc, char** argv) {
         else if (a == "--actout") aopath = next();
         else if (a == "--iters") iters = atoi(next().c_str());
         else if (a == "--rows") rows_per_block = atoi(next().c_str());
+        else if (a == "--in") tok_in = atoi(next().c_str());
+        else if (a == "--tokens") tok_n = atoi(next().c_str());
         else if (a == "--neg") negname = next();
         else {
             fprintf(stderr, "unknown arg %s\n", a.c_str());
@@ -132,7 +141,27 @@ int main(int argc, char** argv) {
     const bool gateup = mode == "gateup";
     const bool pair = mode == "mlp";   // gateup and down ALTERNATED, one layer of a real step
     const size_t xbytes = filesize(xpath);
-    const int in = (int)(xbytes / 2);
+    // Without --in the x file is one token and everything is derived from its size, exactly as
+    // before. With --in the file is a [tokens, in] tile and `--tokens` must agree with it.
+    const int in = tok_in ? tok_in : (int)(xbytes / 2);
+    const int tokens = tok_n;
+    if (tokens < 1) {
+        fprintf(stderr, "--tokens must be >= 1\n");
+        return 1;
+    }
+    if (xbytes != (size_t)in * tokens * 2) {
+        fprintf(stderr, "%s is %zu bytes; --in %d x --tokens %d x BF16 wants %zu\n",
+                xpath.c_str(), xbytes, in, tokens, (size_t)in * tokens * 2);
+        return 1;
+    }
+    if (tokens > 1 && pair) {
+        fprintf(stderr, "--mode mlp (the alternating pair) is the k=1 burst; use --mode gateup"
+                        " with --tokens\n");
+        return 1;
+    }
+    // Shared memory, not registers, is what bounds the token tile: TPB*IN floats must stay inside
+        // the 48 KiB static limit with room for two blocks per CU (64 KiB LDS on this part).
+    const int tpb = in == HID ? 4 : 2;
     const size_t wbytes = (gateup || pair) ? filesize(wgpath) : filesize(wdpath);
     const int rows = (int)(wbytes / (in * 2));
     // For --mode mlp the down kernel is fed the reference act (in = 3584), exactly as F3 does,
@@ -144,18 +173,19 @@ int main(int argc, char** argv) {
         in2 = (int)(abytes / 2);
         rows2 = (int)(filesize(wdpath) / (in2 * 2));
     }
-    printf("mode %s | x in=%d | rows=%d | warpSize=%d | rows/block=%d | weights %.2f MiB%s\n",
-           mode.c_str(), in, rows, ws, rows_per_block, wbytes / 1048576.0,
+    printf("mode %s | x in=%d | rows=%d | tokens=%d (tile %d) | warpSize=%d | rows/block=%d |"
+           " weights %.2f MiB%s\n",
+           mode.c_str(), in, rows, tokens, tpb, ws, rows_per_block, wbytes / 1048576.0,
            pair ? " (+down weights, pair burst)" : "");
 
     // x arrives as BF16 (the reference's own operands are BF16-valued). It is staged as F32
     // because every bf16 value is exact in fp32, so the products are identical and the
     // inner loop never converts x.
     auto xraw = slurp(xpath, xbytes);
-    std::vector<float> xhost(in);
+    std::vector<float> xhost((size_t)in * tokens);
     {
         const hip_bfloat16* p = reinterpret_cast<const hip_bfloat16*>(xraw.data());
-        for (int i = 0; i < in; ++i) xhost[i] = float(p[i]);
+        for (size_t i = 0; i < xhost.size(); ++i) xhost[i] = float(p[i]);
     }
     std::vector<float> ahost;
     if (pair) {
@@ -205,10 +235,10 @@ int main(int argc, char** argv) {
         CK(hipMemcpy(dx2, ahost.data(), (size_t)in2 * sizeof(float), hipMemcpyHostToDevice));
         CK(hipMalloc(&dact, (size_t)rows * 2));
     }
-    CK(hipMalloc(&dx, (size_t)in * sizeof(float)));
-    CK(hipMemcpy(dx, xhost.data(), (size_t)in * sizeof(float), hipMemcpyHostToDevice));
-    CK(hipMalloc(&dout, (size_t)(pair ? rows2 : rows) * 2));
-    if (gateup && !ppath.empty()) CK(hipMalloc(&dpre, 2 * (size_t)rows * 2));
+    CK(hipMalloc(&dx, (size_t)xhost.size() * sizeof(float)));
+    CK(hipMemcpy(dx, xhost.data(), (size_t)xhost.size() * sizeof(float), hipMemcpyHostToDevice));
+    CK(hipMalloc(&dout, (size_t)(pair ? rows2 : rows) * tokens * 2));
+    if (gateup && !ppath.empty()) CK(hipMalloc(&dpre, 2 * (size_t)rows * tokens * 2));
 
     const int neg = negname == "none" ? NEG_NONE : negname == "half" ? NEG_HALF
                   : negname == "trunc" ? NEG_TRUNC : negname == "f32act" ? NEG_F32ACT
@@ -224,6 +254,10 @@ int main(int argc, char** argv) {
     const int threads = rows_per_block * ws;
     const int blocks = (rows + rows_per_block - 1) / rows_per_block;
     const int blocks2 = (rows2 + rows_per_block - 1) / rows_per_block;
+    // tokens == 1 keeps the shipped single-token kernel and its exact launch shape — the decode
+    // path's ledger number is not this package's to move. The batched form takes over above 1 and
+    // is checked bit-for-bit against the single-token one by run.py --tokens.
+    const dim3 grid_t((unsigned)blocks, (unsigned)((tokens + tpb - 1) / tpb));
     auto launch = [&]() {
         if (pair) {          // one layer of a real decode step: gate/up, then down, alternated
             if (in == HID)
@@ -242,6 +276,19 @@ int main(int argc, char** argv) {
             return;
         }
         if (gateup) {
+            if (tokens > 1) {
+                if (in == HID)
+                    mlp_gateup_tokens<HID, 4><<<grid_t, threads>>>(dw, dw2, dx, dout, dpre, rows,
+                                                                    tokens, rows_per_block, neg);
+                else if (in == FF)
+                    mlp_gateup_tokens<FF, 2><<<grid_t, threads>>>(dw, dw2, dx, dout, dpre, rows,
+                                                                   tokens, rows_per_block, neg);
+                else {
+                    fprintf(stderr, "gateup: in=%d not implemented\n", in);
+                    exit(1);
+                }
+                return;
+            }
             if (in == HID)
                 mlp_gateup<HID><<<blocks, threads>>>(dw, dw2, dx, dout, dpre, rows,
                                                      rows_per_block, neg);
@@ -253,6 +300,19 @@ int main(int argc, char** argv) {
                 exit(1);
             }
         } else {
+            if (tokens > 1) {
+                if (in == HID)
+                    mlp_down_tokens<HID, 4><<<grid_t, threads>>>(dw, dx, dout, rows, tokens,
+                                                                 rows_per_block, neg);
+                else if (in == FF)
+                    mlp_down_tokens<FF, 2><<<grid_t, threads>>>(dw, dx, dout, rows, tokens,
+                                                                rows_per_block, neg);
+                else {
+                    fprintf(stderr, "down: in=%d not implemented\n", in);
+                    exit(1);
+                }
+                return;
+            }
             if (in == HID)
                 mlp_down<HID><<<blocks, threads>>>(dw, dx, dout, rows, rows_per_block, neg);
             else if (in == FF)
@@ -270,13 +330,16 @@ int main(int argc, char** argv) {
 
     // Traffic accounting: weights dominate; x is read once per block but is 2-7 KiB, and
     // the intermediates are 2 KiB-7 KiB, so they are rounding error next to 22 MiB. For the pair
-    // it is the sum of both kernels' traffic, and one burst iteration is one layer.
+    // it is the sum of both kernels' traffic, and one burst iteration is one layer. For the
+    // batched form the weights are counted ONCE for the whole tile — that is the whole claim of
+    // the form, so the accounting must state it; x and the outputs scale with tokens.
     const size_t wdbytes = pair ? filesize(wdpath) : 0;
     const double bytes = pair
         ? (double)(2 * wbytes + wdbytes) + xbytes + abytes + (double)rows * 2.0
           + (double)rows2 * 2.0
-        : (double)wbytes * (gateup ? 2.0 : 1.0) + xbytes + (double)rows * 2.0
-          + (gateup && !ppath.empty() ? 2.0 * rows * 2.0 : 0.0);
+        : (double)wbytes * (gateup ? 2.0 : 1.0) + xbytes
+          + (double)rows * tokens * 2.0
+          + (gateup && !ppath.empty() ? 2.0 * rows * tokens * 2.0 : 0.0);
 
     double best = 1e30;
     auto wall0 = std::chrono::steady_clock::now();
@@ -340,11 +403,11 @@ int main(int argc, char** argv) {
     double gbs = bytes / (best / 1e3) / 1e9;
     printf("kernel %.4f ms -> %.1f GB/s (%.1f%% of the 237 GB/s probe)\n", best, gbs,
            gbs / 237.0 * 100.0);
-    printf("RESULT mode=%s ms=%.4f gbs=%.1f rows=%d in=%d rows_per_block=%d\n", mode.c_str(),
-           best, gbs, rows, in, rows_per_block);
+    printf("RESULT mode=%s ms=%.4f gbs=%.1f rows=%d in=%d rows_per_block=%d tokens=%d tile=%d\n",
+           mode.c_str(), best, gbs, rows, in, rows_per_block, tokens, tpb);
 
-    std::vector<hip_bfloat16> hout(pair ? rows2 : rows);
-    CK(hipMemcpy(hout.data(), dout, (size_t)hout.size() * 2, hipMemcpyDeviceToHost));
+    std::vector<hip_bfloat16> hout((size_t)(pair ? rows2 : rows) * tokens);
+    CK(hipMemcpy(hout.data(), dout, hout.size() * 2, hipMemcpyDeviceToHost));
     {
         FILE* f = fopen(opath.c_str(), "wb");
         fwrite(hout.data(), 2, hout.size(), f);
@@ -358,8 +421,8 @@ int main(int argc, char** argv) {
         fclose(f);
     }
     if (gateup && dpre) {
-        std::vector<hip_bfloat16> hpre(2 * (size_t)rows);
-        CK(hipMemcpy(hpre.data(), dpre, 2 * (size_t)rows * 2, hipMemcpyDeviceToHost));
+        std::vector<hip_bfloat16> hpre((size_t)2 * rows * tokens);
+        CK(hipMemcpy(hpre.data(), dpre, hpre.size() * 2, hipMemcpyDeviceToHost));
         FILE* f = fopen(ppath.c_str(), "wb");
         fwrite(hpre.data(), 2, hpre.size(), f);
         fclose(f);

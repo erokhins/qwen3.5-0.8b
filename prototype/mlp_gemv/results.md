@@ -374,3 +374,75 @@ floor, 3.4 % of this op's time. A split gate/up/down version would pay 72.
   negative tests inherited the last layer's weight files from the main loop; the sweep would have
   ranked configs against the wrong matrix and the negatives were vacuous. Cheap to check, ugly
   to notice.
+
+## P4: the token-batched forms (`mlp_gateup_tokens` / `mlp_down_tokens`)
+
+Decode is one token; a prefill wave is `T` of them (§08.2), and the MLP is the biggest weight
+family in the model — 22 MiB per layer against a **2 MiB L2** (measured: `hipDeviceProp` on this
+part reads `l2CacheSize = 2 MiB`, `sharedMemPerBlock = 64 KiB`, `warpSize = 32`, 20 CUs). A
+per-token launch therefore pays that 22 MiB from DRAM for every token it processes. The batched
+kernels load each weight row **once per tile of `TPB` tokens** instead of once per token, which is
+the only reason they exist.
+
+The tile is `TPB` token rows of `x` staged in shared memory and an accumulator array per lane:
+
+```cpp
+for (int v = lane; v < words; v += ws) {
+    uint4 ug = wg[v], uu = wu[v];          // once per row, for the whole tile
+    for (int t = 0; t < TPB; ++t) {
+        const float* xp = &xs[t][v * 8];
+        for (int j = 0; j < 8; ++j) { ag[t] += bf(pg[j]) * xp[j]; au[t] += bf(pu[j]) * xp[j]; }
+    }
+}
+```
+
+Three things worth keeping, because each is a constraint someone could break:
+
+* **The per-output-element order is untouched.** Same `v = lane; v += ws` walk over the same
+  `uint4` words, same 8-element inner loop, same `reduce_row` ladder, same three roundings. Only
+  the accumulator became an array. So output element `(t, row)` is *obliged* to be the bits the
+  k=1 kernel already produced — which is what makes this safe to land at all, and `--tokens` checks
+  it rather than assuming it.
+* **Shared memory, not registers, is the bound.** The tile is `TPB*IN` floats, so the two shapes
+  want different tiles: `TPB=4` (16 KiB) at `IN=1024`, `TPB=2` (28 KiB) at `IN=3584`. Both stay
+  under the 48 KiB static limit and leave two blocks resident per CU. The old `NEG_HALF` /
+  `NEG_TAIL` tricks still work unchanged because `words` stayed a runtime value and the loop shape
+  did not move — no unroll pragma on the word loop, for the same reason (asking the compiler to
+  unroll a runtime trip count only earns a `-Wpass-failed` warning; whether it rolls that loop is
+  not observable in the result).
+* `tokens == 1` keeps the shipped `mlp_gateup`/`mlp_down` kernels and their exact launch shape, so
+  decode's ledger number is not this package's to move.
+
+### Gate: `run.py --tokens p64`
+
+Two claims, and the first is the one the engine's margins depend on.
+
+1. **bit-identity vs the k=1 kernel.** For sampled tokens (`0, 1, T/2, T-2, T-1`) the single-token
+   kernel's `act` and `out` must BE the batched kernel's row for that token, bit for bit.
+2. **the pins**, F1/F2/F3/F4 over the whole `[T, dim]` tile with the rules unchanged, judged **per
+   row** (flattening would move the cancellation band's reference max and let a loud token hide a
+   quiet one), plus a stage-R on the tile: `bf16(silu(gate_pre)) * up_pre` under the reference's
+   three roundings must reproduce the pinned `act` (it does, 0 elements differing; the
+   one-rounding reading moves 26 % of it, which is `NEG_F32ACT`'s number).
+
+Measured (`.venv/bin/python prototype/mlp_gemv/run.py --fixture dec8 --layers 0,3 --no-time
+--tile 0 --negative --tokens p64`, wall 9 s, `gpu_lock util` 93 % — correctness only, **no timing
+taken**; the cold-bandwidth section was suppressed with `--tile 0` on purpose):
+
+| | L00 worst row | L03 worst row | rule |
+|---|---|---|---|
+| stage R `act` (pin self-consistency) | 0 / 3584 differ | 0 / 3584 | bit-exact |
+| F1 `gate_pre` / `up_pre` | 3, 2 / 3584 | 1, 2 / 3584 | ≤ 2 %, none > 1 ULP over the band |
+| F2 `act` | 4 / 3584, max 2 ULP | 3 / 3584, max 2 ULP | ≤ 2 %, none > 2 ULP |
+| F3 `out` from the reference `act` | 1 / 1024 | 2 / 1024 | ≤ 2 %, none > 1 ULP over the band |
+| F4 `out` from the kernel `act` | cos 0.99999995 / meanrel 4.5e-05 | cos 0.99999986 / 8.2e-05 | aggregates only, as always |
+| **bit-identity vs k=1** (`act`+`out`, 5 tokens) | **23 040 elements, 0 differ** | **23 040, 0 differ** | exactly 0 |
+
+The six `--negative` injections (`half`, `tail`, `trunc`, `rowswap`, `preswap`, `f32act`) are still
+caught where the bug lives and nowhere else, at `rows=1`, unchanged from §"Negative tests" above.
+
+What this does **not** claim: that the batched form is fast. The weight-traffic argument is
+arithmetic (22 MiB per layer ÷ `TPB` instead of × 1), the x/L2 traffic is the same shape as the
+per-token path's, and whether the GPU turns the first into time is a measurement — and a measurement
+of a kernel this wide needs the box to itself, which is bench/performance-status.md §6's to take,
+not a worker's.
