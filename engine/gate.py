@@ -3722,10 +3722,10 @@ def decision_margin(ref: np.ndarray, eng, m: dict) -> str:
 # `chunk64b` step 0 is the only entry, and it is unsatisfiable as shipped: the pinned winner is 8337 at
 # 15.625 and the runner-up is 20619 at 15.500 — a 2 BF16 ULP margin at that magnitude — while the
 # engine's legal element error at that step is maxabs 0.2509, larger than the margin. No legal bf16 route
-# can be held to that token. The step's LOGITS are gated and pass (cos 0.999893, deficit 1.07e-04 against
-# §10.1 G5's 5e-04 floor; meanrel 1.57 %). D-9: an admitting rule for this shape must be SIZED (the legal
-# element error at that position, plus a route spread) the way D-3/D-5/D-6 sized their bands — not a skip,
-# not a silent tolerance, not a re-price.
+# can be held to that token. The step's LOGITS are gated and pass (cos 0.999919, deficit 8.06e-05
+# against §10.1 G5's 5e-04 floor; meanrel 1.199 %, maxabs 0.2509). D-9: an admitting rule for this shape
+# must be SIZED — the legal element error at that position, plus a route spread, the way D-3/D-5/D-6
+# sized their bands. Not a skip, not a silent tolerance, not a re-price.
 EXPECTED_RED: dict = {
     "chunk64b": {
         "why": ("step 0's pinned winner is 2 BF16 ULP ahead of the runner-up while the engine's legal"
