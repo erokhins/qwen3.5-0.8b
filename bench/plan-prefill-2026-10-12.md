@@ -323,7 +323,7 @@ the “main agent” column marks the timing passes this plan hands over (§5).
 |---|---|---|---|---|---|---|---|---|
 | **P1** | Make the engine’s §08 state observable and gate it against the pinned prefill-end and per-step fingerprints — the executable half of G5. | `engine/decode_run.cpp` (`--state-fp`, D2H + F64 fp print), `engine/gate.py` (section `(g)`), shared `fp_row` helper (`tools/reference_dump.py` extract), results note | §08.6 inv 1–4, §10 G5, A-04 | §2.6 layer-1 block; plus `gate.py --selftest` new injections (perturbed state must light `(g)`; fp-of-pins identity check) | CPU build; device runs are the 5 fixtures (~1 min total) | 5 | — | the prefill/decode **state end-condition** vs the pins, incl. conv-window roll (A-04) and KV append, at 17/27/232/295-lane boundaries |
 | **P2** | Add the prefill wave entry (`engine/prefill.{h,cpp}`) that runs existing kernels per token under one submission stream with one sync, one `lm_head` + argmax at the end, and `--prefill-logits` set to `all` or `last`. | new `engine/prefill.h/.cpp`, `engine/decode_run.cpp` (run-mode prompt phase + session `feed` route through it; `STEP kind=prefill` line), `engine/build.sh` (one TU), `engine/gate.py` (parse prefill lines; keep `--break-prompt-stop` selftest semantics), fix F6 doc drift | §06.1, §06.5, §07.5 phase rule | `engine/gate.py` on all 5 fixtures **unchanged PASS**, plus byte-identity: `--prefill-logits all` logits dumps == the current per-token path’s dumps on `dec8` (same launches ⇒ same numbers) | device ~10 min | 10 | — | prefill↔decode plumbing: positions, `prefix_len` batching, §07.5 phase split, session pending-sample invariants (`chat.sh` `feed`/`gen`), the first TTFT floor |
-| **P3** | Pin the unpinned chunk-boundary and >512-lane cases: extend the dumper’s lean policy with `--logit-steps`, then make `p128`, `chunk64b`, `wide520f`. | `tools/reference_dump.py` (`--logit-steps`, reusing the `keep_steps` mechanism), `tools/dump_fixtures.sh` (three new rows), new `data/refs/{p128,chunk64b,wide520f}` (gitignored; recipes committed) | §04.7 (chunk 64, zero-β), §10.0/§10.5 (fixture identity, verify), plan §4 deep-fixture prompt rule | `reference_dump.py … --verify data/refs/<tag>` byte-exact for each; `tools/check_dump_reproduction.py`; `gate.py --no-engine` pairing on each | **CPU-only** (torch dumper) | 0 | — | boundary cases unpinned today (F3: no prompt ends at 64·k; nothing crosses 512) — later packages get gates *before* their kernels exist |
+| **P3** | Pin the unpinned chunk-boundary and >512-lane cases: extend the dumper’s lean policy with `--logit-steps`, then make `p128`, `chunk64b`, `wide520f`. | `tools/reference_dump.py` (`--logit-steps`, reusing the `keep_steps` mechanism), `tools/dump_fixtures.sh` (three new rows), new `data/refs/{p128,chunk64b,wide520f}` (gitignored; recipes committed) | §04.7 (chunk 64, zero-β), §10.0/§10.5 (fixture identity, verify), plan §4 deep-fixture prompt rule | `reference_dump.py … --verify data/refs/<tag>` byte-exact for each; `tools/check_dump_reproduction.py`; `gate.py --no-engine` pairing on each | **CPU-only** (torch dumper) | 0 | — | boundary cases unpinned today (F3: no prompt ends at 64·k; nothing crosses 512) — later packages get gates *before* their kernels exist. **LANDED 2026-10-13**: all three pinned, byte-exact, unpriced, `--no-engine` pairable; `wide520f` is inert for device runs until P7 by design (§5.1 “P3 landed”, `bench/p3-boundary-fixtures-2026-10-13.md`) |
 | **P4** | Batch the biggest weight family: multi-row glue + token-batched MLP GEMMs inside the wave (51 % of block-weight bytes). | `prototype/glue/*` (row-indexed `glue_add_norm`; re-gate), `prototype/mlp_gemv/*` (batched gateup/down forms; re-gate incl. all six negatives at rows=1 unchanged), `engine/kernels_glue.cpp`, `engine/kernels_mlp.cpp`, `engine/prefill.cpp`, `engine/DecodeScratch` ([T_w]-sized buffers) | §03.2, §03.3, §06.4 (MLP dominance), §10.1 F1–F4 (method), §10 G3i | per-op: new `mlp_gemv/run.py --rows-batched` stage vs **prefill** pins `L{ll}.mlp.*` on `p64`/`p300` (F1–F4 shapes, aggregate rules unchanged); rows=1 runs of the existing gate must stay green bit-for-bit; then all 5 fixtures on the engine (margin preflight §6.0) | device ~15 min | 15 | P2 | reduction-order risk of the largest GEMM family *before* two more GEMM families stack on it |
 | **P5** | Batch the nine projections + out_proj/o_proj (44 % of the remaining bytes) with GEMM forms of `proj_gemv`. | `prototype/proj_gemv/*` (batched form + gate stage), `engine/kernels_proj.cpp`, `engine/prefill.cpp` | §04.1, §05.1, §06.2 (“one GEMM per projection” is the spec’s own sentence), §10 G3i, §10.5 W1 pins (they exist for prefill) | per-op gate vs prefill `L{ll}.{in_proj_*,q_proj,k_proj,v_proj,o_proj,out_proj}.out` on `p64`/`p300` at G3i (cos ≥ 0.9999, meanrel ≤ 1 %); engine: 5 fixtures + margin preflight | device ~15 min | 15 | P2 (P4 independent of P5 — both need P2; brief whichever order the margin preflights prefer) | GEMM reduction order on the skinny shapes (the narrow-shape ledger rows say these are shape-limited; batching is their only bandwidth lever) |
 | **P6** | Batch GDN conv + gates + gated-norm over a wave, carrying the conv window with the §06.2 request-start zero-padding exactly. | `prototype/gdn_decode/*` (windowed causal conv over `[T,6144]`, multi-token gates), `prototype/gdn_gated_norm/*` (T×), `engine/kernels_gdn.cpp`, `engine/prefill.cpp` (window D2D copies collapse to one per wave) | §04.2, §04.3, §04.5, §06.2, §08.6 inv 2 (window = `raw[T−3..T−1]`), §10 G3/G3i | per-op gate vs prefill `L{ll}.gdn.{mixed_qkv_pre_conv,q,k,v}_post_conv,g_decay_log,beta,o_pre_norm` on `p64`/`p300`; `(g)` state-fp for `conv_fp` on all fixtures; `p128` is the end-condition proof | device ~15 min | 15 | P2, P5 (projections produce the `[T,6144]` `raw`) | the conv-window end-condition at T > 1 (A-04’s falsifier) and the ragged-wave carry |
@@ -349,12 +349,65 @@ seconds, so a worker may run its own gate.
 
 | tag | content | pin policy | est. size | first-stop rule |
 |---|---|---|---|---|
-| `p128` | prompt of **exactly 128 tokens** (prose), + 8 replayed steps; pins the chunk-multiple end-condition and `y0` | `--lean --deep-steps 7 --logits-bits bf16 --first-stop "<probe>"` (probe via `tools/stop_probe.py --max-new 130`; short chain — record whatever it says) | ~20 MB | record probe result |
-| `chunk64b` | prompt ~60 tokens + 12 forced steps ⇒ the chain crosses the 64-chunk boundary mid-stream (the ragged-carry case; stays inside budget — extend steps only if a 128-crossing is later wanted) | `--lean --deep-steps 11 --logits-bits bf16` | ~12 MB | short chain; probe anyway |
-| `wide520f` | prompt ~250 tokens + ~275 forced steps ⇒ ~525 lanes, crossing 512 inside the forced chain | `--lean --logit-steps "<~24 steps around the crossing>" --deep-steps none --logits-bits bf16` — the deep prompt rule binds (probe ≥ 128, prefer ≥ 300 with no stop; known-good families: the count-chain, the months-and-lengths list); first-stop index **required** in the manifest | ~30 MB with `--logit-steps`; **requires P3’s dumper extension first** (without it, lean logits alone would be ~130 MB) | hard requirement |
+| `p128` | prompt of **exactly 128 tokens** (prose), + 8 replayed steps; pins the chunk-multiple end-condition and `y0` | `--lean --deep-steps 7 --logits-bits bf16 --first-stop "<probe>"` (probe via `tools/stop_probe.py --max-new 130`; short chain — record whatever it says) | ~20 MB — **P3 actual: 32.1 MiB, 546 pins** | record probe result |
+| `chunk64b` | prompt ~60 tokens + 12 forced steps ⇒ the chain crosses the 64-chunk boundary mid-stream (the ragged-carry case; stays inside budget — extend steps only if a 128-crossing is later wanted) | `--lean --deep-steps 11 --logits-bits bf16` | ~12 MB — **P3 actual: 43.1 MiB, 656 pins. Shipped as 120 prompt tokens + 30 steps (`--deep-steps 29`), not ~60 + 12: a 128-crossing was wanted, and this way the prompt end is ragged *and* the chain crosses 128. See “P3 landed” below.** | short chain; probe anyway |
+| `wide520f` | prompt ~250 tokens + ~275 forced steps ⇒ ~525 lanes, crossing 512 inside the forced chain | `--lean --logit-steps "<~24 steps around the crossing>" --deep-steps none --logits-bits bf16` — the deep prompt rule binds (probe ≥ 128, prefer ≥ 300 with no stop; known-good families: the count-chain, the months-and-lengths list); first-stop index **required** in the manifest | ~30 MB with `--logit-steps`; **requires P3’s dumper extension first** (without it, lean logits alone would be ~130 MB) — **P3 actual: 53.4 MiB, 626 pins, 500 prompt tokens + 24 steps = 524 lanes, `--logit-steps all` + `--deep-steps 23`; the crossing moved prompt-side and the reason is in “P3 landed” below** | hard requirement |
 
 No existing fixture is re-pinned: their bytes are load-bearing for `--verify` (§10.5). The
 fingerprint pins P1 needs already exist in the four deep fixtures; `dec8` simply has no `(g)` rows.
+
+### P3 landed (2026-10-13): what the three fixtures are, and what this sketch got wrong
+
+Full write-up: **`bench/p3-boundary-fixtures-2026-10-13.md`** — what each pin can and cannot falsify, the
+negative tests, the re-check commands. Recipes are committed in `tools/dump_fixtures.sh`, prompts in
+`speccheck/fixtures/`; the pins are gitignored as usual. All three reproduce byte-for-byte (`--verify` and
+`tools/check_dump_reproduction.py`), all three pair **every** pinned step with `0 declared gaps`, and **no
+device run was taken** — P3 is CPU-only, as planned.
+
+1. **The size arithmetic here was wrong, and it is what reshaped `wide520f`.** Measured off `dec64f`: one
+   BF16 logits vector is **0.4738 MiB**, one full `--deep-steps` dump is **25.96 MiB**, so a ~60 MB budget
+   buys **~71 pinned steps with a deep step, ~126 without one**. The sketch’s “~250 + ~275 forced steps”
+   needs 275 *pinned* steps for `gate.py` to judge them, which is **130 MiB of logits alone** — 2.2× over
+   budget; that is why its `--logit-steps` escape was load-bearing. Approved substitution: **500 prompt
+   tokens + 24 forced steps = 524 lanes**, 53.4 MiB, crossing at the same lane with a quarter of the chain.
+   Side effect, and a useful one: the over-cap lanes are now **prefill-side**, where P8’s wave arithmetic
+   lives. In the gate’s 0-based step names, `decode11` reads exactly 512 lanes (the last the one-pass stage
+   serves), `decode12` is the first it cannot, `decode12`…`decode23` live above the cap. With option C
+   below the sketch’s chain-side shape is now *expressible* (~275 steps with ~24 declared logits ≈ 40 MiB),
+   so a later package can still have a crossing inside the forced chain; P3 did not build it, since the
+   approved shape covers the same lane counts for less.
+2. **`chunk64b` covers both readings of its ambiguous row** instead of choosing: prompt 120 = 64+56 (partial
+   final chunk, with a full chunk carried across the last boundary — which `p64`/`p300` never do, their
+   prompts sit inside one partial chunk) **and** a chain crossing 64·2 = 128 at `decode8`, ending at
+   150 = 128+22. The row said “extend steps only if a 128-crossing is later wanted”; it was wanted.
+3. **A gate change was needed, which the row’s file list did not list.** `--logit-steps` reuses the
+   `keep_steps` mechanism with `--deep-steps`’ step-tag vocabulary (`all` / explicit list, no ranges), is
+   `--lean`-only, and refuses a deep step whose logits were dropped — `--deep-steps N` without `N` in
+   `--logit-steps` would pin every intermediate of a step nothing can judge. But `gate.py` section (0)
+   `load_pin`s every step and hard-exits on a missing tensor, so a sparse pin was not pairable at all. Under
+   the supervisor’s option C: section (0) may skip a step’s logits **only** if `manifest.json` names that
+   exact step in `logits_declared_absent` — per step, never a count, range or ratio; an undeclared gap still
+   fails closed; the gate prints `paired N of M steps, K declared gaps`; device and `--dry-run` paths refuse
+   a gapped fixture rather than silently dropping its `decodeN.input_ids` checks. Six injections in
+   `engine/gate.py --selftest` cover it. No band, margin or `route_allowance.py` behaviour moved, and the
+   five shipped fixtures still report `N of N steps, 0 declared gaps`.
+4. **All three ship unpriced** (no `route_allowance.json`), riding the flat §10.1 floors — D-2, and pricing
+   is a main-agent act. Consequence for P5/P7: a first device failure at these tags may be a flat floor too
+   tight for a wide route, not a wrong kernel. D-14 before any band moves.
+5. **`wide520f` is inert for device gating until P7**, by design: `gate.py` refuses it at the lane-ceiling
+   preflight (`500 prompt + 24 generation = 524 lanes vs MAXSC 512`), which is why `--no-engine` is the only
+   pairing available for it today. **P5 meets this, not P7** — P5 runs the gate across the attention fixtures
+   (§5.4) and will hit the ceiling on its first device pass. Report it; do not shrink the fixture to make P5
+   green.
+6. **These pins do not settle F3’s open half.** §5.2’s padding probe (full 296-token prefill vs 64+104 chunks,
+   `gdn.state_new` at token 295) is still unrun and `data/refs/p64/prefill_state_mismatch.json` still does not
+   exist, so these fixtures can say “the engine must agree with HF at these lane counts”, not “padding moves
+   the state by X”. And a kernel that pads *everything* to 64 still matches HF at `p128` while doing exactly
+   the wasted work F3 is about: correctness is pinned, efficiency is not — the efficiency half needs a timing,
+   and a fixture cannot make one.
+7. **`p128`’s `y0` expectation (P6/P8 rows) is an engine-side comparison, not a pin property.** The fixture
+   pins the first generated row’s logits and the §08 state at every step; whether a wave’s first sample equals
+   the single-token decode’s row (§06.5) is something those gates have to compute *at* the fixture.
 
 ### 5.2 Measurements — **main agent only, lock, best-of-N ≥ 3 with spread stated, util recorded and discounted, blocking, zero subagents** (AGENTS.md)
 
