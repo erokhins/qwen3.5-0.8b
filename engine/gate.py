@@ -185,17 +185,49 @@ def set_fixture(name: str) -> None:
                          " — make it with tools/reference_dump.py (see engine/results.md)")
 
 
-def lane_ceiling() -> int:
-    """MAXSC — the largest lane count the gated attention stage can serve — read out of the kernel
-    header that enforces it, never retyped here. `kernels_attn.cpp` throws above it rather than
-    truncating, so a planned run over the ceiling is a guaranteed failure this gate can name up
-    front instead of a HIP message half way through a device window."""
-    path = ROOT / "prototype" / "attn_decode" / "attn_decode_kernels.h"
-    m = re.search(r"#define\s+MAXSC\s+(\d+)", path.read_text())
+def lane_geometry() -> tuple[int, int, int]:
+    """(lanes one block stages, max split blocks per query row, lane ceiling) — read out of the two
+    files that enforce them and never retyped here.
+
+    P7 turned the flat `MAXSC` wall into a product (§07.3). One block of the one-pass softmax stages
+    `MAXSC` lanes and cannot be split at all; above that the engine cuts the lane axis into
+    `ceil(lanes / MAXSC)` blocks of the streaming form, so the ceiling is `MAXSC × kAttnMaxSplit`
+    and the `part` scratch is sized for exactly that many partials. `engine/kernels_attn.cpp` is the
+    enforcer of both halves — it throws above the product rather than writing past a stage or past the
+    scratch — which is why both constants are grepped out of the code that obeys them instead of being
+    copied here: a number in this gate could disagree with the launcher, and two authorities that can
+    drift is the failure this file refuses everywhere else. `prototype/attn_decode/run.py` reads its
+    `TILE` the same way for the same reason.
+    """
+    kernel = ROOT / "prototype" / "attn_decode" / "attn_decode_kernels.h"
+    m = re.search(r"#define\s+MAXSC\s+(\d+)", kernel.read_text())
     if not m:
-        raise SystemExit(f"gate: cannot read MAXSC from {path} — the lane ceiling is the"
+        raise SystemExit(f"gate: cannot read MAXSC from {kernel} — the lane staging is the"
                          " kernel's to own, so this gate refuses to guess it")
-    return int(m.group(1))
+    staging = int(m.group(1))
+    launcher = ROOT / "engine" / "kernels_attn.cpp"
+    s = re.search(r"constexpr int kAttnMaxSplit\s*=\s*(\d+)", launcher.read_text())
+    if not s:
+        raise SystemExit(f"gate: cannot read kAttnMaxSplit from {launcher} — that is the launcher's"
+                         " half of the lane ceiling (it sizes `part` with it), and a ceiling this gate"
+                         " invented for itself would be a band, not a check")
+    splits = int(s.group(1))
+    return staging, splits, staging * splits
+
+
+def lane_ceiling() -> int:
+    """The lane ceiling alone, for callers that only need the number. See `lane_geometry()`."""
+    return lane_geometry()[2]
+
+
+def lane_ceiling_note() -> str:
+    """The ceiling with its two factors named, so a FAIL says which constant to go look at."""
+    staging, splits, ceiling = lane_geometry()
+    return (f"staging MAXSC {staging} x kAttnMaxSplit {splits} = {ceiling} lanes"
+            " (`prototype/attn_decode/attn_decode_kernels.h` sizes a block,"
+            " `engine/kernels_attn.cpp` caps the blocks per row and allocates the `part` partials for"
+            " them; above it the launcher throws rather than truncating)")
+
 
 # ---- the band ----------------------------------------------------------------------------------
 # A token's logits vector is the end of a 24-layer cascade, so §10.1/§10.2 have already decided what
@@ -1906,9 +1938,10 @@ def parse_run(text: str) -> dict:
 
 def wave_row_ceiling() -> int:
     """`kMaxWaveRows` — how many rows the wave scratch is tall — read from `engine/decode_step.h`,
-    never retyped here. Same reason `lane_ceiling()` reads MAXSC out of the kernel that enforces it:
-    the number belongs to the code that obeys it, and a copy here would be a second authority that
-    can drift. `decode_run --wave-rows` accepts at most this, so it is also the ceiling of the A/B."""
+    never retyped here. Same reason `lane_geometry()` reads its two constants out of the code that
+    enforces them: the number belongs to the code that obeys it, and a copy here would be a second
+    authority that can drift. `decode_run --wave-rows` accepts at most this, so it is also the
+    ceiling of the A/B."""
     path = ROOT / "engine" / "decode_step.h"
     m = re.search(r"constexpr int kMaxWaveRows\s*=\s*(\d+)", path.read_text())
     if not m:
@@ -3042,9 +3075,8 @@ def smoke_run(n_steps: int, args) -> int:
     section(f"(smoke) free run of {n_steps} generated tokens on {REFS.name}'s prompt")
     lanes = len(prompt_ids) + n_steps
     check(lanes <= ceiling, f"the planned run fits the attention stage's lane ceiling",
-          f"{len(prompt_ids)} prompt + {n_steps} generated = {lanes} lanes vs MAXSC {ceiling}"
-          " (`kernels_attn.cpp` reads the ceiling from its own #define and throws rather than"
-          " truncating; the split-block §07.3 form that would raise it is a prefill item)")
+          f"{len(prompt_ids)} prompt + {n_steps} generated = {lanes} lanes vs"
+          f" {lane_ceiling_note()}")
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
     for stale in work.glob("logits*.bin"):
@@ -3310,9 +3342,8 @@ def main() -> int:
     lanes = len(prompt_ids) + n_decode
     ceiling = lane_ceiling()
     check(lanes <= ceiling, "the planned run fits the attention stage's lane ceiling",
-          f"{len(prompt_ids)} prompt + {n_decode} generation = {lanes} lanes vs MAXSC {ceiling}"
-          " (read from `prototype/attn_decode/attn_decode_kernels.h`; `kernels_attn.cpp` throws"
-          " above it rather than truncating)")
+          f"{len(prompt_ids)} prompt + {n_decode} generation = {lanes} lanes vs"
+          f" {lane_ceiling_note()}")
     cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
            "--steps", str(n_decode), "--out", str(work),
            # Named on every run rather than left to the binary's default, so the echoed command says

@@ -39,9 +39,12 @@ class WeightStore;
 //   uses.
 //   * what is left one row wide is what no launch writes in bulk: the conv window's `conv_new` (a
 //     K−1-row window, not a row family) and the attention stage buffers `a_*_rope`/`a_gate`/`a_pre`/
-//     `a_gated`, which belong to an attention block that is still one token wide (P7/P8). The GDN
-//     recurrence is per token too, but it reads and writes ROWS of the tall tiles above rather than
-//     its own scratch, so it did not keep a one-row buffer with it.
+//     `a_gated`, which belong to an attention block that is still one token wide. P7 split that
+//     block's LANE axis (above the staging it is `split` blocks per query head, with `a_part` holding
+//     their partials), which is a different axis and does not make any of these taller; giving the
+//     attention block a token axis is P8. The GDN recurrence is per token too, but it reads and
+//     writes ROWS of the tall tiles above rather than its own scratch, so it did not keep a one-row
+//     buffer with it.
 constexpr int kMaxWaveRows = 512;   // plan §2.1; decode_step.cpp explains why 512 and not 1024
                                     // `allocate_scratch` accepts less, and `decode_run --wave-rows 1`
                                     // deliberately asks for the least: a prompt fed one token per wave
@@ -97,6 +100,13 @@ struct DecodeScratch {
     uint16_t* a_gate = nullptr;     // [2048] the de-interleaved output gate, §05.6
     uint16_t* a_pre = nullptr;      // [2048] attn_out_pre_gate, §05.5
     uint16_t* a_gated = nullptr;    // [2048] pre * σ(gate), o_proj's operand
+    // The split-K online softmax's partials (§07.3, P7): one (max, sum, acc) tuple per query head per
+    // lane block, only ever written by a row too long for the one-pass staging. It lives here rather
+    // than in `RequestState` because it is not §08.1 state — nothing survives the launch that wrote
+    // it, and `(g)`'s fingerprints must keep meaning "model state" — and it is ONE buffer for the
+    // whole request because the engine submits in stream order: `attn_combine` reads a row of `part`
+    // before the next attention layer is allowed to overwrite it.
+    float* a_part = nullptr;        // [8][kAttnMaxSplit][258] F32, sized by attn_part_floats()
 
     // MLP (§03.3). `act` is the F32 intermediate `down_proj` wants, `mlp_act` the BF16 one the
     // gate is pinned against; both exist because the two kernels disagree about the dtype.
@@ -151,8 +161,8 @@ constexpr int kStopToken = 248046;
 // What it does NOT touch is `sampled_token`/`stopped` — there is no sample until `finish_token` —
 // and it leaves the normed final row in `sc.norm` for `finish_token` to read.
 //
-// Throws std::runtime_error on a HIP failure, on a position the gated kernels cannot serve
-// (attention's MAXSC, §07.3 in kernels_attn.cpp), on a token outside [0, vocab), or if
+// Throws std::runtime_error on a HIP failure, on a lane count the attention launcher cannot serve
+// (staging × split, §07.3 in kernels_attn.cpp), on a token outside [0, vocab), or if
 // `prepare_weight_adapters` has not been called on this scratch.
 void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
                        int token);

@@ -244,6 +244,11 @@ DecodeScratch allocate_scratch(int wave_rows) {
     sc.a_gate = alloc<uint16_t>(kNumQueryHeads * kHeadDim);
     sc.a_pre = alloc<uint16_t>(kNumQueryHeads * kHeadDim);
     sc.a_gated = alloc<uint16_t>(kNumQueryHeads * kHeadDim);
+    // The split-K online softmax's partial staging (§07.3, P7). One buffer per request, sized by the
+    // attention launcher itself — it owns the head width and the split cap, and this file should not
+    // have to. 64.5 KiB at the full ceiling, which AGENTS.md is right about: this model uses 4 % of
+    // the pool, so the lane ceiling is bought with scratch rather than with a second code path.
+    sc.a_part = alloc<float>(kernels::attn_part_floats());
 
     sc.mlp_act = alloc<uint16_t>(i);
     sc.mlp_act_f32 = alloc<float>(i);
@@ -284,6 +289,7 @@ void free_scratch(DecodeScratch& sc) {
     (void)hipFree(sc.a_gate);
     (void)hipFree(sc.a_pre);
     (void)hipFree(sc.a_gated);
+    (void)hipFree(sc.a_part);
     (void)hipFree(sc.mlp_act);
     (void)hipFree(sc.mlp_act_f32);
     (void)hipFree(sc.logits);
@@ -505,6 +511,9 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 a.q_rope = sc.a_q_rope;
                 a.k_rope = sc.a_k_rope;
                 a.gate_out = sc.a_gate;
+                // The split-K partials (§07.3): unused by a row that fits the one-pass staging, and
+                // required by one that does not — the launcher refuses rather than lose a partial.
+                a.part = sc.a_part;
                 kernels::attn_decode_layer(a);
 
                 kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32 + (size_t)t * kValueDim,

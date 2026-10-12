@@ -15,6 +15,7 @@
 // The `neg` parameter each op carries for its own negative tests is always the clean value here.
 // The engine is not a place to inject bugs; the injections stay in the op's gate.
 
+#include <cstddef>
 #include <cstdint>
 
 namespace engine::kernels {
@@ -99,17 +100,33 @@ void gdn_gated_norm(const float* o, const uint16_t* z, const float* w_norm, uint
                     uint16_t* norm_out, int tokens = 1);
 
 // ---- §05.1-§05.7: the whole attention block between the projections and o_proj
-// (prototype/attn_decode, fused launch plan, one-pass softmax — the form §07.3 now prescribes and
-// the only one that reproduces `attn_out_pre_gate` bit-for-bit). One launch, 8 blocks.
+// (prototype/attn_decode, fused launch plan). One launch below the lane staging, two above it.
 // `lvalid` is the number of cache lanes this query may read (prefix_len + 1 during decode).
+//
+// TWO FORMS, chosen by the launcher per row and by necessity only (§07.3). `lvalid <= MAXSC` takes
+// the one-pass softmax, which is bit-exact with the pins and is the route every priced fixture rides.
+// A longer row cannot be one-pass at all — that form normalises the weight matrix inside one block —
+// so it takes the op's split-K online form with `split = ceil(lvalid / MAXSC)` blocks per query head
+// plus one merge launch, and it needs `part` to put the partials in (see `attn_part_floats`). The
+// lane ceiling is therefore `MAXSC × kAttnMaxSplit`, both constants living in `kernels_attn.cpp` where
+// they are enforced, and past it the launcher throws instead of writing past a stage.
 struct AttnLayerArgs {
     const uint16_t *q_proj_out, *k_proj_out, *v_proj_out, *q_norm, *k_norm;
     uint16_t *k_cache, *v_cache;            // [2][cap][256], appended at `pos` in place
     int cap, pos, lvalid;
     uint16_t *attn_out_pre_gate, *gated;    // [8][256] each; `gated` is o_proj's operand
     uint16_t *q_rope, *k_rope, *gate_out;   // stage dumps (may be null)
+    float *part;                            // [8][split][258] split-K (max,sum,acc) partials; null
+                                            // below the staging, REQUIRED above it — the launcher
+                                            // refuses rather than drop a row's partials on the floor
 };
 void attn_decode_layer(const AttnLayerArgs& a);
+
+// How many F32 elements `AttnLayerArgs::part` must hold: one (max, sum, acc[head_dim]) tuple per
+// query head per split block, at the maximum split the engine serves. Defined in `kernels_attn.cpp`,
+// because the head width and the split cap are that op's constants and `decode_step` should not have
+// to know either one to size its scratch.
+std::size_t attn_part_floats();
 
 // ---- §03.4: the tied logits GEMV (prototype/lm_head_gemv), full-logit form. The fused-argmax
 // form exists but resolves ties to the highest id, and §03.4 fixes ties to the lowest, so the
