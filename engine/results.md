@@ -2613,8 +2613,10 @@ and whether its element error exceeds the margin), and `--selftest` requires the
 string on an untied step. A gate line that asserts an unchecked fact is worse than a silent gate: this
 one bought a whole wrong diagnosis.
 
-**The engine's prefill is not wrong.** Against the pins (`tmp/` probe over the gate's own dumps, not a
-gate check): prefill row cos **0.999893** (deficit 1.07e−04, meanrel 1.57 %), step 0 cos 0.999919, step 1
+**The engine's prefill is not wrong.** Against the pins — the engine's dumped row
+`tmp/engine_gate/logits119.bin` (F32, the `--prefill-logits last` dump of the wave's last row) against
+`data/refs/chunk64b/logits_last.npy` widened from its BF16 payload; a probe, not a gate check:
+prefill row cos **0.999893** (deficit 1.07e−04, meanrel 1.57 %), step 0 cos 0.999919, step 1
 cos 0.999908 — every one inside §10.1 G5's 5e−04 floor; 29 of the 30 pinned generation samples reproduce
 exactly, and the 30th is step 0 above. The only token that differs after the prompt is one the reference
 had not decided, and the one before it is a proved tie. This is the same conclusion §10.4 and A-18 reach
@@ -2705,8 +2707,10 @@ row above compresses into one column.
 **What a worker ran on the device (correctness only, no timing taken).** `engine/build.sh`, then
 `engine/gate.py --fixture {dec8, dec64f, dec64t, mt32f, p128, chunk64b, dec300f, wide520f}`, each inside
 its own `tools/gpu_lock.sh acquire q5p6b` / `release q5p6b` pair (the gate does **not** self-lock), `util`
-93–95 % throughout, walls 2/7/7/19/11/7/7/2 s — **counts, never durations, and none of these is a
-duration.** CPU-side: `engine/gate.py --selftest --fixture {dec8, chunk64b}` (both SELFTEST PASS, 22 s on
+reading 93–95 % throughout that pass — and a confirmation re-run of `chunk64b` against the final tree
+read `util` 4 % and reproduced the same 365 PASS / 3 FAIL, so the counts are not a contention
+artifact. Walls 2/7/7/19/11/7/7/2 s — **counts, never durations, and none of these is a duration.**
+CPU-side: `engine/gate.py --selftest --fixture {dec8, chunk64b}` (both SELFTEST PASS, 22 s on
 `chunk64b`), including the two new cases `--break-y0` (must FAIL, all fixtures) and `--y0-alt` (must be
 ADMITTED, `chunk64b` only), and the updated `--break-logits 2` needles.
 
