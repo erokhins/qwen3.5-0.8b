@@ -550,10 +550,12 @@ lever, and this table is what prices it.
 
 **And a new ceiling to mind.** P7's split is capped at `kAttnMaxSplit = 8`, so the engine's lane ceiling is
 now **512 × 8 = 4096** and it refuses fail-closed past it: the first attempt at this row died with
-`attn_decode_layer: lvalid=4097 needs split=9`. A full 4k context plus generated tokens exceeds that, so
-"4k support" as shipped means a 4k **prompt window measured to 4096 lanes inclusive**, not 4k of prompt
-*plus* 4k of generation. Raising it means raising `attn_part_floats()` scratch alongside the constant, and
-`engine/gate.py::lane_ceiling()` reads both rather than trusting a number.
+`attn_decode_layer: lvalid=4097 needs split=9`. The boundary is therefore **total session lanes** — prompt
+*plus* everything generated — so a 4096-token prompt cannot produce even one token, and "4k support" as
+shipped means a window that the whole exchange fits inside, not 4k of prompt *plus* 4k of generation.
+Raising it means raising `attn_part_floats()` scratch alongside the constant, and
+`engine/gate.py::lane_ceiling()` reads both rather than trusting a number; P8b priced that and left the
+constant at 8 with the arithmetic in `bench/plan-prefill-2026-10-12.md` §3.1.
 
 Reproduce:
 
@@ -563,3 +565,53 @@ tools/gpu_lock.sh acquire <tag> && tools/gpu_lock.sh util
 .venv/bin/python tools/prefill_sweep.py  --lanes 64,256,1024,3072 --runs 3
 tools/gpu_lock.sh release <tag>
 ```
+
+### P8's payoff: attention leaves the token loop (2026-10-13, zero subagents, foreground, locks `main-p8b-verify` then `main-p8b-timing`)
+
+P8b landed the engine half of P8 (`f4a1095..88fd712`): one attention site per attention layer per body,
+with the plan chosen by row count — P7's fused single launch for one row, `attn_prep` + `attn_core` for a
+wave. The worker took no timings by rule; these are mine, same two harnesses and same protocol as the two
+tables directly above, so they are comparable row-for-row. First, the identity check, on device, my own
+run of all eight fixtures after rebuilding from HEAD: `dec8 168`, `dec64f 650`, `dec64t 647`,
+`dec300f 1156`, `mt32f 391`, `p128 197`, `wide520f 327`, all 0 FAIL, and `chunk64b` at 372 PASS with
+**exactly its 3 announced D-9 red lines** and nothing else. Every count is the pre-P8 count **+7**, which is
+section `(h)`'s new attention checks — the numbers moved because the gate got stricter, not because the
+engine did. `gpu util` 7 % at acquire, 58 % at release; discounted as usual.
+
+**Time to first sampled token, before → after** (`tools/prefill_sweep.py`, `--steps 1`, weight load excluded):
+
+| prompt lanes | before (P7 tree) | **after (P8b)** | Δ | spread after | prompt tok/s before → after |
+|---|---|---|---|---|---|
+| 64 | 89.4 | **82.7** | −7.5 % | 1.91 % | 716 → 774 |
+| 256 | 347.5 | **276.5** | −20.4 % | 0.96 % | 737 → 926 |
+| 1024 | 1610.2 | **1124.3** | −30.2 % | 1.87 % | 636 → 911 |
+| 3072 | 5407.1 | **4116.9** | −23.9 % | 0.66 % | 568 → 746 |
+
+This is the first change in the project that moved a wall-clock number the user would feel, and the shape is
+the expected one: the gain grows with the prompt, because the thing removed is per-query launches, and the
+spreads stayed under 2 % so the effect is far outside noise. A 3072-token prompt now waits 4.1 s instead of
+5.4 s. Against the pre-prefill era (~40 s for the same prompt, derived above) the whole sequence is roughly
+**10×**.
+
+**Decode cost did not move, and I am not going to pretend otherwise** (`tools/context_sweep.py`, differential):
+
+| lanes at last step | before | after | spread after |
+|---|---|---|---|
+| 128 | 12.863 | **12.949** | 1.77 % |
+| 512 | 13.942 | **14.137** | 0.63 % |
+| 1024 | 13.793 | **13.903** | 3.12 % |
+| 2048 | 13.634 | **13.360** | 5.43 % |
+| 4032 | 16.311 | **14.773** (median; best 12.692, worst 17.489) | **37.79 %** |
+
+Four of five points sit inside run-to-run noise, which is the correct result: decode is one row, so it takes
+P7's fused path and P8 deliberately did not change its route. The fifth point is worth stating rather than
+smoothing — at 4032 lanes the spread blew out from 4.8 % to 37.8 % across three runs, and I quote the
+**median**, not the best. That is the dispatch-bound bimodality this file already warns about, showing up at
+the widest lane count where the split path runs eight blocks per site; the honest summary is *"4k decode is
+~13–17 ms/token and we do not yet know which"*, and a re-measure belongs on the list.
+
+Two debts from this pass, both written up by the worker rather than glossed: the mixed one-pass + streaming
+wave grid is priced by engine-vs-engine self-consistency, **not** by a reference pin — pinning it needs a
+>512-token-prompt fixture with its own D-2 allowance, and P8b declined to invent one; and `kAttnMaxSplit`
+stays 8 with the scratch arithmetic (129 KiB per wave-row, ~64.5 MiB per request at `kMaxWaveRows`) recorded
+in `bench/plan-prefill-2026-10-12.md` §3.1 instead of a silent constant bump.
