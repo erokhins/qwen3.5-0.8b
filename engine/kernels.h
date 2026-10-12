@@ -71,11 +71,20 @@ void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows,
 // ---- §04.2/§04.3/§04.4: conv, gates, recurrence (prototype/gdn_decode). All F32 on the state
 // side; `raw` is F32 because the conv kernel reads it that way, which is why decode_step casts the
 // BF16 `in_proj_qkv` output once per layer.
+// `tokens` is P6's token-parallel form (§06.2): `raw`/`u` are then [tokens, 6144] tiles and
+// `a_raw`/`b_raw`/`g`/`beta` [tokens, 16] ones, with the conv reading the [3][6144] window the
+// previous wave or decode step left and writing its own last-3-columns window once per wave
+// (§08.6 inv 2). `tokens == 1` issues the same grid and the same per-element arithmetic this
+// launcher issued before P6 — `prototype/gdn_decode/check.py --tokens` requires the two widths to
+// agree bit for bit, and the window rule (raw[k<0] is the CARRIED window, not zero) is the part
+// that a wider tile could get wrong while every single-wave fixture still passed.
 void gdn_conv(const float* raw, const float* win, const float* conv_weight, float* u,
-              float* new_win);
+              float* new_win, int tokens = 1);
 void gdn_gates(const float* a_raw, const float* b_raw, const float* a_log, const float* dt_bias,
-               float* g, float* beta);
+               float* g, float* beta, int tokens = 1);
 // One GDN layer: 16 blocks, thread j owns column j of S. `S` is the layer's [16][128][128] block.
+// Per TOKEN, and stays that way: the recurrence is a sequential scan (§04.4), so unlike the three
+// launchers above it has no token width. Chunking it is P9, conditionally.
 void gdn_rec(const float* q, const float* k, const float* v, const float* g, const float* beta,
              float* S, float* o);
 
@@ -83,8 +92,11 @@ void gdn_rec(const float* q, const float* k, const float* v, const float* g, con
 // (the kernel rounds it to the activation dtype itself); `z` is in_proj_z's BF16 rows; `w_norm`
 // is F32 in the checkpoint (§01.6) and joins as BF16, which is what the pins carry. `norm_out`
 // may be null; decode_step passes the stage pointer through when dumping.
+// `tokens` is P6 again: `o`, `z` and `out` are [tokens, 2048] tiles and the launch is one block per
+// (token, value head) instead of one per head, so per-head reduction order — and therefore every
+// bit — is unchanged at any width.
 void gdn_gated_norm(const float* o, const uint16_t* z, const float* w_norm, uint16_t* out,
-                    uint16_t* norm_out);
+                    uint16_t* norm_out, int tokens = 1);
 
 // ---- §05.1-§05.7: the whole attention block between the projections and o_proj
 // (prototype/attn_decode, fused launch plan, one-pass softmax — the form §07.3 now prescribes and

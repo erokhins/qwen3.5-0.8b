@@ -37,13 +37,28 @@ Family& mlp_down() {
     static Family f;
     return f;
 }
+Family& gdn_conv() {
+    static Family f;
+    return f;
+}
+Family& gdn_gates() {
+    static Family f;
+    return f;
+}
+Family& gdn_gated_norm() {
+    static Family f;
+    return f;
+}
 
 std::string describe_run() {
     std::ostringstream os;
     os << "LAUNCHSTAT family=glue " << glue().describe() << "\n"
        << "LAUNCHSTAT family=proj " << proj().describe() << "\n"
        << "LAUNCHSTAT family=mlp_gateup " << mlp_gateup().describe() << "\n"
-       << "LAUNCHSTAT family=mlp_down " << mlp_down().describe();
+       << "LAUNCHSTAT family=mlp_down " << mlp_down().describe() << "\n"
+       << "LAUNCHSTAT family=gdn_conv " << gdn_conv().describe() << "\n"
+       << "LAUNCHSTAT family=gdn_gates " << gdn_gates().describe() << "\n"
+       << "LAUNCHSTAT family=gdn_gated_norm " << gdn_gated_norm().describe();
     return os.str();
 }
 

@@ -28,17 +28,20 @@ class WeightStore;
 // so a shape change cannot leave a short buffer behind. The layout is documented in decode_step.cpp
 // next to the buffers' use, because which kernel wants which dtype is the reason each one exists.
 //
-// P4 split the buffers into two families, and the difference is visible in the sizes:
-//   * the ROW family — embed, s_a, s_b, norm, norm_f32, delta, mlp_act, mlp_act_f32, and since P5
-//     also the projections' inputs and outputs (block_out, the `g_*` rows a projection writes, the
-//     `a_*` rows a projection writes) — is `[wave_rows, H]` (or `[wave_rows, I]`, `[wave_rows,
-//     6144]`, …). A prefill wave (§08.2) fills one row per token and a decode step uses row 0, which
-//     is why decode is unchanged by their being taller.
-//   * what is left one row wide is the MIXER's own internals — the conv window's `conv_new`, the
-//     post-conv `g_u`, the recurrence's `g_o`, its `g_g`/`g_beta`, and the attention stage buffers
-//     `a_*_rope`/`a_gate`/`a_pre`/`a_gated`. Those are produced and consumed inside one token's mixer
-//     call; the GDN scan and the attention row are still per token (P6/P7/P8 batch them), so giving
-//     these a token axis would be scratch they never use.
+// P4 split the buffers into two families, and P6 moved one line of that split. The ROW family —
+//   embed, s_a, s_b, norm, norm_f32, delta, mlp_act, mlp_act_f32, the projections' inputs and outputs
+//   (block_out, the `g_*` rows a projection writes, the `a_*` rows a projection writes), and since P6
+//   the GDN mixer's own `g_u`/`g_o`/`g_g`/`g_beta` — is `[wave_rows, H]` (or `[wave_rows, I]`,
+//   `[wave_rows, 6144]`, …). A prefill wave (§08.2) fills one row per token and a decode step uses
+//   row 0, which is why decode is unchanged by their being taller. P6 moved `g_u`/`g_o`/`g_g`/`g_beta`
+//   across because their producing and consuming launches are now one call per wave (the conv writes
+//   the whole `u` tile; the gated norm reads the whole `o` tile), which is exactly the test the split
+//   uses.
+//   * what is left one row wide is what no launch writes in bulk: the conv window's `conv_new` (a
+//     K−1-row window, not a row family) and the attention stage buffers `a_*_rope`/`a_gate`/`a_pre`/
+//     `a_gated`, which belong to an attention block that is still one token wide (P7/P8). The GDN
+//     recurrence is per token too, but it reads and writes ROWS of the tall tiles above rather than
+//     its own scratch, so it did not keep a one-row buffer with it.
 constexpr int kMaxWaveRows = 512;   // plan §2.1; decode_step.cpp explains why 512 and not 1024
                                     // `allocate_scratch` accepts less, and `decode_run --wave-rows 1`
                                     // deliberately asks for the least: a prompt fed one token per wave

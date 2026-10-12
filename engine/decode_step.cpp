@@ -14,12 +14,18 @@
 //     rounding is one named thing (RNE, same as torch's) instead of eighteen local casts.
 //
 // The wave body's launch plan is the per-token plan with the batchable families collapsed — glue and
-// the MLP's two halves (P4), and the nine projections (P5, §06.2's "one GEMM per projection").
+// the MLP's two halves (P4), the nine projections (P5, §06.2's "one GEMM per projection"), and the
+// three token-parallel GDN sites conv/gates/gated norm (P6, §06.2's "the conv is causal over the
+// request start" plus §04.3/§04.5 being per-(token, head) elementwise).
 // `planned_launch_counts()` below derives the n = 1 row of that table, and `gate.py` re-derives
 // every row from §07 in Python and fails on a mismatch, so this comment and the code cannot drift
-// apart quietly. Each collapsed family bills the SAME 49/114/48 launches for a body of 295 tokens as
-// for a body of one — one launch per op per body, whatever its width — which is why this table is the
-// plan for both paths and `gate.py` section (h) can judge a wave against it unchanged.
+// apart quietly. Each collapsed family bills the SAME 49/114/48/18/18/18 launches for a body of 295
+// tokens as for a body of one — one launch per op per body, whatever its width — which is why this
+// table is the plan for both paths and `gate.py` section (h) can judge a wave against it unchanged.
+// The GDN family is the one that does NOT collapse whole: of its four launches per layer, three are
+// now per body and `rec_kernel` (§04.4's sequential scan) stays per token until P9 chunks it. Same
+// for `other`'s 18 conv-window copies: per token at n = 1, per wave from P6 on, because the window
+// is written once per wave whatever T_w is.
 //
 //   glue   1 norm-only (layer 0's input norm) + 2 × 24 fused add+norm = 49   (§03.2, = glue's own
 //          gated 49-launch token plan; the final norm is the last of them, not an extra launch)
@@ -195,8 +201,12 @@ DecodeScratch allocate_scratch(int wave_rows) {
     // [wave_rows, rows] tile, so their inputs and outputs are row-family buffers too. At
     // kMaxWaveRows = 512 that is ~31 MiB on top of P4's ~18 MiB of scratch per request — against a
     // 1.55 GB checkpoint and a ~34 GiB pool, which AGENTS.md is explicit is not the constraint for
-    // this model. The mixer's own internals (g_u, g_o, g_g, g_beta, conv_new, the a_* stage buffers)
-    // stay one row wide: see the two-family note in decode_step.h.
+    // this model. P6 adds the GDN mixer's own three (g_u the conv's output tile, g_o the
+    // recurrence's, g_g/g_beta the gates), because its batched conv / gates / gated norm each read
+    // and write one row per token in one launch; the recurrence's per-token stage is row t of those
+    // tiles. conv_new and the a_* stage buffers stay as they are: the first is a K-1-row window,
+    // which is not a row family, and the others belong to an attention block that is still one
+    // token wide (P7/P8). See the two-family note in decode_step.h.
     const int qkv = (int64_t)wave_rows * kQkvRows;
     const int vdim = (int64_t)wave_rows * kValueDim;
     const int qprj = (int64_t)wave_rows * kQprojRows;
@@ -220,10 +230,10 @@ DecodeScratch allocate_scratch(int wave_rows) {
     sc.g_b_f32 = alloc<float>(vheads);
     sc.g_dt_bias = alloc<float>(kNumGdnLayers * kNumValueHeads);
     sc.g_conv_w = alloc<float>(kNumGdnLayers * kConvChannels * kConvKernel);
-    sc.g_g = alloc<float>(kNumValueHeads);
-    sc.g_beta = alloc<float>(kNumValueHeads);
-    sc.g_u = alloc<float>(kQkvRows);
-    sc.g_o = alloc<float>(kValueDim);
+    sc.g_g = alloc<float>(vheads);
+    sc.g_beta = alloc<float>(vheads);
+    sc.g_u = alloc<float>(qkv);
+    sc.g_o = alloc<float>(vdim);
     sc.conv_new = alloc<float>(kConvWindow * kConvChannels);
 
     sc.a_q = alloc<uint16_t>(qprj);
@@ -328,7 +338,9 @@ void prepare_weight_adapters(const WeightStore& weights, DecodeScratch& sc) {
 //
 // P4 made it a WAVE body: `n` consecutive tokens go through the stack layer by layer, and the two
 // families whose arithmetic is proven row-batchable (glue and the MLP) are launched once per layer
-// over the [n, H] tiles instead of once per layer per token. `submit_token_body` below is this
+// over the [n, H] tiles instead of once per layer per token. P5 moved the nine projections into the
+// same shape, and P6 the GDN conv, gates and gated norm — with the recurrence left alone, because it
+// is a scan over positions and cannot be launched wide (§04.4). `submit_token_body` below is this
 // function with n = 1, which is what keeps one implementation of the order.
 void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
                       const int* tokens, int n) {
@@ -435,11 +447,42 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         }
 
         // ---- the mixer, once per token, in position order (§08.2). The token loop is why
-        // the wave is layer-major: the GDN recurrence, the conv roll and the causal KV append
-        // all need ascending positions WITHIN a layer, and nothing in the mixer needs another
-        // token's mixer output — that is what lets the launches around it batch. At n == 1 this
-        // is the decode path's loop body, same order, same launches. What the mixer now reads is
-        // row t of the tiles the launches above filled (P5); its own scratch stays one row wide.
+        // the wave is layer-major: the GDN recurrence and the causal KV append both need ascending
+        // positions WITHIN a layer, and nothing in the mixer needs another token's mixer output —
+        // that is what lets the launches around it batch. At n == 1 this is the decode path's loop
+        // body, same order, same launches. What the mixer now reads is row t of the tiles the
+        // launches around it filled (P5's projections, P6's conv and gates); its own stage is row t
+        // of a wave-sized tile.
+        //
+        // ---- P6: §04.2's conv and §04.3's gates go ONCE per GDN layer for the whole wave. The conv
+        // reads the [n, 6144] F32 tile P5's `in_proj_qkv` just wrote and the layer's carried window,
+        // and writes the wave's `u` tile plus the window's new contents — so the 3·6144·4 B window
+        // copy that used to run 18 times per TOKEN now runs 18 times per WAVE (§2.4's end condition:
+        // the window after a wave is raw[T−3..T−1], written once). The gates are the same story one
+        // buffer smaller. Neither is allowed to read the recurrence's output, and neither does: the
+        // conv is causal within the tile and the gates are per (token, head), which is what makes
+        // hoisting them out of the token loop the same kind of edit P5 made with the projections.
+        if (!attn_layer) {
+            const int slot = gdn_slot(layer);
+            // §04.2 / §07.2: the conv reads the OLD window and the roll appends the PRE-CONV raw, so
+            // `new_win` cannot be the window itself — conv_kernel's `win`/`new_win` are both
+            // `__restrict__`. It rolls into scratch and the layer's window is updated by one D2D
+            // copy, one per layer per wave: 18 × 73 728 B for the whole wave instead of 18 × T_w of
+            // them. Cheaper than double-buffering 1.27 MiB of state per request, which is the
+            // alternative §08.2's "in-place ring update" wording invites; results.md carries it.
+            kernels::gdn_conv(sc.g_raw_f32, st.conv_window_layer(layer),
+                              sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel,
+                              sc.g_u, sc.conv_new, n);
+            ENGINE_CK(hipMemcpyAsync(st.conv_window_layer(layer), sc.conv_new,
+                                     (size_t)kConvWindow * kConvChannels * sizeof(float),
+                                     hipMemcpyDeviceToDevice));
+            // §04.3, all n rows at once. `A_log` is one of the 36 tensors the checkpoint stores F32
+            // (§01.6), so it goes to the kernel as-is; dt_bias came through the adapter.
+            kernels::gdn_gates(sc.g_a_f32, sc.g_b_f32,
+                               (const float*)layer_dev(weights, layer, leaf::kALog),
+                               sc.g_dt_bias + (size_t)slot * kNumValueHeads,
+                               sc.g_g, sc.g_beta, n);
+        }
         for (int t = 0; t < n; ++t) {
             const int pos = pos0 + t;                          // §02.4: P of this token
             // ---------------- the mixer: §07.2 or §07.3, by layer type (§03.5 routing) ----------
@@ -467,47 +510,35 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32 + (size_t)t * kValueDim,
                                           kQwidth);
             } else {
-                const int slot = gdn_slot(layer);
-                const uint16_t* raw_row = sc.g_raw + (size_t)t * kQkvRows;
-                float* raw_f32_row = sc.g_raw_f32 + (size_t)t * kQkvRows;
-
-                // §04.2 / §07.2: the conv reads the OLD window and the roll appends the PRE-CONV raw,
-                // so `new_win` cannot be the window itself — conv_kernel's `win`/`new_win` are both
-                // `__restrict__`, and one thread's read of row j+1 must not race another's write of
-                // row j. It rolls into scratch and the layer's window is updated by one D2D copy:
-                // 18 × 73 728 B/token ≈ 0.006 ms of traffic, ≈0.033 ms of launch cost. Cheaper than
-                // double-buffering 1.27 MiB of state per request, which is the alternative §08.2's
-                // "in-place ring update" wording invites; results.md carries it as a named cost.
-                kernels::gdn_conv(raw_f32_row, st.conv_window_layer(layer),
-                                  sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel, sc.g_u,
-                                  sc.conv_new);
-                ENGINE_CK(hipMemcpyAsync(st.conv_window_layer(layer), sc.conv_new,
-                                         (size_t)kConvWindow * kConvChannels * sizeof(float),
-                                         hipMemcpyDeviceToDevice));
-
-                // §04.3 gates, then §04.4's recurrence. `A_log` is one of the 36 tensors the checkpoint
-                // stores F32 (§01.6), so it goes to the kernel as-is; dt_bias came through the adapter.
-                kernels::gdn_gates(sc.g_a_f32 + (size_t)t * kNumValueHeads,
-                                   sc.g_b_f32 + (size_t)t * kNumValueHeads,
-                                   (const float*)layer_dev(weights, layer, leaf::kALog),
-                                   sc.g_dt_bias + (size_t)slot * kNumValueHeads, sc.g_g, sc.g_beta);
-                // q, k, v are the three 2048-wide slices of the conv output (§04.1's [q|k|v]); rec_kernel
-                // indexes its own slice as [head][dim], so the pointers are just offsets into `g_u`.
-                kernels::gdn_rec(sc.g_u, sc.g_u + kValueDim, sc.g_u + 2 * kValueDim, sc.g_g, sc.g_beta,
-                                 st.gdn_state_layer(layer), sc.g_o);
-
-                // §04.5, the one op this phase added a launcher for: `o` arrives F32 as the recurrence
-                // left it, `z` is still BF16 (it is an activation, §04.1), and the norm weight is one of
-                // the 36 F32 ones — the kernel rounds it to BF16 itself, which is what the pins carry
-                // (`prototype/gdn_gated_norm/results.md` §1).
-                kernels::gdn_gated_norm(sc.g_o, sc.g_z + (size_t)t * kValueDim,
-                                        (const float*)layer_dev(weights, layer, leaf::kGatedNorm),
-                                        sc.block_out + (size_t)t * kValueDim, nullptr);
-                kernels::cast_bf16_to_f32(sc.block_out + (size_t)t * kValueDim,
-                                          sc.block_out_f32 + (size_t)t * kValueDim, kValueDim);
+                // §04.4's recurrence, and this is the one GDN launch that stays per token: it is a
+                // sequential scan, so token t cannot start before t−1 finished writing S (§04.4,
+                // and §06.2's alternative is the chunked form of §04.7, which is P9's conditional
+                // package and not this one). q, k, v are the three 2048-wide slices of row t of the
+                // conv's output tile (§04.1's [q|k|v]); rec_kernel indexes its own slice as
+                // [head][dim], so the pointers are just offsets into that row.
+                kernels::gdn_rec(sc.g_u + (size_t)t * kQkvRows,
+                                 sc.g_u + (size_t)t * kQkvRows + kValueDim,
+                                 sc.g_u + (size_t)t * kQkvRows + 2 * kValueDim,
+                                 sc.g_g + (size_t)t * kNumValueHeads,
+                                 sc.g_beta + (size_t)t * kNumValueHeads,
+                                 st.gdn_state_layer(layer), sc.g_o + (size_t)t * kValueDim);
             }
 
         }  // for t: the mixer
+
+        // ---- §04.5 over the whole tile, P6's third batched launch. `o` arrives F32 as the
+        // recurrence left it (row t of the tile, one block per (token, head)), `z` is still BF16 (it
+        // is an activation, §04.1), and the norm weight is one of the 36 F32 ones — the kernel rounds
+        // it to BF16 itself, which is what the pins carry (`prototype/gdn_gated_norm/results.md` §1).
+        // The widening that follows goes over `n * kValueDim` elements in one launch for the same
+        // reason `cast_bf16_to_f32_3` went over the projections' tile in P5: it is elementwise, so a
+        // wider call is the same bits in fewer submissions.
+        if (!attn_layer) {
+            kernels::gdn_gated_norm(sc.g_o, sc.g_z,
+                                    (const float*)layer_dev(weights, layer, leaf::kGatedNorm),
+                                    sc.block_out, nullptr, n);
+            kernels::cast_bf16_to_f32(sc.block_out, sc.block_out_f32, n * kValueDim);
+        }
 
         // ---- the mixer's OUTPUT projection, one launch over the [n, 2048] tile the loop just
         // filled (P5). The two layer types write the same scratch and the same width — `kQwidth` and
