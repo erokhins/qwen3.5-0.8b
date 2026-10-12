@@ -63,6 +63,13 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
   (f) FIXTURE INTEGRITY of the state deltas — the pinned fingerprints must be finite and the pinned KV
       delta must be exactly 0 (the cache is append-only). A check on the dump, not the engine: it is
       what caught a misaligned delta in `tools/reference_dump.py`'s first version of this code.
+  (g) G5-STATE — the engine's own §08 state, D2H'd at the prompt end and the run end by
+      `decode_run --state-fp`, against those same pinned fingerprints. What is gated is what §08.6
+      makes exact — append-only Δ² of 0.0, one lane per token, a state that moved, a window that
+      rolled, no family left at the §08.4 zero — plus every row's geometry and the shared helper
+      proved against the pins themselves. The engine-vs-pin DISTANCES are printed and not gated: plan
+      `bench/plan-prefill-2026-10-12.md` §2.6 ships this as "a measurement and a tripwire, not a
+      band", and the band is a main-agent decision with a `D-x` and a ledger line behind it.
 
 Why this file contains no engine arithmetic. Its value is independence. A Python mirror of the
 kernels would check the engine against the engine, which is the failure `bench/gate-audit.md` exists
@@ -71,7 +78,10 @@ to find. Everything Python-side here is either a §10 metric, the §00/§08 stat
 
 CPU-only in `--no-engine` mode; the default mode runs the device binary as a subprocess and reads its
 dumps. It does not import torch (the reference's own dumps are read with numpy), so it runs under the
-same `.venv` the rest of the gates use.
+same `.venv` the rest of the gates use. The one exception is `(g)`'s fingerprint-identity case, which
+lazy-imports torch because "recompute the pinned fingerprint with the dumper's own function" is the
+only way to prove the helper still matches the pins; nothing else in this file touches torch, and
+`--no-engine` on a fixture with no full state tensors never imports it.
 """
 from __future__ import annotations
 
@@ -954,6 +964,611 @@ def deep_matches_shallow(n_decode: int) -> None:
 
 
 
+# ---- (g) the engine's own §08 state, against the pinned fingerprints ---------------------------
+# The state half of G5 ("prefill `T` then decode `D` equals one prefill of `T+D` (states, logits,
+# sampled ids", §10). Sections (a)/(b) have always judged the ids and the logits; the STATES were the
+# half no gate could see, because nothing read the engine's §08.1 tuple. `decode_run --state-fp` now
+# D2Hs it at the two end conditions a fixture has — after the last prompt token, after the last
+# generation step — and this section compares those rows with what the dumper pinned.
+#
+# What gets GATED here is everything §08.6 settles with exact arithmetic rather than a tolerance: the
+# KV may not be rewritten (inv 3: Δ² exactly 0.0), the cache must advance by exactly one lane per
+# token (inv 4), a state that did not move while tokens were fed is a state that was left behind
+# (inv 1), a conv window that did not roll is not a window (inv 2), and a state that is still all zero
+# after 17+ tokens was never written (the §08.4 zeroed start, left behind). Everything mechanical is
+# gated too: each row's element count, the row→layer map, the §08.4 no-previous convention on both
+# sides of the comparison, and the helper identity below.
+#
+# What is NOT gated is how far the engine's state is ALLOWED to be from the dump's.
+# `bench/plan-prefill-2026-10-12.md` §2.6 assigns that in terms: "P1 ships a measurement and a
+# tripwire, not a band", and whether the recurrent-route state is "close enough" to the chunk-route
+# state is "decided by the main agent against those printed numbers" in the D-3/D-5 idiom, with the
+# route spread at the same position as the natural denominator — which needs `route_price` extended
+# to state fingerprints, a measurement that does not exist yet. Adopting a threshold here would be a
+# band move without a `D-x` and a `bench/band-history.jsonl` line, and `tools/band_history.py` exists
+# to refuse exactly that. So every distance below is printed at full precision and judged by nobody in
+# this file. The nearest recorded yardstick for a state-level difference between two legal forms is
+# G3's `cos >= 0.99999` per layer (`speccheck/gates/run_chunkcheck.py`, A-08's verification), which on
+# a moment sum means an n2 ratio inside ~2e-5 for the same quantity under a different sum order. It
+# is printed as a yardstick and never applied as a limit.
+#
+# THE CONV FAMILY IS NOT THE SAME EXTENT ON BOTH SIDES, and that is a finding, not an engine bug. The
+# engine's window is `k_conv−1 = 3` pre-conv columns (§08.2, `state.h`'s `kConvWindow`); the pinned
+# `conv_fp` row pools the REFERENCE's conv buffer, which is `k_conv = 4` columns wide because
+# `causal_conv1d_update` cats `[conv_state, x]` before convolving (A-04). Verified on the pins, not
+# argued: `dec8` and `dec64f` share one 17-token prompt, `dec8` pins the prefill raw columns
+# `L{ll}.gdn.mixed_qkv_pre_conv`, and pooling dec8's newest 4 of them reproduces dec64f's pinned
+# `conv_fp` row bit-for-bit for every GDN layer (newest 3 and newest 2 do not). So a correct engine
+# and a correct pin differ on this family by the energy of one raw column — 19–31 % of n2 on the three
+# layers checked by hand — and no engine change fixes that. The comparable quantity is the pinned
+# buffer's newest 3 columns, which only the deep-step fixtures have; `conv_window_pin` derives it and
+# its absence is reported, never skipped quietly.
+
+FP_FAMILIES = ("state", "conv", "kv")
+FP_COLS = ("n2", "maxabs", "mean", "dn2")
+
+
+def prefill_fp(kind: str):
+    """The untagged fingerprint arrays: the reference's state at the END OF THE PROMPT.
+
+    The manifest records them with `step: "prefill"`, which is what makes them the pair for
+    `decode_run --state-fp`'s `phase=prefill` rows. None when the fixture carries none: `dec8` was
+    pinned before fingerprints existed, and plan §5.1 says plainly that it has no `(g)` rows.
+    """
+    path = REFS / f"{kind}_fp.npy"
+    return np.load(path, allow_pickle=False) if path.exists() else None
+
+
+def deep_state_step():
+    """The deepest step whose FULL per-layer state tensors were pinned, or None.
+
+    `--deep-steps` keeps them at one step (63 for `dec64f`/`dec64t`, 31 for `mt32f`) and
+    `--deep-steps none` keeps none (`dec300f`, whose 128 steps are fingerprint-only). The full
+    tensors are what both the helper-identity case and the conv-window comparison need, so this one
+    question decides whether `(g)` can prove its own arithmetic here and whether it can compare a
+    conv window at all — and both answers get printed, because a missing comparison must not be
+    mistaken for a passing one.
+    """
+    steps = [int(p.name.split(".")[0][len("decode"):])
+             for p in REFS.glob("decode*.L00.gdn.state_new.npy")]
+    return max(steps) if steps else None
+
+
+def index_state_fp(lines: list) -> tuple[dict, dict]:
+    """Group the engine's `STATEFP` lines as {(phase, family, row): fields} plus {phase: prefix}.
+
+    The prefix arrives on its own line (`STATEFP phase=prefill prefix=17`) because it is a property of
+    the snapshot, not of a row; a `note=` line (a run that never left the prompt) carries neither and
+    is kept under `note:<phase>` so a caller can say WHY a phase is missing instead of guessing.
+    """
+    rows: dict = {}
+    meta: dict = {}
+    for line in lines:
+        phase = line.get("phase")
+        if phase is None:
+            continue
+        if "family" not in line:
+            if "prefix" in line:
+                meta[phase] = int(line["prefix"])
+            if "note" in line:
+                meta["note:" + phase] = line["note"]
+            continue
+        fields = {"layer": int(line["layer"]), "n": int(line["n"]),
+                  **{c: float(line[c]) for c in FP_COLS}}
+        for extra in ("cols", "lanes"):
+            if extra in line:
+                fields[extra] = int(line[extra])
+        rows.setdefault((phase, line["family"]), {})[int(line["row"])] = fields
+    return rows, meta
+
+
+def fp_expectations(man: dict) -> dict:
+    """The row→layer map and per-row element counts, DERIVED from the manifest's `text_config`.
+
+    Nothing here is copied from the engine or read off the pin files: the layer map comes from
+    `layer_types`, the GDN row from `linear_num_value_heads × linear_key_head_dim ×
+    linear_value_head_dim`, the conv row from `(linear_conv_kernel_dim − 1) ×` the q/k/v row width
+    (§04.1's 6144), the pinned conv extent from `linear_conv_kernel_dim ×` it, and the KV row from
+    `2 key/value heads × 2 tensors × lanes × head_dim`. So a row count or extent that stops matching
+    fails here whether it moved in the engine, in the checkpoint, or in the dumper: the geometry is
+    checked, not assumed.
+    """
+    cfg = man["text_config"]
+    gdn = [i for i, t in enumerate(cfg["layer_types"]) if t == "linear_attention"]
+    attn = [i for i, t in enumerate(cfg["layer_types"]) if t == "full_attention"]
+    k_conv = cfg["linear_conv_kernel_dim"]
+    qkv_rows = (2 * cfg["linear_num_value_heads"] * cfg["linear_value_head_dim"]
+                + cfg["linear_num_key_heads"] * cfg["linear_key_head_dim"])
+    return {
+        "layers": {"state": gdn, "conv": gdn, "kv": attn},
+        "n": {"state": (cfg["linear_num_value_heads"] * cfg["linear_key_head_dim"]
+                        * cfg["linear_value_head_dim"]),
+              "conv": (k_conv - 1) * qkv_rows},
+        "pin_n": {"conv": k_conv * qkv_rows},
+        "k_conv": k_conv,
+        "head_dim": cfg["head_dim"],
+    }
+
+
+def conv_window_pin(step: int):
+    """Fingerprint rows for the engine's conv WINDOW, derived from the pinned conv BUFFER.
+
+    The newest `k_conv−1` columns of `decode{step}.L{ll}.gdn.conv_state` are what §08.2's window
+    holds — A-04's `cat([conv_state, x])` is what makes the pinned buffer one column wider — so this
+    is the only place the engine's conv row has something of its own extent to be compared against.
+    Returns None when those tensors are not pinned, and the caller says so out loud.
+    """
+    from tools.state_fp import fp_row_np
+    rows = json.loads((REFS / "manifest.json").read_text())[
+        "state_fingerprint"]["rows_are_model_layers"]["conv"]
+    paths = [REFS / f"decode{step}.L{layer:02d}.gdn.conv_state.npy" for layer in rows]
+    if not all(p.exists() for p in paths):
+        return None
+    return np.array([fp_row_np([load_pin(p.name)[..., 1:]], None) for p in paths], dtype=np.float64)
+
+
+def fp_helper_identity(man: dict) -> None:
+    """The mechanical half of a `(g)` PASS: does the shared helper still reproduce the pinned
+    fingerprint arrays from the pinned tensors, BIT FOR BIT?
+
+    This is the check that the *gate's* arithmetic matches the *dumper's*, not the engine's. It matters
+    because everything else in `(g)` rests on the claim that the engine's rows, the pinned rows, and
+    any row this file derives all mean the same thing — and that claim is a piece of code shared
+    between two programs, so it gets proved by importing the dumper's own function and running it on
+    the pinned tensors. This is the only place in the file that imports torch.
+
+    Bit-for-bit is a real constraint and a narrow one. `fp_row` sums in F32 because that is the
+    arithmetic the pins were made with (§10.5: a fresh dump must reproduce them), and an F32 tree sum
+    is a property of torch's reduction order, which follows the thread count: on this box the default
+    reproduces all 42 rows of a deep step exactly, and `torch.set_num_threads(1)` does not (largest
+    relative deviation 4.4e-7 on `mt32f`, measured while writing this). That asymmetry is exactly why
+    the ENGINE's rows are compared with an F64 accumulation floor and reported, while this case can
+    demand equality — this one compares two uses of one function, and the engine does not use torch.
+
+    Column 3 (Δ²) is excluded wherever the predecessor step's tensors were not kept; `--deep-steps`
+    keeps one step, so there is nothing on disk to difference against. The Δ² convention that IS
+    checkable without them — §08.4's, that a first row's Δ² equals its n2 — is asserted against the
+    pins in `state_fp_checks` below.
+    """
+    step = deep_state_step()
+    if step is None:
+        notes.append(f"(g) could NOT prove its own helper on {REFS.name}: this fixture keeps no full"
+                     " per-layer state tensors (`--deep-steps none`), so the fp-of-pins identity has"
+                     " nothing to recompute from, and the conv family cannot be priced at its own"
+                     " extent either. The engine-vs-pin numbers printed for this fixture are still"
+                     " real; what is missing is the proof of the ruler. Run this section on"
+                     " dec64f/dec64t/mt32f, or re-make the fixture with --deep-steps (a re-pin, so a"
+                     " main-agent call: plan §5.1 forbids touching the shipped fixtures).")
+        return
+    import torch     # the only torch this file imports; see the module header
+    from tools.state_fp import fp_row
+
+    rows = man.get("state_fingerprint", {}).get("rows_are_model_layers", {})
+    if not all(v in rows for v in FP_FAMILIES):
+        check(False, "the manifest states which model layer each fingerprint row is", str(rows))
+        return
+    total, ok = 0, True
+    for family in FP_FAMILIES:
+        pin = load_fp(step, family)
+        if pin is None:
+            check(False, f"fp-of-pins: decode{step}.{family}_fp.npy exists")
+            ok = False
+            continue
+        if family == "kv":
+            paths = [REFS / f"decode{step}.L{layer:02d}.cache_{w}.npy"
+                     for layer in rows[family] for w in ("keys", "values")]
+        else:
+            which = "state_new" if family == "state" else "conv_state"
+            paths = [REFS / f"decode{step}.L{layer:02d}.gdn.{which}.npy"
+                     for layer in rows[family]]
+        if not all(p.exists() for p in paths):
+            check(False, f"fp-of-pins: {family}'s full tensors are pinned at decode{step}",
+                  f"{sum(1 for p in paths if not p.exists())} of {len(paths)} missing")
+            ok = False
+            continue
+        bad, worst = [], 0.0
+        for i, layer in enumerate(rows[family]):
+            parts = ([torch.from_numpy(load_pin(p.name)) for p in paths[2 * i:2 * i + 2]]
+                     if family == "kv" else [torch.from_numpy(load_pin(paths[i].name))])
+            got = fp_row(parts, None)
+            total += 1
+            if got[:3] != [float(x) for x in pin[i][:3]]:
+                bad.append(f"{family} row {i} (layer {layer})")
+                worst = max([worst] + [abs(g - p) / abs(p) if p else abs(g)
+                                       for g, p in zip(got[:3], pin[i][:3])])
+        check(not bad, f"fp-of-pins identity at decode{step}: {family} rows reproduce BIT-EXACTLY"
+                       " with the dumper's own function (n2/maxabs/mean)",
+              "" if not bad else f"{len(bad)} row(s) differ, largest relative deviation {worst:.3e};"
+                                 f" first {bad[:3]} — if the deviation is at the 1e-7 level this is"
+                                 " torch's reduction order (thread count), not the data")
+        ok = ok and not bad
+    if ok:
+        print(f"  [info] {total} rows recomputed with `tools/state_fp.py::fp_row` at decode{step} and"
+              " matched bit-for-bit: the pinned arrays, this file, and — up to the F64 accumulation"
+              " floor `decode_run.cpp` states — the engine's rows are one definition. Whether a fresh"
+              " HF run reproduces these pins byte-for-byte is §10.5's question, checked by"
+              " `tools/reference_dump.py --verify`, not here.")
+
+
+def fp_distance(eng: dict, pin: np.ndarray, pin_n: int) -> dict:
+    """Engine-vs-pin distance over one family at one phase. Reports; never judges.
+
+    `n2 ratio` is the summary a moment-sum fingerprint is actually for — two routes' energies divided.
+    `maxabs` is an absolute deviation because it is itself a magnitude. `mean` is printed against the
+    pin's own RMS (`sqrt(n2/n)`) because the mean of a state tensor is a small number whose relative
+    deviation is meaningless on its own. `pin_n` is the pin's pooled extent, which differs from the
+    engine's only for the conv family; where it differs, the ratio carries that mismatch and the
+    caller says so rather than presenting it as a state error.
+    """
+    pin_rms = np.sqrt(pin[:, 0] / max(pin_n, 1))
+    out = {"n2": (0.0, None), "maxabs": (0.0, None), "mean": (0.0, None), "ratios": [],
+           "n2_worst": 1.0}
+    for r, got in sorted(eng.items()):
+        ratio = got["n2"] / pin[r][0] if pin[r][0] else float("nan")
+        out["ratios"].append((r, got["layer"], ratio))
+        for key, value in (("n2", abs(ratio - 1.0)),
+                           ("maxabs", abs(got["maxabs"] - pin[r][1])),
+                           ("mean", (abs(got["mean"] - pin[r][2]) / pin_rms[r]
+                                     if pin_rms[r] else 0.0))):
+            if value > out[key][0]:
+                out[key] = (value, (r, got["layer"]))
+    # The ratio is printed as itself, never as `1 + |deviation|`: a conv row that pools three columns
+    # where the pin pooled four reads 0.72, and "1.28" would read as the engine carrying MORE energy
+    # than the reference when it carries less. Sign is the finding.
+    if out["ratios"] and out["n2"][1] is not None:
+        out["n2_worst"] = next(r for rr, layer, r in out["ratios"]
+                               if (rr, layer) == out["n2"][1])
+    return out
+
+
+def print_fp_distance(label: str, dist: dict, caveat: str = "") -> None:
+    """One distance line, formatted so two fixtures can be diffed by eye.
+
+    A zero worst-deviation prints as `no row differs` rather than naming row 0: a `--dry-run` prints
+    all-zero lines by construction, and "worst at row 0" would read like a finding about row 0.
+    """
+    def at(value, cell):
+        return f"row {cell[0]} (layer {cell[1]})" if value else "no row differs"
+    print(f"  {label:<44} n2 ratio {dist['n2_worst']:.6f}"
+          f" at {at(dist['n2'][0], dist['n2'][1])}; maxabs |Δ| {dist['maxabs'][0]:.4g}"
+          f" at {at(dist['maxabs'][0], dist['maxabs'][1])}; mean |Δ|/RMS {dist['mean'][0]:.3e}"
+          f" at {at(dist['mean'][0], dist['mean'][1])}"
+          + ("" if not caveat else "\n" + " " * 46 + caveat))
+
+
+def parse_state_fp_break(spec: str):
+    """Validate `--break-state-fp WHAT:FAMILY:ROW` into `(what, family, row)`; None when unset.
+
+    Validation lives here because an injection that silently does nothing is worse than no injection:
+    it reads as a passing negative. So every impossible request is a refusal, in the same spirit as
+    `pin_tie` refusing to inject a tie at an untied step. `frozen` on the KV is refused for the same
+    reason — a KV row that stands still is the correct behaviour (§08.6 inv 3), so "freezing" it
+    cannot be the bug; `rewrote` on `state`/`conv` is refused because those two are SUPPOSED to move,
+    and the bug there is the opposite one, `frozen`.
+    """
+    if not spec:
+        return None
+    parts = spec.split(":")
+    if len(parts) != 3:
+        raise SystemExit(f"gate: --break-state-fp wants WHAT:FAMILY:ROW, got {spec!r}")
+    what, family, row = parts
+    if what not in ("zero", "frozen", "rewrote"):
+        raise SystemExit(f"gate: --break-state-fp WHAT must be zero, frozen or rewrote, not"
+                         f" {what!r}")
+    if family not in FP_FAMILIES:
+        raise SystemExit(f"gate: --break-state-fp FAMILY must be one of {FP_FAMILIES}, not"
+                         f" {family!r}")
+    if what == "frozen" and family == "kv":
+        raise SystemExit("gate: --break-state-fp frozen:kv is not a bug — §08.6 inv 3 wants the KV"
+                         " to stand still. Use rewrote:kv:ROW for the append-only failure.")
+    if what == "rewrote" and family != "kv":
+        raise SystemExit(f"gate: --break-state-fp rewrote:{family} is not a bug — a moving"
+                         " state is the point (inv 1/2). Use frozen:"
+                         + family + ":ROW for a state that was left behind.")
+    try:
+        return what, family, int(row)
+    except ValueError:
+        raise SystemExit(f"gate: --break-state-fp ROW must be an integer row index, not {row!r}")
+
+
+def state_fp_stand_in_lines(man: dict, prompt_len: int, n_decode: int, break_spec: str = "") -> list:
+    """`decode_run --state-fp`'s line protocol, filled with the pinned rows: a perfect engine.
+
+    The rows ARE the pins — prompt-end rows from the untagged arrays, run-end rows from
+    `decode{n_decode-1}` — so a clean `(g)` on this input proves plumbing and nothing about the
+    engine, exactly like the rest of `--dry-run`. What it does prove is worth a CPU run: that the line
+    protocol parses, that the geometry and maps agree with what `(g)` derives from the manifest, that
+    the §08.4 and §08.6 convention lines fire on real numbers, and — with `--break-state-fp` — that
+    each of the three state failures lights exactly the row it was aimed at.
+
+    The conv rows carry the pinned FOUR-column pool under the engine's three-column label, so the conv
+    distance a dry run prints is the extent mismatch and nothing else (block comment above `(g)`).
+    A real engine's row adds its own arithmetic on top of that, which is precisely the difference
+    between this stand-in and a device pass.
+    """
+    inj = parse_state_fp_break(break_spec)
+    want = fp_expectations(man)
+    lines = []
+    phases = [("prefill", prompt_len, {k: prefill_fp(k) for k in FP_FAMILIES})]
+    if n_decode > 0:
+        phases.append(("end", prompt_len + n_decode,
+                       {k: load_fp(n_decode - 1, k) for k in FP_FAMILIES}))
+    if inj and inj[1] == "kv" and inj[2] >= len(want["layers"]["kv"]):
+        raise SystemExit(f"gate: --break-state-fp {break_spec}: this fixture has"
+                         f" {len(want['layers']['kv'])} KV rows")
+    for family in FP_FAMILIES:
+        if inj and inj[2] >= len(want["layers"][family]):
+            raise SystemExit(f"gate: --break-state-fp {break_spec}: {family} has"
+                             f" {len(want['layers'][family])} rows here")
+    for phase, prefix, pin in phases:
+        if not any(p is not None for p in pin.values()):
+            continue                       # a fixture with no pins at all: (g) says so itself
+        # A perfect engine's conv row is the window, i.e. the newest k_conv−1 columns of the pinned
+        # buffer — so where those tensors exist at this phase's step, the stand-in uses them and the
+        # window comparison reads as the identity it is. Where they do not (the prompt end of every
+        # deep fixture, which keeps no prefill tensors), the stand-in falls back to the pinned
+        # four-column row and the extent caveat in (g) is what carries it.
+        if phase == "end" and deep_state_step() == n_decode - 1:
+            window = conv_window_pin(n_decode - 1)
+            if window is not None:
+                pin = dict(pin, conv=window)
+        lines.append(f"STATEFP phase={phase} prefix={prefix}")
+        for family in FP_FAMILIES:
+            rows = pin[family]
+            if rows is None:
+                continue
+            for r in range(rows.shape[0]):
+                vals = [float(x) for x in rows[r]]
+                if family == "kv":
+                    extent, tail = 4 * prefix * want["head_dim"], f" lanes={prefix}"
+                elif family == "conv":
+                    extent = want["n"]["conv"]
+                    tail = f" cols={want['k_conv'] - 1}"
+                else:
+                    extent, tail = want["n"]["state"], ""
+                # `frozen` and `rewrote` are run-end bugs by definition: at the prompt end there is no
+                # earlier state to have been left behind, so the injection passes through untouched.
+                if inj and inj[1] == family and inj[2] == r and (
+                        inj[0] == "zero" or (inj[0] == "frozen" and phase == "end")
+                        or (inj[0] == "rewrote" and phase == "end")):
+                    if inj[0] == "zero":
+                        vals = [0.0, 0.0, 0.0, 0.0]
+                    elif inj[0] == "frozen":
+                        vals[3] = 0.0
+                    else:
+                        vals[3] = 1.0
+                lines.append(f"STATEFP phase={phase} family={family} row={r}"
+                             f" layer={want['layers'][family][r]}{tail} n={extent}"
+                             f" n2={vals[0]:.17g} maxabs={vals[1]:.17g} mean={vals[2]:.17g}"
+                             f" dn2={vals[3]:.17g}")
+    return lines
+
+
+def state_fp_checks(man: dict, prompt_len: int, n_decode: int, ran_decode: int,
+                    statefp: list | None, stand_in: bool = False) -> None:
+    """(g) G5-STATE — the engine's §08 state against the pinned fingerprints (§08.6 inv 1–4, §10 G5).
+
+    `statefp` is the run's `STATEFP` lines, or None when there was no engine run at all. The pin-side
+    checks run either way: they are most of what P1 can prove before a device is touched, and
+    `--state-fp` means the driver has been asked to look at the state at all.
+
+    `stand_in` marks a `--dry-run`: the fingerprint rows came from this file, not from the engine, and
+    the helper-identity case is skipped — not because it matters less, but because it is a property of
+    the pins and the shared helper rather than of an engine, and it is the one thing in this file that
+    imports torch. `--selftest` runs it once, in its own process, and says so.
+    """
+    section("(g) G5-STATE — the engine's §08 state against the pinned fingerprints (§08.6, §10 G5)")
+    pins = {k: prefill_fp(k) for k in FP_FAMILIES}
+    if all(p is None for p in pins.values()):
+        notes.append(f"(g) has nothing to compare: {REFS.name} carries no state fingerprints at all"
+                     " (`dec8` was pinned before there were any). Nothing in this section ran, and"
+                     " that is not a pass on the state — plan §5.1 says this fixture simply has no"
+                     " (g) rows.")
+        return
+    want = fp_expectations(man)
+    fmap = man.get("state_fingerprint", {}).get("rows_are_model_layers", {})
+    check(fmap == want["layers"],
+          "the pinned fingerprint row map is the §03.5 routing, re-derived from the manifest's"
+          " layer_types (rows are model layers, not call order)",
+          f"manifest {len(fmap.get('state', []))}/{len(fmap.get('conv', []))}/"
+          f"{len(fmap.get('kv', []))} vs re-derived {len(want['layers']['state'])}/"
+          f"{len(want['layers']['conv'])}/{len(want['layers']['kv'])}")
+
+    # ---- the pin side: conventions the comparisons below stand on --------------------------------
+    for kind in FP_FAMILIES:
+        pin = pins[kind]
+        if pin is None:
+            notes.append(f"(g): {kind} has no untagged (prompt-end) fingerprint in {REFS.name}, so"
+                         " that family's prompt-end comparison did not run.")
+            continue
+        check(bool(np.isfinite(pin).all()),
+              f"the pinned prompt-end {kind}_fp values are finite")
+        same = bool(np.array_equal(pin[:, 3], pin[:, 0]))
+        check(same, f"the pinned prompt-end {kind}_fp rows carry §08.4's convention: no predecessor,"
+                    " so Δ² IS the state (dn2 == n2)",
+              "" if same else f"largest |dn2−n2| {np.max(np.abs(pin[:, 3] - pin[:, 0])):.3g}")
+
+    if stand_in:
+        print("  [info] fp-of-pins identity not re-run here: this is a --dry-run, and the identity is"
+              " a property of the pins and `tools/state_fp.py`, not of an engine. `--selftest` runs it"
+              " once in its own process; a real gate run runs it every time.")
+    else:
+        fp_helper_identity(man)
+
+    if statefp is None:
+        notes.append("(g) ran the pin side only: no engine run (--no-engine), so the engine's own"
+                     " state was never observed and none of the §08.6 invariants below were tested."
+                     " Re-run with a device pass.")
+        return
+    if not statefp:
+        check(False, "the run printed its state fingerprints",
+              "no STATEFP line in the output, so the engine's §08 state is invisible and G5's state"
+              " half is unjudged. Pass `--state-fp` to decode_run (this gate passes it by default);"
+              " a silent skip here is exactly the gap P1 was written to close.")
+        return
+
+    rows, meta = index_state_fp(statefp)
+    phases = [p for p in ("prefill", "end") if p in meta]
+    missing = [p for p in (["prefill"] + (["end"] if ran_decode > 0 else [])) if p not in meta]
+    check(not missing, "the run emitted every end condition it reached",
+          "; ".join(f"{p}: " + (meta.get("note:" + p) or "no phase line — the run stopped before"
+                                " it got there") for p in missing))
+
+    # ---- the mechanical block: geometry of every row ---------------------------------------------
+    geometry, finite = [], []
+    for phase in phases:
+        for family in FP_FAMILIES:
+            got = rows.get((phase, family), {})
+            if [got[r]["layer"] for r in sorted(got)] != want["layers"][family]:
+                check(False, f"{phase}: {family} rows map to the §03.5 layer routing",
+                      f"engine {[got[r]['layer'] for r in sorted(got)][:6]}… vs routing"
+                      f" {want['layers'][family][:6]}…")
+            for r in sorted(got):
+                g = got[r]
+                if not np.isfinite([g[c] for c in FP_COLS]).all():
+                    finite.append(f"{phase} {family} row {r}")
+                if family == "state" and g["n"] != want["n"]["state"]:
+                    geometry.append(f"{phase} state row {r}: n={g['n']}, §08.1 says"
+                                    f" {want['n']['state']}")
+                if family == "conv":
+                    if g["n"] != want["n"]["conv"]:
+                        geometry.append(f"{phase} conv row {r}: n={g['n']}, §08.2's window is"
+                                        f" (k_conv−1)×{want['n']['conv'] // (want['k_conv'] - 1)}"
+                                        f" = {want['n']['conv']}")
+                    if g.get("cols") not in (None, want["k_conv"] - 1):
+                        geometry.append(f"{phase} conv row {r}: cols={g['cols']}, §08.2 keeps"
+                                        f" k_conv−1 = {want['k_conv'] - 1}")
+                if family == "kv":
+                    lanes = g.get("lanes")
+                    if g["n"] != 4 * (lanes or 0) * want["head_dim"]:
+                        geometry.append(f"{phase} kv row {r}: n={g['n']} is not 2 heads × 2 tensors"
+                                        f" × lanes {lanes} × head_dim {want['head_dim']} — a KV"
+                                        " fingerprint over unwritten slots is meaningless")
+                    if lanes is not None and phase in meta and lanes != meta[phase]:
+                        geometry.append(f"{phase} kv row {r}: cache claims {lanes} lanes but the"
+                                        f" snapshot's prefix is {meta[phase]}")
+            check(bool(got), f"{phase}: the engine emitted the {family} rows",
+                  f"{len(got)} of {len(want['layers'][family])}")
+    check(not geometry, "every emitted row's extent matches the geometry derived from the checkpoint",
+          geometry[:4])
+    check(not finite, "every emitted fingerprint value is finite", finite[:4])
+
+    # ---- §08.6, invariant by invariant, engine side ---------------------------------------------
+    inv: dict[str, list[str]] = {"1": [], "2": [], "3": [], "4": []}
+    if "prefill" in meta:
+        ok = meta["prefill"] == prompt_len
+        inv["4"].append(f"prompt end at prefix {meta['prefill']}"
+                        + ("" if ok else f", expected {prompt_len}"))
+        check(ok, f"inv 4: the prompt-end snapshot sits at the fixture's prefix ({prompt_len})")
+    if "end" in meta:
+        want_prefix = prompt_len + ran_decode
+        ok = meta["end"] == want_prefix
+        inv["4"].append(f"run end at prefix {meta['end']}")
+        check(ok, f"inv 4: the run-end snapshot advanced the prefix by one per generated token"
+                  f" ({want_prefix})", f"engine says {meta['end']}")
+    for phase in phases:
+        zeroed = [f"{family} row {r}" for family in FP_FAMILIES for r in rows.get((phase, family), {})
+                  if rows[(phase, family)][r]["maxabs"] == 0.0]
+        check(not zeroed, f"§08.4: no state family is still all zero at the {phase} end — a zeroed"
+                          " moment sum after tokens were fed means the state was never written",
+              "offending: [" + ", ".join(zeroed[:6]) + "]")
+    if "end" in meta and ran_decode > 0:
+        for family, number in (("state", "1"), ("conv", "2")):
+            got = rows.get(("end", family), {})
+            still = [f"{family} row {r}" for r in sorted(got) if got[r]["dn2"] == 0.0]
+            check(not still,
+                  f"inv {number}: every {family} row moved between the prompt end and the run end"
+                  f" ({ran_decode} tokens) — a Δ² of exactly 0 is a state left behind",
+                  "offending: [" + ", ".join(still[:6]) + "]")
+            inv[number].append(f"{len(got) - len(still)}/{len(got)} rows moved")
+        got = rows.get(("end", "kv"), {})
+        rewrote = [f"kv row {r} dn2 {got[r]['dn2']:.6g}" for r in sorted(got)
+                   if got[r]["dn2"] != 0.0]
+        check(not rewrote,
+              "inv 3: the KV's already-written lanes did not move — Δ² exactly 0.0 over the common"
+              " lane extent, part-wise (K vs K, V vs V)",
+              "offending: [" + ", ".join(rewrote[:6]) + "]")
+        inv["3"].append(f"{len(got) - len(rewrote)}/{len(got)} rows bit-still")
+    elif "end" in meta:
+        notes.append("(g) inv 1/2 could not be tested: no generation step ran, so there is no pair of"
+                     " states to difference.")
+
+    # ---- the distances: printed, priced, judged by nobody in this file ---------------------------
+    print("  engine-vs-pin distance, per family and end condition. REPORTED, not gated: no threshold"
+          " is adopted here (plan §2.6 gives that call to the main agent in the D-3/D-5 idiom, and a"
+          " band move needs a `D-x` plus a bench/band-history.jsonl line). Yardstick for scale:"
+          " G3's measured chunk-vs-recurrent agreement, A-08's cos >= 0.99999/layer, which on a moment"
+          " sum is an n2 ratio inside ~2e-5 for the SAME quantity under a different sum order.")
+    last = max(ran_decode - 1, 0)
+    step_pins = {k: (load_fp(last, k) if "end" in meta else None) for k in FP_FAMILIES}
+    distances: dict = {}
+    for phase, pins_here in (("prefill", pins), ("end", step_pins)):
+        if phase not in meta:
+            continue
+        for family in FP_FAMILIES:
+            got = rows.get((phase, family), {})
+            pin = pins_here.get(family)
+            if not got or pin is None:
+                notes.append(f"(g): no {family} comparison at the {phase} end — "
+                             + ("the engine emitted no rows" if not got
+                                else f"the pin is missing ({family}_fp)"))
+                continue
+            pin_n = want["pin_n"].get(family, want["n"].get(family, 1))
+            caveat = ""
+            if family == "conv":
+                caveat = (f"EXTENT MISMATCH, NOT A STATE ERROR: the engine pooled"
+                          f" k_conv−1 = {want['k_conv'] - 1} raw columns"
+                          f" ({want['n']['conv']} elements), the pin pooled k_conv ="
+                          f" {want['k_conv']} ({pin_n}); see the block comment for the pin evidence"
+                          f" and `conv_window_pin` for the comparable number.")
+            distances[(phase, family)] = fp_distance(got, pin, pin_n)
+            print_fp_distance(f"engine({phase}) vs pin({phase}) {family}",
+                              distances[(phase, family)], caveat)
+            if family == "conv" and phase == "end":
+                win = conv_window_pin(deep_state_step() or -1)
+                if win is None:
+                    notes.append("(g) could NOT price the conv window on this fixture: the pinned"
+                                 " conv buffer is not kept at a step whose newest 3 columns can be"
+                                 " pooled (`--deep-steps none`), so inv 2 rests on the engine-side"
+                                 " Δ² line above and the extent-mismatched distance, and nothing"
+                                 " else. A re-pin with --deep-steps is the only way past that, and"
+                                 " re-pinning a shipped fixture is a main-agent call (plan §5.1).")
+                else:
+                    win_d = fp_distance(got, win, want["n"]["conv"])
+                    print_fp_distance("engine(end) vs pin conv WINDOW (newest k_conv−1 cols)",
+                                      win_d)
+                    inv["2"].append(f"window at its own extent: n2 ratio worst"
+                                    f" {win_d['n2_worst']:.6f}"
+                                    + (f" at row {win_d['n2'][1][0]}" if win_d["n2"][1]
+                                       else " (every row identical)"))
+    for family, number in (("state", "1"), ("conv", "2"), ("kv", "3")):
+        for phase in ("prefill", "end"):
+            d = distances.get((phase, family))
+            if d and d["ratios"]:
+                if d["n2"][0] == 0.0:
+                    inv[number].append(f"{phase}-end n2 ratio: every row identical")
+                    continue
+                worst = max(d["ratios"], key=lambda t: abs(t[2] - 1.0))
+                inv[number].append(f"{phase}-end n2 ratio worst {worst[2]:.6f}"
+                                   f" (row {worst[0]}, layer {worst[1]})")
+    print("  §08.6, invariant by invariant — what this fixture proves here and what it cannot:")
+    for number, text in (("1", "S is updated by every token, in all 18 GDN layers"),
+                         ("2", f"the conv window holds the last k_conv−1 raw columns (A-04: the pin"
+                               f" buffers k_conv)"),
+                         ("3", "the KV is append-only: already-written slots never move"),
+                         ("4", "the cache advanced by one per token; prefix == position")):
+        print(f"    inv {number} — {text}: " + ("; ".join(inv[number]) if inv[number]
+                                                     else "not testable on this run"))
+    print("    not proved by fingerprints, at any tolerance: a corruption that preserves the multiset"
+          " of values (a rotation inside a tensor), the ORDER of anything, or the per-element state —"
+          " moment sums cannot see them, and full per-element state pins cost 18 MiB per step, which"
+          " is the 1.7 GB a deep fixture exists to avoid (§08.6's own note, restated in (f)).")
+    notes.append("(g) printed engine-vs-pin state distances and gated none of them. That is the"
+                 " package as planned (§2.6: 'P1 ships a measurement and a tripwire, not a band'); the"
+                 " adopted-threshold decision needs the route spread at the same position, i.e."
+                 " `engine/route_price.py` extended to state fingerprints, then a `D-x` and a"
+                 " band_history line. Nothing in this run is a band.")
+
 # ---- (0) the fixture pairing -------------------------------------------------------------------
 def pairing_checks(man: dict) -> tuple[list, list, np.ndarray]:
     section("(0) fixture pairing — proved from the dumps (§10.5)")
@@ -1067,10 +1682,15 @@ def launch_plan(n_layers: int, n_gdn: int, n_attn: int) -> dict:
 
 
 def parse_run(text: str) -> dict:
-    out = {"steps": [], "state": {}, "launch": {}, "result": {}}
+    out = {"steps": [], "state": {}, "launch": {}, "result": {}, "statefp": []}
     for line in text.splitlines():
         if line.startswith("STEP "):
             out["steps"].append(dict(re.findall(r"(\w+)=([^\s]+)", line)))
+        elif line.startswith("STATEFP "):
+            # Its own key, and matched BEFORE `STATE ` would matter: these are the §08.6 state rows
+            # section (g) judges, one dict per printed line (phase markers included). "STATEFP" does
+            # not match "STATE " so the two readers cannot eat each other's lines.
+            out["statefp"].append(dict(re.findall(r"(\w+)=([^\s]+)", line)))
         elif line.startswith("STATE ") or line.startswith("LAUNCH "):
             key = line.split()[0].lower()
             out[key] = dict(re.findall(r"(\w+)=([^\s]+)", line))
@@ -1082,7 +1702,8 @@ def parse_run(text: str) -> dict:
 def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids: int = -1,
             break_logits: int = -1, break_noise: int = -1, break_prompt_stop: int = -1,
             replay: bool = False, break_feed: int = -1, break_tie: int = -1,
-            tie_alt: int = -1, break_allow: int = -1, tie_same_ulp: int = -1) -> tuple[
+            tie_alt: int = -1, break_allow: int = -1, tie_same_ulp: int = -1,
+            break_state_fp: str = "") -> tuple[
                 str, int]:
     """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
 
@@ -1180,6 +1801,7 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
         lines.append(f"STEP kind=decode index={pos} input={fed} sampled={sampled}"
                      f" top_logit=1 pos_before={pos} pos_after={pos + 1} stop=0")
         (work / f"logits{pos}.bin").write_bytes(logits.astype(np.float32).tobytes())
+    lines += state_fp_stand_in_lines(man, len(prompt_ids), len(dec_logits), break_state_fp)
     lines.append(f"RESULT mode={'replay' if replay else 'run'} steps=25 ms_total=0 ms_per_step=0"
                  f" last_sampled={greedy[-1]} prefix_len={cap - 1} stopped=0")
     return "\n".join(lines), 0
@@ -1217,6 +1839,15 @@ def selftest(fixture: str = "dec8") -> int:
     line recording it, which must stop the gate at startup — before a fixture is read, a binary started,
     or a device touched. `tools/band_history.py --selftest` covers the checker's own behaviour; this
     case covers the wiring, because a checker nobody calls is the same as no checker.
+
+    The state fingerprints get three, one per §08.6 failure a moment-sum fingerprint can see (a family
+    left at the §08.4 zero, a state or window that never moved, KV lanes that moved when they should
+    not have), each aimed at a single row and each required to name that row and no other — the
+    locality is the assertion, because a negative every check catches proves nothing. They need a
+    fixture that carries fingerprints, so `--selftest --fixture dec64f` is the run that exercises
+    section (g); on `dec8` the skip is printed. The section's other mechanical case — recomputing a
+    pinned fingerprint from pinned tensors with `tools/state_fp.py::fp_row` and requiring bit equality
+    — runs once in this process, since it is a fact about the pins and not about an injection.
     """
     base = [sys.executable, str(Path(__file__).resolve()), "--fixture", fixture]
     # The cos band line is NAMED by the rule that produced it, so the needle has to know which rule this
@@ -1317,11 +1948,49 @@ def selftest(fixture: str = "dec8") -> int:
              " route allowance while still inside the flat G5 floor the old band used — must FAIL there"
              " (this is the failure class the allowance exists to make visible)"),
         ]
+    # The state fingerprints get three injections, one per §08.6 failure a moment-sum fingerprint can
+    # see, each aimed at ONE row and required to name only that row. They need a fixture that carries
+    # fingerprints — `dec8` predates them — so on the default fixture this is skipped out loud rather
+    # than quietly passing.
+    if prefill_fp("state") is None:
+        print(f"  [SKIP] state-fingerprint injections: {fixture} carries no state fingerprints at"
+              " all (dec8 was pinned before there were any), so section (g) has nothing to perturb."
+              " Run `--selftest --fixture dec64f` (or dec64t / mt32f) to exercise it.")
+    else:
+        cases += [
+            (["--break-state-fp", "zero:state:5"], 1,
+             ["[FAIL] §08.4: no state family is still all zero at the prefill end",
+              "offending: [state row 5]",
+              "![state row 4]", "![state row 6]", "![conv row 5]", "![kv row 5]"],
+             "GDN state row 5 zeroed at both end conditions — the §08.4 zeroed start, left behind"
+             " (and at the run end, a state that never moved: the same row named twice and no other"
+             " row named)"),
+            (["--break-state-fp", "frozen:conv:2"], 1,
+             ["[FAIL] inv 2: every conv row moved", "offending: [conv row 2]",
+              "![conv row 1]", "![conv row 3]", "![state row 2]"],
+             "conv window row 2 did not roll across the whole run (§08.6 inv 2, the A-04 carry) —"
+             " must fail at row 2 and nowhere else"),
+            (["--break-state-fp", "rewrote:kv:1"], 1,
+             ["[FAIL] inv 3: the KV's already-written lanes did not move",
+              "offending: [kv row 1 dn2 1]",
+              "![kv row 0", "![kv row 2"],
+             "KV row 1's already-written lanes moved (§08.6 inv 3, append-only storage) — the one"
+             " invariant whose correct value is exactly 0.0, so it needs no tolerance to violate"),
+        ]
     bad = []
     for extra, want_rc, want_in, what in cases:
         p = subprocess.run(base + ["--dry-run"] + extra, capture_output=True, text=True)
         needles = [] if want_in is None else ([want_in] if isinstance(want_in, str) else list(want_in))
-        missing = [n for n in needles if n not in p.stdout]
+        missing = []
+        for needle in needles:
+            # A needle starting with "!" must be ABSENT. That is what makes an injection local: "the
+            # gate failed" is cheap — a broken parser fails everything — while "the gate failed at
+            # exactly the row I broke" is the property worth requiring. It is the trap
+            # `prototype/mlp_gemv/results.md` names: a negative every check catches proves nothing.
+            absent = needle.startswith("!")
+            hit = needle.lstrip("!") in p.stdout
+            if hit == absent:
+                missing.append(needle)
         ok = p.returncode == want_rc and not missing
         where = "" if not needles else (" — every expected FAIL line present" if not missing
                                         else " — missing: " + "; ".join(missing))
@@ -1329,6 +1998,16 @@ def selftest(fixture: str = "dec8") -> int:
         if not ok:
             print("      " + "\n      ".join(l for l in p.stdout.splitlines() if "FAIL" in l)[:400])
             bad.append(what)
+    # The fingerprint-identity case is a property of the pins and the shared helper rather than of an
+    # injection, and it is the only thing in this file that imports torch — so it runs once here, in
+    # this process, instead of once per dry-run subprocess. A fixture with no fingerprint pins has
+    # nothing to prove it with, and says so in the SKIP line above.
+    if prefill_fp("state") is not None:
+        section("(g) fp-of-pins identity, run once in the selftest process")
+        before = len(fails)
+        fp_helper_identity(man)
+        if len(fails) > before:
+            bad.append("fp-of-pins identity (section (g)'s mechanical case): " + fails[-1][:160])
     # The band history has to bite here too, and bite before anything runs: an unrecorded edit to `BAND`
     # must stop the gate, not merely look suspicious in review. The injection is the real thing — a
     # scratch tree whose engine/gate.py carries a looser flat floor, sitting beside the shipped ledger —
@@ -1541,6 +2220,21 @@ def main() -> int:
     ap.add_argument("--selftest", action="store_true",
                     help="re-run this file in subprocesses: clean dry run must pass, each injected"
                          " bug must fail at its own step")
+    ap.add_argument("--state-fp", dest="state_fp", action="store_true", default=True,
+                    help="ask decode_run for its §08 state fingerprints (the default, because a"
+                         " fixture that carries fingerprint pins cannot judge G5's state half"
+                         " without them). Accepted explicitly for the commands in the prefill plan's"
+                         " §2.6; section (g) reads whatever arrived either way")
+    ap.add_argument("--no-state-fp", dest="state_fp", action="store_false",
+                    help="do not ask for them: section (g) then fails loudly on a fixture that has"
+                         " pins, which is the honest reading of a gate that could not see the state")
+    ap.add_argument("--break-state-fp", default="", metavar="WHAT:FAMILY:ROW",
+                    help="with --dry-run: corrupt one emitted state-fingerprint row and require"
+                         " section (g) to fail at exactly that row. WHAT is `zero` (a state that was"
+                         " never written), `frozen` (a state or window that did not move over the"
+                         " whole run — §08.6 inv 1/2) or `rewrote` (already-written KV lanes moved"
+                         " — inv 3). Refuses an impossible target, so it cannot become a generic"
+                         " perturbation test")
     ap.add_argument("--build", action="store_true", help="run engine/build.sh first")
     args = ap.parse_args()
 
@@ -1576,6 +2270,7 @@ def main() -> int:
         state_checks(None)
         fingerprint_checks(man, n_decode)
         deep_matches_shallow(n_decode)
+        state_fp_checks(man, len(prompt_ids), n_decode, 0, None)
         return report()
 
     section("(run) decode_run — one decode_step per token: the prompt, then generation")
@@ -1601,6 +2296,12 @@ def main() -> int:
           " above it rather than truncating)")
     cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
            "--steps", str(n_decode), "--out", str(work)]
+    if args.state_fp:
+        # On by default: a fixture that carries fingerprint pins cannot judge G5's state half without
+        # them, and a section that silently did not run is the gap P1 was written to close (§2.6). The
+        # cost is two D2Hs of the §08.1 tuple per run — ~26 MB each at 63–70 GB/s, on the correctness
+        # path, outside every timed region — which is why plan §2.6 gives it no timing significance.
+        cmd.append("--state-fp")
     if replay:
         cmd += ["--replay", ",".join(str(t) for t in greedy[:-1])]
     feeding = ("REPLAY — the reference's own token is fed at every step, because this fixture is"
@@ -1614,7 +2315,7 @@ def main() -> int:
         stdout, rc = dry_run(man, prompt_ids, dec_logits, work, args.break_ids,
                              args.break_logits, args.break_noise, args.break_prompt_stop,
                              replay, args.break_feed, args.break_tie, args.tie_alt,
-                             args.break_allow, args.tie_same_ulp)
+                             args.break_allow, args.tie_same_ulp, args.break_state_fp)
         notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
                      " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
                      " run is not also the first time this file parses a STEP line. Section (d) is"
@@ -1645,6 +2346,9 @@ def main() -> int:
             notes.append(f"injected: generation step {args.tie_same_ulp} kept the pin's own top-1 id"
                          " with its logit one BF16 ULP above the tied payload — an ordinary match, so"
                          " the tie policy must not be consulted (D-1)")
+        if args.break_state_fp:
+            notes.append(f"injected: state fingerprint {args.break_state_fp} — section (g) must fail"
+                         " at exactly that family and row, and nowhere else")
     else:
         print("  $ " + " ".join(cmd))
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -1854,6 +2558,8 @@ def main() -> int:
     curve_checks(per_step, n_decode)
     fingerprint_checks(man, n_decode)
     deep_matches_shallow(n_decode)
+    state_fp_checks(man, len(prompt_ids), n_decode, len(decode_steps), run["statefp"],
+                    stand_in=args.dry_run)
 
     # ---- (d) launch plan ------------------------------------------------------------------------
     section("(d) the launch plan — §07's structure, counted in Python")
