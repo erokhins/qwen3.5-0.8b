@@ -175,6 +175,29 @@ device once; what is still missing is the token result and every timing.
 # In force as of 2026-10-12: `dec64f` 3.50/0.42 (carried from the global era; its own derivation is
 # 3.04/0.34 and keeping it is recorded), `dec64t` 3.50/0.42, `dec300f` 7.99/0.72, `mt32f` 2.93/0.24.
 
+`.venv/bin/python tools/band_history.py check`    # what `engine/gate.py` calls at startup
+# THE BAND POLICE, and the mechanical half of "never loosen a gate to make it pass" (`AGENTS.md`). Every
+# number that decides pass/fail — each value in `engine/gate.py`'s `BAND`, and each priced fixture's
+# `margin`/`margin_rel` in its `route_allowance.json` — must match the newest line recorded for it in
+# `bench/band-history.jsonl` (tracked: `data/` is gitignored, so a ledger beside the allowance files
+# would be a throwaway). A value that moved, appeared or vanished with no line recording it and the gate
+# REFUSES TO RUN, before a fixture is read or a device touched, printing the exact `record` command.
+# Keys are (file, key), so `dec64f`'s margin and `dec300f`'s are different keys and one fixture can
+# never justify another's band (that separation is D-2, and a single global margin key would defeat
+# it). `record` is the only way to move one and it refuses a reason that is empty, thin
+# ("loosen", "tune the margin" — strip the band-mover words and nothing is left), pass-seeking ("so it
+# passes", "needed to pass", "for now", "temporarily"), or a `D-x` that is not in the plan's decision
+# log; it also refuses a line whose `--new` is not what the tree holds, so the ledger cannot drift from
+# the code. `engine/route_allowance.py` appends its own lines when it writes a margin — and when it
+# REFUSES to, as `event: refused`, which logs a caught attempt at loosening without moving the current
+# value. Not policed here, and said plainly: the per-step route spreads inside an allowance file (those
+# are checked against the file's own margin, its own recorded engine deficits and the pin hashes by
+# `gate.py:allowance_problems`), the checker's own source (self-reference — the backstop is review, and
+# the `review` mode below, and `git log` on the ledger), and whether a reason is TRUE. The 2026-10-11
+# git-walk mode is untouched and is still the default with no subcommand. `--selftest` (13 cases, CPU,
+# no fixture touched) includes the shipped tree against the shipped ledger, so a seed line that does
+# not match reality fails here rather than in a gate run next week.
+
 `.venv/bin/python engine/gate.py --dry-run --break-allow STEP`   # and `--selftest`, which aims it itself
 # The injection that proves the route allowance has teeth the flat §10.1 G5 floor did not: noise sized to
 # 1.5x **that step's own cached allowance**, i.e. over the measured legal spread yet still *under* the flat
@@ -192,7 +215,9 @@ device once; what is still missing is the token result and every timing.
 # (the off-by-one a forced driver makes) — plus the tie policy in three directions at a step the fixture
 # really ties at (an UNTIED id must FAIL, the pin's other tied id must PASS as TIE, and the pin's own
 # top-1 with its logit 1 BF16 ULP off the tied payload must PASS as an ordinary match — D-1's regression,
-# `--tie-same-ulp`), and the route-allowance injection — and requires each to fail at the step it
+# `--tie-same-ulp`), the route-allowance injection, and one band-history injection (a scratch tree whose
+# `engine/gate.py` loosens `BAND.cos_hard` unrecorded, which must stop the gate at startup — the wiring,
+# not the checker) — and requires each to fail at the step it
 # was injected at. Ends "SELFTEST PASS". Cases that a given fixture cannot discriminate (no tie, no
 # priced allowance, or a 5 % noise deficit that fits inside that fixture's own wider allowance) are
 # SKIPped out loud rather than silently dropped. `--dry-run` is the same stand-in without the injections, and is
