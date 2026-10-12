@@ -71,6 +71,15 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       `bench/plan-prefill-2026-10-12.md` §2.6 ships this as "a measurement and a tripwire, not a
       band", and the band is a main-agent decision with a `D-x` and a ledger line behind it.
 
+The two phases, and the line protocol that shows them. Since P2 the prompt is fed as ONE prefill wave
+(`engine/prefill.h`, §06.1) and its STEP lines say `kind=prefill`; generation steps say `kind=decode`.
+§07.5's stop check is armed in the second phase only, and this gate asserts both halves of that rule:
+no prefill row may carry `stop=1`, and the wave's LAST row must carry the fixture's first answer token
+(`greedy_continuation[0]`, §06.5's `y0`). Under `--prefill-logits last` — §06.5's shape, and the default
+— the wave argmaxes only that last row, so the earlier prefill rows print `sampled=-1`; `all` prices
+every row and is the shape the wave's byte-identity comparison against the pre-P2 per-token prompt loop
+is made in (`bench/plan-prefill-2026-10-12.md` §4, row P2).
+
 Why this file contains no engine arithmetic. Its value is independence. A Python mirror of the
 kernels would check the engine against the engine, which is the failure `bench/gate-audit.md` exists
 to find. Everything Python-side here is either a §10 metric, the §00/§08 state derivation, or the
@@ -122,6 +131,23 @@ STOP_ID = 248046
 # `n_decode > FREE_RUN_BOUND` is exactly when this gate switches to `decode_run --replay`, and a
 # divergence then shows up at one step instead of cascading through the rest of the fixture.
 FREE_RUN_BOUND = 8
+
+# The step kinds `decode_run` emits. P2 gave the prompt phase its own entry (`engine/prefill.h`), so a
+# prompt-phase step now says `kind=prefill` where it used to say `kind=prompt`; what this file judges is
+# the PHASE (§07.5's rule is about the prompt, not about which loop ran it), and the check names keep
+# saying "prompt" for that reason. One spelling per concept: the engine and the `--dry-run` stand-in
+# below both emit `prefill`, and nothing emits the old spelling.
+PREFILL_KIND = "prefill"
+DECODE_KIND = "decode"
+
+# §06.1/§06.5: the two shapes a prefill wave's logits can take, exactly as `decode_run
+# --prefill-logits` spells them. `last` is the engine's default and §06.5's shape — only the wave's
+# last row is argmaxed, so every earlier prefill STEP line carries `sampled=-1 top_logit=none` (-1 is
+# the engine's "nothing pending" marker, not a token id). `all` prices every row, which is what the
+# byte-identity comparison against the pre-P2 per-token prompt loop runs in, and it is the only shape
+# in which a prompt-phase argmax exists at all to be misread as a stop.
+PREFILL_LOGITS_LAST = "last"
+PREFILL_LOGITS_ALL = "all"
 
 
 def set_fixture(name: str) -> None:
@@ -1703,7 +1729,7 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             break_logits: int = -1, break_noise: int = -1, break_prompt_stop: int = -1,
             replay: bool = False, break_feed: int = -1, break_tie: int = -1,
             tie_alt: int = -1, break_allow: int = -1, tie_same_ulp: int = -1,
-            break_state_fp: str = "") -> tuple[
+            break_state_fp: str = "", prefill_logits: str = PREFILL_LOGITS_LAST) -> tuple[
                 str, int]:
     """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
 
@@ -1718,8 +1744,15 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
     `prototype/*/run.py --negative` does: the injected bug has to make the gate fail *at that step*,
     which is the property worth testing — a negative that every check would catch proves nothing
     (`prototype/mlp_gemv/results.md` has that trap written down). `break_prompt_stop` injects the one
-    bug the engine actually shipped with: the §07.5 stop check firing during the prompt, which truncates
-    the run there and leaves both the rest of the prompt and all generation steps unsaid.
+    bug the engine actually shipped with: the §07.5 stop check firing on a prompt-phase sample, which
+    truncates the run there and leaves both the rest of the prompt and all generation steps unsaid.
+
+    `prefill_logits` picks which row shape the stand-in prints, so that it matches the `decode_run`
+    whose output this is a stand-in for. Under `last` (§06.5, the default) only the wave's LAST row has
+    a sample and the earlier prefill rows print `sampled=-1`; under `all` every row is priced, which is
+    the shape the byte-identity gate compares. It matters for `break_prompt_stop`: an intermediate
+    prompt row that was never argmaxed cannot be the row that fires a stop check, so an injection aimed
+    at one is refused rather than allowed to pass vacuously.
     """
     greedy = man["greedy_continuation"]
     cfg = man["text_config"]
@@ -1734,24 +1767,42 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
     lines.append("LAUNCH " + " ".join(f"{k}={v}" for k, v in plan.items())
                  + f" total={sum(plan.values())}")
     for i, t in enumerate(prompt_ids):
-        # Only the LAST prompt step's sample is checked by section (a) — that is the one the fixture
-        # pins. The earlier ones are the engine's own business; here they echo the next prompt token.
-        sampled = greedy[0] if i == len(prompt_ids) - 1 else (prompt_ids[i + 1] if i + 1 < len(prompt_ids) else greedy[0])
+        is_last_row = i == len(prompt_ids) - 1
+        # Only the LAST prefill row's sample is checked by section (a) — that is the one the fixture
+        # pins and the one §06.5 says the wave is required to produce. Under `last` the earlier rows
+        # were never argmaxed and say so with -1, exactly as `decode_run` does; under `all` every row is
+        # priced and the earlier ones echo the next prompt token.
+        if prefill_logits != PREFILL_LOGITS_ALL and not is_last_row:
+            sampled, top = -1, "none"
+        else:
+            sampled = greedy[0] if is_last_row else (
+                prompt_ids[i + 1] if i + 1 < len(prompt_ids) else greedy[0])
+            top = "1"
         # `stop=` is the §07.5 CHECK being armed and matched — never the raw match. A prompt-phase step
         # reports stop=0 even if it sampled the stop id, because its sample is discarded; that is what
         # decode_run prints and what section (a) asserts. `--break-prompt-stop` is the one case where
         # it is 1, and it reproduces the first device run: the stop match ends the run AT the prompt,
         # so the remaining prompt tokens and all 8 generation steps are simply missing.
         if i == break_prompt_stop:
+            if sampled < 0:
+                # No argmax on this row, so there is no stop check to fire: the injection would be
+                # caught by nothing except itself. Refuse it (the same refusal `--break-tie` and
+                # `--break-allow` make when aimed at a step that cannot carry their bug) and name the
+                # two ways to make it representable.
+                raise SystemExit(
+                    f"--break-prompt-stop {i}: prefill row {i} of {len(prompt_ids)} carries no"
+                    " argmax under --prefill-logits last (§06.5 prices only the last row), so the bug"
+                    f" cannot be injected there. Aim at the last row ({len(prompt_ids) - 1}), or"
+                    " pass --prefill-logits all.")
             # The stop check fires BECAUSE the sample is the stop id, so the stand-in has to say both;
             # `decode_run` prints `stop=1` only under that condition.
-            lines.append(f"STEP kind=prompt index={i} input={t} sampled={STOP_ID} top_logit=1"
-                         f" pos_before={i} pos_after={i + 1} stop=1")
+            lines.append(f"STEP kind={PREFILL_KIND} index={i} input={t} sampled={STOP_ID}"
+                         f" top_logit=1 pos_before={i} pos_after={i + 1} stop=1")
             lines.append(f"RESULT mode=run steps={cap - 1} ms_total=0 ms_per_step=0"
                          f" last_sampled={STOP_ID} prefix_len={i + 1} stopped=1")
             return "\n".join(lines), 0
-        lines.append(f"STEP kind=prompt index={i} input={t} sampled={sampled} top_logit=1"
-                     f" pos_before={i} pos_after={i + 1} stop=0")
+        lines.append(f"STEP kind={PREFILL_KIND} index={i} input={t} sampled={sampled}"
+                     f" top_logit={top} pos_before={i} pos_after={i + 1} stop=0")
     for j in range(len(dec_logits)):
         pos = len(prompt_ids) + j
         sampled = greedy[j + 1]
@@ -1798,7 +1849,7 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             # meanrel line usually goes with it (any noise that moves cos moves meanrel); the assertion
             # is about the cos line failing AT THIS STEP, which is what `selftest` checks.
             logits = allowance_noise(logits, j, SELFTEST_ALLOW_FACTOR)
-        lines.append(f"STEP kind=decode index={pos} input={fed} sampled={sampled}"
+        lines.append(f"STEP kind={DECODE_KIND} index={pos} input={fed} sampled={sampled}"
                      f" top_logit=1 pos_before={pos} pos_after={pos + 1} stop=0")
         (work / f"logits{pos}.bin").write_bytes(logits.astype(np.float32).tobytes())
     lines += state_fp_stand_in_lines(man, len(prompt_ids), len(dec_logits), break_state_fp)
@@ -1875,13 +1926,22 @@ def selftest(fixture: str = "dec8") -> int:
         (["--break-logits", "2"], 1, "[FAIL] step 2: argmax agrees with the pin",
          "top two logits swapped at step 2"),
         # The bug the engine actually shipped with, replayed in the stand-in: id 248046 sampled at
-        # prompt index 6 ended a 17-token prompt after 7 steps. Both new checks have to name it.
-        (["--break-prompt-stop", "6"], 1,
+        # prompt index 6 ended a 17-token prompt after 7 steps. Both checks have to name it.
+        #
+        # It is aimed with `--prefill-logits all` on purpose. Since P2 the prompt is a wave and §06.5's
+        # default prices only its last row, so row 6 has no argmax at all and there is nothing at that
+        # position to fire a stop check on — `dry_run` refuses the injection rather than letting it pass
+        # vacuously (the vacuous-negative trap `prototype/mlp_gemv/results.md` names). In the `all` shape
+        # every row is argmaxed, the bug is representable again, and this is where the regression that
+        # actually happened is caught. The `last` shape gets its own case below, aimed at the one row it
+        # does price.
+        (["--break-prompt-stop", "6", "--prefill-logits", PREFILL_LOGITS_ALL], 1,
          ["[FAIL] no prompt-phase step fires §07.5's stop check",
           "[FAIL] one step per prompt token",
           "that last step's §07.5 stop check HAD fired"],
          "the stop check fired at prompt index 6 (the first device run's bug: a 17-token prompt"
-         " ended after 7 steps and generation never started)"),
+         " ended after 7 steps and generation never started), in the row shape where an intermediate"
+         " prompt row is argmaxed at all"),
         # The forced driver's own failure mode: an off-by-one in the replay list. Everything else
         # can stay perfect, so only the fed-token check can catch it.
         (["--break-feed", "4"], 1,
@@ -1906,6 +1966,18 @@ def selftest(fixture: str = "dec8") -> int:
     # this pair.
     man = json.loads((REFS / "manifest.json").read_text())
     tie_step = next((j for j in range(len(man["greedy_continuation"]) - 1) if pin_tie(j)), None)
+    # §07.5 under the DEFAULT row shape. The case above needs `all` because an unpriced row cannot fire a
+    # stop check, but the default wave prices exactly one prompt row — the last — and that row's sample IS
+    # §06.5's first answer token, so a stop check armed there would end a run before generation began.
+    # This is the case that proves the rule is still testable without `all`, so the negative did not go
+    # extinct when the intermediate argmaxes did.
+    cases.append((
+        ["--break-prompt-stop", str(len(man["sources"][0]["ids"]) - 1)], 1,
+        ["[FAIL] no prompt-phase step fires §07.5's stop check",
+         "[FAIL] the prompt's last token samples greedy_continuation[0]"],
+        "the stop check fired on the wave's last row — the only row `--prefill-logits last` prices,"
+        " and the one whose sample §06.5 turns into the first generated token; §07.5 still says a"
+        " prompt-phase match does not end the run"))
     if tie_step is None:
         print(f"  [SKIP] tie injections: no exact tie anywhere in {fixture}'s pinned logits."
               " Run `--selftest --fixture dec64f` (ties at 17 and 18) or"
@@ -2095,8 +2167,8 @@ def smoke_run(n_steps: int, args) -> int:
         return report()
     check(True, "decode_run exits 0")
     run = parse_run(proc.stdout)
-    prompt_steps = [s for s in run["steps"] if s["kind"] == "prompt"]
-    decode_steps = [s for s in run["steps"] if s["kind"] == "decode"]
+    prompt_steps = [s for s in run["steps"] if s["kind"] == PREFILL_KIND]
+    decode_steps = [s for s in run["steps"] if s["kind"] == DECODE_KIND]
     result = run["result"]
     stopped = result.get("stopped") == "1"
     check(len(prompt_steps) == len(prompt_ids), "one step per prompt token",
@@ -2196,8 +2268,10 @@ def main() -> int:
                          " step with no priced allowance, so it cannot degrade into the --break-noise"
                          " test")
     ap.add_argument("--break-prompt-stop", type=int, default=-1, metavar="PROMPT_INDEX",
-                    help="with --dry-run: fire the §07.5 stop check at that prompt step and end the"
-                         " run there, which is the bug the first device run had")
+                    help="with --dry-run: fire the §07.5 stop check at that prefill row and end the"
+                         " run there, which is the bug the first device run had. Under the default"
+                         " --prefill-logits last only the wave's LAST row has an argmax to fire on"
+                         " (§06.5), so an earlier index is refused unless --prefill-logits all is")
     ap.add_argument("--break-feed", type=int, default=-1, metavar="STEP",
                     help="with --dry-run: feed that step the wrong token, which is an off-by-one"
                          " in the replay list — the plausible way a forced driver breaks")
@@ -2220,6 +2294,13 @@ def main() -> int:
     ap.add_argument("--selftest", action="store_true",
                     help="re-run this file in subprocesses: clean dry run must pass, each injected"
                          " bug must fail at its own step")
+    ap.add_argument("--prefill-logits", choices=[PREFILL_LOGITS_LAST, PREFILL_LOGITS_ALL],
+                    default=PREFILL_LOGITS_LAST,
+                    help="which logits the prompt wave is asked for: `last` (the default, §06.5 — only"
+                         " the wave's last row is argmaxed, so earlier prefill STEP lines carry"
+                         " `sampled=-1`) or `all` (every row priced, which is what the wave's"
+                         " byte-identity comparison against the pre-P2 per-token prompt loop runs in,"
+                         " and the only shape where a prompt-phase argmax exists mid-wave)")
     ap.add_argument("--state-fp", dest="state_fp", action="store_true", default=True,
                     help="ask decode_run for its §08 state fingerprints (the default, because a"
                          " fixture that carries fingerprint pins cannot judge G5's state half"
@@ -2273,7 +2354,7 @@ def main() -> int:
         state_fp_checks(man, len(prompt_ids), n_decode, 0, None)
         return report()
 
-    section("(run) decode_run — one decode_step per token: the prompt, then generation")
+    section("(run) decode_run — one prefill wave (§06.1), then one decode_step per generated token")
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
     # Section (b) reads `logits{pos}.bin` by name, so a run that stops early is judged against whatever
@@ -2295,7 +2376,12 @@ def main() -> int:
           " (read from `prototype/attn_decode/attn_decode_kernels.h`; `kernels_attn.cpp` throws"
           " above it rather than truncating)")
     cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
-           "--steps", str(n_decode), "--out", str(work)]
+           "--steps", str(n_decode), "--out", str(work),
+           # Named on every run rather than left to the binary's default, so the echoed command says
+           # which row shape the dumps were taken in: `last` is §06.5's and the one the fixtures are
+           # gated in, `all` is the one the wave's byte-identity comparison against the pre-P2 per-token
+           # prompt loop is made from.
+           "--prefill-logits", args.prefill_logits]
     if args.state_fp:
         # On by default: a fixture that carries fingerprint pins cannot judge G5's state half without
         # them, and a section that silently did not run is the gap P1 was written to close (§2.6). The
@@ -2315,12 +2401,18 @@ def main() -> int:
         stdout, rc = dry_run(man, prompt_ids, dec_logits, work, args.break_ids,
                              args.break_logits, args.break_noise, args.break_prompt_stop,
                              replay, args.break_feed, args.break_tie, args.tie_alt,
-                             args.break_allow, args.tie_same_ulp, args.break_state_fp)
+                             args.break_allow, args.tie_same_ulp, args.break_state_fp,
+                             args.prefill_logits)
         notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
                      " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
                      " run is not also the first time this file parses a STEP line. Section (d) is"
                      " Python comparing with itself in this mode; only a real decode_run makes it a"
                      " cross-check.")
+        notes.append(f"prefill row shape in force: --prefill-logits {args.prefill_logits}"
+                     + (" — only the wave's last row is argmaxed, so the earlier prefill rows print"
+                        " `sampled=-1` (§06.5)" if args.prefill_logits == PREFILL_LOGITS_LAST else
+                        " — every prefill row is argmaxed, which is the shape the wave's"
+                        " byte-identity comparison runs in"))
         if args.break_ids >= 0:
             notes.append(f"injected: generation step {args.break_ids} sampled the wrong id")
         if args.break_logits >= 0:
@@ -2334,7 +2426,7 @@ def main() -> int:
                          f" {SELFTEST_ALLOW_FACTOR}x its own cached route allowance — over the"
                          " allowance, under the flat §10.1 G5 floor")
         if args.break_prompt_stop >= 0:
-            notes.append(f"injected: the §07.5 stop check fired at prompt step"
+            notes.append(f"injected: the §07.5 stop check fired at prefill row"
                          f" {args.break_prompt_stop} and ended the run there")
         if args.break_tie >= 0:
             notes.append(f"injected: generation step {args.break_tie} sampled an id that is not one"
@@ -2368,8 +2460,10 @@ def main() -> int:
 
     # ---- (a) sampled ids -----------------------------------------------------------------------
     section("(a) sampled token ids — §03.4 greedy, §10.1 G7 exactness")
-    prompt_steps = [s for s in run["steps"] if s["kind"] == "prompt"]
-    decode_steps = [s for s in run["steps"] if s["kind"] == "decode"]
+    # The prompt phase is `kind=prefill` now (P2's wave entry); the check names keep saying "prompt"
+    # because §07.5's rule belongs to the phase, not to whichever loop ran it.
+    prompt_steps = [s for s in run["steps"] if s["kind"] == PREFILL_KIND]
+    decode_steps = [s for s in run["steps"] if s["kind"] == DECODE_KIND]
     # WHY the prompt came up short, not just that it did. The run log already says what ended it, and
     # reading that log on a device window is exactly the round trip these two lines exist to skip.
     if len(prompt_steps) != len(prompt_ids):
@@ -2397,7 +2491,7 @@ def main() -> int:
     prompt_stop = [s for s in prompt_steps if s.get("stop") == "1"]
     check(not prompt_stop, "no prompt-phase step fires §07.5's stop check",
           "" if not prompt_stop else
-          f"kind=prompt index={prompt_stop[0].get('index')}"
+                  f"kind=prefill index={prompt_stop[0].get('index')}"
           f" sampled={prompt_stop[0].get('sampled')} ended the run; §07.5 arms only during"
           f" generation (and {STOP_ID} inside a prompt is not news — see decode_run.cpp)")
     check(len(decode_steps) == n_decode, f"{n_decode} generation steps", f"{len(decode_steps)}")

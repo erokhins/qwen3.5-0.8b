@@ -36,9 +36,11 @@ hipcc "${FLAGS[@]}" engine/loader_test.cpp engine/loader.cpp -o "$BIN/loader_tes
 echo "built $BIN/loader_test"
 
 # The token loop. One TU per kernel family on purpose — see engine/kernels.h for why the families
-# cannot share a translation unit.
+# cannot share a translation unit. `prefill.cpp` is the prompt-phase wave (§06.1) and is a separate TU
+# from `decode_step.cpp` because it is a different question: the step is one token's §07.1 order, the
+# wave is what a request's whole prompt looks like when it is made of those steps.
 hipcc "${FLAGS[@]}" \
-  engine/decode_run.cpp engine/decode_step.cpp engine/state.cpp engine/loader.cpp \
+  engine/decode_run.cpp engine/decode_step.cpp engine/prefill.cpp engine/state.cpp engine/loader.cpp \
   engine/kernels_glue.cpp engine/kernels_proj.cpp engine/kernels_mlp.cpp \
   engine/kernels_gdn.cpp engine/kernels_attn.cpp engine/kernels_lmhead.cpp \
   engine/kernels_cast.cpp \

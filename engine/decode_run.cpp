@@ -14,13 +14,20 @@
 // Python judges.
 //
 // Three ways to drive it, and the split between them is deliberate:
-//   run      `--ids … --steps N`      free generation: the engine feeds its own samples.
+//   run      `--ids … --steps N`      the prompt as ONE prefill wave (§06.1, `engine/prefill.h`),
+//                                     then free generation: the engine feeds its own samples.
 //   replay   `--ids … --replay …`     each generation step is fed the CALLER's token, so a
 //                                     divergence shows up at one step instead of cascading
 //                                     (that is what `gate.py` uses for the 64-step forced pin;
 //                                     §07.5 does not end a replay — the caller owns the stream).
 //   session  `--session`              resident line protocol for `engine/chat.sh`: weights and
 //                                     `RequestState` stay alive across turns. See `session_loop`.
+//
+// THE TWO PHASES ARE DIFFERENT CODE ON PURPOSE (§07.5's phase rule). The prompt is a wave and has no
+// stop check in it; generation is a `decode_step` loop and is the only place `stop_fired` can be
+// computed. Before P2 both were one loop with a `from_prompt` flag, and the first device run armed the
+// stop check on the wrong side of that flag. The flag is gone: the phase is now which loop a step came
+// out of.
 //
 // Every number it prints about *time* is provisional by construction: see `bench/performance-status.md`
 // §6 for what a clean window takes to arrange, and `AGENTS.md` for why a worker must not arrange one.
@@ -42,6 +49,7 @@
 
 #include "engine/decode_step.h"
 #include "engine/loader.h"
+#include "engine/prefill.h"
 #include "engine/state.h"
 
 namespace {
@@ -63,6 +71,10 @@ struct Options {
     bool session = false;            // resident line protocol for engine/chat.sh
     bool no_stop = false;            // §07.5 stays unarmed in generation too (deep smoke runs only)
     bool state_fp = false;           // emit the §08.6 state fingerprints (see the `--state-fp` block)
+    // Which logits a prompt wave gives back (§06.5 / `engine/prefill.h`). `last` is the spec's shape
+    // and the default; `all` is the gate's byte-identity mode, which asks for the rows §06.5 throws
+    // away so they can be `cmp`'d against what the per-token prompt loop used to write.
+    engine::PrefillLogits prefill_logits = engine::PrefillLogits::kLast;
     bool help = false;               // print_usage and exit 0, before anything is loaded
 };
 
@@ -109,6 +121,8 @@ Options parse_args(int argc, char** argv) {
             o.no_stop = true;
         } else if (a == "--state-fp") {
             o.state_fp = true;
+        } else if (a == "--prefill-logits") {
+            o.prefill_logits = engine::parse_prefill_logits(next());
         } else if (a == "--help" || a == "-h") {
             o.help = true;
         } else {
@@ -132,6 +146,14 @@ Options parse_args(int argc, char** argv) {
         throw std::runtime_error("--state-fp fingerprints a run's end conditions; --session and"
                                  " --sizes-only have none");
     }
+    if (o.session && o.prefill_logits != engine::PrefillLogits::kLast) {
+        // Same reasoning, same shape of refusal: a session's `feed` wave has no caller that could do
+        // anything with the discarded rows — nothing is dumped and no logits leave the process — so
+        // `--prefill-logits all` there would buy T vocabulary D2Hs that no one reads.
+        throw std::runtime_error("--prefill-logits all is a run-mode observation flag; a --session"
+                                 " feed never dumps logits, so its wave is always the §06.5"
+                                 " last-row form");
+    }
     // A replay must be able to answer every step it is asked for. Silently falling back to
     // self-feeding after the list runs out would produce a run that is half forced and half
     // free, which is the one thing this mode exists to avoid.
@@ -152,7 +174,9 @@ void write_raw(const std::string& dir, const std::string& name, const std::vecto
 // ---- the session protocol: what `engine/chat.sh` drives -------------------------------------
 // One process, weights and `RequestState` resident, one command per line on stdin:
 //
-//   feed <id> <id>…   advance the state over the caller's tokens (a new turn's prompt), then
+//   feed <id> <id>…   advance the state over the caller's tokens (a new turn's prompt) as ONE
+//                     prefill wave — `--prefill-logits last`, the §06.5 shape, because a feed has no
+//                     use for any row's logits but the last one's — then
 //                     "FED n=<k> prefix_len=<P>". No stop check, exactly as a run's prompt
 //                     phase: the caller owns these tokens. It FIRST feeds the token the
 //                     previous step sampled but never consumed — the last token the caller was
@@ -220,22 +244,17 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
         }
         try {
             if (cmd == "feed") {
-                int n = 0;
                 // The pending sample first, if there is one: it is the last token the caller was
-                // shown and the state has not consumed it (see the invariant above). `decode_step`
-                // leaves `sampled_token` = whatever its own step argmaxed to, so feeding each
-                // token in turn leaves the state's next sample pending at the end — which is what
-                // `gen` emits first.
-                if (st.sampled_token >= 0) {
-                    decode_step(store, st, sc, st.sampled_token, nullptr);
-                    ++n;
-                }
+                // shown and the state has not consumed it (see the invariant above). The wave prices
+                // only its last row, so the state's next sample is left pending at the end — which is
+                // what `gen` emits first — and the intermediate argmaxes the per-token loop used to
+                // compute and throw away are gone (§06.5).
+                std::vector<int> tokens;
+                if (st.sampled_token >= 0) tokens.push_back(st.sampled_token);
                 long id = 0;
-                while (words >> id) {
-                    decode_step(store, st, sc, (int)id, nullptr);
-                    ++n;
-                }
-                std::printf("FED n=%d prefix_len=%d\n", n, st.prefix_len);
+                while (words >> id) tokens.push_back((int)id);
+                engine::prefill_wave(store, st, sc, tokens, engine::PrefillLogits::kLast);
+                std::printf("FED n=%d prefix_len=%d\n", (int)tokens.size(), st.prefix_len);
             } else if (cmd == "gen") {
                 int emitted = 0;
                 bool stop = false;
@@ -282,13 +301,16 @@ void print_usage(FILE* out) {
     std::fprintf(out,
                  "usage: decode_run [--model DIR] [--ids ID,ID,...] [--steps N] [--out DIR]"
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
-                 " [--load-verify] [--sizes-only]\n"
+                 " [--prefill-logits last|all] [--load-verify] [--sizes-only]\n"
                  "  --replay  feed each generation step the caller's token (teacher forcing; also"
                  " leaves §07.5 unarmed)\n"
                  "  --no-stop leave §07.5 unarmed in a free run too (depth smoke only)\n"
                  "  --state-fp D2H the §08 state at the end of the prompt and at the end of the run"
                  " and print one STATEFP row per pinned fingerprint row (judged by engine/gate.py"
                  " section (g))\n"
+                 "  --prefill-logits  `last` (default) samples only the prompt wave's last row, which"
+                 " is all §06.5 uses; `all` dumps every row's logits, which is what the wave's"
+                 " byte-identity gate compares against\n"
                  "  --session resident feed/gen/reset/stats/quit protocol for engine/chat.sh\n");
 }
 
@@ -573,40 +595,110 @@ int main(int argc, char** argv) {
             std::fprintf(log, "# step input_token sampled_token top_logit prefix_len_before\n");
         }
 
-        // Steps 0 .. prompt_len-1 feed the prompt; the rest feed what the previous step produced.
-        // They are the same call: the README's hand-off note is that prefill is token-at-a-time
-        // through `decode_step` with no chunked variant, so a second code path here would be a second
-        // implementation to keep honest. `prefill.{h,cpp}` remains a throughput item, not this one.
+        // ---- the prompt phase: ONE prefill wave (§06.1) ---------------------------------------
+        // This was the front of the loop below: a `decode_step` per prompt token, its sample thrown
+        // away except at the last position. `prefill_wave` makes the same launches in the same order
+        // and gives the phase one owner — the positions, the §06.5 end condition, and the fact that a
+        // wave has no stop check to arm. `--prefill-logits all` prices every row, which is the
+        // byte-identity mode (same launches per token as the loop it replaces); the default `last`
+        // prices only the last row, which is all §06.5 uses.
+        const int prompt_len = (int)o.prompt.size();
+        const int total_steps = prompt_len + o.steps;
         std::vector<float> logits;
-        int fed = 0;
-        int sampled = -1;
-        bool run_stopped = false;   // §07.5 reached in the GENERATION phase; see the rule below
-        double step_ms = 0.0;
-        const int total_steps = (int)o.prompt.size() + o.steps;
-        // `--state-fp` observes the two end conditions rather than deriving them: the prompt-end
-        // snapshot is taken at the phase boundary — after the last prompt token's step, before the
-        // first generation step — which is where §08.4's "after the last prompt token" actually is,
-        // and the run-end snapshot after the loop, wherever the run really ended (a §07.5 stop
-        // included). Both are D2Hs of live state, outside every timed region.
-        HostState prompt_end;
-        bool prompt_end_seen = false;
-        for (int i = 0; i < total_steps; ++i) {
-            if (o.state_fp && !prompt_end_seen && i == (int)o.prompt.size()) {
-                prompt_end = download_state(st);
-                emit_state_fp("prefill", prompt_end, nullptr);
-                prompt_end_seen = true;
+        double step_ms = 0.0;   // the run's step time, by-product not measurement (§6)
+        const auto t_wave = std::chrono::steady_clock::now();
+        const engine::PrefillResult wave =
+            engine::prefill_wave(store, st, sc, o.prompt, o.prefill_logits);
+        // Added to the same accumulator the per-step timings went into, so RESULT's `ms_total` still
+        // means "this run" rather than silently becoming generation-only.
+        step_ms +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wave)
+                .count();
+        std::printf("PREFILL tokens=%zu logits=%s prefix_len=%d", wave.size(),
+                    engine::prefill_logits_name(wave.logits_mode), st.prefix_len);
+        if (!wave.empty()) {
+            std::printf(" pos=%d..%d", wave.rows.front().pos_before, wave.rows.back().pos_after - 1);
+        }
+        std::printf("\n");
+
+        for (const engine::PrefillRow& row : wave.rows) {
+            // ---- §07.5's stop check is not armed here, and cannot be. -------------------------
+            // There is no `stop_fired` in this loop: a prefill row is prompt-phase by construction, so
+            // the only place a stop can be raised is the generate loop below. That used to be a
+            // `!from_prompt` conjunct on one shared loop and the first device run got it wrong: the
+            // `dec8` prompt is the manifest's `sources[0].ids` — a rendered chat template — so it
+            // legitimately contains id 248046 (the end-of-turn token `kStopToken` is) at index 8, and
+            // 248068/248069 later; and on that first run the engine's own argmax at prompt index 6 WAS
+            // 248046, which ended a 17-token prompt after 7 steps, produced 0 generation steps, and
+            // failed six gate checks that all said something else. A prompt-phase match is still
+            // printed, below, as a diagnostic; it is not a stop and do not "restore" it.
+            //
+            // One honest consequence of `--prefill-logits last`: an intermediate row was never
+            // argmaxed, so this diagnostic can only fire on a row the wave actually priced. The rule
+            // does not get weaker for that — there is simply no sample to misread — and
+            // `engine/gate.py --break-prompt-stop` injects the bug in the `all` row shape, where the
+            // intermediate sample exists again.
+            const bool priced = row.sampled >= 0;
+            const bool stop_match = row.sampled == engine::kStopToken;
+            if (priced) {
+                std::printf("prefill %d | fed %7d | sampled %7d | top %.6f | P %d -> %d%s\n",
+                            row.index, row.token, row.sampled, row.top_logit, row.pos_before,
+                            row.pos_after,
+                            // Stays visible as a diagnostic of the prompt path (and a warning that the
+                            // fixture's prompt contains the stop id).
+                            stop_match ? " [stop id in prompt phase — ignored]" : "");
+                // The machine-readable twin. `stop=` is the STOP CHECK (armed, matched, run over), and
+                // a prefill step can never arm it: `gate.py` section (a) asserts exactly that.
+                std::printf("STEP kind=prefill index=%d input=%d sampled=%d top_logit=%.9g"
+                            " pos_before=%d pos_after=%d stop=0\n",
+                            row.index, row.token, row.sampled, row.top_logit, row.pos_before,
+                            row.pos_after);
+            } else {
+                // Nothing was priced for this row, so the sample column says so instead of inventing
+                // an id. `sampled=-1` is `RequestState::sampled_token`'s existing "nothing pending"
+                // marker, and `top_logit=none` keeps the field present for a parser without claiming a
+                // value it does not have.
+                std::printf("prefill %d | fed %7d | sampled       - | top       - | P %d -> %d\n",
+                            row.index, row.token, row.pos_before, row.pos_after);
+                std::printf("STEP kind=prefill index=%d input=%d sampled=-1 top_logit=none"
+                            " pos_before=%d pos_after=%d stop=0\n",
+                            row.index, row.token, row.pos_before, row.pos_after);
             }
-            const bool from_prompt = i < (int)o.prompt.size();
+            if (log) {
+                std::fprintf(log, "%d %d %d %.9g %d\n", row.index, row.token, row.sampled,
+                             row.top_logit, row.pos_before);
+                if (!row.logits.empty()) {
+                    write_raw(o.out_dir, "logits" + std::to_string(row.index) + ".bin", row.logits);
+                }
+            }
+        }
+
+        // `--state-fp` observes the two end conditions rather than deriving them: the prompt-end
+        // snapshot is taken at the phase boundary — after the wave, before the first generation step —
+        // which is where §08.4's "after the last prompt token" actually is. There is no longer a
+        // third case: the wave either completes or throws, so a run cannot end "inside the prompt"
+        // any more (the pre-P2 `run_ended_inside_the_prompt` note existed because the stop check could
+        // fire mid-prompt, and §07.5 says it must not — now it structurally cannot).
+        HostState prompt_end;
+        if (o.state_fp) {
+            prompt_end = download_state(st);
+            if (o.steps > 0) emit_state_fp("prefill", prompt_end, nullptr);
+        }
+
+        int fed = 0;
+        // §06.5: the first token fed here is the wave's own `y0`, produced inside the last wave row,
+        // so no extra decode step is spent on the first sampled token.
+        int sampled = wave.empty() ? -1 : wave.rows.back().sampled;
+        bool run_stopped = false;   // §07.5 reached in the GENERATION phase; see the rule below
+        for (int i = 0; i < o.steps; ++i) {
+            const int step = prompt_len + i;
             // `--replay`: the caller owns the generation-phase tokens, exactly as it owns the
             // prompt's. The engine still samples every step and prints that sample, so a step
             // whose fed token and sampled token disagree is precisely the divergence the gate is
             // looking for — and because the feeding is not self-propagating, that divergence
             // cannot cascade into the steps after it. Without `--replay` the engine feeds itself,
             // which is what a free run does and what A-18 says cannot be pinned past ~8 tokens.
-            const int token = from_prompt
-                                  ? o.prompt[i]
-                                  : (o.feed.empty() ? sampled
-                                                    : o.feed[i - (int)o.prompt.size()]);
+            const int token = o.feed.empty() ? sampled : o.feed[i];
             const int pos_before = st.prefix_len;
             const auto ts = std::chrono::steady_clock::now();
             const engine::StepResult r =
@@ -616,53 +708,38 @@ int main(int argc, char** argv) {
                                                                   ts).count();
             sampled = r.token;
 
-            // ---- §07.5's stop check is armed in the GENERATION phase only. ---------------
-            // While the prompt is being fed, the sample is discarded: the next token fed comes from
-            // the caller's id list, not from the model, so what the engine argmaxed to mid-prompt
-            // says nothing about whether the model wants to stop and cannot be a stop condition.
-            // It is also not hypothetical. The `dec8` prompt is the manifest's `sources[0].ids` — a
-            // rendered chat template — so it legitimately contains id 248046 (the end-of-turn token
-            // `kStopToken` is) at index 8, and 248068/248069 later; and on the first device run the
-            // engine's own argmax at prompt index 6 WAS 248046. Arming the check there ended a
-            // 17-token prompt after 7 steps, produced 0 generation steps, and failed six gate
-            // checks that all said something else. So: a prompt-phase match is printed and ignored;
-            // only a generation-phase match ends the run. Do not "restore" the prompt-phase check.
             const bool stop_match = r.token == engine::kStopToken;
-            // §07.5 ends a FREE run. A replay is not free: the caller feeds the stream, and
-            // dec64f's own forced chain steps PAST the stop id (the reference samples it at
-            // generation step 24 and teacher forcing keeps going), so firing here would truncate
-            // the exact depth the fixture exists to test. `stop_match` is still printed and the
-            // gate still sees `stop=0` with `sampled=248046`, which is the same convention the
-            // prompt phase uses above.
+            // §07.5 ends a FREE run, in this loop and nowhere else (see the prefill loop for the other
+            // half of the rule). A replay is not free: the caller feeds the stream, and dec64f's own
+            // forced chain steps PAST the stop id (the reference samples it at generation step 24 and
+            // teacher forcing keeps going), so firing here would truncate the exact depth the fixture
+            // exists to test. `stop_match` is still printed and the gate still sees `stop=0` with
+            // `sampled=248046`, which is the same convention the prompt phase uses.
             //
             // `--no-stop` is the same waiver for a free run, and exists for one reason: a smoke run
             // that is supposed to reach a given depth. On dec8's prompt the model emits the stop id
             // after 38 tokens, so `--smoke 300` would otherwise test 38 steps of state growth and
             // call it 300. Nothing that claims parity uses this flag; the gate's parity path never
             // sets it.
-            const bool stop_fired = stop_match && !from_prompt && o.feed.empty() && !o.no_stop;
+            const bool stop_fired = stop_match && o.feed.empty() && !o.no_stop;
             if (stop_fired) run_stopped = true;
 
-            std::printf("%s %d | fed %7d | sampled %7d | top %.6f | P %d -> %d%s%s\n",
-                        from_prompt ? "prompt" : "decode", i, token, r.token, r.top_logit,
-                        pos_before, st.prefix_len, stop_fired ? " [STOP]" : "",
-                        // The prompt-phase match stays visible: it is a diagnostic of the prompt
-                        // path (and a warning that the fixture's prompt contains the stop id).
-                        (stop_match && from_prompt) ? " [stop id in prompt phase — ignored]" : "");
+            std::printf("decode %d | fed %7d | sampled %7d | top %.6f | P %d -> %d%s\n",
+                        step, token, r.token, r.top_logit, pos_before, st.prefix_len,
+                        stop_fired ? " [STOP]" : "");
             // The machine-readable twin of the line above, with the step split into a kind so the
             // gate does not have to re-derive which index the reference's `decode{s}` starts at.
-            // `stop=` is the STOP CHECK (armed, matched, run over) — not the raw match; a prompt-phase
-            // match is `stop=0` with `sampled=248046`, which `gate.py` reads as a fact, not a stop.
-            std::printf("STEP kind=%s index=%d input=%d sampled=%d top_logit=%.9g pos_before=%d"
+            std::printf("STEP kind=decode index=%d input=%d sampled=%d top_logit=%.9g pos_before=%d"
                         " pos_after=%d stop=%d\n",
-                        from_prompt ? "prompt" : "decode", i, token, r.token, r.top_logit,
-                        pos_before, st.prefix_len, stop_fired ? 1 : 0);
+                        step, token, r.token, r.top_logit, pos_before, st.prefix_len,
+                        stop_fired ? 1 : 0);
             if (log) {
-                std::fprintf(log, "%d %d %d %.9g %d\n", i, token, r.token, r.top_logit, pos_before);
-                write_raw(o.out_dir, "logits" + std::to_string(i) + ".bin", logits);
+                std::fprintf(log, "%d %d %d %.9g %d\n", step, token, r.token, r.top_logit,
+                              pos_before);
+                write_raw(o.out_dir, "logits" + std::to_string(step) + ".bin", logits);
             }
-            if (stop_fired && i + 1 < total_steps) {
-                std::printf("stopped at step %d (§07.5: id %d)\n", i, engine::kStopToken);
+            if (stop_fired && step + 1 < total_steps) {
+                std::printf("stopped at step %d (§07.5: id %d)\n", step, engine::kStopToken);
                 break;
             }
             fed++;
@@ -670,29 +747,32 @@ int main(int argc, char** argv) {
         if (log) std::fclose(log);
 
         if (o.state_fp) {
-            if (prompt_end_seen) {
+            if (o.steps > 0) {
                 const HostState run_end = download_state(st);
                 emit_state_fp("end", run_end, &prompt_end);
             } else {
-                // The loop never left the prompt: `--steps 0`, or a run that broke early. There is
-                // then one state and it is both end conditions, so it is emitted once as the prompt
-                // end and the reason is printed instead of a second identical row.
-                std::printf("STATEFP phase=prefill note=%s\n",
-                            fed == (int)o.prompt.size()
-                                ? "no_generation_steps_ran"
-                                : "run_ended_inside_the_prompt");
-                prompt_end = download_state(st);
+                // The run never generated anything, so there is one state and it is both end
+                // conditions: emitted once, as the prompt end, with the reason printed instead of a
+                // second identical block.
+                std::printf("STATEFP phase=prefill note=no_generation_steps_ran\n");
                 emit_state_fp("prefill", prompt_end, nullptr);
             }
         }
 
-        const int n = fed > 0 ? fed : 1;
-        // `stopped=` here is the RUN's §07.5 decision (generation phase only), which is what the gate
-        // asserts on. `st.stopped` is decode_step's raw record — "some step argmaxed to the stop id,
-        // in either phase" — so it can be true while this says 0, and on `dec8` it is.
+        // The denominator keeps its pre-P2 meaning — one token fed, prompt row or generated step — so
+        // these figures stay comparable with the ms/token rows already quoted in `engine/results.md`.
+        // P2 moved the prompt's work into the wave (timed as one call above, into the same
+        // accumulator), it did not take it out of the run. Still a by-product, never a measurement (§6).
+        const int n = (int)wave.size() + fed;
+        // `stopped=` here is the RUN's §07.5 decision, which is only ever raised by the generate loop
+        // above — that is the whole phase rule now, so there is no prompt-phase contribution to it.
+        // `st.stopped` is the raw record `finish_token` leaves ("some priced row argmaxed to the stop
+        // id, in either phase"), so it can be true while this says 0, and on `dec8` it is; under the
+        // default `--prefill-logits last` fewer prompt rows are priced, so fewer rows can set it.
         std::printf("RESULT mode=%s steps=%d ms_total=%.3f ms_per_step=%.3f last_sampled=%d"
                     " prefix_len=%d stopped=%d\n",
-                    o.feed.empty() ? "run" : "replay", total_steps, step_ms, step_ms / n, sampled,
+                    o.feed.empty() ? "run" : "replay", total_steps, step_ms,
+                    step_ms / (n > 0 ? n : 1), sampled,
                     st.prefix_len, run_stopped ? 1 : 0);
         std::fflush(stdout);
         engine::free_scratch(sc);
