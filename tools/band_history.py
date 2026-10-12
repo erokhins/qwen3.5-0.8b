@@ -201,7 +201,6 @@ def read_history(path) -> list:
             if f not in rec:
                 raise BandHistoryError(f"{path}:{no} has no {f!r} field")
         rec.setdefault("event", "applied")
-        rec["_line"] = no
         out.append(rec)
     return out
 
@@ -351,7 +350,8 @@ def render(rep: Report, quiet_ok: bool = False) -> int:
     `[PASS]`/`[FAIL]` tally is untouched and `engine/route_price.py --engine-log` (which parses a gate
     log for its engine column) sees nothing new to trip on.
     """
-    print("\n== band history — every band value must have a recorded justification")
+    if not (quiet_ok and rep.ok):
+        print("\n== band history — every band value must have a recorded justification")
     if rep.error:
         print(f"  band history: CANNOT JUDGE — {rep.error}")
         return 1
@@ -490,16 +490,21 @@ def review_main(since, root):
 # ---------------- recording ----------------------------------------------------------------------
 
 # A reason whose stated goal is the gate passing, rather than a measurement that moved. Refused at any
-# length, because this is the exact motive `AGENTS.md` forbids acting on.
+# length, because this is the exact motive `AGENTS.md` forbids acting on. Each entry is (label, pattern)
+# so the refusal names the shape it rejected instead of printing a regex at the operator.
 PASS_SEEKING = [
-    re.compile(r"\bso\s+that?\s+(it|this|that|the\s+gate|the\s+fixture|the\s+run|things)\s+"
-               r"(will\s+|would\s+|can\s+|could\s+|may\s+)?(pass|passes|passed|green|go\s+green)\b"),
-    re.compile(r"\b(to|for)\s+(the\s+gate|it|this|things)\s+to\s+pass\b"),
-    re.compile(r"\bmake\s+(it|this|that|the\s+gate|the\s+fixture|things)\s+(pass|green|go\s+green)\b"),
-    re.compile(r"\b(needed|want|wanted|need)\s+to\s+(pass|be\s+green|go\s+green|be\s+passing)\b"),
-    re.compile(r"\bfor\s+now\b"),
-    re.compile(r"\btemporar(y|ily)\b"),
-    re.compile(r"\bflak(y|iness)\b"),
+    ("so that it passes", re.compile(r"\bso\s+that?\s+(it|this|that|the\s+gate|the\s+fixture|"
+                                     r"the\s+run|things)\s+"
+                                     r"(will\s+|would\s+|can\s+|could\s+|may\s+)?"
+                                     r"(pass|passes|passed|green|go\s+green)\b")),
+    ("for the gate to pass", re.compile(r"\b(to|for)\s+(the\s+gate|it|this|things)\s+to\s+pass\b")),
+    ("make it pass", re.compile(r"\bmake\s+(it|this|that|the\s+gate|the\s+fixture|things)\s+"
+                                r"(pass|green|go\s+green)\b")),
+    ("needed to pass", re.compile(r"\b(needed|want|wanted|need)\s+to\s+(pass|be\s+green|go\s+green|"
+                                  r"be\s+passing)\b")),
+    ("for now", re.compile(r"\bfor\s+now\b")),
+    ("temporarily", re.compile(r"\btemporar(y|ily)\b")),
+    ("flaky", re.compile(r"\bflak(y|iness)\b")),
 ]
 # Words that describe the ACT of moving a band and nothing else. A reason built only out of these (plus
 # stop-words) names no measurement, which is the thing this exists to refuse. This is a THINNESS test,
@@ -545,9 +550,9 @@ def justify(reason, decision, root=ROOT):
     if len(text) < MIN_REASON_CHARS:
         raise ValueError(f"reason is {len(text)} characters — too short to name a measurement."
                          " Say what was measured, on what, and where it is written down.")
-    for pat in PASS_SEEKING:
+    for label, pat in PASS_SEEKING:
         if pat.search(text.lower()):
-            raise ValueError(f"reason states the goal of making the gate pass ({pat.pattern!r}). A"
+            raise ValueError(f"reason states the goal of making the gate pass (it says {label!r}). A"
                              " band move needs the measurement that forced it, not the outcome you"
                              " wanted.")
     words = re.findall(r"[a-z0-9][a-z0-9._/%-]*", text.lower())
@@ -881,12 +886,10 @@ def main(argv=None) -> int:
         mode = "check"
     elif argv and argv[0] in ("check", "record", "review"):
         mode = argv.pop(0)
-    elif selftest:
-        mode = "selftest"
     else:
         mode = "review"        # the bare 2026-10-11 invocation, kept working verbatim
     if selftest:
-        mode = "selftest"
+        mode = "selftest"      # `--selftest` alongside anything else is still the selftest
 
     if mode == "check":
         ap = argparse.ArgumentParser(prog="band_history.py check")
