@@ -2378,3 +2378,92 @@ still one token per wave by construction, so the whole-run ratio (12 513 vs 41 0
 prompt ratio; shortening it is P9's argument, not this one. (4) `wide520f` still cannot exercise a wave: the
 512-lane attention ceiling is P7, and `kMaxWaveRows = 512` is a scratch-sizing constant, not the attention
 cap — the two are unrelated and both are named.
+
+## Q5 / P5: the nine projections batch over the wave, and the batched form is the only form
+
+P4b left item (2) open, and this closes the projection half of it. `submit_wave_body` had been launching
+`in_proj_qkv` 295 times for layer 0 of a 295-token wave; it now launches it once, reading the `[n, 1024]`
+norm tile and writing `[n, 6144]`, and the per-token mixer reads row `t` of what it wrote. Same for `q/k/v/o`
+and `out_proj`. §06.2's "one GEMM per projection" is what the plan asked for and what the counters now prove.
+
+**One kernel body, at two tile widths.** `proj_gemv(weight, x, out, rows, in, tokens)` instantiates only
+`proj_gemv_tokens<IN, TPB, false>`: `TPB = 4` at `in = 1024`, `2` at `2048` (16 KiB of shared per block, the
+budget `prototype/mlp_gemv` settled on), and `TPB = 1` when the wave has one token — which is the k=1 launch
+shape and the k=1 arithmetic. That is a deliberate difference from `kernels_mlp.cpp`, whose launcher branches
+between a batched kernel and a single-token kernel and therefore has two bodies to keep honest. Here decode
+and prefill share one, so there is no possibility of the decode path being the one that was never measured.
+`planned_launch_counts()` still says `proj=114`, and section (d) is untouched: 114 is launches per BODY at
+any width, which is exactly what it always meant at n = 1.
+
+**Counted, on both widths.** A fourth family in `engine/launch_stats.{h,cpp}` — `LAUNCHSTAT family=proj` —
+recorded after the launch and on the one-token branch too, because the failure this instrument exists to catch
+is a wave that quietly took the one-token path, and that is invisible unless the one-token path reports itself.
+Section (h) gained `proj` in the counted families plus two explicit checks, and the arithmetic needed nothing
+new: `wave_expect`'s per-body bill of 114 is correct for a body of 295 tokens and for a body of one.
+
+**The A/B, counted** (`dec300f`, 295-token prompt + 128 steps, `--wave-rows 512` vs `1`):
+
+| | batched wave | `--wave-rows 1` | the count, not a duration |
+|---|---|---|---|
+| proj, whole run | **14 706** calls, 114 batched, rows_max **295** | **48 222** calls, 0 batched, rows_max **1** | `rows_total` **48 222 both sides** |
+| proj, prompt wave alone | 114 | 33 630 | **295× fewer** launches for a 295-token prompt |
+| glue+proj+MLP, prompt wave | 211 | 62 245 | 295×; whole run 27 219 vs 89 253 — 128 generation steps are one token wide either way |
+| sampled ids / logits | 423 rows | 423 rows | ids equal, **423 files, 420 157 440 bytes, 0 differing** |
+
+`dec8` (17-token prompt) reads 211 vs 3587 prompt-wave launches, **17×**, `rows_total` 2850 both sides; the
+ratio is the prompt length on every fixture, because a wave costs 211 glue+proj+MLP launches however wide it
+is — 97 of them were P4's and 114 are this one's.
+
+**Five fixtures, margin preflight (§6.0), before against after.** The deficit is the gate's own per-step `cos`
+deficit; "filled" is that deficit over the allowance the step is judged against (the flat G5 floor for `dec8`,
+which prices no route allowance). The binding step is the largest ratio, and it is the same step and the same
+bits on both sides:
+
+| fixture | worst cos step | deficit / allowance | filled | before → after | worst meanrel step | filled |
+|---|---|---|---|---|---|---|
+| `dec8` | 7 (flat G5) | 3.2365e−05 / 5.0000e−04 | 0.0647 | **x1.0000** | 7 (flat G5) | 0.1460 → **x1.0000** |
+| `dec64f` | 32 | 2.1555e−03 / 2.4844e−03 | 0.8676 | **x1.0000** | 54 | 0.7962 → **x1.0000** |
+| `dec64t` | 54 | 2.3281e−04 / 2.3322e−04 | 0.9982 | **x1.0000** | 4 | 0.9789 → **x1.0000** |
+| `dec300f` | **86** | 4.6322e−04 / 4.6358e−04 | **0.9992** | **x1.0000** | 72 | 0.9997 → **x1.0000** |
+| `mt32f` | 19 | 3.7257e−04 / 3.7358e−04 | 0.9973 | **x1.0000** | 3 | 0.9594 → **x1.0000** |
+
+The plan's risk case was `dec300f` at step 86 — 0.08 % of allowance left, the thinnest margin in the set, and
+the one place where a projection batch that legitimately moved one bit could have turned the fixture red. It
+did not move: the step, the deficit and the meanrel are equal to five significant figures, because the batched
+form's output is the per-row form's bits (138 400 elements per fixture, 0 differing, `prototype/proj_gemv/run.py
+--tokens`) and not merely close. Check counts after the package: **124 / 606 / 603 / 1112 / 347**, zero
+failures — the +5 per fixture over P4b is section (h)'s two new `proj` checks, its `both sides cover the same
+proj rows`, and the two explicit batched/one-row projection checks.
+
+**Why the scratch grew, and by how much.** The projections' inputs and outputs became row-family buffers
+(`a_q` 4096, `a_k`/`a_v` 512, `g_raw`(+F32) 6144, `g_z` 2048, `g_a`/`g_b`(+F32) 16, `block_out`(+F32) 2048,
+per wave row): ≈31 MiB per request at `kMaxWaveRows = 512`, on top of P4's ≈18 MiB. Against a 1.55 GB
+checkpoint and a ~34 GiB device-visible pool that is AGENTS.md's "capacity is not the constraint for this
+model", stated rather than discovered. What did NOT grow is the mixer's own scratch (`g_u`, `g_o`, `g_g`,
+`g_beta`, `conv_new`, the attention stage buffers) — those are produced and consumed inside one token's mixer
+call, and a token axis for them would be unused memory.
+
+### What a worker ran on the device (correctness only, no timing taken)
+
+`prototype/proj_gemv/run.py` (self-locking, run without holding `tools/gpu_lock.sh`): baseline `--negative`
+PASS on the pre-P5 binary, then post-change `--negative` (136 comparisons, 0 failures, all eleven negatives
+caught) and `--tokens p64` / `--tokens p300`, both PASS. `engine/gate.py --selftest --dry-run` (CPU): all
+needles, including the two grown ones. `engine/gate.py --fixture {dec8, dec64f, dec64t, dec300f, mt32f}`: all
+five PASS, 3 / 5 / 6 / 15 / 8 s wall respectively, `gpu_lock.sh util` 47–61 % at the time of each. **No timing
+taken and none of the above is a duration** — the gate's own `ms_per_step` by-product line is not quoted here
+for that reason.
+
+**Not run by a worker, by rule:** any timing, the GB/s of the batched form, the `TPB` sweep, and every number
+that would enter `bench/performance-status.md`. The commands for that pass: `engine/build/decode_run …
+--wave-rows {512,1}` (the pair above), and for the kernel family `prototype/proj_gemv/run.py --mode burst
+--plan … --tokens 295 --tpb {1,2,4}` — `Job::bytes()` already divides weight bytes per TILE, which is the
+divisor that makes a batched GB/s mean anything. Two things that pass are worth pricing there: `TPB` above the
+16 KiB shared budget (8 rows at `in = 1024` wants 32 KiB and halves occupancy), and the `in = 2048` side,
+where `o_proj`/`out_proj` take `TPB = 2` while every 1024-wide projection takes 4.
+
+**Open after P5.** (1) `TPB` is a budget choice, not a measurement (above). (2) `in_proj_a`/`in_proj_b` are
+16-row launches and still separate ones; packing them is the ≈0.12 ms/token plan change `results.md` already
+names, not this one. (3) The per-row pin judging for the batched form lives in the prototype gate; the engine's
+own equivalence is carried by the logits `cmp` and the five-fixture margins. (4) GDN conv/gates/rec and the
+attention row are still one token at a time inside the wave — P6/P7's, and (h)'s counters will show them the
+same way once they batch.
