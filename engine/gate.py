@@ -42,7 +42,10 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       step where the pin itself is an exact tie, which has no defined argmax to agree with; that is a
       named, proved exception (TIE POLICY, next to the band rationale) and every use of it is printed
       as a TIE line and counted in the summary, never waived quietly.
-  (b) THE LOGITS — each step's logits against that step's pinned `logits_last.npy`, inside `BAND`.
+  (b) THE LOGITS — each step's logits against that step's pinned `logits_last.npy`, inside the band
+      rule printed for that step: the measured ROUTE ALLOWANCE where `engine/route_allowance.py` has
+      priced this fixture, the flat published §10 floors where it has not. The rule in force is named on
+      every step line, and the derivation of its margins is in the ROUTE ALLOWANCE block below.
   (c) STATE SIZES — the bytes the engine reports for its request state must equal what
       `engine/state_sizes.py` derives from `state.h`; that file is *run*, not re-typed.
   (d) LAUNCH PLAN — one token's launch bill, counted from §07 in Python and compared with the engine's.
@@ -66,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import re
@@ -171,10 +175,100 @@ def lane_ceiling() -> int:
 # (a ratio of means, not a mean of ratios — the latter explodes on the near-zero logits that most of
 # a 248 320-wide vocabulary is).
 BAND = {
-    "cos_hard": 0.9995,      # §10.1 G5
-    "meanrel_hard": 0.05,    # §10.2 cascade ceiling
+    "cos_hard": 0.9995,      # §10.1 G5 — the flat floor, in force where no route allowance is priced
+    "meanrel_hard": 0.05,    # §10.2 cascade ceiling — same fallback rule
     "cos_report": 0.9999,    # §10.1 G6, decode logits
+    "route_margin": 3.50,    # cos: engine deficit / measured route spread. DERIVED, see below.
+    "route_margin_rel": 0.42,  # meanrel: the same ratio on the meanrel column. DERIVED, see below.
 }
+
+# ROUTE ALLOWANCE — the logits band is keyed on the reference's own measured route spread, per fixture
+# and per step. DECIDED 2026-10-12 by the operator: option 1 of the three written up in
+# `engine/results.md` ("Decision 2 of the deep gate"). The full write-up with its tables is there; what
+# belongs here, next to the code that applies it, is the rule, where its numbers come from, and what was
+# deliberately not chosen.
+#
+# Why the flat floors above had to go. They are absolute, and they were measured to be unreachable by the
+# reference itself. `engine/route_price.py` runs one pinned prompt twice through `speccheck/specimpl.py`
+# — once with the chunked GDN prompt form (§04.7, the one G3 canonicalises) and once with the recurrent
+# one (§04.4, the form an engine with no prefill necessarily takes) — feeds the reference's own tokens,
+# and measures how far apart those two LEGAL forms land on the logits vector at each step. On `dec64f`
+# that spread is 1-cos 2.71e-5 .. 1.714e-3 and it goes under G5 at steps 27, 28, 29, 30, 31, 32 — six of
+# the seven steps the engine goes under it, same window, same shape, no engine anywhere in the
+# measurement — and its meanrel is over §10.2's 5 % at 44 of the 64 steps (worst 60.8 %, i.e. 12x the
+# ceiling). An absolute floor there is not measuring the engine. `dec64t` (same pin policy, a prompt
+# whose own chain never reaches its stop id) supplies the other half: there the spread never exceeds
+# 1.258e-4 and the engine's worst deficit is 2.410e-4, so the same instrument says a well-conditioned
+# step is entitled to be judged far more tightly than 5e-4.
+#
+# The rule, at step j:
+#
+#     1 - cos(engine_j, pin_j) <= margin     x  route_1cos(j)        (the "shape" half)
+#     meanrel(engine_j, pin_j) <= margin_rel x  route_meanrel(j)     (the "scale" half)
+#
+# `route_*(j)` is the measurement above, cached per fixture in
+# `data/refs/<fixture>/route_allowance.json` by `engine/route_allowance.py`. This gate READS that file
+# and never re-prices it: re-pricing is ~5 s of torch CPU per fixture and a gate run must not silently
+# re-run the reference, and a cached spread carries a provenance header (command, date, and the hashes
+# `load_allowance` checks) that a freshly computed one would not.
+#
+# The margins are DERIVED, not chosen — that is the entire difference between this and a relabelled band.
+# Definition: `margin` = max over the priced fixtures of (engine deficit at step j / route spread at
+# step j), i.e. the tightest constant that admits every step ever measured, rounded UP at two decimals
+# (`engine/route_allowance.py` computes it and refuses to write a file whose max exceeds the constant
+# below). Measured on the 2026-10-12 gate runs, both fixtures, 64 steps each (128 steps, and every
+# deficit read at full precision out of the gate log's (b) lines, not off its six-decimal cos):
+#
+#     cos      dec64f  worst 3.0368 at step 32: deficit 2.1555e-3 over a spread of 7.0982e-4  -> 3.04
+#     cos      dec64t  worst 3.4939 at step 54: deficit 2.3281e-4 over a spread of 6.6635e-5  -> 3.50 <- sets it
+#     meanrel  dec64f  worst 0.3344 at step 54: 1.2596 % over a spread of 3.7670 %            -> 0.34
+#     meanrel  dec64t  worst 0.4111 at  step 4: 2.0331 % over a spread of 4.9452 %            -> 0.42 <- sets it
+#
+# Say it plainly, including the inconvenient half: the proposal in `results.md` guessed k = 4 and the
+# measurement says 3.50 — and 3.50 is set not by the ill-conditioned `dec64f` excursion but by an ordinary
+# well-conditioned step of `dec64t`, which is worth knowing. A margin of 3.0 or less leaves `dec64f`
+# step 32 (3.0368) and `dec64t` step 54 (3.4939) RED, and there is no headroom factor hiding that: the
+# constant is a measured property of this engine at these two fixtures. If the engine gets worse the
+# constant has to move, and moving it is a visible edit — this comment, `BAND`, and the `margin` field of
+# every cached file have to agree, `load_allowance` fails the gate when a file disagrees, and
+# `route_allowance.py` refuses to write a file whose measurement does not reproduce the constant.
+#
+# What it costs and what it buys, in both directions. Outside the excursion the allowance is TIGHTER than
+# the floor it replaces — on `dec64t` all 64 steps get a cos cap under §10.1's 5e-4 (tightest 1.2274e-4,
+# step 41), and on `dec64f` 54 of 64 do (tightest 9.4788e-05, step 24) — so this is not a loosening of
+# the gate, it is a band that is tight where the reference is tight and loose only where the reference is
+# provably loose. Inside the excursion it is looser: `dec64f` step 28's cap becomes 5.9983e-3, 12x the
+# flat floor it replaces. What still binds there is unchanged and hard: the
+# per-step argmax (the two legal routes agree with each other at 64/64 steps, and with the pin at every
+# step of that window) plus the tie policy's proof.
+#
+# meanrel gets the SAME treatment rather than becoming reported-only, and the reason is what cos cannot
+# see: cos is scale-invariant, so a mis-scaled final norm — exactly the class §10.2's meanrel ceiling was
+# put in for — scores cos 1.000000 and only meanrel can catch it. Reported-only would have handed that
+# failure class back, which is the hole option 2 below was rejected for; keyed on the measured spread it
+# keeps the check and stops judging a step by a figure two legal reference forms exceed 12x over.
+#
+# What was NOT chosen:
+#   * option 2, "gate the decision, not the vector": per-step argmax only, logits demoted to reported
+#     evidence with the §10.2 margin statistic as the check. Cheapest and honest, and it says what the
+#     gate really verifies — but it gives up any claim on the logits vector's shape, i.e. the whole
+#     wrong-but-argmax-preserving class. The argmax rule is a hard gate HERE too, unchanged by this
+#     decision, underneath the band in section (b), with decision 1's proved-tie exception as its only
+#     qualification. It is just not the only thing this gate checks.
+#   * option 3, "leave the bands and label the window": keep 0.9995 hard and carry a per-fixture list of
+#     steps known to be inside legal spread, printed as `SPREAD` lines that are reported but not armed.
+#     REJECTED, and the reason is on the record: an exempted step is judged by NOTHING, so a real bug
+#     that lands on an exempted step passes silently — and the list is hand-maintained from a measurement
+#     that can move. Under the allowance there is no exempted step and no list to keep in sync: every
+#     step is judged, by a number measured at that step.
+#
+# Staleness is designed to be loud. Each cached file records the prompt-id hash, the forced-feed hash,
+# the `speccheck/specimpl.py` hash and the margins it was priced under, because those four are what the
+# measurement was made from; `load_allowance` FAILS the gate if any of them disagrees with the fixture in
+# front of it, so a re-pinned fixture or a changed reference cannot leave a stale band behind. A fixture
+# with NO cached file — `dec8` today, whose route table `route_price.py` only prints — falls back to the
+# flat published floors and prints `flat G5` on every step line, so the fallback is visible rather than
+# assumed.
 
 # TIE POLICY — an exact tie in the pin is a named, proved exception to "ids exact per step", and it
 # is the strictest thing available, not a concession. DECIDED 2026-10-12 by the operator; the band
@@ -404,6 +498,196 @@ def load_fp(step: int, kind: str):
 def fp_total(step: int, kind: str, col: int):
     a = load_fp(step, kind)
     return None if a is None else float(a[:, col].sum())
+
+
+# ---- the route allowance -----------------------------------------------------------------------
+# The rule and its derivation live in the ROUTE ALLOWANCE block next to `BAND`, above. Everything here
+# is a reader: no number in this section is computed by a gate run.
+ALLOWANCE_FILE = "route_allowance.json"
+SELFTEST_ALLOW_FACTOR = 1.5   # how far over its own allowance the selftest injection puts a step
+
+
+def _ids_sha(ids) -> str:
+    return hashlib.sha256(",".join(str(int(t)) for t in ids).encode()).hexdigest()[:16]
+
+
+def allowance_inputs(n_steps: int) -> dict:
+    """The identity of the measurement a cached allowance must have been priced from.
+
+    Four fields, and each is there because changing it invalidates a cached spread:
+      * `prefill_ids` / `feed_ids` — the route spread is a statement about ONE prompt fed ONE forced
+        token chain; re-pin the fixture and the number belongs to a different prompt.
+      * `n_steps` — an allowance priced with `--max-steps` (or against a shorter chain) must not be
+        used for the steps it never priced.
+      * `specimpl_sha256` — the spread is measured inside `speccheck/specimpl.py`, so a change to the
+        reference's arithmetic is a change to the band. `engine/route_price.py`'s own hash is NOT in
+        here on purpose: a doc-comment edit to the measurer is not a change to the measurement.
+    """
+    man = json.loads((REFS / "manifest.json").read_text())
+    return {"prefill_ids": _ids_sha(man["prefill_ids"]),
+            "feed_ids": _ids_sha(man["greedy_continuation"][:-1]),
+            "n_steps": n_steps,
+            "specimpl_sha256": hashlib.sha256(
+                (ROOT / "speccheck" / "specimpl.py").read_bytes()).hexdigest()}
+
+
+def read_allowance_doc():
+    """The cached file's raw contents, or None if there is none. Reads only — `load_allowance` judges."""
+    path = REFS / ALLOWANCE_FILE
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        check(False, f"{ALLOWANCE_FILE} is readable", f"{type(e).__name__}: {e}")
+        return None
+
+
+def allowance_problems(doc, n_steps: int) -> list:
+    """Every reason this cached file must not be trusted for this fixture at this margin. Empty = use it."""
+    bad = []
+    for key, want in (("margin", BAND["route_margin"]), ("margin_rel", BAND["route_margin_rel"])):
+        got = doc.get(key)
+        if got is None or float(got) != want:
+            bad.append(f"{key}={got} but the gate carries {want} — the margin in force lives in "
+                       "engine/gate.py's BAND, and a file priced under another one is a different band")
+    want_inputs = allowance_inputs(n_steps)
+    got_inputs = doc.get("inputs", {})
+    for field, want in want_inputs.items():
+        if got_inputs.get(field) != want:
+            bad.append(f"inputs.{field}={got_inputs.get(field)!r} but this fixture is {want!r} — the"
+                       " pins or the reference moved under this cached spread; re-price it with"
+                       " engine/route_allowance.py")
+    steps = doc.get("steps", [])
+    priced = {int(r["step"]) for r in steps}
+    missing = [j for j in range(n_steps) if j not in priced]
+    if missing:
+        bad.append(f"{len(priced)} of {n_steps} steps priced; no allowance row for step(s)"
+                   f" {missing[:6]}{' …' if len(missing) > 6 else ''}")
+    return bad
+
+
+def load_allowance(n_steps: int):
+    """The per-step allowance for this fixture as `{margin, margin_rel, steps}`, or None.
+
+    None means "judge by the flat published floors", which is the STRICTER fallback and is always
+    announced per step, never assumed. A file that is present but does not match what it is being read
+    for is a FAIL, not a fallback: a stale spread is a band nobody measured, and the whole point of
+    caching it is that its provenance is checkable.
+    """
+    doc = read_allowance_doc()
+    if doc is None:
+        notes.append(f"no {ALLOWANCE_FILE} next to {REFS.name}'s pins: every step is judged by the flat"
+                     " §10.1 G5 / §10.2 floors. Price it (CPU, ~5 s per fixture, no device):"
+                     " `engine/route_price.py --fixture " + REFS.name + " --engine-log <gate log>"
+                     " --out tmp/route_" + REFS.name + ".json` then `engine/route_allowance.py --table"
+                     " tmp/route_" + REFS.name + "[.json for each priced fixture]`.")
+        return None
+    bad = allowance_problems(doc, n_steps)
+    check(not bad, f"{ALLOWANCE_FILE} is valid for {REFS.name}", bad[:4])
+    if bad:
+        return None
+    gen = doc.get("generated", {})
+    print(f"  allowance: {ALLOWANCE_FILE} — priced {gen.get('date', 'date unknown')} by"
+          f" `{gen.get('command', 'command unknown')}`; margins cos {doc['margin']:.2f} / meanrel"
+          f" {doc['margin_rel']:.2f}")
+    return {"margin": float(doc["margin"]), "margin_rel": float(doc["margin_rel"]),
+            "steps": {int(r["step"]): r for r in doc["steps"]}}
+
+
+def rule_for_step(allowance, j: int) -> tuple:
+    """(cos cap, meanrel cap, the line naming the rule in force) for step j.
+
+    Named on every step because a reader of a gate log must never have to guess why a step passed, and
+    the two rules give different answers at the same step: the allowance is tighter than the flat floor
+    most places and looser in the low-energy window.
+    """
+    if allowance is None:
+        return (1.0 - BAND["cos_hard"], BAND["meanrel_hard"],
+                f"flat G5 (cos deficit <= {1 - BAND['cos_hard']:.4e}, meanrel <="
+                f" {BAND['meanrel_hard']:.0%}) — no route allowance priced for {REFS.name}")
+    row = allowance["steps"][j]
+    return (float(row["allowance_one_cos"]), float(row["allowance_meanrel"]),
+            f"route allowance (spread={float(row['route_one_cos']):.4e},"
+            f" margin={allowance['margin']:.2f} -> cos deficit <="
+            f" {float(row['allowance_one_cos']):.4e}; meanrel spread={float(row['route_meanrel']):.4%},"
+            f" margin={allowance['margin_rel']:.2f} -> <= {float(row['allowance_meanrel']):.4%})")
+
+
+def _counterfactual(value: float, flat_cap: float, flat_name: str) -> str:
+    """What a failed band line says besides its own number: whether the FLAT published floor would have
+    caught it too. A failure under the flat cap is exactly the failure the old band could not see, and
+    that is the sentence a reader of a gate log needs; it is printed only on a failure, because a passing
+    step does not need a counterfactual.
+    """
+    return (f"the flat {flat_name} ({flat_cap:.4e}) would have PASSED this step — the route allowance"
+            " is what caught it" if value <= flat_cap else
+            f"it is outside the flat {flat_name} ({flat_cap:.4e}) too")
+
+
+def fixture_step_count() -> int:
+    """How many generation steps this fixture gates — the number an allowance must cover."""
+    return len(json.loads((REFS / "manifest.json").read_text())["greedy_continuation"]) - 1
+
+
+def allowance_row(j: int):
+    """Step j's cached row for a DRY RUN, quietly, or None. `dry_run` cannot use `load_allowance`: it
+    runs before section (b), and an injection whose allowance is stale must refuse rather than double-
+    report the same FAIL."""
+    doc = read_allowance_doc()
+    if doc is None or allowance_problems(doc, fixture_step_count()):
+        return None
+    for row in doc["steps"]:
+        if int(row["step"]) == j:
+            return row
+    return None
+
+
+def allowance_noise(vec: np.ndarray, j: int, factor: float) -> np.ndarray:
+    """Noise that puts step j's logits deficit at `factor` x its own cached route allowance.
+
+    Sized, not guessed: for g = x + n with n ~ N(0, s²), 1-cos ≈ s²/(2·mean(x²)) to first order; s is
+    then corrected once against the deficit actually achieved, so the injection lands on its target
+    instead of near it. Constant amplitude rather than per-element proportional, because a proportional
+    σ big enough to move cos by 1e-4 is a couple of percent of the LARGEST logits and can shuffle the
+    top pair — that would make the argmax line the thing that caught it, which is a different test.
+    """
+    row = allowance_row(j)
+    if row is None:
+        raise SystemExit(f"gate: --break-allow {j} needs a valid {ALLOWANCE_FILE} for {REFS.name}:"
+                         " the injection's whole meaning is 'above this step's measured allowance,"
+                         " under the flat floor' (engine/route_allowance.py writes the file, CPU only)")
+    target = factor * float(row["allowance_one_cos"])
+    flat = 1.0 - BAND["cos_hard"]
+    if target >= flat:
+        raise SystemExit(f"gate: --break-allow {j}: 2x the allowance at this step is {target:.4e},"
+                         f" which is at or over the flat §10.1 G5 floor {flat:.4e}. An injection the"
+                         " old band would have caught anyway proves nothing"
+                         " (`prototype/mlp_gemv/results.md`); aim it at a step with a tighter spread.")
+    x = vec.astype(np.float64)
+    rms = float(np.sqrt(np.mean(x * x)))
+    rng = np.random.default_rng(7)          # fixed: the injection must be reproducible
+    n = rng.standard_normal(x.shape) * (rms * np.sqrt(2.0 * target))
+    achieved = 1.0 - metrics(x + n, x)["cos"]
+    return (x + n * np.sqrt(target / max(achieved, 1e-30))).astype(np.float32)
+
+
+def break_allow_step():
+    """The step `--break-allow` should be aimed at: the tightest priced allowance in this fixture whose
+    injected deficit still fits under the flat G5 floor — i.e. the step where the old band was most
+    nearly blind. None when no step qualifies, which `selftest` reports as a SKIP rather than quietly
+    running a negative that any band would catch.
+    """
+    doc = read_allowance_doc()
+    if doc is None:
+        return None
+    if allowance_problems(doc, fixture_step_count()):
+        return None
+    flat = 1.0 - BAND["cos_hard"]
+    cands = [(float(r["allowance_one_cos"]), int(r["step"])) for r in doc["steps"]
+             if SELFTEST_ALLOW_FACTOR * float(r["allowance_one_cos"]) < flat]
+    return min(cands)[1] if cands else None
+
 
 
 # ---- (e) the curve ---------------------------------------------------------------------------
@@ -650,7 +934,7 @@ def parse_run(text: str) -> dict:
 def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids: int = -1,
             break_logits: int = -1, break_noise: int = -1, break_prompt_stop: int = -1,
             replay: bool = False, break_feed: int = -1, break_tie: int = -1,
-            tie_alt: int = -1) -> tuple[
+            tie_alt: int = -1, break_allow: int = -1) -> tuple[
                 str, int]:
     """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
 
@@ -732,6 +1016,13 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             # the case that asks whether the band has teeth of its own, separate from the token id.
             rng = np.random.default_rng(4)   # fixed: the injection must be reproducible
             logits = logits * (1.0 + 0.05 * rng.standard_normal(logits.shape)).astype(np.float32)
+        if j == break_allow:
+            # The same class — argmax untouched, aggregate wrong — sized against THIS step's measured
+            # route allowance instead of against the flat floor: a deficit over the allowance that still
+            # fits under the flat §10.1 G5 floor, i.e. a failure the old band could not have seen. The
+            # meanrel line usually goes with it (any noise that moves cos moves meanrel); the assertion
+            # is about the cos line failing AT THIS STEP, which is what `selftest` checks.
+            logits = allowance_noise(logits, j, SELFTEST_ALLOW_FACTOR)
         lines.append(f"STEP kind=decode index={pos} input={fed} sampled={sampled}"
                      f" top_logit=1 pos_before={pos} pos_after={pos + 1} stop=0")
         (work / f"logits{pos}.bin").write_bytes(logits.astype(np.float32).tobytes())
@@ -758,15 +1049,26 @@ def selftest(fixture: str = "dec8") -> int:
     the policy that refuses everything: the engine on the pin's OTHER tied id must PASS as a TIE, and
     the engine on an untied third id must FAIL. Both are aimed at a step the fixture really has a tie
     at, and both are skipped out loud if this fixture has none.
+
+    The route allowance gets one: a step's logits deficit pushed past its own measured route spread
+    while still inside the flat §10.1 G5 floor — i.e. a failure the band this allowance replaced could
+    not have seen. Skipped out loud on a fixture with no priced allowance (dec8 today).
     """
     base = [sys.executable, str(Path(__file__).resolve()), "--fixture", fixture]
+    # The cos band line is NAMED by the rule that produced it, so the needle has to know which rule this
+    # fixture is under: with a priced allowance the same injected noise reads as
+    # `step 5: cos deficit … inside the route allowance …`. `allow_step` is where the allowance
+    # injection will be aimed, or None when there is nothing priced to aim it at.
+    allow_step = break_allow_step()
+    cos_fail_5 = (f"[FAIL] step 5: cos deficit" if allow_step is not None
+                  else f"[FAIL] step 5: cos >= {BAND['cos_hard']} (§10.1 G5)")
     cases = [
         ([], 0, None, "clean dry run"),
         (["--break-ids", "3"], 1, "[FAIL] generation step 3 samples greedy_continuation[4]",
          "wrong id injected at step 3"),
         (["--break-logits", "2"], 1, "[FAIL] step 2: argmax agrees with the pin",
          "top two logits swapped at step 2"),
-        (["--break-noise", "5"], 1, "[FAIL] step 5: cos >= 0.9995 (§10.1 G5)",
+        (["--break-noise", "5"], 1, cos_fail_5,
          "5 % noise on step 5's logits (argmax untouched, aggregate wrong)"),
         # The bug the engine actually shipped with, replayed in the stand-in: id 248046 sampled at
         # prompt index 6 ended a 17-token prompt after 7 steps. Both new checks have to name it.
@@ -802,6 +1104,24 @@ def selftest(fixture: str = "dec8") -> int:
              [f"[FAIL] generation step {tie_step}: exact tie in the pin",
               "is NOT one of the tied ids"],
              f"engine sampled an UNTIED id at tied step {tie_step} — must fail loudly"),
+        ]
+    # The route allowance has to still bite, and bite where the old flat band could not: noise sized to
+    # exceed this step's own measured spread while staying inside §10.1's flat 5e-4 deficit. Aimed at the
+    # tightest priced allowance in the fixture (the step where the flat floor was most nearly blind), and
+    # skipped out loud if this fixture has no priced allowance or no such step — a negative every band
+    # would catch is the vacuous one `prototype/mlp_gemv/results.md` names.
+    if allow_step is None:
+        print(f"  [SKIP] route-allowance injection: {REFS.name} carries no valid"
+              f" {ALLOWANCE_FILE}, or no step whose allowance leaves room for a deficit under the flat"
+              " §10.1 G5 floor. Price it with engine/route_allowance.py (CPU, no device) to exercise"
+              " this case.")
+    else:
+        cases += [
+            (["--break-allow", str(allow_step)], 1,
+             [f"[FAIL] step {allow_step}: cos deficit", "would have PASSED this step"],
+             f"step {allow_step}'s logits deficit pushed to {SELFTEST_ALLOW_FACTOR}x its own measured"
+             " route allowance while still inside the flat G5 floor the old band used — must FAIL there"
+             " (this is the failure class the allowance exists to make visible)"),
         ]
     bad = []
     for extra, want_rc, want_in, what in cases:
@@ -954,6 +1274,12 @@ def main() -> int:
     ap.add_argument("--break-noise", type=int, default=-1, metavar="STEP",
                     help="with --dry-run: put 5 % relative noise on that step's logits, which moves"
                          " cos under the floor without changing the argmax")
+    ap.add_argument("--break-allow", type=int, default=-1, metavar="STEP",
+                    help="with --dry-run: size that step's noise against ITS OWN cached route"
+                         " allowance — a deficit over the allowance that still fits under the flat"
+                         " §10.1 G5 floor, i.e. the failure the old flat band could not see. Refuses a"
+                         " step with no priced allowance, so it cannot degrade into the --break-noise"
+                         " test")
     ap.add_argument("--break-prompt-stop", type=int, default=-1, metavar="PROMPT_INDEX",
                     help="with --dry-run: fire the §07.5 stop check at that prompt step and end the"
                          " run there, which is the bug the first device run had")
@@ -1035,7 +1361,8 @@ def main() -> int:
     if args.dry_run:
         stdout, rc = dry_run(man, prompt_ids, dec_logits, work, args.break_ids,
                              args.break_logits, args.break_noise, args.break_prompt_stop,
-                             replay, args.break_feed, args.break_tie, args.tie_alt)
+                             replay, args.break_feed, args.break_tie, args.tie_alt,
+                             args.break_allow)
         notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
                      " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
                      " run is not also the first time this file parses a STEP line. Section (d) is"
@@ -1049,6 +1376,10 @@ def main() -> int:
         if args.break_noise >= 0:
             notes.append(f"injected: generation step {args.break_noise} got 5 % relative noise"
                          " (wrong in aggregate, argmax untouched)")
+        if args.break_allow >= 0:
+            notes.append(f"injected: generation step {args.break_allow} got noise sized to"
+                         f" {SELFTEST_ALLOW_FACTOR}x its own cached route allowance — over the"
+                         " allowance, under the flat §10.1 G5 floor")
         if args.break_prompt_stop >= 0:
             notes.append(f"injected: the §07.5 stop check fired at prompt step"
                          f" {args.break_prompt_stop} and ended the run there")
@@ -1165,14 +1496,19 @@ def main() -> int:
                      " continuation does not")
 
     # ---- (b) logits ------------------------------------------------------------------------------
-    section("(b) logits vs the pinned dumps — band from §10.1 G5 and §10.2")
-    print(f"  hard: cos >= {BAND['cos_hard']} (G5 incremental==batch), meanrel <= "
-          f"{BAND['meanrel_hard']:.0%} (§10.2 cascade ceiling)")
+    section("(b) logits vs the pinned dumps — the rule in force is named on every step")
+    print(f"  where an allowance is priced, the rule is cos deficit <= margin x the step's measured"
+          f" route spread and meanrel <= margin_rel x it (margins {BAND['route_margin']:.2f} /"
+          f" {BAND['route_margin_rel']:.2f}, DERIVED — see the ROUTE ALLOWANCE comment). Where it is"
+          f" not priced, the flat published floors apply: cos >= {BAND['cos_hard']} (G5"
+          f" incremental==batch), meanrel <= {BAND['meanrel_hard']:.0%} (§10.2 cascade ceiling).")
     print(f"  reported: cos vs {BAND['cos_report']} (G6 decode logits); ndiff and max ULP are "
           "reported but not gated (§10.1 F1–F4: a chained dot's legal ndiff is 29–47 %, and a "
           "max-ULP bound is blind to a whole-tensor 1-ULP shift)")
+    allowance = load_allowance(n_decode)
     per_step: list = [None] * n_decode
     under_g6: list = []
+    ratios: list = []            # (engine deficit / that step's route spread), for the summary line
     for j in range(n_decode):
         path = work / f"logits{len(prompt_ids) + j}.bin"
         eng, why = eng_logits[j]
@@ -1184,20 +1520,39 @@ def main() -> int:
             check(False, f"step {j}: vocabulary length", f"{eng.shape} vs {ref.shape}")
             continue
         m = metrics(eng, ref)
-        margin = ("exact" if m["margin"] == float("inf") else f"{m['margin']:.0f}×")
+        deficit = 1.0 - m["cos"]
+        gap_x = ("exact" if m["margin"] == float("inf") else f"{m['margin']:.0f}×")
+        cos_cap, rel_cap, rule_line = rule_for_step(allowance, j)
+        if allowance is not None:
+            ratios.append((j, deficit / float(allowance["steps"][j]["route_one_cos"])))
         argmax_ok = argmax_low(eng) == argmax_low(ref)
         fed = int(decode_steps[j]["input"]) if j < len(decode_steps) else int(dec_inputs[j][0])
         sampled = (int(decode_steps[j]["sampled"]) if j < len(decode_steps)
                    else argmax_low(ref))
         per_step[j] = {"cos": m["cos"], "meanrel": m["meanrel"], "ndiff": m["ndiff"],
                        "n": ref.size, "argmax_ok": argmax_ok, "fed": fed, "sampled": sampled}
+        # `deficit` is printed at full precision because it is what `engine/route_allowance.py` re-derives
+        # the margins from; the 6-decimal `cos` is not enough (at a 2.3e-4 deficit it is ±0.4 %).
         check(True, f"step {j}: metrics",
-              f"cos {m['cos']:.6f} meanrel {m['meanrel']:.4%} ndiff {m['ndiff']}/{ref.size}"
+              f"cos {m['cos']:.6f} deficit {deficit:.6e} meanrel {m['meanrel']:.4%}"
+              f" ndiff {m['ndiff']}/{ref.size}"
               f" maxabs {m['maxabs']:.4g} | ref top1−top2 gap {m['gap12']:.3f}"
-              f" = {margin} the largest element error")
-        check(m["cos"] >= BAND["cos_hard"], f"step {j}: cos >= {BAND['cos_hard']} (§10.1 G5)")
-        check(m["meanrel"] <= BAND["meanrel_hard"],
-              f"step {j}: meanrel <= {BAND['meanrel_hard']:.0%} (§10.2)")
+              f" = {gap_x} the largest element error | rule: {rule_line}")
+        if allowance is None:
+            check(deficit <= cos_cap, f"step {j}: cos >= {BAND['cos_hard']} (§10.1 G5)")
+            check(m["meanrel"] <= rel_cap,
+                  f"step {j}: meanrel <= {BAND['meanrel_hard']:.0%} (§10.2)")
+        else:
+            ok_cos = deficit <= cos_cap
+            check(ok_cos,
+                  f"step {j}: cos deficit {deficit:.4e} inside the route allowance {cos_cap:.4e}",
+                  "" if ok_cos else _counterfactual(deficit, 1.0 - BAND["cos_hard"],
+                                                    "§10.1 G5 floor"))
+            ok_rel = m["meanrel"] <= rel_cap
+            check(ok_rel,
+                  f"step {j}: meanrel {m['meanrel']:.4%} inside the route allowance {rel_cap:.4%}",
+                  "" if ok_rel else _counterfactual(m["meanrel"], BAND["meanrel_hard"],
+                                                    "§10.2 ceiling"))
         check(argmax_ok or tie_ok.get(j, False), f"step {j}: argmax agrees with the pin",
               f"{argmax_low(eng)}" + ("" if argmax_ok else
                                       (" — but the pin is tied here and the engine's id is one of the"
@@ -1207,6 +1562,15 @@ def main() -> int:
                                        " tied ids")))
         if m["cos"] < BAND["cos_report"]:
             under_g6.append(f"{j}:{m['cos']:.6f}")
+    if ratios:
+        worst_j, worst_r = max(ratios, key=lambda t: t[1])
+        tighter = sum(1 for j in range(n_decode)
+                      if allowance["steps"][j]["allowance_one_cos"] <= 1 - BAND["cos_hard"])
+        notes.append(f"all {len(ratios)} of {n_decode} steps judged by the route allowance; the"
+                     f" allowance is TIGHTER than the flat §10.1 G5 floor at {tighter} of them. Worst"
+                     f" step {worst_j}: deficit = {worst_r:.3f}x its own measured route spread"
+                     f" (margin in force {BAND['route_margin']:.2f}, derived from the same ratio"
+                     " across every priced fixture — engine/route_allowance.py).")
     if under_g6:
         notes.append(f"{len(under_g6)} of {n_decode} steps sit under G6's decode-logits figure "
                      f"{BAND['cos_report']} (step:cos — " + ", ".join(under_g6[:12])

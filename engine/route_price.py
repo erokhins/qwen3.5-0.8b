@@ -55,6 +55,7 @@ of its own legal forms, and the fair end-to-end floor is this table, not 0.99999
 from __future__ import annotations
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 import numpy as np
@@ -84,6 +85,40 @@ def cos(a, b):
 def meanrel(a, b):
     a, b = f64(a).ravel(), f64(b).ravel()
     return float(((a - b).abs() / b.abs().clamp_min(1e-6)).mean().item())
+
+
+# One row of `engine/gate.py`'s (b) section: `step 54: metrics — cos 0.999767 deficit 2.33e-04 meanrel
+# 2.2452% …`. The deficit field is there so this script can read the engine's own numbers at full
+# precision instead of at the (e) table's six decimals of `cos`.
+B_LINE = re.compile(r"step (\d+): metrics .*?deficit ([0-9.eE+-]+) meanrel ([0-9.]+)%")
+
+
+def engine_metrics(log: Path | None) -> dict:
+    """The engine's own per-step numbers, read out of a `engine/gate.py` log. Read-only, no device.
+
+    The (e) table prints cos at six decimals, which on a 2.3e-4 deficit is ±0.4 % — enough to move a
+    derived margin — so the (b) metrics line is preferred: it prints the deficit in scientific notation
+    and meanrel to four decimals of a percent. The (e) row is the fallback for logs written before that
+    field existed, and `source` says which a given log supplied.
+    """
+    out: dict = {}
+    if log is None or not log.exists():
+        return {"source": "no log given", "steps": {}}
+    steps = {step: {"cos": cos, "one_cos": 1.0 - cos, "meanrel": None, "precise": False}
+             for step, cos, _n2, _dn2 in curve_probe.parse(log)}
+    by_b = 0
+    for line in log.read_text().splitlines():
+        m = B_LINE.search(line)
+        if not m:
+            continue
+        j, deficit, rel = int(m.group(1)), float(m.group(2)), float(m.group(3)) / 100.0
+        row = steps.setdefault(j, {"cos": None, "meanrel": None})
+        row.update({"one_cos": deficit, "meanrel": rel, "precise": True,
+                    "cos": 1.0 - deficit if row.get("cos") is None else row["cos"]})
+        by_b += 1
+    return {"steps": steps, "source": f"{by_b} of {len(steps)} steps from the (b) metrics lines"
+            + ("" if by_b else " (this log predates the `deficit` field: 6-decimal cos instead)")}
+
 
 
 def price(w: Weights, prompt: list[int], feed: list[int]) -> tuple[list, list]:
@@ -172,11 +207,10 @@ def forced_price(w: Weights, fixture: str, engine_log: Path | None,
         print(f"  route {form:9s} argmax vs the pinned ids: {sum(ok)}/{n} agree"
               + ("" if not miss else f" — misses {miss}"))
 
-    engine = {}
-    if engine_log is not None:
-        rows = curve_probe.parse(Path(engine_log))
-        engine = {r[0]: r[1] for r in rows}
-        print(f"  engine-vs-pin cos read from {engine_log} ({len(engine)} steps)")
+    eng_log = engine_metrics(Path(engine_log) if engine_log else None)
+    engine = eng_log["steps"]
+    if engine:
+        print(f"  engine-vs-pin read from {engine_log} ({len(engine)} steps; {eng_log['source']})")
     else:
         print("  no --engine-log given: the engine columns are empty (the device run is engine/gate.py's,"
               " this script never touches the device)")
@@ -189,7 +223,9 @@ def forced_price(w: Weights, fixture: str, engine_log: Path | None,
         mr = meanrel(recur[j], chunk[j])
         same = int(torch.argmax(chunk[j])) == int(torch.argmax(recur[j]))
         n2 = egate.fp_total(j, "state", 0)          # col 0 = n2 = sum x^2, summed over the GDN layers
-        ec = engine.get(j)
+        ec = engine.get(j, {}).get("cos")
+        eoc = engine.get(j, {}).get("one_cos")
+        emr = engine.get(j, {}).get("meanrel")
         bad_route = c < G5
         bad_eng = ec is not None and ec < G5
         verdict = ("both legal routes under G5 too -> engine is inside legal spread" if bad_route and bad_eng
@@ -199,14 +235,16 @@ def forced_price(w: Weights, fixture: str, engine_log: Path | None,
         table.append({"step": j, "fed": feed[j], "pinned_sampled": pin_ids[j],
                       "pin_s_n2": n2, "route_cos": c, "route_one_cos": 1.0 - c, "route_meanrel": mr,
                       "routes_argmax_agree": bool(same),
-                      "engine_cos": ec, "engine_one_cos": None if ec is None else 1.0 - ec,
+                      "engine_cos": ec, "engine_one_cos": eoc, "engine_meanrel": emr,
+                      "engine_ratio": None if eoc is None else eoc / (1.0 - c),
+                      "engine_rel_ratio": None if emr is None else emr / mr,
                       "after_first_stop": bool(stop_steps) and j > stop_steps[0],
                       "verdict": verdict})
         r = table[-1]
         print(f"{j:4d}  {feed[j]:8d}  {('%g' % n2) if n2 is not None else '-':>9}"
               f"   {c:.6f}   {1 - c:.3e}   {mr:8.4%}   {'yes' if same else 'NO ':>4}"
               f"        | "
-              + (f"{ec:.6f}   {1 - ec:.3e}    " if ec is not None else "     -           -      ")
+              + (f"{ec:.6f}   {eoc:.3e}    " if ec is not None else "     -           -      ")
               + verdict)
 
     print("\n== what the table says")
@@ -226,6 +264,18 @@ def forced_price(w: Weights, fixture: str, engine_log: Path | None,
                    "the engine fails at steps the two legal routes do not: those are ours")
         print(f"  under-G5 steps: engine {int(np.nansum(eng < G5))}, route-vs-route"
               f" {int((rc < G5).sum())}, BOTH {both}, engine-only {ours} -> {reading}")
+    # The two ratios `engine/gate.py`'s route allowance is keyed on. They are printed here so the number
+    # that sets a margin is visible in the same table it came from; `engine/route_allowance.py` is what
+    # turns them into the constant, over EVERY priced fixture rather than this one.
+    for field, label in (("engine_ratio", "engine deficit / route 1-cos    "),
+                         ("engine_rel_ratio", "engine meanrel / route meanrel")):
+        pairs = [(r[field], r["step"]) for r in table if r[field] is not None]
+        if not pairs:
+            continue
+        vals = np.array([v for v, _ in pairs])
+        worst = max(pairs)
+        print(f"  {label}: median {np.median(vals):.3f}, max {worst[0]:.4f} at step {worst[1]}"
+              "  <- the per-step price of a legal route choice at that step")
     print(f"  corr(route 1-cos, 1/(S n2)) = "
           f"{np.corrcoef(1 - rc, 1.0 / n2)[0, 1]:.3f}"
           f"   corr(route 1-cos, step) = {np.corrcoef(1 - rc, np.arange(n))[0, 1]:.3f}")
