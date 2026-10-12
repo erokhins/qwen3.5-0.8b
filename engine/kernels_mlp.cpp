@@ -38,16 +38,71 @@ void check(const char* what, int rows, int in) {
                                  " in=" + std::to_string(in));
     }
 }
+
+// The token tile of the batched forms (P4): shared memory is TPB*IN floats, and the gated pair is
+// TPB=4 at IN=1024 (16 KiB) and TPB=2 at IN=3584 (28 KiB) — see `prototype/mlp_gemv/results.md`
+// §P4. Any other width has no gated instantiation, so it is refused rather than guessed at.
+template <int IN>
+constexpr int tokens_per_block_for() {
+    return IN == HID ? 4 : 2;
+}
+
+void check_tokens(const char* what, int tokens) {
+    if (tokens < 1) {
+        throw std::runtime_error(std::string("mlp: ") + what +
+                                 " called with tokens=" + std::to_string(tokens) +
+                                 "; a wave has at least one token in it");
+    }
+}
 }  // namespace
 
+// The batched launch: grid.x is the row blocks and grid.y the token tiles, so a weight row is read
+// once per tile. Same per-output-element order as the single-token kernel, which is what makes the
+// two interchangeable for a given (row, token) — gated bit for bit in `prototype/mlp_gemv/run.py
+// --tokens p64`.
+template <int IN>
+static void launch_gateup_batched(const uint16_t* w_gate, const uint16_t* w_up, const float* x,
+                                  uint16_t* act, int rows, int tokens, int threads) {
+    constexpr int TPB = tokens_per_block_for<IN>();
+    const dim3 grid((rows + kRowsPerBlock - 1) / kRowsPerBlock,
+                    (unsigned)((tokens + TPB - 1) / TPB));
+    ::mlp_gateup_tokens<IN, TPB><<<grid, threads>>>(
+        (const hip_bfloat16*)w_gate, (const hip_bfloat16*)w_up, x, (hip_bfloat16*)act, nullptr,
+        rows, tokens, kRowsPerBlock, NEG_NONE);
+}
+
+template <int IN>
+static void launch_down_batched(const uint16_t* w_down, const float* act, uint16_t* out, int rows,
+                                int tokens, int threads) {
+    constexpr int TPB = tokens_per_block_for<IN>();
+    const dim3 grid((rows + kRowsPerBlock - 1) / kRowsPerBlock,
+                    (unsigned)((tokens + TPB - 1) / TPB));
+    ::mlp_down_tokens<IN, TPB><<<grid, threads>>>((const hip_bfloat16*)w_down, act,
+                                                  (hip_bfloat16*)out, rows, tokens, kRowsPerBlock,
+                                                  NEG_NONE);
+}
+
 void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, uint16_t* act,
-                int rows, int in) {
+                int rows, int in, int tokens) {
     check("gateup", rows, in);
+    check_tokens("gateup", tokens);
     const int threads = kRowsPerBlock * warp_width();
     const int blocks = (rows + kRowsPerBlock - 1) / kRowsPerBlock;
     // `pre` (the raw gate/up dumps the gate's F1 stage compares) stays null: the engine never
     // needs the two intermediates, and writing them would put 2×3584 BF16 per layer on the token's
     // write traffic for a dump no gate here reads.
+    if (tokens > 1) {
+        if (in == HID) {
+            launch_gateup_batched<HID>(w_gate, w_up, x, act, rows, tokens, threads);
+        } else if (in == FF) {
+            launch_gateup_batched<FF>(w_gate, w_up, x, act, rows, tokens, threads);
+        } else {
+            throw std::runtime_error("mlp_gateup: input width " + std::to_string(in) +
+                                     " is not one of the two shapes the gated kernel"
+                                     " instantiates");
+        }
+        return;
+    }
     if (in == HID) {
         ::mlp_gateup<HID><<<blocks, threads>>>((const hip_bfloat16*)w_gate,
                                                (const hip_bfloat16*)w_up, x,
@@ -67,10 +122,24 @@ void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, ui
     }
 }
 
-void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows, int in) {
+void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows, int in,
+              int tokens) {
     check("down", rows, in);
+    check_tokens("down", tokens);
     const int threads = kRowsPerBlock * warp_width();
     const int blocks = (rows + kRowsPerBlock - 1) / kRowsPerBlock;
+    if (tokens > 1) {
+        if (in == FF) {
+            launch_down_batched<FF>(w_down, act, out, rows, tokens, threads);
+        } else if (in == HID) {
+            launch_down_batched<HID>(w_down, act, out, rows, tokens, threads);
+        } else {
+            throw std::runtime_error("mlp_down: input width " + std::to_string(in) +
+                                     " is not one of the two shapes the gated kernel"
+                                     " instantiates");
+        }
+        return;
+    }
     // The MLP's second dot is 3584 wide (FF), which is why `in` cannot be pinned to 1024/2048 like
     // proj_gemv's — §01.3: down_proj is [1024, 3584].
     if (in == FF) {

@@ -2,17 +2,24 @@
 // contract this file implements, and `engine/prefill.h`'s header comment owns what a wave is for.
 //
 // The whole of this file's arithmetic is other people's kernels. Nothing here computes a value,
-// chooses a reduction order, or converts a dtype: the wave is `submit_token_body` per token and
-// `finish_token` once, which is why a wave and a run of single-token steps cannot disagree — there
-// is one implementation of the §07.1 order, in `decode_step.cpp`, and this file calls pieces of it.
+// chooses a reduction order, or converts a dtype: the wave is `submit_wave_body` per wave and
+// `finish_token` per priced row, which is why a wave and a run of single-token steps cannot disagree
+// — there is one implementation of the §07.1 order, in `decode_step.cpp`, and this file calls pieces
+// of it.
 //
-// The one thing worth reading closely is the `price_this_row` line. Under `kLast` the wave prices only
-// its last row, so a T-token prompt is T body submissions and ONE vocabulary D2H — §06.5's "only
-// `logits[T-1]` is ever used", and the piece of §1.2's waste this package is allowed to remove. Under
-// `kAll` every row is priced, which reproduces the per-token prompt loop's launch sequence exactly;
-// that mode exists for the byte-identity gate and pays for it in syncs and host memory.
+// Two things here are worth reading closely.
+//
+// The `price_this_row` decision. Under `kLast` the wave prices only its last row, so a T-token prompt
+// is one body submission per wave and ONE vocabulary D2H — §06.5's "only `logits[T-1]` is ever
+// used", and the piece of §1.2's waste this package is allowed to remove. Under `kAll` every row is
+// priced, which is the mode the byte-identity gate runs in and pays for it in syncs and host memory.
+//
+// The wave split. P4 gave the scratch `[T_w]` rows, so a prompt longer than the scratch is several
+// waves; splitting lives here so no caller changed. Under `kAll` a wave prices its own rows before
+// the next wave overwrites the tile, which is why pricing sits inside the loop rather than after it.
 #include "engine/prefill.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -39,27 +46,52 @@ PrefillResult prefill_wave(const WeightStore& weights, RequestState& st, DecodeS
     out.logits_mode = mode;
     out.rows.reserve(tokens.size());
 
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        PrefillRow row;
-        row.index = static_cast<int>(i);
-        row.token = tokens[i];
-        row.pos_before = st.prefix_len;   // §02.4: P is the 0-based position of the token being fed
-        // Submits the token and waits for nothing, so the stream keeps filling. This is where the
-        // position advances (`prefix_len = pos + 1`) and where §08.6's invariants are re-checked.
-        submit_token_body(weights, st, sc, tokens[i]);
-        row.pos_after = st.prefix_len;
+    // ---- the split (plan §2.1). The scratch holds `sc.wave_rows` rows, so a prompt longer than that
+    // is more than one wave and the caller must not have to know. The plan's shape is "one wave for
+    // T ≤ 1024, then waves of 512 at multiples of 64"; the engine cannot yet honour the first half of
+    // that sentence, because attention's one-pass softmax stages MAXSC=512 lanes and refuses more
+    // (`kernels_attn.cpp`), so the wave bound is `min(wave_rows, MAXSC)` in effect and a prompt past
+    // the lane ceiling stops there with that message whatever this loop does. Splitting at
+    // `wave_rows` = 512 is a multiple of 64, so the second half of the sentence is satisfied by
+    // construction. Raising the lane ceiling is P7's, not this file's.
+    const size_t wave_cap = (size_t)sc.wave_rows;
+    for (size_t begin = 0; begin < tokens.size(); begin += wave_cap) {
+        const int n = (int)std::min(wave_cap, tokens.size() - begin);
+        const size_t base = out.rows.size();
+        const int pos0 = st.prefix_len;   // §02.4: P of this wave's first token
+        for (int t = 0; t < n; ++t) {
+            PrefillRow row;
+            row.index = (int)(base + t);
+            row.token = tokens[begin + t];
+            row.pos_before = pos0 + t;
+            row.pos_after = pos0 + t + 1;   // the body advances one position per row
+            out.rows.push_back(std::move(row));
+        }
 
-        // The last row is always priced — §06.5's `y0` has to come from somewhere — and under `kAll`
-        // so is every other one. Body-then-finish for one row is exactly what `decode_step` is, so in
-        // `kAll` the wave's launch sequence is the old prompt loop's, launch for launch, which is
-        // what makes the gate's `cmp` a test rather than a restatement.
-        const bool price_this_row = (mode == PrefillLogits::kAll) || (i + 1 == tokens.size());
-        if (price_this_row) {
-            const StepResult sampled = finish_token(weights, st, sc, &row.logits);
+        // Submits the whole wave and waits for nothing, so the stream keeps filling. This is where the
+        // position advances (`prefix_len = pos0 + n`) and where §08.6's invariants are re-checked.
+        submit_wave_body(weights, st, sc, tokens.data() + begin, n);
+
+        // The LAST row of the whole prompt is always priced — §06.5's `y0` has to come from somewhere
+        // — and under `kAll` so is every other one. Pricing a row now reads that row out of the wave's
+        // norm tile (`finish_token`'s row argument), which is what lets `kAll` reproduce the pre-wave
+        // per-token prompt loop's launches without interleaving a finish into every body: row `t` here
+        // holds exactly the bits the old loop's `sc.norm` held after its `t`-th body, because glue's
+        // and the MLP's batched forms are bit-identical to the per-row ones (`prototype/glue/run.py
+        // --batched`, `prototype/mlp_gemv/run.py --tokens`). That equivalence is the gate's `cmp`.
+        if (mode == PrefillLogits::kAll) {
+            for (int t = 0; t < n; ++t) {
+                PrefillRow& row = out.rows[base + t];
+                const StepResult sampled = finish_token(weights, st, sc, &row.logits, t);
+                row.sampled = sampled.token;
+                row.top_logit = sampled.top_logit;
+            }
+        } else if (begin + (size_t)n == tokens.size()) {
+            PrefillRow& row = out.rows.back();
+            const StepResult sampled = finish_token(weights, st, sc, &row.logits, n - 1);
             row.sampled = sampled.token;
             row.top_logit = sampled.top_logit;
         }
-        out.rows.push_back(std::move(row));
     }
     return out;
 }

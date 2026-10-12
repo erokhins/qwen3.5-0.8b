@@ -13,7 +13,10 @@
 //   * no dtype conversion written by hand. Every widening goes through `kernels_cast.cpp` so the
 //     rounding is one named thing (RNE, same as torch's) instead of eighteen local casts.
 //
-// Launch plan for one token — the count `planned_launch_counts()` derives and `gate.py` re-derives:
+// The wave body's launch plan is the per-token plan with the two batchable families collapsed.
+// `planned_launch_counts()` below derives the n = 1 row of that table, and `gate.py` re-derives
+// every row from §07 in Python and fails on a mismatch, so this comment and the code cannot drift
+// apart quietly.
 //
 //   glue   1 norm-only (layer 0's input norm) + 2 × 24 fused add+norm = 49   (§03.2, = glue's own
 //          gated 49-launch token plan; the final norm is the last of them, not an extra launch)
@@ -170,14 +173,27 @@ constexpr Expected kWantDtBias{leaf::kDtBias, 1, kNumValueHeads, 0, 0, Dtype::BF
 }  // namespace
 
 // ---- scratch ---------------------------------------------------------------------------------
-DecodeScratch allocate_scratch() {
+DecodeScratch allocate_scratch(int wave_rows) {
+    if (wave_rows < 1) {
+        throw std::runtime_error("allocate_scratch: wave_rows must be >= 1, got " +
+                                 std::to_string(wave_rows));
+    }
     DecodeScratch sc;
-    sc.s_a = alloc<uint16_t>(kHidden);
-    sc.s_b = alloc<uint16_t>(kHidden);
-    sc.norm = alloc<uint16_t>(kHidden);
-    sc.norm_f32 = alloc<float>(kHidden);
-    sc.embed = alloc<uint16_t>(kHidden);
-    sc.delta = alloc<uint16_t>(kHidden);
+    sc.wave_rows = wave_rows;
+    // The row family: [wave_rows, H] / [wave_rows, I]. A decode step uses row 0 of each and issues
+    // exactly the launches it issued when these were one row wide; a prefill wave uses rows 0..n-1
+    // and gets one launch per call instead of n of them. At kMaxWaveRows this is ~18 MB of scratch
+    // per request against a 1.55 GB checkpoint and a ~34 GiB pool — AGENTS.md is explicit that
+    // memory capacity is not the constraint for this model, so the wave buys the batching with
+    // scratch rather than with a second code path.
+    const int h = (int64_t)wave_rows * kHidden;
+    const int i = (int64_t)wave_rows * kIntermediate;
+    sc.s_a = alloc<uint16_t>(h);
+    sc.s_b = alloc<uint16_t>(h);
+    sc.norm = alloc<uint16_t>(h);
+    sc.norm_f32 = alloc<float>(h);
+    sc.embed = alloc<uint16_t>(h);
+    sc.delta = alloc<uint16_t>(h);
     sc.block_out = alloc<uint16_t>(kValueDim);
     sc.block_out_f32 = alloc<float>(kValueDim);
 
@@ -205,8 +221,8 @@ DecodeScratch allocate_scratch() {
     sc.a_pre = alloc<uint16_t>(kNumQueryHeads * kHeadDim);
     sc.a_gated = alloc<uint16_t>(kNumQueryHeads * kHeadDim);
 
-    sc.mlp_act = alloc<uint16_t>(kIntermediate);
-    sc.mlp_act_f32 = alloc<float>(kIntermediate);
+    sc.mlp_act = alloc<uint16_t>(i);
+    sc.mlp_act_f32 = alloc<float>(i);
     sc.logits = alloc<float>(kVocab);
     return sc;
 }
@@ -294,156 +310,194 @@ void prepare_weight_adapters(const WeightStore& weights, DecodeScratch& sc) {
 // ---- the body -------------------------------------------------------------------------------
 // The §07.1 order, in §07.1's order, with no readback anywhere in it. `decode_step` at the bottom of
 // this file is this function plus `finish_token`; `prefill_wave` is the only caller that separates
-// them (T bodies, then one finish over the last row — §06.5).
-void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
-                       int token) {
+// them (a body per wave, then the finishes it wants).
+//
+// P4 made it a WAVE body: `n` consecutive tokens go through the stack layer by layer, and the two
+// families whose arithmetic is proven row-batchable (glue and the MLP) are launched once per layer
+// over the [n, H] tiles instead of once per layer per token. `submit_token_body` below is this
+// function with n = 1, which is what keeps one implementation of the order.
+void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
+                      const int* tokens, int n) {
     if (!sc.adapters_ready) {
         throw std::runtime_error(
-            "submit_token_body: prepare_weight_adapters() has not been called on this scratch, so "
+            "submit_wave_body: prepare_weight_adapters() has not been called on this scratch, so "
             "gates_kernel would read dt_bias and conv_kernel would read conv1d.weight as "
             "uninitialised memory.");
     }
-    if (token < 0 || token >= kVocab) {
-        throw std::runtime_error("submit_token_body: token " + std::to_string(token) +
-                                 " is outside [0, vocab)");
+    if (n < 1) {
+        throw std::runtime_error("submit_wave_body: a wave has at least one token in it (n=" +
+                                 std::to_string(n) + ")");
     }
-    const int pos = st.prefix_len;   // §02.4: P is the 0-based position of the token being fed
-    if (pos < 0 || (int64_t)pos >= st.cap) {
-        throw std::runtime_error("submit_token_body: position " + std::to_string(pos) +
-                                 " is not inside the allocated context (cap " +
+    if (n > sc.wave_rows) {
+        throw std::runtime_error("submit_wave_body: " + std::to_string(n) +
+                                 " tokens will not fit this scratch's " +
+                                 std::to_string(sc.wave_rows) +
+                                 " rows. `prefill_wave` splits at that bound; a direct caller must");
+    }
+    const int pos0 = st.prefix_len;   // §02.4: P of the wave's FIRST token
+    if (pos0 < 0 || (int64_t)pos0 + n > st.cap) {
+        throw std::runtime_error("submit_wave_body: positions " + std::to_string(pos0) + ".." +
+                                 std::to_string((int64_t)pos0 + n - 1) +
+                                 " are not inside the allocated context (cap " +
                                  std::to_string(st.cap) + "); §07.5's end-of-context stop is the"
                                  " caller's, not this function's");
     }
+    for (int t = 0; t < n; ++t) {
+        if (tokens[t] < 0 || tokens[t] >= kVocab) {
+            throw std::runtime_error("submit_wave_body: token " + std::to_string(tokens[t]) +
+                                     " at wave row " + std::to_string(t) +
+                                     " is outside [0, vocab)");
+        }
+    }
 
-    // ---- §02.3: x = E[y]. One row of the tied table, one D2D copy (§01.1: there is no second
-    // table, so `lm_head.weight` and this are the same bytes).
+    // ---- §02.3: x = E[y] for every row of the wave. One row of the tied table per token, one D2D
+    // copy each (§01.1: there is no second table, so `lm_head.weight` and this are the same bytes).
+    // A gather kernel would fold these n copies into one launch; that is P5's launch-bill question,
+    // not this package's, and a copy's arithmetic is not in doubt.
     const uint16_t* table = (const uint16_t*)weights.at(kEmbedding).device;
-    ENGINE_CK(hipMemcpyAsync(sc.embed, table + (size_t)token * kHidden, kHidden * sizeof(uint16_t),
-                             hipMemcpyDeviceToDevice));
+    for (int t = 0; t < n; ++t) {
+        ENGINE_CK(hipMemcpyAsync(sc.embed + (size_t)t * kHidden,
+                                 table + (size_t)tokens[t] * kHidden,
+                                 kHidden * sizeof(uint16_t), hipMemcpyDeviceToDevice));
+    }
 
     // ---- §03.2's pairing, as glue's own gate pairs it (`prototype/glue/glue_pins.py`).
     // `s` is the residual as it stands; the write target alternates so `glue_add_norm`'s
     // `__restrict__ s` and `s_out` never alias. `sc.embed` is never a write target: after the first
-    // call the ping-pong is entirely inside s_a/s_b.
+    // call the ping-pong is entirely inside s_a/s_b. Each call now covers the WHOLE tile: one launch
+    // per layer instead of one per layer per token, which is what `prototype/glue --batched` gates.
     const uint16_t* s = sc.embed;
     uint16_t* nxt = sc.s_a;
     const auto add_norm = [&](const uint16_t* delta, const void* norm_w) {
-        kernels::glue_add_norm(s, delta, (const uint16_t*)norm_w, nxt, sc.norm);
+        kernels::glue_add_norm_rows(s, delta, (const uint16_t*)norm_w, nxt, sc.norm, n);
         s = nxt;
         nxt = (nxt == sc.s_a) ? sc.s_b : sc.s_a;
     };
 
     // Layer 0's mixer norm has nothing to add before it — the norm-only form of the same kernel,
     // which is the job glue's gate calls `L00.n0` and pins against `rmsnorm_zc(s_in, w_in(0))`.
-    kernels::glue_add_norm(s, nullptr, (const uint16_t*)layer_dev(weights, 0, leaf::kInputNorm),
-                           nullptr, sc.norm);
+    kernels::glue_add_norm_rows(s, nullptr,
+                                (const uint16_t*)layer_dev(weights, 0, leaf::kInputNorm), nullptr,
+                                sc.norm, n);
 
     for (int layer = 0; layer < kNumLayers; ++layer) {
-        // Every projection in this layer reads the SAME row, and `proj_gemv` is instantiated with
-        // PACK_X=false, so it reads F32 (`kernels.h`, and E2 in `engine/results.md`).
-        kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, kHidden);
+        // Every projection in this layer reads the SAME rows, and `proj_gemv` is instantiated with
+        // PACK_X=false, so it reads F32 (`kernels.h`, and E2 in `engine/results.md`). One widening
+        // for the tile, which is the part of "48 casts/token" that batching removes.
+        kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
 
-        // ---------------- the mixer: §07.2 or §07.3, by layer type (§03.5 routing) ----------
-        if (is_full_attention(layer)) {
-            // §05.1. One GEMV per projection: q_proj's 4096 rows stay interleaved [q|gate] per head
-            // because that is the stored layout (§10.5 measured the split reading at cos −0.14), and
-            // the block de-interleaves it itself.
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kQProj), sc.norm_f32, sc.a_q,
-                               kQprojRows, kHidden);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kKProj), sc.norm_f32, sc.a_k,
-                               kKvProjRows, kHidden);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kVProj), sc.norm_f32, sc.a_v,
-                               kKvProjRows, kHidden);
+        // ---- the mixer, once per token, in position order (§08.2). The token loop is why
+        // the wave is layer-major: the GDN recurrence, the conv roll and the causal KV append
+        // all need ascending positions WITHIN a layer, and nothing in the mixer needs another
+        // token's mixer output — that is what lets the launches around it batch. At n == 1 this
+        // is the decode path's loop body, same order, same launches.
+        for (int t = 0; t < n; ++t) {
+            const int pos = pos0 + t;                          // §02.4: P of this token
+            const float* x_row = sc.norm_f32 + (size_t)t * kHidden;
+            uint16_t* delta = sc.delta + (size_t)t * kHidden;  // this token's addend
+            // ---------------- the mixer: §07.2 or §07.3, by layer type (§03.5 routing) ----------
+            if (is_full_attention(layer)) {
+                // §05.1. One GEMV per projection: q_proj's 4096 rows stay interleaved [q|gate] per head
+                // because that is the stored layout (§10.5 measured the split reading at cos −0.14), and
+                // the block de-interleaves it itself.
+                kernels::proj_gemv(layer_dev(weights, layer, leaf::kQProj), x_row, sc.a_q,
+                                   kQprojRows, kHidden);
+                kernels::proj_gemv(layer_dev(weights, layer, leaf::kKProj), x_row, sc.a_k,
+                                   kKvProjRows, kHidden);
+                kernels::proj_gemv(layer_dev(weights, layer, leaf::kVProj), x_row, sc.a_v,
+                                   kKvProjRows, kHidden);
 
-            kernels::AttnLayerArgs a{};
-            a.q_proj_out = sc.a_q;
-            a.k_proj_out = sc.a_k;
-            a.v_proj_out = sc.a_v;
-            a.q_norm = (const uint16_t*)layer_dev(weights, layer, leaf::kQNorm);
-            a.k_norm = (const uint16_t*)layer_dev(weights, layer, leaf::kKNorm);
-            a.k_cache = st.kv_keys_layer(layer);
-            a.v_cache = st.kv_values_layer(layer);
-            a.cap = (int)st.cap;
-            a.pos = pos;
-            a.lvalid = pos + 1;   // §07.3: during decode the softmax runs over P+1 lanes
-            a.attn_out_pre_gate = sc.a_pre;
-            a.gated = sc.a_gated;
-            // The three stage buffers are mandatory (see kernels_attn.cpp): the fused plan writes
-            // the §05.7 cache append behind the same null check as these dumps.
-            a.q_rope = sc.a_q_rope;
-            a.k_rope = sc.a_k_rope;
-            a.gate_out = sc.a_gate;
-            kernels::attn_decode_layer(a);
+                kernels::AttnLayerArgs a{};
+                a.q_proj_out = sc.a_q;
+                a.k_proj_out = sc.a_k;
+                a.v_proj_out = sc.a_v;
+                a.q_norm = (const uint16_t*)layer_dev(weights, layer, leaf::kQNorm);
+                a.k_norm = (const uint16_t*)layer_dev(weights, layer, leaf::kKNorm);
+                a.k_cache = st.kv_keys_layer(layer);
+                a.v_cache = st.kv_values_layer(layer);
+                a.cap = (int)st.cap;
+                a.pos = pos;
+                a.lvalid = pos + 1;   // §07.3: during decode the softmax runs over P+1 lanes
+                a.attn_out_pre_gate = sc.a_pre;
+                a.gated = sc.a_gated;
+                // The three stage buffers are mandatory (see kernels_attn.cpp): the fused plan writes
+                // the §05.7 cache append behind the same null check as these dumps.
+                a.q_rope = sc.a_q_rope;
+                a.k_rope = sc.a_k_rope;
+                a.gate_out = sc.a_gate;
+                kernels::attn_decode_layer(a);
 
-            kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32, kQwidth);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kOProj), sc.block_out_f32, sc.delta,
-                               kHidden, kQwidth);
-        } else {
-            const int slot = gdn_slot(layer);
-            // §04.1: four projections off one row. The 16-row b/a GEMVs are tiny (32 KiB each) and
-            // stay separate: `proj_gemv` has a packed multi-weight form, and using it is the
-            // ≈0.12 ms/token deferral `engine/results.md` names.
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjQkv), sc.norm_f32, sc.g_raw,
-                               kQkvRows, kHidden);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjZ), sc.norm_f32, sc.g_z,
-                               kValueDim, kHidden);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjB), sc.norm_f32, sc.g_b,
-                               kNumValueHeads, kHidden);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjA), sc.norm_f32, sc.g_a,
-                               kNumValueHeads, kHidden);
-            // One launch for the three widenings this layer needs (6144 + 16 + 16 elements).
-            kernels::cast_bf16_to_f32_3(sc.g_raw, sc.g_raw_f32, kQkvRows, sc.g_a, sc.g_a_f32,
-                                        kNumValueHeads, sc.g_b, sc.g_b_f32, kNumValueHeads);
+                kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32, kQwidth);
+                kernels::proj_gemv(layer_dev(weights, layer, leaf::kOProj), sc.block_out_f32, delta,
+                                   kHidden, kQwidth);
+            } else {
+                const int slot = gdn_slot(layer);
+                // §04.1: four projections off one row. The 16-row b/a GEMVs are tiny (32 KiB each) and
+                // stay separate: `proj_gemv` has a packed multi-weight form, and using it is the
+                // ≈0.12 ms/token deferral `engine/results.md` names.
+                kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjQkv), x_row, sc.g_raw,
+                                   kQkvRows, kHidden);
+                kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjZ), x_row, sc.g_z,
+                                   kValueDim, kHidden);
+                kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjB), x_row, sc.g_b,
+                                   kNumValueHeads, kHidden);
+                kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjA), x_row, sc.g_a,
+                                   kNumValueHeads, kHidden);
+                // One launch for the three widenings this layer needs (6144 + 16 + 16 elements).
+                kernels::cast_bf16_to_f32_3(sc.g_raw, sc.g_raw_f32, kQkvRows, sc.g_a, sc.g_a_f32,
+                                            kNumValueHeads, sc.g_b, sc.g_b_f32, kNumValueHeads);
 
-            // §04.2 / §07.2: the conv reads the OLD window and the roll appends the PRE-CONV raw,
-            // so `new_win` cannot be the window itself — conv_kernel's `win`/`new_win` are both
-            // `__restrict__`, and one thread's read of row j+1 must not race another's write of
-            // row j. It rolls into scratch and the layer's window is updated by one D2D copy:
-            // 18 × 73 728 B/token ≈ 0.006 ms of traffic, ≈0.033 ms of launch cost. Cheaper than
-            // double-buffering 1.27 MiB of state per request, which is the alternative §08.2's
-            // "in-place ring update" wording invites; results.md carries it as a named cost.
-            kernels::gdn_conv(sc.g_raw_f32, st.conv_window_layer(layer),
-                              sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel, sc.g_u,
-                              sc.conv_new);
-            ENGINE_CK(hipMemcpyAsync(st.conv_window_layer(layer), sc.conv_new,
-                                     (size_t)kConvWindow * kConvChannels * sizeof(float),
-                                     hipMemcpyDeviceToDevice));
+                // §04.2 / §07.2: the conv reads the OLD window and the roll appends the PRE-CONV raw,
+                // so `new_win` cannot be the window itself — conv_kernel's `win`/`new_win` are both
+                // `__restrict__`, and one thread's read of row j+1 must not race another's write of
+                // row j. It rolls into scratch and the layer's window is updated by one D2D copy:
+                // 18 × 73 728 B/token ≈ 0.006 ms of traffic, ≈0.033 ms of launch cost. Cheaper than
+                // double-buffering 1.27 MiB of state per request, which is the alternative §08.2's
+                // "in-place ring update" wording invites; results.md carries it as a named cost.
+                kernels::gdn_conv(sc.g_raw_f32, st.conv_window_layer(layer),
+                                  sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel, sc.g_u,
+                                  sc.conv_new);
+                ENGINE_CK(hipMemcpyAsync(st.conv_window_layer(layer), sc.conv_new,
+                                         (size_t)kConvWindow * kConvChannels * sizeof(float),
+                                         hipMemcpyDeviceToDevice));
 
-            // §04.3 gates, then §04.4's recurrence. `A_log` is one of the 36 tensors the checkpoint
-            // stores F32 (§01.6), so it goes to the kernel as-is; dt_bias came through the adapter.
-            kernels::gdn_gates(sc.g_a_f32, sc.g_b_f32,
-                               (const float*)layer_dev(weights, layer, leaf::kALog),
-                               sc.g_dt_bias + (size_t)slot * kNumValueHeads, sc.g_g, sc.g_beta);
-            // q, k, v are the three 2048-wide slices of the conv output (§04.1's [q|k|v]); rec_kernel
-            // indexes its own slice as [head][dim], so the pointers are just offsets into `g_u`.
-            kernels::gdn_rec(sc.g_u, sc.g_u + kValueDim, sc.g_u + 2 * kValueDim, sc.g_g, sc.g_beta,
-                             st.gdn_state_layer(layer), sc.g_o);
+                // §04.3 gates, then §04.4's recurrence. `A_log` is one of the 36 tensors the checkpoint
+                // stores F32 (§01.6), so it goes to the kernel as-is; dt_bias came through the adapter.
+                kernels::gdn_gates(sc.g_a_f32, sc.g_b_f32,
+                                   (const float*)layer_dev(weights, layer, leaf::kALog),
+                                   sc.g_dt_bias + (size_t)slot * kNumValueHeads, sc.g_g, sc.g_beta);
+                // q, k, v are the three 2048-wide slices of the conv output (§04.1's [q|k|v]); rec_kernel
+                // indexes its own slice as [head][dim], so the pointers are just offsets into `g_u`.
+                kernels::gdn_rec(sc.g_u, sc.g_u + kValueDim, sc.g_u + 2 * kValueDim, sc.g_g, sc.g_beta,
+                                 st.gdn_state_layer(layer), sc.g_o);
 
-            // §04.5, the one op this phase added a launcher for: `o` arrives F32 as the recurrence
-            // left it, `z` is still BF16 (it is an activation, §04.1), and the norm weight is one of
-            // the 36 F32 ones — the kernel rounds it to BF16 itself, which is what the pins carry
-            // (`prototype/gdn_gated_norm/results.md` §1).
-            kernels::gdn_gated_norm(sc.g_o, sc.g_z,
-                                    (const float*)layer_dev(weights, layer, leaf::kGatedNorm),
-                                    sc.block_out, nullptr);
-            kernels::cast_bf16_to_f32(sc.block_out, sc.block_out_f32, kValueDim);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kOutProj), sc.block_out_f32,
-                               sc.delta, kHidden, kValueDim);
-        }
+                // §04.5, the one op this phase added a launcher for: `o` arrives F32 as the recurrence
+                // left it, `z` is still BF16 (it is an activation, §04.1), and the norm weight is one of
+                // the 36 F32 ones — the kernel rounds it to BF16 itself, which is what the pins carry
+                // (`prototype/gdn_gated_norm/results.md` §1).
+                kernels::gdn_gated_norm(sc.g_o, sc.g_z,
+                                        (const float*)layer_dev(weights, layer, leaf::kGatedNorm),
+                                        sc.block_out, nullptr);
+                kernels::cast_bf16_to_f32(sc.block_out, sc.block_out_f32, kValueDim);
+                kernels::proj_gemv(layer_dev(weights, layer, leaf::kOutProj), sc.block_out_f32,
+                                   delta, kHidden, kValueDim);
+            }
+
+        }  // for t: the mixer
 
         // ---- §03.2 add #1: the mixer's output onto the residual, and the post-attention norm.
         add_norm(sc.delta, layer_dev(weights, layer, leaf::kPostAttnNorm));
 
-        // ---- §03.3 MLP. Both halves want F32 input (there is no BF16-staged form of these two
-        // kernels — the deferral in results.md), so the norm row and `act` are both widened.
-        kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, kHidden);
+        // ---- §03.3 MLP, batched over the wave's rows (P4). Both halves still want F32 input (there
+        // is no BF16-staged form of these two kernels — the deferral in results.md), so the norm
+        // rows and `act` are both widened, once for the tile rather than once per token.
+        kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
         kernels::mlp_gateup((const uint16_t*)layer_dev(weights, layer, leaf::kGateProj),
                             (const uint16_t*)layer_dev(weights, layer, leaf::kUpProj), sc.norm_f32,
-                            sc.mlp_act, kIntermediate, kHidden);
-        kernels::cast_bf16_to_f32(sc.mlp_act, sc.mlp_act_f32, kIntermediate);
-        kernels::mlp_down((const uint16_t*)layer_dev(weights, layer, leaf::kDownProj), sc.mlp_act_f32,
-                          sc.delta,
-                          kHidden, kIntermediate);
+                            sc.mlp_act, kIntermediate, kHidden, n);
+        kernels::cast_bf16_to_f32(sc.mlp_act, sc.mlp_act_f32, n * kIntermediate);
+        kernels::mlp_down((const uint16_t*)layer_dev(weights, layer, leaf::kDownProj),
+                          sc.mlp_act_f32, sc.delta, kHidden, kIntermediate, n);
 
         // ---- §03.2 add #2: the MLP's output onto the residual, fused with the NEXT norm — the
         // next layer's input norm, or after layer 23 the final norm (§03.4). This is why the token
@@ -454,15 +508,23 @@ void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScrat
         add_norm(sc.delta, next_norm);
     }
 
-    // The launches are all submitted and the final normed row is sitting in `sc.norm` for whoever
-    // wants to price it. The position advances here, not in the tail, because the NEXT body reads
-    // `st.prefix_len` as its own `pos` — that is what makes a wave of bodies legal to queue.
-    st.prefix_len = pos + 1;
+    // The launches are all submitted and the final normed rows are sitting in `sc.norm` for whoever
+    // wants to price them — row t is token t's, and `finish_token` takes the row it should read.
+    // The position advances here, not in the tail, because the NEXT body reads `st.prefix_len` as
+    // its own starting `pos` — that is what makes a wave of bodies legal to queue.
+    st.prefix_len = pos0 + n;
     const std::string broken = st.check_invariants();
     if (!broken.empty()) {
-        throw std::runtime_error("submit_token_body: §08.6 invariant broken after the token: " +
+        throw std::runtime_error("submit_wave_body: §08.6 invariant broken after the wave: " +
                                  broken);
     }
+}
+
+// One token is a wave of one. Same launches, same order, same everything: the decode path's
+// byte-identity to before P4 is this line, not an argument.
+void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
+                       int token) {
+    submit_wave_body(weights, st, sc, &token, 1);
 }
 
 // ---- the tail -------------------------------------------------------------------------------
@@ -470,10 +532,19 @@ void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScrat
 // `submit_token_body` left in `sc.norm`; see the declaration in `decode_step.h` for why that
 // ordering is a contract rather than an accident.
 StepResult finish_token(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
-                        std::vector<float>* logits) {
+                        std::vector<float>* logits, int norm_row) {
     // ---- §03.4: logits = RMSnorm_final(x) · Eᵀ. `sc.norm` already holds RMSnorm_final(x): the
-    // last glue call of the body wrote it as a side effect of the layer-23 residual add.
-    kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, kHidden);
+    // last glue call of the body wrote it as a side effect of the layer-23 residual add. Row 0 for
+    // a decode step; a wave asks for row t of the tile its body left behind.
+    if (norm_row < 0 || norm_row >= sc.wave_rows) {
+        throw std::runtime_error("finish_token: row " + std::to_string(norm_row) +
+                                 " is outside this scratch's " + std::to_string(sc.wave_rows) +
+                                 " norm rows");
+    }
+    const uint16_t* norm_row_ptr = sc.norm + (size_t)norm_row * kHidden;
+    // Row 0 of `norm_f32` is the scratch this widens into: by the time a row is priced the body is
+    // over, so nothing else is reading it.
+    kernels::cast_bf16_to_f32(norm_row_ptr, sc.norm_f32, kHidden);
     kernels::lm_head_full((const uint16_t*)weights.at(kHead).device, sc.norm_f32, sc.logits,
                           kVocab);
 

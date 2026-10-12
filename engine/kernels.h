@@ -29,6 +29,15 @@ namespace engine::kernels {
 void glue_add_norm(const uint16_t* s, const uint16_t* delta, const uint16_t* w,
                    uint16_t* s_out, uint16_t* n_out);
 
+// The same op over a [rows, H] tile (P4, §08.2): one block per row, so a tile in one launch is
+// obliged to produce the bits of `rows` launches of one row — `prototype/glue/run.py --batched p64`
+// requires that on device (adds bit-exact vs the pins, norms inside the floor_probe band, and 612
+// 352 elements compared against one launch per row with 0 differing). `rows == 1` is the launch
+// above. `n_out` may not be null; `delta == nullptr` is the norm-only form and `s_out == nullptr`
+// skips writing the residual, both exactly as in the single-row case.
+void glue_add_norm_rows(const uint16_t* s, const uint16_t* delta, const uint16_t* w,
+                        uint16_t* s_out, uint16_t* n_out, int rows);
+
 // ---- §04.1 / §05.1: the projection GEMV family (prototype/proj_gemv).
 // `in` must be 1024 or 2048 — the only two widths the checkpoint has for these nine shapes, and
 // the only two the kernel is instantiated for. `x` is F32: the launcher instantiates PACK_X=false,
@@ -40,9 +49,15 @@ void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int 
 // ---- §03.3: gate+up+SwiGLU, then down (prototype/mlp_gemv). Both take the input widened to
 // F32; there is no BF16-staged form of these two kernels, so the caller casts (see the launch
 // count in results.md — this is 48 casts/token, a named follow-up).
+// `tokens` is P4's token-batched form (§08.2): `x` is then a [tokens, in] tile and `act`/`out` a
+// [tokens, rows] tile, and each weight row is read once per tile instead of once per token.
+// `tokens == 1` issues the single-token kernel and the single-token launch shape, i.e. exactly the
+// launch the decode ledger was measured on. The two forms are bit-identical per output element —
+// `prototype/mlp_gemv/run.py --tokens p64` requires it (23 040 elements per layer, 0 differing).
 void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, uint16_t* act,
-                int rows, int in);
-void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows, int in);
+                int rows, int in, int tokens = 1);
+void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows, int in,
+              int tokens = 1);
 
 // ---- §04.2/§04.3/§04.4: conv, gates, recurrence (prototype/gdn_decode). All F32 on the state
 // side; `raw` is F32 because the conv kernel reads it that way, which is why decode_step casts the

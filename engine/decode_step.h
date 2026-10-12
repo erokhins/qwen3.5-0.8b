@@ -23,20 +23,36 @@ namespace engine {
 
 class WeightStore;
 
-// Per-step working set. Everything here is one token's scratch, reused by every layer of every step;
-// nothing in it survives a call to `decode_step`. Sizes are the model's own constants from `state.h`,
+// Per-step working set. Everything here is reused by every layer of every step; nothing in it
+// survives a call to `decode_step`. Sizes are the model's own constants from `state.h`,
 // so a shape change cannot leave a short buffer behind. The layout is documented in decode_step.cpp
 // next to the buffers' use, because which kernel wants which dtype is the reason each one exists.
+//
+// P4 split the buffers into two families, and the difference is visible in the sizes:
+//   * the ROW family — embed, s_a, s_b, norm, norm_f32, delta, mlp_act, mlp_act_f32 — is
+//     `[wave_rows, H]` (or `[wave_rows, I]`). A prefill wave (§08.2) fills one row per token and a
+//     decode step uses row 0, which is why decode is unchanged by their being taller.
+//   * the MIXER temporaries — block_out, the `g_*` GDN rows, the `a_*` attention rows — stay one row
+//     wide. The mixer is still per token (P5/P6/P7 batch it), so a wave reuses them token by token
+//     inside a layer, and giving them a token axis they do not use would be 8 MB of silence.
+constexpr int kMaxWaveRows = 512;   // plan §2.1; decode_step.cpp explains why 512 and not 1024
+
 struct DecodeScratch {
+    // How many rows the row family below holds. `submit_wave_body` refuses a wave longer than this,
+    // and `prefill_wave` splits at it, so no launcher here has to re-check.
+    int wave_rows = 0;
     // Residual ping-pong. NOT aliased into one buffer: `glue_add_norm`'s `s` and `s_out` are both
     // `__restrict__`, so writing the new residual over the one it is reading is a contract violation
     // even though the same thread touches the same index.
-    uint16_t* s_a = nullptr;        // [1024]
-    uint16_t* s_b = nullptr;        // [1024]
-    uint16_t* norm = nullptr;       // [1024] the glue norm output, BF16 (what the pins carry)
-    float* norm_f32 = nullptr;      // [1024] the same row widened, for proj_gemv / mlp_gateup
-    uint16_t* embed = nullptr;      // [1024] E[y], the residual layer 0 starts from
-    uint16_t* delta = nullptr;      // [1024] a block's or the MLP's residual addend
+    uint16_t* s_a = nullptr;        // [wave_rows][1024]
+    uint16_t* s_b = nullptr;        // [wave_rows][1024]
+    uint16_t* norm = nullptr;       // [wave_rows][1024] the glue norm output, BF16 (what the pins
+                                    // carry). Row `T-1` is what `finish_token` prices by default;
+                                    // a wave under `--prefill-logits all` prices every row.
+    float* norm_f32 = nullptr;      // [wave_rows][1024] the same rows widened, for proj_gemv /
+                                    // mlp_gateup — one cast launch per wave, not per token
+    uint16_t* embed = nullptr;      // [wave_rows][1024] E[y], the residual layer 0 starts from
+    uint16_t* delta = nullptr;      // [wave_rows][1024] a block's or the MLP's residual addend
     uint16_t* block_out = nullptr;  // [2048] gated_out / gated, i.e. the 2048-wide proj operand
     float* block_out_f32 = nullptr;  // [2048] the same, widened, for out_proj / o_proj
 
@@ -74,8 +90,8 @@ struct DecodeScratch {
 
     // MLP (§03.3). `act` is the F32 intermediate `down_proj` wants, `mlp_act` the BF16 one the
     // gate is pinned against; both exist because the two kernels disagree about the dtype.
-    uint16_t* mlp_act = nullptr;    // [3584]
-    float* mlp_act_f32 = nullptr;   // [3584]
+    uint16_t* mlp_act = nullptr;    // [wave_rows][3584]
+    float* mlp_act_f32 = nullptr;   // [wave_rows][3584]
 
     float* logits = nullptr;        // [kVocab] F32 — §03.4's full-logit form, see kernels_lmhead.cpp
 
@@ -84,7 +100,7 @@ struct DecodeScratch {
     bool adapters_ready = false;
 };
 
-DecodeScratch allocate_scratch();
+DecodeScratch allocate_scratch(int wave_rows = kMaxWaveRows);
 void free_scratch(DecodeScratch& sc);
 
 struct StepResult {
@@ -131,19 +147,43 @@ constexpr int kStopToken = 248046;
 void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
                        int token);
 
+// The wave body (P4): the SAME §07.1 order over `n` consecutive tokens, with the two families that
+// are legal to batch batched and the mixer left per token. `submit_token_body` is this with n = 1,
+// so there is still exactly one implementation of the order — the n = 1 launch sequence is the one
+// the decode ledger was measured on, launch for launch.
+//
+// The batching is layer-major, which is the only way it can be: per layer, all `n` tokens' mixers
+// run in position order (the GDN recurrence and the causal KV append need that order and keep it),
+// then ONE glue launch over the [n, H] tile, then ONE batched MLP over the tile, then ONE more glue
+// launch. Tokens are independent of each other within a layer — that is what §08.2's chunked prefill
+// is — and each layer's scan still visits the tokens in ascending position, so the state a layer
+// hands to the next one is the same state the per-token order produced.
+//
+// What is batched, and what is NOT yet: glue (row-indexed, `prototype/glue --batched`) and the MLP
+// (`--tokens`) are; projections, GDN and attention are still per token (P5/P6/P7/P8). The token-batched
+// forms are bit-identical to the per-token ones on device (612 352 elements, 0 differing in glue;
+// 23 040 per layer in the MLP), which is the reason this is allowed to touch the legal route at all.
+//
+// `n` may not exceed `sc.wave_rows`; `prefill_wave` splits at that bound so a caller never has to.
+// Positions are `st.prefix_len .. st.prefix_len + n - 1`, and `prefix_len` advances by `n` at the
+// end, with §08.6's invariants re-checked once for the wave instead of once per token.
+void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
+                      const int* tokens, int n);
+
 // The tail: `lm_head_full` over the normed row the last `submit_token_body` left in `sc.norm`, then
 // exactly ONE blocking D2H of the vocabulary (this is the sync of the token, and the only one), then
 // §03.4's host argmax — a strict `>` scan, so ties go to the LOWEST id. Sets `st.sampled_token`,
 // and `st.stopped` when that id is `kStopToken` (§07.5's raw match, any phase: the caller decides
 // whether it ENDS anything, and for a prefill wave it never does).
 //
-// THE CONTRACT, stated because the wave is what leans on it: this prices the row `sc.norm` holds
-// *now*, i.e. the one the most recent `submit_token_body` wrote — the scratch is one row wide, so
-// the pair must be called body→finish and a wave must finish after its LAST body. `logits` may be
+// THE CONTRACT, stated because the wave is what leans on it: this prices row `norm_row` of
+// `sc.norm` — row 0 for a decode step, and `n-1` for a wave's `y0` (the body leaves every row of the
+// wave in the tile). The pair must therefore be called body→finish, and under
+// `PrefillLogits::kAll` the caller prices rows 0..n-1 after the wave body, in order. `logits` may be
 // null; when it is not, the full vocabulary comes back in it (≈1 MB, which is the price §03.4's tie
 // rule and this gate both accept). Nothing here reads the state or the weights' shapes again.
 StepResult finish_token(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
-                        std::vector<float>* logits = nullptr);
+                        std::vector<float>* logits = nullptr, int norm_row = 0);
 
 // One greedy decode step (§07.1): `submit_token_body` then `finish_token`, which is the whole
 // definition. Same launches, same order, one sync (in the tail) as when this was one function.
