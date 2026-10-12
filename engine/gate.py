@@ -153,6 +153,15 @@ FREE_RUN_BOUND = 8
 # saying "prompt" for that reason. One spelling per concept: the engine and the `--dry-run` stand-in
 # below both emit `prefill`, and nothing emits the old spelling.
 PREFILL_KIND = "prefill"
+
+# §06.5's first sampled token (`y0`) comes from the row BEFORE generation step 0, and that row's pin is
+# the BARE `logits_last.npy` — `reference_dump.py::Recorder.pin` never prefixes it and refuses to let
+# `--logit-steps` drop it, so on every fixture the bare name IS the prefill row (§10.5's last-writer-wins
+# trap belongs to `input_ids`/`pre_final_hidden`, which the hooks re-pin unprefixed, not to this one).
+# D-8: the tie policy is a statement about a PIN that never chose a winner, not about a generation phase,
+# so it governs this row exactly as it governs step 40. `-1` is how this file names that row in step
+# vocabulary, so one place decides which pin a step number means.
+PREFILL_ROW = -1
 DECODE_KIND = "decode"
 
 # §06.1/§06.5: the two shapes a prefill wave's logits can take, exactly as `decode_run
@@ -519,17 +528,23 @@ def bf16_bump(vec: np.ndarray, index: int) -> np.ndarray:
     return out.reshape(np.shape(vec))
 
 
+def logits_pin(step: int) -> str:
+    """The pin file carrying step `step`'s logits. `PREFILL_ROW` is §06.5's `y0` row, pinned bare."""
+    return "logits_last.npy" if step == PREFILL_ROW else f"decode{step}.logits_last.npy"
+
+
 def pin_tie(step: int):
     """The exact-maximum tie set of one pinned logits dump, or None if that step has a plain winner.
 
-    Everything is on the PIN'S payload. `decode{j}.logits_last.npy` is read raw; the payload is the
+    Everything is on the PIN'S payload. The step's pin — `logits_pin(step)`, so `decode{j}.logits_last.npy`
+    or the bare `logits_last.npy` at `PREFILL_ROW` — is read raw; the payload is the
     stored uint16 (or, for an older F32-stored fixture, the BF16 payload of a value the probe already
     proved is BF16-exact); the winner is located by widening that payload with `load_pin`'s bit shift,
     because BF16 payload order is not numeric order once the sign bit is set, so the MAX has to be
     taken on widened floats while MEMBERSHIP is proved on the payload. Ties are payload equality, never
     a float tolerance.
     """
-    path = REFS / f"decode{step}.logits_last.npy"
+    path = REFS / logits_pin(step)
     raw = np.load(path, allow_pickle=False).reshape(-1)
     stored = raw.dtype == np.uint16
     payload = raw if stored else bf16_payload(raw)
@@ -548,7 +563,11 @@ def pin_tie(step: int):
 
 
 def tie_verdict(step: int, eng, sampled: int) -> tuple[str, bool, str]:
-    """Decide one generation step against the tie policy: `(kind, admissible, the line to print)`.
+    """Decide one judged step against the tie policy: `(kind, admissible, the line to print)`.
+
+    `step` may be `PREFILL_ROW` — §06.5's `y0` row goes through this same predicate (D-8), which is what
+    `chunk64b` proved: its pinned prefill row ties ids 760 and 1596 at 19.875, and an engine landing on
+    1596 with a logit that rounds back to that payload has done nothing illegal.
 
     The single predicate for the whole file — section (a) gates on it and section (b) reuses the answer
     for its argmax line — so exactly one place decides what an engine may do at a tied step. Three
@@ -567,9 +586,10 @@ def tie_verdict(step: int, eng, sampled: int) -> tuple[str, bool, str]:
     tie = pin_tie(step)
     if tie is None:
         return "no-tie", False, ""
+    label = ("the prefill row (§06.5's y0)" if step == PREFILL_ROW else f"step {step}")
     if sampled == tie["top1"]:
         return "match", False, (
-            f"step {step}: the pin is an exact {len(tie['ids'])}-way tie at {tie['value']!r}"
+            f"{label}: the pin is an exact {len(tie['ids'])}-way tie at {tie['value']!r}"
             f" (payload 0x{tie['payload']:04x}) among ids {tie['ids']}, and the engine picked the"
             f" pinned top-1 {tie['top1']} — an ordinary id match, so the tie policy is not consulted")
 
@@ -579,7 +599,7 @@ def tie_verdict(step: int, eng, sampled: int) -> tuple[str, bool, str]:
         v = float(eng[i])
         return f"{i} -> {v:.8g} (bf16 0x{int(bf16_payload(v)[0]):04x})"
 
-    head = (f"TIE step {step}: pinned {tie['value']!r} (payload 0x{tie['payload']:04x}) tied"
+    head = (f"TIE {label}: pinned {tie['value']!r} (payload 0x{tie['payload']:04x}) tied"
             f" {len(tie['ids'])} ways among ids {tie['ids']}; engine's value at each tied id:"
             f" " + ", ".join(shown(i) for i in tie["ids"]))
     if eng is None:
@@ -595,6 +615,16 @@ def tie_verdict(step: int, eng, sampled: int) -> tuple[str, bool, str]:
             + ("" if held else " | NOT ADMISSIBLE"))
 
 
+def read_one_logits(work: Path, index: int, vocab: int) -> tuple:
+    """One row's engine logits as `(array | None, why_not)`. Size-checked: a truncated dump read as a
+    logits vector fails a step for the wrong reason."""
+    path = work / f"logits{index}.bin"
+    if not path.exists():
+        return None, "file missing — check --out"
+    a = np.fromfile(path, dtype="<f4")
+    return (a, "") if a.size == vocab else (None, f"{a.size} floats, expected {vocab}")
+
+
 def read_engine_logits(work: Path, n_decode: int, prompt_len: int, vocab: int) -> list:
     """Every generation step's full logits vector, read once, before the section that needs them.
 
@@ -602,25 +632,18 @@ def read_engine_logits(work: Path, n_decode: int, prompt_len: int, vocab: int) -
     around them, and a tie that cannot be proved has to fail at (a) rather than be waived. Entries are
     `(array | None, why_not)`; (b) keeps naming its own reasons so a missing dump still reads as one.
     """
-    out = []
-    for j in range(n_decode):
-        path = work / f"logits{prompt_len + j}.bin"
-        if not path.exists():
-            out.append((None, "file missing — check --out"))
-            continue
-        a = np.fromfile(path, dtype="<f4")
-        out.append((a, "") if a.size == vocab else (None, f"{a.size} floats, expected {vocab}"))
-    return out
+    return [read_one_logits(work, prompt_len + j, vocab) for j in range(n_decode)]
 
 
-def tie_other(step: int) -> int:
+def tie_other(step: int, flag: str = "--tie-alt") -> int:
     """The pin's second tied id — the legitimate alternative the tie policy exists to admit. Used by
-    `--tie-alt` so the SELFTEST can prove the policy admits, not only that it refuses."""
+    `--tie-alt` (and `--y0-alt`, on `PREFILL_ROW`) so the SELFTEST can prove the policy admits, not only
+    that it refuses."""
     tie = pin_tie(step)
     if tie is None:
-        raise SystemExit(f"gate: --tie-alt {step} names a step with no exact tie in the pin, so the"
-                         " injection would prove nothing (the vacuous-negative trap"
-                         " `prototype/mlp_gemv/results.md` warns about)")
+        raise SystemExit(f"gate: {flag} {step} names a step with no exact tie in the pin"
+                         f" ({logits_pin(step)}), so the injection would prove nothing (the"
+                         " vacuous-negative trap `prototype/mlp_gemv/results.md` warns about)")
     return tie["ids"][1]
 
 
@@ -631,9 +654,18 @@ def untied_id(step: int) -> int:
     tie = pin_tie(step)
     if tie is None:
         raise SystemExit(f"gate: --break-tie {step} names a step with no exact tie in the pin; that"
-                         " injection would just be the ordinary wrong-id test wearing a tie costume")
-    wide = load_pin(f"decode{step}.logits_last.npy")
+                         " injection would just be the ordinary wrong-id test wearing a tie costume"
+                         f" ({logits_pin(step)})")
+    wide = load_pin(logits_pin(step))
     return int(np.flatnonzero(wide != np.float32(tie["value"]))[0])
+
+
+def y0_wrong_id() -> int:
+    """An id the pinned prefill row does NOT put at its maximum — `--break-y0`, D-8's negative. Unlike
+    `untied_id` this one is legal on an untied pin (there the ordinary wrong-id rule is the whole rule);
+    on a tied pin it is the case the policy must refuse: an id outside the tied set."""
+    wide = load_pin(logits_pin(PREFILL_ROW))
+    return int(np.flatnonzero(wide != np.float32(wide.max()))[0])
 
 
 def metrics(got: np.ndarray, ref: np.ndarray) -> dict:
@@ -2277,7 +2309,8 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             break_logits: int = -1, break_noise: int = -1, break_prompt_stop: int = -1,
             replay: bool = False, break_feed: int = -1, break_tie: int = -1,
             tie_alt: int = -1, break_allow: int = -1, tie_same_ulp: int = -1,
-            break_state_fp: str = "", prefill_logits: str = PREFILL_LOGITS_LAST) -> tuple[
+            break_state_fp: str = "", prefill_logits: str = PREFILL_LOGITS_LAST,
+            break_y0: bool = False, y0_alt: bool = False) -> tuple[
                 str, int]:
     """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
 
@@ -2301,6 +2334,12 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
     the shape the byte-identity gate compares. It matters for `break_prompt_stop`: an intermediate
     prompt row that was never argmaxed cannot be the row that fires a stop check, so an injection aimed
     at one is refused rather than allowed to pass vacuously.
+
+    `break_y0`/`y0_alt` are D-8's two directions on §06.5's first sampled token: a first answer token
+    that is not the pinned one (must FAIL), and the pin's OWN other tied id at a tied prefill row (must
+    be ADMITTED). The stand-in writes the pinned prefill logits as the engine's row for this, which is
+    the honest shape of the second case — the policy asks whether the engine's logit at the id it chose
+    keeps the pinned payload, and only a fixture whose pin ties can say yes.
     """
     greedy = man["greedy_continuation"]
     cfg = man["text_config"]
@@ -2326,6 +2365,16 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             sampled = greedy[0] if is_last_row else (
                 prompt_ids[i + 1] if i + 1 < len(prompt_ids) else greedy[0])
             top = "1"
+        if is_last_row and (break_y0 or y0_alt):
+            # D-8's two injections, and they are opposites on purpose: one id the pin never picked, and
+            # the pin's own other tied id. `tie_other` refuses the second unless the prefill pin really
+            # ties, so the admitting half cannot be exercised vacuously.
+            sampled = y0_wrong_id() if break_y0 else tie_other(PREFILL_ROW, "--y0-alt")
+        if is_last_row:
+            # The engine dumps the row it argmaxed, and under `last` that is this one. Without it a tied
+            # `y0` pin could never be proved on the CPU, and "cannot be proved" fails (D-8).
+            (work / f"logits{i}.bin").write_bytes(
+                load_pin(logits_pin(PREFILL_ROW)).astype(np.float32).tobytes())
         # `stop=` is the §07.5 CHECK being armed and matched — never the raw match. A prompt-phase step
         # reports stop=0 even if it sampled the stop id, because its sample is discarded; that is what
         # decode_run prints and what section (a) asserts. `--break-prompt-stop` is the one case where
@@ -2750,7 +2799,26 @@ def selftest(fixture: str = "dec8") -> int:
              " its logit one BF16 ULP above the tied payload (the mt32f step 11 shape) — must PASS as"
              " an ordinary id match, rule not consulted"),
         ]
-    # The route allowance has to still bite, and bite where the old flat band could not: noise sized to
+    # D-8's two directions, on §06.5's first sampled token rather than on a generation step. The
+    # refusing one runs on every fixture: routing `y0` through the tie policy must not have cost the
+    # exact-id rule its teeth. The admitting one only exists where the pinned prefill row actually
+    # ties — `chunk64b`, ids 760 and 1596 at 19.875 — and is skipped out loud elsewhere, because an
+    # injection the policy can never be asked about is the vacuous negative this file keeps refusing.
+    cases.append((["--break-y0"], 1,
+                  ["[FAIL] the prompt's last token samples greedy_continuation[0]"],
+                  "the wave's last row sampled a different first answer token — D-8 widened the tie"
+                  " policy to this row without weakening the exact-id rule"))
+    if pin_tie(PREFILL_ROW) is None:
+        print(f"  [SKIP] --y0-alt: {fixture}'s pinned prefill row has a single winner, so there is no"
+              " tie to admit at §06.5's row. `--selftest --fixture chunk64b` exercises D-8's"
+              " admitting half (it is the one fixture whose `y0` pin ties).")
+    else:
+        cases.append((["--y0-alt"], 0, ["TIE the prefill row (§06.5's y0)"],
+                      "the wave's last row sampled the pinned prefill row's OTHER tied id — must be"
+                      " ADMITTED as a proved tie (D-8). The id is"
+                      f" {tie_other(PREFILL_ROW, '--y0-alt')}, the pinned top-1 is"
+                      f" {pin_tie(PREFILL_ROW)['top1']}"))
+    # The route allowance has to still bite, and bite where the old flat band could not:
     # exceed this step's own measured spread while staying inside §10.1's flat 5e-4 deficit. Aimed at the
     # tightest priced allowance in the fixture (the step where the flat floor was most nearly blind), and
     # skipped out loud if this fixture has no priced allowance or no such step — a negative every band
@@ -3136,6 +3204,15 @@ def main() -> int:
                          "section (h), so the byte-comparison half is proved to bite and to name the "
                          "one file it broke (the locality rule `prototype/mlp_gemv/results.md` "
                          "insists on). Aimed at a position both sides print")
+    ap.add_argument("--break-y0", dest="break_y0", action="store_true",
+                    help="with --dry-run: the wave's LAST prefill row samples an id the pinned"
+                         " prefill row does not put at its maximum, so §06.5's first answer token is"
+                         " wrong. D-8's negative: routing `y0` through the tie policy must not have"
+                         " made the exact-id rule vacuous")
+    ap.add_argument("--y0-alt", dest="y0_alt", action="store_true",
+                    help="with --dry-run: the wave's LAST prefill row samples the pinned prefill row's"
+                         " other tied id — must be ADMITTED as a TIE (D-8). Refused unless this"
+                         " fixture's prefill pin really ties")
     ap.add_argument("--state-fp", dest="state_fp", action="store_true", default=True,
                     help="ask decode_run for its §08 state fingerprints (the default, because a"
                          " fixture that carries fingerprint pins cannot judge G5's state half"
@@ -3252,7 +3329,7 @@ def main() -> int:
                              args.break_logits, args.break_noise, args.break_prompt_stop,
                              replay, args.break_feed, args.break_tie, args.tie_alt,
                              args.break_allow, args.tie_same_ulp, args.break_state_fp,
-                             args.prefill_logits)
+                             args.prefill_logits, break_y0=args.break_y0, y0_alt=args.y0_alt)
         notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
                      " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
                      " run is not also the first time this file parses a STEP line. Section (d) is"
@@ -3291,6 +3368,12 @@ def main() -> int:
         if args.break_state_fp:
             notes.append(f"injected: state fingerprint {args.break_state_fp} — section (g) must fail"
                          " at exactly that family and row, and nowhere else")
+        if args.break_y0:
+            notes.append("injected: the wave's last row sampled an id the pinned prefill row does not"
+                         " put at its maximum — §06.5's first answer token is wrong (D-8's must-FAIL)")
+        if args.y0_alt:
+            notes.append("injected: the wave's last row sampled the pinned prefill row's OTHER tied"
+                         " id — the case D-8 says the tie policy must admit")
     else:
         print("  $ " + " ".join(cmd))
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -3345,15 +3428,36 @@ def main() -> int:
           f" sampled={prompt_stop[0].get('sampled')} ended the run; §07.5 arms only during"
           f" generation (and {STOP_ID} inside a prompt is not news — see decode_run.cpp)")
     check(len(decode_steps) == n_decode, f"{n_decode} generation steps", f"{len(decode_steps)}")
-    check(int(prompt_steps[-1]["sampled"]) == greedy[0] if prompt_steps else False,
-          "the prompt's last token samples greedy_continuation[0]",
-          f"{prompt_steps[-1]['sampled'] if prompt_steps else 'no prompt step ran'} vs {greedy[0]}")
     got_ids = [int(s["sampled"]) for s in decode_steps]
     # The engine's logits vectors, read here rather than in (b): the tie policy is proved against what
     # the engine actually computed, so (a) needs them, and a tie that cannot be proved must FAIL at (a)
     # rather than be waived.
-    eng_logits = read_engine_logits(work, n_decode, len(prompt_ids),
-                                    first_pinned_logits(dec_logits).size)
+    vocab = first_pinned_logits(dec_logits).size
+    eng_logits = read_engine_logits(work, n_decode, len(prompt_ids), vocab)
+    # ---- §06.5's `y0`: the wave's last row, judged by the same predicate as every other step (D-8) --
+    # The tie policy is a statement about a PIN that never chose a winner, not about a generation phase,
+    # so the first sampled token gets the same test as step 40. `chunk64b` is the exhibit: its pinned
+    # prefill row ties ids 760 and 1596 at 19.875 (payload 0x419f) and the engine's logit at 1596 rounds
+    # back to that payload, so the bare `== greedy[0]` this line used to be was failing a row on which the
+    # reference itself had not decided. It still fails closed: no engine logits vector for the row means
+    # the tie cannot be proved, and `tie_verdict` says so rather than waiving the step.
+    y0 = int(prompt_steps[-1]["sampled"]) if prompt_steps else None
+    y0_kind, y0_ok, y0_line = (("no-tie", False, "") if y0 is None else
+                               tie_verdict(PREFILL_ROW, read_one_logits(work, len(prompt_ids) - 1,
+                                                                        vocab)[0], y0))
+    if y0_kind == "tie":
+        ties.append(f"prefill row -> {y0}")
+        check(y0_ok, "the prefill row: exact tie in the pin and the engine picked a different id"
+                     " — tested against the tie policy", y0_line)
+    elif y0_kind == "match":
+        tie_notes.append(f"prefill row -> {y0}")
+        print("  [info] " + y0_line)
+    y0_matches = (y0 == greedy[0]) if y0 is not None else False
+    check(y0_matches or y0_ok,
+          "the prompt's last token samples greedy_continuation[0]",
+          (f"{y0 if y0 is not None else 'no prompt step ran'} vs {greedy[0]}"
+           + (" — admitted as a proved tie (D-8), see the TIE line above" if y0_ok and
+              not y0_matches else "")))
     # One tie decision per step, in the pin's payload space (see TIE POLICY). `tie_ok` is what (b)'s
     # argmax line reuses, so the two sections cannot disagree about what a tied step means.
     tie_ok: dict[int, bool] = {}
@@ -3565,8 +3669,9 @@ def report() -> int:
     for n in notes:
         print("  [note] " + n)
     if ties:
-        print(f"  [TIE] {len(ties)} generation step(s) were exact ties in the pin and were decided by"
-              f" the tie policy: " + ", ".join(ties))
+        print(f"  [TIE] {len(ties)} step(s) — generation steps and, since D-8, §06.5's prefill row"
+              " among them — were exact ties in the pin and were decided by the tie policy: "
+              + ", ".join(ties))
     if tie_notes:
         print(f"  [TIE-NOTE] {len(tie_notes)} step(s) had an exact tie in the pin that the engine"
               " matched outright — ordinary id matches, tie policy not consulted (D-1):"
