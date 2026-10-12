@@ -2172,3 +2172,44 @@ Left open, named:
    distance from HF eager, and the two rule shapes that could change what the band means are both priced and
    both rejected here for a reason: the envelope because it fails at every margin-setting step, the pin-side
    denominator because it shrinks the self-reference without removing it.
+
+## Q5 / P1: the §08 state is now observable, and the end-condition assumption survives contact with the pins
+
+`decode_run --state-fp` emits the engine's GDN state, conv window and KV-tail fingerprints after a run,
+computed by `tools/state_fp.py` — the same helper the dumper uses, extracted rather than re-implemented,
+which is what makes the comparison meaningful instead than coincidental. `engine/gate.py` section `(g)`
+judges them against the `state_fp` / `conv_fp` / `kv_fp` rows already pinned on the four deep fixtures.
+Package as planned: **a measurement and a tripwire, not a band** (prefill plan §2.6).
+
+What it proves, re-run by the main agent on device after the worker expired (util 1 % at acquire, 29 % at
+release, discounted; five fixtures, **no timing taken**):
+
+| fixture | checks before P1 | after P1 | `(g)` result |
+|---|---|---|---|
+| `dec8` | 94 | 94 | no state pins kept (smoke fixture) |
+| `dec64f` | 550 | **576** | PASS |
+| `dec64t` | 547 | **573** | PASS |
+| `dec300f` | 1059 | **1082** | PASS |
+| `mt32f` | 291 | **317** | PASS |
+
+§08.6 invariants, all five fixtures: **inv 1** every state row moved between prompt-end and run-end (a Δ²
+of exactly 0 would be a state left behind); **inv 2** same for the conv rows; **inv 3** the KV's
+already-written lanes did **not** move — Δ² exactly 0.0 over the common lane extent, K vs K and V vs V
+separately. All pass, with the offending-row list empty everywhere.
+
+Engine-vs-pin distances, **reported and not thresholded**: state `n2` ratio 0.995–1.005 with
+mean |Δ|/RMS 1.8e-04 to 4.3e-04; KV `n2` ratio 0.9991–0.9996 with mean |Δ|/RMS ~1e-07 (the written lanes
+are effectively exact); conv, compared at its **own extent** — newest `k_conv−1` columns — `n2` ratio
+**0.9968–0.9980**. The raw whole-buffer conv ratio is ~0.70 and is an artefact of extent mismatch (the
+engine keeps a wider padded window), which `(g)` now says out loud instead of reporting it as a 30 %
+error.
+
+What `(g)` **cannot** yet prove, stated so nobody over-reads the PASS: no threshold is adopted, so the
+distances are witnessed and not judged — adopting one needs the route spread at the same position, i.e.
+`engine/route_price.py` extended to state fingerprints, then a decision and a `band_history` line
+(**D-6** in the plan's decision log). And on `dec300f` specifically, `(g)` prints real engine-vs-pin
+numbers but **cannot prove its own ruler**, because that fixture was pinned with `--deep-steps none` and
+keeps no full per-layer state tensors; the conv family there also cannot be priced at its own extent. The
+only way past that is a re-pin with `--deep-steps`, and re-pinning a shipped fixture is a main-agent call
+(prefill plan §5.1). `dec64f`, `dec64t` and `mt32f` do carry that proof, so the helper is not unverified —
+it is unverified on exactly one fixture.
