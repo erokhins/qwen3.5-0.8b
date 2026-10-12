@@ -5,8 +5,9 @@
 // Why they exist at all: the graduated kernels disagree about activation dtype. `glue`,
 // `proj_gemv` and `gdn_gated_norm` write BF16 activations, while `proj_gemv` (PACK_X=false),
 // `mlp_gemv` and `gdn_decode`'s conv/gates/rec read them as `const float*` — so every producer/
-// consumer pair across that seam needs a widening. That is ≈90 launches/token in `decode_step`
-// (counted in decode_step.cpp's launch table), which is the price of the seam, not of these
+// consumer pair across that seam needs a widening. That is 115 launches/token in `decode_step`
+// (the `cast` row of the table at the top of `decode_step.cpp`, which `planned_launch_counts()`
+// derives and `gate.py` section (d) re-derives), which is the price of the seam, not of these
 // kernels; `engine/results.md` keeps the deferral and the fix (a BF16-staged `mlp_gateup`/
 // `mlp_down`, which `proj_gemv` proved is bit-identical for a dot) on the books.
 //
