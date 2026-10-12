@@ -228,14 +228,16 @@ def buckets(rows: list[dict], budget: int) -> list[dict]:
         if not sel:
             continue
         ke = [r["engine_agree"] for r in sel]
-        kf = [r["floor_agree"] for r in sel]
+        kf = [r["floor_agree"] for r in sel if r["floor_agree"] is not None]
         out.append({
             "gap_median_range": [lo, None if hi == float("inf") else hi],
             "n_prompts": len(sel),
             "engine_mean_agree_tokens": sum(ke) / len(ke),
             "engine_never_diverged": sum(1 for k in ke if k >= budget),
-            "floor_mean_agree_tokens": sum(kf) / len(kf),
-            "floor_never_diverged": sum(1 for k in kf if k >= budget),
+            # None, not 0.0, when there is no floor manifest: a mean over an empty selection would
+            # print as a real zero next to the engine's number.
+            "floor_mean_agree_tokens": (sum(kf) / len(kf)) if kf else None,
+            "floor_never_diverged": (sum(1 for k in kf if k >= budget)) if kf else None,
         })
     return out
 
@@ -329,10 +331,13 @@ def report(args) -> None:
                                        if m else ke),
             "engine_tokens": len(p["continuation"]),
             "engine_stop": p.get("stop_token", 0),
+            # A stream that ended before the budget with everything it emitted matching is NOT full
+            # agreement. The counts already handle it (never-diverged needs k >= budget), but saying so
+            # out loud is what keeps a stop id from quietly reading as a shorter success.
+            "engine_truncated": ke == len(p["continuation"]) < len(refp["continuation"]),
             "floor_agree": kf,
             "gap_median": (stats(gaps)["median"] if gaps else None),
             "gap_min": (min(gaps) if gaps else None),
-            "gap_first": (gaps[0] if gaps else None),
             "engine_flip": eng_flip,
             "floor_flip": flp_flip,
         })
@@ -355,6 +360,11 @@ def report(args) -> None:
     print(f"corpus={args.corpus} engine={args.engine} floor={args.floor} budget={budget} tokens"
           f"  prompts={len(rows)}")
     print()
+    trunc = [r["text"] for r in rows if r["engine_truncated"]]
+    if trunc:
+        print(f"  NOTE: {len(trunc)} prompt(s) whose engine stream ended before the budget (a stop id"
+              " or a short gen), counted as diverging at the last token they produced: "
+              + ", ".join(t[:30] for t in trunc))
     print("mean prefix agreement (A-18's metric: matched-prefix / budget, averaged over prompts)")
     print(f"  ENGINE vs reference      {frac_e:.4f}")
     if args.margins:
@@ -386,15 +396,16 @@ def report(args) -> None:
             print(f"   {k:3d} tokens: {hist_f[k]:2d} prompt(s)"
                   + ("  <- never diverged" if k >= budget else ""))
     print()
-    if rows[0]["gap_median"] is not None or any(r["gap_median"] for r in rows):
+    if any(r["gap_median"] is not None for r in rows):
         print("agreement conditioned on the reference's own decision margin (top1-top2, logits):")
         print("   gap median range        n   engine mean tokens (never-div)   floor mean tokens (never-div)")
         for b in buckets(rows, budget):
             hi = b["gap_median_range"][1]
-            print("   %6s - %-8s %3d   %6.2f (%2d)              %6.2f (%2d)"
+            fl = ("  %6.2f (%2d)" % (b["floor_mean_agree_tokens"], b["floor_never_diverged"])
+                  if b["floor_mean_agree_tokens"] is not None else "        -")
+            print("   %6s - %-8s %3d   %6.2f (%2d)          %s"
                   % (b["gap_median_range"][0], "inf" if hi is None else hi, b["n_prompts"],
-                     b["engine_mean_agree_tokens"], b["engine_never_diverged"],
-                     b["floor_mean_agree_tokens"], b["floor_never_diverged"]))
+                     b["engine_mean_agree_tokens"], b["engine_never_diverged"], fl))
         gmin = [r["gap_min"] for r in rows if r["gap_min"] is not None]
         if gmin:
             s = stats(gmin)
