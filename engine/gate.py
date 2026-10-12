@@ -1903,6 +1903,12 @@ def wave_expect(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int
     token changes `calls` and `rows_max` and leaves every output bit alone, and this is the table that
     notices.
 
+    "Per body" means one `submit_wave_body` call, and for all three batchable families that number is
+    the per-TOKEN bill from §07 whether the body was one token or 295: glue issues one launch per fused
+    add+norm, the MLP one per half, and `proj` one per projection (§06.2's "one GEMM per projection"),
+    each covering every row of the body — so 49/24/24/114 launches arrive per body at any width, and
+    what the width changes is `rows` on each of them. That is why the same table serves both sides.
+
     A generation step is a body of one token (`submit_token_body` is `submit_wave_body` with n = 1),
     which is why the decode steps join the wave sizes below and why `rows_total` comes out
     independent of `wave_rows`: batching moves work between launches, it does not add or remove any.
@@ -2019,7 +2025,7 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
     """Section (h). `sides` is what `batched_ab_stand_in` returns, or the same shape built from two
     real `decode_run` runs; one judging function, so the negative exercises the code that judges the
     engine."""
-    section("(h) the batched path — counted launches, not inferred outputs (§08.2, P4b)")
+    section("(h) the batched path — counted launches, not inferred outputs (§08.2, P4b/P5)")
     batched, perrow = sides["batched"], sides["perrow"]
 
     # The knob first: if `--wave-rows` were ignored, every count below would be an accident. The
@@ -2069,6 +2075,24 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
           " — both must be 0 and 1, or the run named `one-row` was not one row at a time and the"
           " comparison below proves nothing")
 
+    # P5's half, spelled out separately rather than folded into the loop above: the projection family is
+    # the one whose batching could legitimately have moved bits (a long dot over `hidden`/`heads`, not a
+    # residual add), so "the wave batched the projections" is the claim the fixtures cannot make from
+    # their outputs — and `--break-wave`'s one-row projection injection is what shows this check bites.
+    pj = batched["run"].get("launchstat", {}).get("proj", {})
+    check(pj.get("calls_batched", 0) > 0
+          and pj.get("rows_max", 0) == min(prompt_len, wave_rows),
+          "the batched side issues TOKEN-BATCHED projection launches",
+          f"proj calls={pj.get('calls')} calls_batched={pj.get('calls_batched')}"
+          f" rows_max={pj.get('rows_max')}, expected rows_max={min(prompt_len, wave_rows)} for a"
+          f" {prompt_len}-token prompt. rows_max=1 here means every projection still ran one token per"
+          " launch — the §06.2 \"one GEMM per projection\" form is dead code")
+    rpj = perrow["run"].get("launchstat", {}).get("proj", {})
+    check(rpj.get("calls_batched", -1) == 0 and rpj.get("rows_max", -1) == 1,
+          "the one-row side issues ONE-ROW projection launches",
+          f"proj calls_batched={rpj.get('calls_batched')} rows_max={rpj.get('rows_max')}"
+          " — both must be 0 and 1, or the side named `one-row` was not one token at a time")
+
     # Same work, fewer launches. `rows_total` wave-independent is the half that says the launch
     # delta is batching rather than skipped work.
     for family in sorted(counts):
@@ -2091,8 +2115,8 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
     waves_r = len(wave_row_sizes(prompt_len, 1))
     wave_ratio = (r_wave / b_wave) if b_wave else 0.0
     check(b_wave > 0 and r_wave > b_wave and r_wave * waves_b == b_wave * waves_r,
-          "the batched run issues materially fewer glue+MLP launches for the prompt wave",
-          f"prompt wave: {b_wave} glue+MLP launches across {waves_b} wave(s) vs {r_wave} across"
+          "the batched run issues materially fewer glue+proj+MLP launches for the prompt wave",
+          f"prompt wave: {b_wave} glue+proj+MLP launches across {waves_b} wave(s) vs {r_wave} across"
           f" {waves_r} — {wave_ratio:.0f}x fewer for a {prompt_len}-token prompt. The whole run is"
           f" {b_calls} vs {r_calls}: {decode_steps} generation steps are one token wide however the"
           " prompt is batched")
@@ -2114,10 +2138,10 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
                      " (the stand-in emits both sides), exactly as section (d) is: it proves the"
                      " checker bites, never anything about the engine.")
     notes.append(
-        f"P4b launch count on {REFS.name}: the {prompt_len}-token prompt wave issued {b_wave}"
-        f" glue+MLP launches batched vs {r_wave} with --wave-rows 1 ({wave_ratio:.0f}x fewer); the"
-        f" whole run, {b_calls} vs {r_calls}, because {decode_steps} generation steps are one token"
-        " wide either way. Counts, never durations — the timing pass is the main agent's"
+        f"P4b+P5 launch count on {REFS.name}: the {prompt_len}-token prompt wave issued {b_wave}"
+        f" glue+proj+MLP launches batched vs {r_wave} with --wave-rows 1 ({wave_ratio:.0f}x fewer);"
+        " the whole run, " f"{b_calls} vs {r_calls}, because {decode_steps} generation steps are one"
+        " token wide either way. Counts, never durations — the timing pass is the main agent's"
         " (bench/performance-status.md §6) and the command is in engine/results.md.")
 
 
@@ -2689,21 +2713,29 @@ def selftest(fixture: str = "dec8") -> int:
     cases += [
         (["--break-wave"], 1,
          ["[FAIL] batched side: glue launches match the wave arithmetic",
+          "[FAIL] batched side: proj launches match the wave arithmetic",
           "[FAIL] batched side: mlp_gateup launches match the wave arithmetic",
           "[FAIL] the batched side issues ROW-BATCHED glue launches",
           "[FAIL] the batched side issues TOKEN-BATCHED MLP launches",
-          "[FAIL] the batched run issues materially fewer glue+MLP launches",
+          "[FAIL] the batched side issues TOKEN-BATCHED projection launches",
+          "[FAIL] the batched run issues materially fewer glue+proj+MLP launches",
           "![FAIL] one-row side: glue launches match the wave arithmetic",
+          "![FAIL] one-row side: proj launches match the wave arithmetic",
+          "![FAIL] the one-row side issues ONE-ROW projection launches",
           "![FAIL] both sides sample the same token ids",
           "![FAIL] both sides write bit-identical logits",
-          "![FAIL] both sides cover the same glue rows"],
-         "a wide wave that submitted one row per launch (P4's batched kernels never reached). Only"
-         " the launch half may notice: sampled ids and logits are bit-identical either way, so the"
-         " identity half must stay green and the `--wave-rows 1` side must be untouched"),
+          "![FAIL] both sides cover the same glue rows",
+          "![FAIL] both sides cover the same proj rows"],
+         "a wide wave that submitted one row per launch (P4's and P5's batched kernels never" 
+         " reached). Only the launch half may notice: sampled ids and logits are bit-identical either"
+         " way, so the identity half must stay green, `both sides cover the same proj rows` must stay"
+         " green (batching moves rows between launches, it does not add or remove work), and the"
+         " `--wave-rows 1` side must be untouched"),
         (["--break-ab-logits", str(ab_pos)], 1,
-         [f"[FAIL] both sides write bit-identical logits", "logits%d.bin" % ab_pos,
+         [f"[FAIL] both sides write bit-identical logits", "1 differing: ['logits%d.bin']" % ab_pos,
           "![FAIL] the batched side issues ROW-BATCHED glue launches",
-          "![FAIL] the batched run issues materially fewer glue+MLP launches",
+          "![FAIL] the batched side issues TOKEN-BATCHED projection launches",
+          "![FAIL] the batched run issues materially fewer glue+proj+MLP launches",
           "![FAIL] both sides sample the same token ids"],
          f"position {ab_pos}'s logits differ by one byte on the one-row side: the byte comparison must"
          " bite and name that one file, while every launch count stays correct (the locality rule"
@@ -3369,7 +3401,8 @@ def main() -> int:
     # to per-row launches fails something. The counters come from the launchers (`engine/launch_stats.h`)
     # and the two sides differ only in `--wave-rows`, so this is the one place in the tree that can tell
     # "batching cost nothing" from "batching never ran" — the outputs cannot.
-    counts = {"glue": want["glue"], "mlp_gateup": want["mlp"] // 2, "mlp_down": want["mlp"] // 2}
+    counts = {"glue": want["glue"], "proj": want["proj"],
+              "mlp_gateup": want["mlp"] // 2, "mlp_down": want["mlp"] // 2}
     wave_rows = wave_row_ceiling()
     if args.dry_run:
         sides = batched_ab_stand_in(man, prompt_ids, dec_logits, counts, work, wave_rows,
