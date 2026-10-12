@@ -59,7 +59,9 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT))
 from chat_render import parse_turn, render_transcript   # noqa: E402
+from tools.state_fp import fp_row                       # noqa: E402  (§08 state fingerprint, shared)
 
 # Special-token literals (built to keep them out of shell/tool quoting).
 LT, GT, BAR = chr(60), chr(62), chr(124)
@@ -153,49 +155,9 @@ def cache_state_tensors(layer, attr: str) -> list[torch.Tensor]:
     return out
 
 
-def fp_row(parts: list[torch.Tensor], prev: list[torch.Tensor] | None) -> list[float]:
-    """One row of a state fingerprint: [sum x², max|x|, mean x, dn2], F64.
-
-    `parts` is the tensors that make up one logical state (the GDN row has one; the attention
-    row is K and V together, so it is two) and they are summarised as one pooled row. Parts are
-    compared PART-WISE against the previous step's parts, never as one flattened blob: K and V
-    grow by one lane per step, so a flat `x[:prev.numel()] - prev` would silently compare K's
-    tail against the start of V and report a large delta for a cache that is behaving perfectly.
-    (It did, at 1e4 on a clean run, which is why the definition is part-wise.)
-
-    Moment sums, deliberately: they are invariant to element ORDER, and the engine lays its GDN
-    window and KV out differently from the reference in places (`state.h`: head-major window,
-    `[head][slot][dim]` KV), so an order-sensitive summary would read a layout difference as a
-    bug. What they catch is a state that decayed, was zeroed, was scaled, or was left behind —
-    which is what a depth scan looks for. What they CANNOT catch is a corruption that preserves
-    the multiset of values (a rotation within the tensor); per-element state gating needs the
-    full tensors, at 18 MiB per step, which is exactly what a deep fixture cannot afford.
-
-    dn2 = Σ_i Σ_{common extent of dim −2} (x_i − prev_i)², i.e. how much the ALREADY-WRITTEN
-    entries moved. Append-only storage therefore has an expected dn2 of exactly 0.0, and a
-    non-zero kv_fp dn2 means history was rewritten. No `prev` (§08.4: a fresh request's state is
-    zeroed) means the delta is the tensor itself, so the first row's dn2 equals its n2.
-
-    "The common extent of dim −2" is the append axis for a growing cache ([1,H,T,D]) and the
-    whole extent for a state that never grows (S [1,16,128,128], conv [1,6144,4]), which is why
-    one rule serves all three families. Flattening first and slicing a common PREFIX is wrong for
-    a growing tensor: when T changes, the per-head boundaries move, so a flat prefix compares
-    head 1 against the tail of head 0 — it read 3.0e3 on a cache that is bit-identical.
-    """
-    flat = torch.cat([p.reshape(-1) for p in parts]).to(torch.float32)
-    n2 = float(torch.sum(flat * flat))
-    row = [n2, float(torch.max(torch.abs(flat))), float(torch.mean(flat))]
-    if prev is None:
-        row.append(n2)
-        return row
-    dn2 = 0.0
-    for x, p in zip(parts, prev):
-        x = x.detach().to(torch.float32)
-        n = min(x.shape[-2], p.shape[-2])
-        d = x[..., :n, :] - p[..., :n, :]
-        dn2 += float(torch.sum(d * d))
-    row.append(dn2)
-    return row
+# `fp_row` is imported above rather than defined here: the same definition is needed by
+# `engine/gate.py` section (g) (to prove the pins still reproduce) and mirrored by
+# `engine/decode_run.cpp --state-fp` (to emit the engine's rows). One definition, imported.
 
 
 class Recorder:
