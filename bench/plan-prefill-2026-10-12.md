@@ -306,6 +306,45 @@ remains in Q6.3 is the timing follow-up (the lane-curve rows), not the capabilit
   function of the split (staging cap × split over allocated `part` space); the gate must read the
   new expression’s constants from the kernel, not accept a number.
 
+### 3.1 Debt (P8b, 2026-10-13): the 4096-lane ceiling, what lifting it costs, and why it was not lifted
+
+P8 landed with the ceiling where P7 put it: **`MAXSC` 512 × `kAttnMaxSplit` 8 = 4096 lanes**, the two
+factors still read out of the files that obey them (`gate.py::lane_geometry()`). The question P8b was
+asked is whether the 8 should become 16. **Answer: not yet, and here is the arithmetic that says so.**
+
+- **Scratch is not the reason to refuse.** `attn_part_floats(rows)` = `rows × N_Q × kAttnMaxSplit ×
+  (DH + 2)` F32, i.e. **64.5 KiB per wave row at split 8** (8 × 8 × 258 × 4 = 66 048 B) and **129 KiB at
+  split 16**. At `kMaxWaveRows` = 512 that is 32.25 MiB per request at 8 and 64.5 MiB at 16 — 0.19 % of
+  this box’s ~34 GiB visible pool, and `attn_part_floats()` sizes the allocation from the same constant
+  that sizes the refusal, so the pair cannot drift. That is the P7 answer to “is the cap hopeful?”.
+- **Concurrency is where split 16 would actually be paid.** The scratch is per in-flight *request*, so a
+  100-request server pays 3.1 GiB at split 8 today and 6.3 GiB at 16 (arithmetic on the AGENTS.md scope
+  table’s 100 × 69 MiB figure, which does not count `part` at all). Not a constraint for one request, and
+  concurrency is explicitly out of scope (plan-2026-10-12 §5), but the number is now wave_rows × split and
+  no longer 64.5 KiB, and whoever does a server should know that before they size a pool.
+- **Two constants have to move together, and only one of them is in `kernels_attn.cpp`.** The ceiling is
+  unreachable below the context the engine hands out: `decode_run.cpp:61`’s `kSessionDefaultCap` is 4096
+  and lanes are `pos + 1`, so a default session cannot even *ask* for 4097 lanes. Raising
+  `kAttnMaxSplit` to 16 without raising the default cap changes nothing but the scratch bill; raising the
+  cap past 4096 without raising `kAttnMaxSplit` makes `attn_decode_layer` throw. Note what that means for
+  §5’s 4k row: a request that is 4096 prompt tokens **plus one generated token** needs 4097 lanes, so the
+  first generated token of a full 4k-context request is already one lane past the ceiling. The pair is
+  (`kAttnMaxSplit`, `kSessionDefaultCap`); `lane_geometry()` follows both without an edit.
+- **Why “provable” is the blocker, not cost.** Above 4096 the engine can only be checked against itself —
+  there is no pin past 524 lanes (`wide520f`) and making one is P3-class work plus its own priced route
+  allowance (D-2), not a worker’s call. The cheap-looking self-check, “same rows at two `--wave-rows`,
+  byte-for-byte”, is exactly the check that is **not** valid above the staging: `split` is taken from a
+  wave’s widest row (`split_for(lanes_last)`), so a row can be handed more lane blocks than it needs and
+  its `(max, sum)` merge groups differently than the same row run alone. For waves that start on a
+  multiple of 512 — every shipped fixture, and §2.1’s own alignment — each row’s need equals the wave’s,
+  and section (h)’s byte-identity A/B is sound. A wave that straddles a 512 boundary inside itself (a long
+  session prompt starting off that alignment) is a legal different rounding route, and must be judged
+  against its pin, never against another wave width — which is §2.6’s standing rule said out loud.
+
+So: the ceiling stays at 4096, the constants stay where they are obeyed, and a lift is a *fixture* task
+(>4096-lane pin + its allowance) rather than a one-line constant change. If the 4k TTFT row in §5 turns
+out to want 4k contexts, that fixture is the first thing to brief, not the `16`.
+
 ---
 
 ## 4. Packages, risk-ordered
@@ -328,7 +367,7 @@ the “main agent” column marks the timing passes this plan hands over (§5).
 | **P5** | Batch the nine projections + out_proj/o_proj (44 % of the remaining bytes) with GEMM forms of `proj_gemv`. | `prototype/proj_gemv/*` (batched form + gate stage), `engine/kernels_proj.cpp`, `engine/prefill.cpp` | §04.1, §05.1, §06.2 (“one GEMM per projection” is the spec’s own sentence), §10 G3i, §10.5 W1 pins (they exist for prefill) | per-op gate vs prefill `L{ll}.{in_proj_*,q_proj,k_proj,v_proj,o_proj,out_proj}.out` on `p64`/`p300` at G3i (cos ≥ 0.9999, meanrel ≤ 1 %); engine: 5 fixtures + margin preflight | device ~15 min | 15 | P2 (P4 independent of P5 — both need P2; brief whichever order the margin preflights prefer) | GEMM reduction order on the skinny shapes (the narrow-shape ledger rows say these are shape-limited; batching is their only bandwidth lever) |
 | **P6** | Batch GDN conv + gates + gated-norm over a wave, carrying the conv window with the §06.2 request-start zero-padding exactly. | `prototype/gdn_decode/*` (windowed causal conv over `[T,6144]`, multi-token gates), `prototype/gdn_gated_norm/*` (T×), `engine/kernels_gdn.cpp`, `engine/prefill.cpp` (window D2D copies collapse to one per wave) | §04.2, §04.3, §04.5, §06.2, §08.6 inv 2 (window = `raw[T−3..T−1]`), §10 G3/G3i | per-op gate vs prefill `L{ll}.gdn.{mixed_qkv_pre_conv,q,k,v}_post_conv,g_decay_log,beta,o_pre_norm` on `p64`/`p300`; `(g)` state-fp for `conv_fp` on all fixtures; `p128` is the end-condition proof | device ~15 min | 15 | P2, P5 (projections produce the `[T,6144]` `raw`) | the conv-window end-condition at T > 1 (A-04’s falsifier) and the ragged-wave carry |
 | **P7** | Remove the 512-lane cap: engine selection of the prototype’s existing split-K online-softmax form when lanes exceed the staging, one-pass untouched below. | `prototype/attn_decode/*` (re-gate `--softmax online --split k` at the G6-shape band + anti-vacuity), `engine/kernels_attn.cpp` (choose `split = ceil(lanes/staging)`, `full=0` only when forced; allocate `part` in scratch/state), `engine/gate.py` (`lane_ceiling()` → the split expression; relax the two preflight lines), results/ledger notes | §07.3 (decision paragraph + pre-authorized band), §10 G6, A-17, §08.2 (KV head-major index contract) | per-op: `attn_decode/run.py --softmax online --split {2,4}` vs band (ids exact; logits cos ≥ 0.9999 per G6; “online branch ran” anti-vacuity); engine: **`wide520f` PASS** (its own route allowance priced by `route_allowance.py` — a derivation, ledger-logged) **and the five original fixtures bit-identical** (one-pass route unchanged) | device ~20 min | 20 | P2 (P3 for the fixture) | the 4k blocker (ledger §6: measurement “blocked by `MAXSC = 512`”); the (max,sum) merge risk, contained to the new route only |
-| **P8** | Run attention layers of a prefill wave through the same block-parallel path (per-query split-K; positions per row), retiring the last per-token attention launch wave at long prompts. | `prototype/attn_decode/*` (per-row position; multi-query host loop or grid.y over queries), `engine/prefill.cpp`, `engine/kernels_attn.cpp` | §05.5–§05.7, §06.3, §07.3, §10 G4 (de-interleave negative must still fail) | per-op vs prefill `L{ll}.attn.{q_rope,k_rope,attn_out_pre_gate}` on `p64`/`p300` (one-pass lanes) + online band on `wide520f`; engine: all fixtures + `wide520f`; `p128` y0 check (§06.5 first sample) | device ~20 min | 20 | P5, P7 | O(T²) prefill attention at 1024/3072 contexts; KV append at wave positions |
+| **P8** | Run attention layers of a prefill wave through the same block-parallel path (per-query split-K; positions per row), retiring the last per-token attention launch wave at long prompts. | `prototype/attn_decode/*` (per-row position; multi-query host loop or grid.y over queries), `engine/prefill.cpp`, `engine/kernels_attn.cpp` | §05.5–§05.7, §06.3, §07.3, §10 G4 (de-interleave negative must still fail) | per-op vs prefill `L{ll}.attn.{q_rope,k_rope,attn_out_pre_gate}` on `p64`/`p300` (one-pass lanes) + online band on `wide520f`; engine: all fixtures + `wide520f`; `p128` y0 check (§06.5 first sample) | device ~20 min | 20 | P5, P7 | O(T²) prefill attention at 1024/3072 contexts; KV append at wave positions. **LANDED 2026-10-13 (P8 op `a332fd9`; engine half P8b)**: one attention site per attention layer per body (`blockIdx.z` = query row, `attn_prep` + `attn_core` staged plan), every shipped fixture bit-identical (`margin_delta.py` x1.0000 everywhere), `p128`’s prompt wave now 6 attention launches instead of 768, and `(h)` counts `attn` as a fifth batchable family with an aimed injection. The first engine wiring hung the device on `p128`; the cause and the trap are in `engine/results.md` (“Q5 / P8”) and §3.1 above is the ceiling debt ** |
 | **P9** *(conditional)* | Replace the per-token recurrent scan with a §04.7 chunk-64 device kernel **iff** the scan’s launch residual shows in the measured curve, with a route-affordability check first. | new `prototype/gdn_chunk/` (kernel + gate: engine-vs-engine chunk==recurrent per layer, G3 clause), `engine/kernels_gdn.cpp`, `engine/prefill.cpp` (`--gdn-form chunk`) | §04.7, §06.2, A-08, §10 G3; **D-3/D-5** route rule | `run_chunkcheck.py` mirror inside engine (cos ≥ 0.9999/layer); `L{ll}.gdn.o_pre_norm`/`state_new` vs `p64`/`p300`; then §2.2(3) affordability check on all 5 fixtures | CPU kernel dev + device ~20 min | 20 | P1, P6, **main-agent TTFT curve first** | the O(T) scan-launch residual — and, if it lands, the chunk-route distance question, *priced before adopted* |
 | **P10** *(not a worker package)* | The measurement + docs pass: TTFT curve, 1k/4k decode rows, `chat.sh` before/after, ledger + results write-ups. | `bench/performance-status.md` §6, `engine/results.md`, this file’s status column | plan Q5 acceptance | §5 measurement block | main agent only, blocking | — | P1–P8 | closes Q5’s acceptance: G5 at several boundaries, >512 fixture green, TTFT visibly down, rows with lock tag + spread |
 
