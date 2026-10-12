@@ -308,3 +308,51 @@ that may or may not have written the per-step logits dumps (`--out`, 0.993 MB pe
 much to the page cache costs **0.254 ms/step** measured on the CPU, so if the dumps were on, ~2 % of
 each figure is the driver, not the engine. The A/B (same three runs without `--out`) is in the hand-off
 in `engine/results.md`.
+
+### Engine decode cost vs context length (2026-10-12, foreground, zero subagents)
+
+Provenance, same rules as the rows above: three `engine/build/decode_run` runs per point, blocking
+in a foreground tool call with **zero subagents active**, `gpu_lock.sh util` **92 / 91 %** at acquire
+and release and discounted on the same grounds as every other row here. `ms_per_step` is
+`decode_run`'s own `steady_clock` mean over all steps actually run (prompt fed one token per step —
+§06 prefill does not exist yet — plus the requested generation steps, one sync per step at the
+logits). Spread is (max−min)/min over the three runs.
+
+| fixture / prompt | lanes at the last step | `ms_per_step` best of 3 | all three runs | spread | tok/s |
+|---|---|---|---|---|---|
+| `dec8` (17-token prompt, 8 steps) | 25 | **11.919** | 11.919 / 11.966 / 12.045 | 1.06 % | 83.9 |
+| `dec64t` (27-token prompt, 64 steps) | 91 | **12.187** | 12.187 / 12.304 / 12.487 | 2.46 % | 82.1 |
+| `dec64t` (27-token prompt, 300 steps) | 327 | **12.614** | 12.614 / 12.838 / 12.904 | 2.30 % | 79.3 |
+
+Reproduce:
+
+```bash
+tools/gpu_lock.sh acquire <tag> && tools/gpu_lock.sh util
+PT=$(.venv/bin/python -c "import json;print(','.join(map(str,json.load(open('data/refs/dec64t/manifest.json'))['prefill_ids'])))")
+for i in 1 2 3; do mkdir -p /tmp/psw/$i; ./engine/build/decode_run \
+  --model models/Qwen3.5-0.8B --ids "$PT" --steps 300 --out /tmp/psw/$i; done
+tools/gpu_lock.sh release <tag>
+```
+
+**The finding is the slope, not the levels.** Everything the engine does is context-independent except
+the §05 attention read over the KV cache, so the difference between these rows *is* the attention
+kernel's cost: **(12.614 − 11.919) / (327 − 25) = 2.301 µs per lane per token**, i.e. 0.384 µs per
+lane per attention layer. At 2048 B of KV per lane per layer (§00.5: 2 kv-heads × 256 × 2 B × k and v)
+that is **5.34 GB/s effective — 2.3 % of the 237 GB/s probe**. For the whole 300-step run the engine
+reads 3.83 MiB of KV per token, which the probe says should cost ≈16 µs; it costs ≈700 µs.
+
+Two consequences, stated as arithmetic and not as measurements:
+
+1. **Attention is dispatch/parallelism-bound, not bandwidth-bound**, by a factor of ~40. §07.4's
+   correction that "skinny argmax is bandwidth-critical" was already shown wrong for `lm_head`; this is
+   the same lesson on the other hot kernel. The fix is the block-parallel form (more blocks over the lane
+   axis, online `(max, sum)` merge per §07.3), not a faster load.
+2. **Linear extrapolation puts attention at +9.4 ms/token at a 4096-lane context** — which would take the
+   engine from 83.9 to roughly 10 tok/s. That number is an **extrapolation from a 25–327 lane window, not
+   a measurement**, and it must not be quoted as one. Measuring it is currently blocked by `MAXSC = 512`
+   in `engine/kernels_attn.cpp`, which throws rather than truncating — so the split-block work that was
+   filed under "capability, later" is now on the performance critical path.
+
+Next measurement owed (main agent, before any attention rewrite): `prototype/attn_decode` timed in
+isolation at 64 / 256 / 512 / 1024 lanes, so the rewrite is priced against a curve rather than against
+this single slope.
