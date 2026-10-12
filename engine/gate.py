@@ -3719,13 +3719,23 @@ def decision_margin(ref: np.ndarray, eng, m: dict) -> str:
 # nothing: a fixture listed here is still FAIL and still exits 1. It exists because a red that is absorbed
 # is a red nobody reads any more.
 #
-# `chunk64b` step 0 is the only entry, and it is unsatisfiable as shipped: the pinned winner is 8337 at
+# `chunk64b` step 0 is unsatisfiable as shipped: the pinned winner is 8337 at
 # 15.625 and the runner-up is 20619 at 15.500 — a 2 BF16 ULP margin at that magnitude — while the
 # engine's legal element error at that step is maxabs 0.2509, larger than the margin. No legal bf16 route
 # can be held to that token. The step's LOGITS are gated and pass (cos 0.999919, deficit 8.06e-05
 # against §10.1 G5's 5e-04 floor; meanrel 1.199 %, maxabs 0.2509). D-9: an admitting rule for this shape
 # must be SIZED — the legal element error at that position, plus a route spread, the way D-3/D-5/D-6
 # sized their bands. Not a skip, not a silent tolerance, not a re-price.
+#
+# `wide520f`'s two lines are a different kind of red: they are not a known engine defect and not a band
+# question, they are one constant. 500 prompt + 24 generation = 524 lanes, the one-pass attention stage
+# serves 512 (`MAXSC`, `prototype/attn_decode/attn_decode_kernels.h:32`), so `gate.py`'s own lane preflight
+# refuses the run and `decode_run` exits 1 before a single STEP line — which is also why `wide520f`'s y0,
+# id, logits, `(g)` and `(h)` rows have never been judged at all. They are listed here so that *this*
+# package's success criterion is visible in the same reporting: P7 selects the prototype's split-K
+# online-softmax form above the staging (§07.3), the ceiling goes away, and these two lines must HEAL. If
+# only one heals, or they heal while something else is red, `[NEW-FAILURE]` / "did NOT fail this run" below
+# says so. Deleting this entry is part of P7's own cleanup once the fixture is green, not a shortcut past it.
 EXPECTED_RED: dict = {
     "chunk64b": {
         "why": ("step 0's pinned winner is 2 BF16 ULP ahead of the runner-up while the engine's legal"
@@ -3736,6 +3746,17 @@ EXPECTED_RED: dict = {
             # The order-sensitive id list is the consequence of step 0, not a second bug: one wrong token
             # anywhere shifts every later id, so the whole chain mismatches.
             "all 30 generated ids match, in order — exactly, or as a tie proved from the pin",
+        ],
+    },
+    "wide520f": {
+        "why": ("MAXSC = 512 ceiling — removed by P7 (§07.3's split-K online-softmax form is the"
+                " engine's route above the staging). Until it lands, the run cannot start, so none of"
+                " this fixture's parity rows have ever been judged"),
+        "checks": [
+            "the planned run fits the attention stage's lane ceiling",
+            # The `rc=1` is the consequence of the refusal above, not a second bug: the preflight fires
+            # before `decode_run` is invoked, and the run path then has no dumps to judge.
+            "decode_run exits 0",
         ],
     },
 }
