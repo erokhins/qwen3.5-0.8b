@@ -1,0 +1,1021 @@
+{
+ "corpus": "corpus48",
+ "engine_manifest": "corpus48engine",
+ "floor": "corpus48sdpa",
+ "margins": "data/refs/corpus48-margins.json",
+ "budget_tokens": 24,
+ "n_prompts": 49,
+ "engine_mean_prefix_agreement": 0.701530612244898,
+ "engine_mean_prefix_agreement_tie_aware": 0.7236394557823129,
+ "engine_never_diverged_tie_aware": 28,
+ "floor_mean_prefix_agreement": 0.8775510204081632,
+ "engine_first_divergence": {
+  "mean": 16.836734693877553,
+  "median": 24.0,
+  "min": 0.0,
+  "max": 24.0
+ },
+ "floor_first_divergence": {
+  "mean": 21.06122448979592,
+  "median": 24.0,
+  "min": 1.0,
+  "max": 24.0
+ },
+ "engine_never_diverged": 27,
+ "floor_never_diverged": 40,
+ "engine_depth_histogram": {
+  "0": 1,
+  "1": 3,
+  "3": 1,
+  "4": 2,
+  "5": 1,
+  "7": 2,
+  "8": 1,
+  "9": 3,
+  "10": 2,
+  "11": 1,
+  "12": 2,
+  "15": 1,
+  "16": 1,
+  "23": 1,
+  "24": 27
+ },
+ "floor_depth_histogram": {
+  "1": 1,
+  "3": 1,
+  "6": 1,
+  "8": 1,
+  "9": 2,
+  "10": 1,
+  "11": 1,
+  "15": 1,
+  "24": 40
+ },
+ "by_gap_bucket": [
+  {
+   "gap_median_range": [
+    0.0,
+    0.5
+   ],
+   "n_prompts": 1,
+   "engine_mean_agree_tokens": 7.0,
+   "engine_never_diverged": 0,
+   "floor_mean_agree_tokens": 24.0,
+   "floor_never_diverged": 1
+  },
+  {
+   "gap_median_range": [
+    0.5,
+    1.0
+   ],
+   "n_prompts": 8,
+   "engine_mean_agree_tokens": 13.75,
+   "engine_never_diverged": 2,
+   "floor_mean_agree_tokens": 16.875,
+   "floor_never_diverged": 4
+  },
+  {
+   "gap_median_range": [
+    1.0,
+    2.0
+   ],
+   "n_prompts": 19,
+   "engine_mean_agree_tokens": 16.63157894736842,
+   "engine_never_diverged": 10,
+   "floor_mean_agree_tokens": 20.526315789473685,
+   "floor_never_diverged": 15
+  },
+  {
+   "gap_median_range": [
+    2.0,
+    4.0
+   ],
+   "n_prompts": 17,
+   "engine_mean_agree_tokens": 19.941176470588236,
+   "engine_never_diverged": 13,
+   "floor_mean_agree_tokens": 22.764705882352942,
+   "floor_never_diverged": 16
+  },
+  {
+   "gap_median_range": [
+    4.0,
+    8.0
+   ],
+   "n_prompts": 4,
+   "engine_mean_agree_tokens": 13.25,
+   "engine_never_diverged": 2,
+   "floor_mean_agree_tokens": 24.0,
+   "floor_never_diverged": 4
+  }
+ ],
+ "engine_first_flip": {
+  "n_diverged": 22,
+  "gap12_at_flip": {
+   "mean": 0.0,
+   "median": 0.0,
+   "min": 0.0,
+   "max": 0.0
+  },
+  "at_exact_tie": 22,
+  "its_id_also_tied_at_top": 22,
+  "its_id_beyond_ref_topk": 0,
+  "gap_distinct_at_flip": {
+   "mean": 0.6193181818181818,
+   "median": 0.34375,
+   "min": 0.125,
+   "max": 1.8125
+  }
+ },
+ "floor_first_flip": {
+  "n_diverged": 9,
+  "gap12_at_flip": {
+   "mean": 0.013888888888888888,
+   "median": 0.0,
+   "min": 0.0,
+   "max": 0.125
+  },
+  "at_exact_tie": 8,
+  "its_id_also_tied_at_top": 8,
+  "its_id_beyond_ref_topk": 0,
+  "gap_distinct_at_flip": {
+   "mean": 0.5486111111111112,
+   "median": 0.25,
+   "min": 0.125,
+   "max": 1.5
+  }
+ },
+ "prompts": [
+  {
+   "text": "The capital of France is",
+   "n_prompt_tokens": 5,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 3.5,
+   "gap_min": 0.3125,
+   "gap_first": 0.3125,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The largest planet in the solar system is",
+   "n_prompt_tokens": 8,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 2.3125,
+   "gap_min": 0.25,
+   "gap_first": 0.9375,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "Water boils at a temperature of",
+   "n_prompt_tokens": 6,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 0.8125,
+   "gap_min": 0.0,
+   "gap_first": 0.375,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The chemical symbol for gold is",
+   "n_prompt_tokens": 6,
+   "engine_agree": 23,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 2.625,
+   "gap_min": 0.0,
+   "gap_first": 0.75,
+   "engine_flip": {
+    "step": 23,
+    "gap12": 0.0,
+    "gap_distinct": 0.375,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "Shakespeare wrote the tragedy",
+   "n_prompt_tokens": 5,
+   "engine_agree": 15,
+   "engine_agree_tie_aware": 16,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 15,
+   "gap_median": 0.9375,
+   "gap_min": 0.0,
+   "gap_first": 0.875,
+   "engine_flip": {
+    "step": 15,
+    "gap12": 0.0,
+    "gap_distinct": 0.1875,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   },
+   "floor_flip": {
+    "step": 15,
+    "gap12": 0.0,
+    "gap_distinct": 0.1875,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   }
+  },
+  {
+   "text": "The theory of relativity was proposed by",
+   "n_prompt_tokens": 8,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.25,
+   "gap_min": 0.0,
+   "gap_first": 0.875,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The mitochondria is the",
+   "n_prompt_tokens": 5,
+   "engine_agree": 10,
+   "engine_agree_tie_aware": 11,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 10,
+   "gap_median": 1.0,
+   "gap_min": 0.0,
+   "gap_first": 0.75,
+   "engine_flip": {
+    "step": 10,
+    "gap12": 0.0,
+    "gap_distinct": 1.25,
+    "engine_rank_in_ref": 2,
+    "tied_at_top": true
+   },
+   "floor_flip": {
+    "step": 10,
+    "gap12": 0.0,
+    "gap_distinct": 1.25,
+    "engine_rank_in_ref": 2,
+    "tied_at_top": true
+   }
+  },
+  {
+   "text": "The first person to walk on the Moon was",
+   "n_prompt_tokens": 9,
+   "engine_agree": 4,
+   "engine_agree_tie_aware": 5,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 0.90625,
+   "gap_min": 0.0,
+   "gap_first": 0.8125,
+   "engine_flip": {
+    "step": 4,
+    "gap12": 0.0,
+    "gap_distinct": 0.125,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "A group of lions is called a",
+   "n_prompt_tokens": 7,
+   "engine_agree": 1,
+   "engine_agree_tie_aware": 2,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 2.71875,
+   "gap_min": 0.0,
+   "gap_first": 0.8125,
+   "engine_flip": {
+    "step": 1,
+    "gap12": 0.0,
+    "gap_distinct": 0.875,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "The longest river in Africa is",
+   "n_prompt_tokens": 6,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 3.625,
+   "gap_min": 0.25,
+   "gap_first": 2.9375,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "In Python, a list literal is written as",
+   "n_prompt_tokens": 9,
+   "engine_agree": 11,
+   "engine_agree_tie_aware": 12,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 11,
+   "gap_median": 1.875,
+   "gap_min": 0.0,
+   "gap_first": 0.875,
+   "engine_flip": {
+    "step": 11,
+    "gap12": 0.0,
+    "gap_distinct": 0.25,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   },
+   "floor_flip": {
+    "step": 11,
+    "gap12": 0.0,
+    "gap_distinct": 0.25,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   }
+  },
+  {
+   "text": "The gradient of a scalar field is a",
+   "n_prompt_tokens": 8,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 2.5,
+   "gap_min": 0.25,
+   "gap_first": 2.625,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "Recurrence relations are solved by",
+   "n_prompt_tokens": 6,
+   "engine_agree": 9,
+   "engine_agree_tie_aware": 10,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 6,
+   "gap_median": 0.625,
+   "gap_min": 0.0,
+   "gap_first": 0.625,
+   "engine_flip": {
+    "step": 9,
+    "gap12": 0.0,
+    "gap_distinct": 0.125,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": {
+    "step": 6,
+    "gap12": 0.125,
+    "gap_distinct": 0.125,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": false
+   }
+  },
+  {
+   "text": "The time complexity of merge sort is",
+   "n_prompt_tokens": 7,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 3.125,
+   "gap_min": 0.25,
+   "gap_first": 0.375,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "An operating system provides",
+   "n_prompt_tokens": 4,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.34375,
+   "gap_min": 0.25,
+   "gap_first": 1.0,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The TCP handshake consists of",
+   "n_prompt_tokens": 5,
+   "engine_agree": 5,
+   "engine_agree_tie_aware": 7,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.4375,
+   "gap_min": 0.0,
+   "gap_first": 0.0,
+   "engine_flip": {
+    "step": 5,
+    "gap12": 0.0,
+    "gap_distinct": 1.0,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "A hash table degrades to",
+   "n_prompt_tokens": 6,
+   "engine_agree": 3,
+   "engine_agree_tie_aware": 4,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 3,
+   "gap_median": 2.25,
+   "gap_min": 0.0,
+   "gap_first": 0.125,
+   "engine_flip": {
+    "step": 3,
+    "gap12": 0.0,
+    "gap_distinct": 1.5,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": {
+    "step": 3,
+    "gap12": 0.0,
+    "gap_distinct": 1.5,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   }
+  },
+  {
+   "text": "The bits per character of a good entropy coder approach",
+   "n_prompt_tokens": 10,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 4.0,
+   "gap_min": 0.375,
+   "gap_first": 0.75,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "Matrix multiplication is associative because",
+   "n_prompt_tokens": 5,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.0,
+   "gap_min": 0.125,
+   "gap_first": 0.625,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The Fourier transform converts",
+   "n_prompt_tokens": 4,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.4375,
+   "gap_min": 0.125,
+   "gap_first": 2.0,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "Cache coherence protocols ensure",
+   "n_prompt_tokens": 4,
+   "engine_agree": 16,
+   "engine_agree_tie_aware": 17,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 0.625,
+   "gap_min": 0.0,
+   "gap_first": 3.125,
+   "engine_flip": {
+    "step": 16,
+    "gap12": 0.0,
+    "gap_distinct": 0.5,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "The amortized cost of a dynamic array push is",
+   "n_prompt_tokens": 10,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 3.25,
+   "gap_min": 0.25,
+   "gap_first": 0.25,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The speed of light in vacuum is approximately",
+   "n_prompt_tokens": 8,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.0625,
+   "gap_min": 0.0625,
+   "gap_first": 0.875,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "A black hole emits",
+   "n_prompt_tokens": 4,
+   "engine_agree": 7,
+   "engine_agree_tie_aware": 8,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 0.4375,
+   "gap_min": 0.0,
+   "gap_first": 0.0,
+   "engine_flip": {
+    "step": 7,
+    "gap12": 0.0,
+    "gap_distinct": 0.5,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "The chemical bond in table salt is",
+   "n_prompt_tokens": 7,
+   "engine_agree": 1,
+   "engine_agree_tie_aware": 2,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 4.3125,
+   "gap_min": 0.0,
+   "gap_first": 0.375,
+   "engine_flip": {
+    "step": 1,
+    "gap12": 0.0,
+    "gap_distinct": 0.25,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "The human body contains about",
+   "n_prompt_tokens": 5,
+   "engine_agree": 4,
+   "engine_agree_tie_aware": 5,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 5.5625,
+   "gap_min": 0.0,
+   "gap_first": 1.75,
+   "engine_flip": {
+    "step": 4,
+    "gap12": 0.0,
+    "gap_distinct": 0.3125,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "Photosynthesis converts light into",
+   "n_prompt_tokens": 5,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.9375,
+   "gap_min": 0.125,
+   "gap_first": 1.25,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "DNA stores information in",
+   "n_prompt_tokens": 4,
+   "engine_agree": 10,
+   "engine_agree_tie_aware": 11,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.5,
+   "gap_min": 0.0,
+   "gap_first": 1.0,
+   "engine_flip": {
+    "step": 10,
+    "gap12": 0.0,
+    "gap_distinct": 0.125,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "The unit of electrical resistance is",
+   "n_prompt_tokens": 6,
+   "engine_agree": 8,
+   "engine_agree_tie_aware": 11,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 8,
+   "gap_median": 1.25,
+   "gap_min": 0.0,
+   "gap_first": 0.375,
+   "engine_flip": {
+    "step": 8,
+    "gap12": 0.0,
+    "gap_distinct": 0.25,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": {
+    "step": 8,
+    "gap12": 0.0,
+    "gap_distinct": 0.25,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   }
+  },
+  {
+   "text": "Momentum is conserved when",
+   "n_prompt_tokens": 6,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 0.9375,
+   "gap_min": 0.0,
+   "gap_first": 0.25,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "A prime number is divisible by",
+   "n_prompt_tokens": 6,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 3.1875,
+   "gap_min": 0.25,
+   "gap_first": 1.125,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The Riemann zeta function is defined by",
+   "n_prompt_tokens": 10,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 4.875,
+   "gap_min": 0.625,
+   "gap_first": 3.25,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The derivative of sine is",
+   "n_prompt_tokens": 5,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 3.75,
+   "gap_min": 0.375,
+   "gap_first": 0.375,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "A syllogism is a form of",
+   "n_prompt_tokens": 8,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 2.5625,
+   "gap_min": 0.125,
+   "gap_first": 0.25,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The Treaty of Versailles ended",
+   "n_prompt_tokens": 5,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 2.59375,
+   "gap_min": 0.0,
+   "gap_first": 0.375,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The fall of Constantinople occurred in",
+   "n_prompt_tokens": 7,
+   "engine_agree": 12,
+   "engine_agree_tie_aware": 13,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.3125,
+   "gap_min": 0.0,
+   "gap_first": 0.625,
+   "engine_flip": {
+    "step": 12,
+    "gap12": 0.0,
+    "gap_distinct": 1.8125,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "The main organ that filters blood is",
+   "n_prompt_tokens": 7,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 2.0625,
+   "gap_min": 0.0,
+   "gap_first": 1.375,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "Insulin regulates",
+   "n_prompt_tokens": 3,
+   "engine_agree": 1,
+   "engine_agree_tie_aware": 3,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 1,
+   "gap_median": 1.625,
+   "gap_min": 0.0,
+   "gap_first": 0.625,
+   "engine_flip": {
+    "step": 1,
+    "gap12": 0.0,
+    "gap_distinct": 0.125,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": {
+    "step": 1,
+    "gap12": 0.0,
+    "gap_distinct": 0.125,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   }
+  },
+  {
+   "text": "The smallest country by area is",
+   "n_prompt_tokens": 6,
+   "engine_agree": 0,
+   "engine_agree_tie_aware": 1,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 3.125,
+   "gap_min": 0.0,
+   "gap_first": 0.0,
+   "engine_flip": {
+    "step": 0,
+    "gap12": 0.0,
+    "gap_distinct": 0.1875,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "Volcanic rock that cools quickly forms",
+   "n_prompt_tokens": 9,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 2.25,
+   "gap_min": 0.0,
+   "gap_first": 1.4375,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "A market equilibrium occurs when supply",
+   "n_prompt_tokens": 6,
+   "engine_agree": 9,
+   "engine_agree_tie_aware": 10,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 9,
+   "gap_median": 0.875,
+   "gap_min": 0.0,
+   "gap_first": 0.75,
+   "engine_flip": {
+    "step": 9,
+    "gap12": 0.0,
+    "gap_distinct": 1.125,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   },
+   "floor_flip": {
+    "step": 9,
+    "gap12": 0.0,
+    "gap_distinct": 1.125,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   }
+  },
+  {
+   "text": "The central bank controls",
+   "n_prompt_tokens": 4,
+   "engine_agree": 9,
+   "engine_agree_tie_aware": 10,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 9,
+   "gap_median": 0.9375,
+   "gap_min": 0.0,
+   "gap_first": 2.75,
+   "engine_flip": {
+    "step": 9,
+    "gap12": 0.0,
+    "gap_distinct": 0.125,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   },
+   "floor_flip": {
+    "step": 9,
+    "gap12": 0.0,
+    "gap_distinct": 0.125,
+    "engine_rank_in_ref": 1,
+    "tied_at_top": true
+   }
+  },
+  {
+   "text": "The Gutenberg press printed",
+   "n_prompt_tokens": 4,
+   "engine_agree": 12,
+   "engine_agree_tie_aware": 13,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.0,
+   "gap_min": 0.0,
+   "gap_first": 0.5625,
+   "engine_flip": {
+    "step": 12,
+    "gap12": 0.0,
+    "gap_distinct": 1.5,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "The dominant religion of medieval Korea was",
+   "n_prompt_tokens": 7,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 3.375,
+   "gap_min": 0.25,
+   "gap_first": 0.375,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "A ziggurat was built in",
+   "n_prompt_tokens": 7,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.6875,
+   "gap_min": 0.125,
+   "gap_first": 1.375,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The ozone layer absorbs",
+   "n_prompt_tokens": 4,
+   "engine_agree": 7,
+   "engine_agree_tie_aware": 8,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.125,
+   "gap_min": 0.0,
+   "gap_first": 0.375,
+   "engine_flip": {
+    "step": 7,
+    "gap12": 0.0,
+    "gap_distinct": 1.125,
+    "engine_rank_in_ref": 0,
+    "tied_at_top": true
+   },
+   "floor_flip": null
+  },
+  {
+   "text": "Sound travels fastest in",
+   "n_prompt_tokens": 4,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.75,
+   "gap_min": 0.125,
+   "gap_first": 0.125,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "A eukaryotic cell is characterized by",
+   "n_prompt_tokens": 9,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.34375,
+   "gap_min": 0.125,
+   "gap_first": 0.125,
+   "engine_flip": null,
+   "floor_flip": null
+  },
+  {
+   "text": "The trade winds blow near",
+   "n_prompt_tokens": 5,
+   "engine_agree": 24,
+   "engine_agree_tie_aware": 24,
+   "engine_tokens": 24,
+   "engine_stop": 0,
+   "floor_agree": 24,
+   "gap_median": 1.3125,
+   "gap_min": 0.0625,
+   "gap_first": 3.3125,
+   "engine_flip": null,
+   "floor_flip": null
+  }
+ ]
+}

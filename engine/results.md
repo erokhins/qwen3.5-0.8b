@@ -1752,3 +1752,156 @@ rule `AGENTS.md` gives for any measurement already on disk whose inputs have not
    instrument prices only the GDN prompt-form choice, while the engine's end-to-end deficit includes an
    attention path that grows with lanes — and the missing instrument is still the engine's own per-step state
    moments next to the pinned ones.
+
+---
+
+# D-4 of `bench/plan-2026-10-12`: the engine free-runs the corpus, and every one of its divergences is a tie
+
+Q2's item 3 closed by saying the repo had no divergence-depth measurement on a prompt whose next token is
+genuinely uncertain, and named the corpus run as the thing that would give one. This is that run: the same
+49 plain-text prompts × 24 tokens A-18 quotes (`speccheck/fixtures/corpus.txt`, pinned as
+`data/refs/corpus48`), the engine free-running on all of them, judged against the reference's own pinned
+continuations and against `corpus48sdpa` (the chaos floor, reproduced at **0.8776** by
+`tools/corpus_agreement.py corpus48 corpus48sdpa` before anything else was touched, so the baseline in this
+section is A-18's number and not a new one).
+
+Two instruments were needed and both are new. **`tools/corpus_margin.py`** re-derives, on CPU, the
+reference's decision margin at every step of its own greedy chain — `gap12`, the same quantity
+`engine/gate.py::metrics()` reports, plus the top-8 ranking and the gap to the first *distinct* value below
+the top. The corpus fixtures pin ids only (24 steps × 49 prompts of full logits is ~700 MB and buys nothing),
+so the margin had to be re-derived; it is checked, not assumed — **49/49 prompts reproduce their pinned
+continuation 24/24**, which also confirms `corpus48` is the eager route. **`tools/corpus_freerun.py`** drives
+`engine/build/decode_run --session` over the corpus (reset / feed prompt / gen 24 per prompt, one resident
+process so 49 prompts pay the 1.55 GB load once), writes an engine manifest in `corpus_dump.py`'s schema so
+`corpus_agreement.py` can read it, and then judges it. Alignment is the session's direct one — `gen[i]`
+pairs with `greedy_continuation[i]` — which is the *other* index from run mode's `decode[s]` ↔ `greedy[s+1]`;
+both are named in the tool's header because getting this wrong reads as total divergence (§10.5).
+
+## The numbers, against the chaos floor rather than against 1.0
+
+Budget 24 tokens, same as A-18, so the metrics are comparable to its 0.8776.
+
+| reading | ENGINE free run | reference vs reference (`corpus48sdpa`) |
+|---|---|---|
+| mean prefix agreement (matched-prefix / 24, averaged) | **0.7015** | **0.8776** (= A-18, reproduced) |
+| same, tie-aware (an exactly-tied decision resolved inside the tie set counts as agreement) | **0.7236** | — |
+| first-divergence index: mean / median / min | 16.84 / 24 / 0 | 21.06 / 24 / 1 |
+| prompts that never diverged in 24 tokens | **27 / 49** (tie-aware 28) | 40 / 49 |
+| tokens agreed in total | 825 of 1176 | 1032 of 1176 |
+| engine free runs that emitted stop id 248046 | 0 / 49 (no early truncation to explain anything away) | — |
+
+The distribution is the interesting part and it is **bimodal, in both columns**: the engine agrees all 24
+tokens on 27 prompts, and the 22 that diverge are scattered with no tail structure — 1 at 0 tokens, 3 at 1,
+1 at 3, 2 at 4, 1 at 5, 2 at 7, 1 at 8, 3 at 9, 2 at 10, 1 at 11, 2 at 12, 1 at 15, 1 at 16, 1 at 23. A
+mean over a bimodal distribution like this one is a description of neither mode, which is why the median is
+quoted at the budget (a prompt that never diverged is quoted at 24 = "at least this far", never at 0 and
+never dropped).
+
+Conditioned on the reference's own certainty (per-prompt **median** `gap12`, logits units, over its 24
+steps), the expected pattern is there but it is not clean:
+
+| median `gap12` | prompts | engine mean tokens agreed (never-diverged) | floor mean tokens (never-div) |
+|---|---|---|---|
+| 0.0–0.5 | 1 | 7.00 (0) | 24.00 (1) |
+| 0.5–1.0 | 8 | 13.75 (2) | 16.88 (4) |
+| 1.0–2.0 | 19 | 16.63 (10) | 20.53 (15) |
+| 2.0–4.0 | 17 | 19.94 (13) | 22.76 (16) |
+| 4.0–8.0 | 4 | 13.25 (2) | 24.00 (4) |
+
+Agreement does grow with the margin — except in the top bucket, which is four prompts and two divergences
+and proves nothing either way. But the median margin is the wrong conditioner, and the reason is the finding:
+**what matters is the margin at the step that flipped, not the prompt's typical margin.**
+
+## Every first flip is a step where the reference had not made a decision
+
+Judged against the reference's own ranking at the flip step (`gap12` there; whether the divergent id was
+itself tied at the top in the reference's logits; how far below the top the first *differently-valued*
+candidate sat):
+
+```
+ENGINE: 22 prompts diverged. gap12 at the flip: median 0.000, min 0.000, max 0.000. At an exact tie: 22.
+  Of those, its own id was tied at the top in the reference: 22. Id beyond the reference's top-8: 0.
+  First DISTINCT value below the top at the flip: median 0.344 (min 0.125) — the logit error a flip there needed.
+FLOOR (sdpa vs eager): 9 prompts diverged. gap12 at the flip: median 0.000, min 0.000, max 0.125.
+  At an exact tie: 8. Of those, its own id was tied at the top in the reference: 8.
+  First DISTINCT value below the top at the flip: median 0.250 (min 0.125).
+```
+
+So: not one of the 22 engine divergences overruled a decision the reference had actually made. Every one of
+them sits at a step where two ids hold the **same BF16 payload** in the reference's own logits — `gap12` = 0
+— where greedy's convention is to take the lowest id, and where the engine picked an id from that same tied
+set. That is D-1's tie policy and §10.1 G7's tie clause applied per step instead of per fixture, and it says
+such a step is not a failure; `mt32f` step 11 is the same object (a pinned tie between ids 4016 and 15048).
+Ties at the argmax are not exotic at BF16 and a 248 320-wide vocabulary: **28 of these 49 prompts contain at
+least one exactly-tied step inside 24 tokens** (per-prompt minimum `gap12`: median 0.000, max 0.625). The
+reference-vs-reference floor flips for the same reason in 8 of its 9 cases, the ninth at `gap12` = 0.125 =
+one BF16 ULP at that magnitude.
+
+## What this licenses, and what it does not
+
+**What it licenses.** On the prompt set A-18 was measured on, at the same budget, the engine free-runs to a
+mean prefix agreement of 0.7015 strict / 0.7236 tie-aware against the reference's own greedy continuation,
+and **not one of its 22 first divergences was a decision the reference had won by a nonzero margin** — all
+22 were steps where the reference's own top-1 and top-2 held identical BF16 payloads, and in all 22 the
+engine's token was one of the ids in that tie. Divergence *depth* on uncertain prompts therefore turned out
+not to be the quantity worth reporting: on this checkpoint the first flip is governed by tie frequency, not
+by a growing error, and "how deep does an engine agree on an uncertain prompt" has no answer that is not also
+"how many exactly-tied steps did that chain contain". Two consequences are safe to state: the old fear that
+the engine diverges early because it accumulates something (`dec64t` 64/64, `dec300f` 128/128, 27 of 49
+corpus prompts full 24/24, and zero flips at a decided step among the 825 tokens the free runs reached) is
+not supported, and a strict
+token-equality corpus gate applied to the engine without the tie clause would reject correct code — which is
+the A-18 argument, now demonstrated on the engine rather than only on the sdpa variant of the reference.
+
+**What it does not license.** It does not license "0.7015 is worse than the floor, therefore the engine is
+worse than a legal rounding of the reference": the floor's own 9 divergences are 8 ties and one 1-ULP step,
+so the two numbers differ mostly in tie-breaking luck (the engine picks a tied id by a different arithmetic
+path, greedy breaks the tie by index), and a tie-aware recount puts the engine at 0.7236 against a floor of
+the same kind. It does not license *anything* about the steps after a first flip: prefix agreement is
+consumed by the first divergence, so those steps are unmeasured here, and this is a prefix instrument, not a
+divergence-depth instrument, for exactly that reason. It does not license a corpus gate number — no band, no
+`BAND`, no `speccheck/specimpl.py`, and no gate predicate was touched here; a corpus gate for the engine
+would need the tie clause written into it as a decision, not inferred from this table. And it does not
+license treating the margin column as an engine-error bound: `gap12` and `gap_distinct` are properties of
+the reference's logits, and the corpus has no pinned logits, so nothing here says how large the engine's
+logit error is — the instrument that would (the engine's own per-step logits against pins at corpus scale)
+is still the one named as missing in Q1, Q2 and Q3.
+
+## What this pass ran, and how to extend it
+
+One device call, the whole corpus, correctness only, under `tools/gpu_lock.sh` (tag "D-4 corpus free run";
+`gpu_lock.sh util` read **93 %** at the acquire and the lock showed `free` after the release — discounted per
+`AGENTS.md`, the serving engine that renders this text is the load). Wall for the whole command including the
+1.55 GB load was 18 s, comfortably inside the worker allowance; **no timing was taken and nothing here
+belongs in `bench/performance-status.md`** — the wall figure is the cost of running a check, not a
+measurement. The margin pass is CPU-only (~45 s) and the report pass touches neither.
+
+```bash
+tools/gpu_lock.sh acquire "D-4 corpus free run"; tools/gpu_lock.sh util
+.venv/bin/python tools/corpus_freerun.py                      # device, 18 s: all 49 prompts, then the report
+tools/gpu_lock.sh release "D-4 corpus free run"
+.venv/bin/python tools/corpus_margin.py --out data/refs/corpus48-margins.json   # CPU, ~45 s
+.venv/bin/python tools/corpus_freerun.py --report-only --json bench/corpus-freerun-2026-10-12.json
+```
+
+`--start`/`--limit` chunk the corpus across several calls if a longer budget is ever wanted (a 128-token
+corpus budget would be ~4× the steps and still one session; `--steps 128` overrides the corpus' own 24,
+which only changes what this tool prints — the pins stay 24 and the comparison caps at the pin length).
+The full per-prompt records — first divergence, both margins, the flip's rank in the reference's top-8,
+the tie flag — are committed as `bench/corpus-freerun-2026-10-12.json`; the engine manifest it reads lives
+in the gitignored `data/` like every other regenerable fixture.
+
+## What this left open, named
+
+1. **Tie-aware prefix agreement is a metric with no gate behind it.** If a corpus gate for the engine is ever
+   wanted, the tie clause has to be written into it deliberately (this pass measured with it and reported it
+   beside the strict number; it changed no predicate).
+2. **The steps after a first flip are unmeasured.** Measuring them needs a different question — replay the
+   engine along the *reference's* chain at corpus scale (forced, like `dec64f`), which prices per-step
+   agreement without chaos, instead of a free run that burns its budget on the first tie.
+3. **Tie frequency is now a measured property of this checkpoint and nothing consumes it.** 28/49 chains
+   contain a tie inside 24 tokens; any future gate written in "tokens equal" is silently a tie-frequency
+   gate too, and the number to quote beside it is this one.
+4. **49 prompts × 24 tokens is A-18's budget, not a bigger one.** The corpus was never widened (§10's G7
+   intent was "hundreds cheap"); the run costs 18 s of device, so widening it is a fixture-regeneration
+   decision (`tools/corpus_dump.py --tag … --steps …` on a wider prompt list), not an engineering one.
