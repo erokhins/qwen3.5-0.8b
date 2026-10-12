@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -289,6 +290,20 @@ int main(int argc, char** argv) {
     }
 
     try {
+        // `--out DIR` is created here, before anything is loaded, and the failure is reported here too.
+        // The alternative is discovering a typo'd or missing path at the first write — after 1.55 GB of
+        // weights have been `hipMalloc`'d and copied, and after every step has run — which is a real
+        // way to lose a device window: `decode_run FAILED: cannot open /tmp/fr4/sampled.txt` after a
+        // silent 3-second load. Creating it is the friendlier half of the fix (a driver writes
+        // `--out tmp/freerun` and means it); refusing early is the other half.
+        if (!o.out_dir.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(o.out_dir, ec);
+            if (ec || !std::filesystem::is_directory(o.out_dir)) {
+                throw std::runtime_error("cannot create --out directory " + o.out_dir + ": "
+                                         + (ec ? ec.message() : "it exists and is not a directory"));
+            }
+        }
         engine::LoadStats stats;
         engine::WeightStore::Options lopts;
         lopts.model_dir = o.model_dir;
