@@ -37,6 +37,11 @@ need not double as a test of this file.
 
 Sections, in the order the task fixed them plus the ones the deep fixture needed:
 
+  (pre) BAND HISTORY — every number in `BAND`, and every priced fixture's route margin, against
+      `bench/band-history.jsonl`. An unrecorded move and this gate refuses to run at all
+      (`tools/band_history.py`); it runs before any fixture read or device work, and it is the mechanical
+      half of `AGENTS.md`'s "never loosen a gate to make it pass".
+
   (0) FIXTURE PAIRING, proved rather than assumed (§10.5). See `pairing_checks`.
   (a) SAMPLED IDS — the engine's sample after the prompt's last token plus its generation samples
       must equal the manifest's `greedy_continuation`, exactly. §10.1 G7 requires token-for-token
@@ -75,15 +80,20 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+from tools import band_history    # the band ledger this gate refuses to run against otherwise
 
 REFS = ROOT / "data" / "refs" / "dec8"   # replaced by main() from --fixture; see `set_fixture`
 SHALLOW_REFS = ROOT / "data" / "refs" / "dec8"   # the cross-check target for a deep fixture
@@ -1202,6 +1212,11 @@ def selftest(fixture: str = "dec8") -> int:
     noise case is likewise skipped out loud when a fixture's OWN allowance at that step is wider than
     the noise's deficit, because then the band admits the injection and expecting a FAIL there would be
     a claim about the flat floor, not about the rule in force.
+
+    And the band history gets one: a scratch tree whose `engine/gate.py` loosens `BAND.cos_hard` with no
+    line recording it, which must stop the gate at startup — before a fixture is read, a binary started,
+    or a device touched. `tools/band_history.py --selftest` covers the checker's own behaviour; this
+    case covers the wiring, because a checker nobody calls is the same as no checker.
     """
     base = [sys.executable, str(Path(__file__).resolve()), "--fixture", fixture]
     # The cos band line is NAMED by the rule that produced it, so the needle has to know which rule this
@@ -1314,6 +1329,48 @@ def selftest(fixture: str = "dec8") -> int:
         if not ok:
             print("      " + "\n      ".join(l for l in p.stdout.splitlines() if "FAIL" in l)[:400])
             bad.append(what)
+    # The band history has to bite here too, and bite before anything runs: an unrecorded edit to `BAND`
+    # must stop the gate, not merely look suspicious in review. The injection is the real thing — a
+    # scratch tree whose engine/gate.py carries a looser flat floor, sitting beside the shipped ledger —
+    # so this exercises the startup check in the real startup path rather than a stand-in for it
+    # (`tools/band_history.py --selftest` is where the checker's own cases live).
+    with tempfile.TemporaryDirectory(prefix="gate_bandhist_") as td:
+        tdp = Path(td)
+        for entry in ROOT.iterdir():
+            if entry.name not in ("engine", "bench", ".git"):
+                os.symlink(entry.resolve(), tdp / entry.name)
+        (tdp / "bench").mkdir()
+        for entry in (ROOT / "bench").iterdir():
+            if entry.name != Path(band_history.HISTORY_REL).name:
+                os.symlink(entry, tdp / "bench" / entry.name)
+        shutil.copyfile(ROOT / band_history.HISTORY_REL, tdp / band_history.HISTORY_REL)
+        (tdp / "engine").mkdir()
+        for entry in (ROOT / "engine").iterdir():
+            if entry.name != "gate.py":
+                os.symlink(entry, tdp / "engine" / entry.name)
+        # Loosen the flat floor — a cos FLOOR going down is the band widening — and refuse to run the
+        # case if the edit found nothing to edit, so it cannot pass by editing nothing.
+        src = (ROOT / "engine" / "gate.py").read_text()
+        hit = re.search(r'^(\s*"cos_hard":\s*)([0-9.eE+-]+)', src, re.M)
+        injected = False
+        if hit:
+            looser = format(float(hit.group(2)) - 0.0001, "g")
+            (tdp / "engine" / "gate.py").write_text(
+                src[:hit.start()] + hit.group(1) + looser + src[hit.end():])
+            injected = True
+        p = subprocess.run([sys.executable, str(tdp / "engine" / "gate.py"),
+                            "--fixture", fixture, "--no-engine"], capture_output=True, text=True)
+        needles = ["BAND HISTORY FAIL", "BAND.cos_hard", "LOOSER than recorded",
+                   "band_history.py record"]
+        missing = [n for n in needles if n not in p.stdout]
+        ok = injected and p.returncode == 1 and not missing
+        print(f"  [{'PASS' if ok else 'FAIL'}] an unrecorded band edit stops the gate before any"
+              " fixture read or device work — rc=" + str(p.returncode) + " want 1"
+              + ("" if not missing else " — missing: " + "; ".join(missing))
+              + ("" if injected else " — the injection could not find BAND.cos_hard to loosen"))
+        if not ok:
+            print("      " + "\n      ".join(p.stdout.splitlines()[:6])[:400])
+            bad.append("unrecorded band edit must stop the gate")
     print("SELFTEST " + ("FAIL — " + "; ".join(bad) if bad else
                         "PASS (the gate passes clean input and catches each injected bug at its"
                         " injected step; this says nothing about the engine)"))
@@ -1486,6 +1543,15 @@ def main() -> int:
                          " bug must fail at its own step")
     ap.add_argument("--build", action="store_true", help="run engine/build.sh first")
     args = ap.parse_args()
+
+    # (pre) BAND HISTORY — checked before a fixture is read, before a binary is started, before a
+    # device is touched. `tools/band_history.py` compares every number in `BAND`, and every priced
+    # fixture's route margin, against `bench/band-history.jsonl`; an unrecorded move and this gate
+    # refuses to run, because a gate must not be judged by a band nobody agreed to (`AGENTS.md`: bands
+    # are derived from measured floors and never loosened to pass). It reads the same small files this
+    # gate reads anyway — one `BAND` block and one margin per priced fixture.
+    if (rc := band_history.for_gate(ROOT)):
+        return rc
 
     set_fixture(args.fixture)
 
