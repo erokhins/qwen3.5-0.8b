@@ -2996,3 +2996,26 @@ main agent's, in a window with zero subagents (`AGENTS.md`, `bench/performance-s
 dropped once these commits land. (3) If the 4k-context TTFT row is ever wanted, `bench/plan-prefill-2026-
 10-12.md` §3.1 is the ceiling debt: a >4096-lane pin first, then `kAttnMaxSplit` and `kSessionDefaultCap`
 together. (4) `speccheck/` was neither touched nor run: nothing here reaches `specimpl.py` or a spec gate.
+
+**One shape no shipped fixture reaches, priced by self-consistency instead of a pin.** `prototype/attn_decode`
+§11 ends with the honest admission that "no shipped fixture has a wave that straddles `MAXSC`", which
+means the engine's mixed grid — one launch carrying rows that fit the one-pass staging *and* rows that
+must stream — was gated at the op level but never once run by the engine: `wide520f`'s prompt wave is 500
+rows under the staging and everything above 512 lanes on that fixture is a single-row decode step. Taking
+`wide520f`'s own 500 prompt ids plus its 25 pinned greedy continuations as one **525-token prompt** does
+the job without a new pin (this is a wave-vs-one-row claim, and §11's identity half needs no reference
+values to be checkable): three runs at `--wave-rows 512 / 5 / 1`, `--steps 0`.
+
+```
+family=attn calls=12   calls_batched=12  rows_total=3150 rows_max=512   # 512 + 13 rows, split 2
+family=attn calls=630  calls_batched=630 rows_total=3150 rows_max=5     # 105 waves of 5
+family=attn calls=3150 calls_batched=0   rows_total=3150 rows_max=1     # per token, as before
+```
+
+`rows_total` 3150 on all three (§06.4: fewer launches, not less work — 3150 = 6 layers × 525 rows), and
+the priced row — the last one, at **525 lanes**, which is above the staging in all three and therefore
+takes two lane blocks — is **byte-identical** across the three runs, `logits524.bin` and `sampled.txt`
+both. So the 512-row grid really did mix one-pass rows with streaming rows, `attn_combine` skipped the
+rows the staging finished, and the reduction grouping a row sees does not depend on the company it was
+launched with — at least while waves start on multiples of the staging, which is where §3.1's caveat
+begins. No pin was created, priced or compared against; `data/refs/` is untouched and no band moved.
