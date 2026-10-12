@@ -2213,3 +2213,44 @@ keeps no full per-layer state tensors; the conv family there also cannot be pric
 only way past that is a re-pin with `--deep-steps`, and re-pinning a shipped fixture is a main-agent call
 (prefill plan §5.1). `dec64f`, `dec64t` and `mt32f` do carry that proof, so the helper is not unverified —
 it is unverified on exactly one fixture.
+
+## Q5 / P2: the prompt is now a wave, and the seam that made it possible is proven arithmetic-free
+
+`prefill_wave()` (`engine/prefill.{h,cpp}`) submits one `submit_token_body()` per prompt token and calls
+`finish_token()` at the end — §06.5's shape, one submission stream and one vocabulary D2H instead of T of
+each. It is enabled by a **decomposition-only seam** in `engine/decode_step.{h,cpp}`: `decode_step()` is
+now literally body-then-finish, so §07.1 still has exactly one implementation and the wave is the only
+caller that splits the two. The seam was not in the plan's file list; the worker stopped and asked rather
+than editing outside its package, and the file list was wrong (`decode_step.cpp:455-471` puts
+`lm_head` + the blocking 1 MB D2H + the host argmax inside the per-token call, so a wave that called
+`decode_step` could not have one sync without a seam). P4/P5/P6 reuse that seam, which is why it is cut
+now, alone, with no arithmetic in the same commit.
+
+**Byte-identity, re-proven by the main agent against the pre-P2 binary** (a worktree built at `358a3fb`,
+the P1 state; device run under the lock, util 93 %→35 %, **no timing taken**): `dec8` prompt + 6 steps,
+`--prefill-logits all` versus the old per-token path —
+
+| artifact | result |
+|---|---|
+| `logits0.bin` … `logits6.bin` (7 × 993 280 B) | **`cmp`-identical** |
+| `sampled.txt` | **identical** (same ids, same top logits to 7 digits, same `prefix_len_before`) |
+| `RESULT` line | same `last_sampled=4058`, `prefix_len=7` |
+
+Five fixtures after the change (my run, not the worker's): 94 / 576 / 573 / 1082 / 317 checks, **zero
+failures**, unchanged from P1, with the new `STEP kind=prefill` lines appearing once per prompt row —
+17 / 17 / 27 / 295 / 232, i.e. exactly the prompt lengths. `engine/gate.py --selftest` passes, including
+the §07.5 injections.
+
+Two deliberate choices worth recording. **§07.5 is now structural, not a conjunct:** the prefill loop has
+no `stop_fired` variable at all, so a stop id inside the prompt cannot fire even in principle — the old
+`stop_fired = stop_match && !from_prompt` is replaced by the absence of the code path. Because
+`--prefill-logits last` (the default) does not even price the earlier rows, `--break-prompt-stop` is aimed
+with `--prefill-logits all` explicitly, and refuses an out-of-range index under `last` instead of passing
+vacuously. And **`RESULT ms_per_step` keeps its old denominator** (prompt rows + generation steps) so the
+ms/token figures already in this file stay comparable across the change; a prefill that amortises launches
+will show up there as it should, not as a relabelled denominator.
+
+What P2 does **not** do: nothing is batched. The wave calls the same kernels per token, so it costs the
+same launches — the win is the removed T−1 `lm_head`s and syncs and the fact that P4–P6 now have somewhere
+to land. The honest open item is a protocol detail: `PREFIX … stopped=` no longer shows a per-prompt-token
+stop observation, since under `last` those rows are never priced.
