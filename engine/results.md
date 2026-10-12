@@ -1201,7 +1201,15 @@ are: a fixed absolute floor on the logits cos now demonstrably fires on steps wh
 it against itself, and passes cleanly everywhere else.
 
 
-# Q1 of `bench/plan-2026-10-12`: band option 1 is in force — the margin is 3.50 because it is a measurement, and what that costs
+# Q1 of `bench/plan-2026-10-12`: band option 1 is in force — the margin is a measurement, and what that costs
+
+> **SUPERSEDED IN PART, same day (D-2).** This section's *rule* stands — judge step *j* against the route
+> spread measured at step *j* — but the margin is no longer one global constant: it is now **per fixture**,
+> each fixture's file carrying a margin derived from that fixture's own steps. Everything below that says
+> "3.50 sets it for everyone" was true when written and is now history; `dec64f` and `dec64t` still carry
+> 3.50 / 0.42, `dec300f` is priced at 7.99 / 0.72 and `mt32f` at 2.93 / 0.24, and the reason the global
+> constant was retired is in the D-1/D-2 section at the end of this file (which also re-derives every
+> number in the table below from the shipped files rather than from memory).
 
 The operator's decision on "Decision 2" above was **option 1**: judge step *j* against the reference's own
 measured route spread at step *j*, not against an absolute floor the reference cannot hold against itself.
@@ -1283,18 +1291,32 @@ FAIL there. That is a failure class the old absolute band could not see at all, 
 the new band sees it. `--break-allow` also refuses a step where 1.5× the allowance would not fit under the
 flat floor, so the negative cannot quietly degrade into the ordinary noise test.
 
-## The tripwire this derivation carries (written down because a new fixture can move it)
+## The tripwire this derivation used to carry — retired by D-2, kept here because it is how D-2 was found
 
-`margin` is a **global max over the priced fixture set**. Therefore a newly priced fixture whose
-engine-deficit/route-spread ratio exceeds 3.4939 does not just price itself — it **raises the constant and
-loosens the gate for every existing fixture**. `engine/route_allowance.py` makes that loud rather than
-silent: it refuses a run that names only a subset of the fixtures carrying an allowance file (`stale_dir`),
-and it refuses to write when the derived constant differs from the one in `engine/gate.py`. The standing rule
-for the queue, operator's call, recorded here so nobody meets it as a surprise:
+As originally written, `margin` was a **global max over the priced fixture set**, so a newly priced fixture
+whose engine-deficit/route-spread ratio exceeded 3.4939 did not just price itself — it raised the constant
+and loosened the gate for every existing fixture. The standing rule then was:
 
 > A new fixture whose ratio exceeds 3.4939 is a **finding, not a re-pricing**. Stop and report the step, the
 > fixture and the ratio. The answer is either a per-fixture margin (a real change to the rule) or something
 > true about that fixture; silently bumping 3.50 is neither.
+
+That tripwire fired for real, on `dec300f` (7.98 at step 86 — see the Q2 section), and the answer it produced
+was the first branch: **a per-fixture margin**, decided as D-2. So the tripwire is gone, and with it the
+`stale_dir` refusal in `engine/route_allowance.py` that demanded every priced fixture be named in every run:
+with per-fixture keying a margin is derived from its own fixture's rows and nothing else, so naming one
+fixture is now the normal thing to do, and the tool says out loud which files it did not touch and why they
+cannot be affected. `engine/route_allowance.py --selftest` is the test for that property — it prices a
+3.49-ratio fixture next to a 7.98-ratio one, requires the first to stay at 3.50, and asserts that a global
+max would have answered differently, so reverting the derivation to global fails the test rather than
+passing it quietly.
+
+What replaced the tripwire is a different guard, not a weaker one: re-pricing a fixture never moves its band
+by itself. If a fresh derivation disagrees with the margin that fixture's file already carries — in either
+direction — the tool REFUSES and names the file to delete deliberately, so a band move stays a decision that
+shows up in a diff. And the self-reference that per-fixture keying does **not** fix is spelled out in the
+D-1/D-2 section: a margin defined as `max(engine deficit / route spread)` puts that fixture's worst step on
+the boundary by construction, which is D-3 / Q4b's problem, not this one's.
 
 ## What was not chosen, and why it is on the record
 
@@ -1339,6 +1361,10 @@ quoted anywhere in this section** — `decode_run` prints its own `ms_per_step` 
 |---|---|---|---|---|---|---|
 | `dec300f` | 295-token prose (continue a letter) | **128** | **423** | 61.5 MiB (649 files) | lean, `--deep-steps none` | **PASS** — 1058 checks, 128/128 ids |
 | `mt32f` | 232-token transcript, user/assistant/user | 32 | 264 | 48.2 MiB (667 files) | lean, full operands at step 31 | **FAIL on 1 line** — the tie policy, at a step where the engine matched the pin's own id; 32/32 ids exact |
+
+Both rows are the state as of that pass. **They are superseded two sections down**: D-1 scoped the tie
+predicate so `mt32f` is green for the right reason, and D-2 priced both fixtures under margins each fixture
+derives from its own steps.
 
 ## The pre-flight, and making them
 
@@ -1491,8 +1517,12 @@ next item and it is not this one.
 ## What this pass left open, named
 
 1. **`mt32f` is red pending a decision** on tie-policy clause 3 above. Nothing about its numerics is in doubt.
+   → **RESOLVED the same day by D-1**: the scope was the bug. The policy now applies only when the engine
+   picked an id other than the pin's top-1, and `mt32f` is green with step 11 an ordinary id match.
 2. **Nothing was priced.** Pricing `dec300f` would move the global margin from 3.50 to 7.99; `mt32f` and any
    future fixture carry the same risk until the per-fixture-vs-global question is answered.
+   → **RESOLVED the same day by D-2**: margins are per fixture, and `dec300f` (7.99/0.72) and `mt32f`
+   (2.93/0.24) are priced. The numbers did not move; the keying did.
 3. **`dec300f` has no full per-layer operands at depth** (budget arithmetic, above) — if a per-kernel gate at
    400 lanes is ever wanted, it needs either a bigger budget or a knob that dumps operands without the
    18 MiB state.
@@ -1517,3 +1547,208 @@ engine/gate.py --fixture mt32f      4 s   FAIL — 1 line (tie policy); 290 chec
 decode_run --ids <dec300f prompt> --steps 128      5 s   free run, 423 steps, stopped=0
 tmp/q2_session.py mt32f 32                        7 s   feed+gen parity, 32/32
 ```
+
+**That `mt32f` FAIL and the "nothing was priced" state were both superseded later the same day** — by D-1
+(the tie predicate was scoped to the case it exists for, so step 11 is an ordinary id match and `mt32f` is
+green) and D-2 (margins became per fixture, so `dec300f` at 7.99/0.72 and `mt32f` at 2.93/0.24 could be
+priced without moving anyone else's band). The numbers in this section are what that pass measured and are
+still true as history; the section at the end of this file is the current state.
+
+---
+
+# D-1 and D-2 of `bench/plan-2026-10-12`: the tie policy keeps to the case it exists for, and the route margin became per-fixture
+
+Two gate-policy decisions the operator recorded in `bench/plan-2026-10-12.md` §3, implemented and re-gated
+the same day they were written. **Neither touched one line of the engine**: both are about what the gate is
+entitled to call a failure, which is why every number below comes from a gate run or a shipped allowance
+file rather than from a kernel change. No timing is quoted anywhere in this section — `decode_run` prints
+its own `ms_per_step` and none of it is repeated here, per `AGENTS.md`.
+
+## D-1 — a step where the engine and the pin picked the same id is not a tie case
+
+The shape `mt32f` step 11 had (Q2 section above, the one red line there):
+
+```
+pinned max 24.25, payload 0x41c2, shared by ids [4016, 15048]      <- a 2-way exact tie on the BF16 payload
+engine picked 4016                                                 <- the PIN'S OWN top-1: G7 satisfied outright
+engine's F32 at 4016 = 24.391083 -> bf16 0x41c3 != 0x41c2          <- old clause 3, evaluated at the PIN's top-1
+```
+
+So the exception was refusing a step that never asked for an exception, and it was doing it with a half-ULP
+test — the very kind of band the policy's own comment says it will not invent. The predicate now has three
+outcomes (`tie_verdict` returns a kind), and only the third arms a check:
+
+| kind | when | what the gate does |
+|---|---|---|
+| `no-tie` | the pin has one winner | nothing; the ordinary id check judges it |
+| `match` | the engine's id **is** the pin's top-1 id | prints an `[info]` line naming the tie, counts a `[TIE-NOTE]`, **does not consult the rule** |
+| `tie` | the engine picked a different id at a tied step | admissible iff (i) ≥2 ids share the max on the payload, (ii) the engine's id is one of them, (iii) RNE(the engine's F32 **at that id**) == the shared tied payload — else FAIL loudly |
+
+Clause (iii) moved from the pin's top-1 to the engine's own chosen id for the same reason: the exception is
+about the id the engine stands on, and all the tied ids share one payload (that is what a payload tie *is*),
+so it is still exactly one check, not one per tied id.
+
+**`dec64f` 17/18 still resolve through the tie path** — that is what the policy was built for, and the numbers
+at the engine's own id are the ones that now have to hold:
+
+```
+step 17: pinned 17.25 / 0x418a tied among [2018, 10407]; engine picked 10407; engine's logit at 10407
+         = 17.237261 -> 0x418a == the tied payload     -> ADMITTED
+step 18: pinned 19.75 / 0x419e tied among [1379, 64704]; engine picked 64704; engine's logit at 64704
+         = 19.785622 -> 0x419e == the tied payload     -> ADMITTED
+```
+
+and an engine landing on a third, untied id at either step still fails there. Both directions, plus the new
+regression, are selftest injections aimed at a step the fixture really ties at:
+
+```
+.venv/bin/python engine/gate.py --selftest --fixture dec64f     # ties at step 17
+.venv/bin/python engine/gate.py --selftest --fixture mt32f      # ties at step 11
+  [PASS] engine sampled the pin's other tied id at tied step 11 — must be ADMITTED …
+  [PASS] engine sampled an UNTIED id at tied step 11 — must fail loudly
+  [PASS] engine kept the pin's own top-1 4016 at tied step 11 with its logit one BF16 ULP above the tied
+         payload (the mt32f step 11 shape) — must PASS as an ordinary id match, rule not consulted
+```
+
+The third is the new one, `--dry-run --tie-same-ulp STEP`: it bumps the engine's logit at the pin's top-1 to
+the next BF16 value up (so the payload check would fail under the old predicate) while leaving the sampled id
+alone, and requires GREEN. `bf16_bump()` is the helper, and it earned its keep the way helpers do: the first
+version forgot the `<< 16` when widening the payload back, produced `2.35e-41` instead of `17.375`, silently
+moved the argmax to the *other* tied id, and the selftest reported a wrong-argmax FAIL where it wanted a
+PASS. A guard now refuses any bump that does not land strictly above the value it started from.
+
+On the device, `mt32f` is green for the right reason:
+
+```
+[info] step 11: the pin is an exact 2-way tie at 24.25 (payload 0x41c2) among ids [4016, 15048], and the
+       engine picked the pinned top-1 4016 — an ordinary id match, so the tie policy is not consulted
+[PASS] generation step 11 samples greedy_continuation[12] — 4016 vs 4016
+[TIE-NOTE] 1 step(s) had an exact tie in the pin that the engine matched outright — ordinary id matches,
+           tie policy not consulted (D-1): step 11 -> 4016
+```
+
+`dec64f` still prints its two `[TIE]` lines (steps 17 → 10407, 18 → 64704), so the policy's real work is
+visible and counted exactly as before.
+
+## D-2 — the route margin is keyed per fixture, because a global max let one fixture move everybody's band
+
+The retired rule was `margin = max over every priced fixture and step of engine deficit / route spread`.
+`dec300f`'s pricing (Q2 section) showed what that means in practice: its worst ratio is **7.98** while its
+route spread is *tighter* than the 64-step fixtures' (median route 1−cos 4.09e-5 vs `dec64t`'s 6.75e-5), so
+pricing it globally would have set the shared constant to 7.99 and loosened `dec64f` and `dec64t` by
+2.3× — while leaving it unpriced sat it on the flat floor with 3.7e-6 of headroom at step 86. Neither is a
+measurement of the fixture being judged, which is the only thing a margin may be.
+
+Now each `data/refs/<fixture>/route_allowance.json` carries its own margins, derived as the max ratio
+**inside that fixture only**, rounded up at 2 dp, and hash-checked as before. Re-derived from the shipped
+files (not from memory — `tmp/d5_allowance_report.py` recomputes every figure in this table from the
+`route_*`, `engine_*_when_priced` columns of the four files):
+
+| fixture | margin / margin_rel | own derivation from its own rows | steps judged tighter than flat G5 (cos / meanrel) | worst-ratio step | engine 1−cos at that step | its cap | headroom |
+|---|---|---|---|---|---|---|---|
+| `dec64f` | **3.50 / 0.42** (carried, pre-D-2 file) | 3.0368 at 32 / 0.3344 at 54 → **3.04 / 0.34** | 54 / 48 of 64 | 32 | 2.1555e-3 | 2.4844e-3 | 13.2 % of the cap |
+| `dec64t` | **3.50 / 0.42** | 3.4939 at 54 / 0.4111 at 4 → **3.50 / 0.42** | 64 / 52 of 64 | 54 | 2.3281e-4 | 2.3322e-4 | 0.17 % of the cap |
+| `dec300f` | **7.99 / 0.72** (new) | 7.9837 at 86 / 0.7198 at 72 → **7.99 / 0.72** | 110 / 98 of 128 | 86 | 4.6322e-4 | 4.6358e-4 | 0.08 % of the cap |
+| `mt32f` | **2.93 / 0.24** (new) | 2.9221 at 19 / 0.2303 at 3 → **2.93 / 0.24** | 32 / 30 of 32 | 19 | 3.7257e-4 | 3.7358e-4 | 0.27 % of the cap |
+
+Three things that table says, and one thing it does not.
+
+1. **`dec64f`'s margin is unchanged at 3.50 / 0.42** — measured in its gate log, not asserted: "this
+   fixture's margin in force 3.50". Its own derivation would be 3.04 / 0.34, i.e. *tighter*; D-2 recorded
+   keeping the carried numbers, and the tool enforces that: `engine/route_allowance.py --table
+   tmp/route_dec64f.ra.json` **refuses** (`exit=2`) with "this measurement derives 3.04/0.34 but the file on
+   disk carries 3.50/0.40… re-pricing would make the band tighter. This tool does not move a band on its
+   own", and names the file to delete deliberately if the new number is the one to believe.
+2. **The wide fixture is now priced and green**: `dec300f` at 7.99 and `mt32f` at 2.93, both from their own
+   steps. Per fixture, the allowance is *tighter than the flat floors on the overwhelming majority of steps*
+   (110 of 128 and 32 of 32 on cos) and opens only where two legal reference forms open first — the property
+   that made option 1 defensible in the Q1 section is intact at the new breadth.
+3. **The structural guarantee**: pricing or re-pricing one fixture cannot change any other fixture's margin,
+   because `route_allowance.py:derive()` takes one table and reads nothing else. `--selftest` in that tool
+   proves it and proves the proof is falsifiable: it prices a synthetic fixture whose own worst ratio is
+   3.4939 alongside one whose own worst ratio is 7.9837, requires the first to stay at **3.50** and the
+   second to be **7.99**, and asserts that a global max over the same rows would have answered *differently*
+   — so a revert to the old rule fails the test rather than passing it. The refusal that used to enforce the
+   old scheme ("pass every priced fixture each time") is gone, and replaced by a printout of the files this
+   run did not touch and why they cannot be affected. One property of where these files live, stated because
+   it changes how the table above is reproduced: `data/` is gitignored, so **no** `route_allowance.json` is
+   tracked — not these two, not `dec64f`'s. They are regenerable artifacts (`engine/route_price.py` then
+   `engine/route_allowance.py`, both CPU-only), which is why every figure quoted here is re-derived from the
+   files on disk by `tmp/d5_allowance_report.py` instead of from a commit.
+4. What the table does **not** say: that the rule is now honest about the engine. **The self-reference is
+   still there, and per-fixture keying makes it more visible, not less.** A margin defined as
+   `max(engine deficit / route spread)` puts that fixture's worst observed step exactly on the boundary *by
+   construction*: `dec300f` step 86 now passes with 3.6e-7 of a 4.6e-4 cap left, which is 0.08 %, and
+   `dec64t` step 54 with 0.17 %. The gate says so on its summary line ("Worst step 86: deficit = 7.984x its
+   own measured route spread, this fixture's margin in force 7.99"), because a band whose worst case is its
+   own calibration point is a fitted constant wearing a measurement's clothes. **D-3 / Q4b is the fix** — a
+   multiplier derived from legal-route disagreement alone (a third legal variant, `route(a,b)` vs
+   `route(a,c)`), which does not reference the engine. It is scheduled, not attempted here, and if it comes
+   out smaller than the engine needs that is a finding about the engine, not a licence to loosen.
+
+## What the gate prints now, per step
+
+The rule in force is still named on every step line, and now names the fixture and its own margin:
+
+```
+step 0: metrics — … | rule: route allowance for dec64f (this step's measured spread=5.2616e-05,
+        dec64f's own margin=3.50 -> cos deficit <= 1.8415e-04; meanrel spread=6.1065%, margin_rel=0.42
+        -> <= 2.5647%)
+```
+
+and a failed band line still carries the flat-G5 counterfactual ("the flat §10.1 G5 floor (5.0000e-04) would
+have PASSED this step — the route allowance is what caught it", or "it is outside the flat … too").
+`load_allowance` also now checks each cached file against itself — the file must name the fixture it is read
+for, every step's cap must equal its own margin × its own spread, and the margin must admit the engine
+deficits recorded in the same file — so a hand-edited number fails the gate instead of quietly becoming the
+band. `dec64f` and `dec64t` carry no `margin_basis` field because they predate D-2; the gate says so out loud
+("carried in this file from the retired global-max scheme… may be looser than this fixture's own derivation")
+rather than pretending they set their own constants.
+
+## The pass, and what a worker ran
+
+All correctness-only, each inside the `<60 s` worker allowance, under `tools/gpu_lock.sh` (tag
+"engine gate D-1/D-2 last worker pass (correctness only)"), `gpu_lock.sh util` **92 %** at the first read and
+**60 %** at the last — discounted as usual, the serving engine that renders this text is the load and it
+busy-polls the iGPU. **No timing taken**: the wall figures below are the cost of running a check, printed only
+to show each one fit the worker allowance, and none of it goes near `bench/performance-status.md`. The whole
+pass is one command — `tmp/d6_final_pass.py` — and it left the ten logs in `tmp/d6_*.log`. Both helpers live
+under `tmp/`, which is gitignored: they are how these figures were made, the tables above are the record.
+
+```
+engine/route_allowance.py --selftest                                   CPU    ~0 s   PASS (6 checks)
+engine/gate.py --selftest --fixture dec8                               CPU    1.1 s  PASS (tie + allow cases SKIPped out loud)
+engine/gate.py --selftest --fixture dec64f                             CPU    5.0 s  PASS (10 cases incl. 3 tie injections)
+engine/gate.py --selftest --fixture dec64t                             CPU    3.5 s  PASS
+engine/gate.py --selftest --fixture dec300f                            CPU    6.1 s  PASS (5 % noise SKIPped: inside its own allowance)
+engine/gate.py --selftest --fixture mt32f                              CPU    3.2 s  PASS (9 cases incl. 3 tie injections)
+engine/gate.py --fixture dec8       device  1.1 s  PASS — 94 checks, flat G5 (still unpriced)
+engine/gate.py --fixture dec64f     device  2.0 s  PASS — 550 checks, 2 steps TIE, margin 3.50 (unchanged)
+engine/gate.py --fixture dec64t     device  2.2 s  PASS — 547 checks, margin 3.50
+engine/gate.py --fixture dec300f    device  6.8 s  PASS — 1059 checks, margin 7.99, worst step 86 at 7.984x
+engine/gate.py --fixture mt32f      device  4.1 s  PASS — 291 checks, 32/32 ids, margin 2.93, step 11 an ordinary match
+engine/route_price.py --fixture mt32f --engine-log … --out …  CPU  3.8 s  the table that priced mt32f
+speccheck/run_all.py                                       CPU  7m50s  26 gates run, 0 failed
+```
+
+`dec300f` was **not** re-priced on the CPU: `tmp/route_dec300f.json` (from the Q2 pass) was checked step by
+step against a fresh gate log with `route_price.py`'s own parser and the engine column is identical at all
+128 steps (`tmp/d2_dec300f_still_valid.py`), so the shipped table was cited rather than re-made — the same
+rule `AGENTS.md` gives for any measurement already on disk whose inputs have not moved.
+
+## What this pass left open, named
+
+1. **`dec8` is still unpriced**, so its 8 steps are judged by the flat floors and every step line says
+   `flat G5`. Under D-2 pricing it would write only its own margin, so the old objection ("it would move the
+   shared constant") is gone; what is left is that no question here needs its answer.
+2. **D-3 / Q4b**, the engine-independent multiplier, above. D-2 keyed the margin per fixture; it did not make
+   the margin engine-independent.
+3. **No fixture has a 3-way-or-wider tie**, so "all tied ids share one payload" is exercised at 2-way only.
+   It is structural in `pin_tie` (membership *is* payload equality), but it is untested at width.
+4. **`margin_basis` is absent on `dec64f`/`dec64t`'s files**, on purpose. If either is ever re-priced the tool
+   refuses first, so keeping the carried constants stays a decision rather than an oversight.
+5. **Why `dec300f`'s ratio is ~8 while the 64-step fixtures' are ~3 is still unexplained.** D-2 accommodates
+   it per fixture; it does not explain it. The candidate cause named in the Q2 section stands — the route
+   instrument prices only the GDN prompt-form choice, while the engine's end-to-end deficit includes an
+   attention path that grows with lanes — and the missing instrument is still the engine's own per-step state
+   moments next to the pinned ones.

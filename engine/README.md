@@ -159,17 +159,21 @@ device once; what is still missing is the token result and every timing.
 # whether an engine's whole-token cos deficit needs a bug to explain it: the engine's is smaller than this
 # spread at every step. ~90 s, torch CPU.
 
-`.venv/bin/python engine/route_allowance.py --table tmp/route_dec64f.json --table tmp/route_dec64t.json`
+`.venv/bin/python engine/route_allowance.py --table tmp/route_dec300f.json`   # one `--table` per fixture
 # Turns `route_price.py`'s tables into the per-fixture `data/refs/<fixture>/route_allowance.json` files the
-# gate READS (the gate never re-prices). One command, one flag per priced fixture, and it must name every
-# fixture that already carries a file — the margin is a max over the whole priced set, so naming a subset
-# would silently narrow it. It derives `ceil2(max engine/route)` and **refuses to write** when that disagrees
-# with `engine/gate.py`'s `BAND["route_margin"]` (3.50 / 0.42 as of 2026-10-12, measured: 3.4939 at dec64t
-# step 54 sets the cos margin, 0.4111 at dec64t step 4 the meanrel one), and refuses a table whose steps do
-# not cover the fixture or whose two legal routes disagree on an id. CPU, torch, ~5 s per fixture on top of
-# `route_price.py`; the files it writes carry prompt/feed/specimpl hashes that `gate.py:load_allowance` fails
-# the gate over if they stop matching. **Tripwire: a new fixture whose ratio exceeds 3.4939 raises the margin
-# for every fixture at once — that is a finding to report, not a constant to bump.**
+# gate READS (the gate never re-prices). Each fixture's margin is `ceil2(max engine/route ratio inside that
+# fixture alone)` — PER FIXTURE since D-2 of `bench/plan-2026-10-12`, because while the margin was one global
+# max, pricing `dec300f` (own worst ratio 7.98) would have moved the constant every other fixture is judged
+# by. Naming a subset of fixtures is therefore normal now: the run prints which files it did not touch and
+# why they cannot be affected. `--selftest` proves that non-interference (and that it is falsifiable — a
+# global-max derivation would fail the test). It **refuses to write** when a fresh derivation disagrees with
+# the margin that fixture's file already carries, either direction: re-pricing never moves a band by itself,
+# deleting the file deliberately does (see also `--dry-run`). Refusals also cover a table whose steps do not
+# cover the fixture, a table with no engine column, and two tables naming one fixture. The written files carry
+# prompt/feed/specimpl hashes plus `margin_basis`, all of which `gate.py:load_allowance` fails the gate over
+# if they stop matching. CPU, torch, seconds on top of `route_price.py` (~4 min for a 128-step fixture).
+# In force as of 2026-10-12: `dec64f` 3.50/0.42 (carried from the global era; its own derivation is
+# 3.04/0.34 and keeping it is recorded), `dec64t` 3.50/0.42, `dec300f` 7.99/0.72, `mt32f` 2.93/0.24.
 
 `.venv/bin/python engine/gate.py --dry-run --break-allow STEP`   # and `--selftest`, which aims it itself
 # The injection that proves the route allowance has teeth the flat §10.1 G5 floor did not: noise sized to
@@ -177,18 +181,23 @@ device once; what is still missing is the token result and every timing.
 # 5e-4 deficit the old band used, so the failure it produces is one the old gate could not have seen. `STEP`
 # must be a step the fixture has a priced allowance for (it refuses otherwise, rather than degrading into
 # `--break-noise`); `--selftest` picks the tightest qualified step by itself and SKIPs out loud on a fixture
-# with no allowance — `dec64t` aims it at step 41, `dec64f` at step 24, both green, `dec8` skips it because
-# dec8 is unpriced. No engine, no device.
+# with no allowance — it aims at step 41 on `dec64t`, 24 on `dec64f`, 104 on `dec300f`, 10 on `mt32f`, all
+# green, and `dec8` skips it because dec8 is unpriced. No engine, no device.
 
 `.venv/bin/python engine/gate.py --selftest [--fixture dec64f]`
 # Proves the token gate DISCRIMINATES, with no engine and no device: it re-runs gate.py in
 # subprocesses against a CPU stand-in with five bugs injected — a wrong sampled id at a named step, a
 # swapped top-two logits, 5 % logits noise that leaves the argmax alone, the §07.5 stop check
 # firing during the prompt (the bug the first device run had), and a replay step fed the wrong token
-# (the off-by-one a forced driver makes) — and requires each to fail at the step it
-# was injected at. Ends "SELFTEST PASS". `--dry-run` is the same stand-in without the injections, and is
-# what exercises sections (a)–(e)'s parsing before a GPU window exists. It takes ~6 s on dec8, ~15 s on
-# dec64f (64 steps of stand-in logits), and both are green.
+# (the off-by-one a forced driver makes) — plus the tie policy in three directions at a step the fixture
+# really ties at (an UNTIED id must FAIL, the pin's other tied id must PASS as TIE, and the pin's own
+# top-1 with its logit 1 BF16 ULP off the tied payload must PASS as an ordinary match — D-1's regression,
+# `--tie-same-ulp`), and the route-allowance injection — and requires each to fail at the step it
+# was injected at. Ends "SELFTEST PASS". Cases that a given fixture cannot discriminate (no tie, no
+# priced allowance, or a 5 % noise deficit that fits inside that fixture's own wider allowance) are
+# SKIPped out loud rather than silently dropped. `--dry-run` is the same stand-in without the injections, and is
+# what exercises sections (a)–(e)'s parsing before a GPU window exists. Measured on this box: under 1 s on
+# dec8, ~3 s on `dec64t`/`mt32f`, ~5 s on `dec64f`/`dec300f`, and all five end "SELFTEST PASS".
 
 `.venv/bin/python engine/gate.py --no-engine [--fixture dec64f]`
 # Sections (0), (c) and — with --selftest/--dry-run — the whole judging half of the token gate, with
@@ -327,10 +336,13 @@ tools/gpu_lock.sh release "engine decode_step token gate (W5b)"
 #                          ignored (§07.5 is a generation rule; `decode_run.cpp` says why).
 #   (b) logits           — the rule in force is named on every step line. Where a route allowance is
 #                          priced (`data/refs/<fixture>/route_allowance.json`) the test is cos deficit <=
-#                          3.50 x that step's measured route spread and meanrel <= 0.42 x it; where it is
-#                          not (`dec8`, and every new fixture until someone prices it) the flat floors
-#                          apply: cos >= 0.9995 (§10.1 G5), meanrel <= 5 % (§10.2). The per-step argmax
-#                          must equal the pin's either way. ndiff/max-ULP lines are printed for the record.
+#                          M x that step's measured route spread and meanrel <= M_rel x it, where M/M_rel
+#                          are THAT FIXTURE's own margins from its own file (3.50/0.42 dec64f and dec64t,
+#                          7.99/0.72 dec300f, 2.93/0.24 mt32f as of 2026-10-12 — D-2, see the Q1 section of
+#                          results.md); where it is not (`dec8`, and every new fixture until someone prices
+#                          it) the flat floors apply: cos >= 0.9995 (§10.1 G5), meanrel <= 5 % (§10.2). The
+#                          per-step argmax must equal the pin's either way. ndiff/max-ULP lines are printed
+#                          for the record.
 #   (c) state sizes      — engine's bytes == state_sizes.py's, byte-exact, at cap 26.
 #   (d) launch plan      — glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
 # If it FAILS, in this order:
@@ -356,16 +368,18 @@ tools/gpu_lock.sh acquire "engine deep token gate"
 .venv/bin/python engine/gate.py --fixture dec64f          # 17 prompt + 64 REPLAYED steps, ~2 s
 .venv/bin/python engine/gate.py --smoke 300 --smoke-no-stop   # 317 lanes, no parity claim, ~5 s
 tools/gpu_lock.sh release "engine deep token gate"
-# Expected as of 2026-10-12 (re-run on the device that day, worker pass, correctness only):
-#   dec8    PASS — 93 checks.
-#   dec64f  PASS (with 2 steps reported TIE, not counted as failures) — the 15 failures it carried on
+# Expected as of 2026-10-12 (re-run on the device that day, worker pass, correctness only; check
+# counts are [PASS] lines, re-counted on the D-1/D-2 pass — the old numbers were stale by one or four):
+#   dec8    PASS — 94 checks, every step judged by the flat floors (dec8 is unpriced).
+#   dec64f  PASS — 550 checks, 2 steps reported TIE (not counted as failures) and judged under its own
+#           3.50/0.42 margins. The 15 failures it carried on
 #           2026-10-11 are gone: 5 were tie-driven (steps 17/18, the pin's own exact BF16 ties, now
 #           admitted by the proved-tie policy) and 10 were band lines that sit inside the measured route
 #           allowance, because two legal reference routes go under flat G5 at 6 of the 7 steps the
 #           engine does. results.md: "Decision 2" and the Q1 section.
-#   dec64t  PASS — 546 checks, nothing admitted by the tie policy, 0 steps under any floor.
-#   Do NOT tune a band to make a fixture green; the derivation and the tripwire are in the Q1 section of
-#   results.md and in gate.py's ROUTE ALLOWANCE comment.
+#   dec64t  PASS — 547 checks, nothing admitted by the tie policy, 0 steps under any floor.
+#   Do NOT tune a band to make a fixture green: the margins are derived per fixture, `route_allowance.py`
+#   refuses a re-price that would move one, and the derivation is in gate.py's ROUTE ALLOWANCE comment.
 #   --smoke passes either way: --no-stop exists because without it the model's own stop at 38 tokens
 #   made a "300-token" smoke a 38-token one. It checks crash/NaN/id-range/state-inside-allocation and
 #   nothing else; prefix_len 317 vs cap 318 is the tightest §08.6 has ever been here.
@@ -378,14 +392,21 @@ timing is quoted nowhere):
 ```bash
 tools/gpu_lock.sh acquire "engine Q2 breadth gates"
 .venv/bin/python engine/gate.py --fixture dec300f   # 295-token prose prompt + 128 replayed steps = 423
-                                                    # lanes vs MAXSC 512; PASS, judged by the flat floors
+                                                    # lanes vs MAXSC 512; PASS — 1059 checks, 128/128 ids,
+                                                    # priced 2026-10-12 under its OWN margins 7.99/0.72
+                                                    # (worst step 86 at 7.984x its own route spread, and
+                                                    # 110 of 128 steps are judged tighter than flat G5)
 .venv/bin/python engine/gate.py --fixture mt32f     # user/assistant/user transcript, 232 tokens + 32
-                                                    # replayed steps; FAILs on ONE line — the tie policy
-                                                    # arming at a step where the engine matched the pin's
-                                                    # own id (engine/results.md, Q2 section: an open
-                                                    # gate-semantics question for the operator, not a
-                                                    # numerics failure — all 32 ids are exact)
+                                                    # replayed steps; PASS — 291 checks, 32/32 ids, priced
+                                                    # under its own 2.93/0.24. Step 11 is an exact pin tie
+                                                    # the engine matched outright, so it prints an ordinary-
+                                                    # match [info] + [TIE-NOTE] line and does NOT consult
+                                                    # the tie policy (D-1; it used to be the one red line
+                                                    # on this fixture)
 tools/gpu_lock.sh release "engine Q2 breadth gates"
+# Both fixtures are green for the reasons in `engine/results.md`'s Q2 section plus the D-1/D-2 section;
+# the mt32f failure that Q2 recorded was a gate-semantics bug in the tie predicate, not an engine bug, and
+# the 423-lane state carry and the append-only KV invariant it proved are unchanged by either fix.
 # The two things a forced pin cannot test, both from `decode_run` directly:
 #   FREE RUN (where does the engine's own chain leave the reference's?):
 #     ./engine/build/decode_run --ids <manifest prefill_ids> --steps 128
