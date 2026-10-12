@@ -380,3 +380,115 @@ logits rule for `wide520f` is priced from `wide520f`'s own steps per D-2, not fr
 one-pass route below 512 lanes is still the pinned route: the split exists only where a row does not
 fit the staging, which is the blast-radius rule plan §3 states and `engine/results.md` proves with
 five fixtures whose numbers did not move.
+
+## 11. P8 (2026-10-13): a whole prefill wave through one launch — `blockIdx.z` is the query row
+
+Plan `bench/plan-prefill-2026-10-12.md` §2.1/P8 asks for the attention layers of a prefill **wave**
+(§06.3: up to 512 query rows, each at its own position, each with one more visible lane than the row
+before it) to be priced by ONE launch per attention layer instead of one per row. This section is the
+op-level half: what the kernel had to gain, why the grid is shaped the way it is, and what a wave is
+now required to agree with.
+
+**`grid.z` over query rows, not a host loop.** `CoreArgs` gained `nrows` and the three kernels gained a
+query-row index: `attn_prep<<<N_Q + N_KV, nrows>>>` uses `blockIdx.y`, `attn_core<<<N_Q, split,
+nrows>>>` and `attn_combine<<<N_Q, nrows>>>` use `blockIdx.z` and `blockIdx.y`. A host loop over rows
+would have been the smaller diff — no `nrows`, no row strides, no per-row slab in `part` — and it would
+have failed the thing P8 exists for: §06.3's saving is *launch count*, and 512 launches from a loop are
+512 launches however neatly they are written. The gate that has to notice is `engine/gate.py` (h),
+which counts launches per batched site and must see the collapse (§06.4's "count the launches, do not
+infer them from outputs"); a loop would leave that counter flat. Row position and row width come out of
+the row index, one expression each — `a.pos + qrow`, `a.lvalid + qrow` — so the §06.3 causal mask is
+per-row by construction and the two ways an engine gets it wrong are still expressible as injections
+(`NEG_READPAST` reads `cap`, `NEG_DROPCUR` forgets the row's own appended lane).
+
+**A wave rides the staged plan; a single row may still ride the fused one.** In the fused plan each core
+block does its own §05.7 append, and for one query that is safe because nobody else reads what it wrote.
+In a wave row *t* reads the lanes rows *0..t-1* appended, and blocks across `grid.z` have no ordering
+between them, so a fused wave would be a race that usually works — the worst kind. The staged plan puts
+every row's prep (norm, rope, gate extract, append) in a launch that is complete before any core block
+starts, which is the only ordering the wave needs. The host therefore **refuses** `--launch fused` for a
+case with `nrows > 1` rather than pricing a race, and refuses `--neg carry` for one too (the
+previous-query state an injection seeds is undefined when there is no previous query).
+
+**One row's bits must not depend on its neighbours.** That is the claim P8's blast radius rests on, and
+it is what the new `--wave` stage measures, three ways:
+
+1. **The wave against the same rows run one at a time, bit for bit.** Same pins, same knobs, five
+   stages, every row. The pins cannot make this claim — two forms can each agree with a pin and still
+   differ — so it is measured directly. Measured, L03 of `p300`, 277 rows in waves of 64 and in one
+   wave of 277 and in waves of 32 on `p64`: **0 of 2 397 450 elements differ.**
+2. **Every row against its own pinned prefill row** (`L03.attn.q_rope` / `k_rope` /
+   `attn_out_pre_gate`, §10.5's pairing), judged **one row at a time** — a flat 64-row comparison would
+   dilute §10.1's ndiff limit by 64 and would not be comparable with the one-row run it is being
+   compared against. `gate_cases` therefore skips the reduction stages of a wave case and
+   `wave_row_divergences` judges them per row, from both sources, under one rule.
+3. **The online route, waves included**: `--softmax online --split 2/4` over the same spans, with the
+   anti-vacuity pointed at this shape — an online wave whose reduction stages are bit-identical to the
+   same waves run `--softmax full` never streamed. Measured **245 898 / 245 902** elements moved
+   (split 2 / split 4); the check fails at zero.
+
+Rows 64..127, 128..191 and 192..255 of `p300` are the multi-wave carry: their lanes below `p0` arrive
+from `prefill.L03.cache_*` exactly as a previous wave would have left them, and their first row must
+read lanes it did not append. `v_append` and `cache_*` are compared over the wave's whole span, which is
+§05.7 checked for every row of it at once, and the §10.5 operand rebuild runs at both ends of every span
+(it is a per-row fact; re-running the torch chain once per row would cost more than the gate does).
+
+**A sampling gap this found, and it is not P8's.** Pricing all 277 pinned `p300` rows — which `--wave`
+does and `--long` never did, because `LONG_ROWS` is a 20-row boundary sample — turns up **7 of 554**
+reduction comparisons over the shipped §10.1 rule: rows 40, 52 (×2 stages), 78, 141 (×2) and 242 of
+`p300`, worst 9 ULP at |ref|/max 1.9e-02, plus row 32 of `p64`. The same rows, launched **one at a
+time** through the same judge, miss **identically**: same 7, 0 wave-only. So this is the op's long-cache
+reduction floor at lane counts nothing in this directory had priced, not a wave effect — which is what
+§10.1's own warning predicts (a chain's legal ndiff is set by summation order, and a whole-tensor
+1-ULP move is invisible to a max-ULP bound). `LONG_ROWS` is **unchanged** — those rows were never
+priced, and a boundary sample that misses them is a sampling gap to report, not a licence to move a
+threshold. Reproduce with:
+
+```
+.venv/bin/python prototype/attn_decode/run.py --long --long-rows 40,52,78,141,242   # FAIL, same 7
+.venv/bin/python prototype/attn_decode/run.py --wave                                # PASS, names them
+```
+
+`--long-rows` is new for exactly that reason: `sample` is the shipped list, `all` is every pinned row,
+and the difference between "the gate is green" and "the gate is green on the rows it samples" is only
+visible if both are sayable.
+
+**One knob became obsolete, and dropping it let the mixed grid be priced.** P7's host refused
+`--softmax full --split > 1`, because the two-pass form normalises its weight matrix inside one block
+and splitting it was silently wrong. `blocks_for_row` moves that decision from the launch to the ROW — a
+full row that fits `MAXSC` takes exactly one block whatever the grid's depth — so the combination is now
+meaningful: one-pass wherever a row fits, streaming above it. That is the shape `engine/kernels_attn.cpp`
+needs for a wave whose widest row is over the staging, and the wave stage prices it: the same waves at
+`--split 2 --softmax full` move **0 elements** versus `--split 1` — the upper lane blocks return before
+they touch anything and `attn_combine` skips a row the core already finished. What is still refused, and
+is the only remaining route to mis-normalisation, is a row WIDER than the staging served by ONE block
+(`lanes_last / split > MAXSC`).
+
+The wave stage's third line — waves at `--split 2 --softmax full` moving 0 elements — is that mechanism
+gated: a wave with a 2-deep lane grid in which every row takes the one-pass route. No shipped fixture
+has a wave that straddles `MAXSC` (`p128` and `p300` are single waves under the staging; `wide520f`'s
+tail wave of 8 rows is entirely above it, and `chunk64b`'s waves are 64 rows wide at 64-lane steps, so
+they cross the staging between waves, never inside one), so this is the mechanism priced rather than the
+combination; both halves of the combination are gated separately (the streaming rows by §10, the
+one-pass rows by the identity in point 1 above).
+
+**Re-taken on device, correctness only, `util` 93 % as read (discount it: the serving process
+busy-polls the iGPU), no timing taken.** Waves are 64 rows = plan §2.1's chunk width:
+
+```
+.venv/bin/python prototype/attn_decode/run.py --wave                                  # 4112 cmp, 0 fail, 22 s
+.venv/bin/python prototype/attn_decode/run.py --wave --wave-rows 300                  # 4084 cmp, 0 fail, 22 s
+.venv/bin/python prototype/attn_decode/run.py --wave --long-fixture p64 --wave-rows 32 # 2012 cmp, 0 fail, 2 s
+.venv/bin/python prototype/attn_decode/run.py --wave --softmax online --split 2        # 3738 cmp, 0 fail, 21 s
+.venv/bin/python prototype/attn_decode/run.py --wave --softmax online --split 4        # 3738 cmp, 0 fail, 23 s
+.venv/bin/python prototype/attn_decode/run.py --negative                              # 12/12 caught, 1584 cmp, 4 s
+.venv/bin/python prototype/attn_decode/run.py --softmax online --split 2 --long --negative  # 1380 cmp, 0 fail, 5 s
+.venv/bin/python prototype/attn_decode/run.py --softmax online --split 4 --long --negative  # 1380 cmp, 0 fail, 5 s
+.venv/bin/python prototype/attn_decode/run.py --long --negative                       # 1764 cmp, 0 fail, 3 s
+```
+
+The last three are §10's re-gate commands, re-run unchanged after the kernel grew `nrows`: same
+comparison counts, same 0 failures, same 67-of-68 anti-vacuity, same 12 negatives localising to the same
+stages — including G4's de-interleave (`--neg gatehalf`, caught by `gate_vec`+`gated` and nowhere else)
+and `--neg qswap`. A single-row case with `nrows` absent behaves exactly as it did before: the row
+strides are the strides a one-row launch already used, and `grid.z = 1` costs nothing.

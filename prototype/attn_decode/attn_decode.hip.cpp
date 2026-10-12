@@ -137,20 +137,27 @@ static float* g_stale = nullptr;
 struct Case {
     std::string name, outdir;
     int pos = 0, lvalid = 0, cap = 0;
+    // P8 (§06.3): how many query rows this case is. 1 is every plan line written before P8 — the field
+    // is optional and defaults to 1 — and a WAVE line carries one pinned prefill span: `pos`/`lvalid`
+    // describe the FIRST row, and row r sits at position pos+r with lvalid+r lanes visible to it.
+    int nrows = 1;
     hip_bfloat16 *qg = nullptr, *kg = nullptr, *vg = nullptr, *qn = nullptr, *kn = nullptr;
     std::vector<hip_bfloat16*> kc, vc;          // cache replicas (--tile)
     hip_bfloat16 *qrope = nullptr, *krope = nullptr, *gate = nullptr, *aout = nullptr;
     hip_bfloat16 *gated = nullptr, *rcs = nullptr;
     float *part = nullptr, *stale = nullptr;
 
+    int lanes_last() const { return lvalid + nrows - 1; }
+
     // Bytes one launch moves, for the bandwidth sanity check only: at these cache lengths the op
     // is launch-latency-bound, so GB/s here measures how little it moves, not how well it moves it.
     size_t bytes(int split) const {
-        const size_t rd = (size_t)4096 * 2 + (size_t)512 * 2 + (size_t)512 * 2
-                          + (size_t)256 * 2 * 2 + (size_t)lvalid * 2048;
-        const size_t wr = (size_t)(DH * N_Q) * 2 * 2 + (size_t)(DH * N_KV) * 2 * 2
-                          + (size_t)ROT * 2 * 2 + (size_t)(DH * N_KV) * 2 * 2;
-        return rd + wr + (split > 1 ? (size_t)N_Q * split * (DH + 2) * 4 : 0);
+        const size_t rd = ((size_t)4096 * 2 + (size_t)512 * 2 + (size_t)512 * 2
+                           + (size_t)256 * 2 * 2) * nrows
+                          + (size_t)lanes_last() * 2048;
+        const size_t wr = ((size_t)(DH * N_Q) * 2 * 2 + (size_t)(DH * N_KV) * 2 * 2
+                           + (size_t)ROT * 2 * 2 + (size_t)(DH * N_KV) * 2 * 2) * nrows;
+        return rd + wr + (split > 1 ? (size_t)nrows * N_Q * split * (DH + 2) * 4 : 0);
     }
 };
 
@@ -212,11 +219,14 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--neg carry is only defined at --split 1 (one state per query row)\n");
         return 1;
     }
-    if (full && split != 1) {
-        fprintf(stderr, "--softmax full normalises the weight matrix inside one block, so it is"
-                        " the single-block reference form: --split must stay 1\n");
-        return 1;
-    }
+    // `--softmax full` used to mean "one block per row", and this is where that was refused with
+    // `--split != 1`. P8 moved the decision from the launch to the ROW (`blocks_for_row`): a full row
+    // that fits `MAXSC` takes exactly one block and the pins' bits, whatever the grid's depth, and a row
+    // that does not fit streams across the launch's `split` blocks and is merged by `attn_combine`. So
+    // `--softmax full --split 4` is now a meaningful request — one-pass wherever it fits, streaming
+    // above it — which is exactly what one wave of mixed lane counts needs. What would still be
+    // mis-normalisation is a row WIDER than the staging served by ONE block, and the per-case check
+    // below (`lanes_last / split > MAXSC`) is what refuses that.
     hipDeviceProp_t prop{};
     CK(hipGetDeviceProperties(&prop, 0));
     const int nw = THREADS / prop.warpSize;
@@ -248,7 +258,14 @@ int main(int argc, char** argv) {
             if (!(ss >> c.name >> qgf >> kgf >> vgf >> kcf >> vcf >> qnf >> knf >> c.pos
                   >> c.lvalid >> c.outdir)) {
                 fprintf(stderr, "plan %s line %d: NAME QG KG VG KCACHE VCACHE QNORM KNORM POS "
-                                "LCACHE OUTDIR\n", plan_path.c_str(), ln);
+                                "LCACHE OUTDIR [NROWS]\n", plan_path.c_str(), ln);
+                return 1;
+            }
+            // P8: the optional 12th field makes the line a WAVE — NROWS pinned query rows in one
+            // launch, at positions pos..pos+NROWS-1 over one shared cache. Absent means 1, which is
+            // every plan file this op has ever been gated with.
+            if (ss >> c.nrows && c.nrows < 1) {
+                fprintf(stderr, "%s: NROWS must be >= 1 (got %d)\n", c.name.c_str(), c.nrows);
                 return 1;
             }
             const std::vector<char> kraw = slurp(kcf);
@@ -257,20 +274,37 @@ int main(int argc, char** argv) {
                 return 1;
             }
             c.cap = (int)(kraw.size() / ((size_t)N_KV * DH * 2));
-            if (c.lvalid < 0 || c.lvalid > c.cap || c.pos >= c.cap) {
-                fprintf(stderr, "%s: pos %d / lvalid %d do not fit cap %d\n", c.name.c_str(),
-                        c.pos, c.lvalid, c.cap);
+            if (c.lvalid < 0 || c.lanes_last() > c.cap || c.pos + c.nrows - 1 >= c.cap) {
+                fprintf(stderr, "%s: pos %d (+%d rows) / lvalid %d do not fit cap %d\n",
+                        c.name.c_str(), c.pos, c.nrows - 1, c.lvalid, c.cap);
                 return 1;
             }
-            if (full && (c.lvalid + split - 1) / split > MAXSC) {
+            if (c.nrows > 1 && launch == "fused") {
+                // Not a missing feature: a wave's row t READS the lanes rows 0..t-1 appended (§06.3),
+                // and the fused plan appends from inside the block that scores, so there is no grid-wide
+                // barrier to order it. Staging is what makes a wave legal, and saying so here is better
+                // than measuring a race.
+                fprintf(stderr, "%s: --launch fused cannot serve a wave of %d rows (the §05.7 append "
+                                "would race the next row's read). Use --launch staged.\n",
+                        c.name.c_str(), c.nrows);
+                return 1;
+            }
+            if (c.nrows > 1 && neg == NEG_CARRY) {
+                // `carry` is one query's state leaking into the NEXT query. Inside one wave launch there
+                // is no previous query to leak from — the injection is only defined row at a time.
+                fprintf(stderr, "--neg carry is not defined on a wave line (%d rows in one launch); "
+                                "run it on single-row cases\n", c.nrows);
+                return 1;
+            }
+            if (full && (c.lanes_last() + split - 1) / split > MAXSC) {
                 fprintf(stderr,
                         "%s: --softmax full stages %d lanes per block, MAXSC is %d (raise --split)\n",
-                        c.name.c_str(), (c.lvalid + split - 1) / split, MAXSC);
+                        c.name.c_str(), (c.lanes_last() + split - 1) / split, MAXSC);
                 return 1;
             }
-            c.qg = upload(qgf, 4096);
-            c.kg = upload(kgf, 512);
-            c.vg = upload(vgf, 512);
+            c.qg = upload(qgf, (size_t)4096 * c.nrows);
+            c.kg = upload(kgf, (size_t)512 * c.nrows);
+            c.vg = upload(vgf, (size_t)512 * c.nrows);
             c.qn = upload(qnf, DH);
             c.kn = upload(knf, DH);
             for (int r = 0; r < std::max(1, tile_rep); ++r) {
@@ -282,15 +316,17 @@ int main(int argc, char** argv) {
                 c.kc.push_back(kd);
                 c.vc.push_back(vd);
             }
-            CK(hipMalloc(&c.qrope, (size_t)N_Q * DH * 2));
-            CK(hipMalloc(&c.krope, (size_t)N_KV * DH * 2));
-            CK(hipMalloc(&c.gate, (size_t)N_Q * DH * 2));
-            CK(hipMalloc(&c.aout, (size_t)N_Q * DH * 2));
-            CK(hipMalloc(&c.gated, (size_t)N_Q * DH * 2));
+            CK(hipMalloc(&c.qrope, (size_t)N_Q * DH * 2 * c.nrows));
+            CK(hipMalloc(&c.krope, (size_t)N_KV * DH * 2 * c.nrows));
+            CK(hipMalloc(&c.gate, (size_t)N_Q * DH * 2 * c.nrows));
+            CK(hipMalloc(&c.aout, (size_t)N_Q * DH * 2 * c.nrows));
+            CK(hipMalloc(&c.gated, (size_t)N_Q * DH * 2 * c.nrows));
             CK(hipMalloc(&c.rcs, (size_t)ROT * 2 * 2));
             c.stale = g_stale;               // ONE buffer for the whole plan: `carry` has to leak
             if (split > 1)                    // from case i into case i+1, not into itself
-                CK(hipMalloc(&c.part, (size_t)N_Q * split * (DH + 2) * 4));
+                // Sized for every row of the case, which is exactly the expression the kernel indexes
+                // with: ((qrow*N_Q + head)*split + y) in `attn_core`.
+                CK(hipMalloc(&c.part, (size_t)c.nrows * N_Q * split * (DH + 2) * 4));
             cases.push_back(c);
         }
     }
@@ -300,10 +336,12 @@ int main(int argc, char** argv) {
     }
 
     const int launches = (launch == "staged" ? 1 : 0) + 1 + (split > 1 ? 1 : 0);
-    printf("plan %s | cases=%zu | launch=%s (split %d) | softmax=%s | warps=%d tile=%d | neg=%s"
-           " | score=%s | replicas=%d\n",
-           plan_path.c_str(), cases.size(), launch.c_str(), split, softmax.c_str(), nw, tile,
-           negname.c_str(), score_f32 ? "f32" : "bf16", std::max(1, tile_rep));
+    size_t plan_rows = 0;
+    for (auto& c : cases) plan_rows += c.nrows;
+    printf("plan %s | cases=%zu | rows=%zu | launch=%s (split %d) | softmax=%s | warps=%d tile=%d"
+           " | neg=%s | score=%s | replicas=%d\n",
+           plan_path.c_str(), cases.size(), plan_rows, launch.c_str(), split, softmax.c_str(), nw,
+           tile, negname.c_str(), score_f32 ? "f32" : "bf16", std::max(1, tile_rep));
     if (neg != NEG_NONE) printf("NEGATIVE TEST: injected bug = %s\n", negname.c_str());
 
     auto launch_case = [&](Case& c, int rep, bool stages) {
@@ -316,32 +354,37 @@ int main(int argc, char** argv) {
         a.kc_as = a.kcache; a.vc_as = a.vcache;   // the append writes in place (§05.7)
         a.rope_out = c.rcs;
         a.part = c.part; a.stale = c.stale;
-        a.cap = c.cap; a.pos = c.pos; a.lvalid = c.lvalid; a.split = split;
+        a.cap = c.cap; a.pos = c.pos; a.lvalid = c.lvalid; a.split = split; a.nrows = c.nrows;
         a.neg = neg; a.full = full ? 1 : 0; a.score_f32 = score_f32 ? 1 : 0;
         a.fused = launch == "fused" ? 1 : 0; a.tile = tile;
         if (stages) rope_table<<<1, ROT>>>(a);   // stage check, not part of the timed path
         if (launch == "staged") {
             CoreArgs p = a;
             p.qrope_out = c.qrope; p.krope_out = c.krope; p.gate_out = c.gate;
-            attn_prep<<<N_Q + N_KV, THREADS>>>(p);
+            // grid.y is the query row (P8): one launch stages the whole wave and performs every row's
+            // §05.7 append at that row's own position, which is what lets the core launch below read a
+            // cache that already holds the rows before it.
+            attn_prep<<<dim3(N_Q + N_KV, c.nrows), THREADS>>>(p);
             a.qrope = c.qrope; a.krope = c.krope;      // core reads what prep wrote
         } else {
             a.qrope_out = c.qrope; a.krope_out = c.krope; a.gate_out = c.gate;
         }
         a.aout = c.aout; a.gout = c.gated;
-        attn_core<<<dim3(N_Q, split), THREADS>>>(a);
-        if (split > 1) attn_combine<<<N_Q, THREADS>>>(a);
+        // grid.z is the query row, grid.y the lane block within it (§07.3's split axis, unchanged).
+        attn_core<<<dim3(N_Q, split, c.nrows), THREADS>>>(a);
+        if (split > 1) attn_combine<<<dim3(N_Q, c.nrows), THREADS>>>(a);
         CK(hipGetLastError());
     };
 
     auto write_case = [&](Case& c) {
         const std::string& o = c.outdir;
-        dump_file(o + "/q_rope.bin", c.qrope, (size_t)N_Q * DH);
-        dump_file(o + "/k_rope.bin", c.krope, (size_t)N_KV * DH);
-        dump_file(o + "/gate_vec.bin", c.gate, (size_t)N_Q * DH);
+        const size_t nr = c.nrows;
+        dump_file(o + "/q_rope.bin", c.qrope, (size_t)N_Q * DH * nr);
+        dump_file(o + "/k_rope.bin", c.krope, (size_t)N_KV * DH * nr);
+        dump_file(o + "/gate_vec.bin", c.gate, (size_t)N_Q * DH * nr);
         dump_file(o + "/rope_cs.bin", c.rcs, (size_t)ROT * 2);
-        dump_file(o + "/attn_pre_gate.bin", c.aout, (size_t)N_Q * DH);
-        dump_file(o + "/gated.bin", c.gated, (size_t)N_Q * DH);
+        dump_file(o + "/attn_pre_gate.bin", c.aout, (size_t)N_Q * DH * nr);
+        dump_file(o + "/gated.bin", c.gated, (size_t)N_Q * DH * nr);
         dump_file(o + "/cache_keys.bin", c.kc[0], (size_t)N_KV * c.cap * DH);
         dump_file(o + "/cache_values.bin", c.vc[0], (size_t)N_KV * c.cap * DH);
     };
@@ -354,8 +397,10 @@ int main(int argc, char** argv) {
         for (auto& c : cases) launch_case(c, rep++, true);
         CK(hipDeviceSynchronize());
         for (auto& c : cases) write_case(c);
-        printf("RESULT mode=once cases=%zu launches=%d neg=%s split=%d launch=%s softmax=%s\n",
-               cases.size(), launches, negname.c_str(), split, launch.c_str(), softmax.c_str());
+        printf("RESULT mode=once cases=%zu rows=%zu launches=%d neg=%s split=%d launch=%s"
+               " softmax=%s\n",
+               cases.size(), plan_rows, launches, negname.c_str(), split, launch.c_str(),
+               softmax.c_str());
         return 0;
     }
 

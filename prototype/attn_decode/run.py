@@ -267,13 +267,41 @@ def stages_for(case: dict, outdir: Path) -> list[tuple]:
     """(stage, kernel output, pinned reference) for one case, in report order. Whether a stage is
     bit-exact or judged by the §10.1 criteria is `EXACT_STAGES`, not a flag here.
 
-    The cache comparisons cover lanes [0, lvalid) only: lanes past that are `reference.POISON`
-    slack the engine would never read, and comparing them would make every clean run fail.
+    The cache comparisons cover the valid lanes only — for a WAVE case that is the LAST row's lane
+    count, `lvalid + nrows - 1`, because every earlier row's lanes are a prefix of the same cache.
+    Lanes past that are `reference.POISON` slack the engine would never read, and comparing them would
+    make every clean run fail.
+
+    A wave case's refs are already stacked in row order and flattened the way the kernel writes them,
+    so each stage is one flat comparison; `v_append` is the wave's own appended span, which is the
+    §05.7 check for every row of it at once.
     """
-    ref, cap, n = case["ref"], case["cap"], case["lvalid"]
+    ref, cap = case["ref"], case["cap"]
+    nrows = case.get("nrows", 1)
+    n = case["lvalid"] + nrows - 1
     kc = R.read_out(outdir, "cache_keys", 2 * cap * R.DH).reshape(2, cap, R.DH)
     vc = R.read_out(outdir, "cache_values", 2 * cap * R.DH).reshape(2, cap, R.DH)
     cos, sin = R.rope_cs(torch.tensor([case["pos"]]), None)
+    if nrows > 1:
+        p0, p1 = case["span"]
+        gate = case["qg"].reshape(nrows, R.N_Q, 2 * R.DH)[:, :, R.DH:].reshape(-1)
+        return [
+            ("q_rope", R.read_out(outdir, "q_rope", R.N_Q * R.DH * nrows),
+             ref["q_rope"].reshape(-1)),
+            ("k_rope", R.read_out(outdir, "k_rope", R.N_KV * R.DH * nrows),
+             ref["k_rope"].reshape(-1)),
+            ("v_append", vc[:, p0:p1 + 1].reshape(-1), ref["v"].reshape(-1)),
+            ("cache_keys", kc[:, :n].reshape(-1), ref["cache_keys"].reshape(-1)),
+            ("cache_values", vc[:, :n].reshape(-1), ref["cache_values"].reshape(-1)),
+            ("gate_vec", R.read_out(outdir, "gate_vec", R.N_Q * R.DH * nrows), gate),
+            # The one cos||sin table this launch wrote is row 0's; the per-row positions are pinned by
+            # q_rope/k_rope being BIT-EXACT at every row of the wave, which is the stronger claim.
+            ("rope_cs", R.read_out(outdir, "rope_cs", 2 * R.ROT),
+             torch.cat([cos.to(torch.bfloat16), sin.to(torch.bfloat16)]).reshape(-1)),
+            ("attn_pre_gate", R.read_out(outdir, "attn_pre_gate", R.N_Q * R.DH * nrows),
+             ref["attn_pre_gate"].reshape(-1)),
+            ("gated", R.read_out(outdir, "gated", R.N_Q * R.DH * nrows), ref["gated"].reshape(-1)),
+        ]
     return [
         ("q_rope", R.read_out(outdir, "q_rope", R.N_Q * R.DH), ref["q_rope"].reshape(-1)),
         ("k_rope", R.read_out(outdir, "k_rope", R.N_KV * R.DH), ref["k_rope"].reshape(-1)),
@@ -291,13 +319,16 @@ def stages_for(case: dict, outdir: Path) -> list[tuple]:
 
 
 def gate_cases(cases, outroot: Path, tag: str, fails, worst, ncmp, extra=(), quiet=True,
-               online_route=False, band=None):
+               online_route=False, band=None, print_cases=True):
     """Run one plan and judge every stage of every case; returns the raw reports per stage.
 
     `online_route` is §07.3's split-K/streaming form under test: it relaxes pin agreement for
     `SOFTMAX_STAGES` only (the `pin_agreement` argument to `judge`), and `band` — a dict owned by the
     caller — collects the aggregate numbers that band is made of, plus whether ANY case moved, which
     is the anti-vacuity that keeps an online-labelled run from being the two-pass form in disguise.
+
+    `print_cases=False` is for a set whose per-case lines would bury the report (the 277 one-row cases
+    the wave stage compares itself against); everything else about the run is identical.
     """
     lines = [R.write_case(c, WORK / "in", outroot / c["name"]) for c in cases]
     plan = write_plan(WORK / ("plan_%s.txt" % tag), lines)
@@ -306,6 +337,13 @@ def gate_cases(cases, outroot: Path, tag: str, fails, worst, ncmp, extra=(), qui
     for c in cases:
         row = []
         for name, got, ref in stages_for(c, outroot / c["name"]):
+            if (c.get("nrows", 1) > 1 and name in SOFTMAX_STAGES and not online_route):
+                # A WAVE's reduction stages are judged one ROW at a time by `wave_row_bad`, under
+                # exactly the tolerance a single-row case gets. Judged flat, §10.1's ndiff limit would
+                # be diluted by the row count and the verdict would no longer be comparable with the
+                # one-row-per-launch run it is being compared against. Under `online_route` these stages
+                # are band-judged (aggregates), so flat is the right shape there.
+                continue
             rep = compare(got, ref)
             band_stage = online_route and name in SOFTMAX_STAGES
             judge("%s %s" % (c["name"], name), rep, fails, worst, exact=(name in EXACT_STAGES),
@@ -321,8 +359,9 @@ def gate_cases(cases, outroot: Path, tag: str, fails, worst, ncmp, extra=(), qui
                 b[3] += rep["n"]
                 b[4] += 1 if rep["ndiff"] else 0
             row.append("%s %d/%d" % (name, rep["ndiff"], rep["n"]))
-        print("  %-16s pos %3d lvalid %3d cap %3d | %s" % (c["name"], c["pos"], c["lvalid"],
-                                                          c["cap"], " ".join(row)))
+        if print_cases:
+            print("  %-16s pos %3d lvalid %3d cap %3d rows %3d | %s"
+                  % (c["name"], c["pos"], c["lvalid"], c["cap"], c.get("nrows", 1), " ".join(row)))
     return per
 
 
@@ -381,6 +420,202 @@ def cross_variant(label, knobs, cases, base, alt, fails, ncmp, gate_it=True, onl
     return bits
 
 
+def long_rows(spec: str, dl: Path) -> list[int]:
+    """Which pinned prefill rows `--long` prices. `sample` is the shipped boundary list; `all` is every
+    row the fixture pins (277 for p300), which is what separates a real regression from the sample
+    happening to miss it — at ~30 s for one layer, a diagnosis cost worth knowing the answer to.
+    """
+    if spec == "sample":
+        return list(LONG_ROWS)
+    if spec == "all":
+        return list(range(R.prefill_tokens(dl, R.ATTN_LAYERS[0])))
+    return [int(x) for x in spec.split(",") if x.strip() != ""]
+
+
+def run_plan(cases, outroot: Path, tag: str, extra) -> Path:
+    """Write the case files, run one `--mode once` pass, return the output root."""
+    lines = [R.write_case(c, WORK / "in", outroot / c["name"]) for c in cases]
+    plan = write_plan(WORK / ("plan_%s.txt" % tag), lines)
+    run_bin(["--mode", "once", "--plan", str(plan)] + list(extra), tag)
+    return outroot
+
+
+# Stages a wave launch writes per row, with the element count one row of each occupies. Same numbers
+# the kernel's ROW_H / ROW_KV strides use, taken from the reference's own constants.
+WAVE_STAGE_ROWS = (("q_rope", R.N_Q * R.DH), ("k_rope", R.N_KV * R.DH), ("gate_vec", R.N_Q * R.DH),
+                   ("attn_pre_gate", R.N_Q * R.DH), ("gated", R.N_Q * R.DH))
+# The two of those that are reductions, i.e. the only ones whose bits a softmax policy can move.
+WAVE_RED_STAGES = WAVE_STAGE_ROWS[3:]
+
+
+def wave_row_divergences(dl: Path, layer: int, chunks, stacked: bool) -> set:
+    """{(stage, absolute row)} for every prefill row whose reduction output breaks the shipped §10.1
+    rule — a large element more than 1 ULP off, or more differing elements than §10.1 allows a
+    comparison of that size.
+
+    `chunks` is `[(case dir, [absolute rows in launch order]), ...]`; `stacked` says whether each case
+    directory holds all of its rows (one wave launch) or one row (one launch per row). The rule and
+    the tolerance are the ones `judge` applies, and the reference is the same pin either way, so the
+    two calls of this function differ ONLY in how the rows were launched: any difference between the
+    two sets is a difference P8 introduced, and nothing else can produce it.
+    """
+    pre_gate = R.pin(dl, "L%02d.attn.attn_out_pre_gate" % layer).reshape(-1, R.N_Q, R.DH)
+    qproj = R.pin(dl, "L%02d.q_proj.out" % layer).reshape(-1, R.N_Q * 2 * R.DH)
+    bad = set()
+    for stage, elems in WAVE_RED_STAGES:
+        for dirdir, rows in chunks:
+            flat = R.read_out(dirdir, stage, elems * (len(rows) if stacked else 1))
+            for i, p in enumerate(rows):
+                ref = pre_gate[p].reshape(-1)
+                if stage == "gated":
+                    ref = ref * torch.sigmoid(
+                        qproj[p].reshape(R.N_Q, 2 * R.DH)[:, R.DH:].reshape(-1))
+                got = flat[i * elems:(i + 1) * elems] if stacked else flat
+                rep = compare(got, ref)
+                if rep["n_bad"] or rep["ndiff"] > ndiff_limit(rep["n"]):
+                    bad.add((stage, p))
+    return bad
+
+
+def wave_stage(args, fails, worst, ncmp, online_route, band):
+    """P8 (§06.3): a whole prefill wave of queries through ONE launch, gated three ways.
+
+    1. **The wave against the same rows run ONE AT A TIME, bit for bit.** This is the claim
+       `engine/submit_wave_body` leans on: P8 replaced one attention launch per token with one per
+       layer per wave, and the five shipped fixtures must not move by a bit. The pins cannot make that
+       claim on their own — two forms can each agree with a pin and still differ from each other — so
+       it is measured directly, stage by stage and row by row.
+    2. **Every row against its own pinned prefill row** (`L{ll}.attn.q_rope` / `k_rope` /
+       `attn_out_pre_gate`, §10.5's pairing), under the same rule a single-row case gets. The spans
+       that do not start at row 0 are the multi-wave carry: those lanes arrive from the pins exactly as
+       a previous wave would have left them, so row `p0` has to read lanes it did not append. Any row
+       this flags is then priced one at a time, so the report says whether the wave caused it.
+    3. The online route's anti-vacuity, in the direction this stage needs: an `--softmax online` wave
+       whose reduction stages are bit-identical to the `--softmax full` wave is a wave that never
+       streamed. §07.3 measured 26 % of these elements move, so identity here is a bug report.
+    """
+    dl = ROOT / "data" / "refs" / args.long_fixture
+    if not dl.exists():
+        raise SystemExit("no long fixture %s (needed for --wave)" % dl)
+    # A wave is per attention layer, exactly as in the engine: one launch serves the layer's rows.
+    layers = (R.ATTN_LAYERS[:1] if len(R.ATTN_LAYERS) > 1 and args.layers == "all"
+              else [int(x) for x in args.layers.split(",")])
+    # A wave cannot be fused: the §05.7 append would race the next row's read (the host says so too),
+    # so this stage always prices the staged plan.
+    knobs = ["--launch", "staged", "--split", str(args.split), "--softmax", args.softmax]
+    print("\nP8 waves of %d rows from %s prefill rows (one launch per layer, positions per row, "
+          "staged plan): %s" % (args.wave_rows, args.long_fixture, " ".join(knobs)))
+    for layer in layers:
+        seq = R.prefill_tokens(dl, layer)
+        spans = R.wave_spans(seq, args.wave_rows)
+        rows_here = [r for p0, p1 in spans for r in range(p0, p1 + 1)]
+        wcases = R.wave_cases(dl, layer, spans)
+        for c in wcases:
+            p0, p1 = c["span"]
+            # The operand rebuild, at the two ends of the span: the pairing this whole gate stands on
+            # (§10.5) is a per-row fact, and checking both ends covers the span's positions without
+            # re-running the torch chain once per row.
+            for probe in R.prefill_cases(dl, layer, [p0, p1]):
+                for ok, line in R.verify(dl, probe):
+                    if not ok:
+                        fails.append("verify %s (span %s-%s): %s" % (probe["name"], p0, p1, line))
+        wchunks = [(WORK / "out_wave" / c["name"], list(range(c["span"][0], c["span"][1] + 1)))
+                   for c in wcases]
+        gate_cases(wcases, WORK / "out_wave", "wave", fails, worst, ncmp, extra=knobs,
+                   online_route=online_route, band=band)
+
+        # Claim 1: the same rows, one launch each, must produce the same bits.
+        per_row = R.prefill_cases(dl, layer, rows_here)
+        gate_cases(per_row, WORK / "out_wave_rows", "wave-row", [], worst, ncmp, extra=knobs,
+                   online_route=online_route, band=None, quiet=True, print_cases=False)
+        rchunks = [(WORK / "out_wave_rows" / ("prefill%03d.L%02d" % (p, layer)), [p])
+                   for p in rows_here]
+        bits = 0
+        for wdir, wrows in wchunks:
+            for stage, row_elems in WAVE_STAGE_ROWS:
+                got_wave = R.read_out(wdir, stage, row_elems * len(wrows))
+                for r, p in enumerate(wrows):
+                    one = R.read_out(WORK / "out_wave_rows" / ("prefill%03d.L%02d" % (p, layer)),
+                                     stage, row_elems)
+                    bits += int((got_wave[r * row_elems:(r + 1) * row_elems] != one).sum())
+        rows_done = len(rows_here)
+        print("  wave-vs-one-row (L%02d): %d elements across %d rows x %d stages differ"
+              % (layer, bits, rows_done, len(WAVE_STAGE_ROWS)))
+        if bits:
+            fails.append("wave L%02d: %d elements differ between one launch over the wave and one "
+                         "launch per row. They must be bit-identical: P8 changes how a wave is "
+                         "submitted, not what is computed (this is the claim the five shipped "
+                         "fixtures' bit-identity rests on)" % (layer, bits))
+        else:
+            print("    -> a wave of %d rows is BIT-IDENTICAL to %d single-row launches (L%02d)"
+                  % (rows_done, rows_done, layer))
+
+        # Claim 2: the pins. Row by row, and attributed: a row that misses the shipped rule in a wave
+        # and also misses it one row at a time is this op's long-cache floor, which P8 neither caused
+        # nor fixes; a row that misses ONLY in a wave is P8's and is fatal.
+        if not online_route:
+            bad_wave = wave_row_divergences(dl, layer, wchunks, stacked=True)
+            bad_rows = wave_row_divergences(dl, layer, rchunks, stacked=False)
+            only_wave = sorted(bad_wave - bad_rows)
+            print("  wave-vs-pins (L%02d): %d of %d (stage, row) reduction comparisons over the "
+                  "shipped §10.1 rule; one-row launches on the same rows: %d; wave-only: %d"
+                  % (layer, len(bad_wave), 2 * rows_done, len(bad_rows), len(only_wave)))
+            if bad_wave:
+                print("    rows over the rule (wave): %s" % sorted(p for _, p in bad_wave))
+            if bad_rows:
+                print("    the same rows, priced ONE AT A TIME, miss identically — pre-existing at"
+                      " these lane counts, not caused by P8. Reproduce with --long --long-rows %s"
+                      % ",".join(str(p) for p in sorted(set(p for _, p in bad_rows))))
+            for stage, p in only_wave:
+                fails.append("wave L%02d row %d %s: over the §10.1 rule in a wave but NOT one row at"
+                             " a time, so the wave itself caused it" % (layer, p, stage))
+
+        # Claim 2b: the mixed-grid mechanism, priced. `--split 2` under `--softmax full` must not move
+        # a single bit, because `blocks_for_row` hands every row that fits the staging EXACTLY ONE block
+        # whatever the grid's depth — the upper blocks return before touching anything, and
+        # `attn_combine` skips a row its core already finished. That is the shape the engine's launcher
+        # produces for a wave whose widest row is above the staging (deep y, one-pass rows underneath),
+        # so the mechanism is gated here even though no shipped fixture has a wave that needs it.
+        if not online_route:
+            run_plan(wcases, WORK / "out_wave_deep", "wave_deep",
+                     ["--launch", "staged", "--split", "2", "--softmax", "full"])
+            bits_deep = 0
+            for wdir, wrows in wchunks:
+                for stage, row_elems in WAVE_STAGE_ROWS:
+                    a = R.read_out(wdir, stage, row_elems * len(wrows))
+                    b = R.read_out(WORK / "out_wave_deep" / wdir.name, stage, row_elems * len(wrows))
+                    bits_deep += int((a != b).sum())
+            print("  wave at --split 2 under --softmax full (L%02d): %d elements moved vs --split 1"
+                  " (%s)" % (layer, bits_deep,
+                             "one block per row that fits, as designed" if bits_deep == 0 else
+                             "a deeper grid changed the arithmetic"))
+            if bits_deep:
+                fails.append("wave L%02d: %d elements moved when the lane grid was deepened to 2 under"
+                             " --softmax full. A row the staging fits must take exactly one block"
+                             " (blocks_for_row); if it moved, the one-pass form is reading the split"
+                             " grid and normalising per block — §07.3's trap, back again"
+                             % (layer, bits_deep))
+
+        # Claim 3: the wave's own anti-vacuity, online runs only.
+        if online_route:
+            run_plan(wcases, WORK / "out_wave_full", "wave_full",
+                     ["--launch", "staged", "--split", "1", "--softmax", "full"])
+            moved = 0
+            for wdir, wrows in wchunks:
+                for stage, row_elems in WAVE_RED_STAGES:      # the two reduction stages
+                    a = R.read_out(wdir, stage, row_elems * len(wrows))
+                    b = R.read_out((WORK / "out_wave_full" / wdir.name), stage, row_elems * len(wrows))
+                    moved += int((a != b).sum())
+            print("  wave anti-vacuity (L%02d): %d reduction elements differ from the same waves run"
+                  " --softmax full (%s)" % (layer, moved,
+                                            "streaming ran" if moved else "NOTHING MOVED"))
+            if not moved:
+                fails.append("anti-vacuity: the --softmax online waves produced output bit-identical "
+                             "to --softmax full on every stage of every wave, which is what a wave "
+                             "that never entered the streaming branch does (§07.3 measures 26 %% of "
+                             "these elements moving)")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -392,6 +627,15 @@ def main() -> int:
     ap.add_argument("--split", type=int, default=1)
     ap.add_argument("--softmax", default="full", choices=["online", "full"])
     ap.add_argument("--long", action="store_true", help="long-cache cases from the prefill pins")
+    ap.add_argument("--wave", action="store_true",
+                    help="P8: pinned prefill spans as WAVES (one launch per layer over many query "
+                         "rows), each row judged against its own pin and the whole wave against the "
+                         "same rows run one at a time")
+    ap.add_argument("--long-rows", default="sample",
+                    help="--long row list: 'sample' (the shipped boundary rows), 'all' (every pinned "
+                         "prefill row), or a comma-separated row list")
+    ap.add_argument("--wave-rows", type=int, default=64,
+                    help="rows per wave for --wave (default 64, plan §2.1's chunk width)")
     ap.add_argument("--negative", action="store_true")
     ap.add_argument("--no-verify", action="store_true",
                     help="skip the operand-rebuild proof (it is the gate's own foundation)")
@@ -483,9 +727,10 @@ def main() -> int:
         dl = ROOT / "data" / "refs" / args.long_fixture
         if not dl.exists():
             raise SystemExit("no long fixture %s (needed for --long)" % dl)
+        rows = long_rows(args.long_rows, dl)
         lc: list[dict] = []
         for layer in (layers[:1] if len(layers) > 1 else layers):
-            lc += R.prefill_cases(dl, layer, LONG_ROWS)
+            lc += R.prefill_cases(dl, layer, rows)
         print("\nlong-cache cases from %s prefill rows (each row is a decode-shaped query at"
               " position p over lanes 0..p): %d cases, %d..%d lanes"
               % (args.long_fixture, len(lc), lc[0]["lvalid"], lc[-1]["lvalid"]))
@@ -520,6 +765,11 @@ def main() -> int:
                   " on at least one softmax stage (a two-pass run moves none). `--negative` proves it"
                   " again from the other side: `nomax` exists only in the online branch and is"
                   " injected at this run's own split" % (moved, n_cases_run))
+
+    # 4c. P8: waves. Runs after `--long` because it reuses the same fixture, and before the negatives
+    # so a wave failure is visible next to the row failures it mirrors.
+    if args.wave:
+        wave_stage(args, fails, worst, ncmp, online_route, band)
 
     # 5. Negatives.
     if args.negative:

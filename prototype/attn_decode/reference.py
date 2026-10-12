@@ -39,7 +39,8 @@ for _p in (str(ROOT), str(ROOT / "prototype"), str(ROOT / "prototype" / "proj_ge
         sys.path.insert(0, _p)
 
 from speccheck.specimpl import Weights, rmsnorm_zc, rope_cs  # noqa: E402
-from operands import CKPT, ckpt_tensor, dump_bf16, pin, read_bf16  # noqa: E402
+from operands import (CKPT, ckpt_tensor, dump_bf16, pin, prefill_tokens,  # noqa: E402
+                      read_bf16)
 
 SCALE = 0.0625                      # 1/sqrt(256), §00.2
 N_Q, N_KV, DH, ROT = 8, 2, 256, 64   # §01.3
@@ -237,8 +238,65 @@ def prefill_cases(d: Path, layer: int, rows) -> list[dict]:
     return out
 
 
+def wave_spans(seq: int, rows: int) -> list[tuple[int, int]]:
+    """`seq` pinned prefill rows split into consecutive waves of `rows`, last one ragged (§06.1's
+    ragged tail). Row indices are inclusive on both ends."""
+    return [(lo, min(seq - 1, lo + rows - 1)) for lo in range(0, seq, rows)]
+
+
+def wave_cases(d: Path, layer: int, spans) -> list[dict]:
+    """Pinned prefill spans as WAVE cases (§06.3, P8): `p0..p1` consecutive query rows served by ONE
+    launch, at positions p0..p1, over one shared cache.
+
+    The cache is handed over PRE-append at `p0`: lanes `< p0` come from the pinned prefill cache (the
+    carried prefix, i.e. what a second wave reads after a first one wrote it) and lanes `>= p0` are
+    POISON, waiting for the wave's own §05.7 appends. That is the thing a per-row case cannot test at
+    all: row `t` reading a lane that row `t-1` appended in the SAME launch. A span that starts at 0 is
+    the whole prompt in one wave; a span that starts later is the multi-wave carry.
+
+    `ref` holds the pinned stages STACKED IN ROW ORDER, laid out exactly as the kernel writes them
+    (row-major, `ROW_H` per row), so the comparison is one flat compare per stage.
+    """
+    qproj = pin(d, "L%02d.q_proj.out" % layer).reshape(-1, N_Q * 2 * DH)
+    kproj = pin(d, "L%02d.k_proj.out" % layer).reshape(-1, N_KV * DH)
+    vproj = pin(d, "L%02d.v_proj.out" % layer).reshape(-1, N_KV * DH)
+    kc = pin(d, "prefill.L%02d.cache_keys" % layer).reshape(N_KV, -1, DH)
+    vc = pin(d, "prefill.L%02d.cache_values" % layer).reshape(N_KV, -1, DH)
+    pre_gate = pin(d, "L%02d.attn.attn_out_pre_gate" % layer).reshape(-1, N_Q, DH)
+    q_rope = pin(d, "L%02d.attn.q_rope" % layer).reshape(N_Q, -1, DH).permute(1, 0, 2)
+    k_rope = pin(d, "L%02d.attn.k_rope" % layer).reshape(N_KV, -1, DH).permute(1, 0, 2)
+    v_all = pin(d, "L%02d.attn.v" % layer).reshape(N_KV, -1, DH)
+    qn, kn = attn_norms(layer)
+    out = []
+    for p0, p1 in spans:
+        nrows = p1 - p0 + 1
+        cap = _cap_for(p1 + 1)
+        k_slack, v_slack = _slack_cache(cap), _slack_cache(cap)
+        k_slack[:, :p0] = kc[:, :p0]
+        v_slack[:, :p0] = vc[:, :p0]
+        gate = qproj[p0:p1 + 1].reshape(nrows, N_Q, 2 * DH)[:, :, DH:]
+        out.append({
+            "name": "wave%03d-%03d.L%02d" % (p0, p1, layer), "kind": "wave", "pos": p0,
+            "lvalid": p0 + 1, "nrows": nrows, "cap": cap,
+            "qg": qproj[p0:p1 + 1].reshape(-1), "kg": kproj[p0:p1 + 1].reshape(-1),
+            "vg": vproj[p0:p1 + 1].reshape(-1),
+            "kcache": k_slack.reshape(-1), "vcache": v_slack.reshape(-1), "qn": qn, "kn": kn,
+            "ref": {
+                "q_rope": q_rope[p0:p1 + 1], "k_rope": k_rope[p0:p1 + 1],
+                "v": v_all[:, p0:p1 + 1],
+                "cache_keys": kc[:, :p1 + 1], "cache_values": vc[:, :p1 + 1],
+                "attn_pre_gate": pre_gate[p0:p1 + 1],
+                "gated": (pre_gate[p0:p1 + 1].reshape(nrows, N_Q * DH)
+                          * torch.sigmoid(gate.reshape(nrows, N_Q * DH))),
+                "o_proj": None,
+            },
+            "span": (p0, p1),
+        })
+    return out
+
+
 def write_case(case: dict, indir: Path, outdir: Path) -> list:
-    """Raw BF16 input files for the kernel, plus the plan line's POS/LCACHE/OUTDIR fields.
+    """Raw BF16 input files for the kernel, plus the plan line's POS/LCACHE/OUTDIR [NROWS] fields.
     The kernel names its outputs by stage (q_rope.bin, ...), so each case gets its own OUTDIR."""
     indir.mkdir(parents=True, exist_ok=True)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -250,8 +308,11 @@ def write_case(case: dict, indir: Path, outdir: Path) -> list:
     vc = dump_bf16(case["vcache"], Path(str(f) % "vc"))
     qn = dump_bf16(case["qn"], Path(str(f) % "qn"))
     kn = dump_bf16(case["kn"], Path(str(f) % "kn"))
-    return [case["name"], str(qg), str(kg), str(vg), str(kc), str(vc), str(qn), str(kn),
+    line = [case["name"], str(qg), str(kg), str(vg), str(kc), str(vc), str(qn), str(kn),
             str(case["pos"]), str(case["lvalid"]), str(outdir)]
+    if case.get("nrows", 1) > 1:
+        line.append(str(case["nrows"]))      # the optional 12th field: this line is a wave
+    return line
 
 
 def read_out(outdir: Path, what: str, n: int) -> torch.Tensor:
