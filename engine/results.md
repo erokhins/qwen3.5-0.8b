@@ -2435,6 +2435,9 @@ form's output is the per-row form's bits (138 400 elements per fixture, 0 differ
 failures — the +5 per fixture over P4b is section (h)'s two new `proj` checks, its `both sides cover the same
 proj rows`, and the two explicit batched/one-row projection checks.
 
+The table is `tools/margin_delta.py <before-prefix> <after-prefix> dec8 dec64f dec64t dec300f mt32f` reading
+the two sets of gate logs; it is committed so that the "filled" column is re-derivable rather than remembered.
+
 **Why the scratch grew, and by how much.** The projections' inputs and outputs became row-family buffers
 (`a_q` 4096, `a_k`/`a_v` 512, `g_raw`(+F32) 6144, `g_z` 2048, `g_a`/`g_b`(+F32) 16, `block_out`(+F32) 2048,
 per wave row): ≈31 MiB per request at `kMaxWaveRows = 512`, on top of P4's ≈18 MiB. Against a 1.55 GB
