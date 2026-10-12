@@ -422,6 +422,7 @@ TIE_POLICY = ("exact tie in the pin (>= 2 ids share the max on the BF16 payload)
               " logit at it rounds back to the shared tied payload")
 
 fails: list[str] = []
+fail_names: list[str] = []    # the check NAME of every failure, for the D-9 expected-red split below
 notes: list[str] = []
 ties: list[str] = []        # one entry per generation step resolved by the tie policy; counted in report()
 tie_notes: list[str] = []   # tied steps the engine matched outright: printed, NOT policy decisions (D-1)
@@ -434,6 +435,7 @@ def check(ok: bool, name: str, detail: object = "") -> bool:
     print(("  [PASS] " if ok else "  [FAIL] ") + name + ((" — " + text) if text else ""))
     if not ok:
         fails.append(name + (": " + text if text else ""))
+        fail_names.append(name)
     return bool(ok)
 
 
@@ -3712,6 +3714,33 @@ def decision_margin(ref: np.ndarray, eng, m: dict) -> str:
             f" this step is {m['maxabs']:.4g}, " + verdict)
 
 
+# EXPECTED-RED (D-9) — the failures this tree already knows about, NAMED, so a NEW failure stays
+# distinguishable on a fixture that is red for a recorded reason. This changes no verdict and pardons
+# nothing: a fixture listed here is still FAIL and still exits 1. It exists because a red that is absorbed
+# is a red nobody reads any more.
+#
+# `chunk64b` step 0 is the only entry, and it is unsatisfiable as shipped: the pinned winner is 8337 at
+# 15.625 and the runner-up is 20619 at 15.500 — a 2 BF16 ULP margin at that magnitude — while the
+# engine's legal element error at that step is maxabs 0.2509, larger than the margin. No legal bf16 route
+# can be held to that token. The step's LOGITS are gated and pass (cos 0.999893, deficit 1.07e-04 against
+# §10.1 G5's 5e-04 floor; meanrel 1.57 %). D-9: an admitting rule for this shape must be SIZED (the legal
+# element error at that position, plus a route spread) the way D-3/D-5/D-6 sized their bands — not a skip,
+# not a silent tolerance, not a re-price.
+EXPECTED_RED: dict = {
+    "chunk64b": {
+        "why": ("step 0's pinned winner is 2 BF16 ULP ahead of the runner-up while the engine's legal"
+                " element error there is larger (D-9); its logits pass, its token cannot be promised"),
+        "checks": [
+            "generation step 0 samples greedy_continuation[1]",
+            "step 0: argmax agrees with the pin",
+            # The order-sensitive id list is the consequence of step 0, not a second bug: one wrong token
+            # anywhere shifts every later id, so the whole chain mismatches.
+            "all 30 generated ids match, in order — exactly, or as a tie proved from the pin",
+        ],
+    },
+}
+
+
 def report() -> int:
     section("summary")
     for n in notes:
@@ -3729,6 +3758,26 @@ def report() -> int:
               + (f" ({len(ties)} step(s) reported TIE and not counted as failures)" if ties else ""))
         for f in fails:
             print("  - " + f)
+        # D-9's reporting half: name the recorded failures so a NEW one on an already-red fixture stays
+        # visible, and say it loudly enough that nobody reads "3 failed" on `chunk64b` and stops. Labels
+        # only — none of this changes the exit code, and nothing here makes a red fixture green.
+        recorded = EXPECTED_RED.get(REFS.name)
+        if recorded is None:
+            print(f"  [expected-red] none recorded for {REFS.name}, so all {len(fails)} failure(s)"
+                  " above are new by construction")
+        else:
+            known = [n for n in fail_names if n in recorded["checks"]]
+            unseen = [n for n in fail_names if n not in recorded["checks"]]
+            healed = [c for c in recorded["checks"] if c not in fail_names]
+            print(f"  [expected-red] {REFS.name}: {len(known)} of {len(fails)} — {recorded['why']}"
+                  ". A label, not a pardon: this fixture is FAIL and exits 1.")
+            if unseen:
+                print(f"  [NEW-FAILURE] {len(unseen)} failure(s) are NOT in the recorded list: "
+                      + "; ".join(unseen))
+            if healed:
+                print(f"  [expected-red] {len(healed)} recorded line(s) did NOT fail this run — the"
+                      " fixture or the engine moved, so re-read D-9 before believing green here: "
+                      + "; ".join(healed))
         return 1
     print("ENGINE GATE PASS" + (f" — with {len(ties)} step(s) reported TIE" if ties else ""))
     return 0
