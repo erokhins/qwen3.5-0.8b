@@ -1905,3 +1905,232 @@ in the gitignored `data/` like every other regenerable fixture.
 4. **49 prompts × 24 tokens is A-18's budget, not a bigger one.** The corpus was never widened (§10's G7
    intent was "hundreds cheap"); the run costs 18 s of device, so widening it is a fixture-regeneration
    decision (`tools/corpus_dump.py --tag … --steps …` on a wider prompt list), not an engineering one.
+
+---
+
+# D-3 — the route margin cannot be made engine-independent, and the reason is a reference-side baseline
+
+Task: `bench/plan-2026-10-12.md` Q4b / decision **D-3** — stop fitting the margin to the engine's own errors,
+calibrate the multiplier from **legal reference-side routes alone**, and if that multiplier turns out smaller
+than what the engine needs, report it as a finding about the engine rather than as a licence to loosen.
+
+**Outcome: keep.** No band was moved, no fixture re-priced, nothing under `data/refs/` was written. The
+engine-independent multiplier is **1.19–1.96** on the primary column (up to 2.40 if a second legal axis is
+counted), while the engine-fitted margins in force are **2.93–7.99**. The instrument is
+[`route_margin.py`](route_margin.py) — CPU-only, reads the pins and the priced allowances, writes only `tmp/`,
+imports neither `route_allowance.py` nor `band_history.py`, and refuses by construction to turn this measurement
+into a band move in either direction.
+
+## The third legal route, and the two constraints that shaped it
+
+The two routes the gate already prices are (a) the chunked GDN prompt form of §04.7 — the family the pins came
+from — and (b) the token-by-token recurrent form of §04.4. D-3 needed a **third**, independent of both.
+
+**Route c: a different GDN chunk width under §04.7.** The legality is verbatim §04.7: *"Any prefill algorithm is
+correct iff, for every t, it returns the `o[t]` and final `S` of §04.4 applied token-by-token … vLLM-ref and the
+engine may differ in chunk size or fusion strategy"*. The gate that licenses that sentence already exists —
+`speccheck/gates/run_chunkcheck.py` (chunk vs recurrent ≥ 0.99999 per layer, both equidistant from the pinned
+reference; A-08 closed). It is not a knob: it re-associates the same F32 sums with a different block width,
+nothing re-typed or dropped, which is `prototype/mlp_gemv/floor_probe.py`'s reassociation argument (§10.1 F1–F4)
+applied to the whole prompt→state map rather than to one dot. Several widths are priced per fixture so the
+answer cannot be one width's artifact.
+
+**Route d/e: §07.3's blocked `(max, sum)` decode softmax**, a second and orthogonal legal freedom
+(`Forward(attn_softmax="online")`), legal by §07.3 verbatim — *"the blocked form is not banned … it stays
+available in the oracle"* — with its band measured in A-17. It is priced and reported, but **kept out of the
+conservative multiplier**, because the shipped engine uses the one-pass form (§07.3's decision, since that one
+is bit-exact). Pricing a freedom nobody took would make the gate greener for nobody's benefit, which is exactly
+the failure D-3 exists to catch.
+
+Two constraints decided how this is built. First, **`speccheck/specimpl.py` may not be edited**:
+`engine/gate.py:allowance_inputs` pins the oracle's sha256 into every priced fixture, so an oracle edit would
+invalidate all five cached `route_allowance.json` files at once. The width is therefore rebound **in this
+process only**, as a module-attribute swap on `specimpl.gdn_chunk_scan`, and the rebind is counted so a silent
+no-op cannot pass; `--check-patch` runs route a through the rebind at the shipped width and requires it
+**bit-identical** to the unpatched route a. It is, on every fixture. Second, **a width that does not repartition
+the prompt is not a third route**: `gdn_chunk_scan` right-pads to a multiple of `C`, so a 17-token prompt is one
+chunk at `C=32` and at `C=64`, and the deficit comes back exactly 0.0. Such widths are reported INERT and
+excluded, detected by **bit-equality rather than a magnitude threshold** — F64 `cos` carries ~2e-16 of noise, so
+a threshold test would have fed a run of zeros into a max and understated the multiplier, which is a loosening.
+`dec64f`/`dec64t` (17/27-token prompts) therefore have two live widths, `C=8` and `C=16`; `dec300f` and `mt32f`
+have all four.
+
+## The instrument, and what proves it is measuring what the gate measures
+
+`engine/route_margin.py` computes, per step, each legal route's deficit **against route a** — the same reference
+the engine is judged against, since the pins came from the chunked family — and divides by `def_b`, the spread the
+gate prices today:
+
+```
+fitted  = max_j engine_def(j) / def_b(j)      today's basis: the engine sits in the numerator
+M_1     = max_j def_c(j)      / def_b(j)      the same functional with a legal route in the engine's seat
+M_wide  = max over every axis priced, §07.3 included
+ENVELOPE= max_j max_x def_x(j) / def_b(j)     widest legal deficit the priced set can make at that step
+```
+
+One functional with three numerators, so comparing them is arithmetic rather than argument. The statistic is a
+**max**, not a p95 or a median, because the rule it calibrates is a per-step cap that every step must clear — a
+p95 multiplier leaves the p95+1 step red by construction, and D-2's whole point was that a margin is the
+tightest constant admitting *every* measured step. p95 and median are printed beside it so a reader can see
+whether a given max is one outlier or the whole tail; they are not offered as the constant.
+
+Three properties were checked rather than assumed:
+
+- **The engine column is faithful.** Re-deriving `fitted` from the recorded gate logs reproduces the shipped raw
+  maxima **bit-exactly** on all four fixtures (`3.036751330619`, `3.4938884843377`, `7.98371554188016`,
+  `2.92207154233073`), so route b and the log reader are the same computation the allowance was priced with.
+- **The margin in force is read, not copied.** The comparison uses `engine/gate.py`'s own allowance reader, and
+  `verdict()` refuses to call a looser multiplier an improvement: `--selftest` case 4 fails if anyone makes it
+  possible to adopt a smaller number as a way of turning a gate green, and case 9 refuses a step where two
+  legal routes agree bit-for-bit rather than skipping it (a skipped step is a silently shrunken max, and a zero
+  denominator is the same event seen from the other side).
+- `--selftest` is 12 cases and passes, including the chunk-count arithmetic that makes an inert width inert
+  (cases 10–11) and the meanrel definition check below (case 12).
+
+## The numbers
+
+Engine column from the re-verified gate runs (`tmp/d6_gate_*.log`, the same runs D-2 was re-verified on); no
+device work was done for this section. `M_1` is the §04.7-width axis only — the legal freedom the shipped engine
+is actually entitled to take.
+
+| fixture | steps | engine-fitted | in force | M_1 lo | M_1 hi | M_wide | ENVELOPE | RED if M_1 lo adopted | RED at 1.00 |
+|---|---|---|---|---|---|---|---|---|---|
+| `dec64f` | 64 | **3.0368** @32 | 3.50 | 1.4481 (C8) | 1.7982 (C16) | 2.3971 (d) | 2.3971 | **10 of 64** | 45 of 64 |
+| `dec64t` | 64 | **3.4939** @54 | 3.50 | 1.5004 (C8) | 1.7173 (C16) | 1.7173 (C16) | 1.7173 | **25 of 64** | 58 of 64 |
+| `dec300f` | 128 | **7.9837** @86 | 7.99 | 1.4948 (C16) | 1.9622 (C128) | 1.9622 (C128) | 1.9622 | **85 of 128** | 125 of 128 |
+| `mt32f` | 32 | **2.9221** @19 | 2.93 | 1.1899 (C128) | 1.5446 (C32) | 1.7591 (e) | 1.7591 | **21 of 32** | 29 of 32 |
+
+The trap fires on every fixture, and the answer to "which multiplier, max or p95 or median" does not change it:
+the widest legal route anywhere in this measurement reaches 2.40, the engine needs 2.92–7.99. **The engine sits
+1.7×–4.1× outside what any legal prompt route produces at the step that sets its own margin** (1.3× on `dec64f`
+alone if §07.3's axis is counted). Per the task's own instruction, that is a finding about the engine: nothing
+was loosened, no band touched, no fixture re-priced.
+
+It is not a small-denominator artifact either. The step that sets each margin is one where the *priced spread is
+large*, not where it collapsed — `dec64f` step 32 sits at the 95th percentile of that fixture's spreads
+(7.098e-04 against a 4.930e-05 median) and `dec300f` step 86 at the 83rd. And at those steps the legal routes do
+open (at `dec64f` step 32 the worst legal excursion is 1.276e-03 against the priced 7.098e-04) — the engine's
+2.156e-03 there is simply 1.7× beyond the widest legal excursion at the same step, in absolute magnitude, not
+merely beyond the ratio.
+
+## The meanrel column is worse than that: the shipped constant mixes two statistics
+
+§10.2 fixes the definition, and `engine/gate.py:metrics` follows it: meanrel is **mean|Δ| / mean|ref|**, a ratio
+of means, with the BAND comment saying explicitly that the mean-of-ratios form "explodes on the near-zero logits
+that most of a 248 320-wide vocabulary is". But `route_price.meanrel` — the denominator of every cached
+`margin_rel` — **is** that mean of ratios. So `margin_rel` is a ratio of two different statistics. The gate's
+arithmetic is internally consistent (the same two quantities are used when pricing and when gating, so no gate
+result is wrong as applied), but the constant cannot be read as "the engine's relative error is 0.42× the legal
+route spread"; the legal denominator is on a different scale from the engine numerator. `--selftest` case 12
+prices the definitional gap directly: on a vocabulary-shaped tensor (one real logit, 999 near-zero ones) the same
+absolute perturbation prices **11× higher** as a mean of ratios than as a ratio of means.
+
+Priced both ways, on the same routes:
+
+| fixture | as shipped (engine rom / route mor) | M_1, same basis | consistent (§10.2 both sides) | M_1, consistent | in force |
+|---|---|---|---|---|---|
+| `dec64f` | 0.3344 @54 | 1.8408–1.8755 | **1.8284** @32 | 1.3211–1.7040 | 0.42 |
+| `dec64t` | 0.4111 @4 | 2.1256–2.5169 | **2.2522** @56 | 1.4653–1.5502 | 0.42 |
+| `dec300f` | 0.7198 @72 | 2.2911–5.1284 | **3.2000** @86 | 1.3832–1.7411 | 0.72 |
+| `mt32f` | 0.2303 @3 | 1.5945–2.0397 | **1.8907** @19 | 1.1878–1.3460 | 0.24 |
+
+Read as shipped, adopting a route-derived meanrel multiplier would **loosen** the line by 3–7× (0.24 → 1.59 on
+`mt32f`, 0.72 → 2.29 on `dec300f`), which the same anti-loosening rule refuses. Read consistently — the column
+on the right, which is the only one that means what it appears to say — the picture matches the cos column
+instead: the engine needs 1.83–3.20 and the legal width axis reaches 1.19–1.74, so it is tight in the same
+direction, for the same reason.
+Both readings end at `keep`. The mismatch itself is reported, not fixed: correcting it would multiply every
+`margin_rel` by ~4–5×, which is a band move and therefore the operator's call with a `tools/band_history.py`
+line, not an artefact of this measurement.
+
+## Why the route spread cannot price the engine's deficit — the baseline that decides it
+
+The engine's deficit is measured against the **pinned HF dump**; every legal route's deficit above is measured
+against **specimpl's route a**. Different references, so two more quantities are priced, both on the pin: how far
+the oracle's own route a sits from the dump the engine is judged on (`ORACLE` below, in margin units), and — the
+only comparison with both sides on the same dump — the per-step ratio of the engine's deficit to the oracle's
+(`ENGINE/ORACLE`, a max over steps of a per-step ratio, not a ratio of two maxima).
+
+| fixture | engine vs pin, fitted | oracle a vs pin, in margin units | engine ÷ oracle, per step | oracle worst deficit | engine worst deficit |
+|---|---|---|---|---|---|
+| `dec64f` | 3.0368 @32 | 3.7758 @34 | **3.4801** @32 | 3.170e-03 | 2.156e-03 |
+| `dec64t` | 3.4939 @54 | 2.2535 @54 | **1.6795** @56 | 1.794e-04 | 2.410e-04 |
+| `dec300f` | 7.9837 @86 | 3.2254 @89 | **3.2274** @86 | 4.926e-04 | 4.632e-04 |
+| `mt32f` | 2.9221 @19 | 1.9357 @23 | **2.4615** @19 | 1.810e-04 | 3.726e-04 |
+
+Both halves of that table matter and neither is a fact about the engine alone. The oracle's own chunked route — a
+legal route, one of the two the gate already prices — needs **1.94–3.78** in margin units all by itself, which is
+the same order as the entire fitted margin, so a large part of what the band is paying for is the distance between
+the reference implementation and the HF dump it is pinned against (A-18's chaos floor, 0.8776 sdpa-vs-eager, one
+level up). No pair of specimpl-internal routes can exhibit that term, both members of such a pair being
+specimpl. **But it does not absorb the engine**: measured per step against the same dump, the engine's deficit is
+**1.68–3.48×** the oracle's own deficit at that step. The engine's error is on top of the reference's, not
+inside it.
+
+That is the honest shape of the answer to D-3. The self-referentiality the row complained about is real — the
+current denominator is a route pair, and the numerator contains a term neither member of that pair can produce.
+It is also not a licence to treat the engine's deficits as noise: they are against the dump the gate is defined
+on, and they exceed the oracle's own gap at the same step on every fixture. Two wrong readings are both worth
+naming, because the numbers invite them. (1) Re-denominating on the oracle-vs-pin column does not make the margin
+engine-free in the way D-3 hoped — it moves the required number from 2.92–7.98 to **1.68–3.48**, which is smaller
+and no longer self-referential, but it is still a number measured on the engine. (2) It is per-fixture and
+per-prompt in exactly the way D-2 already found unsafe to pool, and it would have to be priced and cached for
+every prompt the engine is ever gated on.
+
+## Recommendation
+
+**Keep the margins as they are: 3.50 / 3.50 / 7.99 / 2.93 (cos) and 0.42 / 0.42 / 0.72 / 0.24 (meanrel).** The
+engine-independent multiplier D-3 asked for exists, it is 1.19–1.96 (§04.7 widths) or at most 2.40 (any legal axis
+priced here), and it is 1.7×–4.1× smaller than what the engine needs on every fixture priced; adopting it would
+turn 10, 25, 85 and 21 of the respective fixture's steps RED. The reason is now identified rather than
+speculated about: the numerator contains an oracle-vs-dump term that no legal-route pair inside the oracle can
+produce, so the basis cannot be replaced by route disagreement at this rule shape.
+
+If the margins are ever to be replaced rather than re-fitted, two candidate rule shapes were priced here and
+neither adopted. The first, an **absolute legal envelope** per step (`allow(j) = max over legal routes of
+def_route(j)` measured against route a), was checked at all four margin-setting steps and **fails at every one**:
+the widest legal excursion at `dec64f` step 32 is 1.276e-03 where the engine's deficit there is 2.156e-03, and
+the same holds on `dec64t` (8.339e-05 vs 2.328e-04), `dec300f` (9.577e-05 vs 4.632e-04) and `mt32f` (1.737e-04 vs
+3.726e-04). The second is the only one worth carrying forward: **denominate the allowance on the oracle's own
+gap to the pin** — `allow(j) = margin_pin × def_pin_vs_route_a(j)` — which puts the denominator on the same dump
+as the numerator and removes the term no route pair can produce. The multiplier it needs is **1.68–3.48** instead
+of 2.92–7.98. That is still a number measured on the engine, so it does not settle D-3's original objection; it
+shrinks the self-reference rather than removing it, and it would need a third column in every
+`route_allowance.json` plus a rule change in `engine/gate.py`. Both are decisions about what the band means, not
+calibrations, and they belong in the plan's decision log with a band-history line before any code follows.
+
+## What this pass ran, and what was left for the device pass
+
+Everything here is CPU-only: the torch reference passes plus the already-recorded gate logs. No device work was
+done and **no timing was taken**; the gates themselves were not re-run, because nothing that feeds them changed
+(this section adds one read-only instrument and documentation; no band, no allowance file, no `specimpl`, no
+`gate.py`). The recorded D-2 re-verification remains the green state.
+
+```bash
+.venv/bin/python engine/route_margin.py --selftest                    # 12 cases, no files touched
+.venv/bin/python engine/route_margin.py --fixture dec64f --engine-log tmp/d6_gate_dec64f.log \
+    --check-patch --out tmp/route_margin_dec64f.json                  # repeat per fixture
+```
+
+Left open, named:
+
+1. **The meanrel definition mismatch is unfixed on purpose.** Making both sides of `margin_rel` use §10.2's
+   definition changes four shipped constants by ~4–5×; that is a band move. The measurement needed to expose it
+   is in this section and in `route_margin.py`'s two meanrel columns.
+2. **`dec64f` and `dec64t` still carry 3.50 / 0.42** from the retired global scheme, while their own derivations
+   are 3.04 / 0.34 and 3.50 / 0.42 — i.e. the carried number is *looser* than their own measurement allows.
+   Pre-existing, recorded under D-2, untouched here.
+3. **`dec64f` step 17 is unexplained by any of this, and it is reference-side.** **Every** route — including
+   route a, the pin's own chunked family — picks a different id than the pin at that one step and agrees
+   everywhere else (8/8 routes, 63/64). So it is a place where `specimpl` and the HF dump themselves part
+   company, not an engine event; it is the single clearest illustration of the oracle-vs-dump term above, and
+   related to §07.5's stop-check and D-4's tie finding without being resolved by either.
+4. **The pin-side baseline is priced for route a only, and only as a diagnostic.** If the second candidate rule
+   above were ever adopted, every legal route's distance to the pin needs pricing per step and caching in the
+   allowance file (cheap — the pins are already on disk), and the interaction with A-18's depth decay has to be
+   stated rather than assumed.
+5. **A 4k-context fixture will want a bigger number, and this section does not make one available.** The honest
+   statement for Q5 is that the band there is engine-fitted, a large part of its numerator is the oracle's own
+   distance from HF eager, and the two rule shapes that could change what the band means are both priced and
+   both rejected here for a reason: the envelope because it fails at every margin-setting step, the pin-side
+   denominator because it shrinks the self-reference without removing it.
