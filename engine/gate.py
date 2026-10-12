@@ -2829,7 +2829,7 @@ def selftest(fixture: str = "dec8") -> int:
                       " ADMITTED as a proved tie (D-8). The id is"
                       f" {tie_other(PREFILL_ROW, '--y0-alt')}, the pinned top-1 is"
                       f" {pin_tie(PREFILL_ROW)['top1']}"))
-    # The route allowance has to still bite, and bite where the old flat band could not:
+    # The route allowance has to still bite, and bite where the old flat band could not: noise sized to
     # exceed this step's own measured spread while staying inside §10.1's flat 5e-4 deficit. Aimed at the
     # tightest priced allowance in the fixture (the step where the flat floor was most nearly blind), and
     # skipped out loud if this fixture has no priced allowance or no such step — a negative every band
