@@ -3008,18 +3008,25 @@ must stream — was gated at the op level but never once run by the engine: `wid
 rows under the staging and everything above 512 lanes on that fixture is a single-row decode step. Taking
 `wide520f`'s own 500 prompt ids plus its 25 pinned greedy continuations as one **525-token prompt** does
 the job without a new pin (this is a wave-vs-one-row claim, and §11's identity half needs no reference
-values to be checkable): three runs at `--wave-rows 512 / 5 / 1`, `--steps 0`.
+values to be checkable). Five runs at `--steps 0`, `--wave-rows 512 / 500 / 300 / 5 / 1`; the two that
+actually mix are **500 and 300**, because a wave has to straddle the staging *internally* to mix and a
+512-row wave cannot — its rows are lanes 1–512 (all under it) and the ragged 13-row tail is lanes 513–525
+(all over it). At `--wave-rows 500` the second wave is lanes 501–525: twelve rows the staging finishes and
+thirteen that must stream, in one launch.
 
 ```
-family=attn calls=12   calls_batched=12  rows_total=3150 rows_max=512   # 512 + 13 rows, split 2
+family=attn calls=12   calls_batched=12  rows_total=3150 rows_max=512   # waves 512+13: neither wave mixes
+family=attn calls=12   calls_batched=12  rows_total=3150 rows_max=500   # 500+25: lanes 501-525 mix
+family=attn calls=12   calls_batched=12  rows_total=3150 rows_max=300   # 300+225: lanes 301-525 mix
 family=attn calls=630  calls_batched=630 rows_total=3150 rows_max=5     # 105 waves of 5
 family=attn calls=3150 calls_batched=0   rows_total=3150 rows_max=1     # per token, as before
 ```
 
-`rows_total` 3150 on all three (§06.4: fewer launches, not less work — 3150 = 6 layers × 525 rows), and
-the priced row — the last one, at **525 lanes**, which is above the staging in all three and therefore
-takes two lane blocks — is **byte-identical** across the three runs, `logits524.bin` and `sampled.txt`
-both. So the 512-row grid really did mix one-pass rows with streaming rows, `attn_combine` skipped the
-rows the staging finished, and the reduction grouping a row sees does not depend on the company it was
-launched with — at least while waves start on multiples of the staging, which is where §3.1's caveat
-begins. No pin was created, priced or compared against; `data/refs/` is untouched and no band moved.
+`rows_total` 3150 on all five (§06.4: fewer launches, not less work — 3150 = 6 layers × 525 rows), and the
+priced row — the last one, at **525 lanes**, above the staging in every run so it takes two lane blocks in
+each — is **byte-identical across all five**, `logits524.bin` and `sampled.txt` both. So one wave can
+carry one-pass and streaming rows at once, `attn_combine` skipping the rows the staging finished does not
+disturb the rows that did not, and the grouping a row sees does not depend on the company it was launched
+with. No pin was created, priced or compared against; `data/refs/` is untouched and no band moved. A first
+cut of this note credited the 512-row wave with the mixing; it does not mix, and the narrower claim is the
+one worth keeping.
