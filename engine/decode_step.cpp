@@ -185,10 +185,10 @@ DecodeScratch allocate_scratch(int wave_rows) {
     sc.wave_rows = wave_rows;
     // The row family: [wave_rows, H] / [wave_rows, I]. A decode step uses row 0 of each and issues
     // exactly the launches it issued when these were one row wide; a prefill wave uses rows 0..n-1
-    // and gets one launch per call instead of n of them. At kMaxWaveRows this is ~18 MB of scratch
-    // per request against a 1.55 GB checkpoint and a ~34 GiB pool — AGENTS.md is explicit that
-    // memory capacity is not the constraint for this model, so the wave buys the batching with
-    // scratch rather than with a second code path.
+    // and gets one launch per call instead of n of them. P4's part of the family is ~18 MB of scratch
+    // per request at kMaxWaveRows — AGENTS.md is explicit that memory capacity is not the constraint
+    // for this model, so the wave buys the batching with scratch rather than with a second code path.
+    // P5 adds to that family below, not beside it.
     const int h = (int64_t)wave_rows * kHidden;
     const int i = (int64_t)wave_rows * kIntermediate;
     // P5's side of the same argument: the nine projections read a [wave_rows, in] tile and write a
