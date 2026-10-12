@@ -2112,6 +2112,43 @@ done and **no timing was taken**; the gates themselves were not re-run, because 
     --check-patch --out tmp/route_margin_dec64f.json                  # repeat per fixture
 ```
 
+## The handover: what this pass could not run, and the sequence if a band move is ever decided
+
+Two things are device-bound and were therefore not run here, and one is deliberately not this pass's to run.
+
+**Re-verifying the fixtures green** (main agent only, blocking, zero subagents — `engine/gate.py` drives the
+built binary on the device this session is being served from):
+
+```bash
+tools/gpu_lock.sh acquire "D-3 keep: re-verify"; tools/gpu_lock.sh util
+for f in dec8 dec64f dec64t dec300f mt32f; do .venv/bin/python engine/gate.py --fixture $f; done
+tools/gpu_lock.sh release "D-3 keep: re-verify"
+```
+
+Expected, from the recorded D-2 pass: 94 / 550 / 547 / 1059 / 291 checks, zero failures, and the rule line
+naming each fixture's own margin (3.50, 3.50, 7.99, 2.93). Nothing here should change that — no input to the
+gate moved — so if any of those five goes red after this commit, the cause is something else in the tree and
+`route_margin.py` is a useful witness: it will show whether the reference's own routes moved.
+
+**Moving a margin, if a decision is ever taken to do one** (the documented way, which `route_allowance.py`
+enforces — it refuses a re-price that differs from the shipped constant until the file is deleted deliberately,
+and it writes its own `band_history` line for both the write and the refusal):
+
+```bash
+# ONLY under a recorded decision (plan §3, revisit clause (a) or (b)) — D-3 as measured says do not.
+rm data/refs/<fixture>/route_allowance.json                       # the deliberate step; it is what makes it visible
+.venv/bin/python engine/route_price.py --fixture <fixture> \
+    --engine-log tmp/d6_gate_<fixture>.log --out tmp/route_<fixture>.json
+.venv/bin/python engine/route_allowance.py --table tmp/route_<fixture>.json --dry-run
+.venv/bin/python engine/route_allowance.py --table tmp/route_<fixture>.json
+.venv/bin/python tools/band_history.py check                      # must come back clean
+```
+
+and the same in `engine/results.md` about what moved and why, which is the half the tool cannot write for you.
+If the change decided is instead a *rule shape* (the pin-side denominator above), that sequence is not enough:
+it needs a third per-step column in the allowance schema and a matching rule in `engine/gate.py`, which is a
+change to what the gate means, not a constant.
+
 Left open, named:
 
 1. **The meanrel definition mismatch is unfixed on purpose.** Making both sides of `margin_rel` use §10.2's
