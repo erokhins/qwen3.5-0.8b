@@ -52,7 +52,7 @@ WORK = Path("/tmp/gdn_in")
 OUT = Path("/tmp/gdn_out")
 
 GDN_LAYERS = [l for l in range(24) if l % 4 != 3]      # §00: every 4th layer is full attn
-D, NH, CH = 128, 16, 6144
+D, NH, CH, K = 128, 16, 6144, 4
 Q_SCALE = 128 ** -0.5
 
 
@@ -155,6 +155,243 @@ def report(label: str, got: np.ndarray, ref: np.ndarray, tol: float, fails: list
         fails.append("%s: meanrel %.3g > %.3g" % (label, meanrel, tol))
 
 
+def run_typed(mode: str, work: Path, out: Path, tokens: int, neg: str = "none") -> dict:
+    """`run()` with the two P6 switches. Separate helper rather than more defaults on the old one, so
+    the decode-step stages above keep their exact command line."""
+    cmd = [str(BIN), "--mode", mode, "--dir", str(work), "--out", str(out),
+           "--iters", "1", "--tokens", str(tokens)]
+    if neg != "none":
+        cmd += ["--neg", neg]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode:
+        print(proc.stdout, proc.stderr)
+        raise SystemExit("%s tokens=%d neg=%s failed" % (mode, tokens, neg))
+    for line in proc.stdout.splitlines():
+        if line.startswith("RESULT"):
+            return dict(kv.split("=", 1) for kv in line.split()[1:])
+    raise SystemExit("no RESULT line from %s" % mode)
+
+
+def exact(label: str, got: np.ndarray, ref: np.ndarray, fails: list, why: str = "") -> bool:
+    """Bit-identity, which is the only honest claim for two launches of the same arithmetic over the
+    same bytes. `why` says what is being claimed, because "not bit-identical" is not a diagnosis."""
+    same = bool(np.array_equal(got, ref))
+    ndiff = int((got != ref).sum())
+    print("  %-52s bitexact=%s%s%s" % (label, same, "" if same else "  %d/%d elems differ" % (
+        ndiff, got.size), "  " + why if not same and why else ""))
+    if not same:
+        fails.append("%s: %d/%d elements differ%s" % (label, ndiff, got.size,
+                                                      " — " + why if why else ""))
+    return same
+
+
+def moved_rows(a: np.ndarray, b: np.ndarray) -> list:
+    """Which ROWS differ — the locality question every negative below answers. A negative that moves
+    everything catches itself and proves nothing (`prototype/mlp_gemv/results.md`)."""
+    if a.shape != b.shape:
+        return [-1]
+    return [i for i in range(a.shape[0]) if not np.array_equal(a[i], b[i])]
+
+
+def tokens_gate(fx: str, nlayers: int, fails: list) -> int:
+    """P6: §04.2's conv and §04.3's gates over a [T, CH] tile, against the PREFILL pins.
+
+    The decode-step stages above cannot test any of this: `smoke` is one token per dump, so its conv
+    window is always the one the engine rolls by hand and a kernel that ignored the window entirely
+    would pass them. A prefill fixture has T tokens per layer, which is what makes four claims testable:
+
+      1. the tile reproduces q/k/v_post_conv for EVERY row, not just the last one (§04.2's causality);
+      2. the window it writes is `raw[T-3..T-1]` — compared as CONTENTS, because `u` cannot see what
+         the window will be read for (a lagged window produces a correct `u`);
+      3. a wave that carries a window reproduces the single-wave result bit for bit (A-04's `T > 1`
+         end condition, tested rather than assumed), and zero-padding there instead moves rows 0..2 of
+         the second wave and nothing else — the locality proof that the carried window is load-bearing;
+      4. `--tokens 1` is bit-identical to the wide launch row by row, which is what licenses keeping
+         one kernel for both paths instead of a decode kernel and a prefill kernel.
+
+    Each injected bug is required to appear only where it lives, same rule as the negatives in
+    `prototype/mlp_gemv/results.md`.
+    """
+    global WORK, OUT
+    ref = ROOT / "data/refs" / fx
+    if not ref.is_dir():
+        raise SystemExit("no such prefill fixture: %s" % ref)
+    T = int(np.load(ref / "L00.gdn.beta.npy").shape[1])
+    # A wave split with a ragged second wave, so the prompt end falls mid-chunk and the carried window
+    # has real work to do. 7 and 5 are not divisors of 46 or 277, which is the point: with an even
+    # split the last interior boundary would land on a multiple of the wave size and the case most
+    # like `p128` (a boundary-aligned prompt end) would be the only one priced.
+    splits = [s for s in (T - 7, T - 5, T // 2) if 3 < s < T - 3][:2]
+    print("tokens gate on %s: T=%d, layers=%d, wave splits=%s"
+          % (fx, T, nlayers, splits))
+
+    for l in GDN_LAYERS[:nlayers]:
+        ll = "L%02d" % l
+        w = WORK / fx / ll
+        o = OUT / fx / ll
+        w.mkdir(parents=True, exist_ok=True)
+        o.mkdir(parents=True, exist_ok=True)
+        raw = np.ascontiguousarray(np.squeeze(np.load(ref / f"{ll}.gdn.mixed_qkv_pre_conv.npy")).T)
+        assert raw.shape == (T, CH), (ll, raw.shape)
+        z = np.zeros((3, CH), np.float32)     # the request-start window §08.2 specifies
+        Cw = wkey(f"model.language_model.layers.{l}.linear_attn.conv1d.weight").float().numpy()
+        Cw = np.ascontiguousarray(Cw.reshape(CH, K))
+        put_at(w, "raw.f32", raw)
+        put_at(w, "win.f32", z)
+        put_at(w, "convw.f32", Cw)
+        ref_u = np.concatenate([np.squeeze(np.load(ref / f"{ll}.gdn.{n}.npy")).reshape(T, NH * D)
+                                for n in ("q_post_conv", "k_post_conv", "v_post_conv")], axis=1)
+
+        # ---- 1. the whole prompt in one wave, window starting at zeros (§08.2's request start) ----
+        run_typed("conv", w, o, T)
+        u = np.fromfile(o / "u.f32", dtype=np.float32).reshape(T, CH).copy()
+        win_new = np.fromfile(o / "new_win.f32", dtype=np.float32).reshape(3, CH).copy()
+        print(f"{ll} §04.2 conv, one wave of {T} tokens (window = zeros):")
+        for nm, sl in (("q_post_conv", slice(0, 2048)), ("k_post_conv", slice(2048, 4096)),
+                       ("v_post_conv", slice(4096, 6144))):
+            report(nm, u[:, sl].reshape(T, NH, D),
+                   np.squeeze(np.load(ref / f"{ll}.gdn.{nm}.npy")), 1e-6, fails)
+        # 2. the window, compared to the pre-conv raw and NOT to anything derived from `u`: a window
+        # taken after the conv is the bug, so an `u`-based check could not see it.
+        exact("new window == raw[T-3..T-1] (contents)", win_new, raw[-3:], fails,
+              "the window the next wave would read is wrong, so the next wave's first three rows"
+              " would be computed from the wrong taps (§08.2, A-04)")
+
+        # ---- 3. the same prompt as two waves: the window is the only thing carried ----
+        for c in splits:
+            put_at(w, "raw.f32", np.ascontiguousarray(raw[:c]))
+            put_at(w, "win.f32", z)
+            run_typed("conv", w, o, c)
+            winA = np.fromfile(o / "new_win.f32", dtype=np.float32).reshape(3, CH).copy()
+            put_at(w, "raw.f32", np.ascontiguousarray(raw[c:]))
+            put_at(w, "win.f32", winA)
+            run_typed("conv", w, o, T - c)
+            uB = np.fromfile(o / "u.f32", dtype=np.float32).reshape(T - c, CH).copy()
+            winB = np.fromfile(o / "new_win.f32", dtype=np.float32).reshape(3, CH).copy()
+            print(f"{ll} two waves, boundary after row {c} (prompt end mid-chunk):")
+            exact(f"wave A window == raw[{c-3}:{c}]", winA, raw[c - 3:c], fails,
+                  "wave A handed wave B the wrong three taps")
+            exact(f"wave B u == one-wave u rows {c}..", uB, u[c:], fails,
+                  "the carried window did not reproduce the single-wave conv — A-04's T>1 clause")
+            exact("window after two waves == raw[T-3..T-1]", winB, raw[-3:], fails)
+            # …and the carry is load-bearing: zero-pad the same second wave and exactly its first
+            # three rows move. If this injection changed nothing, the "carry" above would be vacuous.
+            put_at(w, "win.f32", winA)
+            run_typed("conv", w, o, T - c, neg="zero_pad")
+            uBz = np.fromfile(o / "u.f32", dtype=np.float32).reshape(T - c, CH).copy()
+            rows = moved_rows(uBz, uB)
+            ok = bool(rows) and set(rows) <= {0, 1, 2}
+            print(f"  {'':<52} zero_pad injection: rows {rows} moved, want a non-empty subset"
+                  f" of [0,1,2]  %s" % ("ok" if ok else "FAIL"))
+            if not ok:
+                fails.append(f"{ll} split {c}: zero-padding the carried window moved rows {rows}")
+        put_at(w, "raw.f32", raw)      # restore for the stages below
+
+        # ---- 4. --tokens 1 must be the launch this op shipped with, row for row ----
+        probe = sorted({0, 1, 2, 3, splits[0] - 1, splits[0], splits[0] + 1, T - 2, T - 1})
+        bad = []
+        for i in probe:
+            put_at(w, "raw.f32", np.ascontiguousarray(raw[i:i + 1]))
+            # A row before index 3 has fewer than three carried taps and the shortfall is zeros at the
+            # FRONT of the window, which is exactly how `win` is indexed (row k of `win` is column
+            # k-(K-1-i) of the sequence), so a short prefix pads the front.
+            pad = np.zeros((3 - min(i, 3), CH), np.float32)
+            put_at(w, "win.f32", np.concatenate([pad, raw[max(i - 3, 0):i]], axis=0)
+                   if i else z)
+            run_typed("conv", w, o, 1)
+            one = np.fromfile(o / "u.f32", dtype=np.float32).reshape(1, CH)
+            if not np.array_equal(one, u[i:i + 1]):
+                bad.append(i)
+        print(f"  %-52s bitexact=%s rows %s of %s probed"
+              % ("T=1 launches == the wide launch, row by row", not bad, probe, len(probe)))
+        if bad:
+            fails.append(f"{ll}: --tokens 1 differs from the tile at rows {bad}")
+
+        # ---- 5. conv negatives, each required to appear only where it lives ----
+        put_at(w, "raw.f32", raw)      # the one-row probes above left a one-row file behind
+        put_at(w, "win.f32", z)
+        # `tap_stride` indexes the tile as if it were still HF's [CH][tokens]. At tokens == 1 the two
+        # indexings are the same address, so the bug is invisible on a decode step and only the wide
+        # launch can show it — which is the reason this gate exists at all. The two window injections
+        # are the opposite case: `u` cannot see either one, so only a direct window comparison can.
+        run_typed("conv", w, o, 1, neg="tap_stride")
+        one_bad = not np.array_equal(np.fromfile(o / "u.f32", dtype=np.float32).reshape(1, CH),
+                                     u[0:1])
+        print(f"  {'':<52} tap_stride at tokens=1 is invisible (both indexings are one address)"
+              f"  %s" % ("ok" if not one_bad else "FAIL"))
+        if one_bad:
+            fails.append(f"{ll}: tap_stride moved the tokens=1 launch — the single-token path is"
+                         " supposed to be unaffected by the tile indexing bug")
+        for neg, claim in (("tap_stride", "every row of the wide launch moves"),
+                           ("win_lag", "u unchanged, window moved"),
+                           ("win_from_u", "u unchanged, window moved")):
+            run_typed("conv", w, o, T, neg=neg)
+            un = np.fromfile(o / "u.f32", dtype=np.float32).reshape(T, CH)
+            wn = np.fromfile(o / "new_win.f32", dtype=np.float32).reshape(3, CH)
+            u_rows, w_same = moved_rows(un, u), np.array_equal(wn, win_new)
+            if neg == "tap_stride":
+                ok = len(u_rows) == T and w_same
+            else:
+                ok = not u_rows and not w_same
+            print(f"  %-52s %s  u rows moved: %s  window unchanged: %s"
+                  % (f"neg {neg} ({claim})", "ok" if ok else "FAIL",
+                     f"{len(u_rows)}/{T}" if neg == "tap_stride" else str(u_rows[:6]), w_same))
+            if not ok:
+                fails.append(f"{ll}: neg {neg} misplaced — u rows {u_rows[:6]} of {T}, window"
+                             f" unchanged {w_same}")
+
+        # ---- 6. §04.3 gates over the tile, from the pinned a/b projections ----
+        a_raw = np.ascontiguousarray(np.squeeze(np.load(ref / f"{ll}.in_proj_a.out.npy")))
+        b_raw = np.ascontiguousarray(np.squeeze(np.load(ref / f"{ll}.in_proj_b.out.npy")))
+        A_log = wkey(f"model.language_model.layers.{l}.linear_attn.A_log").float().numpy()
+        dt_bias = wkey(f"model.language_model.layers.{l}.linear_attn.dt_bias").float().numpy()
+        put_at(w, "a_raw.f32", a_raw)
+        put_at(w, "b_raw.f32", b_raw)
+        put_at(w, "A_log.f32", A_log)
+        put_at(w, "dt_bias.f32", dt_bias)
+        run_typed("gates", w, o, T)
+        g = np.fromfile(o / "g.f32", dtype=np.float32).reshape(T, NH)
+        beta = np.fromfile(o / "beta.f32", dtype=np.float32).reshape(T, NH)
+        print(f"{ll} §04.3 gates over {T} tokens:")
+        # Two levels, same as F1 above, for the same reason: against the same input bytes the formula
+        # is checkable exactly, while the PIN can only be bounded — the reference's `beta` dump is
+        # BF16-valued, so the residual there is the dump's rounding and not the kernel's.
+        At = torch.tensor(np.asarray(A_log, dtype=np.float32))
+        dt = torch.tensor(np.asarray(dt_bias, dtype=np.float32))
+        gt = (-At.exp() * torch.nn.functional.softplus(
+            torch.tensor(np.asarray(a_raw, dtype=np.float32)) + dt)).numpy()
+        bt = torch.sigmoid(torch.tensor(np.asarray(b_raw, dtype=np.float32))).numpy()
+        report("g vs torch(unit, same bytes)", g, gt, 1e-6, fails)
+        report("beta vs torch(unit, same bytes)", beta, bt, 1e-6, fails)
+        report("g vs pin (bounded)", g,
+               np.squeeze(np.load(ref / f"{ll}.gdn.g_decay_log.npy")), 5e-3, fails)
+        report("beta vs pin (bounded)", beta, np.squeeze(np.load(ref / f"{ll}.gdn.beta.npy")),
+               5e-3, fails)
+        run_typed("gates", w, o, T, neg="row_zero")
+        gz = np.fromfile(o / "g.f32", dtype=np.float32).reshape(T, NH)
+        rows = moved_rows(gz, g)
+        ok = rows and 0 not in rows
+        print(f"  {'':<52} neg row_zero: rows {rows[:4]}… moved, row 0 still exact"
+              f"  %s" % ("ok" if ok else "FAIL"))
+        if not ok:
+            fails.append(f"{ll}: neg row_zero misplaced (rows {rows[:4]})")
+
+    print()
+    if fails:
+        print("TOKENS GATE FAIL")
+        for f in fails:
+            print("  -", f)
+        return 1
+    print("TOKENS GATE PASS: the wave conv and gates reproduce the prefill pins row by row, the"
+          " carried window is exact across an interior boundary, T=1 is bit-identical to the wide"
+          " launch, and every injection stayed where it was put.")
+    return 0
+
+
+def put_at(work: Path, name: str, arr: np.ndarray) -> None:
+    np.ascontiguousarray(arr, dtype=np.float32).tofile(work / name)
+
+
 def main() -> int:
     global ITERS, WORK, OUT
     ap = argparse.ArgumentParser()
@@ -165,6 +402,15 @@ def main() -> int:
                     help="where the assembled inputs go — the binary's --dir (default %(default)s)")
     ap.add_argument("--out-dir", type=Path, default=OUT,
                     help="where kernel output goes — the binary's --out (default %(default)s)")
+    ap.add_argument("--tokens", metavar="FIXTURE", default="",
+                    help="P6: run the WAVE stages against the prefill fixture named (p64 or p300)"
+                         " instead of the decode-step stages. Checks §04.2/§04.3 over a [T,6144]"
+                         " tile, the carried conv window across a wave boundary, T=1 bit-identity"
+                         " against the single-token launch, and that each injected bug appears only"
+                         " where it lives")
+    ap.add_argument("--layers", type=int, default=2,
+                    help="with --tokens: how many GDN layers to price (default 2 — every shipped"
+                         " engine fixture already prices all 18 through its logits)")
     args = ap.parse_args()
     ITERS, WORK, OUT = args.iters, args.work_dir, args.out_dir
     WORK.mkdir(parents=True, exist_ok=True)
@@ -173,6 +419,9 @@ def main() -> int:
         subprocess.run([str(Path(__file__).with_name("build.sh"))], check=True)
 
     fails: list[str] = []
+    if args.tokens:
+        return tokens_gate(args.tokens, args.layers, fails)
+
     prefpref = "L00.gdn."
 
     # ---------------- F1: S04.3 gates ------------------------------------

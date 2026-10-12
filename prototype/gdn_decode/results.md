@@ -109,3 +109,55 @@ reads `S` to form `r`; pass B re-reads `S`, writes `γS + k̃⊗Δv`, and accumu
 the stored value. `k̃`, `q̃` staged in shared (1 KiB each); two block reductions for the L2
 norms. q/k/v arrive bf16-rounded (the reference casts before the recurrence) and everything
 else is F32.
+
+## P6: the wave form — `conv` and `gates` over a `[T][CH]` tile (plan §4 P6)
+
+Until P6 the engine called `conv_kernel` and `gates_kernel` once per token, so this file had never
+seen a tile. Both now take a `tokens` argument: `conv_kernel` launches `dim3(CH/256, tokens)` — grid.x
+is still the channel strip the single-token launch used, so `tokens == 1` is the same grid and not a
+grid padded to one — and `gates_kernel` launches `<<<tokens, NH>>>`. The per-element arithmetic did
+not move: F32 taps in `j` order, one BF16 round, SiLU; the gates are still one thread per
+(token, head).
+
+What the width adds is the part that had no test before: **the conv window**. A tile beginning at
+token `t > 0` has three columns of history that are not in the tile, and §08.2/A-04 say they are the
+carried **pre-conv** `raw` values, not zeros. `conv_tap` states that rule once for both the body and
+the window write, and `new_win` is `raw[T−3..T−1]` — read through the same tap rule, so a tile that
+begins mid-request writes the same window a token-at-a-time walk would.
+
+Gate: `check.py --tokens p64` (T=46) / `--tokens p300` (T=277), `--layers N` (default 2). Run on
+device, foreground, `tools/gpu_lock.sh util` 47–93 % at the time; **correctness only, no timing taken**.
+
+| stage (per layer) | result |
+|---|---|
+| one wave of T, window = zeros: `u` vs `q/k/v_post_conv` | `max\|d\| 0`, bitexact on all T rows, both fixtures |
+| window written by that wave vs `raw[T−3..T−1]` | **bitexact** (contents, not a fingerprint) |
+| two waves, interior boundary at `T−7` and `T−5` | wave A's window **bitexact**, wave B's `u` **bitexact** against the single-wave rows, final window **bitexact** |
+| `zero_pad` injected into wave B | moves **rows {0,1,2} of wave B and no other row** — the carry is load-bearing and localized |
+| `--tokens 1` on nine probed rows (incl. both sides of a boundary) | **bitexact** with the wide launch, row for row |
+| `tap_stride` (tile indexed as HF's `[CH][T]`) | invisible at `tokens=1`; **46/46 rows** move at `tokens=46`, window untouched |
+| `win_lag`, `win_from_u` | `u` **bitexact**, window moved — see finding 1 |
+| gates, T rows: `g`,`beta` vs torch on the same bytes | meanrel 2.0e−09 / 4.5e−09 |
+| gates, T rows: vs the pins | `g` 2.0e−09; `beta` 1.3e−03 — bounded, see finding 4 |
+| `row_zero` injected into the gates | rows 1..T−1 move, **row 0 stays exact** |
+
+1. **A window bug is invisible in `u`, so the gate compares window contents.** Both window
+   injections — write the window one row late, or write it from the post-conv `u` instead of the
+   pre-conv `raw` (A-04's exact falsifier) — leave every element of `u` bit-identical, because
+   neither changes what the current wave convolves. Any gate that checks only `u` passes both. That is
+   why this gate compares `new_win` against `raw[T−3..T−1]` as bytes, and why the two-wave stage
+   compares the window a wave *received* as well as the one it wrote.
+2. **Zero-window fixtures hide the whole carry question.** `p64`/`p300` start a request, so their
+   incoming window is zeros and a kernel that ignored the window entirely would still reproduce every
+   pinned column. The split-wave stage is what makes the carry testable; the same argument on the
+   engine's side is `engine/gate.py` section (h)'s `--wave-rows 5` side.
+3. **A tile-indexing bug is invisible at `tokens == 1`.** `GC_TAP_STRIDE` reads the same buffer as if
+   it were HF's channel-major `[CH][T]`; at one token both indexings are the same address, so the bug
+   is undetectable on a decode step and moves every row of a wave. The negative is required to show
+   both halves, which is the locality rule from `prototype/mlp_gemv/results.md` applied to a width
+   rather than to a stage.
+4. **`beta` cannot be pinned bit-for-bit even when the kernel is unit-exact.** The reference dumped
+   `beta` BF16-valued, so feeding the kernel the *pinned* `in_proj_b.out` and comparing bit-for-bit
+   charges the dump's own rounding to the kernel (meanrel 1.3e−03, `max|d|` 0.00195). The gate says
+   so and keeps two levels: against torch on the same input bytes (1e−6 band, the sharp one) and
+   against the pin (bounded, 5e−3, the same split F1 above already made for the same reason).

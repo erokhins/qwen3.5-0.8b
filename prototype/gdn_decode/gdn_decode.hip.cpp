@@ -5,9 +5,16 @@
  * every function gets its own correctness check before the next one is written):
  *
  *   gates   S04.3: beta = sigmoid(b_raw), g = -exp(A_log)·softplus(a_raw + dt_bias)
- *   conv    S04.2: causal depthwise conv, kernel 4, on one new token + a 3-row window
+ *   conv    S04.2: causal depthwise conv, kernel 4, on a [tokens][CH] tile + a [K-1][CH] window
  *   rec     S04.4: the gated-delta recurrence for one token, one GDN layer (16 heads)
  *   all     `rec` over all 18 GDN layers at once — the bandwidth-relevant case
+ *
+ * `gates` and `conv` take `--tokens N` (default 1) and `--neg NAME` (default none). At N = 1 both
+ * launch exactly the grids they launched before P6 and read/write the same single-token files, so
+ * the four original checks are the T = 1 cases unchanged; N > 1 is the prefill-wave shape (P6,
+ * `bench/plan-prefill-2026-10-12.md` §4 row P6) and is gated by `check.py --tokens <fixture>`.
+ * The window is the part that is NOT a trivial batch: see the `GdnConvNeg` block in
+ * `gdn_decode_kernels.h` for what the injections are and which of them no downstream output can see.
  *
  * The recurrence, per value head η with state S ∈ F32^{128×128} (row i over d_k, column j
  * over d_v), is `S ← γS; r = Sᵀk̃; Δv = β(v − r); S += k̃⊗Δv; o = q̃ᵀS`. One block per head
@@ -82,8 +89,8 @@ static void dump_f32(const std::string& p, const void* dptr, size_t n) {
 }
 
 int main(int argc, char** argv) {
-    std::string mode, dir, out;
-    int iters = 20, nlayers = 18, trials = 3, restore_each = 0;
+    std::string mode, dir, out, negname = "none";
+    int iters = 20, nlayers = 18, trials = 3, restore_each = 0, tokens = 1;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() { return std::string(argv[++i]); };
@@ -94,45 +101,65 @@ int main(int argc, char** argv) {
         else if (a == "--trials") trials = atoi(next().c_str());
         else if (a == "--restore-each") restore_each = 1;
         else if (a == "--layers") nlayers = atoi(next().c_str());
+        else if (a == "--tokens") tokens = atoi(next().c_str());
+        else if (a == "--neg") negname = next();
         else { fprintf(stderr, "unknown arg %s\n", a.c_str()); return 1; }
+    }
+    if (tokens < 1) { fprintf(stderr, "--tokens must be >= 1 (got %d)\n", tokens); return 1; }
+    // One name per injected bug, and the kernel's own enum value beside it. An unknown name is a
+    // refusal, not a silent 0: a negative that quietly became `none` would read as a passing gate.
+    const int gneg = negname == "none" ? GC_NONE : negname == "tap_stride" ? GC_TAP_STRIDE
+                     : negname == "win_lag" ? GC_WIN_LAG : negname == "win_from_u" ? GC_WIN_FROM_U
+                     : negname == "zero_pad" ? GC_ZERO_PAD : -1;
+    const int gtneg = negname == "none" ? GG_NONE : negname == "row_zero" ? GG_ROW_ZERO : -1;
+    if ((mode == "conv" && gneg < 0) || (mode == "gates" && gtneg < 0)) {
+        fprintf(stderr, "--neg for conv is none|tap_stride|win_lag|win_from_u|zero_pad, for"
+                        " gates it is none|row_zero (got '%s' for mode %s)\n",
+                negname.c_str(), mode.c_str());
+        return 1;
     }
     auto path = [&](const char* n) { return dir + "/" + n; };
 
     if (mode == "gates") {
-        auto a_raw = load_f32(path("a_raw.f32"), NH), b_raw = load_f32(path("b_raw.f32"), NH);
+        const size_t n = (size_t)tokens * NH;
+        auto a_raw = load_f32(path("a_raw.f32"), n), b_raw = load_f32(path("b_raw.f32"), n);
         auto A_log = load_f32(path("A_log.f32"), NH), dt = load_f32(path("dt_bias.f32"), NH);
         float *da, *db, *dA, *dd, *dg, *dbt;
-        CK(hipMalloc(&da, NH * 4)); CK(hipMalloc(&db, NH * 4));
+        CK(hipMalloc(&da, n * 4)); CK(hipMalloc(&db, n * 4));
         CK(hipMalloc(&dA, NH * 4)); CK(hipMalloc(&dd, NH * 4));
-        CK(hipMalloc(&dg, NH * 4)); CK(hipMalloc(&dbt, NH * 4));
-        CK(hipMemcpy(da, a_raw.data(), NH * 4, hipMemcpyHostToDevice));
-        CK(hipMemcpy(db, b_raw.data(), NH * 4, hipMemcpyHostToDevice));
+        CK(hipMalloc(&dg, n * 4)); CK(hipMalloc(&dbt, n * 4));
+        CK(hipMemcpy(da, a_raw.data(), n * 4, hipMemcpyHostToDevice));
+        CK(hipMemcpy(db, b_raw.data(), n * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dA, A_log.data(), NH * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dd, dt.data(), NH * 4, hipMemcpyHostToDevice));
-        gates_kernel<<<1, NH>>>(da, db, dA, dd, dg, dbt);
+        gates_kernel<<<tokens, NH>>>(da, db, dA, dd, dg, dbt, tokens, gtneg);
         CK(hipGetLastError()); CK(hipDeviceSynchronize());
-        dump_f32(out + "/g.f32", dg, NH);
-        dump_f32(out + "/beta.f32", dbt, NH);
-        printf("RESULT mode=gates heads=%d\n", NH);
+        dump_f32(out + "/g.f32", dg, n);
+        dump_f32(out + "/beta.f32", dbt, n);
+        printf("RESULT mode=gates heads=%d tokens=%d neg=%s\n", NH, tokens, negname.c_str());
         return 0;
     }
 
     if (mode == "conv") {
-        auto raw = load_f32(path("raw.f32"), CH);
+        const size_t nraw = (size_t)tokens * CH;
+        auto raw = load_f32(path("raw.f32"), nraw);
         auto win = load_f32(path("win.f32"), (K - 1) * CH);
         auto C = load_f32(path("convw.f32"), CH * K);
         float *draw, *dwin, *dC, *du, *dnew;
-        CK(hipMalloc(&draw, CH * 4)); CK(hipMalloc(&dwin, (K - 1) * CH * 4));
-        CK(hipMalloc(&dC, CH * K * 4)); CK(hipMalloc(&du, CH * 4));
+        CK(hipMalloc(&draw, nraw * 4)); CK(hipMalloc(&dwin, (K - 1) * CH * 4));
+        CK(hipMalloc(&dC, CH * K * 4)); CK(hipMalloc(&du, nraw * 4));
         CK(hipMalloc(&dnew, (K - 1) * CH * 4));
-        CK(hipMemcpy(draw, raw.data(), CH * 4, hipMemcpyHostToDevice));
+        CK(hipMemcpy(draw, raw.data(), nraw * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dwin, win.data(), (K - 1) * CH * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dC, C.data(), CH * K * 4, hipMemcpyHostToDevice));
-        conv_kernel<<<CH / 256, 256>>>(draw, dwin, dC, du, dnew);
+        // grid.x is the channel strip (the single-token launch's 24 blocks), grid.y the token.
+        // tokens = 1 is therefore the same grid, not a grid padded to one.
+        const dim3 grid(CH / 256, tokens);
+        conv_kernel<<<grid, 256>>>(draw, dwin, dC, du, dnew, tokens, gneg);
         CK(hipGetLastError()); CK(hipDeviceSynchronize());
-        dump_f32(out + "/u.f32", du, CH);
+        dump_f32(out + "/u.f32", du, nraw);
         dump_f32(out + "/new_win.f32", dnew, (K - 1) * CH);
-        printf("RESULT mode=conv channels=%d\n", CH);
+        printf("RESULT mode=conv channels=%d tokens=%d neg=%s\n", CH, tokens, negname.c_str());
         return 0;
     }
 
