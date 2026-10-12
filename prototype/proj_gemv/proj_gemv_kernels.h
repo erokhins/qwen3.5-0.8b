@@ -97,6 +97,12 @@ __device__ __forceinline__ int perm_out_row(int row, int rows, int neg) {
 // of unpacking it to F32 (4 KiB): identical products — every BF16 value is exact in F32 — half
 // the shared-memory traffic and half the shared memory per block, which is what limits blocks/CU
 // for the 2048-wide shapes. run.py's sweep measures both instead of guessing.
+//
+// This is the k=1 form. `engine/kernels_proj.cpp` no longer launches it — the engine issues
+// `proj_gemv_tokens` for every width, `TPB = 1` included — and it stays here as the gate's
+// independent per-row reference: `run.py --tokens` diffs the tile against this kernel run one row
+// at a time, which is a different code path rather than the same one with a different template
+// argument (`--kernel k1`). See the batched form below.
 template <int IN, bool PACK_X>
 __global__ void proj_gemv(const hip_bfloat16* __restrict__ W, const void* __restrict__ x,
                           hip_bfloat16* __restrict__ out, int rows, int rpb, int neg) {
@@ -135,4 +141,113 @@ __global__ void proj_gemv(const hip_bfloat16* __restrict__ W, const void* __rest
     }
     acc = reduce_row(acc);
     if (lane == 0) out[perm_out_row(row, rows, neg)] = rnd(acc, neg);
+}
+
+/*
+ * ── the token-batched form (P5, bench/plan-prefill-2026-10-12.md §4 row P5) ───────────────────
+ *
+ * One block owns `rpb` output rows AND a tile of `TPB` tokens, so each weight row is read ONCE for
+ * the whole tile instead of once per token. That is the entire point: the nine projections are
+ * 0.4677 GB of the token's bytes, `results.md` measures the family at 63–66 % of the read probe,
+ * and the narrow shapes are the weak ones (`k_proj`/`v_proj` 39–40 %, `o_proj`/`out_proj` 46–49 %)
+ * because a [512,1024] launch is 16 blocks and cannot fill 20 CUs. Widening a launch along the
+ * token axis is the only lever those shapes have; §06.2's "one GEMM per projection" is this kernel.
+ *
+ * WHY THIS IS ALLOWED TO TOUCH THE LEGAL ROUTE AT ALL: the per-output-element arithmetic is
+ * untouched. `x` is staged per token, the word walk is the same `v = lane; v < words; v += ws` over
+ * the same `uint4` words in the same order, the inner 8-element loop is the same, the ladder is the
+ * same `reduce_row`, and there is still exactly one BF16 rounding per dot. Only the accumulator
+ * became an array indexed by token, and no accumulator ever crosses a token — the same
+ * "reduction state stays inside one row" rule A-17 states for attention. So output element (t, row)
+ * of the tile is OBLIGED to be the bits the k=1 kernel already produced for `row` with token t's
+ * input, and `run.py --tokens` checks that on device, bit for bit, before it checks the pins.
+ *
+ * Unlike `mlp_gemv`'s batched pair this one is not a second kernel the engine also has to keep
+ * honest: `engine/kernels_proj.cpp` instantiates THIS template for every width, `tokens == 1`
+ * included, where `TPB = 1` and `gridDim.y = 1` give back the k=1 kernel's arithmetic and its launch
+ * shape byte for byte (one staged row, one accumulator, the same shared footprint). One arithmetic,
+ * two tile widths — which is what the P5 brief asks for and what P4's two-branch launcher did not do.
+ *
+ * Shared memory is what bounds TPB, not registers: the tile is TPB*IN floats, so the two input
+ * widths want different tiles to land on the same 16 KiB budget the gated MLP chose at IN=1024
+ * (4 x 4 KiB at IN=1024, 2 x 8 KiB at IN=2048; the device reports 64 KiB of LDS, and staying at
+ * 16 KiB keeps several blocks resident per CU). The launcher picks TPB; the kernel sees one.
+ * TPB is unmeasured — same as the MLP's — and `--tpb` exists so the main agent's timing pass can
+ * sweep it without a rebuild (bench/performance-status.md §6: measurements are the main agent's).
+ */
+template <int IN, int TPB, bool PACK_X>
+__global__ void proj_gemv_tokens(const hip_bfloat16* __restrict__ W, const void* __restrict__ x,
+                                 hip_bfloat16* __restrict__ out, int rows, int tokens, int rpb,
+                                 int neg) {
+    // The staged x is BF16 when PACK_X and F32 otherwise — the same two choices the k=1 kernel offers,
+    // and `tof` below converts either to F32 the same way, so the products are identical.
+    using Xstaged = typename std::conditional<PACK_X, hip_bfloat16, float>::type;
+    __shared__ Xstaged xs[TPB][IN];
+    const int t0 = (int)blockIdx.y * TPB;           // this block's first token
+    const int nt = min(TPB, tokens - t0);           // grid.y = ceil(tokens/TPB), so nt >= 1
+    // Cooperative staging of the tile, cooperatively: the same widening the k=1 kernel does for one
+    // row, done for `nt` of them. `IN` is a template constant, so `i % IN` is a shift, not a divide.
+    for (int i = threadIdx.x; i < nt * IN; i += blockDim.x) {
+        const int col = i % IN;
+        const int t = i / IN;
+        if (PACK_X) {
+            xs[t][col] = ((const hip_bfloat16*)x)[(size_t)(t0 + t) * IN + col];
+        } else {
+            xs[t][col] = ((const float*)x)[(size_t)(t0 + t) * IN + col];
+        }
+    }
+    __syncthreads();
+
+    const int ws = warpSize;
+    const int lane = threadIdx.x % ws;
+    const int row = blockIdx.x * rpb + threadIdx.x / ws;
+    if (row >= rows) return;
+
+    float acc[TPB];
+#pragma unroll
+    for (int t = 0; t < TPB; ++t) acc[t] = 0.f;
+
+    if (neg == NEG_TRANSPOSE) {
+        // Read the same bytes as [in, rows]: in-bounds for any shape, and a different set of
+        // products. The weight value is loop-invariant across the tile, so it is hoisted — the
+        // per-token product and its order are unchanged.
+        for (int k = lane; k < IN; k += ws) {
+            const float w = bf(W[(size_t)k * rows + row]);
+#pragma unroll
+            for (int t = 0; t < TPB; ++t) {
+                if (t >= nt) break;
+                acc[t] += w * tof(xs[t][k]);
+            }
+        }
+    } else {
+        const uint4* wrow = reinterpret_cast<const uint4*>(W + (size_t)row * IN);
+        int words = IN / 8;
+        if (neg == NEG_TAIL) words -= 1;
+        else if (neg == NEG_HALF) words /= 2;
+        // No unroll pragma: `words` is a runtime value once the negatives can shrink it (the note in
+        // `mlp_gemv_kernels.h` says the same), and what matters here is the ORDER this loop visits
+        // words, which is the k=1 kernel's order.
+        for (int v = lane; v < words; v += ws) {
+            const uint4 u = wrow[v];                 // ONE weight-word load for the whole tile
+            const hip_bfloat16* p = reinterpret_cast<const hip_bfloat16*>(&u);
+#pragma unroll
+            for (int t = 0; t < TPB; ++t) {
+                if (t >= nt) break;
+                const Xstaged* xp = &xs[t][v * 8];
+#pragma unroll
+                for (int j = 0; j < 8; ++j) acc[t] += bf(p[j]) * tof(xp[j]);
+            }
+        }
+    }
+
+    // The row permutations (§05.1's qhalf, §04.1's kvswap, the row swap) apply per row, in every
+    // token's output — the same `perm_out_row` the k=1 kernel calls, so a negative that localises in
+    // one form localises in the other and neither is a special case of the other.
+    const int orow = perm_out_row(row, rows, neg);
+#pragma unroll
+    for (int t = 0; t < TPB; ++t) {
+        if (t >= nt) break;
+        const float s = reduce_row(acc[t]);
+        if (lane == 0) out[(size_t)(t0 + t) * rows + orow] = rnd(s, neg);
+    }
 }

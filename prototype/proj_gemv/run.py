@@ -33,6 +33,7 @@ rows/block and x-packing sweeps. Both write outputs and correctness-check the ti
     .venv/bin/python prototype/proj_gemv/run.py [--fixture dec8] [--layers all] [--steps all]
                                                [--negative] [--time] [--sweep] [--rows 8]
                                                [--iters 30] [--no-verify]
+    .venv/bin/python prototype/proj_gemv/run.py --tokens p64      # P5: the token-batched form
 """
 from __future__ import annotations
 
@@ -50,7 +51,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "prototype"))
 import bf16_ulp  # noqa: E402
 from operands import (CKPT, attn_operand, dump_bf16, is_attn_layer, operands_for,  # noqa: E402
-                      pack_offsets, pin, projections_of, proj_weight, read_bf16, verify,
+                      pack_offsets, pin, pin_tile, prefill_operands_for, prefill_tokens,
+                      prefill_verify, projections_of, proj_weight, read_bf16, verify,
                       wrong_normed_inputs)
 
 BIN = Path(__file__).resolve().parent / "proj_gemv"
@@ -333,6 +335,176 @@ def run_negatives(args, d: Path, fails) -> None:
                              % (label, ",".join(wrong)))
 
 
+# ------------------------------------------------------------------ the token-batched stage (P5)
+def worst_over_rows(got, ref, **kw) -> dict:
+    """Judge a [T, dim] tile one row at a time and return the worst row's comparison.
+
+    Per row rather than over the flattened tile for the reason `mlp_gemv` gives: the cancellation
+    band and the 2 % ndiff rule are relative to the tensor being judged, and flattened one loud token
+    could hide a quiet one. The rules themselves are the k=1 gate's, unchanged — `floor_probe.py`
+    sized them for K = 1024/2048, which is a property of the reduction length, not of how many rows
+    a launch carries. `kw` is passed through so a caller can widen `ulp_max` exactly where the decode
+    stage does.
+    """
+    bad = None
+    for i in range(got.shape[0]):
+        c = compare(got[i], ref[i], **kw)
+        if bad is None or (c["n_bad"], c["ndiff"], c["maxulp"], -c["cos"], -c["meanrel"]) > (
+                bad["n_bad"], bad["ndiff"], bad["maxulp"], -bad["cos"], -bad["meanrel"]):
+            bad = c
+            bad["row"] = i
+    return bad
+
+
+def prefill_layer_jobs(layer, files, outdir, ops):
+    """The two launches a wave issues in this layer: the packed input projection over the whole
+    [T,1024] norm tile, then the output projection over the [T,2048] gated block output."""
+    pack, out_name = ops["pack"], ops["out_proj"]
+    return [("tile.inproj", pack_rows(pack), 1024, files["xin"],
+             [files["w"][n] for n, _ in pack], outdir / ("tile.inproj.%d.bin" % layer)),
+            ("tile." + out_name, 1024, 2048, files["xout"],
+             [files["w"][out_name]], outdir / ("tile.outproj.%d.bin" % layer))], pack, out_name
+
+
+def run_tokens(args, fails, worst) -> None:
+    """P5: the token-batched projections, gated against the prefill pins and against the k=1 kernel.
+
+    Three claims, in the order the engine depends on them:
+
+    1. **bit-identity vs the shipped single-row kernel.** A batched kernel that moved one bit would
+       move the legal route every fixture margin was priced against, and the fixtures cannot see that
+       (P4b: identical arithmetic submitted one row at a time produces identical bits). So for
+       sampled tokens the k=1 kernel's answer must BE the tile's row, bit for bit. The reference is
+       `--kernel k1` — the original kernel, a different code path, not the same template with a
+       different tile width.
+    2. **the pins.** The same four rules the k=1 gate applies, judged per row, over every row the
+       fixture pins.
+    3. **the identity check can fail.** One injected bug (`tail`, one word of K dropped) into the tile
+       run only: if the tile still matched the per-row reference the comparison would be vacuous,
+       which is the trap `mlp_gemv/results.md` names.
+    """
+    dp = ROOT / "data" / "refs" / args.tokens
+    if not dp.exists():
+        raise SystemExit("no prefill fixture %s (try p64)" % dp)
+    layers = [l for l in (list(range(24)) if args.layers == "all"
+                          else [int(x) for x in args.layers.split(",")])
+              if (dp / ("L%02d.s_in.npy" % l)).exists()]
+    if not layers:
+        raise SystemExit("%s pins no L{ll}.s_in for %s" % (dp.name, args.layers))
+    T = prefill_tokens(dp, layers[0])
+    sample = sorted({0, 1, T // 2, max(0, T - 2), T - 1})
+    outdir = WORK / "tokens"
+    outdir.mkdir(exist_ok=True)
+    print("\ntoken-batched stage on %s: T=%d rows, layers %s, tile sampled at tokens %s"
+          % (dp.name, T, layers, sample))
+
+    # 0. The gate's foundation, on the tile: the rebuilt operands reproduce every row of the pins
+    #    bit-exactly and the wrong readings do not (the §10.5 pairing proof, at T rows).
+    print("  operand rebuild on the prefill tiles:")
+    nbad = 0
+    for layer in layers:
+        for ok, line in prefill_verify(dp, layer):
+            if not ok:
+                nbad += 1
+                print("    FAIL %s" % line)
+    print("    %d layers checked, %d failures" % (len(layers), nbad))
+    if nbad:
+        raise SystemExit("prefill operand rebuild failed - stopping: a gate against the wrong tile"
+                         " verifies nothing")
+
+    ncomp = ndiff_bits = njudge = 0
+    for layer in layers:
+        ops = prefill_operands_for(dp, layer)
+        pack, out_name = ops["pack"], ops["out_proj"]
+        names = [n for n, _ in pack] + [out_name]
+        files = {"w": {n: dump_bf16(proj_weight(layer, n),
+                                    WORK / ("T%02d_%s.bin" % (layer, n))) for n in names},
+                 "xin": dump_bf16(ops["x_in"], WORK / ("T%02d_xin.bin" % layer)),
+                 "xout": dump_bf16(ops["x_out"], WORK / ("T%02d_xout.bin" % layer))}
+        refs = {}
+        for name, rows in pack:
+            refs[name] = pin_tile(dp, "L%02d.%s.out" % (layer, name), rows)
+        refs[out_name] = pin_tile(dp, "L%02d.%s.out" % (layer, out_name), 1024)
+
+        jobs, _, _ = prefill_layer_jobs(layer, files, outdir, ops)
+        plan = write_plan(WORK / ("plan_tile_L%02d.txt" % layer), jobs)
+        run_bin(["--mode", "once", "--plan", str(plan), "--rows", str(args.rows),
+                 "--tokens", str(T)], "L%02d tile" % layer)
+        got = {}
+        whole = read_bf16(outdir / ("tile.inproj.%d.bin" % layer), pack_rows(pack) * T)
+        whole = whole.reshape(T, pack_rows(pack))
+        offs = pack_offsets(pack)
+        for name, rows in pack:
+            got[name] = whole[:, offs[name][0]:offs[name][0] + rows]
+        got[out_name] = read_bf16(outdir / ("tile.outproj.%d.bin" % layer),
+                                  1024 * T).reshape(T, 1024)
+
+        print("  L%02d %-4s tile T=%d, pack %s + %s"
+              % (layer, ops["kind"], T, ",".join(n for n, _ in pack), out_name))
+        for name in names:
+            c = worst_over_rows(got[name], refs[name])
+            judge("L%02d r%03d %s" % (layer, c["row"], name), c, fails, worst)
+            njudge += got[name].shape[0]
+
+        # 1. bit-identity vs the k=1 kernel, run one row at a time on the same operands
+        layer_comp = layer_diff = 0
+        bad_bits = 0
+        for t in sample:
+            xone = {"xin": dump_bf16(ops["x_in"][t:t + 1], WORK / ("T%02d_one_in.bin" % layer)),
+                    "xout": dump_bf16(ops["x_out"][t:t + 1], WORK / ("T%02d_one_out.bin" % layer))}
+            one = [("one.inproj", pack_rows(pack), 1024, xone["xin"],
+                    [files["w"][n] for n, _ in pack], outdir / ("one.inproj.%d.bin" % layer)),
+                   ("one." + out_name, 1024, 2048, xone["xout"],
+                    [files["w"][out_name]], outdir / ("one.outproj.%d.bin" % layer))]
+            plan = write_plan(WORK / ("plan_one_L%02d_t%d.txt" % (layer, t)), one)
+            run_bin(["--mode", "once", "--plan", str(plan), "--rows", str(args.rows),
+                     "--kernel", "k1"], "L%02d k1 t%d" % (layer, t))
+            w1 = read_bf16(outdir / ("one.inproj.%d.bin" % layer), pack_rows(pack))
+            row1 = {name: w1[offs[name][0]:offs[name][0] + rows] for name, rows in pack}
+            row1[out_name] = read_bf16(outdir / ("one.outproj.%d.bin" % layer), 1024)
+            for name in names:
+                many = got[name][t].reshape(-1)
+                n = int((many != row1[name]).sum())
+                ncomp += many.numel()
+                ndiff_bits += n
+                layer_comp += many.numel()
+                layer_diff += n
+                bad_bits += n
+                if n:
+                    fails.append("L%02d token %d: the %d-token tile's `%s` row differs from the"
+                                 " k=1 kernel in %d of %d elements — batching changed the"
+                                 " arithmetic" % (layer, t, T, name, n, many.numel()))
+        print("    bit-identity vs the k=1 kernel: tokens %s, all %d projections, %d elements"
+              " compared, %d differ" % (sample, len(names), layer_comp, layer_diff))
+
+        # 3. the falsification: the same tile plan with one word of K dropped, which must move the
+        #    tile. Proves both that the batched kernel honours the injected-bug vocabulary and that
+        #    the element comparison above is not comparing a buffer with itself.
+        jobs_bad = [list(j) for j in jobs]
+        for j in jobs_bad:
+            j[5] = Path(str(j[5]) + ".bad")
+        plan = write_plan(WORK / ("plan_bad_L%02d.txt" % layer), [tuple(j) for j in jobs_bad])
+        run_bin(["--mode", "once", "--plan", str(plan), "--rows", str(args.rows),
+                 "--tokens", str(T), "--neg", "tail"], "L%02d tile --neg tail" % layer)
+        bad_in = read_bf16(outdir / ("tile.inproj.%d.bin.bad" % layer),
+                           pack_rows(pack) * T).reshape(T, pack_rows(pack))
+        moved = int((bad_in != whole).sum())
+        moved += int((read_bf16(outdir / ("tile.outproj.%d.bin.bad" % layer), 1024 * T)
+                      != got[out_name].reshape(-1)).sum())
+        print("    falsification (--neg tail on the tile only): %d of %d tile elements moved"
+              % (moved, pack_rows(pack) * T + 1024 * T))
+        if not moved:
+            fails.append("L%02d: --neg tail on the tile moved nothing — the batched kernel ignores"
+                         " the injected-bug vocabulary and/or the tile comparison is vacuous"
+                         % layer)
+        if not judge_neg(compare(bad_in.reshape(-1), whole.reshape(-1))):
+            fails.append("L%02d: the --neg tail tile is not judged different from the clean tile by"
+                         " the gate's own comparator" % layer)
+    print("  tile vs k=1: %d elements compared, %d differ. %d per-row pin comparisons (%d layers x "
+          "every row the fixture pins), worst row reported per block."
+          % (ncomp, ndiff_bits, njudge, len(layers)))
+
+
 # ------------------------------------------------------------------ timing
 @contextlib.contextmanager
 def gpu_lock(tag: str):
@@ -451,6 +623,11 @@ def main() -> int:
     ap.add_argument("--rows", type=int, default=8)
     ap.add_argument("--iters", type=int, default=30)
     ap.add_argument("--negative", action="store_true")
+    ap.add_argument("--tokens", default=None, metavar="PREFILL_FIXTURE",
+                    help="P5 stage: run the token-batched form over this PREFILL fixture's"
+                         " L{ll}.{in_proj_*,q_proj,k_proj,v_proj,out_proj,o_proj}.out pins"
+                         " (p64/p300), judge them per row with the k=1 rules, and require the tile"
+                         " rows to be BIT-IDENTICAL to the k=1 kernel run one row at a time.")
     ap.add_argument("--time", action="store_true", help="cold timings (takes the GPU lock)")
     ap.add_argument("--sweep", action="store_true", help="with --time: rows/block + x packing")
     ap.add_argument("--no-verify", action="store_true",
@@ -465,7 +642,10 @@ def main() -> int:
     if not steps:
         raise SystemExit("%s has no decode steps; this kernel is the k=1 path" % d)
     layers = list(range(24)) if args.layers == "all" else [int(x) for x in args.layers.split(",")]
-    if not BIN.exists():
+    if not BIN.exists() or any(src.stat().st_mtime > BIN.stat().st_mtime for src in
+                               (BIN.parent / "proj_gemv.hip.cpp", BIN.parent / "proj_gemv_kernels.h")):
+        # Staleness, not just existence: a gate that silently runs the previous binary passes
+        # vacuously — one P5 pass did exactly that, green, on a source that had not compiled.
         subprocess.run(["bash", str(BIN.parent / "build.sh")], check=True)
     if bf16_ulp.selftest():
         raise SystemExit("bf16_ulp selftest failed - the gate cannot be trusted")
@@ -498,6 +678,9 @@ def main() -> int:
 
     if args.negative:
         run_negatives(args, d, fails)
+
+    if args.tokens:
+        run_tokens(args, fails, worst)
 
     if args.time:
         with gpu_lock("proj_gemv timing (run.py)"):

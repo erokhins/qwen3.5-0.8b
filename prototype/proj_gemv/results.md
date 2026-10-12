@@ -242,6 +242,58 @@ handing the kernel the F32 norm output (`PACK_X = false`, measured above). W5 al
 only stay inside the budget if `lm_head` (~485 MiB/token) and the MLP (~353 MiB/token) are at the
 probe too, which `mlp_gemv` measured at 50–62 % and `lm_head_gemv` at 52 %.
 
+## P5 — the token-batched form: `proj_gemv_tokens`, and what it is gated on
+
+A prefill wave hands a projection a `[T, IN]` tile instead of one row. `proj_gemv_tokens<IN, TPB,
+PACK_X>` gives each block `rpb` rows **and** a tile of `TPB` tokens, so a weight row is read once per
+tile instead of once per token — the family's only bandwidth lever, since the narrow shapes are
+shape-limited (`k_proj`/`v_proj` 39–40 % of the probe at 64 blocks, `in_proj_a`/`b` at 5 %, the table
+above). `TPB` is bounded by shared memory, not registers: the launcher picks 4 at `IN = 1024` and 2 at
+`IN = 2048`, both 16 KiB/block, the same budget `mlp_gemv` settled on. **`TPB` is not measured** —
+`--tpb` exists so the main agent's timing pass can sweep it (bench/performance-status.md §6), and no
+duration appears anywhere in this section.
+
+One kernel, not two. `engine/kernels_proj.cpp` instantiates the tile form at **every** width,
+`tokens == 1` included, where `TPB = 1` and `gridDim.y = 1` are the k=1 launch shape and the k=1
+arithmetic — one staged row, one accumulator, same shared footprint. That is deliberate: P4's MLP
+launcher keeps a `tokens > 1` branch and a single-token branch, i.e. two kernels to keep honest, and
+P5 was briefed not to repeat that. `proj_gemv<IN, PACK_X>` (the original) stays in the header because
+the gate needs an independent per-row reference to diff the tile against (`--kernel k1`) and because
+the `--x-packed` timing sweep still runs through it; the engine never launches it.
+
+### `run.py --tokens <p64|p300>` — the batched stage
+
+Same four rules as the k=1 gate, judged **per row** (`worst_over_rows`, worst row printed per block),
+against the prefill pins `L{ll}.{in_proj_qkv,in_proj_z,in_proj_b,in_proj_a,q_proj,k_proj,v_proj,out_proj,
+o_proj}.out`, after re-running the pairing proof on the tiles (`prefill_verify`: the rebuilt operand
+reproduces every row of every pin bit-exactly with torch's own matmul, and each wrong norm fails to —
+0 failures on both fixtures, both block types). Three claims, in order of how much the engine needs them:
+
+| claim | `p64` (T = 46) | `p300` (T = 277) |
+|---|---|---|
+| **bit-identity vs the k=1 kernel** (tile row *t* must BE the k=1 kernel's answer for token *t*, sampled tokens `0,1,T/2,T−2,T−1`, every projection of the layer) | **138 400 elements compared, 0 differ** (4 layers) | **138 400 elements compared, 0 differ** (4 layers) |
+| the pins, per row: worst row of every block | `ndiff ≤ 13/6144` (0.21 %), max 11 ULP, **0 large elements over tolerance**, `cos ≥ 0.99999997`, `meanrel ≤ 2.7e−05` | same shape: `ndiff ≤ 0.3 %`, 0 large elements over tolerance, `cos = 1.0` to 8 dp, `meanrel ≤ 2.7e−05` |
+| the identity check can fail: `--neg tail` on the tile run only | 408 843 / 425 408 (L00) and 258–266 k of 282 624 (attn layers) tile elements moved | 2 466 286 / 2 561 696, and 1.56–1.60 M / 1 701 888 |
+
+The ULP outliers are the same population the k=1 gate already excuses — a handful of elements per row,
+at `|ref|/max` of 1e−6 or less (cancellation, `floor_probe.py`), zero of them large — so **batching
+moved nothing**: the batched rows are the k=1 bits, and the k=1 bits are what the pins reproduce. The
+per-row pin numbers above are therefore the *kernel-vs-reference* distance, not a batching distance;
+the batching distance is the 0 in the first row.
+
+### rows = 1 stayed green, and stayed green through the new kernel
+
+`run.py` now launches the tile form by default at `tokens = 1`, so the existing 136-comparison gate and
+all eleven negatives ran **through `proj_gemv_tokens<IN, 1, PACK_X>`** — the instantiation the engine
+uses for decode — and passed unchanged (`136 comparisons, 0 failures`; every negative caught where
+declared and nowhere else). `--kernel k1` reproduces the old path: the two are the same arithmetic, and
+the diff above (138 400 elements, 0 differ) is the proof rather than an argument.
+
+**Not taken:** any timing. The commands the main agent's clean-window pass needs are
+`run.py --time` (unchanged, k=1 shapes) and, for the batched family, `--mode burst --plan … --tokens 295
+--tpb {1,2,4}` with the plan of §"Performance"; `Job::bytes()` already counts weight bytes per
+*TILE* rather than per token, which is the divisor that matters.
+
 ## Traps found here (added to the index)
 
 - **`min(wall, event)` is a trap on this iGPU.** `hipEventElapsedTime` returns 0 — or, once, −1.9e6
@@ -254,3 +306,8 @@ probe too, which `mlp_gemv` measured at 50–62 % and `lm_head_gemv` at 52 %.
 - **`ndiff ≥ 1` is vacuous on a 16-row output.** `in_proj_b/a` are bit-exact; a 1-element allowance
   on 16 elements is 6 % of the tensor. The floor probe, not the allowance, is what makes those two
   rows mean something.
+- **A gate that runs the previous binary passes vacuously.** `run.py` rebuilt only when `proj_gemv`
+  did not exist, so a source edit that failed to compile left the OLD binary in place and the k=1
+  stage printed PASS against a kernel that was no longer in the tree — caught mid-P5 only because the
+  new stage then failed on `unknown arg --tokens`. `run.py` now rebuilds whenever either source is
+  newer than the binary.

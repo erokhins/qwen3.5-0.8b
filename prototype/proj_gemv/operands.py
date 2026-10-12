@@ -89,8 +89,10 @@ def pin(d: Path, name: str) -> torch.Tensor:
 
 def is_attn_layer(d: Path, layer: int, step: str = "decode0") -> bool:
     """Which block type a layer is, read off the pins themselves — §10.5 says the pinned names are
-    the check to trust rather than a transcription of `layer_types`."""
-    return (d / ("%s.L%02d.q_proj.out.npy" % (step, layer))).exists()
+    the check to trust rather than a transcription of `layer_types`. `step=""` asks the PREFILL
+    pass, whose names carry no step prefix (`L03.q_proj.out` rather than `decode0.L03.q_proj.out`)."""
+    stem = "L%02d.q_proj.out" % layer if not step else "%s.L%02d.q_proj.out" % (step, layer)
+    return (d / (stem + ".npy")).exists()
 
 
 def pack_offsets(pack):
@@ -154,8 +156,93 @@ def operands_for(d: Path, step: str, layer: int) -> dict:
             "out_proj": "out_proj"}
 
 
-def projections_of(d: Path, layer: int) -> list[str]:
-    if is_attn_layer(d, layer):
+# ---- the PREFILL pass: the same operands as [T, in] tiles (§06.1, plan P5) ----------------
+#
+# The pins are the prefill-pass ones, `L{ll}.s_in` / `L{ll}.gdn.gated_out` /
+# `L{ll}.attn.attn_out_pre_gate` / `L{ll}.{projection}.out`, whose leading axes are just the batch
+# and the token count (§10.5: every batched kernel family already has a prefill pin). Nothing about
+# the reconstruction changes — the same RMSNorm, the same gated norm, the same §05.6 output gate —
+# which is the point: a token-batched projection is gated against the same tensors the k=1 gate is,
+# at T rows instead of one. `prefill_verify` re-runs the same proof per row, because a mispaired
+# tile is the §10.5 trap and it must be refused here exactly as it is at k=1.
+
+def pin_tile(d: Path, name: str, cols: int) -> torch.Tensor:
+    """One prefill pin as a [T, cols] BF16 tile (the pins carry F32 files of BF16-representable
+    values, the same cast `pin()` makes at k=1)."""
+    return torch.from_numpy(np.load(d / (name + ".npy"))).to(torch.bfloat16).reshape(-1, cols)
+
+
+def prefill_tokens(d: Path, layer: int) -> int:
+    """How many rows this prefill fixture pins for one layer — read off `s_in`, never assumed."""
+    return int(np.load(d / ("L%02d.s_in.npy" % layer)).shape[1])
+
+
+def prefill_normed_input(d: Path, layer: int) -> torch.Tensor:
+    s_in = pin_tile(d, "L%02d.s_in" % layer, 1024)
+    return rmsnorm_zc(s_in, ckpt_tensor(LAYER_PREFIX % layer + "input_layernorm.weight"))
+
+
+def prefill_wrong_normed_inputs(d: Path, layer: int) -> dict[str, torch.Tensor]:
+    """The tile versions of the k=1 wrong readings: same three mistakes, at T rows."""
+    s_in = pin_tile(d, "L%02d.s_in" % layer, 1024)
+    pre = LAYER_PREFIX % layer
+    return {
+        "pre-norm s_in": s_in,
+        "post_attention_layernorm output": rmsnorm_zc(
+            s_in, ckpt_tensor(pre + "post_attention_layernorm.weight")),
+        "norm without the (1+w) affine": (s_in.float()
+                                         * torch.rsqrt((s_in.float() ** 2).mean(-1, keepdim=True)
+                                                       + 1e-6)).to(torch.bfloat16),
+    }
+
+
+def prefill_operands_for(d: Path, layer: int) -> dict:
+    """The tiles one layer's two launches consume on the prefill pass."""
+    if is_attn_layer(d, layer, step=""):
+        pre_gate = pin_tile(d, "L%02d.attn.attn_out_pre_gate" % layer, N_Q * D_HEAD)
+        qg = pin_tile(d, "L%02d.q_proj.out" % layer, 2 * N_Q * D_HEAD)
+        gate = qg.reshape(-1, N_Q, D_HEAD * 2)[:, :, D_HEAD:].reshape(-1, N_Q * D_HEAD)
+        return {"kind": "attn", "x_in": prefill_normed_input(d, layer),
+                "x_out": pre_gate * torch.sigmoid(gate), "pack": ATTN_PACK, "out_proj": "o_proj"}
+    return {"kind": "gdn", "x_in": prefill_normed_input(d, layer),
+            "x_out": pin_tile(d, "L%02d.gdn.gated_out" % layer, H_KV * D_KV),
+            "pack": GDN_PACK, "out_proj": "out_proj"}
+
+
+def prefill_verify(d: Path, layer: int) -> list[tuple[bool, str]]:
+    """(ok, line) per projection, over the whole tile: the rebuilt operand must reproduce every row
+    of the pin BIT-EXACTLY with torch's own matmul, and each wrong reading must fail to.
+
+    The pin widths are the projection's own row count, so a mispaired file (the §10.5
+    last-writer-wins trap) shows up as a shape or bit mismatch rather than as a quiet kernel
+    disagreement."""
+    ops = prefill_operands_for(d, layer)
+    out_name = ops["out_proj"]
+    out = []
+    for name, rows in ops["pack"]:
+        ref = pin_tile(d, "L%02d.%s.out" % (layer, name), rows)
+        ndiff = int(((ops["x_in"] @ proj_weight(layer, name).t()).reshape(-1)
+                     != ref.reshape(-1)).sum())
+        out.append((ndiff == 0, "%s: rebuilt tile reproduces the pin (ndiff %d/%d)"
+                    % (name, ndiff, ref.numel())))
+    ref = pin_tile(d, "L%02d.%s.out" % (layer, out_name), 1024)
+    ndiff = int(((ops["x_out"] @ proj_weight(layer, out_name).t()).reshape(-1)
+                 != ref.reshape(-1)).sum())
+    out.append((ndiff == 0, "%s: rebuilt tile reproduces the pin (ndiff %d/%d)"
+                % (out_name, ndiff, ref.numel())))
+
+    first = ops["pack"][0][0]
+    first_rows = ops["pack"][0][1]
+    ref = pin_tile(d, "L%02d.%s.out" % (layer, first), first_rows)
+    bad = [label for label, xx in prefill_wrong_normed_inputs(d, layer).items()
+           if int(((xx @ proj_weight(layer, first).t()).reshape(-1) != ref.reshape(-1)).sum()) == 0]
+    out.append((not bad, "wrong-norm readings rejected: %s" % (
+        "pre-norm, other norm, no-affine" if not bad else "STILL MATCHES " + ",".join(bad))))
+    return out
+
+
+def projections_of(d: Path, layer: int, step: str = "decode0") -> list[str]:
+    if is_attn_layer(d, layer, step):
         return [n for n, _ in ATTN_PACK] + ["o_proj"]
     return [n for n, _ in GDN_PACK] + ["out_proj"]
 

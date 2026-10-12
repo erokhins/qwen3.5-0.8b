@@ -27,6 +27,13 @@
  * which is why they are folded rather than timed as shapes of their own. The driver below is
  * plan-driven so the gate can exercise packed and unpacked forms with one code path.
  *
+ * TOKEN BATCHING (P5). A prefill wave hands one projection a [T,IN] tile instead of one row, and
+ * `proj_gemv_tokens` reads each weight row once per TPB-token tile rather than once per token; that
+ * is the family's only bandwidth lever, because the narrow shapes are shape-limited (results.md:
+ * `k_proj`/`v_proj` at 39-40 % of the read probe, `o_proj`/`out_proj` 46-49 %, `in_proj_a`/`b` ~5 %).
+ * The engine issues that kernel at every width, one token included. §06.2's "one GEMM per
+ * projection" is this sentence.
+ *
  * Rounding: one F32 dot, rounded once to BF16 (RNE, the cast torch does). There is no epilogue to
  * get wrong here (unlike the MLP's three-rounding SwiGLU); what there is to get wrong is the row
  * LAYOUT — §05.1's per-head `[8 heads][q 256 | gate 256]` q_proj block and §04.1's `[q|k|v]`
@@ -46,15 +53,24 @@
  *
  * Build: prototype/proj_gemv/build.sh   (-O3, -Wl,-rpath,/opt/rocm/lib)
  * Run:   ./proj_gemv --mode once  --plan PLAN [--rows N] [--neg NAME] [--x-packed]
+ *        ./proj_gemv --mode once  --plan PLAN --tokens T [--tpb N] [--kernel k1]
  *        ./proj_gemv --mode burst --plan PLAN [--rows N] [--iters N] [--tile N] [--write-out]
- *        ./proj_gemv --mode burst --plan PLAN --rows-list 2,4,8,16,32 [--tile N]
+ *        ./proj_gemv --mode burst --plan PLAN --rows-list 2,4,8,16,32 [--tile N] [--tpb N]
  * Validate: prototype/proj_gemv/run.py
  *
  * PLAN is a text file, one launch per line:
  *     NAME ROWS IN XFILE WFILE[,WFILE...] [OUTFILE]
- * XFILE is raw little-endian BF16 with IN elements; WFILEs are row-major BF16 [rows_i, IN]
- * concatenated in the order given (ROWS must equal the sum); OUTFILE, if present, receives the
- * BF16 output of ROWS elements — always in `once` mode, in `burst` mode only with --write-out.
+ * XFILE is raw little-endian BF16 with IN elements — or, with `--tokens T`, with T*IN elements, the
+ * [T,IN] input tile one prefill wave presents (row-major, token-major). WFILEs are row-major BF16
+ * [rows_i, IN] concatenated in the order given (ROWS must equal the sum); OUTFILE, if present,
+ * receives the BF16 output — ROWS elements in the k=1 form, TOKENS*ROWS elements in the batched
+ * one, laid out [token][row] — always in `once` mode, in `burst` mode only with --write-out.
+ *
+ * --kernel picks which kernel the plan runs through: `tokens` (default) is the tile form the engine
+ * uses at every width, `TPB = 1` included; `k1` is the original one-wavefront-per-row kernel, kept
+ * as the batched gate's independent per-row reference. --tpb overrides the tile width the launcher
+ * picks (4 at in=1024, 2 at in=2048, 1 when tokens == 1); it exists for the main agent's sweep, and
+ * nothing in the gated correctness path uses a value other than the launcher's own.
  */
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
@@ -118,10 +134,17 @@ struct Weight {                       // one launch's concatenated weight blob, 
 struct Job {
     std::string name, xfile, outfile;
     int widx = 0, xidx = 0;
-    int rows = 0, in = 0;
+    int rows = 0, in = 0, tpb = 1, tokens = 1;
     size_t wbytes = 0, xbytes = 0;
     hip_bfloat16* dout = nullptr;
-    size_t bytes() const { return wbytes + xbytes + (size_t)rows * 2; }
+    // Traffic accounting for one launch of this job: weight bytes once per TPB-token tile, and each
+    // distinct x / output element once per tile pass. Same level of approximation the k=1 form used
+    // (x is in fact re-staged by every row block of the launch, and was counted once there too); the
+    // divisor that matters — weights per token-tile instead of per token — is exact.
+    size_t bytes() const {
+        const size_t tiles = (size_t)((tokens + tpb - 1) / tpb);
+        return wbytes * tiles + xbytes * tiles + (size_t)tokens * rows * 2;
+    }
 };
 
 struct Plan {
@@ -129,6 +152,7 @@ struct Plan {
     std::vector<float*> xdev;              // widened F32 x, one per distinct x file
     std::vector<hip_bfloat16*> xdev_bf;    // the same x left as BF16
     std::vector<std::string> xpaths;
+    int tokens = 1;                        // rows in each XFILE tile; set from --tokens
     std::vector<Job> jobs;
 
     int weight_index(const std::vector<std::string>& files, int in) {
@@ -161,27 +185,39 @@ struct Plan {
     int x_index(const std::string& path, int in) {
         for (int i = 0; i < (int)xpaths.size(); ++i)
             if (xpaths[i] == path) return i;
+        const size_t want = (size_t)tokens * in * 2;
         const std::vector<char> raw = slurp(path);
-        if (raw.size() != (size_t)in * 2) {
-            fprintf(stderr, "%s: %zu bytes, expected %d bf16 elements\n", path.c_str(),
-                    raw.size(), in);
-            exit(1);
+        if (raw.size() != want) {
+            fprintf(stderr, "%s: %zu bytes, expected %zu (%d bf16 rows of in=%d)\n", path.c_str(),
+                    raw.size(), want, tokens, in);            exit(1);
         }
-        std::vector<float> host(in);
+        std::vector<float> host(raw.size() / 2);
         const hip_bfloat16* p = (const hip_bfloat16*)raw.data();
-        for (int i = 0; i < in; ++i) host[i] = float(p[i]);
+        for (size_t i = 0; i < host.size(); ++i) host[i] = float(p[i]);
         float* d = nullptr;
         hip_bfloat16* db = nullptr;
-        CK(hipMalloc(&d, (size_t)in * sizeof(float)));
-        CK(hipMemcpy(d, host.data(), (size_t)in * sizeof(float), hipMemcpyHostToDevice));
-        CK(hipMalloc(&db, (size_t)in * 2));
-        CK(hipMemcpy(db, raw.data(), (size_t)in * 2, hipMemcpyHostToDevice));
+        CK(hipMalloc(&d, host.size() * sizeof(float)));
+        CK(hipMemcpy(d, host.data(), host.size() * sizeof(float), hipMemcpyHostToDevice));
+        CK(hipMalloc(&db, raw.size()));
+        CK(hipMemcpy(db, raw.data(), raw.size(), hipMemcpyHostToDevice));
         xpaths.push_back(path);
         xdev.push_back(d);
         xdev_bf.push_back(db);
         return (int)xpaths.size() - 1;
     }
 };
+
+// One launch of the tile form. TPB is a template argument, so this is spelled out per width rather
+// than reached through a runtime switch: a wrong width must not silently become a different kernel.
+template <int IN, int TPB>
+static void launch_tiles(dim3 grid, int threads, const hip_bfloat16* W, const void* xp,
+                         hip_bfloat16* out, const Job& j, int rpb, int neg, bool packed) {
+    if (packed) {
+        proj_gemv_tokens<IN, TPB, true><<<grid, threads>>>(W, xp, out, j.rows, j.tokens, rpb, neg);
+    } else {
+        proj_gemv_tokens<IN, TPB, false><<<grid, threads>>>(W, xp, out, j.rows, j.tokens, rpb, neg);
+    }
+}
 
 static void upload(Weight& w, int copies) {
     char* host = nullptr;
@@ -202,8 +238,8 @@ static void upload(Weight& w, int copies) {
 }
 
 int main(int argc, char** argv) {
-    std::string mode = "once", plan_path, negname = "none", rows_list;
-    int iters = 30, rows_per_block = 8, tile = 1;
+    std::string mode = "once", plan_path, negname = "none", rows_list, kernel = "tokens";
+    int iters = 30, rows_per_block = 8, tile = 1, tokens = 1, tpb_flag = 0;
     bool x_packed = false, write_out = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -214,6 +250,9 @@ int main(int argc, char** argv) {
         else if (a == "--rows-list") rows_list = next();
         else if (a == "--iters") iters = atoi(next().c_str());
         else if (a == "--tile") tile = atoi(next().c_str());
+        else if (a == "--tokens") tokens = atoi(next().c_str());
+        else if (a == "--tpb") tpb_flag = atoi(next().c_str());
+        else if (a == "--kernel") kernel = next();
         else if (a == "--neg") negname = next();
         else if (a == "--x-packed") x_packed = true;
         else if (a == "--write-out") write_out = true;
@@ -226,6 +265,22 @@ int main(int argc, char** argv) {
         fprintf(stderr, "usage: proj_gemv --mode once|burst --plan PLAN [options]\n");
         return 1;
     }
+    if (tokens < 1) {
+        fprintf(stderr, "--tokens takes at least 1 token (got %d)\n", tokens);
+        return 1;
+    }
+    if (kernel != "tokens" && kernel != "k1") {
+        fprintf(stderr, "--kernel must be `tokens` (the tile form the engine runs) or `k1`\n");
+        return 1;
+    }
+    // The launcher's own tile width, and the engine's: shared memory is TPB*IN floats and 16 KiB is
+    // the budget the gated MLP settled on, so 4 rows at in=1024 and 2 at in=2048. One token is a tile
+    // of one — that is what makes `tokens == 1` the k=1 shape rather than a special case.
+    auto tile_width = [&](int in) {
+        if (tpb_flag > 0) return tpb_flag;
+        if (tokens == 1) return 1;
+        return in == 1024 ? 4 : 2;
+    };
     const int neg = negname == "none" ? NEG_NONE : negname == "tail" ? NEG_TAIL
                   : negname == "half" ? NEG_HALF : negname == "trunc" ? NEG_TRUNC
                   : negname == "rowswap" ? NEG_ROWSWAP : negname == "transpose" ? NEG_TRANSPOSE
@@ -249,6 +304,7 @@ int main(int argc, char** argv) {
     }
 
     Plan plan;
+    plan.tokens = tokens;      // how many rows each XFILE carries (x_index checks against it)
     {
         std::ifstream pf(plan_path);
         if (!pf) {
@@ -280,10 +336,12 @@ int main(int argc, char** argv) {
             }
             j.widx = plan.weight_index(wfiles, j.in);
             j.xidx = plan.x_index(j.xfile, j.in);
-            j.xbytes = (size_t)j.in * 2;
-            // Traffic accounting: every launch streams its whole weight blob once, plus x in and
-            // the result out. `tile` replicas are cache-defeats, not extra work, so they are NOT
-            // counted per launch — the reported GB/s is the same bytes a real token moves.
+            j.tokens = tokens;
+            j.tpb = tile_width(j.in);
+            j.xbytes = (size_t)tokens * j.in * 2;
+            // Traffic accounting: see Job::bytes(). `tile` replicas are cache-defeats, not extra
+            // work, so they are NOT counted per launch — the reported GB/s is the same bytes a real
+            // token moves.
             j.wbytes = plan.weights[j.widx].bytes;
             plan.jobs.push_back(j);
         }
@@ -296,14 +354,15 @@ int main(int argc, char** argv) {
     // resident for the whole run; nothing here models a per-token H2D (devices/: H2D is
     // 76-82 GB/s and would dominate if a token had to wait for it).
     for (auto& w : plan.weights) upload(w, mode == "burst" ? tile : 1);
-    for (auto& j : plan.jobs) CK(hipMalloc(&j.dout, (size_t)j.rows * 2));
+    for (auto& j : plan.jobs) CK(hipMalloc(&j.dout, (size_t)j.tokens * j.rows * 2));
 
     double wbytes = 0;
     for (const auto& w : plan.weights) wbytes += w.bytes;
     printf("plan %s | jobs=%zu distinct weights=%zu (%.1f MiB) | warpSize=%d CUs=%d"
-           " | rows/block=%d | x=%s | tile=%d\n",
+           " | rows/block=%d | x=%s | tile=%d | kernel=%s tokens=%d\n",
            plan_path.c_str(), plan.jobs.size(), plan.weights.size(), wbytes / 1048576.0,
-           ws, ncu, rows_per_block, x_packed ? "bf16 in shared" : "f32 in shared", tile);
+           ws, ncu, rows_per_block, x_packed ? "bf16 in shared" : "f32 in shared", tile,
+           kernel.c_str(), tokens);
     if (neg != NEG_NONE) printf("NEGATIVE TEST: injected bug = %s\n", negname.c_str());
 
     auto launch_job = [&](Job& j, int rep, int rpb) {
@@ -323,14 +382,46 @@ int main(int argc, char** argv) {
         const void* xp = x_packed ? (const void*)plan.xdev_bf[j.xidx]
                                   : (const void*)plan.xdev[j.xidx];
         hip_bfloat16* W = w.rep[(size_t)rep % w.rep.size()];
+        // grid.x is the row blocks, exactly as the k=1 form; grid.y is the token tiles, and is 1
+        // whenever there is one token or one tile, which is why the decode shape is unchanged.
+        const int tpb = j.tpb;
+        const dim3 grid_t((unsigned)blocks, (unsigned)((j.tokens + tpb - 1) / tpb));
+        if (kernel == "k1") {
+            if (j.tokens != 1) {
+                fprintf(stderr, "%s: --kernel k1 is the one-row-per-launch form; drop --tokens\n",
+                        j.name.c_str());
+                exit(1);
+            }
+            if (j.in == 1024) {
+                if (x_packed) proj_gemv<1024, true><<<blocks, threads>>>(W, xp, j.dout, j.rows,
+                                                                         rpb, neg);
+                else proj_gemv<1024, false><<<blocks, threads>>>(W, xp, j.dout, j.rows, rpb, neg);
+            } else {
+                if (x_packed) proj_gemv<2048, true><<<blocks, threads>>>(W, xp, j.dout, j.rows,
+                                                                         rpb, neg);
+                else proj_gemv<2048, false><<<blocks, threads>>>(W, xp, j.dout, j.rows, rpb, neg);
+            }
+            CK(hipGetLastError());
+            return;
+        }
+        // The form the engine runs, at every width. TPB=1 with grid.y=1 is the k=1 arithmetic.
+        // TPB is a template argument, so only the widths the launcher actually picks are instantiated:
+        // 1 (the decode shape) plus the tile width for that input width. Anything else is refused
+        // rather than silently mapped onto a different width than the one asked for.
         if (j.in == 1024) {
-            if (x_packed) proj_gemv<1024, true><<<blocks, threads>>>(W, xp, j.dout, j.rows,
-                                                                     rpb, neg);
-            else proj_gemv<1024, false><<<blocks, threads>>>(W, xp, j.dout, j.rows, rpb, neg);
+            if (tpb == 1) launch_tiles<1024, 1>(grid_t, threads, W, xp, j.dout, j, rpb, neg, x_packed);
+            else if (tpb == 4) launch_tiles<1024, 4>(grid_t, threads, W, xp, j.dout, j, rpb, neg, x_packed);
+            else {
+                fprintf(stderr, "--tpb %d is not instantiated at in=1024 (1 or 4)\n", tpb);
+                exit(1);
+            }
         } else {
-            if (x_packed) proj_gemv<2048, true><<<blocks, threads>>>(W, xp, j.dout, j.rows,
-                                                                     rpb, neg);
-            else proj_gemv<2048, false><<<blocks, threads>>>(W, xp, j.dout, j.rows, rpb, neg);
+            if (tpb == 1) launch_tiles<2048, 1>(grid_t, threads, W, xp, j.dout, j, rpb, neg, x_packed);
+            else if (tpb == 2) launch_tiles<2048, 2>(grid_t, threads, W, xp, j.dout, j, rpb, neg, x_packed);
+            else {
+                fprintf(stderr, "--tpb %d is not instantiated at in=2048 (1 or 2)\n", tpb);
+                exit(1);
+            }
         }
         CK(hipGetLastError());
     };
@@ -338,10 +429,11 @@ int main(int argc, char** argv) {
     auto write_outputs = [&]() {
         for (auto& j : plan.jobs) {
             if (j.outfile.empty()) continue;
-            std::vector<hip_bfloat16> h(j.rows);
-            CK(hipMemcpy(h.data(), j.dout, (size_t)j.rows * 2, hipMemcpyDeviceToHost));
+            const size_t n = (size_t)j.tokens * j.rows;      // [token][row], the tile layout
+            std::vector<hip_bfloat16> h(n);
+            CK(hipMemcpy(h.data(), j.dout, n * 2, hipMemcpyDeviceToHost));
             std::ofstream of(j.outfile, std::ios::binary);
-            of.write((const char*)h.data(), (std::streamsize)j.rows * 2);
+            of.write((const char*)h.data(), (std::streamsize)(n * 2));
         }
     };
 
@@ -392,11 +484,14 @@ int main(int argc, char** argv) {
             // which is exactly how one shape here once reported 25433 GB/s.
             return std::pair<double, double>(wall, (double)ev);
         };
-        const int occ_x = x_packed ? 2048 : 4096;      // shared bytes for in=2048, widest case
+        // Shared bytes per block for the widest case (in=2048 at its tile width) and the occupancy the
+        // instantiated kernel gets. With the tile form this is TPB*IN*(2 or 4) bytes, which is exactly
+        // the quantity that bounds TPB, so it is printed rather than assumed.
+        const int occ_x = tile_width(2048) * 2048 * (x_packed ? 2 : 4);
         int occ = 0;
         CK(hipOccupancyMaxActiveBlocksPerMultiprocessor(
-            &occ, x_packed ? (const void*)&proj_gemv<2048, true>
-                           : (const void*)&proj_gemv<2048, false>, rpb * ws, 0));
+            &occ, x_packed ? (const void*)&proj_gemv_tokens<2048, 2, true>
+                           : (const void*)&proj_gemv_tokens<2048, 2, false>, rpb * ws, 0));
         burst(1);                                      // warm: fresh pages run at ~35 GB/s
         const int reps = std::max(1, iters);
         const std::pair<double, double> t = burst(reps);
