@@ -498,3 +498,68 @@ What this number is for: it is a **once-per-process** cost, not a per-token one 
 row changes anything downstream. It closes the last `cold weight-restore` debt from
 `bench/gate-audit.md`, and it is the number that bounds any future "restart the engine per request"
 idea: at 454 ms it is affordable exactly zero times inside a conversation.
+
+### Long-context decode and time-to-first-token (2026-10-13, zero subagents, foreground, locks `main-ctx-final` and `main-ttft3`)
+
+**This is the row that `MAXSC = 512` blocked, and it is also the first correction to it.** P7 removed the
+lane ceiling, so the 4k point is now measurable instead of extrapolated. Two things had to be fixed in
+method before any number could be quoted:
+
+- **`RESULT ms_per_step` stopped being a decode cost in P2.** It averages every token the run priced, and
+  since P2/P4–P6 the prompt is a wave with amortised launches, so the mean fell to ~2 ms/token and says
+  nothing about decode. The decode rows below are therefore **differential**: two runs that differ only in
+  `--steps` (32 vs 64), same prompt, same prefill in both, so `(ms_total_B − ms_total_A) / 32` is the cost
+  of a generation step at that context. `tools/context_sweep.py`.
+- The old extrapolation in this file (**+9.4 ms/token at 4096 lanes, "~10 tok/s", flagged there as an
+  extrapolation from a 25–327 lane window and not to be quoted as a measurement**) is now refuted by a
+  measurement. It over-predicted by ~2.6×.
+
+| lanes at last step | marginal ms/token, best of 3 | all three | spread | tok/s |
+|---|---|---|---|---|
+| 128 | **12.863** | 12.863 / 12.966 / 13.051 | 1.47 % | 77.7 |
+| 512 | **13.942** | 13.942 / 13.975 / 14.469 | 3.78 % | 71.7 |
+| 1024 | **13.793** | 13.793 / 13.861 / 14.348 | 4.02 % | 72.5 |
+| 2048 | **13.634** | 13.634 / 13.882 / 13.969 | 2.46 % | 73.3 |
+| 4032 | **16.311** | 16.311 / 16.635 / 17.089 | 4.77 % | 61.3 |
+
+`gpu util` 94 % at acquire, 46 % at release; discounted as everywhere else here. Prompts are repeated
+prose truncated to length and checked stop-id-free — the lane count is what matters for this row, not the
+tokens' meaning, and that is stated rather than hidden.
+
+**Reading it.** The context term is **(16.311 − 12.863) / (4032 − 128) = 0.89 µs per lane per token**, not
+2.3 µs: the ≤327-lane slope was dominated by fixed launch cost and did not extrapolate. The curve is flat
+from 512 to 2048 and only climbs past 2k, which is consistent with P7's split-K path parallelising the
+lane axis above the 512-lane staging — the same "attention is dispatch-bound, not bandwidth-bound" finding
+as before, now with the fix in place and still only at 61 tok/s at 4k, so the attention read remains the
+hot path. 4k single-stream decode is **viable, not fast**.
+
+| prompt lanes | ms to first sampled token, best of 3 | all three | spread | prompt tok/s |
+|---|---|---|---|---|
+| 64 | **89.4** | 89.4 / 89.9 / 90.5 | 1.31 % | 716 |
+| 256 | **347.5** | 347.5 / 347.6 / 348.0 | 0.13 % | 737 |
+| 1024 | **1610.2** | 1610.2 / 1614.5 / 1620.3 | 0.63 % | 636 |
+| 3072 | **5407.1** | 5407.1 / 5441.5 / 5450.2 | 0.80 % | 568 |
+
+`tools/prefill_sweep.py`, `ms_total` with `--steps 1` (prompt wave plus one priced step, weight load
+excluded — the 454.4 ms cold restore above is a separate, once-per-process cost). Before P2 the prompt was
+fed one token per decode step, so 3072 tokens would have cost roughly 3072 × 12.9 ms ≈ **40 s** of TTFT;
+**5.4 s is ~7× better**, and that is the derived comparison, not a measured old-path row. What it is still
+not: good. A 3k-token chat prompt waits five and a half seconds, because prefill throughput is ~570–740
+tok/s while the per-token GDN recurrence and per-token attention remain serial — P9's chunked scan is the
+lever, and this table is what prices it.
+
+**And a new ceiling to mind.** P7's split is capped at `kAttnMaxSplit = 8`, so the engine's lane ceiling is
+now **512 × 8 = 4096** and it refuses fail-closed past it: the first attempt at this row died with
+`attn_decode_layer: lvalid=4097 needs split=9`. A full 4k context plus generated tokens exceeds that, so
+"4k support" as shipped means a 4k **prompt window measured to 4096 lanes inclusive**, not 4k of prompt
+*plus* 4k of generation. Raising it means raising `attn_part_floats()` scratch alongside the constant, and
+`engine/gate.py::lane_ceiling()` reads both rather than trusting a number.
+
+Reproduce:
+
+```bash
+tools/gpu_lock.sh acquire <tag> && tools/gpu_lock.sh util
+.venv/bin/python tools/context_sweep.py --lanes 128,512,1024,2048,4032 --steps 32 --runs 3
+.venv/bin/python tools/prefill_sweep.py  --lanes 64,256,1024,3072 --runs 3
+tools/gpu_lock.sh release <tag>
+```
