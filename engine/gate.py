@@ -42,7 +42,13 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       (`tools/band_history.py`); it runs before any fixture read or device work, and it is the mechanical
       half of `AGENTS.md`'s "never loosen a gate to make it pass".
 
-  (0) FIXTURE PAIRING, proved rather than assumed (§10.5). See `pairing_checks`.
+  (0) FIXTURE PAIRING, proved rather than assumed (§10.5). See `pairing_checks`. A step whose logits
+      the fixture DECLARED absent (`reference_dump --logit-steps`) is skipped for the logits half while
+      its feed line is still checked, and the section prints `paired N of M steps, K declared gaps` so
+      that a fixture which quietly lost its pairing shows up in the output rather than only in the
+      check total. Logits that are merely missing — not declared — still exit 1, and a gapped fixture is
+      refused an engine run: sections (a)/(b)/(e) judge every pinned step, and judging fewer of them is
+      not a thing this gate does silently. `--selftest` injects each of those four cases.
   (a) SAMPLED IDS — the engine's sample after the prompt's last token plus its generation samples
       must equal the manifest's `greedy_continuation`, exactly. §10.1 G7 requires token-for-token
       exactness, and a token id is an integer: there is no band to argue about. The ONE exception is a
@@ -427,6 +433,39 @@ def load_pin(name: str) -> np.ndarray:
     if a.dtype == np.uint16:
         a = (a.astype(np.uint32) << 16).view(np.float32)
     return a
+
+
+gapset: frozenset = frozenset()   # the FIXTURE's declared logit gaps, as step indices; set by
+                                  # `pairing_checks` from the manifest, because section (f2) runs
+                                  # later and must not re-read the manifest for it
+
+
+def declared_logit_gaps(man: dict) -> list:
+    """The steps this fixture DECLARES it did not pin logits for, as sorted step indices.
+
+    `tools/reference_dump.py --logit-steps` keeps a long chain's logits at a chosen set of steps and
+    writes every step it dropped into `logits_declared_absent`, one entry per step — never a count, a
+    range or a ratio, because "keep 1 in 8" expressed as a policy is a weaker gate worn as a knob.
+    A fixture made before the flag has no key and therefore declares nothing, which is the correct
+    answer: it has no gaps either.
+    """
+    raw = man.get("logits_declared_absent", []) or []
+    steps = []
+    for tag in raw:
+        try:
+            steps.append(int(str(tag).removeprefix("decode")))
+        except ValueError:
+            raise SystemExit(f"gate: {REFS.name}: logits_declared_absent names {tag!r}, which is not"
+                             " a step tag like 'decode7'. Every gap has to be named per step, so this"
+                             " gate refuses to guess what the list means")
+    return sorted(set(steps))
+
+
+def first_pinned_logits(dec_logits: list):
+    """The first step's pinned logits vector, or None if the fixture declared every step away. Only
+    ever asked for a dtype/shape to print, so a fixture with no per-step logits gets a sentence here
+    instead of an IndexError on an empty list."""
+    return next((lg for lg in dec_logits if lg is not None), None)
 
 
 def argmax_low(a: np.ndarray) -> int:
@@ -976,8 +1015,17 @@ def deep_matches_shallow(n_decode: int) -> None:
                      " not apply.")
         return
     n_shallow = len(shallow_man["greedy_continuation"]) - 1
+    n_steps = min(n_shallow, n_decode)
+    if all(s in gapset for s in range(n_steps)):
+        notes.append(f"(f2) did not run: every one of the {n_steps} overlapping steps is a declared"
+                     " logit gap in this fixture, so there is no step left to compare with dec8."
+                     " The gaps are declared per step by the pin, but this cross-check is one of the"
+                     " things it gave up.")
+        return
     agree = []
-    for s in range(min(n_shallow, n_decode)):
+    for s in range(n_steps):
+        if s in gapset:
+            continue    # declared absent, already counted in section (0)'s pairing line
         deep = load_pin(f"decode{s}.logits_last.npy")
         shallow = np.load(SHALLOW_REFS / f"decode{s}.logits_last.npy", allow_pickle=False)
         if shallow.dtype == np.uint16:
@@ -1597,6 +1645,14 @@ def state_fp_checks(man: dict, prompt_len: int, n_decode: int, ran_decode: int,
 
 # ---- (0) the fixture pairing -------------------------------------------------------------------
 def pairing_checks(man: dict) -> tuple[list, list, np.ndarray]:
+    """Section (0): does this fixture pair with itself? Inputs, per-step logits, the prefill anchor,
+    and the last-writer-wins trap that the bare names are the LAST step's, not the prompt's.
+
+    A step whose logits the fixture declared absent is skipped for the logits half only — its feed line
+    is still checked — and the accounting is closed with a printed `paired N of M steps, K declared
+    gaps`, because "the pairing passed" means nothing if it quietly passed on two steps out of twenty.
+    A missing logits file that was NOT declared still exits 1 from `load_pin`, and `--selftest` keeps an
+    injection for exactly that."""
     section("(0) fixture pairing — proved from the dumps (§10.5)")
     print(f"  manifest: {REFS / 'manifest.json'}")
     prompt_ids = man["sources"][0]["ids"]
@@ -1604,19 +1660,58 @@ def pairing_checks(man: dict) -> tuple[list, list, np.ndarray]:
     print(f"  sources[0].ids        = {prompt_ids}")
     print(f"  greedy_continuation   = {greedy}")
 
-    dec_logits = [load_pin(f"decode{s}.logits_last.npy").reshape(-1) for s in range(len(greedy) - 1)]
-    dec_inputs = [load_pin(f"decode{s}.input_ids.npy").reshape(-1) for s in range(len(greedy) - 1)]
+    global gapset
+    gapset = frozenset(declared_logit_gaps(man))
+    n_steps = len(greedy) - 1
+    # A declared gap must name a step this fixture HAS. A declaration for step 40 of a 24-step chain is
+    # a stale copy of a manifest, and a stale declaration is how a real loss hides.
+    beyond = sorted(s for s in gapset if s >= n_steps)
+    check(not beyond,
+          "every declared logit gap names a step this fixture has, so a stale manifest cannot quietly"
+          " stand in for a lean pin",
+          f"{n_steps} steps in the chain, and "
+          + ", ".join(f"decode{s}" for s in beyond) + " which is not a step this fixture has"
+          if beyond else "no gaps declared")
+    gapset = frozenset(s for s in gapset if s < n_steps)
+    # A declared gap that is not actually missing is a stale declaration, and a stale declaration is how
+    # a real loss hides: the pin says step 12 carries nothing, step 12's file is sitting there, and the
+    # next re-pin will "conveniently" lose it. Refuse the disagreement in both directions.
+    lying = sorted(s for s in gapset if (REFS / f"decode{s}.logits_last.npy").exists())
+    check(not lying,
+          "every declared logit gap is actually absent from the fixture (the declaration and the disk"
+          " agree, in both directions)",
+          "declares a step whose logits are present: "
+          + ", ".join(f"decode{s}" for s in lying) if lying else "no gaps declared")
+    dec_logits = [None if s in gapset else load_pin(f"decode{s}.logits_last.npy").reshape(-1)
+                  for s in range(n_steps)]
+    dec_inputs = [load_pin(f"decode{s}.input_ids.npy").reshape(-1) for s in range(n_steps)]
     prefill_logits = load_pin("logits_last.npy").reshape(-1)
 
+    paired = 0
     for s, (lg, ip) in enumerate(zip(dec_logits, dec_inputs)):
+        # The input line is checked whether or not the logits were pinned: what was fed is a fact about
+        # the chain, and a step that gave up its logits does not get to give up its feed list too.
+        check(len(ip) == 1 and int(ip[0]) == greedy[s],
+              f"decode{s}.input_ids == greedy_continuation[{s}]", ip.astype(int).tolist())
+        if lg is None:
+            continue
         meta = man["pins"][f"decode{s}.logits_last"]
         check(meta["step"] == f"decode{s}", f"manifest declares decode{s}.logits_last step",
               f'{meta["step"]} / {meta["shape"]} / {meta["dtype"]}')
-        check(len(ip) == 1 and int(ip[0]) == greedy[s],
-              f"decode{s}.input_ids == greedy_continuation[{s}]", ip.astype(int).tolist())
         check(argmax_low(lg) == greedy[s + 1],
               f"argmax(decode{s}.logits_last) == greedy_continuation[{s + 1}]",
               f"{argmax_low(lg)} vs {greedy[s + 1]}")
+        paired += 1
+    check(paired + len(gapset) == n_steps,
+          "every step of the chain is either paired against its logits or declared absent — none"
+          " silently unjudged",
+          f"paired {paired} of {n_steps} steps, {len(gapset)} declared gaps"
+          + (f" ({', '.join('decode' + str(s) for s in sorted(gapset))})" if gapset else ""))
+    check(paired > 0 or n_steps == 0,
+          "at least one step of the chain still carries logits to pair against: a fixture that"
+          " declares EVERY step away is a manifest, not a pin (the dumper refuses `--logit-steps none`"
+          " so this cannot be made by accident)",
+          f"{len(gapset)} of {n_steps} steps declared away")
     check(argmax_low(prefill_logits) == greedy[0],
           "argmax(bare logits_last.npy) == greedy_continuation[0] — so the bare name is the PREFILL",
           f"{argmax_low(prefill_logits)} vs {greedy[0]}")
@@ -1625,11 +1720,15 @@ def pairing_checks(man: dict) -> tuple[list, list, np.ndarray]:
           f"bare input_ids.npy is decode{len(greedy) - 2}'s input, NOT the prompt — recorded so it"
           " is never used as one (§10.5's last-writer-wins trap)",
           f"{bare_inputs.astype(int).tolist()} == greedy_continuation[-2] == {greedy[-2]}")
+    seen = first_pinned_logits(dec_logits)
     print(f"  [info] prompt ids come from the manifest's sources[0].ids; the prompt's own logits"
           f" come from the bare logits_last.npy, whose argmax was just proved to be"
-          f" greedy_continuation[0]. Pinned logits read as {dec_logits[0].dtype},"
-          f" shape {dec_logits[0].shape}, stored as"
-          f" {man.get('logits_storage', 'f32 (pre-dates --logits-bits)')}.")
+          f" greedy_continuation[0]. "
+          + (f"Pinned logits read as {seen.dtype}, shape {seen.shape}, stored as"
+             f" {man.get('logits_storage', 'f32 (pre-dates --logits-bits)')}."
+             if seen is not None else
+             "No step's logits are pinned, so there is no per-step logits storage to report; the"
+             " bare prefill logits are the only token evidence this fixture carries."))
     stop_at = [i for i, t in enumerate(prompt_ids) if t == STOP_ID]
     print(f"  [info] the prompt itself contains the stop id {STOP_ID} at index {stop_at}, so a"
           " prompt-phase step can legitimately sample it. §07.5 is a generation-phase rule and such"
@@ -1865,6 +1964,200 @@ def ss_sizes() -> list:
     return [ss.gdn_state, ss.conv_window, ss.kv_per_token]
 
 
+def selftest_declared_gaps(fixture: str) -> list:
+    """The declared-logit-gap rule, injected on both sides (`tools/reference_dump.py --logit-steps`).
+
+    One sentence decides the rule: a step whose logits are missing may be skipped only if the FIXTURE
+    NAMED that step. Get it wrong in the permissive direction and the gate quietly stops checking
+    steps — the failure `prototype/mlp_gemv/results.md` names, a negative every check catches — and
+    get it wrong in the strict direction and a legitimately lean fixture cannot be checked at all. So
+    there is an injection on each side, plus the three ways a declaration can be a lie:
+
+      * undeclared gap      — must still exit 1 with `pinned dump missing`, naming THAT step;
+      * declared gap        — must exit 0 and print `paired N of M steps, K declared gaps`;
+      * declaration lies    — a declared step whose logits are present: exit 1;
+      * declaration is stale— a declared step past the end of the chain: exit 1;
+      * every step declared — a manifest, not a pin: exit 1;
+      * engine asked anyway — a gapped fixture must be refused before any run, `--dry-run` included.
+
+    The scratch fixture is a copy of the section-(0) files only (manifest, logits, feed list): copying
+    a whole 60-to-292 MB fixture to exercise a five-file code path would make every `--selftest` pay
+    for tensors this section never reads. `route_allowance.json` is deliberately NOT copied: a fixture
+    copy carrying a priced allowance reads as NEW band keys (`margin`, `margin_rel`) that no
+    `bench/band-history.jsonl` line introduces, and the band check would stop the run before section
+    (0) — which is that check working correctly, and the reason the three P3 fixtures ship unpriced.
+    """
+    section("(0) declared logit gaps — a step is skipped only because the pin said so")
+    bad = []
+    src = ROOT / "data" / "refs" / fixture
+    n_steps = len(json.loads((src / "manifest.json").read_text())["greedy_continuation"]) - 1
+    if n_steps < 2:
+        print(f"  [SKIP] {fixture} pins {n_steps} decode step(s); the gap injections need a chain of"
+              " at least 2 (one to drop, one left to pair).")
+        return bad
+    mid = n_steps // 2
+    scratch = ROOT / "data" / "refs" / f"selftest-gap-{os.getpid()}"
+    base = [sys.executable, str(Path(__file__).resolve()), "--fixture", scratch.name]
+
+    def build(declare, remove=None):
+        """A fresh scratch fixture: the section-(0) files, `remove`d steps deleted, `declare`d steps
+        named in the manifest. Rebuilt per case so one case cannot leave state for the next."""
+        if scratch.exists():
+            shutil.rmtree(scratch)
+        scratch.mkdir(parents=True)
+        keep = re.compile(r"^(manifest\.json|logits_last\.npy|input_ids\.npy"
+                          r"|decode\d+\.(logits_last|input_ids)\.npy)$")
+        for entry in src.iterdir():
+            if keep.match(entry.name):
+                shutil.copyfile(entry, scratch / entry.name)
+        for step in (remove if remove is not None else []):
+            (scratch / f"decode{step}.logits_last.npy").unlink()
+        man = json.loads((scratch / "manifest.json").read_text())
+        man["logits_declared_absent"] = [f"decode{s}" for s in (declare or [])]
+        (scratch / "manifest.json").write_text(json.dumps(man, indent=1, default=str))
+
+    cases = [
+        # (declare, remove)                 rc  needles                                                                                     what
+        (None, [mid],                        1, [f"pinned dump missing: {scratch / f'decode{mid}.logits_last.npy'}"],
+         "a logits file that is merely MISSING still exits 1, naming the step (no silent skip)"),
+        ([mid], [mid],                       0, [f"paired {n_steps - 1} of {n_steps} steps, 1 declared gap",
+                                                "!declares a step whose logits are present"],
+         "the same step DECLARED in the manifest is skipped, and the pairing count says so"),
+        ([mid], None,                        1, ["declares a step whose logits are present"],
+         "a declaration naming a step whose logits are actually there is refused (both directions)"),
+        ([n_steps + 5], None,                1, ["which is not a step this fixture has"],
+         "a declaration past the end of the chain is refused as the stale copy it is"),
+        (list(range(n_steps)), None,         1, ["is a manifest, not a pin"],
+         "declaring EVERY step away is refused: a pin with no logits has nothing for §10 G7 to judge"),
+    ]
+    for declare, remove, want_rc, needles, what in cases:
+        build(declare, remove)
+        p = subprocess.run(base + ["--no-engine"], capture_output=True, text=True)
+        bad += _needles(p, want_rc, needles, what)
+    # The refusal to run an engine at all on a gapped fixture, aimed at `--dry-run` so it costs no
+    # device window: the check sits before the binary is started, which is the only reason this is
+    # testable here at all.
+    build([mid], [mid])
+    p = subprocess.run(base + ["--dry-run"], capture_output=True, text=True)
+    bad += _needles(p, 1, ["cannot run the engine against it", f"decode{mid}"],
+                    "a gapped fixture is refused a device run instead of quietly judging fewer steps")
+    shutil.rmtree(scratch, ignore_errors=True)
+    return bad
+
+
+def _needles(p, want_rc, needles, what) -> list:
+    """Same needle language as the main injection table, so a gap case reads the same way: a needle
+    starting with `!` must be ABSENT, and the rc has to match. Returns the failures, if any."""
+    missing = []
+    for needle in needles:
+        absent = needle.startswith("!")
+        if (needle.lstrip("!") in p.stdout) == absent:
+            missing.append(needle)
+    ok = p.returncode == want_rc and not missing
+    print(f"  [{'PASS' if ok else 'FAIL'}] {what} — rc={p.returncode} want {want_rc}"
+          + ("" if not missing else " — missing: " + "; ".join(missing)))
+    if not ok:
+        print("      " + "\n      ".join(p.stdout.splitlines()[-6:])[:400])
+    return [] if ok else [what]
+
+
+def selftest_declared_gaps(fixture: str) -> list:
+    """Injections for the declared-logit-gap rule (`tools/reference_dump.py --logit-steps`).
+
+    One sentence is being tested: a step whose logits are missing may be skipped only if the FIXTURE
+    NAMED that step. Get it wrong in the permissive direction and the gate quietly stops checking
+    steps — the failure `prototype/mlp_gemv/results.md` names, a negative every check catches — and get
+    it wrong in the strict direction and a legitimately lean fixture cannot be checked at all. So there
+    is an injection on each side, plus the ways a declaration can be a lie:
+
+      * undeclared gap     — must still exit 1 with `pinned dump missing`, naming THAT step;
+      * declared gap       — must exit 0 and print `paired N of M steps, K declared gaps`;
+      * declaration lies   — a declared step whose logits are present: exit 1;
+      * declaration stale  — a declared step past the end of the chain: exit 1;
+      * every step declared — a manifest, not a pin: exit 1;
+      * engine asked anyway— a gapped fixture is refused before any run, `--dry-run` included.
+
+    The scratch fixture copies the section-(0) files only (manifest, logits, feed list): copying a
+    whole 60–292 MB fixture to exercise a five-file path would make every `--selftest` pay for tensors
+    this section never reads. `route_allowance.json` is deliberately NOT among them — a copy of a
+    priced fixture reads as NEW band keys (`margin`, `margin_rel`) that no `bench/band-history.jsonl`
+    line introduces, and the band check stops the run before section (0) ever sees the injection.
+    That is the band check working, and it is also why the three P3 fixtures ship unpriced.
+    """
+    section("(0) declared logit gaps — a step is skipped only because the pin said so")
+    src = ROOT / "data" / "refs" / fixture
+    n_steps = len(json.loads((src / "manifest.json").read_text())["greedy_continuation"]) - 1
+    if n_steps < 2:
+        print(f"  [SKIP] {fixture} pins {n_steps} decode step(s); the gap injections need a chain of"
+              " at least 2 — one to drop and one left to pair.")
+        return []
+    mid = n_steps // 2
+    scratch = ROOT / "data" / "refs" / f"selftest-gap-{os.getpid()}"
+    keep = re.compile(r"^(manifest\.json|logits_last\.npy|input_ids\.npy"
+                      r"|decode\d+\.(logits_last|input_ids)\.npy)$")
+
+    def build(declare=(), remove=()):
+        """A fresh scratch fixture: the section-(0) files, `remove`'d steps deleted, `declare`'d steps
+        named in the manifest. Rebuilt per case so one case cannot leave state for the next."""
+        shutil.rmtree(scratch, ignore_errors=True)
+        scratch.mkdir(parents=True)
+        for entry in src.iterdir():
+            if keep.match(entry.name):
+                shutil.copyfile(entry, scratch / entry.name)
+        for step in remove:
+            (scratch / f"decode{step}.logits_last.npy").unlink()
+        man = json.loads((scratch / "manifest.json").read_text())
+        man["logits_declared_absent"] = [f"decode{s}" for s in declare]
+        (scratch / "manifest.json").write_text(json.dumps(man, indent=1, default=str))
+
+    def run(extra, want_rc, needles, what):
+        p = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                            "--fixture", scratch.name] + extra, capture_output=True, text=True)
+        # A hard refusal is a `raise SystemExit`, which lands on stderr; a gated check is a `check()`
+        # line on stdout. The needles below span both, because the rule under test is exactly the
+        # boundary between them — "refuse loudly" versus "skip and say so".
+        out = p.stdout + p.stderr
+        missing = []
+        for needle in needles:
+            absent = needle.startswith("!")
+            if (needle.lstrip("!") in out) == absent:
+                missing.append(needle)
+        ok = p.returncode == want_rc and not missing
+        print(f"  [{'PASS' if ok else 'FAIL'}] {what} — rc={p.returncode} want {want_rc}"
+              + ("" if not missing else " — missing: " + "; ".join(missing)))
+        if not ok:
+            print("      " + "\n      ".join((p.stdout + p.stderr).splitlines()[-8:])[:500])
+        return [] if ok else [what]
+
+    bad = []
+    try:
+        build(remove=[mid])
+        bad += run(["--no-engine"], 1, [f"pinned dump missing: {scratch / f'decode{mid}.logits_last.npy'}"],
+                   "logits that are merely MISSING still exit 1, naming the step — no silent skip")
+        build(declare=[mid], remove=[mid])
+        bad += run(["--no-engine"], 0,
+                   [f"paired {n_steps - 1} of {n_steps} steps, 1 declared gap",
+                    "!declares a step whose logits are present"],
+                   "that step DECLARED in the manifest is skipped, and the pairing line says so")
+        build(declare=[mid])
+        bad += run(["--no-engine"], 1, ["declares a step whose logits are present"],
+                   "a declaration naming a step whose logits are actually there is refused")
+        build(declare=[n_steps + 5])
+        bad += run(["--no-engine"], 1, ["which is not a step this fixture has"],
+                   "a declaration past the end of the chain is refused as the stale copy it is")
+        build(declare=list(range(n_steps)))
+        bad += run(["--no-engine"], 1, ["is a manifest, not a pin"],
+                   "declaring EVERY step away is refused: with no logits there is nothing for §10 G7"
+                   " to judge")
+        build(declare=[mid], remove=[mid])
+        bad += run(["--dry-run"], 1, ["cannot run the engine against it", f"decode{mid}"],
+                   "a gapped fixture is refused a device run rather than quietly judging fewer steps"
+                   " (aimed at --dry-run: the refusal fires before a binary is started)")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return bad
+
+
 def selftest(fixture: str = "dec8") -> int:
     """Prove the gate discriminates, on the CPU, before anyone spends a GPU window on it.
 
@@ -1899,6 +2192,12 @@ def selftest(fixture: str = "dec8") -> int:
     section (g); on `dec8` the skip is printed. The section's other mechanical case — recomputing a
     pinned fingerprint from pinned tensors with `tools/state_fp.py::fp_row` and requiring bit equality
     — runs once in this process, since it is a fact about the pins and not about an injection.
+
+    The declared logit gaps get six (`selftest_declared_gaps`), because that rule is one sentence with a
+    failure mode on each side: a logits file the fixture did not declare must still stop the gate, and a
+    declared one must be skipped and PRINTED as skipped. The injections cover both directions of the
+    declaration disagreeing with the disk, the case where every step is declared away, and the refusal
+    to run an engine at all against a gapped fixture.
     """
     base = [sys.executable, str(Path(__file__).resolve()), "--fixture", fixture]
     # The cos band line is NAMED by the rule that produced it, so the needle has to know which rule this
@@ -2080,6 +2379,7 @@ def selftest(fixture: str = "dec8") -> int:
         fp_helper_identity(man)
         if len(fails) > before:
             bad.append("fp-of-pins identity (section (g)'s mechanical case): " + fails[-1][:160])
+    bad += selftest_declared_gaps(fixture)
     # The band history has to bite here too, and bite before anything runs: an unrecorded edit to `BAND`
     # must stop the gate, not merely look suspicious in review. The injection is the real thing — a
     # scratch tree whose engine/gate.py carries a looser flat floor, sitting beside the shipped ledger —
@@ -2354,6 +2654,21 @@ def main() -> int:
         state_fp_checks(man, len(prompt_ids), n_decode, 0, None)
         return report()
 
+    if gapset:
+        # A declared gap is licensed for the sections that can live with it — (0) pairs what the pin
+        # carries, (f)/(f2)/(g) read fingerprints and state, none of which needs the dropped logits —
+        # and NOT for the ones that judge every step of the chain. Skipping the gapped steps from (b)
+        # and (e) would be easy and would end in a gate that passes because it looked at less; the
+        # refusal is the difference between a weaker fixture and a quiet gate. It fires before the
+        # binary starts and before `--dry-run` too, so the injection can be tested on the CPU.
+        raise SystemExit(
+            f"gate: {REFS.name} declares {len(gapset)} step(s) with no pinned logits"
+            f" ({', '.join('decode' + str(s) for s in sorted(gapset))}), so this gate cannot run the"
+            " engine against it: sections (a)/(b)/(e) judge EVERY pinned step against that step's"
+            " pin, and quietly judging fewer steps is how a gate goes vacuous. `--no-engine` is the"
+            " mode a gapped fixture can be checked in (pairing, state integrity, fingerprints); a"
+            " device run needs those steps pinned — see `tools/reference_dump.py --logit-steps`.")
+
     section("(run) decode_run — one prefill wave (§06.1), then one decode_step per generated token")
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
@@ -2502,7 +2817,8 @@ def main() -> int:
     # The engine's logits vectors, read here rather than in (b): the tie policy is proved against what
     # the engine actually computed, so (a) needs them, and a tie that cannot be proved must FAIL at (a)
     # rather than be waived.
-    eng_logits = read_engine_logits(work, n_decode, len(prompt_ids), dec_logits[0].size)
+    eng_logits = read_engine_logits(work, n_decode, len(prompt_ids),
+                                    first_pinned_logits(dec_logits).size)
     # One tie decision per step, in the pin's payload space (see TIE POLICY). `tie_ok` is what (b)'s
     # argmax line reuses, so the two sections cannot disagree about what a tied step means.
     tie_ok: dict[int, bool] = {}
