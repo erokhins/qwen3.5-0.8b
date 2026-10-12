@@ -168,7 +168,11 @@ def run_route(w: Weights, prompt: list[int], feed: list[int], form: str, width: 
         calls = len(seen)
     # Anti-vacuity, the shape A-17's gate uses: if the chunked branch never ran, this "third route" is
     # route a wearing a hat and every ratio against it is a silent 1.0.
-    assert calls > 0, f"the chunked GDN ran {calls} times at width {width}: the rebind did not apply"
+    # Raised, not asserted: this is the falsifiable half of "the rebind applied", and a check that a
+    # `python -O` invocation can delete is not a check. Same reason in `ratios()` below.
+    if calls <= 0:
+        raise SystemExit(f"route_margin: the chunked GDN ran {calls} times at width {width}: the rebind"
+                         " did not apply, so this route is route a wearing a hat")
     return logits, calls
 
 
@@ -247,7 +251,8 @@ def ratios(numer: list[dict], denom: list[dict], field: str) -> list[tuple[float
     there — dropping it would quietly shrink a max."""
     out = []
     for n_row, d_row in zip(numer, denom):
-        assert n_row["step"] == d_row["step"], "ratio between two different steps"
+        if n_row["step"] != d_row["step"]:
+            raise SystemExit("route_margin: tried to take a ratio between two different steps")
         if d_row[field] <= 0:
             raise SystemExit(f"route_margin: step {n_row['step']} has {field} {d_row[field]!r} in the"
                              " denominator. A step where two legal routes agree exactly cannot carry a"
