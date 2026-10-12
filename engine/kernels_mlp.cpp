@@ -7,6 +7,7 @@
 
 #include <stdexcept>
 
+#include "engine/launch_stats.h"
 #include "prototype/mlp_gemv/mlp_gemv_kernels.h"
 
 namespace engine::kernels {
@@ -69,6 +70,7 @@ static void launch_gateup_batched(const uint16_t* w_gate, const uint16_t* w_up, 
     ::mlp_gateup_tokens<IN, TPB><<<grid, threads>>>(
         (const hip_bfloat16*)w_gate, (const hip_bfloat16*)w_up, x, (hip_bfloat16*)act, nullptr,
         rows, tokens, kRowsPerBlock, NEG_NONE);
+    launchstats::mlp_gateup().record(tokens);
 }
 
 template <int IN>
@@ -80,6 +82,7 @@ static void launch_down_batched(const uint16_t* w_down, const float* act, uint16
     ::mlp_down_tokens<IN, TPB><<<grid, threads>>>((const hip_bfloat16*)w_down, act,
                                                   (hip_bfloat16*)out, rows, tokens, kRowsPerBlock,
                                                   NEG_NONE);
+    launchstats::mlp_down().record(tokens);
 }
 
 void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, uint16_t* act,
@@ -120,6 +123,10 @@ void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, ui
         throw std::runtime_error("mlp_gateup: input width " + std::to_string(in) +
                                  " is not one of the two shapes the gated kernel instantiates");
     }
+    // The single-token path, counted as the one token it launched. Batched and single go through the
+    // same counter on purpose: the failure `engine/launch_stats.h` exists to catch is a wave that
+    // only ever took this branch, and that is invisible unless this branch is counted too.
+    launchstats::mlp_gateup().record(1);
 }
 
 void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows, int in,
@@ -152,6 +159,7 @@ void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows,
         throw std::runtime_error("mlp_down: input width " + std::to_string(in) +
                                  " is not one of the two shapes the gated kernel instantiates");
     }
+    launchstats::mlp_down().record(1);   // see the note in `mlp_gateup`
 }
 
 }  // namespace engine::kernels

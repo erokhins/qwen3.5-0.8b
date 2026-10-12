@@ -36,6 +36,9 @@ class WeightStore;
 //     wide. The mixer is still per token (P5/P6/P7 batch it), so a wave reuses them token by token
 //     inside a layer, and giving them a token axis they do not use would be 8 MB of silence.
 constexpr int kMaxWaveRows = 512;   // plan §2.1; decode_step.cpp explains why 512 and not 1024
+                                    // `allocate_scratch` accepts less, and `decode_run --wave-rows 1`
+                                    // deliberately asks for the least: a prompt fed one token per wave
+                                    // is the run `engine/launch_stats.h` exists to be able to see.
 
 struct DecodeScratch {
     // How many rows the row family below holds. `submit_wave_body` refuses a wave longer than this,

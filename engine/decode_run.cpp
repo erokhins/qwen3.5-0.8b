@@ -48,6 +48,7 @@
 #include <hip/hip_runtime.h>
 
 #include "engine/decode_step.h"
+#include "engine/launch_stats.h"
 #include "engine/loader.h"
 #include "engine/prefill.h"
 #include "engine/state.h"
@@ -75,6 +76,13 @@ struct Options {
     // and the default; `all` is the gate's byte-identity mode, which asks for the rows §06.5 throws
     // away so they can be `cmp`'d against what the per-token prompt loop used to write.
     engine::PrefillLogits prefill_logits = engine::PrefillLogits::kLast;
+    // How many rows the wave scratch is tall, i.e. how many tokens one wave may batch (§06.1, plan
+    // §2.1). The default is the engine's ceiling, `kMaxWaveRows`; `--wave-rows 1` is the P4b
+    // anti-vacuity knob — it makes `prefill_wave` split the prompt into waves of one token, so every
+    // glue/MLP submission takes the single-row form and the run becomes exactly the "batching is dead
+    // code" case that bit-identical output cannot distinguish from a batched run. Running the same
+    // prompt both ways and comparing counters AND dumps is `engine/gate.py` section (h).
+    int wave_rows = engine::kMaxWaveRows;
     bool help = false;               // print_usage and exit 0, before anything is loaded
 };
 
@@ -123,6 +131,8 @@ Options parse_args(int argc, char** argv) {
             o.state_fp = true;
         } else if (a == "--prefill-logits") {
             o.prefill_logits = engine::parse_prefill_logits(next());
+        } else if (a == "--wave-rows") {
+            o.wave_rows = std::atoi(next().c_str());
         } else if (a == "--help" || a == "-h") {
             o.help = true;
         } else {
@@ -130,6 +140,15 @@ Options parse_args(int argc, char** argv) {
         }
     }
     if (o.help) return o;   // --help answers before it complains about what is missing
+    if (o.wave_rows < 1 || o.wave_rows > engine::kMaxWaveRows) {
+        // Refuse rather than clamp: this flag is how a gate forces a particular launch shape, and a
+        // silently clamped value would make the A/B compare the wrong two runs.
+        throw std::runtime_error("--wave-rows takes 1.." +
+                                 std::to_string(engine::kMaxWaveRows) + ", got " +
+                                 std::to_string(o.wave_rows) + " (the scratch is sized for "
+                                 "kMaxWaveRows rows; `--wave-rows 1` is the one-row-per-launch "
+                                 "comparison run)");
+    }
     if (!o.sizes_only && !o.session && o.prompt.empty()) {
         throw std::runtime_error(
             "decode_run needs --ids <comma-separated token ids> (the fixture's prefill_ids); "
@@ -301,7 +320,7 @@ void print_usage(FILE* out) {
     std::fprintf(out,
                  "usage: decode_run [--model DIR] [--ids ID,ID,...] [--steps N] [--out DIR]"
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
-                 " [--prefill-logits last|all] [--load-verify] [--sizes-only]\n"
+                 " [--prefill-logits last|all] [--wave-rows N] [--load-verify] [--sizes-only]\n"
                  "  --replay  feed each generation step the caller's token (teacher forcing; also"
                  " leaves §07.5 unarmed)\n"
                  "  --no-stop leave §07.5 unarmed in a free run too (depth smoke only)\n"
@@ -311,6 +330,10 @@ void print_usage(FILE* out) {
                  "  --prefill-logits  `last` (default) samples only the prompt wave's last row, which"
                  " is all §06.5 uses; `all` dumps every row's logits, which is what the wave's"
                  " byte-identity gate compares against\n"
+                 "  --wave-rows N  rows in the wave scratch (default: the engine's kMaxWaveRows)."
+                 " `1` forces one-row glue/MLP launches for every prompt token: the P4b comparison"
+                 " run, whose launch counts must differ from the default's and whose outputs must"
+                 " not (see engine/launch_stats.h)\n"
                  "  --session resident feed/gen/reset/stats/quit protocol for engine/chat.sh\n");
 }
 
@@ -572,7 +595,7 @@ int main(int argc, char** argv) {
         }
 
         engine::RequestState st = engine::allocate_state(cap);
-        engine::DecodeScratch sc = engine::allocate_scratch();
+        engine::DecodeScratch sc = engine::allocate_scratch(o.wave_rows);
         engine::prepare_weight_adapters(store, sc);
 
         const std::string inv = st.check_invariants();
@@ -614,8 +637,8 @@ int main(int argc, char** argv) {
         step_ms +=
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wave)
                 .count();
-        std::printf("PREFILL tokens=%zu logits=%s prefix_len=%d", wave.size(),
-                    engine::prefill_logits_name(wave.logits_mode), st.prefix_len);
+        std::printf("PREFILL tokens=%zu logits=%s prefix_len=%d wave_rows=%d", wave.size(),
+                    engine::prefill_logits_name(wave.logits_mode), st.prefix_len, sc.wave_rows);
         if (!wave.empty()) {
             std::printf(" pos=%d..%d", wave.rows.front().pos_before, wave.rows.back().pos_after - 1);
         }
@@ -769,6 +792,14 @@ int main(int argc, char** argv) {
         // `st.stopped` is the raw record `finish_token` leaves ("some priced row argmaxed to the stop
         // id, in either phase"), so it can be true while this says 0, and on `dec8` it is; under the
         // default `--prefill-logits last` fewer prompt rows are priced, so fewer rows can set it.
+        // What the engine ACTUALLY launched, as opposed to the `LAUNCH` plan line printed before the
+        // run. Printed before `RESULT` so the last line of a run stays the result line (the `tail -1`
+        // trap in `AGENTS.md`), and printed always rather than on a flag, because a counter an author
+        // can switch off is a counter that gets switched off. `engine/launch_stats.h` says why this
+        // and not another output comparison is the proof that P4's batched kernels are the ones
+        // running.
+        std::printf("%s\n", engine::launchstats::describe_run().c_str());
+
         std::printf("RESULT mode=%s steps=%d ms_total=%.3f ms_per_step=%.3f last_sampled=%d"
                     " prefix_len=%d stopped=%d\n",
                     o.feed.empty() ? "run" : "replay", total_steps, step_ms,

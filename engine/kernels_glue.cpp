@@ -5,6 +5,7 @@
 
 #include <stdexcept>
 
+#include "engine/launch_stats.h"
 #include "prototype/glue/glue_kernels.h"
 
 namespace engine::kernels {
@@ -44,6 +45,11 @@ void glue_add_norm_rows(const uint16_t* s, const uint16_t* delta, const uint16_t
     ::glue_add_norm<256><<<rows, 256>>>((const hip_bfloat16*)s, (const hip_bfloat16*)delta,
                                         (const hip_bfloat16*)w, (hip_bfloat16*)s_out,
                                         (hip_bfloat16*)n_out, NEG_NONE);
+    // Counted where the launch is, not at the call site, so no caller can decline to report itself.
+    // `rows == 1` counts too: a wave whose every submission is one row is precisely the regression
+    // `engine/launch_stats.h` exists to catch, and it is only visible if the single-row shape is
+    // counted alongside the batched one.
+    launchstats::glue().record(rows);
 }
 
 void glue_add_norm(const uint16_t* s, const uint16_t* delta, const uint16_t* w, uint16_t* s_out,

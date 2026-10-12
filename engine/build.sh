@@ -39,8 +39,11 @@ echo "built $BIN/loader_test"
 # cannot share a translation unit. `prefill.cpp` is the prompt-phase wave (§06.1) and is a separate TU
 # from `decode_step.cpp` because it is a different question: the step is one token's §07.1 order, the
 # wave is what a request's whole prompt looks like when it is made of those steps.
+# `launch_stats.cpp` is the observed-launch counter (`engine/launch_stats.h`): the two kernel TUs
+# increment it, the driver prints it, and it has no business being anywhere else.
 hipcc "${FLAGS[@]}" \
   engine/decode_run.cpp engine/decode_step.cpp engine/prefill.cpp engine/state.cpp engine/loader.cpp \
+  engine/launch_stats.cpp \
   engine/kernels_glue.cpp engine/kernels_proj.cpp engine/kernels_mlp.cpp \
   engine/kernels_gdn.cpp engine/kernels_attn.cpp engine/kernels_lmhead.cpp \
   engine/kernels_cast.cpp \
