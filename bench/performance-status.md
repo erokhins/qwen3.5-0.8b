@@ -1,9 +1,18 @@
 # Performance status — what is measured, what is projected
 
-Written after the second HIP kernel. The point of this file is the split: **nothing
-end-to-end has been timed yet**, because there is no engine — there are three measured GPU
-numbers and a roofline they are consistent with. Do not quote a tokens/s figure from this
-project as measured until a row moves into the first table.
+Written after the second HIP kernel. The point of this file has always been the split between
+what is measured and what is projected.
+
+**Status as of 2026-10-12: the engine exists and has been timed.** `engine/build/decode_run` runs
+the whole token on the GPU and measures **11.919 ms/step at a 25-lane context (83.9 tok/s)**, rising
+to **12.614 ms at 327 lanes** — see §6's context-length table, which is the row this file was
+waiting for. Sections 1–3 below are the *pre-engine* projection and are kept for provenance, but
+three of their claims are now known to be wrong and are corrected in place: the projection of
+**120–127 tok/s** (§3) is ~52 % above what the engine actually does; the claim that §05 attention
+adds **~0.1 ms at a 4k context** (§2) is wrong by two orders of magnitude, because attention here is
+dispatch-bound rather than bandwidth-bound and extrapolates to **+9.4 ms**; and "coverage stopped
+being the interesting number" (§2) stopped being true the moment attention's context dependence
+appeared. Read §6 for current numbers and §1–§3 for how each op behaves in isolation.
 
 ## 1. Measured on the GPU (real kernels, real reference data)
 
@@ -13,9 +22,9 @@ project as measured until a row moves into the first table.
 | `mlp_gemv` MLP, 24 layers, cold weights | 528.5 MB | **2.650 ms** | 199.4 GB/s | **84 %** |
 | `proj_gemv` all 9 projections × 24 layers, 48 launches, cold | 445.7 MB | **2.990 ms** † | 156.3 GB/s | **66 %** † |
 | `proj_gemv` best config seen (rows/block 32, same conditions) | 445.7 MB | 2.785 ms † | 167.8 GB/s | 71 % † |
-| `glue` residual+RMSNorm, fused, 49 launches/token | ~0.5 MB | **0.1336–0.1360 ms** † | 2.73–2.78 µs/launch | launch-bound: roofline is 0.0021 ms |
+| `glue` residual+RMSNorm, fused, 49 launches/token | ~0.5 MB | **0.1336–0.1360 ms** † — **superseded: §6 re-take is 0.1499 ms @512 t / 0.1851 @256, and the row is bimodal (spread up to 269 %)**, so quote it at 256 threads with the spread | 2.73–2.78 µs/launch | launch-bound: roofline is 0.0021 ms |
 | same, unfused (48 adds + 49 norms = 97 launches) | ~0.5 MB | 0.2131–0.2155 ms † | 2.20–2.22 µs/launch | fusion buys 0.0795 ms/token |
-| `attn_decode` §05 core, 6 layers, one launch each | ~0.4 MB at 25 lanes | ~0.011 ms (launch floor arithmetic, not timed) | — | bit-exact to 277 lanes |
+| `attn_decode` §05 core, 6 layers, one launch each | ~0.4 MB at 25 lanes | ~0.011 ms (launch floor arithmetic, not timed) — **superseded**: measured in situ at **2.301 µs per lane per token**, i.e. 5.34 GB/s effective at 327 lanes | **5.34 GB/s** at 327 lanes | **2.3 % of the probe — dispatch-bound, not bandwidth-bound**; bit-exact to 277 lanes |
 | `gdn_decode` recurrence, 18 layers, state warm | 54 MB (3 × 18 MiB) | **0.0646 ms** | 876 GB/s (derived) | 370 % — cache-resident |
 | `gdn_gated_norm` §04.5, 18 layers × 8 dec8 steps = 144 launches | ~2.9 MB/plan (0.37 MB/token) | **0.4227 ms/plan** = 2.936 µs/launch | 6.6 GB/s | launch-bound: 0.0016 ms/token of roofline |
 | same kernel, state tiled to 108 MiB (cold) | 324 MB | 1.344 ms | 255 GB/s | 108 % |
@@ -52,7 +61,7 @@ Three things in that table were surprises and all are now load-bearing:
   2.61–3.59 ms and ranked the configs differently. Rule that follows: a number goes in this file
   only if it was taken under `tools/gpu_lock.sh` **and** its repeat spread is stated with it.
 
-## 2. Per-component budget: 65 % of a token has a real kernel
+## 2. Per-component budget: every op now has a real kernel (title was written when it was 65 %)
 
 Weights re-derived from the safetensors headers, grouped as §01.7 (decimal GB, so
 `1.5457 GB` text-path total checks out). Roofline column = bytes ÷ 237 GB/s.
@@ -68,16 +77,29 @@ Weights re-derived from the safetensors headers, grouped as §01.7 (decimal GB, 
 | norms and small tensors | ~0.005 | 0.021 ms | — | not written |
 | GDN state traffic (18 layers, warm) | 0.054 | 0.228 ms cold | **0.0646 ms** | **kernel exists** |
 | §04.5 gated norm (18 layers) | ~0.0004 | 0.0016 ms | **0.053 ms** | **kernel exists** — launch-bound, 18 × 2.94 µs |
-| **total per token** | **1.605** | **6.52 ms** | **7.81 ms measured** | |
+| **total per token** | **1.605** | **6.52 ms** | **7.81 ms** of summed op time; **the engine measures 11.919 ms/token** — see the correction below | |
+
+> **Correction, 2026-10-12.** This table is the sum of separately-measured op times, and the engine
+> now measures **11.919 ms/token** end to end at a 25-lane context (§6). Two things follow. First,
+> **4.1 ms/token is not accounted for by any op in this table** — 424 launches with a sync per step,
+> 115 of them pure dtype casts, plus whatever the interleave costs; `engine/results.md` prices 1.27 ms
+> of that as plan structure and leaves ~2.5 ms explicitly unattributed. Second, the summed figure is
+> not an upper bound on anything: the engine's per-launch cost is paid in series, which the table's
+> "measured" column cannot see because each op was timed in a burst of its own.
 
 So **1.5588 / 1.605 = 97 %** of the token's bytes are now covered by a kernel that has been
 measured on this box — `lm_head`, the MLP, every projection, the GDN recurrence, and the norms.
 What is left is §05's attention core, and that number is a standing warning about the whole
 table: **attention's traffic is a function of context length, not of the model.** At the fixture's
 25 lanes the KV read is ~0.4 MB/token, which is why `attn_decode` is launch-bound and costs
-~11 µs. At a 4k context the same six layers read ~25 MB/token — an extra ~0.1 ms that this table
-cannot see, because the fixtures are short. Any tok/s number taken at prefix-24 is therefore an
-optimistic bound on long-context behaviour, not a prediction of it. Coverage stopped being the interesting number; the spread did —
+~11 µs. ~~At a 4k context the same six layers read ~25 MB/token — an extra ~0.1 ms that this table
+cannot see, because the fixtures are short.~~ **Corrected 2026-10-12: that ~0.1 ms was traffic
+arithmetic and it is wrong by two orders of magnitude.** Measured in situ, attention costs
+**2.301 µs per lane per token** (§6), so a 4k context adds **≈9.4 ms/token**, not 0.1 ms — the engine
+would fall from 83.9 tok/s to roughly 10. The bytes really are only ~25 MB (≈0.1 ms of roofline); the
+cost is that the kernel reads them at 5.34 GB/s, i.e. the kernel is the problem, not the memory.
+Any tok/s number taken at prefix-24 is therefore not merely an optimistic bound on long-context
+behaviour, it is a number from a different regime. Coverage stopped being the interesting number; the spread did —
 **102 % / 84 % / 66 %** for `lm_head` / MLP / projections, and within the projections alone the
 per-shape results run from 77 % of the probe (`in_proj_qkv` packed) down to 39 % (`v_proj`) and
 5 % for the 16-row `in_proj_b`/`in_proj_a`. The wide shapes behave like `lm_head`; the narrow ones
@@ -102,13 +124,16 @@ per-launch cost at a useful block width is ~50 % above it.
 | no fp32 upcast traffic for accumulation | assumed | low — demonstrated twice now: MLP and projections both accumulate in F32 registers and move no extra bytes |
 | MTP drafting disabled | assumed | drafting adds 0.0409 GB + an extra logits read per accepted burst |
 
-**Projected single-stream bf16 decode: ~7.9–8.3 ms/token = ~120–127 tok/s.** That is a second
-revision *downward* (was 145–153, then 137–147), and the cause is the same both times: the §07.4
-roofline assumes every byte stream arrives at probe speed, and each family measured so far arrives
-slower than the one before it — 102 %, then 84 %, then 66 %. 7.81 ms of the token is now measured,
-so only attention's core and the norms remain, and they are small in bytes (~0.03 ms of roofline)
-but not in launches. §07.4's headline 151 tok/s is now roughly 25 % above the measured trajectory
-and should be treated as wrong on this box unless the narrow-shape gap closes.
+**Projected single-stream bf16 decode: ~~7.9–8.3 ms/token = ~120–127 tok/s~~ → measured
+11.919 ms/token = 83.9 tok/s at a 25-lane context (§6), so the projection was ~52 % high.**
+That was a second revision *downward* at the time (was 145–153, then 137–147), and the cause is the
+same both times and is now fully identified: the §07.4 roofline assumes every byte stream arrives at
+probe speed, and each family measured so far arrives slower than the one before it — 102 %, then
+84 %, then 66 %, and finally attention at **2.3 %**. 7.81 ms of the token is now measured in
+isolation and the engine costs 11.919 ms, so the remaining error is not in the bytes at all: it is
+launch structure (424 launches/token, 115 of them casts) and attention's context term. §07.4's
+headline 151 tok/s is now roughly 80 % above the measured engine and should be treated as wrong on
+this box.
 
 The two small ops confirm that framing rather than changing it: `glue` at 0.137 ms/token is 97 →
 49 launches worth of saving (fusion bought ~0.079 ms/token, ~1 % of the budget, which is exactly
@@ -122,6 +147,10 @@ box.
 
 ## 4. What *is* measured end-to-end today (and is not the engine)
 
+> **Superseded in part, 2026-10-12.** The engine now exists and is measured — see §6's engine rows
+> (11.919 ms/token at 25 lanes, 83.9 tok/s). What follows is kept because the CPU oracle's numbers are
+> still the correctness reference and the comparison is still informative.
+
 `speccheck/` runs the whole model in torch, CPU-only, bf16: **~24 tok/s** greedy, **~21
 tok/s** with `--mtp 1` (accept 0.660, 1.24 tok/forward). That is the correctness oracle.
 It is 6× below the GPU projection because the CPU path reads at 75–117 GB/s at best and
@@ -129,6 +158,10 @@ torch adds per-op overhead on ~200 ops/token. It is quoted here so the number is
 record as *not* the engine's performance.
 
 ## 5. What has to happen before this file can say "measured"
+
+> **Done, 2026-10-12.** Item 0 below was executed as §6 ("Clean-window re-take"), with the engine rows
+> added afterwards in the same regime. The numbers in §1 marked † are floors, not measurements, and stay
+> marked; §6 supersedes them wherever it has a row.
 
 0. **A quiescent GPU pass, run by the main agent with no subagents live.** Every device command run
    today — `mlp_gemv`, `proj_gemv`, `attn_decode`, `glue` gates and the cold timing sweeps — was run
@@ -356,3 +389,62 @@ Two consequences, stated as arithmetic and not as measurements:
 Next measurement owed (main agent, before any attention rewrite): `prototype/attn_decode` timed in
 isolation at 64 / 256 / 512 / 1024 lanes, so the rewrite is priced against a curve rather than against
 this single slope.
+
+### Per-component re-take, whole board (2026-10-12, zero subagents, blocking calls)
+
+Every op family re-measured in one sitting, to see which of the §6 numbers from 2026-10-11 survive.
+`gpu_lock.sh util` read 93 % at acquire and release, discounted as always; the numbers below were
+taken in the foreground with nothing else running, which is the condition that makes them repeat.
+
+| component | 2026-10-11 | 2026-10-12 best of 3 | spread | verdict |
+|---|---|---|---|---|
+| `lm_head_gemv` | 2.107–2.110 ms = 241.0–241.3 GB/s | **2.1266 / 2.1274 / 2.1321 ms** = 238.5–239.1 GB/s | 0.26 % | reproduces within **0.8 %**; still ~101 % of probe |
+| MLP cold, 24 layers | 2.605 ms = 202.9 GB/s (86 %) | **2.594 / 2.597 ms** = 203.5–203.7 GB/s (86 %) | 0.1 % | reproduces, marginally better |
+| projections, 48 launches | 3.039 ms = 153.8 GB/s (65 %) | **3.081 / 3.114 ms** = 150.1–151.7 GB/s (**63–64 %**) | 1.1 % | same story, 2.4 % slower; the 66 % of §1 is not achievable |
+| `glue` fused, 49 launches @512 t | 0.1499 ms | **0.1496 ms** (3.7 %) | 3.7 % | identical. **@256 t: 0.1904 ms but spread 62 %**, @128 t: 0.2576 ms, spread 83 % — the bimodality is still there and is a property of narrow blocks, not of the 10-11 window |
+| `glue` unfused, 97 launches @512 t | 0.2455 ms | **0.2228 / 0.2228 / 0.2257 ms** | 1.3 % | fusion still buys **0.073–0.076 ms/token** |
+| `gdn_decode` recurrence, 18 layers | 0.0646 best / 0.0650 worst (0.5 %) | **0.0648 ms** best, worst 0.0691, 20 launches × 3 trials | **6.6 %** | same level, worse tail than the 10-11 re-take — quote 0.065 ± 6 % |
+| `gdn_gated_norm` §04.5, 144-job plan | 0.4227 ms = 2.936 µs/launch (1.4 %) | **0.4260 ms** = 2.958 µs/launch | **0.3 %** | reproduces; gate PASS in the same run |
+| engine, context slope (below) | 3 points | **5 points**, `R² = 0.9475` | — | slope tightened from 2.30 to **2.01 µs per lane-token** |
+
+Commands, group 1 (caller holds the lock — these three do **not** self-lock):
+
+```bash
+tools/gpu_lock.sh acquire <tag>
+.venv/bin/python prototype/lm_head_gemv/run.py --iters 8
+.venv/bin/python prototype/mlp_gemv/run.py --layers all --fixture dec8
+.venv/bin/python prototype/gdn_decode/check.py --iters 20
+tools/gpu_lock.sh release <tag>
+```
+
+Group 2 (**do not hold the lock** — `glue`, `proj_gemv` and `gdn_gated_norm` acquire it themselves and
+will park until it frees; this cost a stalled run and a stale-holder entry today):
+
+```bash
+.venv/bin/python prototype/glue/run.py --time          # sweeps 128/256/512 t, fused and unfused
+.venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time
+.venv/bin/python prototype/gdn_gated_norm/run.py --gate --time
+```
+
+**Attention, five points instead of two.** Same engine, one variable (context), `dec64t` prompt,
+`decode_run --steps {8,64,128,250,300}` giving 25 / 91 / 155 / 277 / 327 lanes at the last step:
+
+| lanes | best of 3 `ms_per_step` | all three runs | spread |
+|---|---|---|---|
+| 25 | 11.919 | 11.919 / 11.966 / 12.045 | 1.06 % |
+| 91 | 12.187 | 12.187 / 12.304 / 12.487 | 2.46 % |
+| 155 | 12.241 | 12.241 / 12.247 / 12.455 | 1.75 % |
+| 277 | 12.420 | 12.420 / 12.658 / 12.687 | 2.15 % |
+| 327 | 12.614 | 12.614 / 12.838 / 12.904 | 2.30 % |
+
+Least-squares over the five points: **slope 2.014 µs per lane-token, intercept 11.924 ms,
+`R² = 0.9475`, max residual 0.080 ms.** That is **6.10 GB/s effective per attention layer against the
+237 GB/s probe**. Extrapolating the fit (still an extrapolation, still not a measurement):
+**+2.06 ms/token at 1024 lanes (71.5 tok/s)** and **+8.25 ms/token at 4096 lanes (49.6 tok/s)**. The
+4k figure is the reason the block-parallel attention rewrite is a performance item rather than a
+capability item, and `MAXSC = 512` is the reason it cannot yet be measured directly.
+
+Board-level conclusion, stated once: **no op family is more than 2.5 % off its previous clean-window
+number**, so the ledger's per-op rows are stable; the engine's 11.92 ms/token is not explained by any
+single op being slower than the board says, and the two named residues (4.1 ms of launch structure
+per §2's correction, and attention's context term) are where the work is.
