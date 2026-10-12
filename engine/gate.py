@@ -77,6 +77,15 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       `bench/plan-prefill-2026-10-12.md` §2.6 ships this as "a measurement and a tripwire, not a
       band", and the band is a main-agent decision with a `D-x` and a ledger line behind it.
 
+  (h) THE BATCHED PATH (P4b) — the same prompt run twice, once at the wave scratch's full width and
+      once with `decode_run --wave-rows 1`, judged two ways: the launchers' own counters (P4's
+      batched glue/MLP forms must be the ones submitted, over the same total rows, in materially fewer
+      launches) and the two runs' dumps (identical sampled ids, `cmp`-identical logits). The second
+      half is what turns "P4's deficits were bit-identical" into "batching cost zero numerics"; the
+      first half is what makes the second half mean anything, because a wave that never batched would
+      print bit-identical outputs too. `--selftest` injects each half alone (`--break-wave`,
+      `--break-ab-logits`) and requires the other to stay green.
+
 The two phases, and the line protocol that shows them. Since P2 the prompt is fed as ONE prefill wave
 (`engine/prefill.h`, §06.1) and its STEP lines say `kind=prefill`; generation steps say `kind=decode`.
 §07.5's stop check is armed in the second phase only, and this gate asserts both halves of that rule:
@@ -1807,7 +1816,8 @@ def launch_plan(n_layers: int, n_gdn: int, n_attn: int) -> dict:
 
 
 def parse_run(text: str) -> dict:
-    out = {"steps": [], "state": {}, "launch": {}, "result": {}, "statefp": []}
+    out = {"steps": [], "state": {}, "launch": {}, "launchstat": {}, "prefill": {},
+           "result": {}, "statefp": []}
     for line in text.splitlines():
         if line.startswith("STEP "):
             out["steps"].append(dict(re.findall(r"(\w+)=([^\s]+)", line)))
@@ -1816,12 +1826,331 @@ def parse_run(text: str) -> dict:
             # section (g) judges, one dict per printed line (phase markers included). "STATEFP" does
             # not match "STATE " so the two readers cannot eat each other's lines.
             out["statefp"].append(dict(re.findall(r"(\w+)=([^\s]+)", line)))
+        elif line.startswith("LAUNCHSTAT "):
+            # Observed launches, counted by the launchers themselves (`engine/launch_stats.h`). A
+            # different prefix from `LAUNCH ` on purpose: that line is the PLAN section (d) polices,
+            # this one is the OBSERVATION section (h) judges, and a reader must not be able to
+            # mistake one for the other. Same reason `STATEFP` is not `STATE`.
+            d = dict(re.findall(r"(\w+)=([^\s]+)", line))
+            family = d.pop("family", "?")
+            out["launchstat"][family] = {k: int(v) for k, v in d.items()}
+        elif line.startswith("PREFILL "):
+            out["prefill"] = dict(re.findall(r"(\w+)=([^\s]+)", line))
         elif line.startswith("STATE ") or line.startswith("LAUNCH "):
             key = line.split()[0].lower()
             out[key] = dict(re.findall(r"(\w+)=([^\s]+)", line))
         elif line.startswith("RESULT "):
             out["result"] = dict(re.findall(r'(\w+)=(".*?"|[^\s]+)', line))
     return out
+
+
+# ---- (h) the batched-path proof (P4b) -----------------------------------------------------------
+#
+# WHY A LAUNCH COUNTER, WHEN THE OUTPUTS WERE ALREADY BIT-IDENTICAL. P4 batched glue and the MLP
+# inside the prefill wave, and every fixture came back with its worst per-step logits deficit
+# bit-identical (x1.000 on all four deep ones). That is the right numerical answer — a batched kernel
+# reads a weight row once per tile and changes no per-element reduction order — and it is also the
+# EXACT answer an engine that never reached the batched kernels would print. Identical arithmetic
+# submitted one row at a time produces identical bits, so output equality cannot distinguish "P4 is
+# free" from "P4 is dead code", and the fixtures could not tell those apart even in principle. Only
+# the submissions can, so section (h) counts them:
+#
+#   * the same prompt runs twice, once at the scratch's full wave width and once at
+#     `decode_run --wave-rows 1`, which makes `prefill_wave` split the prompt into waves of one token
+#     and therefore makes every glue/MLP submission take the single-row form;
+#   * the batched side must issue row/token-batched launches and the one-row side must not, while
+#     BOTH cover exactly the same rows — same work, fewer launches, not less work;
+#   * and the two runs must be byte-identical in their dumps, which is what converts the x1.000
+#     observation from "suspicious" into "batching costs exactly zero numerics", proven by an A/B.
+#
+# The negative is built into the shape: the `--wave-rows 1` side IS the dead-code case, run for real.
+# `--selftest` injects it as a bug (a multi-row wave whose counters say one row at a time) and requires
+# the launch half to FAIL while the identity half stays green — the proof that the identity half alone
+# cannot see this, which is the whole reason this section exists. A negative that every check catches
+# proves nothing (`prototype/mlp_gemv/results.md`); this one is caught by exactly one of the halves.
+
+def wave_row_ceiling() -> int:
+    """`kMaxWaveRows` — how many rows the wave scratch is tall — read from `engine/decode_step.h`,
+    never retyped here. Same reason `lane_ceiling()` reads MAXSC out of the kernel that enforces it:
+    the number belongs to the code that obeys it, and a copy here would be a second authority that
+    can drift. `decode_run --wave-rows` accepts at most this, so it is also the ceiling of the A/B."""
+    path = ROOT / "engine" / "decode_step.h"
+    m = re.search(r"constexpr int kMaxWaveRows\s*=\s*(\d+)", path.read_text())
+    if not m:
+        raise SystemExit("gate: cannot read kMaxWaveRows from engine/decode_step.h — the wave width"
+                         " is the scratch's to own, so this gate refuses to guess it")
+    return int(m.group(1))
+
+
+def wave_row_sizes(prompt_len: int, wave_rows: int) -> list:
+    """How `prefill_wave` splits `prompt_len` tokens over a scratch `wave_rows` rows tall (§2.1's
+    split, `engine/prefill.cpp`). One wave of the whole prompt is the case every shipped fixture is
+    in; the loop is here so a longer prompt is still counted rather than quietly assumed away."""
+    sizes, left = [], int(prompt_len)
+    while left > 0:
+        n = min(int(wave_rows), left)
+        sizes.append(n)
+        left -= n
+    return sizes
+
+
+def wave_expect(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int) -> dict:
+    """The counters a run of this shape MUST print, family by family, derived rather than remembered.
+
+    `counts` is the per-body launch bill from `launch_plan()` (§07's structure, section (d)'s source),
+    so this is the same arithmetic §07 implies — which is the point: the engine's observed counters are
+    compared against what §07 says a wave of that width owes. A refactor that loops the wave body per
+    token changes `calls` and `rows_max` and leaves every output bit alone, and this is the table that
+    notices.
+
+    A generation step is a body of one token (`submit_token_body` is `submit_wave_body` with n = 1),
+    which is why the decode steps join the wave sizes below and why `rows_total` comes out
+    independent of `wave_rows`: batching moves work between launches, it does not add or remove any.
+    """
+    sizes = wave_row_sizes(prompt_len, wave_rows) + [1] * int(decode_steps)
+    out = {}
+    for family, per_body in counts.items():
+        out[family] = {
+            "calls": per_body * len(sizes),
+            "calls_batched": per_body * sum(1 for s in sizes if s > 1),
+            "rows_total": per_body * sum(sizes),
+            "rows_max": max(sizes) if sizes else 0,
+        }
+    return out
+
+
+def wave_launchstat_lines(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int) -> list:
+    """`wave_expect()` formatted as the `LAUNCHSTAT` lines the engine prints. Stand-in only — a real
+    run's counters come from the launchers — but produced from the same function the check compares
+    against, so the dry-run plumbing cannot drift from the device one."""
+    return [f"LAUNCHSTAT family={fam} calls={c['calls']} calls_batched={c['calls_batched']}"
+            f" rows_total={c['rows_total']} rows_max={c['rows_max']}"
+            for fam, c in wave_expect(counts, prompt_len, decode_steps, wave_rows).items()]
+
+
+def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: dict,
+                        work: Path, wave_rows: int, break_wave: bool = False,
+                        break_ab_logits: int = -1) -> dict:
+    """The two sides of section (h), on the CPU, for `--dry-run` / `--selftest`.
+
+    Like section (d) in dry-run mode this is Python comparing with itself — said out loud in the note
+    the caller appends — and its job is to prove the CHECKER discriminates, not the engine. The logits
+    files are a shape (small, deterministic, same names and count a real run writes), not engine
+    numbers; `--break-ab-logits` differs one file on the one-row side to prove the byte comparison
+    bites, and `--break-wave` writes one-row counters for a multi-row wave to prove the launch
+    comparison bites — each aimed at one half, so neither injection can satisfy itself.
+    """
+    greedy = man["greedy_continuation"]
+
+    def side(name: str, requested_rows: int, observed_rows: int, perturbs: bool) -> dict:
+        out_dir = work / name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for stale in out_dir.glob("logits*.bin"):
+            stale.unlink()
+
+        def perturb(pos: int) -> None:
+            """One byte, one file, on ONE side only (the caller decides which): the byte-comparison
+            half must name this file and no other. Perturbing both sides would change nothing, which
+            is the same mistake as a negative that is true on both runs. Aimed in the same index
+            vocabulary as the STEP lines (`pos`)."""
+            if not perturbs or pos != break_ab_logits:
+                return
+            path = out_dir / f"logits{pos}.bin"
+            raw = bytearray(path.read_bytes())
+            raw[0] ^= 0x01
+            path.write_bytes(bytes(raw))
+
+        lines = [f"PREFILL tokens={len(prompt_ids)} logits={PREFILL_LOGITS_ALL}"
+                 f" prefix_len={len(prompt_ids)} wave_rows={requested_rows}",
+                 # Every row priced: the A/B compares every row of the wave, and under `last` there
+                 # would be nothing but the last row's logits to compare.
+                 ]
+        for i, tok in enumerate(prompt_ids):
+            sampled = greedy[0] if i == len(prompt_ids) - 1 else prompt_ids[i + 1]
+            lines.append(f"STEP kind={PREFILL_KIND} index={i} input={tok} sampled={sampled}"
+                         f" top_logit=1 pos_before={i} pos_after={i + 1} stop=0")
+            (out_dir / f"logits{i}.bin").write_bytes(
+                np.arange(64, dtype=np.float32).tobytes())
+            perturb(i)
+        for j in range(len(dec_logits)):
+            pos = len(prompt_ids) + j
+            lines.append(f"STEP kind={DECODE_KIND} index={pos} input={greedy[j]}"
+                         f" sampled={greedy[j + 1]} top_logit=1 pos_before={pos}"
+                         f" pos_after={pos + 1} stop=0")
+            (out_dir / f"logits{pos}.bin").write_bytes(
+                np.arange(64, dtype=np.float32).tobytes())
+            perturb(pos)
+        lines += wave_launchstat_lines(counts, len(prompt_ids), len(dec_logits), observed_rows)
+        lines.append(f"RESULT mode=run steps={len(prompt_ids) + len(dec_logits)} ms_total=0"
+                     f" ms_per_step=0 last_sampled={greedy[-1]}"
+                     f" prefix_len={len(prompt_ids) + len(dec_logits)} stopped=0")
+        return {"requested_wave_rows": requested_rows, "dir": out_dir,
+                "run": parse_run("\n".join(lines))}
+
+    # `break_wave` is the refactor: the driver still asked for (and echoes) a wide wave, but the body
+    # submitted one row at a time, so only the counters change. That is exactly the state of an engine
+    # whose batched kernels are never reached.
+    return {"batched": side("ab_batched", wave_rows, 1 if break_wave else wave_rows,
+                             perturbs=False),
+            "perrow": side("ab_perrow", 1, 1, perturbs=True)}
+
+
+def compare_dump_dirs(a: Path, b: Path) -> tuple:
+    """Compare every `logits*.bin` in two run directories, byte for byte (the `cmp` of P2's
+    byte-identity proof, done in the gate so it is permanent). Returns (files, bytes, differing)."""
+    names_a = sorted(p.name for p in a.glob("logits*.bin"))
+    names_b = sorted(p.name for p in b.glob("logits*.bin"))
+    total = 0
+    differing = [] if names_a == names_b else ["the file sets differ"]
+    for name in names_a:
+        pa, pb = a / name, b / name
+        if not pb.exists():
+            differing.append(name + " (missing on the other side)")
+            continue
+        ba, bb = pa.read_bytes(), pb.read_bytes()
+        total += len(ba)
+        if ba != bb or len(ba) != len(bb):
+            differing.append(name)
+    return len(names_a), total, differing
+
+
+def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_steps: int,
+                         wave_rows: int, *, stand_in: bool) -> None:
+    """Section (h). `sides` is what `batched_ab_stand_in` returns, or the same shape built from two
+    real `decode_run` runs; one judging function, so the negative exercises the code that judges the
+    engine."""
+    section("(h) the batched path — counted launches, not inferred outputs (§08.2, P4b)")
+    batched, perrow = sides["batched"], sides["perrow"]
+
+    # The knob first: if `--wave-rows` were ignored, every count below would be an accident. The
+    # engine echoes the scratch width it actually allocated, on the PREFILL line.
+    for label, side in (("batched", batched), ("one-row", perrow)):
+        echoed = side["run"].get("prefill", {}).get("wave_rows")
+        check(echoed is not None and str(echoed) == str(side["requested_wave_rows"]),
+              f"decode_run honoured --wave-rows on the {label} side",
+              f"PREFILL wave_rows={echoed}, the command asked"
+              f" {side['requested_wave_rows']}")
+
+    want = {"batched": wave_expect(counts, prompt_len, decode_steps, wave_rows),
+            "one-row": wave_expect(counts, prompt_len, decode_steps, 1)}
+    for label, side in (("batched", batched), ("one-row", perrow)):
+        got = side["run"].get("launchstat", {})
+        check(bool(got), f"the {label} run reported observed launch counters",
+              "no LAUNCHSTAT line: the counters are compiled out or the driver stopped printing"
+              " them, and section (h) has nothing to judge" if not got else "")
+        for family in sorted(counts):
+            obs = got.get(family)
+            exp = want[label][family]
+            check(obs == exp, f"{label} side: {family} launches match the wave arithmetic",
+                  f"observed {obs} vs §07's plan for a {prompt_len}-token prompt +"
+                  f" {decode_steps} steps at wave_rows={side['requested_wave_rows']}: {exp}")
+
+    # The two halves of the claim, spelled out so a FAIL names the thing that broke rather than a
+    # dict comparison.
+    gl = batched["run"].get("launchstat", {}).get("glue", {})
+    check(gl.get("calls_batched", 0) > 0 and gl.get("rows_max", 0) == min(prompt_len, wave_rows),
+          "the batched side issues ROW-BATCHED glue launches",
+          f"glue calls={gl.get('calls')} calls_batched={gl.get('calls_batched')}"
+          f" rows_max={gl.get('rows_max')}, expected rows_max={min(prompt_len, wave_rows)} for a"
+          f" {prompt_len}-token prompt. rows_max=1 here means the wave is one row at a time and the"
+          " batched glue kernel is dead code")
+    mlp_gateup = batched["run"].get("launchstat", {}).get("mlp_gateup", {})
+    mlp_down = batched["run"].get("launchstat", {}).get("mlp_down", {})
+    check(mlp_gateup.get("calls_batched", 0) > 0 and mlp_down.get("calls_batched", 0) > 0
+          and mlp_gateup.get("rows_max", 0) == min(prompt_len, wave_rows)
+          and mlp_down.get("rows_max", 0) == min(prompt_len, wave_rows),
+          "the batched side issues TOKEN-BATCHED MLP launches (gateup and down)",
+          f"gateup {mlp_gateup} down {mlp_down}, expected rows_max="
+          f"{min(prompt_len, wave_rows)} on both")
+    rg = perrow["run"].get("launchstat", {}).get("glue", {})
+    check(rg.get("calls_batched", -1) == 0 and rg.get("rows_max", -1) == 1,
+          "the one-row side issues ONE-ROW launches (so the knob produces the shape it claims)",
+          f"glue calls_batched={rg.get('calls_batched')} rows_max={rg.get('rows_max')}"
+          " — both must be 0 and 1, or the run named `one-row` was not one row at a time and the"
+          " comparison below proves nothing")
+
+    # Same work, fewer launches. `rows_total` wave-independent is the half that says the launch
+    # delta is batching rather than skipped work.
+    for family in sorted(counts):
+        b_total = batched["run"].get("launchstat", {}).get(family, {}).get("rows_total")
+        r_total = perrow["run"].get("launchstat", {}).get(family, {}).get("rows_total")
+        check(b_total == r_total and b_total is not None,
+              f"both sides cover the same {family} rows (fewer launches, not less work)",
+              f"rows_total {b_total} vs {r_total}")
+    b_calls = sum(c.get("calls", 0) for c in batched["run"].get("launchstat", {}).values())
+    r_calls = sum(c.get("calls", 0) for c in perrow["run"].get("launchstat", {}).values())
+    # The delta belongs to the PROMPT wave, so that is what gets compared. Generation steps are one
+    # token wide whatever the prompt does — `submit_token_body` is `submit_wave_body` with n = 1, and
+    # batching the mixer is P5/P6/P7's job, not this one's — so on a fixture like `dec64t` (27 prompt
+    # tokens, 64 steps) the whole-run ratio is only 1.4x even though the wave itself is 27x cheaper.
+    # Quoting the whole-run ratio as "the batching win" would understate it and, as a threshold, would
+    # fail a correct engine.
+    decode_share = sum(counts.values()) * decode_steps
+    b_wave, r_wave = b_calls - decode_share, r_calls - decode_share
+    waves_b = len(wave_row_sizes(prompt_len, wave_rows))
+    waves_r = len(wave_row_sizes(prompt_len, 1))
+    wave_ratio = (r_wave / b_wave) if b_wave else 0.0
+    check(b_wave > 0 and r_wave > b_wave and r_wave * waves_b == b_wave * waves_r,
+          "the batched run issues materially fewer glue+MLP launches for the prompt wave",
+          f"prompt wave: {b_wave} glue+MLP launches across {waves_b} wave(s) vs {r_wave} across"
+          f" {waves_r} — {wave_ratio:.0f}x fewer for a {prompt_len}-token prompt. The whole run is"
+          f" {b_calls} vs {r_calls}: {decode_steps} generation steps are one token wide however the"
+          " prompt is batched")
+
+    # And the outputs must not have moved: that is the half the fixtures could not supply, because
+    # they only ever saw one of these two runs.
+    keys = lambda s: [(st.get("kind"), st.get("index"), st.get("input"), st.get("sampled"),
+                       st.get("pos_before"), st.get("pos_after")) for st in s["run"]["steps"]]
+    check(keys(batched) == keys(perrow) and bool(keys(batched)),
+          "both sides sample the same token ids",
+          f"{len(keys(batched))} prefill rows + generation steps compared"
+          + (" — 0 lines, which is a broken run, not a match" if not keys(batched) else ""))
+    nfiles, nbytes, differing = compare_dump_dirs(batched["dir"], perrow["dir"])
+    check(not differing and nfiles > 0, "both sides write bit-identical logits",
+          f"{nfiles} files, {nbytes} bytes compared, {len(differing)} differing"
+          + (f": {differing[:5]}" if differing else ""))
+    if stand_in:
+        notes.append("section (h) in dry-run mode is the gate's own arithmetic compared with itself"
+                     " (the stand-in emits both sides), exactly as section (d) is: it proves the"
+                     " checker bites, never anything about the engine.")
+    notes.append(
+        f"P4b launch count on {REFS.name}: the {prompt_len}-token prompt wave issued {b_wave}"
+        f" glue+MLP launches batched vs {r_wave} with --wave-rows 1 ({wave_ratio:.0f}x fewer); the"
+        f" whole run, {b_calls} vs {r_calls}, because {decode_steps} generation steps are one token"
+        " wide either way. Counts, never durations — the timing pass is the main agent's"
+        " (bench/performance-status.md §6) and the command is in engine/results.md.")
+
+
+
+
+def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: bool,
+                   work: Path, wave_rows: int) -> dict:
+    """Run this fixture's prompt twice for section (h): once at the scratch's full wave width, once
+    with `decode_run --wave-rows 1`.
+
+    Same flags as the main run apart from `--wave-rows` and `--out`, plus `--prefill-logits all` on
+    BOTH sides — under §06.5's default there would be one logits vector per side to compare instead of
+    the whole wave, and comparing one row when the batch moved hundreds is not a comparison. This is a
+    device path; the CPU stand-in for it is `batched_ab_stand_in`.
+    """
+    def side(name: str, rows: int) -> dict:
+        out_dir = work / name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for stale in out_dir.glob("logits*.bin"):
+            stale.unlink()      # section (h) must judge this run, not the last one's leftovers
+        cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
+               "--steps", str(n_decode), "--out", str(out_dir),
+               "--prefill-logits", PREFILL_LOGITS_ALL, "--wave-rows", str(rows)]
+        if replay:
+            cmd += ["--replay", ",".join(str(t) for t in greedy[:-1])]
+        print("  $ " + " ".join(cmd))
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        check(proc.returncode == 0, f"the {name} A/B run exits 0",
+              f"rc={proc.returncode}" + (" " + proc.stderr.strip()[-300:] if proc.stderr.strip() else ""))
+        return {"requested_wave_rows": rows, "dir": out_dir, "run": parse_run(proc.stdout)}
+
+    return {"batched": side("ab_batched", wave_rows), "perrow": side("ab_perrow", 1)}
+
 
 
 def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids: int = -1,
@@ -2348,6 +2677,38 @@ def selftest(fixture: str = "dec8") -> int:
              "KV row 1's already-written lanes moved (§08.6 inv 3, append-only storage) — the one"
              " invariant whose correct value is exactly 0.0, so it needs no tolerance to violate"),
         ]
+    # Section (h) gets two, and they are aimed at opposite halves on purpose. `--break-wave` is the
+    # bug this section exists to catch — a multi-row wave whose launch counters say one row at a time,
+    # which is exactly what an engine whose batched kernels are never reached looks like — and the
+    # assertion that matters is as much about what must stay GREEN as what must go red: the ids and the
+    # logits of such a run are identical to the correct one, so a gate that only compares outputs
+    # cannot fail it (the x1.000 finding in `engine/results.md`'s P4 section). `--break-ab-logits` is
+    # the mirror: identical launches, one differing logit, which the launch half must not care about.
+    # Without the pair, either half could be vacuous and the other would hide it.
+    ab_pos = 3
+    cases += [
+        (["--break-wave"], 1,
+         ["[FAIL] batched side: glue launches match the wave arithmetic",
+          "[FAIL] batched side: mlp_gateup launches match the wave arithmetic",
+          "[FAIL] the batched side issues ROW-BATCHED glue launches",
+          "[FAIL] the batched side issues TOKEN-BATCHED MLP launches",
+          "[FAIL] the batched run issues materially fewer glue+MLP launches",
+          "![FAIL] one-row side: glue launches match the wave arithmetic",
+          "![FAIL] both sides sample the same token ids",
+          "![FAIL] both sides write bit-identical logits",
+          "![FAIL] both sides cover the same glue rows"],
+         "a wide wave that submitted one row per launch (P4's batched kernels never reached). Only"
+         " the launch half may notice: sampled ids and logits are bit-identical either way, so the"
+         " identity half must stay green and the `--wave-rows 1` side must be untouched"),
+        (["--break-ab-logits", str(ab_pos)], 1,
+         [f"[FAIL] both sides write bit-identical logits", "logits%d.bin" % ab_pos,
+          "![FAIL] the batched side issues ROW-BATCHED glue launches",
+          "![FAIL] the batched run issues materially fewer glue+MLP launches",
+          "![FAIL] both sides sample the same token ids"],
+         f"position {ab_pos}'s logits differ by one byte on the one-row side: the byte comparison must"
+         " bite and name that one file, while every launch count stays correct (the locality rule"
+         " `prototype/mlp_gemv/results.md` demands — a negative every check catches proves nothing)"),
+    ]
     bad = []
     for extra, want_rc, want_in, what in cases:
         p = subprocess.run(base + ["--dry-run"] + extra, capture_output=True, text=True)
@@ -2601,6 +2962,17 @@ def main() -> int:
                          " `sampled=-1`) or `all` (every row priced, which is what the wave's"
                          " byte-identity comparison against the pre-P2 per-token prompt loop runs in,"
                          " and the only shape where a prompt-phase argmax exists mid-wave)")
+    ap.add_argument("--break-wave", action="store_true",
+                    help="with --dry-run: make the wide-wave side of section (h) report one-row-per-"
+                         "token launch counters, which is what a refactor that silently drops back to "
+                         "per-token glue/MLP looks like from the outside. The launch half must FAIL and "
+                         "the bit-identity half must stay green — the outputs cannot see this bug, "
+                         "which is the entire reason section (h) counts launches")
+    ap.add_argument("--break-ab-logits", type=int, default=-1, metavar="POS",
+                    help="with --dry-run: differ run position POS's logits on the one-row side of "
+                         "section (h), so the byte-comparison half is proved to bite and to name the "
+                         "one file it broke (the locality rule `prototype/mlp_gemv/results.md` "
+                         "insists on). Aimed at a position both sides print")
     ap.add_argument("--state-fp", dest="state_fp", action="store_true", default=True,
                     help="ask decode_run for its §08 state fingerprints (the default, because a"
                          " fixture that carries fingerprint pins cannot judge G5's state half"
@@ -2991,6 +3363,21 @@ def main() -> int:
         notes.append(f"decode_run reported {run['result']['ms_per_step']} ms/step. Timing from a"
                      " gate run is a by-product, not a measurement: see bench/performance-status.md"
                      " §6 for what a clean window takes.")
+
+    # ---- (h) the batched-path proof --------------------------------------------------------------
+    # Runs on every device gate, because that is the only way a later refactor that quietly drops back
+    # to per-row launches fails something. The counters come from the launchers (`engine/launch_stats.h`)
+    # and the two sides differ only in `--wave-rows`, so this is the one place in the tree that can tell
+    # "batching cost nothing" from "batching never ran" — the outputs cannot.
+    counts = {"glue": want["glue"], "mlp_gateup": want["mlp"] // 2, "mlp_down": want["mlp"] // 2}
+    wave_rows = wave_row_ceiling()
+    if args.dry_run:
+        sides = batched_ab_stand_in(man, prompt_ids, dec_logits, counts, work, wave_rows,
+                                    args.break_wave, args.break_ab_logits)
+    else:
+        sides = run_batched_ab(args, prompt_ids, n_decode, greedy, replay, work, wave_rows)
+    batched_proof_checks(sides, counts, len(prompt_ids), n_decode, wave_rows,
+                         stand_in=args.dry_run)
     return report()
 
 
