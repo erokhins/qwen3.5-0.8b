@@ -62,6 +62,36 @@ def pin(d: Path, name: str) -> torch.Tensor:
     return torch.from_numpy(np.load(d / (name + ".npy"))).to(torch.bfloat16).reshape(-1)
 
 
+def pin_rows(d: Path, name: str) -> torch.Tensor:
+    """A prefill pin as [rows, H] (§08.2: a chunk dump is [1, T, dim]; the wave's tile is [T, H]).
+
+    `pin()` flattens, which is right for one token and wrong for a tile: §03.1 normalises over the
+    LAST axis, so a flattened T*1024 vector would be read as one giant row. Anything the norm sees
+    keeps this shape; the kernel's own buffer is the same bytes flattened, which is why
+    `dump_bf16` needs no variant.
+    """
+    flat = torch.from_numpy(np.load(d / (name + ".npy"))).to(torch.bfloat16).reshape(-1)
+    if flat.numel() % H:
+        raise SystemExit("%s: %d elements is not a whole number of %d-element rows"
+                         % (name, flat.numel(), H))
+    return flat.reshape(-1, H)
+
+
+def pin_rows(d: Path, name: str) -> torch.Tensor:
+    """A prefill pin as [rows, H] (§08.2: a chunk dumps as [1, T, dim]; the wave's tile is [T, H]).
+
+    `pin()` flattens, which is right for one token and wrong for a tile: §03.1 normalises over the
+    LAST axis, so a flattened 10240-element vector would be one giant row. Anything that feeds the
+    norm keeps this shape; anything that only feeds an elementwise add may flatten.
+    """
+    t = torch.from_numpy(np.load(d / (name + ".npy"))).to(torch.bfloat16)
+    flat = t.reshape(-1)
+    if flat.numel() % H:
+        raise SystemExit("%s: %d elements is not a whole number of %d-element rows"
+                         % (name, flat.numel(), H))
+    return flat.reshape(-1, H)
+
+
 def dump_bf16(t: torch.Tensor, path: Path) -> Path:
     """torch refuses bf16.numpy(); view the bits instead (prototype/README.md)."""
     t.detach().to(torch.bfloat16).contiguous().view(torch.uint16).numpy().tofile(path)
@@ -75,6 +105,11 @@ def read_bf16(path: Path, n: int = H) -> torch.Tensor:
 def is_attn_layer(d: Path, layer: int, step: str = "decode0") -> bool:
     """Block type read off the pins themselves (§10.5), not off a transcription of layer_types."""
     return (d / ("%s.L%02d.o_proj.out.npy" % (step, layer))).exists()
+
+
+def is_attn_layer_pre(d: Path, layer: int) -> bool:
+    """Same question for a prefill fixture, whose pins carry no `decode{N}.` prefix (§10.5)."""
+    return (d / ("L%02d.o_proj.out.npy" % layer)).exists()
 
 
 def block_proj(layer: int, d: Path) -> str:
@@ -139,6 +174,32 @@ def case(d: Path, step: str, layer: int) -> dict:
         "ref_g1_n": pin(d, "%s.L%02d.mlp.in" % (step, layer)),
         "ref_g1_s": s_mid,
         "ref_g2_s": pin(d, "%s.L%02d.s_out" % (step, layer)),
+        "ref_g2_n": rmsnorm_zc(s_out, ckpt_w(w_g2(layer))),
+    }
+
+
+def case_prefill(d: Path, layer: int) -> dict:
+    """The same two calls over a WHOLE PREFILL TILE (§08.2: a chunk is one §03.x op over [T, H]).
+
+    A prefill fixture (`data/refs/p64`, `data/refs/p300`) pins the bare `L{ll}.*` names with the
+    leading length-1 axis: [1, T, dim]. Here that axis is dropped and T kept, because the wave
+    hands the kernel a [T, H] tile and §03.1 must normalise each row on its own. Stage R runs the
+    identical pairing checks on these tiles (`run.py --batched`), so the tile pairing is proved
+    the same way the per-token pairing is — not assumed from the file names.
+    """
+    s_in = pin_rows(d, "L%02d.s_in" % layer)
+    add1 = pin_rows(d, "L%02d.%s.out" % (layer, "o_proj" if is_attn_layer_pre(d, layer)
+                                         else "out_proj"))
+    add2 = pin_rows(d, "L%02d.mlp.out" % layer)
+    s_mid = s_in + add1                      # §03.2: BF16 add, rounded before the norm sees it
+    s_out = s_mid + add2
+    return {
+        "layer": layer, "rows": s_in.shape[0],
+        "s": s_in, "add1": add1, "add2": add2, "s_mid": s_mid, "s_out": s_out,
+        "w1": w_g1(layer), "w2": w_g2(layer),
+        "ref_g1_n": pin_rows(d, "L%02d.mlp.in" % layer),
+        "ref_g1_s": s_mid,
+        "ref_g2_s": pin_rows(d, "L%02d.s_out" % layer),
         "ref_g2_n": rmsnorm_zc(s_out, ckpt_w(w_g2(layer))),
     }
 

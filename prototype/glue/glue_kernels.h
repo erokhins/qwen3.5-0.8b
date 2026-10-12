@@ -67,8 +67,19 @@ __device__ __forceinline__ float block_reduce(float v, float* red, bool bf16_tre
 }
 
 /*
- * The fused op. One block, whole row resident in registers (`v[]`), so `s` and `delta` are
- * each read once and the norm reads the values it already has instead of going back to memory.
+ * The fused op. One BLOCK PER ROW, whole row resident in registers (`v[]`), so `s` and `delta`
+ * are each read once and the norm reads the values it already has instead of going back to
+ * memory.
+ *
+ * `blockIdx.x` IS the row (P4, bench/plan-prefill-2026-10-12.md). The §03.1 reduction is
+ * row-local — one block, one 1024-element row, nothing crosses a row boundary — so a
+ * `[rows, H]` tile in one launch has to produce the same bits as `rows` launches of one row.
+ * At `gridDim.x == 1` every pointer this kernel forms is the pointer it formed before the row
+ * index existed, which is why the shipped rows=1 gate stays green by construction rather than by
+ * argument; `prototype/glue/run.py --batched` checks the other half on device (one multi-row
+ * launch vs one launch per row, bit for bit, against the prefill pins).
+ *
+ * The norm weight `w` is deliberately NOT row-indexed: one norm vector serves every row.
  */
 template <int THREADS>
 __global__ void __launch_bounds__(THREADS)
@@ -77,6 +88,11 @@ glue_add_norm(const hip_bfloat16* __restrict__ s, const hip_bfloat16* __restrict
               hip_bfloat16* __restrict__ n_out, int neg) {
     __shared__ float red[32];   // >= THREADS/warpSize warp partials (1024/32 is the most)
     constexpr int PER = H / THREADS;
+    const size_t row = (size_t)blockIdx.x * H;
+    s += row;
+    if (delta) delta += row;
+    if (s_out) s_out += row;
+    n_out += row;
     const bool norm_delta = (neg == NEG_NORMDELTA) && delta != nullptr;
     const bool bf16_acc = (neg == NEG_BF16ACC);
 

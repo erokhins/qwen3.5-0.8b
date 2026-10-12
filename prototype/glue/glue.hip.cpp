@@ -55,10 +55,14 @@
  *   bf16sub     only this thread's partial is rounded to BF16 before the F32 ladder
  *
  * Build: prototype/glue/build.sh   (-O3, -Wl,-rpath,/opt/rocm/lib, links ../../engine/loader.cpp)
- * Run:   ./glue --mode once   --plan PLAN [--threads 256] [--neg NAME] [--scope 1|2|0] [--split]
- *        ./glue --mode burst  --plan PLAN [--threads 256] [--iters N] [--trials N]
+ * Run:   ./glue --mode once   --plan PLAN [--threads 256] [--rows 1] [--neg NAME] [--scope 1|2|0]
+ *               [--split]
+ *        ./glue --mode burst  --plan PLAN [--threads 256] [--rows 1] [--iters N] [--trials N]
  *                            [--chained] [--split]
  * Validate: prototype/glue/run.py
+ *
+ * --rows N makes every activation file in the plan a [N, H] tile and launches N blocks, one per
+ * row (P4, the prefill wave). N=1 is the shipped decode shape and produces the identical launch.
  *
  * PLAN is a text file, one launch per line:
  *     NAME SFILE DFILE WNAME SOUT NFOUT
@@ -129,6 +133,8 @@ int main(int argc, char** argv) {
     std::string plan_path, negname = "none", model = "models/Qwen3.5-0.8B", threads_list;
     std::string mode = "once";
     int scope = 1, iters = 200, trials = 3, threads = 256;
+    int rows = 1;                      // P4: rows of [rows, H] per launch, one block per row
+    int64_t row_elems = H;
     bool split = false, chained = false, loader_verify = false, quiet = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -140,6 +146,7 @@ int main(int argc, char** argv) {
         else if (a == "--split") split = true;
         else if (a == "--chained") chained = true;
         else if (a == "--threads") threads = atoi(next().c_str());
+        else if (a == "--rows") rows = atoi(next().c_str());
         else if (a == "--threads-list") threads_list = next();
         else if (a == "--iters") iters = atoi(next().c_str());
         else if (a == "--trials") trials = atoi(next().c_str());
@@ -171,6 +178,11 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--threads must be 128, 256, 512 or 1024 (H=1024 must split evenly)\n");
         return 1;
     }
+    if (rows < 1) {
+        fprintf(stderr, "--rows must be >= 1 (one block per row of the tile)\n");
+        return 1;
+    }
+    row_elems = (int64_t)rows * H;
 
     // ---- the engine loader is the only way a weight gets to the device here. It is also what
     // prototype/README.md rule 3 (warm the pages before timing) is satisfied by: load() does one
@@ -237,13 +249,14 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < paths.size(); ++i)
             if (paths[i] == p) return devs[i];
         std::vector<char> raw = slurp(p);
-        if (raw.size() != H * 2) {
-            fprintf(stderr, "%s: %zu bytes, expected %d bf16 elements\n", p.c_str(), raw.size(), H);
+        if (raw.size() != (size_t)row_elems * 2) {
+            fprintf(stderr, "%s: %zu bytes, expected %lld bf16 elements (%d rows x %d)\n",
+                    p.c_str(), raw.size(), (long long)row_elems, rows, H);
             exit(1);
         }
         hip_bfloat16* d = nullptr;
-        CK(hipMalloc(&d, H * 2));
-        CK(hipMemcpy(d, raw.data(), H * 2, hipMemcpyHostToDevice));
+        CK(hipMalloc(&d, (size_t)row_elems * 2));
+        CK(hipMemcpy(d, raw.data(), (size_t)row_elems * 2, hipMemcpyHostToDevice));
         paths.push_back(p);
         devs.push_back(d);
         return d;
@@ -264,8 +277,8 @@ int main(int argc, char** argv) {
         }
         j.dw = (const hip_bfloat16*)wt.device;
         if (wnames.insert(j.wname).second) wbytes += wt.nbytes;
-        CK(hipMalloc(&j.dsout, H * 2));
-        CK(hipMalloc(&j.dnout, H * 2));
+        CK(hipMalloc(&j.dsout, (size_t)row_elems * 2));
+        CK(hipMalloc(&j.dnout, (size_t)row_elems * 2));
         // Traffic the kernel itself moves, per launch of this job.
         //   fused, with a delta: read s + delta + w, write s_out + norm_out  = 5 vectors
         //   fused, norm only:    read s + w, write norm_out                  = 3 vectors
@@ -273,14 +286,14 @@ int main(int argc, char** argv) {
         //                        norm reads s_out + w writes norm_out (3)   = 6 vectors
         //   split, norm only:    norm reads s + w writes norm_out            = 3 vectors
         const bool writes_s = j.sout != "-";
-        j.bytes_fused = (size_t)((j.dd ? 3 : 2) + (writes_s ? 1 : 0) + 1) * H * 2;
-        j.bytes_split = (size_t)(j.dd ? 6 : 3) * H * 2;
+        j.bytes_fused = (size_t)((j.dd ? 3 : 2) + (writes_s ? 1 : 0) + 1) * row_elems * 2;
+        j.bytes_split = (size_t)(j.dd ? 6 : 3) * row_elems * 2;
         j.launches = split ? (j.dd ? 2 : 1) : 1;
     }
     if (!quiet)
-        printf("plan %s | jobs=%zu | norm weights: %zu distinct, %.1f KiB, all via"
-               " engine::WeightStore | neg=%s scope=%d split=%d\n",
-               plan_path.c_str(), jobs.size(), wnames.size(), wbytes / 1024.0,
+        printf("plan %s | jobs=%zu | rows/launch=%d | norm weights: %zu distinct, %.1f KiB, all"
+               " via engine::WeightStore | neg=%s scope=%d split=%d\n",
+               plan_path.c_str(), jobs.size(), rows, wnames.size(), wbytes / 1024.0,
                negname.c_str(), scope, (int)split);
     if (neg != NEG_NONE && !quiet)
         printf("NEGATIVE TEST: injected bug = %s on jobs with scope %d (or all if scope 0)\n",
@@ -293,24 +306,24 @@ int main(int argc, char** argv) {
             // The unfused pair reads what the add wrote, from memory — that round trip is part
             // of what fusion removes, so it must not be optimised away here.
             if (j.dd) {
-                if (th == 128) residual_add<128><<<1, 128>>>(s, j.dd, j.dsout);
-                else if (th == 256) residual_add<256><<<1, 256>>>(s, j.dd, j.dsout);
-                else if (th == 512) residual_add<512><<<1, 512>>>(s, j.dd, j.dsout);
-                else residual_add<1024><<<1, 1024>>>(s, j.dd, j.dsout);
+                if (th == 128) residual_add<128><<<rows, 128>>>(s, j.dd, j.dsout);
+                else if (th == 256) residual_add<256><<<rows, 256>>>(s, j.dd, j.dsout);
+                else if (th == 512) residual_add<512><<<rows, 512>>>(s, j.dd, j.dsout);
+                else residual_add<1024><<<rows, 1024>>>(s, j.dd, j.dsout);
             }
             const hip_bfloat16* src = j.dd ? j.dsout : s;
-            if (th == 128) norm_only<128><<<1, 128>>>(src, j.dw, j.dnout);
-            else if (th == 256) norm_only<256><<<1, 256>>>(src, j.dw, j.dnout);
-            else if (th == 512) norm_only<512><<<1, 512>>>(src, j.dw, j.dnout);
-            else norm_only<1024><<<1, 1024>>>(src, j.dw, j.dnout);
+            if (th == 128) norm_only<128><<<rows, 128>>>(src, j.dw, j.dnout);
+            else if (th == 256) norm_only<256><<<rows, 256>>>(src, j.dw, j.dnout);
+            else if (th == 512) norm_only<512><<<rows, 512>>>(src, j.dw, j.dnout);
+            else norm_only<1024><<<rows, 1024>>>(src, j.dw, j.dnout);
         } else if (th == 128) {
-            glue_add_norm<128><<<1, 128>>>(s, j.dd, j.dw, so, j.dnout, eff);
+            glue_add_norm<128><<<rows, 128>>>(s, j.dd, j.dw, so, j.dnout, eff);
         } else if (th == 512) {
-            glue_add_norm<512><<<1, 512>>>(s, j.dd, j.dw, so, j.dnout, eff);
+            glue_add_norm<512><<<rows, 512>>>(s, j.dd, j.dw, so, j.dnout, eff);
         } else if (th == 1024) {
-            glue_add_norm<1024><<<1, 1024>>>(s, j.dd, j.dw, so, j.dnout, eff);
+            glue_add_norm<1024><<<rows, 1024>>>(s, j.dd, j.dw, so, j.dnout, eff);
         } else {
-            glue_add_norm<256><<<1, 256>>>(s, j.dd, j.dw, so, j.dnout, eff);
+            glue_add_norm<256><<<rows, 256>>>(s, j.dd, j.dw, so, j.dnout, eff);
         }
         CK(hipGetLastError());
     };
@@ -318,19 +331,19 @@ int main(int argc, char** argv) {
     if (mode == "once") {
         for (auto& j : jobs) launch(j, j.ds, threads);
         CK(hipDeviceSynchronize());
-        std::vector<hip_bfloat16> host(H);
+        std::vector<hip_bfloat16> host((size_t)row_elems);
         for (auto& j : jobs) {
             if (j.sout != "-") {
-                CK(hipMemcpy(host.data(), j.dsout, H * 2, hipMemcpyDeviceToHost));
-                spit(j.sout, host.data(), H * 2);
+                CK(hipMemcpy(host.data(), j.dsout, (size_t)row_elems * 2, hipMemcpyDeviceToHost));
+                spit(j.sout, host.data(), (size_t)row_elems * 2);
             }
             if (j.nout != "-") {
-                CK(hipMemcpy(host.data(), j.dnout, H * 2, hipMemcpyDeviceToHost));
-                spit(j.nout, host.data(), H * 2);
+                CK(hipMemcpy(host.data(), j.dnout, (size_t)row_elems * 2, hipMemcpyDeviceToHost));
+                spit(j.nout, host.data(), (size_t)row_elems * 2);
             }
         }
-        printf("RESULT mode=once jobs=%zu neg=%s scope=%d threads=%d split=%d\n", jobs.size(),
-               negname.c_str(), scope, threads, (int)split);
+        printf("RESULT mode=once jobs=%zu neg=%s scope=%d threads=%d split=%d rows=%d\n",
+               jobs.size(), negname.c_str(), scope, threads, (int)split, rows);
         return 0;
     }
 

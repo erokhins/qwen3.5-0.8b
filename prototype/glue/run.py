@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -53,8 +54,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "prototype"))
 import bf16_ulp  # noqa: E402
-from glue_pins import (H, case, ckpt_w, dump_bf16, final_pair, first_proj, is_attn_layer,  # noqa
-                       pin, proj_weight, read_bf16, w_g1, w_g2, w_in)
+from glue_pins import (H, case, case_prefill, ckpt_w, dump_bf16, final_pair, first_proj,  # noqa
+                       is_attn_layer, is_attn_layer_pre, pin, pin_rows, proj_weight,
+                       read_bf16, w_g1, w_g2, w_in)
 from speccheck.specimpl import rmsnorm_zc  # noqa: E402
 
 BIN = Path(__file__).resolve().parent / "glue"
@@ -411,6 +413,212 @@ def split_equivalence(d, steps, layers, final_step, fails) -> None:
                      " elements differ) — the launch saving changed the arithmetic" % diffs)
 
 
+# ------------------------------------------------------------------ P4: the tile form
+def pre_rebuild(d: Path, layers: list[int]) -> int:
+    """Stage R for a prefill tile: the same pairing proof, over [T, H] instead of [H].
+
+    The tile form is only worth gating if the tile is the reference's own tile, so the same
+    bit-exact requirements apply: torch's add must land on the pinned `s_out`, the norm of the
+    mid-residual must BE the pinned `mlp.in`, layer L's `s_out` must be layer L+1's `s_in` across
+    the whole chunk, and the misreadings must still fail. §10.5 is why none of this is assumed.
+    """
+    fails = checked = 0
+    for layer in layers:
+        c = case_prefill(d, layer)
+        w1 = ckpt_w(c["w1"])
+        checks = [
+            (bool((rmsnorm_zc(c["s_mid"], w1) == c["ref_g1_n"]).all()), "g1.n == pin mlp.in"),
+            (bool((c["s_out"] == c["ref_g2_s"]).all()), "g2.s == pin s_out"),
+            (not bool((rmsnorm_zc(c["s_mid"], 1.0 + w1) == c["ref_g1_n"]).all()),
+             "plain-w affine refused"),
+            (not bool((rmsnorm_zc(c["add1"], w1) == c["ref_g1_n"]).all()),
+             "norming the addend refused"),
+            (not bool((rmsnorm_zc(c["s"], w1) == c["ref_g1_n"]).all()),
+             "norming the pre-add residual refused"),
+            (not bool((rmsnorm_zc(c["s_mid"], ckpt_w(w_in(layer))) == c["ref_g1_n"]).all()),
+             "this layer's input norm refused for call 1"),
+        ]
+        if layer < 23:
+            checks.append((bool((c["ref_g2_s"] == pin_rows(d, "L%02d.s_in" % (layer + 1))).all()),
+                           "s_out == next layer's s_in, whole chunk"))
+        for ok, what in checks:
+            checked += 1
+            if not ok:
+                fails += 1
+                print("    FAIL L%02d: %s" % (layer, what))
+    if 23 in layers:
+        for nm, what in (("pre_final_hidden", "g2.s at L23"), ("final_hidden", "g2.n at L23")):
+            if not (d / (nm + ".npy")).exists():
+                continue
+            c = case_prefill(d, 23)
+            ref = pin_rows(d, nm)
+            got = c["s_out"] if nm == "pre_final_hidden" \
+                else rmsnorm_zc(c["s_out"], ckpt_w(w_g2(23)))
+            checked += 1
+            if not bool((got == ref).all()):
+                fails += 1
+                print("    FAIL %s: %s does not reproduce the unprefixed %s pin bit-for-bit"
+                      % (what, nm, nm))
+        print("    the unprefixed final_hidden/pre_final_hidden pins pair with the whole prompt"
+              " (a prefill fixture has one phase, so §10.5's last-writer-wins trap cannot bite)"
+              " — checked bit for bit" if (d / "final_hidden.npy").exists() else "")
+    print("    %d checks, %d failures" % (checked, fails))
+    return fails
+
+
+def _tile_lines(d: Path, layers: list[int], work: Path, outdir: Path, per_row: bool):
+    """Plan lines over a whole tile (`per_row=False`, one launch per call) or one row at a time.
+
+    Two shapes from one function on purpose: the batched stage's whole point is that the tile
+    launch and the per-row launches are the same arithmetic, and that claim is worthless if the
+    two plans are built by two pieces of code that can drift.
+    """
+    work.mkdir(parents=True, exist_ok=True)
+    outdir.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for layer in layers:
+        c = case_prefill(d, layer)
+        t = c["rows"]
+        for r in ([None] if not per_row else range(t)):
+            pick = (lambda x: x) if r is None else (lambda x: x[r:r + 1])
+            tag = "L%02d" % layer if r is None else "L%02d.r%03d" % (layer, r)
+            sf = dump_bf16(pick(c["s"]), work / ("%s.s.bin" % tag))
+            if layer == 0:
+                lines.append("%s.n0 %s - %s - %s" % (tag, sf, w_in(0),
+                                                     outdir / ("%s.n0.n.bin" % tag)))
+            a1 = dump_bf16(pick(c["add1"]), work / ("%s.a1.bin" % tag))
+            sm = dump_bf16(pick(c["s_mid"]), work / ("%s.smid.bin" % tag))
+            a2 = dump_bf16(pick(c["add2"]), work / ("%s.a2.bin" % tag))
+            lines.append("%s.g1 %s %s %s %s %s" % (tag, sf, a1, c["w1"],
+                                                   outdir / ("%s.g1.s.bin" % tag),
+                                                   outdir / ("%s.g1.n.bin" % tag)))
+            lines.append("%s.g2 %s %s %s %s %s" % (tag, sm, a2, c["w2"],
+                                                   outdir / ("%s.g2.s.bin" % tag),
+                                                   outdir / ("%s.g2.n.bin" % tag)))
+    return lines
+
+
+def worst_over_rows(got: torch.Tensor, ref: torch.Tensor) -> tuple:
+    """Judge a tile row by row and return the worst row's comparison.
+
+    Per row, not over the flattened tile, because the band is relative to the tensor max: one
+    giant row would let a loud token hide a quiet one, and the decode gate judges per row.
+    """
+    bad = None
+    for i in range(got.shape[0]):
+        c = compare(got[i], ref[i])
+        if bad is None or (c["n_bad"], c["ndiff"], c["maxulp"], -c["cos"]) > (
+                bad["n_bad"], bad["ndiff"], bad["maxulp"], -bad["cos"]):
+            bad = c
+            bad["row"] = i
+    return bad
+
+
+def batched_stage(d: Path, layers: list[int], args, fails: list[str]) -> None:
+    """One launch per glue call over a [T, H] tile, gated two ways.
+
+    (a) against the prefill pins — the same rules the decode gate uses, applied per row;
+    (b) against T launches of one row each, BIT FOR BIT. (b) is the one that matters for the
+        engine's margins: if the multi-row launch changes any bit, the legal route changes and
+        every priced margin is suspect. If it does not, prefill arithmetic is decode arithmetic
+        and the fixtures cannot move.
+    """
+    tiles = [l for l in layers]
+    c0 = case_prefill(d, tiles[0])
+    T = c0["rows"]
+    print("\nbatched (tile) stage on %s: %d rows x %d layers, threads %d"
+          % (d.name, T, len(tiles), args.threads))
+    if pre_rebuild(d, tiles):
+        fails.append("prefill pin pairing failed on %s — a gate against the wrong tensor"
+                     " verifies nothing" % d.name)
+        return
+
+    work, out_t = WORK / "pre_in", WORK / "out_tile"
+    out_r = WORK / "out_rows"
+    for p in (work, out_t, out_r):
+        if p.exists():
+            shutil.rmtree(p)
+    plan_t = write_plan(WORK / "plan_tile.txt",
+                        _tile_lines(d, tiles, work, out_t, per_row=False))
+    plan_r = write_plan(WORK / "plan_rows.txt",
+                        _tile_lines(d, tiles, work, out_r, per_row=True))
+    print("    tile plan: %d launches (one per call) | per-row plan: %d launches (one per row)"
+          % (len(plan_t.read_text().rstrip().splitlines()),
+             len(plan_r.read_text().rstrip().splitlines())))
+    run_bin(["--mode", "once", "--plan", str(plan_t), "--threads", str(args.threads),
+             "--rows", str(T)], "tile")
+    run_bin(["--mode", "once", "--plan", str(plan_r), "--threads", str(args.threads),
+             "--rows", "1"], "rows")
+
+    ncmp, bitdiff, bitn = 0, 0, 0
+    for layer in tiles:
+        c = case_prefill(d, layer)
+        tag = "L%02d" % layer
+        obs = {"g1_s": c["ref_g1_s"], "g1_n": c["ref_g1_n"], "g2_s": c["ref_g2_s"],
+               "g2_n": c["ref_g2_n"]}
+        if layer == 0:
+            obs["n0_n"] = rmsnorm_zc(c["s"], ckpt_w(w_in(0)))
+        if layer == 23 and (d / "final_hidden.npy").exists():
+            obs["g2_n"] = pin_rows(d, "final_hidden")
+        for name, ref in obs.items():
+            leaf = name.replace("_", ".")
+            got = read_bf16(out_t / ("%s.%s.bin" % (tag, leaf)), T * H).reshape(T, H)
+            # (a) against the pins / the spec mirror, with the decode gate's rules
+            if name.endswith("_s"):     # a residual add has no reordering freedom at all
+                n = int((got != ref).sum())
+                if n:
+                    fails.append("%s %s: %d of %d elements differ from the reference add in the"
+                                 " tile launch" % (tag, name, n, ref.numel()))
+                print("    %s %-5s add   %d/%d elements differ from the pin" % (tag, name, n,
+                                                                                ref.numel()))
+            else:
+                cc = worst_over_rows(got, ref)
+                ncmp += 1
+                how = "FAIL" if band_ok(cc) else "ok"
+                print("    %s %-5s norm worst row %3d: %s [%s]" % (tag, name, cc["row"],
+                                                                    fmt(cc), how))
+                if band_ok(cc):
+                    fails.append("%s %s: tile launch outside tolerance at row %d" % (tag, name,
+                                                                                      cc["row"]))
+            # (b) bit-identity with one launch per row, same plan, same inputs
+            per_row = torch.cat([read_bf16(out_r / ("L%02d.r%03d.%s.bin" % (layer, r, leaf)), H)
+                                 for r in range(T)])
+            n = int((per_row != got.reshape(-1)).sum())
+            bitn += T * H
+            bitdiff += n
+            if n:
+                fails.append("%s %s: the %d-row launch differs from %d one-row launches in %d"
+                             " elements — batching changed the arithmetic" % (tag, name, T, T, n))
+    print("    bit-identity: tile vs one launch per row, %d elements compared, %d differ"
+          % (bitn, bitdiff))
+    print("    %d norm comparisons judged per row (worst row printed above)" % ncmp)
+
+    # Falsification: a tile stage that cannot fail verifies nothing. `plainw` on call 1 must move
+    # g1_n and leave the residual adds and call 2 alone, exactly as it does at rows=1.
+    run_bin(["--mode", "once", "--plan", str(plan_t), "--threads", str(args.threads),
+             "--rows", str(T), "--neg", "plainw", "--scope", "1"], "neg-plainw")
+    moved, clean = [], []
+    for layer in tiles:
+        c = case_prefill(d, layer)
+        tag = "L%02d" % layer
+        for name, ref in (("g1_s", c["ref_g1_s"]), ("g1_n", c["ref_g1_n"]),
+                          ("g2_s", c["ref_g2_s"]), ("g2_n", c["ref_g2_n"])):
+            got = read_bf16(out_t / ("%s.%s.bin" % (tag, name.replace("_", "."))),
+                            T * H).reshape(T, H)
+            broke = bool((got != ref).any()) if name.endswith("_s") else band_ok(
+                worst_over_rows(got, ref))
+            (moved if broke else clean).append(name)
+        if "g1_n" not in moved:
+            fails.append("negative plainw@call1 was NOT caught by the tile stage at %s"
+                         " — the stage is vacuous" % tag)
+        if any(n in moved for n in ("g1_s", "g2_s", "g2_n")):
+            fails.append("negative plainw@call1 moved %s at %s, which it should not touch"
+                         % (sorted(set(m) - {"g1_n"}), tag))
+    print("    falsification --neg plainw @call%d on the tile plan: moved %s | left alone %s"
+          % (1, ",".join(sorted(set(moved))) or "NOTHING",
+             ",".join(sorted(set(clean))) or "-"))
+
+
 # ------------------------------------------------------------------ timing
 @contextlib.contextmanager
 def gpu_lock(tag: str):
@@ -478,6 +686,11 @@ def main() -> int:
     ap.add_argument("--loader-verify", action="store_true",
                     help="ask the loader to SHA-256 every resident blob (~7.6 s)")
     ap.add_argument("--verify-only", action="store_true", help="stage R and stop")
+    ap.add_argument("--batched", default=None, metavar="FIXTURE",
+                    help="P4 stage: run the same fused op over a whole prefill tile [T, H] from "
+                         "this fixture (p64/p300), one launch, and require (a) every row matches "
+                         "the prefill pins and (b) the multi-row launch is BIT-IDENTICAL to one "
+                         "launch per row. Multi-row arithmetic is otherwise untested.")
     args = ap.parse_args()
 
     d = ROOT / "data" / "refs" / args.fixture
@@ -521,6 +734,12 @@ def main() -> int:
     if args.split_check:
         split_equivalence(d, steps[:1], layers[:4] if len(layers) > 4 else layers, final_step,
                           fails)
+
+    if args.batched:
+        pd = ROOT / "data" / "refs" / args.batched
+        if not pd.exists():
+            raise SystemExit("no prefill fixture %s (try p64)" % pd)
+        batched_stage(pd, [l for l in (0, 3, 23) if l in layers] or layers[:1], args, fails)
 
     if args.negative:
         run_negatives(d, steps, layers, final_step, fails)

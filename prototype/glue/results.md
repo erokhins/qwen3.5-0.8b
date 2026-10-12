@@ -229,3 +229,58 @@ Friction, in the order it showed up:
   what re-run it needs.
 * `run.py`'s default block width is 256, the sweep's best is 1024 (§4).
 * No `engine/` change: this op consumes the loader, it does not modify it.
+
+## 8. P4: `blockIdx.x` is the row, so a wave batched the pair (§08.2)
+
+Prefill (§08.2) does the same op over a `[T, H]` tile, and the wave wants one launch per call
+instead of `T` of them. The kernel gained a row index and nothing else:
+
+```cpp
+const size_t row = (size_t)blockIdx.x * H;
+s += row;  if (delta) delta += row;  if (s_out) s_out += row;  n_out += row;
+```
+
+The reason this is allowed at all is that §03.1's reduction is **row-local** — one block, one
+1024-element row, no partial ever crosses a row boundary — so `<<<T, THREADS>>>` is obliged to
+produce the same bits as `T` launches of `<<<1, THREADS>>>`, and at `gridDim.x == 1` the pointers
+above are the pointers the kernel formed before the row index existed. That is the decode
+path's protection by construction, not by argument; `--rows 1` is still the default and the
+shipped rows=1 gate is unchanged. `residual_add`/`norm_only` took the same index so the
+fused-vs-unfused equivalence (§2) still holds at any row count. The norm weight `w` is
+deliberately not row-indexed: one norm vector serves the tile.
+
+New gate stage, `run.py --batched p64` (also `p300`), three checks per layer, all of them on
+device:
+
+1. **stage R for tiles** (`pre_rebuild`): torch's own adds must land on the pinned
+   `L{ll}.s_out`, `rmsnorm_zc(s_mid, w_g1)` must BE the pinned `L{ll}.mlp.in`, layer L's
+   `s_out` must be layer L+1's `s_in` across the whole chunk, and `pre_final_hidden` /
+   `final_hidden` must reproduce from layer 23. A prefill fixture has one phase, so §10.5's
+   last-writer-wins trap cannot bite here — said out loud because the decode fixture's `final_*`
+   pins are exactly the trap. Misreadings (plain `w`, norming the addend, norming the pre-add
+   residual, the wrong layer's norm) must still fail.
+2. **the tile launch vs the pins**, judged **per row** rather than over the flattened tile: the
+   cancellation band is relative to the tensor max, and a flattened 47 104-element "row" would
+   let a loud token hide a quiet one. Adds are required bit-exact; norms get the same
+   `floor_probe.py` band as §2/§3.
+3. **bit-identity vs one launch per row** — the check the engine's margins actually depend on.
+   Same plan, same inputs, built by one function (`_tile_lines`) so the two shapes cannot drift
+   apart, then a hard `!= 0` on the element count.
+
+Measured (`.venv/bin/python prototype/glue/run.py --fixture dec8 --layers 0,3,23 --steps decode0
+--batched p64`, wall 3.3 s, `gpu_lock util` 93 % — correctness only, no timing taken, and the
+tile stage takes no `ms` figure anywhere):
+
+| observable (46-row tile, layers 0/3/23) | vs pins | vs one launch per row |
+|---|---|---|
+| `g1_s`, `g2_s` (the two residual adds) | 0 / 47 104 differ | 0 |
+| `g1_n`, `g2_n`, `n0_n` (the three norms) | worst row ≤ 2 / 1024 differ, max 1 ULP, cos 1.00000000, meanrel ≤ 4.4e-07 | 0 |
+| all six outputs together | — | **612 352 elements compared, 0 differ** |
+
+So the multi-row launch is bit-identical to the per-token one, and prefill glue does not move the
+legal route that `engine/route_allowance.py` priced. Falsification, because a stage that cannot
+fail verifies nothing: `--neg plainw --scope 1` on the tile plan moved `g1_n` and left
+`g1_s`/`g2_s`/`g2_n` alone, exactly as it does at rows=1.
+
+`--rows` also multiplies the burst's byte accounting (the `--time` path is unchanged in shape and
+still main-agent-only, bench/performance-status.md §6).
