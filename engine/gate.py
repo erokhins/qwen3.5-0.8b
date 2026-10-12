@@ -114,6 +114,7 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -2720,8 +2721,16 @@ def selftest(fixture: str = "dec8") -> int:
         ([], 0, None, "clean dry run"),
         (["--break-ids", "3"], 1, "[FAIL] generation step 3 samples greedy_continuation[4]",
          "wrong id injected at step 3"),
-        (["--break-logits", "2"], 1, "[FAIL] step 2: argmax agrees with the pin",
-         "top two logits swapped at step 2"),
+        (["--break-logits", "2"], 1,
+         ["[FAIL] step 2: argmax agrees with the pin",
+          # The old FAIL line printed "the pin is tied but the engine's id is not one of the tied ids"
+          # for EVERY unadmitted argmax failure, and step 2 is untied in all eight fixtures (narrowest
+          # gap 0.75, mt32f) — so before the fix this needle's negation was the line that lied. Now the
+          # line states the pin's actual top1/top2, the gap in BF16 ULP, and the engine's element error.
+          "the pin's winner is unique",
+          "!the pin is tied but the engine's id"],
+         "top two logits swapped at step 2 — and the FAIL line must give the real decision margin"
+         " instead of asserting a tie that does not exist"),
         # The bug the engine actually shipped with, replayed in the stand-in: id 248046 sampled at
         # prompt index 6 ended a 17-token prompt after 7 steps. Both checks have to name it.
         #
@@ -3578,8 +3587,7 @@ def main() -> int:
                                       (" — but the pin is tied here and the engine's id is one of the"
                                        " tied ids, so the tie policy admits it"
                                        if tie_ok.get(j, False) else
-                                       " — and the pin is tied but the engine's id is not one of the"
-                                       " tied ids")))
+                                       decision_margin(ref, eng, m))))
         if m["cos"] < BAND["cos_report"]:
             under_g6.append(f"{j}:{m['cos']:.6f}")
     if ratios:
@@ -3662,6 +3670,46 @@ def main() -> int:
     batched_proof_checks(sides, counts, len(prompt_ids), n_decode, wave_rows,
                          stand_in=args.dry_run)
     return report()
+
+
+def bf16_ulp(x: float) -> float:
+    """One BF16 step at |x| — 2**(exponent − 7). Used to state a gap in ULP, which is the unit a
+    near-tie question has to be asked in: 0.125 is nothing at 40 and two whole ULP at 15.6."""
+    a = abs(float(x))
+    if a == 0.0 or not math.isfinite(a):
+        return float("nan")
+    return math.ldexp(1.0, math.floor(math.log2(a)) - 7)
+
+
+def decision_margin(ref: np.ndarray, eng, m: dict) -> str:
+    """Why an argmax disagreed, said on the pin's own numbers — for the FAIL line of section (b).
+
+    A gate must not assert what it did not check. The text this replaced printed "the pin is tied but the
+    engine's id is not one of the tied ids" for EVERY unadmitted argmax failure, tied or not, and that
+    false claim is what made `chunk64b` step 0 read as a broken fixture instead of what it is: a pinned
+    winner 2 BF16 ULP ahead of the runner-up against an engine element error of 0.2509 (D-9). So this
+    prints the two ids, the gap in ULP, the engine's values at both, and whether the engine's error is
+    big enough that a legal route could flip the token — which is a fact, not a verdict.
+    """
+    order = np.argsort(ref)[::-1]
+    top1, top2 = int(order[0]), int(order[1])
+    v1, v2 = float(ref[top1]), float(ref[top2])
+    gap = v1 - v2
+    tied = int(np.count_nonzero(ref == ref.max()))
+    if tied > 1:
+        return (f" — the pin ties {tied} ways at {v1} (ids"
+                f" {sorted(int(i) for i in np.flatnonzero(ref == ref.max()))}), and the tie policy did"
+                " not admit the engine's id here — it is not one of the tied ids, or the engine's logit"
+                " at it does not round back to the shared payload")
+    ulps = gap / bf16_ulp(v1)
+    verdict = ("LARGER than that margin, so a legal bf16 route can flip this token (§10.4's chaos at a"
+               " near-tie; the logits band above still judges the vector)"
+               if m["maxabs"] > gap else
+               "smaller than that margin, so this is a real disagreement, not a rounding coin-flip")
+    return (f" — the pin's winner is unique: top1 {top1} ({v1}) over top2 {top2} ({v2}), a gap of"
+            f" {gap:.4g} = {ulps:.1f} BF16 ULP. The engine's own values there are"
+            f" {float(eng[top1]):.6g} and {float(eng[top2]):.6g}, and its largest element error at"
+            f" this step is {m['maxabs']:.4g}, " + verdict)
 
 
 def report() -> int:
