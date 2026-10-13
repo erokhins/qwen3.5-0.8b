@@ -276,6 +276,9 @@ surface of the conversion is therefore two things: the subnormal band below 2^-1
 | activations, `data/refs/p300` | 484 | 252,910,720 | **82.5** | **0** | 4,237,738 — all F32 sources | 1,504,085 | 19,201 | 3.4e-03 |
 
 No NaN and no Inf anywhere in the checkpoint or the fixture. `zero` counts and −0 counts are in the log.
+The activation row is the `p300` prefill fixture; the same audit over `wide520f` and `chunk64b` puts the
+activation max at 37.25 (`decode*.L15.attn.v.npy`) instead of 82.5, and nowhere higher — so the range
+headroom on the activation side is ~800× on the widest sample looked at, not a one-fixture accident.
 
 **Verdict, in the words of the question.** bf16→fp16 is **not** bit-lossless, and it does not need to be:
 0.036 % of the GEMM weights change, all of them inside fp16's subnormal band, and **the largest absolute
