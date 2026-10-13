@@ -434,6 +434,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     const auto project = [&](const void* weight, const uint16_t* x_bf16, const float* x_f32,
                              uint16_t* out, int rows, int in) {
         if (lib_gemm) {
+
             kernels::proj_gemm(weight, x_bf16, out, rows, in, n);
         } else {
             kernels::proj_gemv(weight, x_f32, out, rows, in, n);
@@ -641,9 +642,18 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // `kValueDim` are both 2048 — so this is one call site, and it is the §03.2 addend that
         // `add_norm` below consumes for every row of the wave.
         stageclock::note(stageclock::kProj);
+        // The BF16 operand is NOT one tile: the attention mixer leaves its [n,2048] output in
+        // `a_gated` and widens that straight into `block_out_f32`, while the GDN gated norm is what
+        // writes `block_out`. The hand GEMV never noticed, because it only ever read the F32 widening —
+        // so `block_out` is stale for every attention layer, and a library call pointed at it computes
+        // the output projection from whatever the last GDN layer left there (measured on dec8: logits
+        // cos 0.42 against the pins, 37 failed rows, every one of them downstream of layer 1). Same
+        // numbers either way once the right tile is named: `a_gated` and `block_out` are both
+        // [wave_rows,2048] BF16 at ld = 2048.
         project(layer_dev(weights, layer, attn_layer ? leaf::kOProj : leaf::kOutProj),
-                sc.block_out, sc.block_out_f32, sc.delta, kHidden,
+                attn_layer ? sc.a_gated : sc.block_out, sc.block_out_f32, sc.delta, kHidden,
                 attn_layer ? kQwidth : kValueDim);
+
 
         // ---- §03.2 add #1: the mixer's output onto the residual, and the post-attention norm.
         add_norm(sc.delta, layer_dev(weights, layer, leaf::kPostAttnNorm));
