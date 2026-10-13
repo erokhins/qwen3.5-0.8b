@@ -142,3 +142,47 @@ Likely driver error!`), which is why this file quotes sysfs. So: my measured 4.7
 14.85 TFLOPS advertised is ~32–46 %, and part of that shortfall is clock state rather than kernel quality.
 5k prompt tok/s still needs ~8 TFLOP/s sustained, which is now **within sight of the fp16 rate at the engine's
 own shape (6.89)** rather than science fiction — it needs a good tiling *and* fp16 *and* the clocks to stay up.
+
+## Second correction, same day: every rate above is an **F32-`C`** rate, and it is 6–8× below the same call
+
+Caught while cross-checking the prefill route spike, and it is a bigger deal than the CU-count error, because
+the numbers above were load-bearing for the whole prefill ceiling argument.
+
+**The confound.** `tools/gemm_peak.cpp`'s timing path hard-coded `HIPBLAS_R_32F` for `C` in every row it ever
+timed. `rocblas_gemm_ex` on this build (hipBLAS 3.6 / ROCm 10) selects *radically different kernels* depending
+on whether the output is 32-bit or 16-bit, for byte-identical inputs. Measured cleanly in window
+`prefill-Wclean` (zero subagents, blocking, best of 15, same process, same handle, same pinned 128 MiB
+workspace, same buffers and fill; clock sampled at 1857–2401 MHz of 2900):
+
+| shape | M | 16-bit `C` | F32 `C` | ratio |
+|---|---|---|---|---|
+| `gate_proj` 3584×1024 | 512 | 0.112 ms (33.6 TFLOP/s) | 0.636 ms | **5.67×** |
+| `gate_proj` | 1024 | 0.226 ms (33.2) | 1.356 ms | **6.00×** |
+| `gate_proj` | 3072 | 0.682 ms (33.1) | 4.355 ms | **6.39×** |
+| `down_proj` 1024×3584 | 1024 | 0.223 ms (33.7) | 1.503 ms | **6.75×** |
+| `down_proj` | 3072 | 0.597 ms (37.7) | 4.551 ms | **7.62×** |
+
+The fast path is not cheating: the wide correctness leg writes every element of `C` (**zero filler survivors**)
+and agrees with the slow kernel's product to **≤1.000 ULP**, with three rows also host-dotted against a double
+dot. Workspace size does not matter (0.213 vs 0.214 ms), data entropy does not (0.212 vs 0.217), and `OP_N`
+with F32 `C` reproduces `gemm_peak`'s original rows — so the only variable is the output width.
+
+**What is now true, and what must not be quoted any more.**
+
+- **True:** with a 16-bit output — which is what the engine actually needs, since it rounds to bf16 anyway —
+  dense bf16 matmul on this box sustains **~33–38 TFLOP/s** at the engine's own shapes, and the full 150-call
+  24-layer wave mix runs at **22.3–23.3 TFLOP/s** at `M ≥ 512` (window `prefill-Wclean`: all-24 best 4.80 /
+  18.84 / 22.31 / 23.26 TFLOP/s at `M` = 64 / 512 / 1024 / 3072, spreads 3.6–19.2 %).
+- **Retired:** "dense bf16 runs at 4.7–6.0 TFLOP/s", "fp16 beats bf16 by 21–26 %", and every ceiling derived
+  from them, including "5k prompt tok/s needs 8 TFLOP/s, which is more than this GPU can do". All of those are
+  statements about the **F32 epilogue**, not the matrix units. The fp16-vs-bf16 result in particular is now
+  measured on the mix, where the two are **within noise of each other** — see §W2 in the route spike.
+- **Also retired:** the TechPowerUp 14.85 TFLOPS figure as a yardstick for matmul. It is the FP32 *vector*
+  rate; the matrix units are several times above it, which is why the "32–46 % of advertised peak" reading
+  in the previous correction was itself an artifact of comparing a crippled call form to a vector peak.
+  **This repo still has no clean dense-matrix peak row** — the largest clean 16-bit-`C` number I have is 37.7
+  TFLOP/s at a shape we use, and a deliberate peak probe (`square` at 16-bit `C`) is now owed.
+- **Consequence for prefill, stated as arithmetic:** a 1024-token wave's block matmuls are 1017.9 GFLOP, and at
+  the measured mix rate that is **~46 ms**, against a current TTFT of **1054.6 ms**. So matmul is *at most*
+  ~4.4 % of what prefill costs if the engine reached library rates, and the ceiling is no longer the matrix
+  units at all — it is everything that is not a matmul.
