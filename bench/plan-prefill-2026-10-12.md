@@ -554,3 +554,31 @@ exists — the engineering is the engine launcher and the G6-shape band gate.
    **8 TFLOP/s sustained**, so the first act of that package is to find out what this GPU's dense-matrix peak
    actually is and what fraction of it the current path reaches. If the answer makes 5k arithmetically
    impossible, the deliverable is that number and the honest ceiling, not a re-scoped target presented as a win.
+
+## Funded: prefill compute — routes (a) and (c). Decided by the operator 2026-10-13.
+
+Measured basis: `devices/strix-halo-compute.md` (hipBLAS at our own shape: bf16 5.67, **fp16 6.89**, fp32 2.93
+TFLOP/s; the engine's whole prefill is 1.55 TFLOP/s in aggregate; the GPU sustains 2.206 GHz of 2.9).
+
+- **(a) funded — fp16 arithmetic on the prefill path.** Chosen because it is *faster and more precise* at the
+  same time (10 mantissa bits vs bf16's 7) — the only lever in this project with no accuracy price. Two hard
+  prerequisites: a bf16→fp16 **range audit** over every tensor before any conversion is trusted, and a band
+  re-sizing decided by the main agent after measurement, because every band in the ledger is sized against
+  bf16 pins.
+- **(c) funded — matrix-unit tiling for the prefill matmuls.** This is the ~4× term, and it is independent of
+  (a). Two candidate routes, to be chosen by a spike rather than by taste: **hand-tiled `rocwmma`/MFMA** (which
+  has a public `gfx1151` breakage report — [rocm-libraries 4618](https://github.com/ROCm/rocm-libraries/issues/4618),
+  "still broken in practice as of February 2026") versus **calling the vendor library** (hipBLAS/hipBLASLt),
+  which already reaches 6.89 TFLOP/s here but brings its own questions: determinism across runs, missing
+  epilogues (rope/silu/mul have to live somewhere), and per-call overhead at our sizes.
+- **(b) not funded — sub-8-bit weights.** Deferred not because decode doesn't want it (weights are 99.4 % of
+  what a token reads, so it is the biggest decode lever left) but because it converts the gate regime from
+  "bit-identical or banded against pinned logits" into something accuracy-shaped, and that conversation has to
+  happen before code, not after. `__dp4a` is unavailable on `gfx1151` anyway, so it would need a different
+  mechanism than integer dot products.
+
+**Sequencing.** Spike first (does MFMA even work on this part, and which route is real?), then the fp16 range
+audit, then the main agent's device window to price both, then implementation behind the standard proof. A
+flop-accounting audit (padding, wave rounding, what the engine actually multiplies per prompt token) runs
+alongside, because the 1.6 GFLOP/token figure every ceiling in this file rests on is arithmetic on a parameter
+count rather than a measurement of our own code.
