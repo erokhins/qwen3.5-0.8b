@@ -52,6 +52,11 @@ a block-count under-fill and remains unexplained. `prototype/mlp_gemv/results.md
 
 ## What this means for the decode roofline
 
+> **Is 237 GB/s even the right denominator for a decode step, which also writes?** That question,
+> the traffic budget that bounds it, and the pre-registered probe that settles it live in
+> `devices/strix-halo-mixed-traffic.md` (`tools/mixed_bw.cpp`). The rows there are not taken yet;
+> nothing below is restated on the strength of this file.
+
 Ceiling = bandwidth / bytes-per-token. §01.7 + §00.5 give **1.565 GB/token** for
 bf16 Qwen3.5-0.8B single stream (weights 1.5457 + GDN state 18 MiB + conv 0.63 MiB).
 At the measured iGPU read bandwidth of **237 GB/s**:

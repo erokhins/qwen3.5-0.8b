@@ -390,3 +390,200 @@ Written before the run so the conclusion cannot drift into it — and item 1 is 
    Everything except the weights is ~46 MB/token = **0.21 ms** at the ceiling, against a ~5.8 ms
    residue. And the largest non-weight item, the 37.75 MB of GDN state, is not reducible at all.
    Byte reduction cannot close this gap at this model size; only the rate or the launch count can.
+
+## Q9: the two surviving candidates — pre-registered 2026-10-13, before any Q9 device run
+
+Q8 left one comparison standing. `C_mixlaunch_62` — 48 × 11.01 MiB read once, 96 serialized launches,
+62:1 — runs at **86.6 % of the read probe**, while the same MLP kernels inside a real step run at **52 %**
+(4.264 ms/token against a 2.230 ms roofline), and Q7 M1 showed those same kernels at the same 528 MB
+footprint reaching **93 %** in isolation. The box offers the floor; the engine does not reach it. Two
+mechanisms can still do that, and their fixes are opposite:
+
+* **(A) intra-kernel mapping** — *which thread touches which byte* inside `mlp_gateup`/`mlp_down`,
+  including the row's LDS staging and its 8-rows-per-block wavefront shape. Fix: change a kernel.
+* **(B) inter-launch locality** — *what else was touched between* two MLP launches: in a step every MLP
+  launch is separated from the next by several other families' reads and writes, and no MLP blob is
+  revisited inside a token. Fix: change the step's layout, or re-declare the ceiling.
+
+`tools/mixed_bw` gained one instrument per mechanism, each holding every other variable fixed:
+
+| new | holds fixed | only free variable |
+|---|---|---|
+| `--pattern engine-mlp` (`--engine-in 1024\|3584`, `--stage 0\|1`) | bytes, regions, grid, threads, launch count, serialized order, checksum | which thread reads which byte — the engine's real per-thread index arithmetic, with the dot products, the SwiGLU epilogue and the output store removed |
+| `--mode interleave --interleave blocked\|roundrobin` (`--revisits`, `--dummy-mib`, `--dummy-nbuf`) | the **multiset** of launches and the total bytes, proved equal by `--selftest`'s order anti-vacuity | the order in which the regions are touched |
+
+### CPU-side verdict on (A), written before any device run: the weight reads are already fully coalesced
+
+Every GEMV family reads weights the same way (`prototype/mlp_gemv/mlp_gemv_kernels.h`, which
+`engine/kernels_mlp.cpp` includes verbatim, and `prototype/proj_gemv/proj_gemv_kernels.h`): one wavefront
+per weight row (`row = blockIdx.x*rpb + threadIdx.x/warpSize`), and inside the row
+`for (v = lane; v < words; v += warpSize) wrow[v]` over `uint4` words.
+
+| family | weight row | uint4 words/row | weight bytes per warp instruction | 128-B lines touched | lines fully consumed | stride, next iteration | verdict |
+|---|---|---|---|---|---|---|---|
+| `mlp_gateup<1024>` | 2 KiB, **two streams** (gate + up) | 128 | 32×16×2 = 1024 B | 8 | 8/8 = 100 % | +512 B per lane, still whole lines | coalesced |
+| `mlp_down<3584>` | 7 KiB, one stream | 448 | 32×16 = 512 B | 4 | 4/4 = 100 % | +512 B | coalesced |
+| projections `q/k/v/o/gate/up/down` | row-major `uint4` walk, same loop | IN/8 | 512 B | 4 | 4/4 = 100 % | +512 B | coalesced |
+| `lm_head` (248 320 rows) | row-major `uint4` walk | IN/8 | 512 B | 4 | 4/4 = 100 % | +512 B | coalesced, and measured at ceiling |
+
+So (A) in the form it was posed — a per-thread stride on the weight read — is **dead on the host**: there
+is no strided weight read and no partially-used 128-byte transaction anywhere in the engine's GEMV path.
+Q7 M1 covers most of what is left: the 93 % burst runs *the same kernel source* at the same rpb, so the
+staging, the two-stream interleave and the wavefront shape are not new to the burst. What the burst never
+reproduced is the step's x/act traffic and the spacing between launches — which is why the pattern rows are
+still worth running (a fall there would be the surprise), and why (B) is the stronger prior.
+
+### The pattern geometry is the engine's, not an average
+
+A gate blob, an up blob and a down blob are each 3584×1024×2 = 1024×3584×2 = **7 MiB exactly**, so the
+probe's regions can be the engine's blobs rather than an averaged 11.01 MiB launch:
+
+| row | launches | per launch | grid vs rows | engine truth |
+|---|---|---|---|---|
+| `--nbuf 48 --buf-mib 7 --pattern engine-mlp --engine-in 1024 --threads 256 --blocks 448` | 24, each pairing two 7 MiB regions (gate + up) | 2 × 7 MiB, 3584 rows of 2 KiB | 448×256 ⇒ 3584 wavefronts = **exactly one grid pass** | `mlp_gateup`, 24 launches ✓ |
+| `--nbuf 24 --buf-mib 7 --pattern engine-mlp --engine-in 3584 --threads 256 --blocks 128` | 24 | 7 MiB, 1024 rows of 7 KiB | 128×256 ⇒ 1024 wavefronts = **one pass** | `mlp_down`, 24 launches ✓ |
+| the two together | 48 | 504 MiB | — | one token's whole MLP weight traffic |
+
+`--stage 1` (the default with `--pattern engine-mlp`) reproduces the engine's activation staging too: the
+kernels declare `__shared__ float xs[IN]`, stage one row, `__syncthreads()`, then re-read `&xs[v*8]` —
+32 B of LDS per 16 B of weight, every launch. The probe stages the same width and element type, so the LDS
+footprint (4 KiB gate/up, 14 KiB down) and the bank pattern match the engine's rather than approximating
+them. The staged buffer is pre-filled with `0.0f`, so it adds exactly 0.0 to a checksum that must stay
+exact: traffic, not evidence. The row prints `stage_mib=` and `stage_witness=zero_by_construction`, and
+`--stage 0` is the row that separates the staging from everything else.
+
+### Thresholds — written down now, applied to the run unchanged
+
+Every comparison is a **ratio of same-window rows**, never a ratio against a historical number: absolute
+%of-probe moves a few % between windows, so a threshold against a stale row could be flipped by the window
+instead of by the mechanism. Every row must print `checksum=ok` and `suspect=0`, or it is void (rule 11).
+
+**(A) mapping** — same bytes, same launch count, same grid, the read mapping the only difference. Each
+pair was `--dry-run`-checked to bill **identical** byte counts and launch counts (printed by
+`--selftest`'s mapping anti-vacuity, which also rejects a plan where `--pattern engine-mlp` failed to
+reach its launches — the vacuous form of this instrument, invisible to the byte account because both
+readers touch the same bytes):
+
+| pair | engine side | contiguous twin | both sides bill |
+|---|---|---|---|
+| gate/up, pure read | `--mode read --pattern engine-mlp --engine-in 1024 --nbuf 48 --buf-mib 7 --threads 256 --blocks 448` | `--mode read --engine-in 1024 --nbuf 24 --buf-mib 14 --threads 256 --blocks 448` | 336.000 MiB, 24 launches, 448 blocks |
+| gate/up, step's write stream | `--mode mixlaunch --ratio 62 --pattern engine-mlp --engine-in 1024 --nbuf 48 --buf-mib 7 --threads 256 --blocks 448` | `--mode mixlaunch --ratio 62 --engine-in 1024 --nbuf 24 --buf-mib 14 --threads 256 --blocks 448` | 330.000 MiB read + 5.324 MiB written, 24 + 24 launches |
+| down, step's write stream | `--mode mixlaunch --ratio 62 --pattern engine-mlp --engine-in 3584 --nbuf 24 --buf-mib 7 --threads 256 --blocks 128` | `--mode mixlaunch --ratio 62 --engine-in 3584 --nbuf 24 --buf-mib 7 --threads 256 --blocks 128` | 164.391 MiB read + 2.652 MiB written, 24 + 24 launches |
+
+`--engine-in` is passed to the contiguous twins on purpose: the row width is geometry (it decides the
+whole-row rounding of a region), while `--pattern` alone decides which kernel runs. Without it the two
+sides round differently and the comparison is not byte-clean.
+
+* **(A) is refuted per family if `gbs(engine) ≥ 0.95 × gbs(twin)`, confirmed if `≤ 0.75 ×`, partial in
+  between**; a partial reports the share of the 86.6 → 52 gap it accounts for and is not rounded up. The
+  bytes-weighted score over the three pairs (336 : 330 : 164 MiB) is quoted alongside, never instead of
+  the per-family verdict — gate/up and down are different launches and one may refute while the other
+  confirms.
+* inside (A), attribution: `--stage 0` on the engine side removes the engine's `__shared__ float xs[IN]`
+  staging and its `&xs[v*8]` re-reads. If `gbs(stage1) ≤ 0.90 × gbs(stage0)` the fall is LDS staging, a
+  one-kernel fix with a known shape; if not, the fall belongs to the two-stream row interleave or the row
+  tail, which is a different fix.
+* `C_mixlaunch_62` itself is re-taken in the same window as a reference only (it is the average launch
+  shape, 11.01 MiB, not one of the engine's launches, so it is not an (A) denominator).
+
+**(B) locality** — identical launch multiset, two orders. The stand-ins stand in for the other families and
+are sized to the step: ~424 launches/token minus the MLP's 48 leaves 376, and 376 × 2.73 MiB ≈ 1026 MiB ≈
+the step's 1530.6 MiB read budget minus the MLP's 504 MiB.
+
+* `B_blk` = `--mode interleave --nbuf 48 --buf-mib 11.01 --revisits 1 --dummy-nbuf 376 --dummy-mib 2.73
+  --interleave blocked --threads 256 --blocks 448` — all stand-ins first, then the 48 MLP-shaped buffers back to
+  back: the best locality the MLP can have.
+* `B_rr` = the same row with `--interleave roundrobin` — pass-major over the MLP buffers with the stand-ins
+  spread evenly between them, ≈7.8 non-MLP launches between consecutive MLP launches, the step's spacing.
+* **(B) confirmed if `gbs(B_rr) ≤ 0.75 × gbs(B_blk)`; refuted if `≥ 0.92 ×`; partial between.** The bound
+  is not arbitrary: fully explaining the step needs an order penalty of ~0.60, so a fall under a quarter
+  cannot be the mechanism, and a quarter-or-more is well outside this box's ±5 % step reproducibility.
+  `--selftest` proves the two orders launch one multiset of the same sizes (`same_multiset ok=1`) and that
+  dropping a stand-in breaks that equality (`dropped_dummy_caught=1`), so the only difference a row can
+  show is the order.
+* `B_rr_nostandins` (same row, `--dummy-nbuf 1`) separates "the stand-ins' own bytes compete for the
+  controller" from "the stand-ins evict what the MLP just read": if the fall survives removing 375 of 376
+  stand-ins, it was contention, not locality, and (B) is re-opened as a controller question rather than
+  closed as an L2/TLB one.
+
+**(A) and (B) together — the row that ends the argument**
+
+`R_decisive` = `--mode interleave --nbuf 72 --buf-mib 7 --pattern engine-mlp --engine-in 3584 --revisits 1
+--dummy-nbuf 376 --dummy-mib 2.73 --interleave roundrobin --threads 256 --blocks 128`, judged **against
+`A_read_512m` re-taken in the same window** (not against the historical 100.3 %). Why this shape: 72
+launches × 7 MiB is the MLP's 504 MiB in launches whose row width (7 KiB) and grid (128 blocks ⇒ 1024
+wavefronts ⇒ 1024 rows, one grid pass) are `mlp_down`'s exactly, with the step's other families' bytes
+spread between them. It cannot carry the gate/up two-stream shape — `interleave` keeps one region per
+launch so that the two orders are the same multiset — and that shape is tested by the (A) rows instead.
+
+* **≤ 62 % of that probe → (A)+(B) reproduce the step's 52 %.** Nothing further is owed on the
+  memory-system side; the work becomes per-mechanism as attributed by the (A) and (B) rows above.
+* **≥ 80 % → neither mechanism explains the step**, and Q9's conclusion reads: the residue is per-launch
+  engine work (epilogue, waiting, co-tenancy with the step's own writes), not DRAM-side mapping or
+  locality; the next instrument is in-situ per-launch stall attribution, not a kernel change.
+* between → report the fraction of the gap closed and leave the residue named and open.
+
+If either confirms, the prize is bounded by arithmetic Q6.1 already carries: the MLP is **4.264 ms/token
+in-situ against a 2.594 ms burst and a 2.230 ms roofline**, so the whole MLP gap is **1.67–2.03 ms/token,
+13–16 % of a 12.4 ms token**. A mechanism whose measured rate ratio is `f` explains
+`(1/f − 1) × 2.594 ms`, capped at that gap: `f = 0.75` buys **≈0.86 ms/token** (about half the gap), and
+`f = 0.60` buys the whole 1.67 ms — which is why 0.75 is the confirm line and not something softer. That
+number, not a percentage, is what the next step gets scheduled against. A confirmed (A) is a kernel edit
+inside `engine/kernels_mlp.cpp`, which includes `prototype/mlp_gemv/mlp_gemv_kernels.h` verbatim, and it
+must come with that gate re-run; a confirmed (B) is a step-layout change (group the MLP launches, or stop
+reading 504 MiB of weights per token), never a kernel edit.
+
+### The pre-registered command list (main agent: one lock window, blocking, zero subagents)
+
+Every row is `--pages warm` — a cold row is void by rule 11 and exits non-zero, and cold is not what the
+step is. `--blocks` is a cap: the solver takes the largest grid within 0.5 % of the best fit, so the
+resolved `blocks=` in the row is the number to compare, and each pair resolves to the same one.
+
+```bash
+tag="q9-mapping-locality"; tools/gpu_lock.sh acquire "$tag"; tools/gpu_lock.sh util
+tools/build/mixed_bw --selftest            # gate: must print `SELFTEST ok fails=0` before any timing
+mkdir -p tmp/q9
+r() { tools/build/mixed_bw "$@" | tee -a tmp/q9/rows.log; }
+
+# references, same window (the two committed rows the sections above quote)
+r --tag A_read_512m     --mode read --footprint-mib 512 --threads 256 --pages warm --iters 8
+r --tag C_mixlaunch_62  --mode mixlaunch --ratio 62 --nbuf 48 --buf-mib 11.01 --threads 256 --pages warm --iters 8
+
+# (A) mapping: three engine/contiguous pairs, each byte-identical on both sides
+r --tag A_gu_eng        --mode read --pattern engine-mlp --engine-in 1024 --nbuf 48 --buf-mib 7 \
+                          --threads 256 --blocks 448 --pages warm --iters 8
+r --tag A_gu_plain      --mode read --engine-in 1024 --nbuf 24 --buf-mib 14 \
+                          --threads 256 --blocks 448 --pages warm --iters 8
+r --tag A_gu_eng_nostage --mode read --pattern engine-mlp --engine-in 1024 --stage 0 --nbuf 48 --buf-mib 7 \
+                          --threads 256 --blocks 448 --pages warm --iters 8
+r --tag A_mgu_eng       --mode mixlaunch --ratio 62 --pattern engine-mlp --engine-in 1024 \
+                          --nbuf 48 --buf-mib 7 --threads 256 --blocks 448 --pages warm --iters 8
+r --tag A_mgu_plain     --mode mixlaunch --ratio 62 --engine-in 1024 --nbuf 24 --buf-mib 14 \
+                          --threads 256 --blocks 448 --pages warm --iters 8
+r --tag A_mdn_eng       --mode mixlaunch --ratio 62 --pattern engine-mlp --engine-in 3584 \
+                          --nbuf 24 --buf-mib 7 --threads 256 --blocks 128 --pages warm --iters 8
+r --tag A_mdn_plain     --mode mixlaunch --ratio 62 --engine-in 3584 --nbuf 24 --buf-mib 7 \
+                          --threads 256 --blocks 128 --pages warm --iters 8
+
+# (B) order: one launch multiset (1548.688 MiB, 424 read launches), two orders
+r --tag B_blk           --mode interleave --nbuf 48 --buf-mib 11.01 --revisits 1 \
+                          --dummy-nbuf 376 --dummy-mib 2.73 --interleave blocked --threads 256 --pages warm --iters 5
+r --tag B_rr            --mode interleave --nbuf 48 --buf-mib 11.01 --revisits 1 \
+                          --dummy-nbuf 376 --dummy-mib 2.73 --interleave roundrobin --threads 256 --pages warm --iters 5
+r --tag B_rr_nostandins --mode interleave --nbuf 48 --buf-mib 11.01 --revisits 1 \
+                          --dummy-nbuf 1 --dummy-mib 2.73 --interleave roundrobin --threads 256 --pages warm --iters 5
+
+# the row that ends the argument: engine mapping + the step's spacing + the step's read budget
+r --tag R_decisive      --mode interleave --nbuf 72 --buf-mib 7 --pattern engine-mlp --engine-in 3584 \
+                          --revisits 1 --dummy-nbuf 376 --dummy-mib 2.73 --interleave roundrobin \
+                          --threads 256 --pages warm --iters 5
+tools/gpu_lock.sh util; tools/gpu_lock.sh release "$tag"
+```
+
+Verdict arithmetic to apply to those rows, in this order: `gbs(A_*) ratio` per pair → (A) per family;
+`gbs(B_rr)/gbs(B_blk)` → (B); then `gbs(R_decisive)/gbs(A_read_512m)` → the 62 % / 80 % call above. If
+(B) is confirmed, `B_rr_nostandins` decides whether the finding is "eviction" (re-opened as a layout
+question) or "controller contention" (re-opened as a Q8 refinement), and the two are different next steps.
+
+Nothing here changes engine code, and nothing here is a number: the rows, the ratios and the two
+exit-criterion lines were written before the run, and the thresholds are unchanged by whatever it prints.
