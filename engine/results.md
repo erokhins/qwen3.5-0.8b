@@ -835,16 +835,61 @@ That gives two independent readings, which should agree:
    submission-side left to win and the residue is inside the kernels. If `K − B ≈ 0`, the queue is already
    empty in the real step: every launch pays its dispatch in the open and the fix is submission-side.
 2. **In-situ execution vs the isolated sum.**
-   `Σ exec_in_situ ≈ K − (D + N·s)` compared against Q6's ≈9.4–9.6 ms of §6-measured family cost. A
+   `Σ exec_in_situ ≈ K − (D + N·s)` compared against Q6's ≈9.35–9.55 ms of §6-measured family cost. A
    match means the kernels are *not* slower in situ and the residue is dispatch or the never-measured
-   families; a match with B (≈12.9) instead means they are, by about the size of the residue.
+   families; a match with B (≈12.9) instead means they are, by about the size of the residue. Read this one
+   with the asymmetry that makes it informative rather than alarming: those §6 numbers came from **isolated
+   warm bursts**, and this repo already knows both ways that misprices an in-step pass — the dispatch curve
+   over-prices small multi-block launches by up to **1.8×** (the gated-norm row: curve 5.30 µs against the
+   kernel's own 2.958 µs), and a warm burst *understates* an in-step cold pass (the GDN recurrence row, which
+   is deliberately priced +0.16 above its warm figure). So `Σ exec_in_situ` landing *above* 9.55 ms is partly
+   expected in-situ cost, not a new leak, and the excess has to be attributed family by family before it is
+   called a finding.
 
-   ⚠️ **This is the opposite polarity from the one-line sketch in `bench/plan-2026-10-12.md` Q6.1** ("if
-   burst ≈ sum of stages, the residue is inside the kernels; if burst ≪ sum, the stall is exposed"). Read
-   as an empirical claim about *this* engine it is inverted: the pipelined burst is the one that *can*
-   overlap, so a large burst-to-serialized gap is evidence the pipeline was already overlapping, not a
-   stall still to be removed. The model above is three lines of algebra and worth arguing with before the
-   table below is trusted; the instrument itself is neutral between the two readings, which is the point.
+   The polarity in (1) and (2) is worth stating plainly because the first sketch of this experiment, in
+   `bench/plan-2026-10-12.md` Q6 item 1, had it **inverted** ("burst ≈ sum of stages ⇒ the residue is inside
+   the kernels; burst ≪ sum ⇒ the stall is exposed, fix submission-side"). Caught before the run, agreed,
+   and corrected in place there and in `stage_clock.h`'s header; §07.4 is the precedent for correcting a wrong
+   claim where it stood rather than leaving it and dissenting downstream. The instrument is neutral between the
+   two readings — that is its whole design — so nothing about the measurement depends on which one wins.
+
+**Pre-registered predictions, written before the window.** So that the answer cannot be fitted to the
+number afterwards. Anchors, all from this repo: N = 424 launches; E_iso = 9.35–9.55 ms (Q6's own column
+sum); **D = 1.1–1.63 ms** — 1.63 is Q6's dispatch column as written, and 1.1 is the same column with the
+small-multi-block rows divided by the curve's own 1.8× over-price, which is the honest lower end; s = the
+`STAGECAL idle_sync_us` line the same window prints; B must land on §6's 12.7–13.0 ms or nothing below
+means anything.
+
+| quantity | story A (dispatch exposed) | story B (kernels slow in situ) | mixed |
+|---|---|---|---|
+| `exposed = K − B` | ≈ `N·s` only → **≤0.2 ms** if the calib line reads sub-µs, ≤1.3 ms if it reads 3 µs | ≈ `D + N·s` → **1.1–1.7 ms** plus `N·s` | between the two bands |
+| `Σ exec_in_situ = K − (D + N·s)` | ≈ E_iso, 9.4–9.6 | ≈ B, **12.7–13.0** | between |
+| `K` itself | ≈ B + `N·s` → **12.8–14.3** | ≈ B + `D` + `N·s` → **13.9–16.0** | between |
+| consequence | fund submission work first (fold the 115 casts, pack the 114 projections) | stop submission work; fund shape/memory (Q6 lever 4) and the two unpriced families | **report it as a split, never as the nearer story** |
+
+And the split, if it lands in the middle — which the arithmetic above makes the *likely* outcome, because
+`D ≤ 1.63 ms < 3.4 ms`, so **no outcome of this experiment can make the residue entirely a dispatch
+story**: that is a pre-registered conclusion, independent of the measurement. Compute both halves from the
+same log and report both:
+
+    exposed_dispatch = B − (K − (D + N·s))        # what the step failed to hide
+    in_kernel        = B − exposed_dispatch − E_iso   # everything else, incl. cast/copy never priced
+    identity:  B − E_iso ≈ exposed_dispatch + in_kernel   # must hold to ~noise, else the model is wrong
+
+Two sub-cases the family rows decide and the aggregate cannot, also pre-registered now:
+
+- **B1 vs B2.** If story B wins, the `in_kernel` excess must show up *inside the named families* (their
+  `stage`-granularity rows exceeding their §6 burst rows). If instead it sits in `cast` and `copy` — the two
+  rows Q6 marks "never measured", ≈0.43 + ≈0.06 ms of dispatch by Q6's own estimate — then nothing got
+  slower in situ; two families were simply never billed, and the fix is folding casts into producers, which is
+  Q6 lever 2 and *is* submission-side. Same headline story, opposite lever, and only the rows can tell them.
+- **Contention manufactures story B.** A sync in a contended window waits for somebody else's work, so
+  `K − B` inflates in exactly the direction story B predicts. A window with any contender — including this
+  session's own serving — does not merely add noise to this experiment, it produces the story-B answer as an
+  artifact. That is why every number here is the main agent's. A contended worker smoke pass of this same
+  three-granularity comparison did in fact show the serialized totals well above the burst total; it is
+  deliberately not recorded, and anyone tempted to read it as a preliminary result should note it is the one
+  direction contention can *create*.
 
 **The experiment, and the if/then table.** One locked window, a fixed 128-lane context (cheapest point
 that is pure one-row decode: under the 512-lane staging the attention site is one fused kernel and the
@@ -854,16 +899,36 @@ five runs, and more repetitions did not move it).
 
 | outcome (128-lane point, medians of 3) | reading | what to do |
 |---|---|---|
-| `K−B` within ~±0.4 ms of `D + N·s`, and `Σ exec_in_situ` ≈ 9.4 | dispatch is fully hidden; the kernels are ~3.5 ms slower in situ than the bursts said | **Story B. Stop all submission work** (packed projections, cast folding, graphs — §6's graph result of ~4 % is then explained, not a missed opportunity). The next move is the shape/memory work: Q6 lever 4 (the 5 %-efficient `in_proj_a/b`, 40 % `k/v_proj`, 46–49 % `o/out_proj`), and a re-examination of the burst-vs-situ cache asymmetry — `prototype/README.md` rule 8 says a burst that re-reads one weight 300× keeps it hot, so §6's op-sum is *expected* to flatter the step. |
-| `K−B ≲ 0.3 ms` | the queue is already empty in production: dispatch is exposed, launch for launch | **Story A. Go submission-side**, in Q6's own order: fold the 49 of 115 casts that a producer can write, then packed projections (114 → 48 launches). Expect ≈D ≈ 1.6 ms, *not* 3.5 — so whatever is left is a second finding, not this one. |
-| `0.3 ms ≲ K−B ≲ D + N·s` | partly hidden | the residue splits: the hidden part is inside the kernels, the exposed part is dispatch. Price each separately; do not fuse on a mixed signal. |
-| `S−B > K−B`, or `plan_match=0`, or any `STAGEPARITY` not `1` | the instrument or the window is broken — per-kernel serialization is a superset of per-stage, so it cannot be the cheaper one | **Stop and fix the instrument.** Do not interpret any number from that run. |
+| `K−B` within ~±0.4 ms of `D + N·s`, and `Σ exec_in_situ` ≈ B (12.7–13.0) | dispatch is fully hidden; the step's own kernels cost ~3.2–3.7 ms more in situ than the isolated bursts said | **Story B. Stop all submission work** (packed projections, cast folding, graphs — §6's graph result of ~4 % is then explained, not a missed opportunity). The next move is the shape/memory work: Q6 lever 4 (the 5 %-efficient `in_proj_a/b`, 40 % `k/v_proj`, 46–49 % `o/out_proj`), and a re-examination of the burst-vs-situ cache asymmetry — `prototype/README.md` rule 8 is the measured case: 6 back-to-back replicas of one kernel re-read cached bytes and reported 344 GB/s for a kernel that streams 237, so an isolated burst whose repetitions touch the same weights is *expected* to flatter the step. **Then split B1/B2 with the family rows before funding anything:** if the excess is inside the named families it is in-situ cost; if it is in `cast`/`copy`, nothing slowed and the lever is folding casts, which is submission work — the opposite instruction. |
+| `K−B ≲ 0.3 ms` (sub-µs `s`) | the queue is already empty in production: dispatch is exposed, launch for launch | **Story A, capped at D ≈ 1.1–1.6 ms of the 3.4** — go submission-side in Q6's own order: fold the 49 of 115 casts a producer can write, then packed projections (114 → 48 launches). The remaining ≥1.8 ms is in-kernel by the arithmetic above and needs its own finding; do not spend the fusion work expecting the residue to close. |
+| `0.3 ms ≲ K−B ≲ D + N·s` | partly hidden — the expected case, given `D < residue` | Compute both halves (`exposed_dispatch`, `in_kernel`, above) and report the **split**, never the nearer story. Fund whichever half is larger first, and say in the ledger row that the other half exists. |
+| `S−B > K−B`, or `plan_match=0`, or any `STAGEPARITY` not `1`, or the split identity off by more than ~0.3 ms | the instrument or the window is broken — per-kernel serialization is a superset of per-stage, so it cannot be the cheaper one, and a failed identity means the three-term model does not describe the step | **Stop and fix the instrument.** Do not interpret any number from that run. |
+| any doubt about window exclusivity (`gpu_lock.sh util` high at acquire, a subagent alive, serving in flight) | contention inflates every sync, i.e. it *manufactures* the story-B signature | Void, not noisy. Re-take with zero subagents. This is the one failure mode that fakes the answer rather than blurring it. |
 | `burst` does not reproduce §6's 128-lane row (12.7–13.0) within ~5 % | contaminated window, or the warm-pass assumption is wrong | re-take; every serialized number is conditioned on the same warm state as the burst. |
 | 4032-lane `spread_pct` large while 128-lane is tight | the bimodality is the split attention path (8 blocks/site), not the memory system | the wide-context story becomes the attention split, and §6's "we do not yet know which" resolves in that direction. |
 
 Also free from the same run: `cast` and `copy` have never been measured at all (Q6's table says "never
 measured" for both, ≈0.35–0.49 ms of the residue is theirs by elimination). Their `stage`-granularity rows
 price them directly, for the first time, in the same window.
+
+**Third reading — the graph A/B, specified but not built.** A captured step removes the per-launch host cost
+without changing one kernel, so it tests "is host submission exposed?" more directly than the drain test
+does; and the drain test has a blind spot worth naming — serializing removes *overlap*, it does not add host
+work, so any host cost spent building arguments before enqueue is invisible to `K − B` and visible to a graph.
+This one was not built, and the reason is budget, not an oversight: capturing the step needs a stream handle
+threaded through the launch sites (the engine submits on the default stream today, and stream capture does not
+capture the legacy stream), plus an exclusion for the logits D2H + argmax, which are host work in
+`finish_token`. That is a second bench change with its own correctness A/B, and the experiment above does not
+need it to be decision-grade. It is the next thing to build **if `K − B` lands in the middle band**, because
+it is the only reading that can contradict the other two.
+
+What is already on the record, and what it predicts: §1 measured 64 captured launches replaying at **1.78 µs
+per kernel against 1.85 µs eager** — no gain, because the limit is the GPU's own dispatch rate — which is why
+the plan says a graph around the decode step buys ~4 % of the dispatch bill, ≈0.06 ms. Pre-register against
+that: a captured step should win **≈0.06 ms under story B**, and up to **`D` ≈ 1.1–1.6 ms under story A**
+(≈9–13 % of the step). If `K − B` says the dispatch was hidden and the graph nonetheless buys ≥5 % of the
+step, that contradiction is the result and gets reported as one — the likely reading being host work ahead of
+enqueue, which neither of the other two readings can see. Do not quote whichever of the two is cleaner.
 
 **Proof it does not perturb the step.** Two directions, both byte-level, both on device:
 
@@ -935,10 +1000,13 @@ tools/gpu_lock.sh util
 
 # 2 · quote, per point: the median of the three runs' STAGEPASS ms_mean (one per gran), the STAGEGAP
 #     exposed_ms and ratio, `Σ exec_in_situ = kernel.ms_mean − (D + syncs_per_step × idle_sync_us)` with
-#     D = 1.63 ms from the Q6 table, the family `ms_per_step` rows against Q6's measured column, and the
-#     spread across runs (the per-gran `spread_pct` is across *steps* within a run, which is a different
-#     spread and not the one §6 quotes). If a run prints `stopped=1` the prompt was too short: lengthen
-#     it rather than interpret a truncated step.
+#     D = 1.63 ms (Q6's column as written) and again with D = 1.1 ms (the same column with the curve's 1.8×
+#     small-launch over-price undone) — the two anchors bracket it, so state which band the result lands in
+#     and, if it lands between the pre-registered predictions, quote both halves of the split rather than
+#     the nearer story. Then the family `ms_per_step` rows against Q6's measured column (that comparison is
+#     what separates B1 from B2), and the spread across runs (the per-gran `spread_pct` is across *steps*
+#     within a run, which is a different spread and not the one §6 quotes). If a run prints `stopped=1` the
+#     prompt was too short: lengthen it rather than interpret a truncated step.
 
 # 3 · if the 4032 point is still bimodal after these three, five more rather than a bigger N: §6 took
 #     five runs of the differential and the spread did not move.
@@ -960,16 +1028,20 @@ tools/gpu_lock.sh release q61-4032
 .venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time --sweep --rows 32
 ```
 
-**Left open, named.** (a) The polarity question above, which is the main agent's to settle before the
-table is used to pick a direction; (b) the serialized passes measure a warm step (they run after the run's
-own steps, which is deliberate — it is what makes the three comparable), so `burst` here is a warm
-pipelined step and should be sanity-checked against §6's differential row rather than quoted as it; (c)
-the wave path has no stage clock — `note()` ignores submissions outside a measured step on purpose, and
-`notes_ignored` in the report is what would say so out loud if it were ever armed on a wave; (d) the
-`attn` family's launch count per site is lane-dependent above the staging, so `plan_match` is expected to
-read 0 at the 4032 point and that is not a defect; (e) `D`, the dispatch anchor, is still §6's derived
-curve rather than a fresh measurement of this tree's widths — §6's item 4 (the `glue --time --threads
-256/1024` anchor) is what would replace it.
+**Left open, named.** (a) Settled 2026-10-13, not open: the main agent re-ran the algebra, agreed the sketch
+in plan Q6 item 1 was inverted, and adopted the polarity above — the plan line and `stage_clock.h`'s header
+are corrected in place, so there is no second version of this claim loose in the tree; (b) the serialized
+passes measure a warm step (they run after the run's own steps, which is deliberate — it is what makes the
+three comparable), so `burst` here is a warm pipelined step and should be sanity-checked against §6's
+differential row rather than quoted as it; (c) the wave path has no stage clock — `note()` ignores
+submissions outside a measured step on purpose, and `notes_ignored` in the report is what would say so out
+loud if it were ever armed on a wave; (d) the `attn` family's launch count per site is lane-dependent above
+the staging, so `plan_match` is expected to read 0 at the 4032 point and that is not a defect; (e) `D`, the
+dispatch anchor, is still §6's derived curve rather than a fresh measurement of this tree's widths — §6's
+item 4 (the `glue --time --threads 256/1024` anchor) is what would replace it, and the pre-registered bands
+move with it; (f) the graph A/B reading above is specified, not built — it needs a stream handle at the launch
+sites, and it is deliberately deferred until either the middle band or a contradiction, since building a
+bench path to answer a question the first two readings may already answer is the wrong order.
 
 ### Context, not action: there is no prefill
 
