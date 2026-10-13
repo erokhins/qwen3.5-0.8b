@@ -707,3 +707,43 @@ numbers above stand.
 
 Reproduce: `engine/results.md` §Q6.1 command block, one locked window `q61-stage`, three runs at 128 lanes
 (`--steps 16`) and three at 4032 (`--steps 32`), prompts from `context_sweep.build_prompt`.
+
+### Q7 M1: the locality story died in its own pre-registered test (2026-10-13, zero subagents, foreground, lock `q7-window`)
+
+Q7 established the residue is not dispatch (Q6.1), not launch ramp (a 42.4 µs/launch ramp would bill a
+12.74 ms step 18.0 ms), and not a wrong roofline (all three recompute from `engine/state.h` within 0.2 %),
+and nominated **(b) fresh-window locality**: the MLP burst re-walks a 132 MB window 6×, the step walks
+528 MB once and never returns. **M1** was the decisive test, written before the run: grow the burst's window
+at fixed kernel geometry (`--tile 6 / 12 / 24`, i.e. 132 → 264 → 528 MB, `--iters 30`, `--layers all`,
+`--mode all`, same kernel, same grid, same 11.01 MB per launch) and watch the per-token MLP figure. Story (b)
+predicted ≥ 3.6 ms — the in-step row is 4.26 ms; the flat answer that refutes it was set at < 2.8 ms.
+
+| burst window | per-token MLP (best of 30 iters) | vs probe | pre-registered verdict |
+|---|---|---|---|
+| 132 MB (`--tile 6`, the committed 2.594 row) | **2.630 ms** | 201 GB/s (85 %) | reproduces the ledger's 2.594 within 1.4 % ✓ |
+| 264 MB (`--tile 12`) | **2.457 ms** | 215 GB/s (91 %) | |
+| **528 MB (`--tile 24`, same size as one token's real MLP traffic)** | **2.408 ms** | 219 GB/s (93 %) | (b) needed ≥ 3.6 → **refuted** |
+
+Growing the window 4× made the MLP **faster**, not slower — it walked *toward* the roofline, monotonically.
+So warmth is not what the step is missing, and a cold 528 MB window is not the step's problem: at exactly the
+traffic size of one real token, the same kernels reach **93 % of probe** in isolation and **52 %** inside the
+step. Each run also re-gated correctness (`act ndiff 1 out ndiff 0`, `PASS: the §03.3 MLP reproduces the
+reference operands`), so this is a green run per row, not a bare timing.
+
+That leaves a fourth candidate that neither (a) nor (b) covers, and it is now the cheapest thing on the board
+to test: **the step's traffic is not pure read.** A burst reads a weight buffer and writes a small activation;
+a real step reads 1.5 GB of weights *while* writing activations, GDN state (18.66 MiB/request), KV, and the
+~115 cast outputs — so every weight read can be competing with write-back of dirty lines the step just
+dirtied. Read-only probes would never show that, and it fits the shape of the deficit: **+3.85 µs/MB on MLP
+and +4.87 µs/MB on proj is roughly a doubling**, which is what mixed read/write traffic on LPDDR5x commonly
+costs, not what a kernel defect looks like. If it holds, the conclusion is uncomfortable but useful: the
+"52 % of a 237 GB/s read roofline" is a **mis-stated ceiling**, the real per-step ceiling is a mixed-traffic
+number, and the way to go faster is to move fewer bytes, not to write better kernels. **Q8** is that probe.
+
+Not run, and why: **M2** (re-take of the 128-lane stage rows) would reproduce numbers already in this file
+from `q61-stage`, and nothing shipped to A/B against, so citing them is correct and re-making them is the
+budget sink `AGENTS.md` warns about. **M3** (packed projections, proj 114 → 48) is held: it predicts
+0.1–0.25 ms, needs a `gate.py::launch_plan` and §07 table change, and buying ~2 % of a 12.4 ms step with a
+gate edit is a bad trade until the ceiling question is settled. **M4** (captured-step check) needs a stream
+handle at the launch sites, which the engine does not have (default stream, so capture is impossible today);
+Q6.1 already priced the same question from the other side, and the graph result agreed with the drain test.
