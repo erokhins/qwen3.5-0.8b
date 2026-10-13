@@ -20,8 +20,6 @@
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>
-#include <algorithm>
-#include <cmath>
 #include <hipblas/hipblas.h>
 
 #include <chrono>
@@ -32,26 +30,14 @@
 #include <string>
 #include <vector>
 
-#define CK(x)                                                              \
-    do {                                                                   \
-        hipError_t e_ = (x);                                               \
-        if (e_ != hipSuccess) {                                            \
-            std::printf("HIP_ERROR %s:%d %s\n", __FILE__, __LINE__,        \
-                        hipGetErrorString(e_));                            \
-            std::exit(2);                                                  \
-        }                                                                  \
-    } while (0)
-#define BK(x)                                                              \
-    do {                                                                   \
-        hipblasStatus_t s_ = (x);                                          \
-        if (s_ != HIPBLAS_STATUS_SUCCESS) {                                \
-            std::printf("HIPBLAS_ERROR %s:%d status=%d\n", __FILE__,       \
-                        __LINE__, (int)s_);                                \
-            std::exit(3);                                                  \
-        }                                                                  \
-    } while (0)
+#include "gemm_common.h"
 
 namespace {
+
+// CK/BK, the 16-bit encode/decode pair, gemm_stored_weight, fnv1a, fill_16bit and the 16-bit-C
+// comparator all live in gemm_common.h, because tools/prefill_mix.cpp has to make the same two
+// claims (same call, same rounding comparison) and a second copy of either could drift.
+using namespace gemm_common;
 
 struct Row {
     int m, n, k;
@@ -77,38 +63,7 @@ static const Row kDeterminismRows[] = {
     {1, 248320, 1024, "lm_head@1"},       // prefill prices exactly one row (§06.5)
 };
 
-// FNV-1a over the raw output bytes. A hash rather than a diff because the question is "are these the
-// same bytes" at 100 MB, and because printing one line per shape is what makes a cross-PROCESS
-// comparison possible: run the tool three times and compare the hashes.
-uint64_t fnv1a(const uint8_t *p, size_t n) {
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
-    return h;
-}
-
-inline uint16_t bits_of_bf16(float f) {
-    hip_bfloat16 b = hip_bfloat16(f);
-    uint16_t out;
-    __builtin_memcpy(&out, &b, 2);
-    return out;
-}
-inline uint16_t bits_of_fp16(float f) {
-    __half h = __float2half_rn(f);
-    uint16_t out;
-    __builtin_memcpy(&out, &h, 2);
-    return out;
-}
-inline float fp16_to_f32(uint16_t bits) {
-    __half h;
-    __builtin_memcpy(&h, &bits, 2);
-    return __half2float(h);
-}
-inline float bf16_to_f32(uint16_t bits) {
-    uint32_t u = (uint32_t)bits << 16;
-    float f;
-    __builtin_memcpy(&f, &u, 4);
-    return f;
-}
+// FNV-1a and the 16-bit encode/decode helpers are in gemm_common.h.
 
 // C[m,n] = A[m,k] * B[k,n], row-major, bf16 in, f32 accumulate. hipBLAS is column-major, so the
 // row-major product is expressed as the transposed column-major one (C^T = B^T A^T).
@@ -136,32 +91,10 @@ double run_gemm(hipblasHandle_t h, int m, int n, int k, int iters,
     return best;                  // caller prints spread from separate calls if it wants it
 }
 
-// Host-side bf16 -> f32 without relying on device-only helpers (this comparison runs on the CPU).
-float bf2f(hip_bfloat16 x) {
-    uint16_t bits;
-    __builtin_memcpy(&bits, &x, 2);
-    uint32_t u = (uint32_t)bits << 16;
-    float f;
-    __builtin_memcpy(&f, &u, 4);
-    return f;
-}
+// Host-side bf16 -> f32 lives in gemm_common.h as bf2f (this comparison runs on the CPU).
 
-// The form the engine would actually call: the weight as the checkpoint stores it, [n, k] row-major,
-// used directly as the transposed operand, so no transpose copy is ever made.
-//
-// Derivation, because getting this backwards is silent: BLAS is column-major and computes
-// C_cm(m×n) = op(X)(m×k)·op(Y)(k×n). We want C_rm[m,n] = A_rm[m,k]·W_rm[n,k]^T, i.e.
-// C_cm = W·Aᵗ, so m_blas=n, n_blas=m, X = W with OP_T (a row-major [n,k] buffer IS a cm k×n matrix,
-// and transposing it gives the n×k we need, ld=k), Y = A with OP_N (a row-major [m,k] buffer is a cm
-// k×m matrix, ld=k), and C with ldc=n.
-inline hipblasStatus_t gemm_stored_weight(hipblasHandle_t h, int m, int n, int k, hipDataType dt,
-                                          const void *A, const void *W, void *C,
-                                          hipDataType dt_out) {
-    const float alpha = 1.0f, beta = 0.0f;
-    return hipblasGemmEx(h, HIPBLAS_OP_T, HIPBLAS_OP_N, n, m, k, &alpha, W, dt, k,
-                         A, dt, k, &beta, C, dt_out, n,
-                         HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT);
-}
+// The OP_T form of the call, gemm_stored_weight, is in gemm_common.h too — tools/prefill_mix.cpp
+// calls that same function, so the layout derivation and the mix run through one place.
 
 bool selfcheck(hipblasHandle_t h) {
     const int M = 64, N = 96, K = 128;
@@ -275,8 +208,8 @@ bool cdtype_probe(hipblasHandle_t h) {
                 "worst |device - host-rounded| in ULP of the 16-bit format");
     for (const Ab &ab : {Ab{HIP_R_16BF, "bf16"}, Ab{HIP_R_16F, "fp16"}}) {
         const bool is_bf = ab.dt == HIP_R_16BF;
-        auto enc = [&](float f) { return is_bf ? bits_of_bf16(f) : bits_of_fp16(f); };
-        auto dec = [&](uint16_t b) { return is_bf ? bf16_to_f32(b) : fp16_to_f32(b); };
+        auto enc = [&](float f) { return enc16(f, is_bf); };
+        auto dec = [&](uint16_t b) { return dec16(b, is_bf); };
         std::vector<uint16_t> ha((size_t)M * K), hw((size_t)N * K);
         for (size_t i = 0; i < ha.size(); ++i) ha[i] = enc(sa[i]);
         for (size_t i = 0; i < hw.size(); ++i) hw[i] = enc(sw[i]);
@@ -324,28 +257,11 @@ bool cdtype_probe(hipblasHandle_t h) {
                 CK(hipFree(dc));
                 continue;
             }
-            double worst_ulp = 0.0;
-            size_t nd = 0;
-            for (size_t i = 0; i < ref.size(); ++i) {
-                uint16_t b;
-                __builtin_memcpy(&b, raw.data() + i * 2, 2);
-                const double got = dec(b);
-                // The comparator is the reference rounded the same way: the question is whether the
-                // library rounds where we would, not whether the product is exact.
-                const double want = (double)dec(enc((float)ref[i]));
-                const double d = std::fabs(got - want);
-                // Adding 1 to the raw bits of a positive 16-bit float is its next representable
-                // neighbour, so the spacing comes from the format rather than from a guess.
-                const uint16_t wb = enc((float)std::fabs(want));
-                const double ulp = std::max(std::fabs((double)dec((uint16_t)(wb + 1)) -
-                                                      (double)dec(wb)), 1e-30);
-                worst_ulp = std::max(worst_ulp, d / ulp);
-                nd += (got != want);
-            }
-            const bool good = (worst_ulp <= 1.0);
+            const auto cmp = compare_16bit_output(raw.data(), ref.data(), ref.size(), is_bf);
+            const bool good = (cmp.worst_ulp <= 1.0);
             ok = ok && good;
-            std::printf("  %-6s %-6s %-10s %-11zu %.3g %s\n", ab.name, c.second, "accepted", nd,
-                        worst_ulp, good ? "" : "<- more than one ULP off");
+            std::printf("  %-6s %-6s %-10s %-11zu %.3g %s\n", ab.name, c.second, "accepted", cmp.ndiff,
+                        cmp.worst_ulp, good ? "" : "<- more than one ULP off");
             CK(hipFree(dc));
         }
         CK(hipFree(da)); CK(hipFree(dw));
@@ -385,15 +301,9 @@ bool determinism(hipDataType dt, const char *dname, int reps) {
             // it, which is the whole point, not in the values. Filled in the dtype under test, because
             // a bf16 bit pattern read as fp16 is arbitrary data and could carry an Inf into a product
             // that has nothing to do with the question.
-            auto fill = [&](uint8_t *p, size_t n, int salt) {
-                for (size_t i = 0; i < n; ++i) {
-                    float v = (float)(((int)(i * salt + 11) % 200) - 100) / 256.f;
-                    if (dt == HIP_R_16F) ((uint16_t *)p)[i] = bits_of_fp16(v);
-                    else ((uint16_t *)p)[i] = bits_of_bf16(v);
-                }
-            };
-            fill(hw.data(), nw, 37);
-            fill(ha.data(), na, 17);
+            const bool is_bf = dt != HIP_R_16F;
+            fill_16bit(hw.data(), nw, is_bf, 37);
+            fill_16bit(ha.data(), na, is_bf, 17);
             // One scratch buffer, handed to some handles and withheld from others: kernel selection
             // depends on how much workspace the handle was given, so "a second handle disagreed" is
             // only evidence of nondeterminism if the two handles were given the same workspace.
