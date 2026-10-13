@@ -40,6 +40,63 @@ void glue_add_norm(const uint16_t* s, const uint16_t* delta, const uint16_t* w,
 void glue_add_norm_rows(const uint16_t* s, const uint16_t* delta, const uint16_t* w,
                         uint16_t* s_out, uint16_t* n_out, int rows);
 
+// ---- route (c): the wave matmul route (hipBLAS for the ten fat shapes at wave width).
+//
+// WHAT THIS IS. `bench/prefill-route-spike-2026-10-13.md` §6 item 1 funds hipBLAS for ten shapes
+// (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `in_proj_qkv`, `in_proj_z`, `out_proj`, `gate_proj`,
+// `up_proj`, `down_proj` — 150 of a wave's 186 matmul calls) and §"Wave-path attribution" of
+// `bench/performance-status.md` says why: matmul is 74.4 % of a 1024-token prefill and the hand
+// GEMMs run at ~0.85 TFLOP/s against hipBLAS's ~33 at the same shape. The call form is the probe's:
+// `OP_T` on the weight as the shard stores it (no transpose copy), bf16 in, f32 accumulate, **bf16
+// `C`** — 16-bit `C` because every shipped pin rounds a projection's product to a 16-bit width, and
+// an f32 `C` would move that rounding AND double the activation traffic (§4.3, §3.3).
+//
+// THE SEAM IS THE ROW COUNT, and it is the same seam the MLP walk and the attention plan already run
+// on: a body of ONE row keeps the hand GEMV (decode is bandwidth-bound and the one-row `lm_head` sits
+// at 102 % of the stream roofline — there is nothing for a library to win, and W4 measured the
+// small-N library call at 12–22× the dispatch floor), and a body of two or more rows may take the
+// library. So decode's launch sequence — every bit of it — is untouched by this route by construction.
+// `in_proj_a`/`in_proj_b` (N=16, 0.065 B/flop, below the ridge at every width) stay in the hand
+// kernel at any width, which is why their call sites call `proj_gemv` and not `proj_gemm`.
+//
+// `kAuto` does not exist here on purpose: there is no third thing for a row count to pick.
+enum class WaveGemm {
+    // The funded route, and NOT yet the shipped default: hipBLAS for a wave body, hand GEMV for a
+    // one-row body. Opt-in with `--gemm library` until it clears the prefill bands — see
+    // `engine/results.md`, route (c).
+    kLibrary,
+    // What runs by default, and the A/B side: with this set every body takes the hand kernel whatever
+    // its width, which is how the old path stays measurable in the same window (§7 W9 is an A/B) and
+    // how "decode untouched" is checkable end to end.
+    kHand,
+};
+
+// "library" / "hand". Throws on anything else: this flag selects which side of an A/B a run is.
+WaveGemm parse_wave_gemm(const std::string& name);
+const char* wave_gemm_name(WaveGemm route);
+
+// THE ROW-COUNT RULE, in one place, next to `resolve_mlp_gate_map`'s: a one-row body is always the
+// hand GEMV — that is what makes "decode byte-identical" a property of the rule rather than of a
+// call site remembering it — and any wider body takes what the run asked for.
+WaveGemm resolve_wave_gemm(WaveGemm want, int rows);
+
+// One handle and one workspace for the process, created here and pinned: nothing in this route
+// allocates per call. Returns the line `decode_run` prints when the flag named the route (one handle,
+// one pinned workspace, default stream, nothing per call — said out loud because it is the constraint
+// a reviewer cannot check from the call sites). Idempotent; throws if the handle or the workspace
+// cannot be created, which is better than a first matmul failing 400 launches into a prefill.
+std::string gemm_route_init();
+// Tears down what `gemm_route_init` created. Safe to call when it never ran.
+void gemm_route_shutdown();
+
+// The matmul itself: `out[m,n] = x[m,k] · weight[n,k]ᵀ`, bf16 operands, f32 accumulate, bf16 `out`.
+// `weight` is the shard's [n,k] row-major blob used as stored; `x` is [m,k] row-major and `out` is
+// [m,n] row-major, both at their natural leading dimension (`k` and `n`), which is what every
+// row-family tile in `DecodeScratch` already is. NOT counted in `engine/launch_stats.h`: this is the
+// bare call, and the family counters belong to the routed entry points below so that one projection
+// site counts as one site whichever GEMM ran.
+void gemm_bf16(const void* weight, const void* x, void* out, int m, int n, int k);
+
 // ---- §04.1 / §05.1: the projection GEMV family (prototype/proj_gemv).
 // `in` must be 1024 or 2048 — the only two widths the checkpoint has for these nine shapes, and
 // the only two the kernel is instantiated for. `x` is F32: the launcher instantiates PACK_X=false,
@@ -56,6 +113,13 @@ void glue_add_norm_rows(const uint16_t* s, const uint16_t* delta, const uint16_t
 // 0 differing) and `gate.py` section (h) requires that a wave is the side that batched.
 void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int in,
                int tokens = 1);
+
+// The same projection through hipBLAS (route (c)). `x` is the SAME tile `proj_gemv`'s `x` was widened
+// from, still in the BF16 glue wrote — the library takes a 16-bit `A` operand, so it reads what the
+// producer wrote instead of a widening of it. `tokens` is the body's row count (`m`), and as in
+// `proj_gemv` it is what `engine/launch_stats.h` counts this site as: one library call per projection
+// per body, the same one-site-per-projection bill §06.2's "one GEMM per projection" already prices.
+void proj_gemm(const void* weight, const void* x, uint16_t* out, int rows, int in, int tokens);
 
 // ---- §03.3: gate+up+SwiGLU, then down (prototype/mlp_gemv). Both take the input widened to
 // F32; there is no BF16-staged form of these two kernels, so the caller casts (see the launch
@@ -109,6 +173,18 @@ void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, ui
                 int rows, int in, int tokens, MlpGateMap map);
 void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows, int in,
               int tokens = 1);
+
+// The MLP through hipBLAS (route (c)). The library unfuses exactly one epilogue in this model —
+// `silu(gate)·up`, §3.3's bill of the one place the engine fuses today — so this issues two matmuls
+// into `gate_raw`/`up_raw` and then the epilogue kernel that writes `act`. The epilogue is
+// bit-for-bit the fused kernel's: `act = bf16( bf16(silu_f32(g)) * u )` with `g`/`u` the BF16 dots,
+// three roundings, the same `expf` expression (`prototype/mlp_gemv/mlp_gemv_kernels.h`, whose F2
+// gate is what pinned that policy). `x` and `act` are BF16; `act` is the same buffer the hand form
+// writes, so `down`'s two forms read the same tile.
+void mlp_gateup_gemm(const void* w_gate, const void* w_up, const void* x, void* gate_raw,
+                     void* up_raw, uint16_t* act, int rows, int in, int tokens);
+// `act` here is the BF16 `act` itself, not a widening of it — the library reads 16-bit `A`.
+void mlp_down_gemm(const void* w_down, const void* act, uint16_t* out, int rows, int in, int tokens);
 
 // ---- §04.2/§04.3/§04.4: conv, gates, recurrence (prototype/gdn_decode). All F32 on the state
 // side; `raw` is F32 because the conv kernel reads it that way, which is why decode_step casts the

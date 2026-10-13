@@ -44,11 +44,16 @@ echo "built $BIN/loader_test"
 # `stage_clock.cpp` is the same shape for time instead of counts (`engine/stage_clock.h`): the body
 # marks its family boundaries, the driver arms and reads the clock, and an unarmed clock costs one
 # null-pointer read per mark.
+# `kernels_gemm.cpp` is the hipBLAS route of route (c) and the only TU that links `-lhipblas`: one
+# handle and one pinned workspace for the process, and the one call form every library matmul in the
+# engine shares (`tools/gemm_common.h`, which `tools/gemm_peak --check` and `tools/prefill_mix --check`
+# certify against a CPU reference — one authority for the OP_T/ld pair, not a copy that can drift).
 hipcc "${FLAGS[@]}" \
   engine/decode_run.cpp engine/decode_step.cpp engine/prefill.cpp engine/state.cpp engine/loader.cpp \
   engine/launch_stats.cpp engine/stage_clock.cpp \
   engine/kernels_glue.cpp engine/kernels_proj.cpp engine/kernels_mlp.cpp \
   engine/kernels_gdn.cpp engine/kernels_attn.cpp engine/kernels_lmhead.cpp \
-  engine/kernels_cast.cpp \
+  engine/kernels_cast.cpp engine/kernels_gemm.cpp \
+  -lhipblas \
   -o "$BIN/decode_run"
 echo "built $BIN/decode_run"
