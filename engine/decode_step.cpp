@@ -43,6 +43,17 @@
 // `mlp_gateup`/`mlp_down` (which would delete 48 of the 115 casts) — are what shrink it.
 // `gate.py` re-derives every row of that table from §07 in Python and fails on a mismatch, so this
 // comment and the code cannot drift apart quietly.
+//
+// THE STAGE-CLOCK MARKERS. Every submission site below is preceded by one `stageclock::note(family)`
+// naming which row of the table above the launch that follows belongs to. It is a marker, not a
+// barrier: with no clock armed it reads one null pointer and returns — no sync, no launch, no reorder,
+// no readback — and with one armed it is where that pass drains the stream. That is why it PRECEDES the
+// submission rather than following it: a sync taken after a note has already let the next launch into
+// the queue, so it drains that launch too and charges it to the previous stage, shifting every boundary
+// by one submission and being invisible about it on a step where most segments are one launch long.
+// Same always-compiled, cheap-when-idle choice as `engine/launch_stats.h`'s counters, for the same
+// reason: a probe that changes the shape of the thing it measures is not a probe, and the decision to
+// measure belongs to the driver, not to this file.
 #include "engine/decode_step.h"
 
 #include <hip/hip_runtime.h>
@@ -56,6 +67,7 @@
 
 #include "engine/kernels.h"
 #include "engine/loader.h"
+#include "engine/stage_clock.h"
 
 #define ENGINE_CK(x)                                                                \
     do {                                                                            \
@@ -391,6 +403,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     // not this package's, and a copy's arithmetic is not in doubt.
     const uint16_t* table = (const uint16_t*)weights.at(kEmbedding).device;
     for (int t = 0; t < n; ++t) {
+        stageclock::note(stageclock::kCopy);
         ENGINE_CK(hipMemcpyAsync(sc.embed + (size_t)t * kHidden,
                                  table + (size_t)tokens[t] * kHidden,
                                  kHidden * sizeof(uint16_t), hipMemcpyDeviceToDevice));
@@ -404,6 +417,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     const uint16_t* s = sc.embed;
     uint16_t* nxt = sc.s_a;
     const auto add_norm = [&](const uint16_t* delta, const void* norm_w) {
+        stageclock::note(stageclock::kGlue);
         kernels::glue_add_norm_rows(s, delta, (const uint16_t*)norm_w, nxt, sc.norm, n);
         s = nxt;
         nxt = (nxt == sc.s_a) ? sc.s_b : sc.s_a;
@@ -411,6 +425,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
 
     // Layer 0's mixer norm has nothing to add before it — the norm-only form of the same kernel,
     // which is the job glue's gate calls `L00.n0` and pins against `rmsnorm_zc(s_in, w_in(0))`.
+    stageclock::note(stageclock::kGlue);
     kernels::glue_add_norm_rows(s, nullptr,
                                 (const uint16_t*)layer_dev(weights, 0, leaf::kInputNorm), nullptr,
                                 sc.norm, n);
@@ -419,6 +434,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // Every projection in this layer reads the SAME rows, and `proj_gemv` is instantiated with
         // PACK_X=false, so it reads F32 (`kernels.h`, and E2 in `engine/results.md`). One widening
         // for the tile, which is the part of "48 casts/token" that batching removes.
+        stageclock::note(stageclock::kCast);
         kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
 
         const bool attn_layer = is_full_attention(layer);
@@ -432,24 +448,32 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         if (attn_layer) {
             // §05.1. q_proj's 4096 rows stay interleaved [q|gate] per head because that is the stored
             // layout (§10.5 measured the split reading at cos −0.14), and the block de-interleaves it.
+            stageclock::note(stageclock::kProj);
             kernels::proj_gemv(layer_dev(weights, layer, leaf::kQProj), sc.norm_f32, sc.a_q,
                                kQprojRows, kHidden, n);
+            stageclock::note(stageclock::kProj);
             kernels::proj_gemv(layer_dev(weights, layer, leaf::kKProj), sc.norm_f32, sc.a_k,
                                kKvProjRows, kHidden, n);
+            stageclock::note(stageclock::kProj);
             kernels::proj_gemv(layer_dev(weights, layer, leaf::kVProj), sc.norm_f32, sc.a_v,
                                kKvProjRows, kHidden, n);
         } else {
             // §04.1: four projections off the tile.
+            stageclock::note(stageclock::kProj);
             kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjQkv), sc.norm_f32, sc.g_raw,
                                kQkvRows, kHidden, n);
+            stageclock::note(stageclock::kProj);
             kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjZ), sc.norm_f32, sc.g_z,
                                kValueDim, kHidden, n);
+            stageclock::note(stageclock::kProj);
             kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjB), sc.norm_f32, sc.g_b,
                                kNumValueHeads, kHidden, n);
+            stageclock::note(stageclock::kProj);
             kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjA), sc.norm_f32, sc.g_a,
                                kNumValueHeads, kHidden, n);
             // One launch for the three widenings this LAYER needs, not three per token: 6144 + 16 + 16
             // elements for every row of the tile at once.
+            stageclock::note(stageclock::kCast);
             kernels::cast_bf16_to_f32_3(sc.g_raw, sc.g_raw_f32, n * kQkvRows,
                                         sc.g_a, sc.g_a_f32, n * kNumValueHeads,
                                         sc.g_b, sc.g_b_f32, n * kNumValueHeads);
@@ -481,14 +505,17 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // copy, one per layer per wave: 18 × 73 728 B for the whole wave instead of 18 × T_w of
             // them. Cheaper than double-buffering 1.27 MiB of state per request, which is the
             // alternative §08.2's "in-place ring update" wording invites; results.md carries it.
+            stageclock::note(stageclock::kGdn);
             kernels::gdn_conv(sc.g_raw_f32, st.conv_window_layer(layer),
                               sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel,
                               sc.g_u, sc.conv_new, n);
+            stageclock::note(stageclock::kCopy);
             ENGINE_CK(hipMemcpyAsync(st.conv_window_layer(layer), sc.conv_new,
                                      (size_t)kConvWindow * kConvChannels * sizeof(float),
                                      hipMemcpyDeviceToDevice));
             // §04.3, all n rows at once. `A_log` is one of the 36 tensors the checkpoint stores F32
             // (§01.6), so it goes to the kernel as-is; dt_bias came through the adapter.
+            stageclock::note(stageclock::kGdn);
             kernels::gdn_gates(sc.g_a_f32, sc.g_b_f32,
                                (const float*)layer_dev(weights, layer, leaf::kALog),
                                sc.g_dt_bias + (size_t)slot * kNumValueHeads,
@@ -526,16 +553,19 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // The split-K partials (§07.3): unused by rows that fit the one-pass staging, and required
             // by any that does not — the launcher refuses rather than lose a partial.
             a.part = sc.a_part;
+            stageclock::note(stageclock::kAttn);
             kernels::attn_decode_layer(a);
             // One widening over the whole [n][2048] tile, for the same reason P5 packed the casts
             // around the projections: it is elementwise, so a wider call is the same bits in fewer
             // submissions (and `cast` is not a launchstats family, so nothing has to re-derive it).
+            stageclock::note(stageclock::kCast);
             kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32, (size_t)n * kQwidth);
         } else {
             for (int t = 0; t < n; ++t) {
                 // §04.4's recurrence. q, k, v are the three 2048-wide slices of row t of the conv's
                 // output tile (§04.1's [q|k|v]); rec_kernel indexes its own slice as [head][dim], so
                 // the pointers are just offsets into that row.
+                stageclock::note(stageclock::kGdn);
                 kernels::gdn_rec(sc.g_u + (size_t)t * kQkvRows,
                                  sc.g_u + (size_t)t * kQkvRows + kValueDim,
                                  sc.g_u + (size_t)t * kQkvRows + 2 * kValueDim,
@@ -553,9 +583,11 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // reason `cast_bf16_to_f32_3` went over the projections' tile in P5: it is elementwise, so a
         // wider call is the same bits in fewer submissions.
         if (!attn_layer) {
+            stageclock::note(stageclock::kGdn);
             kernels::gdn_gated_norm(sc.g_o, sc.g_z,
                                     (const float*)layer_dev(weights, layer, leaf::kGatedNorm),
                                     sc.block_out, nullptr, n);
+            stageclock::note(stageclock::kCast);
             kernels::cast_bf16_to_f32(sc.block_out, sc.block_out_f32, n * kValueDim);
         }
 
@@ -563,6 +595,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // filled (P5). The two layer types write the same scratch and the same width — `kQwidth` and
         // `kValueDim` are both 2048 — so this is one call site, and it is the §03.2 addend that
         // `add_norm` below consumes for every row of the wave.
+        stageclock::note(stageclock::kProj);
         kernels::proj_gemv(layer_dev(weights, layer, attn_layer ? leaf::kOProj : leaf::kOutProj),
                            sc.block_out_f32, sc.delta, kHidden,
                            attn_layer ? kQwidth : kValueDim, n);
@@ -573,11 +606,15 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // ---- §03.3 MLP, batched over the wave's rows (P4). Both halves still want F32 input (there
         // is no BF16-staged form of these two kernels — the deferral in results.md), so the norm
         // rows and `act` are both widened, once for the tile rather than once per token.
+        stageclock::note(stageclock::kCast);
         kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
+        stageclock::note(stageclock::kMlp);
         kernels::mlp_gateup((const uint16_t*)layer_dev(weights, layer, leaf::kGateProj),
                             (const uint16_t*)layer_dev(weights, layer, leaf::kUpProj), sc.norm_f32,
                             sc.mlp_act, kIntermediate, kHidden, n);
+        stageclock::note(stageclock::kCast);
         kernels::cast_bf16_to_f32(sc.mlp_act, sc.mlp_act_f32, n * kIntermediate);
+        stageclock::note(stageclock::kMlp);
         kernels::mlp_down((const uint16_t*)layer_dev(weights, layer, leaf::kDownProj),
                           sc.mlp_act_f32, sc.delta, kHidden, kIntermediate, n);
 
@@ -626,12 +663,15 @@ StepResult finish_token(const WeightStore& weights, RequestState& st, DecodeScra
     const uint16_t* norm_row_ptr = sc.norm + (size_t)norm_row * kHidden;
     // Row 0 of `norm_f32` is the scratch this widens into: by the time a row is priced the body is
     // over, so nothing else is reading it.
+    stageclock::note(stageclock::kCast);
     kernels::cast_bf16_to_f32(norm_row_ptr, sc.norm_f32, kHidden);
+    stageclock::note(stageclock::kLmHead);
     kernels::lm_head_full((const uint16_t*)weights.at(kHead).device, sc.norm_f32, sc.logits,
                           kVocab);
 
     // ---- §03.4's tie rule, on the host: ties go to the LOWEST id, which is a strict `>` scan.
     // One sync for the whole step, here and only here.
+    stageclock::note(stageclock::kHostTail, 0);   // 0: a D2H and a host loop, not a launch
     std::vector<float> host_logits(kVocab);
     ENGINE_CK(hipMemcpy(host_logits.data(), sc.logits, kVocab * sizeof(float),
                         hipMemcpyDeviceToHost));

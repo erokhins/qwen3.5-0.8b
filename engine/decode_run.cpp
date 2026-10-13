@@ -51,7 +51,10 @@
 #include "engine/launch_stats.h"
 #include "engine/loader.h"
 #include "engine/prefill.h"
+#include "engine/stage_clock.h"
 #include "engine/state.h"
+
+#include <memory>
 
 namespace {
 
@@ -83,6 +86,11 @@ struct Options {
     // code" case that bit-identical output cannot distinguish from a batched run. Running the same
     // prompt both ways and comparing counters AND dumps is `engine/gate.py` section (h).
     int wave_rows = engine::kMaxWaveRows;
+    // The stage clock (`engine/stage_clock.h`): re-runs the run's generation steps twice more, once
+    // with a wait at every family boundary and once with a wait after every submission, and reports
+    // them next to the pipelined step. A bench-only observation flag: the run it is attached to still
+    // produces the same dumps and the same lines, and the extra passes print nothing but `STAGE*`.
+    bool time_stages = false;
     bool help = false;               // print_usage and exit 0, before anything is loaded
 };
 
@@ -133,6 +141,8 @@ Options parse_args(int argc, char** argv) {
             o.prefill_logits = engine::parse_prefill_logits(next());
         } else if (a == "--wave-rows") {
             o.wave_rows = std::atoi(next().c_str());
+        } else if (a == "--time-stages") {
+            o.time_stages = true;
         } else if (a == "--help" || a == "-h") {
             o.help = true;
         } else {
@@ -172,6 +182,17 @@ Options parse_args(int argc, char** argv) {
         throw std::runtime_error("--prefill-logits all is a run-mode observation flag; a --session"
                                  " feed never dumps logits, so its wave is always the §06.5"
                                  " last-row form");
+    }
+    if (o.time_stages && (o.session || o.sizes_only)) {
+        // The stage clock measures a fixed, replayable list of generation steps against three
+        // submission granularities, which needs a run-mode step list: a session's `gen` budget is the
+        // caller's and can end anywhere, and --sizes-only runs no steps at all.
+        throw std::runtime_error("--time-stages measures a run's generation steps; --session and"
+                                 " --sizes-only have no such list to re-run");
+    }
+    if (o.time_stages && o.steps < 1) {
+        throw std::runtime_error("--time-stages needs --steps >= 1 (there is nothing to time in a"
+                                 " run that generates nothing)");
     }
     // A replay must be able to answer every step it is asked for. Silently falling back to
     // self-feeding after the list runs out would produce a run that is half forced and half
@@ -320,7 +341,14 @@ void print_usage(FILE* out) {
     std::fprintf(out,
                  "usage: decode_run [--model DIR] [--ids ID,ID,...] [--steps N] [--out DIR]"
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
-                 " [--prefill-logits last|all] [--wave-rows N] [--load-verify] [--sizes-only]\n"
+                 " [--prefill-logits last|all] [--wave-rows N] [--time-stages] [--load-verify]"
+                 " [--sizes-only]\n"
+                 "  --time-stages After the run, replay its generation steps from a fresh state at"
+                 " three submission granularities — one wait per step (burst), per family boundary"
+                 " (stage), per submission (kernel) — and print per-stage wall time next to the"
+                 " pipelined total (`engine/stage_clock.h`). Timing instrument: the numbers it prints"
+                 " are a measurement, so they belong to a clean window, and the run's own dumps are"
+                 " unchanged by it\n"
                  "  --replay  feed each generation step the caller's token (teacher forcing; also"
                  " leaves §07.5 unarmed)\n"
                  "  --no-stop leave §07.5 unarmed in a free run too (depth smoke only)\n"
@@ -518,6 +546,153 @@ void emit_state_fp(const char* phase, const HostState& cur, const HostState* pre
     std::fflush(stdout);
 }
 
+// ---- the stage clock's passes (`--time-stages`, `engine/stage_clock.h`) ---------------------
+// One pass = rebuild the state this run's generation steps started from (§08.4 reset plus the same
+// prompt wave), replay the SAME fed tokens through it, and price each step at one submission
+// granularity. Three passes — burst (production shape, one wait per step), stage (a wait at every
+// family boundary), kernel (a wait after every submission) — so the three numbers are taken on the same
+// tokens at the same lanes in one process. The comparison this instrument exists to make is between
+// them, and nothing else about the box is allowed to differ across them.
+//
+// Why a REPLAY rather than a second free run: a free run feeds its own samples, so a second free run
+// could diverge and compare two different tokens; feeding the recorded list makes the work identical by
+// construction. The parity line each pass prints (same samples, bit-identical top logits) is what proves
+// the granularity did not change the work, which is the difference between a controlled comparison and
+// two unrelated runs quoted next to each other.
+//
+// Why the writes and the gate lines stay with the run's own pass: `engine/gate.py` parses the `decode`/
+// `STEP`/`RESULT` lines and the `--out` dumps are pinned bytes. A measurement pass therefore prices a
+// step and keeps only its sample id and that sample's logit.
+
+struct StepRec {
+    int step = -1;
+    int fed = -1;          // what the run fed this step — the replay feeds exactly this
+    int sampled = -1;      // what it produced, for the parity check
+    float top_logit = 0.0f;
+};
+
+struct PassResult {
+    const char* gran = "";
+    std::vector<double> step_ms;
+    bool tokens_ok = true;
+    bool logits_ok = true;
+    int first_mismatch = -1;
+    double mean_ms = 0.0;
+};
+
+// The ledger's own spread convention: (max - min) / min, as a percentage.
+struct Spread {
+    double mean = 0.0;
+    double mn = 0.0;
+    double mx = 0.0;
+    double pct = 0.0;
+};
+
+Spread summarize(const std::vector<double>& v) {
+    Spread s;
+    if (v.empty()) return s;
+    double sum = 0.0;
+    s.mn = s.mx = v[0];
+    for (const double x : v) {
+        sum += x;
+        if (x < s.mn) s.mn = x;
+        if (x > s.mx) s.mx = x;
+    }
+    s.mean = sum / static_cast<double>(v.size());
+    s.pct = s.mn > 0.0 ? 100.0 * (s.mx - s.mn) / s.mn : 0.0;
+    return s;
+}
+
+// One granularity, priced and printed. `ref` is the run's own step list.
+PassResult stage_pass(const Options& o, const engine::WeightStore& store, engine::RequestState& st,
+                      engine::DecodeScratch& sc, const std::vector<StepRec>& ref,
+                      engine::stageclock::Mode mode) {
+    using engine::stageclock::Clock;
+    using engine::stageclock::Mode;
+    PassResult out;
+    out.gran = engine::stageclock::mode_name(mode);
+
+    st.reset();
+    st.sampled_token = -1;
+    st.stopped = false;
+    // The prompt wave again, at `kLast`: the state it leaves is the state the run's first generation
+    // step started from, and pricing every row's logits would buy vocabulary D2Hs nobody reads.
+    engine::prefill_wave(store, st, sc, o.prompt, engine::PrefillLogits::kLast);
+
+    std::unique_ptr<Clock> clock;
+    if (mode != Mode::kBurst) clock = std::make_unique<Clock>(mode);
+    engine::stageclock::arm(clock.get());
+    for (const StepRec& want : ref) {
+        if (clock) clock->begin_step();
+        const auto t0 = std::chrono::steady_clock::now();
+        // logits=nullptr: the sample and its logit come back in `StepResult`; the vocabulary itself is
+        // still downloaded and argmaxed by `finish_token`, which is the point — a pass that skipped the
+        // D2H would be measuring a step the production path never submits.
+        const engine::StepResult r = engine::decode_step(store, st, sc, want.fed, nullptr);
+        if (clock) clock->end_step();
+        out.step_ms.push_back(std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - t0).count());
+        if (r.token != want.sampled) {
+            out.tokens_ok = false;
+            if (out.first_mismatch < 0) out.first_mismatch = want.step;
+        }
+        if (std::memcmp(&r.top_logit, &want.top_logit, sizeof(float)) != 0) out.logits_ok = false;
+    }
+    engine::stageclock::arm(nullptr);   // never leave the marker armed for an unmeasured pass
+
+    const Spread sp = summarize(out.step_ms);
+    out.mean_ms = sp.mean;
+    // No `syncs=` here: the wait count is the clock's, and it prints it per step on its own TOTAL line.
+    std::printf("STAGEPASS gran=%s steps=%zu ms_mean=%.4f ms_min=%.4f ms_max=%.4f spread_pct=%.2f\n",
+                out.gran, out.step_ms.size(), sp.mean, sp.mn, sp.mx, sp.pct);
+    std::printf("STAGEPARITY gran=%s tokens_identical=%d logits_bitidentical=%d first_mismatch=%s"
+                "%s\n",
+                out.gran, out.tokens_ok ? 1 : 0, out.logits_ok ? 1 : 0,
+                out.first_mismatch < 0 ? "none" : std::to_string(out.first_mismatch).c_str(),
+                (out.tokens_ok && out.logits_ok) ? "" : " note=COMPARISON_VOID");
+    if (clock) std::printf("%s\n", clock->describe().c_str());
+    for (size_t i = 0; i < ref.size(); ++i) {
+        std::printf("STAGESTEP gran=%s step=%d fed=%d sampled=%d ms=%.4f\n", out.gran, ref[i].step,
+                    ref[i].fed, ref[i].sampled, i < out.step_ms.size() ? out.step_ms[i] : 0.0);
+    }
+    return out;
+}
+
+// The whole `--time-stages` report. Called after the run has printed everything it normally prints
+// about its state, because every pass here MUTATES `st` (reset + re-prefill), and after the run's own
+// dumps are closed, because a pass writes nothing.
+void time_stages_report(const Options& o, const engine::WeightStore& store, engine::RequestState& st,
+                        engine::DecodeScratch& sc, const std::vector<StepRec>& base) {
+    if (base.empty()) {
+        std::printf("STAGE gran=calib note=no_generation_steps_ran\n");
+        return;
+    }
+    // The instrument's own overhead, printed first: every serialized segment ends in one of these
+    // waits, so a reader can take the clock back out of the clock's number.
+    const double idle_sync_us = engine::stageclock::calibrate_idle_sync(200);
+    std::printf("STAGE gran=calib idle_sync_us=%.3f iters=200"
+                " note=one_of_these_sits_inside_every_serialized_segment\n", idle_sync_us);
+
+    const PassResult burst =
+        stage_pass(o, store, st, sc, base, engine::stageclock::Mode::kBurst);
+    const PassResult stage =
+        stage_pass(o, store, st, sc, base, engine::stageclock::Mode::kStage);
+    const PassResult kernel =
+        stage_pass(o, store, st, sc, base, engine::stageclock::Mode::kKernel);
+
+    // `exposed` is the finding this whole instrument was built for: what one extra wait per stage (or
+    // per kernel) costs, on the same launches at the same lanes. ~0 means there was no overlap to lose
+    // and the residue is inside the kernels; a large positive number means the production step is
+    // hiding exactly that much per-launch stall. Arithmetic, not interpretation — the reading belongs
+    // to whoever is holding a clean window.
+    for (const PassResult* p : {&stage, &kernel}) {
+        std::printf("STAGEGAP gran=%s burst_ms_mean=%.4f serialized_ms_mean=%.4f exposed_ms=%.4f"
+                    " ratio=%.3f\n",
+                    p->gran, burst.mean_ms, p->mean_ms, p->mean_ms - burst.mean_ms,
+                    burst.mean_ms > 0.0 ? p->mean_ms / burst.mean_ms : 0.0);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -713,6 +888,10 @@ int main(int argc, char** argv) {
         // so no extra decode step is spent on the first sampled token.
         int sampled = wave.empty() ? -1 : wave.rows.back().sampled;
         bool run_stopped = false;   // §07.5 reached in the GENERATION phase; see the rule below
+        // One row per generation step the run actually took, for `--time-stages`, which replays exactly
+        // these steps at the other two submission granularities. Inert when the flag is off: a vector of
+        // PODs filled from values the loop already had, no device work and no sync.
+        std::vector<StepRec> step_records;
         for (int i = 0; i < o.steps; ++i) {
             const int step = prompt_len + i;
             // `--replay`: the caller owns the generation-phase tokens, exactly as it owns the
@@ -727,8 +906,10 @@ int main(int argc, char** argv) {
             const engine::StepResult r =
                 engine::decode_step(store, st, sc, token,
                                     o.out_dir.empty() ? nullptr : &logits);
-            step_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                                  ts).count();
+            const double wall_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - ts).count();
+            step_ms += wall_ms;
+            step_records.push_back({step, token, r.token, r.top_logit});
             sampled = r.token;
 
             const bool stop_match = r.token == engine::kStopToken;
@@ -799,6 +980,18 @@ int main(int argc, char** argv) {
         // and not another output comparison is the proof that P4's batched kernels are the ones
         // running.
         std::printf("%s\n", engine::launchstats::describe_run().c_str());
+
+        // The stage clock's three passes. Their position is load-bearing twice over: they `reset()` and
+        // re-prefill `st`, so they run only after everything the RUN reports about its own state
+        // (`--state-fp` above) has been taken and after `LAUNCHSTAT` has been printed — otherwise the
+        // launch counters would report four passes instead of the run's one, and section (h)'s reading
+        // of them would stop meaning the run it is judging. And they write nothing to `--out`, so a
+        // `--time-stages` run and a plain run produce identical dumps (proved in `engine/results.md`).
+        // Their lines sit between `LAUNCHSTAT` and `RESULT`, which keeps the last line of a run the
+        // result line.
+        if (o.time_stages) {
+            time_stages_report(o, store, st, sc, step_records);
+        }
 
         std::printf("RESULT mode=%s steps=%d ms_total=%.3f ms_per_step=%.3f last_sampled=%d"
                     " prefix_len=%d stopped=%d\n",

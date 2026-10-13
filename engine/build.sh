@@ -41,9 +41,12 @@ echo "built $BIN/loader_test"
 # wave is what a request's whole prompt looks like when it is made of those steps.
 # `launch_stats.cpp` is the observed-launch counter (`engine/launch_stats.h`): the two kernel TUs
 # increment it, the driver prints it, and it has no business being anywhere else.
+# `stage_clock.cpp` is the same shape for time instead of counts (`engine/stage_clock.h`): the body
+# marks its family boundaries, the driver arms and reads the clock, and an unarmed clock costs one
+# null-pointer read per mark.
 hipcc "${FLAGS[@]}" \
   engine/decode_run.cpp engine/decode_step.cpp engine/prefill.cpp engine/state.cpp engine/loader.cpp \
-  engine/launch_stats.cpp \
+  engine/launch_stats.cpp engine/stage_clock.cpp \
   engine/kernels_glue.cpp engine/kernels_proj.cpp engine/kernels_mlp.cpp \
   engine/kernels_gdn.cpp engine/kernels_attn.cpp engine/kernels_lmhead.cpp \
   engine/kernels_cast.cpp \
