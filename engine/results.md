@@ -4054,3 +4054,232 @@ roofline**, which is the part of Q9's penalty the mapping was not — the row ta
 could reach — Q6 established it is bit-identical by row ownership and swept it for the one-row shape only —
 but it has no second measured number pulling against it today, so it stays a queue decision rather than a
 package.
+
+
+## Q11 (2026-10-13): D-9's near-tie becomes a **sized** rule — `chunk64b` leaves the expected-red list as a green that names its own tie, and the size comes from the band the gate already polices
+
+D-9 (`bench/plan-2026-10-12.md`) kept `chunk64b` step 0 RED for one honest reason: the pin puts **8337 at
+15.625** and **20619 at 15.500** — a unique winner by **0.125**, which is **2 BF16 ULP** at that magnitude —
+while the engine's legal element error at that step is larger (measured maxabs **0.2509**). Demanding the
+pinned id there is asking a bit-tolerant fixture to be bit-exact. D-9's second half said the fix must not be
+a number invented to fit: *"the step where the rule starts admitting tokens needs its own `D-x`, its own
+band, and the same provenance as D-1 had — until then the line stays red and the reason stays written."*
+This is that derivation, and the reason is now replaced by a threshold with a source.
+
+### The bound, and the one place a number like this can come from
+
+Per judged step *j*:
+
+```
+bound(j) = meanrel cap in force at step j  ×  mean|pin_j|
+```
+
+`meanrel` is defined (§10.2, and `gate.py::metrics` implements exactly that) as `mean|Δ| / mean|ref|`, and it is
+policed per step by the check named `step j: meanrel <= 5 % (§10.2)` — or, on a priced fixture,
+`step j: meanrel X inside the route allowance Y`. Inverting the definition gives the same sentence in logits:
+**the largest element error this step's own policed band would pass**, if the error were spread evenly over the
+248 320-wide vocabulary. Both inputs are existing objects — a cap `rule_for_step` already prints, and a pinned
+tensor — so this adds no constant, no measurement, no error model. `chunk64b` step 0, from the live run:
+
+```
+margin 0.125 = 2.0 BF16 ULP  vs  bound 0.162049 = meanrel cap 5.0000 % × mean|pin| 3.24099
+             (flat §10.2 cascade ceiling 5.00 %, because chunk64b carries no route_allowance.json)
+```
+
+Why not the other candidates, each measured rather than dismissed:
+
+* **cos** is scale-invariant and has no element-space reading. Turning its cap into a max-element bound
+  (‖Δ‖ ≤ 2·√cap·‖ref‖) gives **≈ 83** at this step — it would excuse every token in the corpus.
+* **the maxabs / cancellation floor** has no logits-unit reading at all, for the reason `gate.py` already
+  writes about the §10.1 G6 floor: pinning a max-element error to the ULP floor fails on *rearrangement*
+  noise at positions that cancelled to ~1e-6.
+* **the engine's own measured error** — the tempting one — is circular (this route's error used to judge
+  another) and provably broader: it would also have excused **`dec300f` step 30**, margin 0.25 against a
+  measured maxabs 0.2773 where the licensed figure is 0.17161. D-9 named one fixture; a bound that reaches
+  a second one is a scope change, so it was rejected on the table, not on taste.
+* the **measured mean** (0.0389 at step 0) is a fact about one route, not a licence, and it sits below the
+  margin — so the *cap* is used, never the measurement.
+
+`engine/slack_size.py` (new, CPU-only, imports `gate.step_slack` rather than copying it, the way
+`prototype/mlp_gemv/floor_probe.py` reads its band from `run.py`) prices every fixture and every step:
+
+```
+== corpus: 4 step(s) inside the region — chunk64b step 0, chunk64b step 1, chunk64b step 13, chunk64b step 22
+   the five refused steps nearest the line: dec300f step 30 (1.46x), chunk64b step 8 (2.05x), p128 step 1
+   (2.16x), dec64f step 29 (2.23x), chunk64b step 20 (2.31x)
+   steps outside `chunk64b` the rule could reach: none   <- must be empty, or the rule broadens past the
+                                                             fixture D-9 named
+```
+
+and per fixture:
+
+```
+  dec8:     0 inside; 0 exact tie(s); no refused step within 5x of its bound
+  dec64f:   0 inside; 2 exact tie(s) (17, 18) belong to D-1; nearest refused step 29 at 2.23x
+  dec64t:   0 inside; 0 exact tie(s); no refused step within 5x
+  dec300f:  0 inside; 0 exact tie(s); nearest refused step 30 at 1.46x
+  mt32f:    0 inside; 1 exact tie(s) (11) belong to D-1; no refused step within 5x
+  p128:     0 inside; 0 exact tie(s); nearest refused step 1 at 2.16x
+  wide520f: 0 inside; 0 exact tie(s); no refused step within 5x
+  chunk64b: 4 inside (0, 1, 13, 22); 1 exact tie (11) belongs to D-1; nearest refused step 8 at 2.05x;
+            measured maxabs at the inside steps: 0=0.2509, 1=0.2452, 13=0.2132, 22=0.2018
+```
+
+Two things that table has to say plainly. First, the licensed bound is **narrower than what this engine
+demonstrably carries** at every one of the four steps it reaches (0.162049 < 0.2509, and the same at 1, 13,
+22), so the rule admits less than the band grants — it is a floor under the argument, not a ceiling over it.
+Second, **the line is not comfortably clear of the nearest green step**: 46 % more bound and `dec300f` step 30
+starts being excused. That is why the injections are aimed at exactly that step.
+
+### The rule, as encoded
+
+A distinct counted verdict next to D-1's proved tie — `tie-by-quantization-slack`, its own `[SLACK]` counter,
+its own SLACK line — admissible only if **all** of:
+
+1. the pin has a **unique** winner at the step (exact ties stay D-1's, with their stricter payload-equality
+   leader set; `chunk64b` step 11 is inside this bound and still belongs to D-1 — its leader set is 2 of the
+   4 ids the slack bound would name);
+2. the engine's id is **not** that winner (D-1's scope rule; a step where the engine reproduced the pin's id
+   consults no exception, and gets a `[SLACK-NOTE]` instead — three of `chunk64b`'s four inside steps are
+   notes, not uses);
+3. `margin < bound(j)`;
+4. the engine's id is **one of the pinned ids lying inside that margin** — the D-1 shape, kept: an excused
+   token must be a token the pin itself put up for election;
+5. every other judged step still matches, which is the existing aggregate id-list check doing its job — one
+   excused token may not drag a changed chain with it.
+
+Nothing polices a vector band on §06.5's `y0` row, so there is no cap to read a bound from and the rule
+**fails closed** there. And one tempting condition was measured and thrown out: the engine's own gap between
+the two ids at `chunk64b` step 0 is `15.5778 − 15.3934 = 0.1844`, *larger* than the 0.162049 licence, so
+"the engine must also call it a near-tie" would have refused the very case the rule exists for. It is printed
+on the SLACK line and gated by nothing — which way a legal route's coin landed is not a band.
+
+### Proof it is narrow: the other seven fixtures did not move
+
+`tools/gate_locked_run.sh` (new) holds `tools/gpu_lock.sh` inside each call — one fixture per acquisition,
+never concurrent, tag released on `trap … EXIT` — and writes the run's provenance header (command, util at
+acquire/release, wall) into the top of the log it produces, so the log carries its own provenance. Each log
+begins:
+
+```
+# cmd: .venv/bin/python engine/gate.py --fixture chunk64b
+# gpu_lock util at acquire:gpu use: 45% at release:gpu use: 56% | wall=8,19s (by-product, not a measurement)
+```
+
+Eight runs before the change (`tmp/d9_sizing/base/`, taken with the harness before it wrote headers, so
+`util` survived only for the `chunk64b` one: 92 % → 52 %) and eight after (`tmp/d9_sizing/new/`, complete
+headers, walls 2.77–17.61 s each, util at acquire 41–54 %). **These are correctness gates: no burst, no
+best-of-N, and no ms figure from them enters any timing doc or ledger** — the wall in the header is the
+harness's own span, and the `ms/step` lines `decode_run` prints are by-products the gate itself already
+disclaims. The before/after, from `tools/gate_log_diff.sh tmp/d9_sizing/base tmp/d9_sizing/new` (new):
+
+```
+dec8:      pass 168 → 168 | fail 0 → 0 | slack lines 0 → 0 | decision-line md5 IDENTICAL
+dec64f:    pass 650 → 650 | fail 0 → 0 | slack lines 0 → 0 | decision-line md5 IDENTICAL  (2 TIE, unchanged)
+dec64t:    pass 647 → 647 | fail 0 → 0 | slack lines 0 → 0 | decision-line md5 IDENTICAL
+dec300f:   pass 1156 → 1156 | fail 0 → 0 | slack lines 0 → 0 | decision-line md5 IDENTICAL
+mt32f:     pass 391 → 391 | fail 0 → 0 | slack lines 0 → 0 | decision-line md5 IDENTICAL  (TIE-NOTE unchanged)
+p128:      pass 197 → 197 | fail 0 → 0 | slack lines 0 → 0 | decision-line md5 IDENTICAL
+wide520f:  pass 327 → 327 | fail 0 → 0 | slack lines 0 → 0 | decision-line md5 IDENTICAL
+chunk64b:  pass 372 → 376 | fail  3 → 0 | slack lines 0 → 5
+```
+
+"decision-line md5" is the md5 of every `[PASS] step j: metrics|cos|meanrel|argmax` and
+`[PASS] generation step …` line — the whole set of lines by which a step is judged. For the seven
+the only surviving differences after normalising the engine's own ms echo are two texts this change had to
+touch: the aggregate check's name ("as a tie **or a quantization slack** proved from the pin") and the
+`route_allowance.json` validity line, which moved a few rows earlier because the slack rule needs the
+allowance before section (a) runs. No band, no pin, no margin definition, no fixture, and no `specimpl.py`
+was touched; `tools/band_history.py --check` still reports **15 band value(s) checked** and adds no row,
+because the rule reads caps that are already policed instead of registering a new one.
+
+`chunk64b`'s three red lines, before and after:
+
+```
+- [FAIL] generation step 0 samples greedy_continuation[1] — 20619 vs 8337
++ [PASS] generation step 0 samples greedy_continuation[1] — 20619 vs 8337 — admitted as
++        tie-by-quantization-slack, see the SLACK line above
+- [FAIL] step 0: argmax agrees with the pin — 20619 — the pin's winner is unique: top1 8337 (15.625) over
+-        top2 20619 (15.5), a gap of 0.125 = 2.0 BF16 ULP. …
++ [PASS] step 0: argmax agrees with the pin — 20619 — but this is the step the quantization-slack rule
++        admits: pin top1 8337 (15.625) over top2 20619 (15.5) — margin 0.125 = 2.0 BF16 ULP at that
++        magnitude, against this step's licensed element error 0.162049 = meanrel cap 5.0000 % × mean|pin|
++        3.24099 … | the pin could not decide this token: engine id 20619 is one of the 2 pinned ids inside
++        the margin [8337, 20619]; engine's values: 8337 -> 15.39336, 20619 -> 15.57782; the engine's own gap
++        at those two ids is 0.18446 (printed, not gated) … | ADMITTED
+- [FAIL] all 30 generated ids match, in order — exactly, or as a tie proved from the pin — …
++ [PASS] all 30 generated ids match, in order — exactly, or as a tie or a quantization slack proved from the
++        pin — 0 step(s) resolved by the tie policy (prefill row -> 1596); 1 admitted by quantization slack
++        (step 0 -> 20619 (pin margin 0.125 = 2.0 ULP vs bound 0.162049)) | unmatched steps []
+```
+
+and the run now ends `ENGINE GATE PASS — with 1 step(s) reported TIE and 1 step(s) reported SLACK`, with the
+`[SLACK]` counter naming the step and the numbers, plus a `[SLACK-NOTE]` for steps 1, 13 and 22 where the
+engine reproduced the pin's own id and no exception was consulted.
+
+### Injections: two are required, there are four, and each is aimed at the tightest place
+
+`--slack-alt N` / `--break-slack N` / `--break-runnerup N` are dry-run stand-ins (`gate.py`, and wired into
+`--selftest`, which skips them with a stated reason on a fixture that has no step inside its own bound). All
+four below were run as dry-runs — CPU, no device, no lock taken.
+
+| injection | fixture, step | rc | what it proves |
+|---|---|---|---|
+| runner-up lifted 1 BF16 step over the pinned max, **inside** the region | `chunk64b` 0 | **0** | the rule actually fires. A rule that never fires would also pass the seven-identity test |
+| same lift, aimed at the highest pinned id **outside** the margin | `chunk64b` 0 | **1** | tied-but-not-in-the-leader-set goes RED. Not a rubber stamp |
+| runner-up lifted over the max at the fixture's **decidable** step | `chunk64b` 8 (2.05×) | **1** | the bound, not the shape, is what admits — same injection, one step later, is refused |
+| runner-up lifted over the max at the **narrowest decidable step in the corpus** | `dec300f` 30 (1.46×) | **1** | the anti-too-loose test at the one place a 46 % looser bound would fail. Red, with 3 failures |
+
+### Three bugs found on the way, all worth recording
+
+* **the leader set came out of the permutation, not the values.** The first version printed the ids
+  **74123, 57529** for `chunk64b` step 0 — positions in the sorted array, not token ids — while the accept/reject
+  decision happened to be right. A verdict line whose printed evidence is wrong but whose boolean is right is
+  the worst possible failure mode for a gate whose whole job is to print its numbers: it would have been
+  believed. Correct line is `order[wide[order] >= v1 - bound]`, and the SLACK line now prints the leader ids
+  next to the pinned values, so the mismatch is visible against the decision line above it.
+* **a `(1, 248320)` pin row and a rank-1 `argsort`.** `load_pin` deliberately does not reshape (it hands back
+  what the dumper wrote, and most call sites want that), so `np.argsort` on a logits dump sorts along axis 1
+  and the first attempt at the runner-up helper produced a 248 320 × 248 320 fancy index — a `MemoryError` of
+  about 230 GiB. `pin_row()` is now the one place that turns a dump into a ranked vector, with that trap in
+  its docstring.
+* **the lock harness was releasing without its tag, and nothing complained.** `tools/gpu_lock.sh release`
+  refuses a tagless call, so every run of the first harness left a stale holder and the *next* run printed
+  `clearing lock left by a dead holder` and proceeded. The serialization looked intact the whole time —
+  it was being enforced by PID-liveness recovery, not by the lock. `tools/gate_locked_run.sh` now carries
+  the pattern the lock tool's own header documents (`trap "… release '$tag'" EXIT`), and
+  `gpu_lock.sh status` reads `free` after a run.
+
+### What this does **not** settle, and what moves it
+
+* **The bound is the licence in force, not a property of the pin.** `chunk64b` is unpriced, so its cap is
+  §10.2's flat 5 %. Pricing it — D-2's standing offer, printed as a note at the top of every `chunk64b` run —
+  would put that fixture's own margin in place of 5 %, which at step 0 is nearer the **1.1990 %** the run
+  itself reports. The bound would fall to ≈ 0.04, **below** the 0.125 margin, and step 0 would fall back out
+  of the region and back to RED. Correctly: a tighter licence is a narrower permission to be wrong. Whoever
+  prices `chunk64b` re-runs `engine/slack_size.py` before concluding the slack rule broke.
+* **The admission is per-element-shaped, not per-chain-shaped.** The leader set is read from the pin's values;
+  a step where the engine's divergence is spread differently is refused, which is the narrow behaviour D-9
+  asked for but is a choice, not a law.
+* **`dec300f` step 30 sits at 1.46×.** Nothing in the tree stops a future bound 46 % larger from starting to
+  excuse it. The defence is this derivation plus the injection aimed at that step, not margin of comfort.
+* **A high slack count is still a smell.** D-1's 24-raw-ties rule stays: 24 real ties in a 64-token generation
+  would be the log looking fine at something that has gone wrong elsewhere. The counter exists so that is
+  visible.
+
+### Reproduce
+
+```bash
+tmp/d9_sizing/all.sh                                                  # the eight device runs, locked, one at
+#   a time — that loop is one line: for fx in <the eight>; do tools/gate_locked_run.sh $fx tmp/gate_logs; done
+tools/gate_log_diff.sh tmp/d9_sizing/base tmp/d9_sizing/new           # the seven-identity table above
+tools/gate_log_diff.sh tmp/d9_sizing/base tmp/d9_sizing/new --diff    # …and the chunk64b residual, line by line
+.venv/bin/python engine/slack_size.py --engine-log tmp/d9_sizing/new   # the whole sizing table, CPU
+.venv/bin/python engine/gate.py --fixture chunk64b --slack-region       # the region, with the nearest step outside it
+.venv/bin/python engine/gate.py --fixture chunk64b --selftest --dry-run # includes the three slack needles
+.venv/bin/python engine/gate.py --fixture chunk64b --dry-run --slack-alt 0      # rc 0, ADMITTED
+.venv/bin/python engine/gate.py --fixture chunk64b --dry-run --break-slack 0    # rc 1
+.venv/bin/python engine/gate.py --fixture chunk64b --dry-run --break-runnerup 8 # rc 1
+.venv/bin/python engine/gate.py --fixture dec300f --dry-run --break-runnerup 30 # rc 1
+tools/band_history.py --check                                         # 15 bands, unchanged by this
+```
