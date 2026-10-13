@@ -3,6 +3,14 @@
 
     .venv/bin/python tools/prefill_gemm_shapes.py [--waves 64,512,1024,3072]
                                                  [--model models/Qwen3.5-0.8B] [--rate fp16]
+    .venv/bin/python tools/prefill_gemm_shapes.py --json > tools/build/prefill_gemm_shapes.json
+
+The table below is paper for a human. `--json` is the same census for a machine, and it exists so that
+`tools/prefill_mix.cpp` gets its shapes and its per-layer counts from this file rather than from a
+second copy of them typed into C++ (AGENTS.md: do not duplicate logic — a census and a harness that
+can disagree silently are two bugs instead of one). The JSON carries the layer split, the attn-layer
+indices, the block-matmul total and the flop sum, so the harness can check itself against the census's
+own arithmetic instead of trusting it. One record per line, so a wrong row is a diffable row.
 
 Three questions from `bench/plan-prefill-2026-10-12.md` ("Funded: prefill compute", route (b)/(c)
 spike), all of them arithmetic on shapes and on rates that are already measured elsewhere:
@@ -78,6 +86,8 @@ def main() -> int:
     ap.add_argument("--waves", default="64,512,1024,3072")
     ap.add_argument("--rate", default="fp16", choices=sorted(RATES_TFLOPS))
     ap.add_argument("--bw-gbs", type=float, default=DEFAULT_BW_GBS)
+    ap.add_argument("--json", action="store_true",
+                    help="emit the machine-readable census (shapes + per-layer counts) and exit")
     args = ap.parse_args()
 
     model = ROOT / args.model if not Path(args.model).is_absolute() else Path(args.model)
@@ -92,9 +102,29 @@ def main() -> int:
     for leaf, scope in MATMULS:
         L = attn[0] if scope == "attn" else 0
         dtype, (n, k) = header[f"model.language_model.layers.{L}.{leaf}"]
-        rows.append({"leaf": leaf, "scope": scope, "count": counts[scope], "n": n, "k": k})
+        rows.append({"leaf": leaf, "scope": scope, "count": counts[scope], "n": n, "k": k,
+                     "dtype": dtype})
     head_dtype, (hn, hk) = header["model.language_model.embed_tokens.weight"]
-    rows.append({"leaf": "lm_head (= embed, §01.1)", "scope": "once", "count": 1, "n": hn, "k": hk})
+    rows.append({"leaf": "lm_head (= embed, §01.1)", "scope": "once", "count": 1, "n": hn, "k": hk,
+                 "dtype": head_dtype})
+
+    if args.json:
+        block_matmuls = sum(r["count"] for r in rows if r["scope"] != "once")
+        block_flops = sum(2 * r["n"] * r["k"] * r["count"] for r in rows if r["scope"] != "once")
+        recs = [json.dumps(r, separators=(",", ":")) for r in rows]
+        print("{")
+        print('  "schema": "prefill_gemm_shapes/1",')
+        print(f'  "model": {json.dumps(model.name)},')
+        print(f'  "full_attention_interval": {interval},')
+        print(f'  "counts": {json.dumps(counts, separators=(",", ":"))},')
+        print(f'  "attn_layers": {json.dumps(attn, separators=(",", ":"))},')
+        print(f'  "block_matmuls_per_wave": {block_matmuls},')
+        print(f'  "block_flops_per_token": {block_flops},')
+        print('  "matmuls": [')
+        print(",\n".join("    " + r for r in recs))
+        print("  ]")
+        print("}")
+        return 0
 
     waves = [int(w) for w in args.waves.split(",")]
     esz = 2                                   # bf16 and fp16 are the same width: the whole point (a)
