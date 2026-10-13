@@ -635,11 +635,14 @@ CASCADE_RULE = ("a reassociating route is judged by the step's own band floored 
                 " the pin (= the hand route) had < 0.10 of top-1/top-2 room")
 
 # Which GEMM route the run being judged used (`decode_run --gemm`). Module state for the same reason
-# `REFS` is: five sections need it and none of them owns it. `hand` is the default because it is the
-# shipped route, and every band in this file means exactly what it meant before route (c) when this is
-# `hand` — the cascade floor is armed for `library` and for nothing else.
+# `REFS` is: five sections need it and none of them owns it. `library` is the default because it is the
+# shipped route now — D-11 admitted it on the audit's terms, which are a band and not bit-identity — and
+# the cascade floor below is armed for it and for nothing else. `hand` stays fully supported and stays
+# judged the old way: with this set to `hand`, every band in this file means exactly what it meant before
+# route (c). This default and `decode_run`'s move together, in one commit, because a gate that judged
+# library output under hand bands would be judging the wrong rule.
 GEMM_ROUTES = ("hand", "library")
-GEMM_ROUTE = "hand"
+GEMM_ROUTE = "library"
 
 
 def set_route(name: str) -> None:
@@ -2607,13 +2610,16 @@ def parse_run(text: str) -> dict:
         elif line.startswith("PREFILL "):
             out["prefill"] = dict(re.findall(r"(\w+)=([^\s]+)", line))
         elif line.startswith("GEMM "):
-            # Which GEMM a wide body ran, echoed by `decode_run` when `--gemm` was named. Its own key
-            # because section (b) judges a different band per route, so the gate has to be able to prove
-            # the run it is reading is the run it asked for.
+            # The handle line: which GEMM a wide body ran, echoed by `decode_run` when `--gemm` was
+            # named. NOT the route assertion — its `route=` field names the library ("route=hipblas
+            # handle=1 workspace_mib=128 …") because it is a statement about the handle that got built,
+            # and the hand side spells itself "route=hand". The route the run is judged under comes from
+            # the NUMERICS line's `gemm=` field below, which spells `library|hand` the way `--gemm` does.
             out["gemm"] = dict(re.findall(r"(\w+)=([^\s]+)", line))
         elif line.startswith("NUMERICS "):
             # Pin provenance: the wave-row ceiling and the hipBLAS version this binary was built and
-            # linked against (D-11). Read by `numerics_checks` against the recorded file.
+            # linked against (D-11). Read by `numerics_provenance_checks` against the recorded file, and
+            # its `gemm=` field is ALSO the authoritative route echo (see the route check in `run_all`).
             out["numerics"] = dict(re.findall(r"(\w+)=([^\s]+)", line))
         elif line.startswith("STATE ") or line.startswith("LAUNCH "):
             key = line.split()[0].lower()
@@ -3072,8 +3078,7 @@ def wave_band_checks(a_dir: Path, b_dir: Path, a_label: str, b_label: str, what:
           " — a row present on one side only is a different corpus, not a wider band")
 
 
-def cross_width_ids(sides: list[tuple[str, dict]], prompt_len: int,
-                    band_ref: str) -> None:
+def cross_width_ids(sides: list[tuple[str, dict]], band_ref: str) -> None:
     """Cross-width token-id agreement on the library route, where bit-identity is gone (D-11).
 
     Two widths of a library route can sample different tokens at a row, and §A2 says exactly where: at
@@ -3082,9 +3087,13 @@ def cross_width_ids(sides: list[tuple[str, dict]], prompt_len: int,
     the smaller of the two sides' own gaps because in this comparison neither side is a reference (the
     audit defined its flip line the same way; `flip_admissible` is where that is written).
 
-    Row files are mapped from the STEP lines rather than assumed: `kind=prefill index=N` is
-    `logitsN.bin`, `kind=decode index=N` is `logits{prompt_len+N}.bin`. Both sides walked in lockstep,
-    so a structural difference in the two runs is reported as one rather than silently pairing rows.
+    Row files are mapped from the STEP lines rather than assumed, and the mapping is the trivial one:
+    `decode_run` prints the row's ABSOLUTE position as `index=` for BOTH kinds (`kind=prefill index=0…`
+    then `kind=decode index=147…`), and dumps that row as `logits{index}.bin`. There is no `prompt_len`
+    to add — an earlier version added one and every flip then pointed at a file one prompt-length past
+    the dump, which is a bug that could only ever be found on this route, and nothing had been on it.
+    Both sides walked in lockstep, so a structural difference in the two runs is reported as one rather
+    than silently pairing rows.
     """
     label_a, a = sides[0]
     for label_b, b in sides[1:]:
@@ -3093,7 +3102,6 @@ def cross_width_ids(sides: list[tuple[str, dict]], prompt_len: int,
             check(False, f"{label_a} and {label_b} ran the same number of rows",
                   f"{len(sa)} STEP lines vs {len(sb)} — id comparison needs them position by position")
             continue
-        prompt_len_used = prompt_len
         flips, reds = [], []
         for i, (x, y) in enumerate(zip(sa, sb)):
             if x.get("kind") != y.get("kind") or x.get("index") != y.get("index"):
@@ -3103,7 +3111,9 @@ def cross_width_ids(sides: list[tuple[str, dict]], prompt_len: int,
             xa, xb = x.get("sampled"), y.get("sampled")
             if xa == xb or xa in (None, -1) or xb in (None, -1):
                 continue
-            fidx = x["index"] if x.get("kind") == "prefill" else prompt_len_used + x["index"]
+            # `parse_run` keeps a STEP field as the string it was printed as, and the index is already
+            # the absolute row position, so the only arithmetic needed here is the `int`.
+            fidx = int(x["index"])
             pa, pb = a["dir"] / f"logits{fidx}.bin", b["dir"] / f"logits{fidx}.bin"
             if not pa.exists() or not pb.exists():
                 check(False, f"{label_a} and {label_b} differ at row {i} and both rows are readable",
@@ -3297,7 +3307,7 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
     if route_is_library():
         cross_width_ids([("batched", batched), ("one-row", perrow)]
                         + ([("carry", sides["carry"])] if "carry" in sides else []),
-                        prompt_len, "D-11, from §A2's 24 flips in 1694 rows, all of them thin-room")
+                        "D-11, from §A2's 24 flips in 1694 rows, all of them thin-room")
         wave_band_checks(batched["dir"], perrow["dir"], "batched", "one-row",
                          "the route (c) wave-width band (D-11)")
     else:
@@ -3466,13 +3476,17 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
                  f" per_token={ss_sizes()[2]}")
     lines.append("LAUNCH " + " ".join(f"{k}={v}" for k, v in plan.items())
                  + f" total={sum(plan.values())}")
-    # The stand-in echoes the route the gate asked for, exactly as `decode_run` does when `--gemm` is
-    # named, so the route check that guards section (b)'s band choice is exercised in `--dry-run` and
-    # `--selftest` too. It is a statement about which rule this run is being judged under, and the
-    # stand-in is not the engine: the bits below are the pins replayed, on either route.
-    lines.append(f"GEMM route={GEMM_ROUTE}")
+    # The stand-in echoes the lines the ENGINE really prints, not the lines this gate would like to
+    # see: on the library route the real binary prints `GEMM route=hipblas handle=1 …` (the handle line
+    # names the library, not the route word), and on the hand route `GEMM route=hand`. A stand-in that
+    # prints the value a check is hunting for is a check that can never fail — this one printed
+    # `route=library` while the engine printed `route=hipblas`, which is how every dry run was green and
+    # every real library run was red. `--selftest` asserts this spelling.
+    lines.append("GEMM route=hipblas handle=1 workspace_mib=128 dtype=bf16-in/bf16-C/f32-compute"
+                 " stream=default" if route_is_library() else "GEMM route=hand")
     # Same reasoning as the GEMM line above, and the same limit: the stand-in has no hipBLAS to ask, so
     # it echoes `hipblas=dry-run` and `numerics_provenance_checks` refuses to assert anything from it.
+    # `gemm=` here is the route the gate was invoked with, and it is the field the route check reads.
     lines.append(f"NUMERICS wave_rows_cap={wave_row_ceiling()} wave_rows={wave_row_ceiling()}"
                  f" gemm={GEMM_ROUTE} hipblas=dry-run")
     for i, t in enumerate(prompt_ids):
@@ -3878,6 +3892,16 @@ def selftest(fixture: str = "dec8") -> int:
     noise_caught = noise_deficit > noise_eff
     cases = [
         ([], 0, None, "clean dry run"),
+        # The stand-in must print the engine's OWN spelling, not the value the route check is looking
+        # for, or that check can never fail. The real binary writes `GEMM route=hipblas handle=…` on the
+        # library route and `route=hand` on the hand route; the stand-in used to write `route=library`,
+        # so the dry runs were green for a whole commit while every real library run was red. The route
+        # assertion now reads NUMERICS's `gemm=`, and this case pins both halves of what the check
+        # printed, so neither the checker nor its stand-in can drift back into agreeing with each other.
+        ([], 0, [f"NUMERICS echoed gemm={GEMM_ROUTE}",
+                 f"(GEMM line says {'hipblas' if route_is_library() else 'hand'})"],
+         "the route check reads NUMERICS's `gemm=` and the stand-in's GEMM line carries the spelling the"
+         " real engine prints, so the check is exercised against something that could disagree"),
         (["--break-ids", "3"], 1, "[FAIL] generation step 3 samples greedy_continuation[4]",
          "wrong id injected at step 3"),
         (["--break-logits", "2"], 1,
@@ -4465,17 +4489,20 @@ def main() -> int:
                          " pinned tie — too far for rounding, so the generalised tie clause must still"
                          " FAIL it (the counterpart to --tie-alt). Refuses an untied step or one with no"
                          " priced meanrel band, so it cannot degrade into the ordinary wrong-id test")
-    ap.add_argument("--gemm", choices=list(GEMM_ROUTES), default="hand",
+    ap.add_argument("--gemm", choices=list(GEMM_ROUTES), default="library",
                     help="which GEMM route the run being judged uses (route (c), `decode_run --gemm`)."
-                         " `hand` — the shipped default — leaves every band in this file exactly where it"
-                         " was. `library` arms the cascade floor (CASCADE_BAND): each step's cos/meanrel"
-                         " cap is floored at the measured hand<->library cascade, a flipped token is"
+                         " `library` — the shipped default, and the default `decode_run` itself now"
+                         " carries — arms the cascade floor (CASCADE_BAND): each step's cos/meanrel cap"
+                         " is floored at the measured hand<->library cascade, a flipped token is"
                          " admissible where that row's top-1/top-2 room was under"
                          f" {CASCADE_BAND['flip_room_max']:.2f} (the smaller of the two sides' gaps,"
                          " §A2's definition), and section (h) judges wave-width drift against that"
-                         " band instead of bit-identity. The flag is passed to every `decode_run` this"
-                         " gate starts and the run's echoed route is checked against it, so a log"
-                         " cannot be judged under the wrong rule.")
+                         " band instead of bit-identity. `hand` is still fully supported and leaves"
+                         " every band in this file exactly where it was before route (c) — it is the"
+                         " A/B side, and the route whose bits are byte-identical to a pre-route"
+                         " binary. The flag is passed to every `decode_run` this gate starts and the"
+                         " run's echoed route is checked against it, so a log cannot be judged under"
+                         " the wrong rule.")
     ap.add_argument("--write-provenance", action="store_true",
                     help="with a real (not --dry-run) run: write engine/numerics_provenance.json from"
                          " this run's NUMERICS line (wave-row ceiling + hipBLAS version, D-11) and"
@@ -4746,13 +4773,19 @@ def main() -> int:
     run = parse_run(stdout)
     # Which GEMM the run says it ran. Not a formality: section (b)'s caps, section (a)'s flip rule and
     # section (h)'s band-or-bit-identity choice are all keyed on it, and a wrapper binary that quietly
-    # forced the other route would otherwise be judged by the wrong band. The engine prints this line
-    # only when `--gemm` was named, which it now always is (`--gemm hand` included).
-    echoed_route = run["gemm"].get("route")
+    # forced the other route would otherwise be judged by the wrong band. The authoritative echo is the
+    # NUMERICS line's `gemm=` field: the engine prints it in every mode, it spells the two routes exactly
+    # as `--gemm` does, and D-11 already made that line provenance-bearing. The `GEMM route=` line is
+    # printed and NOT asserted on — its `route=` names the library ("hipblas") as a fact about the handle,
+    # so comparing that spelling with the judging route made every genuine library run read as a route
+    # mismatch, which nothing caught because the dry-run stand-in printed the route word instead.
+    echoed_route = run.get("numerics", {}).get("gemm")
     check(echoed_route == GEMM_ROUTE, "the run ran the GEMM route this gate is judging it under",
-          ("the binary printed no GEMM line at all — it did not get --gemm, or it predates route (c)"
+          ("its NUMERICS line carried no `gemm=` — the binary did not get --gemm, or it predates route"
+           " (c), so nothing in this log says which band these bits are owed"
            if echoed_route is None else
-           f"run echoed route={echoed_route}, this gate was run with --gemm {GEMM_ROUTE}"))
+           f"NUMERICS echoed gemm={echoed_route}, this gate was run with --gemm {GEMM_ROUTE}"
+           f" (GEMM line says {run.get('gemm', {}).get('route', 'nothing')})"))
     # D-11's provenance half, immediately after the route echo and for the same reason: with two GEMMs
     # in the tree, what produced the bits is part of what they mean.
     numerics_provenance_checks(run, stand_in=args.dry_run, write=args.write_provenance)

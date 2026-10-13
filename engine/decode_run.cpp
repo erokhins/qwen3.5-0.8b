@@ -91,14 +91,15 @@ struct Options {
     // it for every body, which is what makes the flag an override and not a second opinion.
     engine::kernels::MlpGateMap mlp_gate_map = engine::kernels::MlpGateMap::kAuto;
     bool mlp_gate_map_given = false;
-    // Which GEMM a WIDE body runs (route (c), `engine/kernels.h:WaveGemm`). The default is HAND, not
-    // the funded route: the hipBLAS path is implemented and is deterministic run to run, but it has not
-    // yet cleared the prefill bands (see `engine/results.md`, route (c) — dec8 reads cos 0.42 with the
-    // library on, which is a bug in the route, not a band to widen). Defaulting to hand means the
-    // committed binary's bits are the pre-route bits, and `--gemm library` is the opt-in A/B side that
-    // keeps the route measurable in the same window (§7 W9 is an A/B). A one-row body is the hand GEMV
-    // under either setting (`resolve_wave_gemm`), so this flag cannot move a decode bit either way.
-    engine::kernels::WaveGemm wave_gemm = engine::kernels::WaveGemm::kHand;
+    // Which GEMM a WIDE body runs (route (c), `engine/kernels.h:WaveGemm`). The default is LIBRARY:
+    // D-11 accepted the route's wave-width dependence and the route-c audit proved the hand<->library
+    // delta to be reassociation (bench/route-c-audit-2026-10-14.md), so the funded route is what ships.
+    // The admitted guarantee is a band, not bit-identity — `engine/gate.py` judges a library run against
+    // CASCADE_BAND and a hand run byte-identically, which is why `hand` stays a first-class route rather
+    // than a legacy alias: it is the A/B side (§7 W9) and the way to reproduce a pre-route binary's bits
+    // in the same window. A one-row body is the hand GEMV under either setting (`resolve_wave_gemm`),
+    // so this flag cannot move a decode bit either way.
+    engine::kernels::WaveGemm wave_gemm = engine::kernels::WaveGemm::kLibrary;
     bool wave_gemm_given = false;
     // The stage clock (`engine/stage_clock.h`): re-runs the run's generation steps twice more, once
     // with a wait at every family boundary and once with a wait after every submission, and reports
@@ -383,13 +384,17 @@ void print_usage(FILE* out) {
                  " [--prefill-logits last|all] [--wave-rows N]"
                  " [--mlp-map auto|interleave|contig] [--gemm library|hand]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
-                 "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `hand` is the"
-                 " default and runs the pre-route path everywhere. `library` sends the ten fat prefill"
+                 "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
+                 " default and sends the ten fat prefill"
                  " matmuls to hipBLAS for a body of two or more rows — bf16 in, f32 accumulate, bf16 C,"
                  " the weight used as stored, one handle and one pinned workspace, all on the default"
-                 " stream — and keeps the hand GEMVs for in_proj_a/b, every mixer, glue and cast. Not"
-                 " yet band-clear; see engine/results.md. A one-row body is the hand GEMV under either"
-                 " setting, so no decode step changes shape or bits on either side of this flag\n"
+                 " stream — and keeps the hand GEMVs for in_proj_a/b, every mixer, glue and cast."
+                 " `hand` is still fully supported and runs the pre-route path everywhere; it is the"
+                 " A/B side and the route whose bits are byte-identical to a pre-route binary. Not"
+                 " byte-identical across wave widths on the library route — that check is inside a band"
+                 " there (engine/gate.py's CASCADE_BAND, bench/route-c-audit-2026-10-14.md). A one-row"
+                 " body is the hand GEMV under either setting, so no decode step changes shape or bits"
+                 " on either side of this flag\n"
                  "  --time-waves After the run, replay its PROMPT wave from a fresh state at two"
                  " submission granularities — the production shape, queued with one wait at the logits"
                  " (burst), and one wait at every family boundary (stage) — and attribute the serialized"

@@ -61,13 +61,16 @@ void glue_add_norm_rows(const uint16_t* s, const uint16_t* delta, const uint16_t
 //
 // `kAuto` does not exist here on purpose: there is no third thing for a row count to pick.
 enum class WaveGemm {
-    // The funded route, and NOT yet the shipped default: hipBLAS for a wave body, hand GEMV for a
-    // one-row body. Opt-in with `--gemm library` until it clears the prefill bands — see
-    // `engine/results.md`, route (c).
+    // The shipped default since D-11 admitted it: hipBLAS for a wave body, hand GEMV for a one-row
+    // body. Admitted on the audit's terms, and the guarantee is one the reader has to read as weaker
+    // than the hand route's: on this route the wave-boundary check is INSIDE A BAND, not
+    // byte-identical — see `bench/route-c-audit-2026-10-14.md` and `engine/results.md`, route (c).
     kLibrary,
-    // What runs by default, and the A/B side: with this set every body takes the hand kernel whatever
-    // its width, which is how the old path stays measurable in the same window (§7 W9 is an A/B) and
-    // how "decode untouched" is checkable end to end.
+    // Still first-class, and deleted by nothing: with this set every body takes the hand kernel
+    // whatever its width, which is how the old path stays measurable in the same window (§7 W9 is an
+    // A/B), how "decode untouched" is checkable end to end, and how a pre-route binary's bits can
+    // still be reproduced. `engine/gate.py` judges it by the pre-route bands: its cascade floor is
+    // armed for `library` and for nothing else.
     kHand,
 };
 
