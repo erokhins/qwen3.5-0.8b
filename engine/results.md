@@ -3487,3 +3487,187 @@ disturb the rows that did not, and the grouping a row sees does not depend on th
 with. No pin was created, priced or compared against; `data/refs/` is untouched and no band moved. A first
 cut of this note credited the 512-row wave with the mixing; it does not mix, and the narrower claim is the
 one worth keeping.
+
+## Q7 (2026-10-13): the ~3.2 ms residue is the memory system treating a fresh window poorly, not a per-launch ramp — and the reporting bug was in the ledger sentence, not the instrument
+
+Again no millisecond in this section is this worker's. Every input is already on disk: the stage-clock
+family rows are `tmp/q61/stage128_{1,2,3}.log` and `tmp/q61/stage4032_{1,2,3}.log` as the main agent took
+them, the isolated-burst rows and the 237 GB/s probe are `bench/performance-status.md`'s Q6 table, and the
+byte counts are recomputed from `engine/state.h`. What was added is one CPU-only comparison tool,
+`tools/instep_family_budget.py`, which median-merges those logs, re-derives each family's weight bytes
+from the shapes the engine compiles with, and prints the three tests below. It launches nothing and takes
+no timing — a device run would have made it a second measurement of a quantity that already has three.
+
+**The question Q6.1 left open.** `Σ exec_in_situ = 12.74 ms` against `E_iso = 9.4–9.6 ms` of isolated
+family cost is ≈3.2 ms/step unaccounted, and three stories were on the table: **(a)** a per-launch ramp,
+where a small launch spends its first tens of microseconds getting started and a burst hides that behind
+the previous launch's tail; **(b)** interleaved traffic and locality, where the step's 424 launches across
+~1.5 GB leave every launch's pages, DRAM rows and TLB entries cold in a way a single-kernel loop never is;
+**(c)** a mispriced denominator, where the rooflines the bursts are compared against are simply wrong.
+
+**(b) wins, and the deciding number is x1.64 against a control of x1.03.** `mlp` runs the same two
+kernels, the same grids and the same **11.01 MB per launch** in its own burst and inside a step, and the
+two do not agree:
+
+| same launch geometry | in-step | its own burst | ratio |
+|---|---|---|---|
+| `mlp`, 48 launches of 11.01 MB | 88.8 µs/launch = 8.07 µs/MB = **124 GB/s** | 54.0 µs/launch = 4.91 µs/MB = 204 GB/s | **x1.64** |
+| `lm_head`, 1 launch of 508.6 MB | 2199.5 µs/launch = 4.32 µs/MB = **231 GB/s** | 2127.0 µs/launch = 4.18 µs/MB = 239 GB/s | **x1.03** |
+
+A ramp belongs to the launch, so a launch-shape story must show up on both sides of that row — it does
+not, at identical bytes, identical grid, identical kernel. What differs is only the address history: the
+MLP burst re-walks **one layer's weights replicated 6×** (a 132 MB window, re-read every 6 launches —
+`prototype/mlp_gemv/results.md` says the quiet part itself: replicas 1–5 "re-read replica 0's
+out-of-cache-but-still-cached bytes"), while a token walks **528 MB of distinct MLP weights once and
+never returns to them**. `lm_head` is the control that makes that the reading rather than a guess: its
+burst window *is* its whole 485 MiB, so it is equally cold in both worlds and its two numbers agree to
+3 %. Same story at 4032 lanes (`mlp` 4.302 vs 4.264 ms/step, 122.8 vs 124 GB/s), so the deficit is not a
+context-size or state-size effect — it is the weight walk itself.
+
+**Why (a) fails arithmetically, not just by the control.** Per launch, the in-situ deficit over each
+family's own roofline is +42.4 µs (`mlp`, 48 launches), +19.9 µs (`proj`, 114) and +53.7 µs (`lm_head`,
+1). Those are not flat, so there is no per-launch constant to find; and they are the *wrong sign* for a
+ramp that amortizes with size — the launch 46× bigger than the MLP's carries the same per-launch
+deficit while its per-MB deficit is 35× smaller (+0.11 vs +3.85 µs/MB). And scale it up: a ramp of
+42.4 µs per launch billed across the step's 424 launches is 18.0 ms, in a step that is 12.74 ms of
+kernel time. The flat quantity that does fit the two many-launch families is per byte — +3.85 and
++4.87 µs/MB, i.e. both families stream the step's weights at **124 and 110 GB/s against a 237 GB/s
+probe** — and the aggregate agrees: 1504 MB of weights over 12.72 ms of `Σ exec_in_situ` is 118 GB/s.
+
+**Why (c) fails: the denominators recompute.** `tools/instep_family_budget.py` re-derives each family's
+bytes from `engine/state.h` (it parses the `constexpr int kX = …` lines rather than retyping them, for
+the reason `engine/weights_contract.py` gives) and divides by the measured probe: `mlp` 528,482,304 B →
+2.230 ms against the ledger's 2.230; `proj` 466,747,392 B → 1.969 against 1.973; `lm_head` 508,559,360 B
+→ 2.146 against 2.146. All three inside 0.2 %. (An earlier hand calculation of mine had `proj` 5 % high;
+the error was `o_proj`, which is `[1024, 2048]`, not `[1024, 4096]` — the ledger row was right.)
+
+**The residue has two components, and only one of them is launch-shaped.** The `cast` (115 launches,
+0.9216 ms), `glue` (49, 0.6888), `copy` (19, 0.2146) and `gdn` (72, 0.6375) families carry essentially no
+weight bytes at n = 1, so their 2.46 ms is traffic-free and therefore per-launch: 8–14 µs per launch
+in-situ against the dispatch curve's 2.6–3.8 µs, i.e. ~4–11 µs of launch floor each, of which the
+instrument's own exposed submission is a part. That is where fewer launches still buys something, and it
+is the smaller part. The traffic families' deficit (+2.03 ms `mlp`, +2.27 ms `proj` over roofline, 4.3 ms
+in total) is not: merging launches does not change the bytes, and this is the part Q6.1's 3.2 ms actually
+consists of. **Consequence, said plainly: the submission-side levers are pointed at the floor families,
+not at the residue.**
+
+### What already ships batched, which is why the obvious cheap case was already taken
+
+The named candidate — gate and up both read the same input — has been shipped since P4: `mlp_gateup`
+takes both weight pointers and writes the `act` tile in **one** launch, which is why the MLP's bill is
+48 launches (gate+up, down) and not 72. P5's `cast_bf16_to_f32_3` likewise already packs three widenings
+into one launch (that is the "one packed qkv+a+b" cast row of §07). Nothing in `mlp` or `glue` is left to
+consolidate at n = 1.
+
+What is left, in the one-row path, is exactly two groups of independent GEMVs that share one input:
+
+* GDN: `in_proj_qkv`, `in_proj_z`, `in_proj_b`, `in_proj_a` — all four read `sc.norm_f32` and write
+  separate tiles, 4 launches per GDN layer = 72 of the 114 proj launches;
+* attention: `q_proj`, `k_proj`, `v_proj` — same input, same independence, 18 of the 114.
+
+Both would be bit-identical by construction: a row's dot walks its own `IN = 1024` bytes in the same
+uint4 order with the same reduction no matter which other rows share the grid, which is precisely the
+argument `bc61dce` used when it moved `proj` to 32 rows/block and came back byte-identical. **No band
+question is needed for any of this, and no band was touched.** But neither can be done cheaply: `kernels_proj.cpp`
+#includes `prototype/proj_gemv/proj_gemv_kernels.h` directly, so a multi-weight launch form belongs to
+that op and to its gate, and taking it moves the gate-policed plan (`gate.py::launch_plan`'s
+`proj = 5·n_gdn + 4·n_attn` = 114) together with §07's table — Q6's own deferred "packed multi-weight
+projections (114 → 48)" item, costed there at 0.11–0.57 ms/token as "a plan change with a kernel-signature
+change and its own gate, not a constant". Spending a plan change plus a spec table plus an op gate on the
+lever Q7 just argued is pointed at the wrong 4.3 ms was not mine to decide, so **this pass ships no
+engine change**; the measurement that would justify or kill it is pre-registered as M3 below instead.
+If the answer is "take it anyway", the A/B and the proof standard are already written down.
+
+### The reporting bug was real, and it was in the ledger sentence
+
+The ledger's Q6.1 note says the stage clock "prints 323 for `stage` but **42 for `kernel`**, where the
+spec says per-launch granularity is ~425 waits". It does not print 42. Every kernel-granularity `TOTAL`
+row of every log that window produced — `tmp/q61/stage128_{1,2,3}.log`, `tmp/q61/stage4032_{1,2,3}.log`,
+`tmp/q61/on{2,3,4}.log`, nine runs — reads `syncs_per_step=425`, and `grep -r "syncs_per_step=" ` over the
+whole tree returns exactly two distinct values, 323 and 425. `tools/instep_family_budget.py` prints both
+per log, so the claim can be re-checked without a device. 425 is also what the instrument must produce:
+`syncs_` counts closed segments (`stage_clock.cpp`'s `close_segment`), kernel granularity opens a segment
+per submission, and the per-step bill is 424 launches + the `host_tail` segment. So the field was right,
+the subtraction it feeds was never at risk, and the wrong thing was the sentence in
+`bench/performance-status.md` — corrected there, with the pointer to this section, in the same pass that
+wrote these numbers. `stage`'s 323 is also correct (it is segments, not launches: 424 launches collapse
+into 323 family-boundary segments because same-family neighbours share a segment).
+
+### Deliberately left alone
+
+No kernel, launcher, gate, pin, band, margin or fixture was edited; `speccheck/` was not run because
+nothing it checks can be affected by a CPU-only arithmetic tool and two prose files. No timing was taken,
+so nothing here is a measurement this worker made: `gpu_lock.sh` was never acquired. The prefill wave paths
+(P4b/P5/P8), the rows/block choices (P6, `bc61dce`), the attention staging (P8) and the cast set (P5) were
+read, not re-derived. `tmp/q61/*.log` are cited as committed evidence and were not regenerated.
+
+### Pre-registered measurements, expectations written before any of them ran
+
+All four belong to the main agent's window: three are timing, and the one that is not (`M0`) is cheap
+enough to include for the cross-check it provides. `M1` is the decisive one. Quote medians of three, and
+void rather than discount any run with a contender — a contended sync inflates exactly the direction that
+would be read as locality (Q6.1's own failure-mode row).
+
+**M0 — CPU-only, re-derive the table this section is made of.** Expectation: reproduces the numbers above
+exactly, and the 4032-lane logs show `mlp` within 1 % of the 128-lane row while `attn` grows ~6.5×.
+
+```bash
+python3 tools/instep_family_budget.py tmp/q61/stage128_{1,2,3}.log
+python3 tools/instep_family_budget.py tmp/q61/stage4032_{1,2,3}.log
+```
+
+**M1 — the locality test the story actually predicts: grow the burst's window, change nothing else.**
+Same kernel, same grid, same bytes per launch; only the replicated window grows from 132 MB (`--tile 6`,
+what the committed 2.594 ms row was taken with) to 528 MB (`--tile 24`, the same size as one token's real
+MLP traffic). Pre-registered: **(b)** predicts the per-token MLP figure rises from 2.594 ms toward the
+in-step row of **4.26 ms** — call it confirmed at ≥3.6 ms — because the burst loses the warmth that the
+story blames; **(a)** predicts it barely moves, because launch geometry is untouched, and a flat answer
+below ~2.8 ms refutes (b) and re-opens the ramp story under a different name. The existing
+`--tile 6`/`--iters 60` ladder is the shape to copy, and the run must validate the LAST replica as usual.
+
+```bash
+tools/gpu_lock.sh acquire q7-window && tools/gpu_lock.sh util
+for t in 6 12 24; do
+  .venv/bin/python prototype/mlp_gemv/run.py --layers all --fixture dec8 --mode all \
+      --rows-sweep 8 --tile $t --iters 30
+done
+tools/gpu_lock.sh release q7-window
+```
+
+**M2 — re-take the stage-clock family rows at 128 lanes, three runs, same prompt recipe as Q6.1.**
+Expectation: `mlp` ≈4.26 ms, `proj` ≈4.24, `lm_head` ≈2.20, `cast` ≈0.92, `TOTAL` ≈14.4 at `stage` and
+≈15.0 at `kernel`, `syncs_per_step` 323 and 425, `plan_match=1`, both `STAGEPARITY` flags 1 — i.e. the
+rows above within ~5 %. Anything outside that band, or a `syncs_per_step` that is not 425, voids this
+section rather than updating it. If M1 or M3 changes the engine, this is also the A/B: same command,
+before and after, and the diff is the claim.
+
+```bash
+tools/gpu_lock.sh acquire q7-stage && tools/gpu_lock.sh util
+ids_for() {
+  .venv/bin/python -c "
+import sys; sys.path.insert(0, 'tools')
+from context_sweep import build_prompt
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained('models/Qwen3.5-0.8B')
+print(','.join(str(t) for t in build_prompt(tok, $1)))"
+}
+IDS128=$(ids_for 112); mkdir -p tmp/q7
+for i in 1 2 3; do timeout 900 ./engine/build/decode_run --ids "$IDS128" --steps 16 \
+    --time-stages > tmp/q7/stage128_$i.log 2>&1; done
+tools/gpu_lock.sh release q7-stage
+python3 tools/instep_family_budget.py tmp/q7/stage128_{1,2,3}.log
+```
+
+**M3 — the A/B for the only shipped change this section could have made, held until it is authorized.**
+Packed projections (GDN 4→1, attention 3→1, proj 114→48). Pre-registered under (b): the step must improve
+by roughly the removed dispatch and nothing else, **≈0.1–0.25 ms**, with `proj`'s in-situ row dropping by
+about that much and `mlp`'s unchanged; if instead `proj` drops by ≥1 ms, (b) is wrong about the traffic
+families and launch count is the lever after all. The proof standard is the one already in force, and it
+is not negotiable from this side: byte-identical across all `dec8` outputs, identical gate counts on all
+eight fixtures, `tools/margin_delta.py` ×1.0000, plus `plan_match=1` after §07 and `gate.py::launch_plan`
+move together. Not taken here because it edits the spec table and the gate's plan, which is the main
+agent's call, not a worker's.
+
+**M4 — the contradiction check Q6.1 already specified: the captured step.** Under (b) it must buy
+**≈0.06 ms** (the §1 eager-vs-captured per-kernel figure), and anything ≥5 % of the step contradicts this
+section and is the result, not the section. Same window as M1/M2 if the stream-handle work is done.
