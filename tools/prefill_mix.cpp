@@ -19,11 +19,22 @@
 //   --list              CPU only, no device call at all. Prints the census as this tool expanded it:
 //                       per-group call counts, flops, weight bytes, and the consistency checks. Run
 //                       it first; it is where a census/harness divergence shows up.
-//   --check             CORRECTNESS ONLY, no timing: one small shape per family, C written 16-bit,
-//                       compared bit-for-bit against a CPU dot of the same 16-bit inputs rounded the
-//                       same way (the comparator is gemm_peak --check's). This is the mode that says
-//                       whether the mix harness computes what it claims — §4.3's bf16-C bit-for-bit
-//                       claim re-asked at the mix's own shapes and call form.
+//   --check             CORRECTNESS ONLY, no timing. Two legs:
+//                       (1) the CPU-dot leg — one small shape per family (M = --check-m, default 16),
+//                           C written 16-bit, compared bit-for-bit against a CPU dot of the same
+//                           16-bit inputs rounded the same way (the comparator is gemm_peak --check's).
+//                           This is §4.3's bf16-C claim re-asked at the mix's own shapes and call form.
+//                       (2) the wide-M leg (M = --check-wide-m, default 1024) — the same call form at
+//                           the width the mix actually bills, over EVERY element of C. A host dot at
+//                           M=1024 is 3e10 MACs per row, so the reference here is the same product
+//                           from the other hipBLAS kernel, the one that writes an F32 C; agreement to
+//                           <=1 ULP on all M*N elements, with an F32 filler under both outputs, says
+//                           the 16-bit-C kernel bills no more work than it computes. Three host-dotted
+//                           rows (first, middle, last) anchor that agreement to the host rounding
+//                           rather than to itself.
+//                       Leg (2) exists because leg (1) alone certified the call form only at M=16 while
+//                       --mix bills M up to 3072, and a 2026-10-13 contradiction between this tool and
+//                       gemm_peak was chased for a day partly through that gap.
 //   --mix-determinism   CORRECTNESS ONLY, no timing: three identical passes of the whole mix, output
 //                       bytes hashed, plus a fresh handle given the same workspace, plus the beta==0
 //                       filler check. §3.1 proved determinism per shape; the mix's call order, and
@@ -494,6 +505,20 @@ bool call_site(hipblasHandle_t h, const Site &s, int M, const DType &dt) {
     return true;
 }
 
+// The F32-C twin of call_site: the same gemm_stored_weight, the same arguments, the output width the
+// other hipBLAS kernel takes. The two forms have to sit side by side, derived from one call, so the
+// comparison cannot drift from the call the timing modes make.
+bool call_site_f32_c(hipblasHandle_t h, const Site &s, int M, const DType &dt) {
+    const hipblasStatus_t st =
+        gemm_stored_weight(h, M, s.n, s.k, dt.dt, s.A, s.W, s.C, HIP_R_32F);
+    if (st != HIPBLAS_STATUS_SUCCESS) {
+        std::printf("GEMM_REFUSED %s M=%d N=%d K=%d %s-in/f32-C status=%d\n", s.name.c_str(), M, s.n,
+                    s.k, dt.name, (int)st);
+        return false;
+    }
+    return true;
+}
+
 // One pass of a group: every call issued back to back, one sync at the end — what a wave does.
 // steady_clock only: hipEventElapsedTime returns exactly 0 for sub-millisecond work here.
 double one_pass_ms(hipblasHandle_t h, const Plan &plan, const Group &g, int M, const DType &dt) {
@@ -626,7 +651,101 @@ bool check_one(hipblasHandle_t h, const char *tag, int M, int n, int k, const DT
     return good;
 }
 
-bool check_mode(hipblasHandle_t h, const Census &c, const std::vector<DType> &dtypes, int M) {
+// The wide-M leg of --check. The host dot above costs M*N*K doubles, which is why it runs at M=16 while
+// --mix bills up to 3072 — at M=1024 one row of it is 3e10 MACs. This leg closes that gap with a
+// reference the device can afford, the same product from the kernel that writes an F32 C, and it asks
+// the question over EVERY element rather than a sample:
+//   * both outputs start as a filler no product of these benign inputs can store, so a C with unwritten
+//     rows shows up as a survivor count instead of as a plausible-looking partial tensor;
+//   * every element of the 16-bit C must land within one ULP of the rounded F32-C product, so the fast
+//     16-bit kernel cannot be computing a shorter dot, writing a shorter C, or billing more work than
+//     it issues;
+//   * the first, middle and last rows are also dotted on the host, because a kernel agreeing with
+//     another kernel is not the same evidence as one agreeing with the host rounding.
+// Correctness only; there is no timing loop here, so a worker may run it (AGENTS.md).
+bool check_wide_one(hipblasHandle_t h, const char *tag, int M, int n, int k, const DType &dt,
+                    unsigned salt, bool &any_bad) {
+    const size_t na = (size_t)M * k, nw = (size_t)n * k, nc = (size_t)M * n;
+    std::vector<uint8_t> ha(na * 2), hw(nw * 2);
+    fill_16bit(ha.data(), na, dt.is_bf, salt);
+    fill_16bit(hw.data(), nw, dt.is_bf, salt + 5u);
+    void *dA, *dW, *dC16, *dC32;
+    CK(hipMalloc(&dA, ha.size())); CK(hipMalloc(&dW, hw.size()));
+    CK(hipMalloc(&dC16, nc * 2)); CK(hipMalloc(&dC32, nc * 4));
+    CK(hipMemcpy(dA, ha.data(), ha.size(), hipMemcpyHostToDevice));
+    CK(hipMemcpy(dW, hw.data(), hw.size(), hipMemcpyHostToDevice));
+    CK(hipMemset(dC16, 0xFF, nc * 2));
+    CK(hipMemset(dC32, 0xFF, nc * 4));
+    Site s;
+    s.name = tag;
+    s.leaf = tag;
+    s.n = n;
+    s.k = k;
+    s.A = dA;
+    s.W = dW;
+    s.C = dC16;
+    bool ok = call_site(h, s, M, dt);
+    s.C = dC32;
+    if (ok) ok = call_site_f32_c(h, s, M, dt);
+    if (!ok) {
+        std::printf("  %-5s %-24s M=%-5d N=%-6d K=%-5d REFUSED — a refused width is not a pass\n", dt.name,
+                    tag, M, n, k);
+        any_bad = true;
+        CK(hipFree(dA)); CK(hipFree(dW)); CK(hipFree(dC16)); CK(hipFree(dC32));
+        return false;
+    }
+    CK(hipDeviceSynchronize());
+    std::vector<uint8_t> raw16(nc * 2);
+    std::vector<float> raw32(nc);
+    CK(hipMemcpy(raw16.data(), dC16, raw16.size(), hipMemcpyDeviceToHost));
+    CK(hipMemcpy(raw32.data(), dC32, raw32.size() * 4, hipMemcpyDeviceToHost));
+    size_t surv16 = 0, surv32 = 0;
+    for (size_t i = 0; i < nc; ++i) surv16 += (((const uint16_t *)raw16.data())[i] == 0xFFFFu);
+    for (size_t i = 0; i < nc; ++i) {
+        uint32_t w;
+        __builtin_memcpy(&w, &raw32[i], 4);
+        surv32 += (w == 0xFFFFFFFFu);
+    }
+    std::vector<double> ref(nc);
+    for (size_t i = 0; i < nc; ++i) ref[i] = (double)raw32[i];
+    const auto cmp = compare_16bit_output(raw16.data(), ref.data(), nc, dt.is_bf);
+
+    // host anchor on three rows: decode once, dot the whole row, compare at the rounding point
+    const int rows[3] = {0, M / 2, M - 1};
+    std::vector<float> fa(na), fw(nw);
+    for (size_t i = 0; i < na; ++i) fa[i] = dec16(((const uint16_t *)ha.data())[i], dt.is_bf);
+    for (size_t i = 0; i < nw; ++i) fw[i] = dec16(((const uint16_t *)hw.data())[i], dt.is_bf);
+    double worst_host = 0.0;
+    size_t host_nd = 0;
+    for (int r : rows) {
+        for (int j = 0; j < n; ++j) {
+            double acc = 0.0;
+            const float *pa = fa.data() + (size_t)r * k;
+            const float *pw = fw.data() + (size_t)j * k;
+            for (int t = 0; t < k; ++t) acc += (double)pa[t] * (double)pw[t];
+            uint16_t b;
+            __builtin_memcpy(&b, raw16.data() + ((size_t)r * n + j) * 2, 2);
+            const double got = dec16(b, dt.is_bf);
+            const double want = (double)dec16(enc16((float)acc, dt.is_bf), dt.is_bf);
+            const uint16_t wb = enc16((float)std::fabs(want), dt.is_bf);
+            const double ulp = std::max(
+                (double)dec16((uint16_t)(wb + 1), dt.is_bf) - (double)dec16(wb, dt.is_bf), 1e-30);
+            worst_host = std::max(worst_host, std::fabs(got - want) / ulp);
+            host_nd += (got != want);
+        }
+    }
+    const bool good = ok && cmp.worst_ulp <= 1.0 && worst_host <= 1.0 && surv16 == 0 && surv32 == 0;
+    any_bad = any_bad || !good;
+    std::printf("  %-5s %-24s M=%-5d N=%-6d K=%-5d %6zu/%-7zu %6.3fU %6zu/%-7zu %6.3fU %s%s\n", dt.name,
+                tag, M, n, k, cmp.ndiff, nc, cmp.worst_ulp, host_nd, (size_t)3 * n, worst_host,
+                good ? "ok" : "FAIL",
+                (surv16 || surv32) ? "  0xFF SURVIVED beta=0" : "");
+    CK(hipFree(dA)); CK(hipFree(dW)); CK(hipFree(dC16)); CK(hipFree(dC32));
+    return good;
+}
+
+bool check_mode(hipblasHandle_t h, const Census &c, const std::vector<DType> &dtypes, int M,
+                int wide_m) {
     std::printf("MIXCHECK — the mix's own call form (OP_T on W as [n,k] ld=k, 16-bit C with ldc=n) at\n"
                 "the census's shapes, against a CPU dot of the same 16-bit inputs rounded the same way.\n"
                 "The question is the ROUNDING POINT, not whether the product is exact: a library dot\n"
@@ -634,6 +753,8 @@ bool check_mode(hipblasHandle_t h, const Census &c, const std::vector<DType> &dt
                 "mode, so no ms figure can be printed by it and none is.\n");
     std::printf("  %-5s %-24s %-7s %-9s %-7s %-24s %s\n", "dt", "family", "M", "N", "K",
                 "bits differ", "worst distance");
+    std::printf("  (the host dot costs M*N*K doubles, so this leg runs at --check-m=%d; the wide-M leg\n"
+                "  below is the one that covers the M this tool bills.)\n", M);
     bool any_bad = false;
     for (const DType &dt : dtypes) {
         for (const char *leaf : kLibraryLeaves) {
@@ -647,14 +768,38 @@ bool check_mode(hipblasHandle_t h, const Census &c, const std::vector<DType> &dt
         const CensusRow *ra = census_find(c, "linear_attn.in_proj_a.weight");
         check_one(h, "in_proj_a|b FUSED", M, (int)(2 * ra->n), (int)ra->k, dt, 29u, any_bad);
     }
+    if (wide_m > 0) {
+        std::printf("\n  WIDE-M leg: the same call at M=%d, over EVERY element of C. The reference is\n"
+                    "  the same product from the kernel that writes an F32 C, because a host dot at this\n"
+                    "  width costs ~3e10 MACs per row. Three rows per shape (first, middle, last) are\n"
+                    "  also dotted on the host, so this is not a kernel agreeing only with itself.\n",
+                    wide_m);
+        std::printf("  %-5s %-24s %-7s %-9s %-7s %-14s %-14s %s\n", "dt", "family", "M", "N", "K",
+                    "vs F32-C product", "host-dot rows", "filler");
+        for (const DType &dt : dtypes) {
+            for (const char *leaf : kLibraryLeaves) {
+                const CensusRow *r = census_find(c, leaf);
+                check_wide_one(h, leaf, wide_m, (int)r->n, (int)r->k, dt, 11u + (unsigned)leaf[0] * 3u,
+                               any_bad);
+            }
+            for (const char *leaf : kSkinnyLeaves) {
+                const CensusRow *r = census_find(c, leaf);
+                check_wide_one(h, leaf, wide_m, (int)r->n, (int)r->k, dt, 13u + (unsigned)leaf[0] * 5u,
+                               any_bad);
+            }
+            const CensusRow *ra = census_find(c, "linear_attn.in_proj_a.weight");
+            check_wide_one(h, "in_proj_a|b FUSED", wide_m, (int)(2 * ra->n), (int)ra->k, dt, 29u, any_bad);
+        }
+    }
     std::printf("MIXCHECK %s\n", any_bad ? "FAIL" : "PASS");
     if (any_bad)
         std::printf("  A 16-bit C came back further than one ULP from the host rounding, or left filler\n"
                     "  behind. Route (c)'s \"no numerics change\" premise does not hold through this\n"
                     "  harness, and that belongs in a correctness run, not in a slow timing row.\n");
     else
-        std::printf("  Every row is within one ULP of the host rounding — §4.3's bf16-C claim restated\n"
-                    "  at the mix's own shapes and call form. No timing taken by this mode.\n");
+        std::printf("  Every row is within one ULP of the host rounding at both widths this mode checks —\n"
+                    "  §4.3's bf16-C claim restated at the mix's own shapes and call form, at M=16 and\n"
+                    "  over every element at the wide M. No timing taken by this mode.\n");
     return !any_bad;
 }
 
@@ -879,7 +1024,9 @@ void usage() {
         "  --iters N        best-of-N (default 5)\n"
         "  --warm N         untimed warm passes before each timed set (default 1)\n"
         "  --groups LIST    attn, gdn, all (default all three)\n"
-        "  --check-m N      M for the --check rows (default 16)\n"
+        "  --check-m N      M for the --check host-dot rows (default 16; the dot costs M*N*K)\n"
+        "  --check-wide-m N M for the --check wide leg, which compares EVERY element of C against\n"
+        "                   the same product from the F32-C kernel (default 1024; 0 turns it off)\n"
         "  --det-m N        M for --mix-determinism (default 64)\n"
         "  --burst N        calls per burst in --skinny (default 128)\n"
         "  --workspace-mib N hipBLAS workspace to pin (default 128)\n");
@@ -893,7 +1040,7 @@ int main(int argc, char **argv) {
     std::vector<std::string> want_groups = {"attn", "gdn", "all"};
     std::vector<int> Ms = {64, 512, 1024, 3072};
     std::vector<std::string> want_dtypes = {"bf16"};
-    int iters = 5, warm = 1, check_m = 16, det_m = 64, burst = 128;
+    int iters = 5, warm = 1, check_m = 16, check_wide_m = 1024, det_m = 64, burst = 128;
     size_t wsz = (size_t)128 << 20;
 
     for (int i = 1; i < argc; ++i) {
@@ -913,6 +1060,7 @@ int main(int argc, char **argv) {
         else if (a == "--iters") iters = atoi(next("--iters"));
         else if (a == "--warm") warm = atoi(next("--warm"));
         else if (a == "--check-m") check_m = atoi(next("--check-m"));
+        else if (a == "--check-wide-m") check_wide_m = atoi(next("--check-wide-m"));
         else if (a == "--det-m") det_m = atoi(next("--det-m"));
         else if (a == "--burst") burst = atoi(next("--burst"));
         else if (a == "--workspace-mib") wsz = (size_t)atoi(next("--workspace-mib")) * 1048576u;
@@ -962,7 +1110,7 @@ int main(int argc, char **argv) {
     int rc = 0;
     if (mode == "--check") {
         for (const DType &dt : dtypes)
-            if (!check_mode(h, census, {dt}, check_m)) rc = 1;
+            if (!check_mode(h, census, {dt}, check_m, check_wide_m)) rc = 1;
     } else if (mode == "--mix-determinism") {
         std::printf("MIXDET — three identical passes of the mix, every C hashed in call order (FNV-1a).\n"
                     "§3.1 proved determinism per shape; this asks the question of the mix's call order\n"
