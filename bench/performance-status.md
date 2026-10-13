@@ -615,3 +615,32 @@ wave grid is priced by engine-vs-engine self-consistency, **not** by a reference
 >512-token-prompt fixture with its own D-2 allowance, and P8b declined to invent one; and `kAttnMaxSplit`
 stays 8 with the scratch arithmetic (129 KiB per wave-row, ~64.5 MiB per request at `kMaxWaveRows`) recorded
 in `bench/plan-prefill-2026-10-12.md` §3.1 instead of a silent constant bump.
+
+### Q6: the decode step is not launch-bound, and the width change that follows from that (2026-10-13, zero subagents, foreground, lock `q6-rpb-ab`)
+
+Q6's worker built the launch bill for one decode step from the counters — **424 launches per token**, priced at the block width each site actually uses, ≈**1.6 ms of a 12.949 ms token** — and the conclusion it forces is that **launch overhead is not the gap**. The full table is in `engine/results.md`; the shape is: `lm_head` 2.127 ms measured against a 2.146 ms roofline (at ceiling, no lever), MLP 2.594 against 2.230 (86 % traffic-bound), projections 3.54–3.60 against 1.973 — **the single named inefficiency, ~+1.6 ms, and it is a *shape* problem** (`in_proj_a/b` run at 5 % of probe, `k/v_proj` 40 %, `o/out_proj` 46–49 %), glue 0.190 measured against 0.184 derived (pure dispatch, the launch-cost curve agrees within 3 %), casts and D2D copies ~0.35–0.49 ms of dispatch that is the only overhead still unclaimed by a family. Sum of named parts leaves a **≈3.4–3.6 ms residue** — same residue as §6's older "zero-context intercept 11.924 ms vs 8.4 ms of parts", two framings of one unknown.
+
+The one change it shipped is `kRowsPerBlock` 8 → **32** in the projection launcher (`bc61dce`, threads follow the one constant so they cannot drift). Bit-identical by construction — a row is owned end-to-end by one wavefront — and proven: byte-identical across all 40 output files of `dec8` at 64 steps, identical counters, identical gate counts on all eight fixtures, `margin_delta` x1.0000 everywhere including the two tightest lanes on the tree (`dec300f` step 86, `wide520f` step 17). I priced it on device, both binaries in one locked window, differential decode and TTFT, best-of-3 each. **Decode, medians** (medians rather than bests because the spreads are larger than the effect):
+
+| lanes | rows/block 8 | **rows/block 32** | Δ | spread (old / new) |
+|---|---|---|---|---|
+| 128 | 12.915 | **12.728** | −1.4 % | 3.84 % / 0.38 % |
+| 512 | 13.959 | **13.784** | −1.3 % | 18.92 % / 4.49 % |
+| 1024 | 13.934 | **13.670** | −1.9 % | 4.64 % / 3.02 % |
+| 2048 | 14.157 | **13.781** | −2.7 % | 14.28 % / 5.39 % |
+| 4032 | 15.620 | 16.502 (see below) | +5.6 % | 7.07 % / 9.19 % |
+
+Read honestly: at ≤2048 lanes the gain is **1.3–2.7 %, same sign at all four points but inside or barely outside the run-to-run spread**, so it is real but small — consistent with the attribution, which predicted a fraction of a millisecond, not a breakthrough. The worker's derived hope of −0.50 ms/token did not materialise.
+
+**TTFT moved clearly, and that is where the change pays** (spreads ≤1.8 %, so these are far outside noise):
+
+| prompt lanes | rows/block 8 | **rows/block 32** | Δ | spread new | prompt tok/s old → new |
+|---|---|---|---|---|---|
+| 64 | 84.1 | **79.4** | −5.6 % | 0.34 % | 761 → 806 |
+| 256 | 281.1 | **258.6** | −8.0 % | 0.60 % | 911 → 990 |
+| 1024 | 1140.4 | **1054.6** | −7.5 % | 0.86 % | 898 → 971 |
+| 3072 | 4099.7 | **3841.2** | −6.3 % | 1.80 % | 749 → 800 |
+
+Which is the expected asymmetry, and a good illustration of why the attribution came first: a wider block only helps when there are many rows to fill it, so the wave path eats the win and the one-row decode path does not. **Cumulative prompt speed for a 3072-token context is now 1406 → 800…749 tok/s era-wise: 5407 ms at P7, 4117 after P8, 3841 after Q6.**
+
+**The 4032-lane point, re-measured at 5 runs** because its spread had gone to 37.8 %: `15.179 / 15.159 / 14.514 / 15.050 / 12.989` → **median 15.050 ms (66.6 tok/s)**, spread 16.86 %. So the earlier "we do not yet know which" resolves to *~15 ms, ±10 %, with one occasionally-fast run at 12.99 ms* — the bimodality is still there, and it is not resolved by more repetitions. What resolves it is a stage-clock instrument inside the step (Q6.1), not a bigger N: the residue is ~3.5 ms and the only honest statement left is that we cannot yet say where it is.
