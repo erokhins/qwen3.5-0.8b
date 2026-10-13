@@ -734,7 +734,11 @@ Accounts verify_accounts(const Cfg& c, const Plan& p, Dev& d, bool reads, bool w
         readback(d, p, &a.wr_sum);
         a.wr_want = 4.0 * (double)p.wr_buf_n4;
         a.write_ok = (a.wr_sum == a.wr_want);
-        a.write_note = (p.wr_n4 > p.wr_buf_n4) ? "arena_slots_only_cycled" : "exact";
+        // Never label a short sum "exact": the landed= field is what a reader of the log trusts, and a
+        // clean-looking word next to a mismatching account is how an instrument starts lying.
+        a.write_note = (!a.write_ok)
+                           ? ((p.wr_n4 > p.wr_buf_n4) ? "short_within_cycled_arena" : "short")
+                           : ((p.wr_n4 > p.wr_buf_n4) ? "arena_slots_only_cycled" : "exact");
     }
     return a;
 }
