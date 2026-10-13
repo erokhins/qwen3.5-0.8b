@@ -993,8 +993,10 @@ print(','.join(str(t) for t in build_prompt(tok, $1)))"
 }
 IDS128=$(ids_for 112); IDS4032=$(ids_for 4000)
 mkdir -p tmp/q61
-for i in 1 2 3; do ./engine/build/decode_run --ids "$IDS128"  --steps 16 --time-stages > tmp/q61/stage128_$i.log;  done
-for i in 1 2 3; do ./engine/build/decode_run --ids "$IDS4032" --steps 32 --time-stages > tmp/q61/stage4032_$i.log; done
+for i in 1 2 3; do timeout 900 ./engine/build/decode_run --ids "$IDS128"  --steps 16 --time-stages > tmp/q61/stage128_$i.log  2>&1; done
+for i in 1 2 3; do timeout 900 ./engine/build/decode_run --ids "$IDS4032" --steps 32 --time-stages > tmp/q61/stage4032_$i.log 2>&1; done
+tools/gpu_lock.sh release q61-stage
+for f in tmp/q61/stage128_*.log tmp/q61/stage4032_*.log; do echo "== $f"; grep -E "STAGE|RESULT" "$f" | grep -vE "note=\{\}" | head -28; done
 tools/gpu_lock.sh release q61-stage
 tools/gpu_lock.sh util
 

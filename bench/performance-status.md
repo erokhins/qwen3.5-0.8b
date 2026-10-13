@@ -644,3 +644,62 @@ Read honestly: at ≤2048 lanes the gain is **1.3–2.7 %, same sign at all four
 Which is the expected asymmetry, and a good illustration of why the attribution came first: a wider block only helps when there are many rows to fill it, so the wave path eats the win and the one-row decode path does not. **Cumulative prompt speed for a 3072-token context is now 1406 → 800…749 tok/s era-wise: 5407 ms at P7, 4117 after P8, 3841 after Q6.**
 
 **The 4032-lane point, re-measured at 5 runs** because its spread had gone to 37.8 %: `15.179 / 15.159 / 14.514 / 15.050 / 12.989` → **median 15.050 ms (66.6 tok/s)**, spread 16.86 %. So the earlier "we do not yet know which" resolves to *~15 ms, ±10 %, with one occasionally-fast run at 12.99 ms* — the bimodality is still there, and it is not resolved by more repetitions. What resolves it is a stage-clock instrument inside the step (Q6.1), not a bigger N: the residue is ~3.5 ms and the only honest statement left is that we cannot yet say where it is.
+
+### Q6.1: the residue is inside the kernels — stage clock, one window (2026-10-13, zero subagents, foreground, lock `q61-stage`)
+
+`decode_run --time-stages` (`8b81970`, spec `e90f62f`) replays the same fed tokens at three submission
+granularities and proves each pass did the same work (`STAGEPARITY … logits_bitidentical=1`,
+`plan_match=1`, `launches_per_step=424 = plan_per_step`), so the three numbers below are one step measured
+three ways, not three different runs. Medians of three runs, `idle_sync_us` from the instrument's own
+calibration line (0.098 µs at 128, 0.108–0.164 at 4032):
+
+| | burst (pipelined, production shape) | stage (323 waits/step) | kernel (per-launch waits) | exposed = stage − burst |
+|---|---|---|---|---|
+| 128 lanes | **12.399** (12.342 / 12.399 / 12.544) | 14.399 | 15.037 | **1.880** (1.855 / 1.880 / 2.088) |
+| 4032 lanes | **15.378** (15.324 / 15.378 / 15.400) | 17.219 | 18.335 | **1.819** (1.786 / 1.819 / 1.819*) |
+
+\*third 4032 run's stage gap 1.786, median 1.819. Against the pre-registered bands — story A predicted
+`exposed ≤ 0.2 ms`, story B predicted `1.1–1.7 ms + N·s` — the measurement lands on **story B**, and
+comfortably: `D + N·s ≈ 1.63 + 323×0.098 µs ≈ 1.66 ms`, and the observed gap is **1.82–1.88 ms**, i.e.
+`≈ D + N·s` with nothing left over. Serialising the step costs exactly the dispatch bill and not a µs more,
+which means the pipelined step was **already hiding every launch behind execution**. There is no
+submission-side prize: no fusion-for-launch-count, no graph capture, no wider block. Also inside the ±5 %
+sanity gate the spec set (§6's decode was 12.7–13.0 ms, this window's burst is 12.40; §6's 4032 median was
+15.05, here 15.38).
+
+**So the residue is in-situ kernel cost, and the isolated bursts understated it.**
+`Σ exec_in_situ = stage − (D + N·s) = 14.399 − 1.66 ≈ 12.74 ms/token` against the ~9.4–9.6 ms the named
+family bursts predicted: **~3.2 ms/step, ~25 %, was invisible to a burst.** Per family, in-situ (128 lanes,
+median of 3) against the isolated-burst number Q6's table carried:
+
+| family | in-situ ms | burst / derived | Δ | in-situ vs its own roofline |
+|---|---|---|---|---|
+| mlp | **4.264** | 2.594 | **+1.67** | 4.264 vs 2.230 → **52 %** (burst claimed 86 %) |
+| proj | **4.225** | 3.54–3.60 | +0.63 | 4.225 vs 1.973 → 47 % |
+| cast | 0.918 | never measured (0.43 dispatch) | +0.49 | 0.918 vs 0.007 traffic |
+| host tail | 0.718 | 0.14 (CPU) | +0.58 | — |
+| glue | 0.678 | 0.190 | +0.49 | — |
+| gdn | 0.641 | ~0.12 (rec+norm) | +0.4 | 0.641 vs 0.228 cold |
+| attn | 0.486 | 0.114 (derived) | +0.37 | — |
+| copy | 0.208 | never (0.06 dispatch) | +0.15 | — |
+| lm_head | **2.200** | 2.127 | **+0.07** | 2.200 vs 2.146 → at ceiling, and it *agrees* |
+
+`lm_head` — one fat launch, streaming 485 MiB — moves by 3 % between burst and step, which is the control
+case: the instrument is not inflating everything, the *small* kernels are. The candidate explanation is the
+one this file already has a row for in miniature ("warm-burst understates in-step", GDN rec): a burst repeats
+one kernel against the same buffers, so its ramp-up overlaps the next repeat and its DRAM pages stay hot,
+while a real step interleaves 424 launches across ~1.5 GB of weights. That is now the standing reason a
+burst number may not be quoted as a step cost, and it is the number to plan against: **the engine runs at
+~52 % of achievable bandwidth on MLP and ~47 % on projections inside a real step**, not 86 %.
+
+**Two things retired on the way.** The 4032-lane "bimodality" was mostly an artefact of the differential
+harness: measured directly, step means are 15.324 / 15.378 / 15.400 (**0.5 % across runs**) even though
+individual steps inside a run still jitter 11 %. The earlier 16.9 % spread came from differencing two runs
+per point, which amplifies noise; the honest figure for 4k decode is **15.35 ms (65.2 tok/s)**. And the
+instrument has one reporting bug to fix before it is used again: `syncs_per_step` prints 323 for `stage` but
+**42 for `kernel`**, where the spec says per-launch granularity is ~425 waits — the subtraction it feeds is
+immaterial (0.004 vs 0.042 ms), but a wrong field is a wrong field, and the parity and token checks were
+clean, so the numbers above stand.
+
+Reproduce: `engine/results.md` §Q6.1 command block, one locked window `q61-stage`, three runs at 128 lanes
+(`--steps 16`) and three at 4032 (`--steps 32`), prompts from `context_sweep.build_prompt`.
