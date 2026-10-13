@@ -48,12 +48,25 @@
 //                       each --M, for one attn layer, one gdn layer and all 24 layers.
 //   --skinny            W4: the per-call cost of in_proj_a/in_proj_b (N=16), the a|b-fused N=32
 //                       variant §6 offers as the alternative, and k_proj/v_proj (N=512).
+//   --cdtype-ab         One shape, timed BOTH ways — 16-bit C and F32 C — same handle, same pinned
+//                       workspace, same buffers, same fill, same iters. It exists because every rate in
+//                       devices/strix-halo-compute.md comes from gemm_peak, which writes an F32 C, and
+//                       this mix writes a 16-bit C: on this hipBLAS/gfx1151 those are not the same call
+//                       and must not be read against each other. This mode is the comparison, so nobody
+//                       has to re-derive it from memory. It is a timing mode: main agent only.
 //
 // Honesty rules this file follows (AGENTS.md):
 //   * Timings come from steady_clock bursts only. `hipEventElapsedTime` returns exactly 0 for kernels
 //     below ~1 ms on this iGPU — a broken timer, not a fast kernel.
 //   * Warm pass before any timed pass: the first GPU pass over fresh pages runs ~35 GB/s here.
 //   * Best-of-N with the spread printed, always.
+//   * Every rate printed here is a 16-bit C rate. A 16-bit C is not a cheaper copy of an F32 C on this
+//     library: at the same shape, handle, workspace and data, hipBLAS/rocBLAS ran the 16-bit-C form
+//     several times faster than the F32-C form (measured 2026-10-13 in a contended window; the split is
+//     what --cdtype-ab prints). So NO row of this tool is comparable with a row of
+//     devices/strix-halo-compute.md, and a threshold written against one is not a threshold on the other.
+//     If §7's W1/W2 bands are to be applied to a mix row, they have to be restated on a 16-bit-C basis —
+//     which is §7's owner's call, not this file's.
 //   * No thresholds, no verdicts on a timing row. W1/W2/W4's bands live in §7 and are applied outside
 //     this tool; a harness that prints a verdict gets read as one even when it is not, and a rate
 //     printed here is not a ledger row. Nothing this tool prints belongs in
@@ -882,7 +895,9 @@ void mix_mode(hipblasHandle_t h, const Plan &plan, const std::vector<int> &Ms, c
                 dt.name, dt.name);
     std::printf("  flops ÷ wall for a WHOLE PASS of the group's calls, one sync at the end of the pass,\n"
                 "  which is what a wave does. Rates are aggregate over the mix, not per kernel. No\n"
-                "  threshold is applied here: §7 owns W1/W2's bands, and a row here is not a ledger row.\n");
+                "  threshold is applied here: §7 owns W1/W2's bands, and a row here is not a ledger row.\n"
+                "  The C is 16-bit, so these TFLOP/s are NOT comparable with a gemm_peak row, which is\n"
+                "  F32 C; --cdtype-ab prints that split at one shape.\n");
     std::printf("  %-5s %-16s %6s %10s %9s %9s %9s %8s %10s %11s %13s\n", "M", "group", "calls",
                 "gflop", "best_ms", "med_ms", "worst_ms", "spread", "TFLOP/s", "TFLOP/s med",
                 "TFLOP/s worst");
@@ -913,6 +928,84 @@ void mix_mode(hipblasHandle_t h, const Plan &plan, const std::vector<int> &Ms, c
 }
 
 // -----------------------------------------------------------------------------------------------
+// --cdtype-ab : the comparison that decides whether a mix row and a gemm_peak row are the same fact.
+// One shape, the mix's own call form, timed twice — 16-bit C and F32 C — on one handle, in one
+// workspace, over the same buffers and the same fill, with the same iters count. Nothing else changes
+// between the two columns, so the ratio is the C width and nothing else. Timing mode: main agent only,
+// and its numbers are not ledger rows (§7 owns the windows).
+// -----------------------------------------------------------------------------------------------
+
+void cdtype_ab_mode(hipblasHandle_t h, const Census &c, const std::vector<int> &Ms,
+                    const DType &dt, int iters, int warm) {
+    std::printf("CDTYPE-AB %s in / f32 compute — the SAME call at one shape, C written 16-bit and C\n"
+                "written F32, same handle, same pinned workspace, same buffers, same fill, same iters.\n"
+                "The ratio is the output width. devices/strix-halo-compute.md's rows are all F32 C; the\n"
+                "--mix rows of this tool are all 16-bit C. This mode exists so the two are never quietly\n"
+                "compared again. No threshold applied, no ledger row.\n", dt.name);
+    std::printf("  %-5s %-24s %9s %10s %10s %10s %9s\n", "M", "shape", "gflop",
+                "ms 16bitC", "ms F32C", "TF/s 16bit", "F32/16");
+    for (const CensusRow *row : {census_find(c, "self_attn.q_proj.weight"),
+                                 census_find(c, "mlp.gate_proj.weight"),
+                                 census_find(c, "mlp.down_proj.weight")}) {
+        Site s;
+        s.name = row->leaf;
+        s.leaf = row->leaf;
+        s.n = (int)row->n;
+        s.k = (int)row->k;
+        s.A = nullptr;
+        s.W = nullptr;
+        s.C = nullptr;
+        const int mmax = *std::max_element(Ms.begin(), Ms.end());
+        CK(hipMalloc(&s.A, (size_t)mmax * s.k * 2));
+        CK(hipMalloc(&s.W, (size_t)s.n * s.k * 2));
+        void *c32 = nullptr;
+        CK(hipMalloc(&c32, (size_t)mmax * s.n * 4));
+        {
+            std::vector<uint8_t> host((size_t)mmax * s.k * 2);
+            fill_16bit(host.data(), (size_t)mmax * s.k, dt.is_bf, 17u);
+            CK(hipMemcpy(s.A, host.data(), host.size(), hipMemcpyHostToDevice));
+            host.resize((size_t)s.n * s.k * 2);
+            fill_16bit(host.data(), (size_t)s.n * s.k, dt.is_bf, 37u);
+            CK(hipMemcpy(s.W, host.data(), host.size(), hipMemcpyHostToDevice));
+        }
+        for (int M : Ms) {
+            CK(hipMalloc(&s.C, (size_t)M * s.n * 2));
+            const double gflop = 2.0 * M * s.n * s.k;
+            auto time_form = [&](bool wide_c) {
+                auto once = [&] {
+                    const hipblasStatus_t st = gemm_stored_weight(
+                        h, M, s.n, s.k, dt.dt, s.A, s.W, wide_c ? c32 : s.C,
+                        wide_c ? HIP_R_32F : dt.dt_out);
+                    if (st != HIPBLAS_STATUS_SUCCESS) {
+                        std::printf("GEMM_REFUSED %s %s-C status=%d — a refused width is not a wash\n",
+                                    s.name.c_str(), wide_c ? "f32" : "16bit", (int)st);
+                        std::exit(3);
+                    }
+                    CK(hipDeviceSynchronize());
+                };
+                for (int w = 0; w < warm; ++w) once();
+                std::vector<double> samples;
+                for (int i = 0; i < iters; ++i) {
+                    const auto t0 = std::chrono::steady_clock::now();
+                    once();
+                    const auto t1 = std::chrono::steady_clock::now();
+                    samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+                }
+                return stat_of(samples).lo;
+            };
+            const double ms16 = time_form(false);
+            const double ms32 = time_form(true);
+            std::printf("  %-5d %-24s %9.3f %10.3f %10.3f %10.3f %9.2fx\n", M, s.name.c_str(),
+                        gflop / 1e9, ms16, ms32, gflop / (ms16 * 1e-3) / 1e12, ms32 / ms16);
+            std::fflush(stdout);
+            CK(hipFree(s.C));
+            s.C = nullptr;
+        }
+        CK(hipFree(s.A)); CK(hipFree(s.W)); CK(hipFree(c32));
+    }
+}
+
+// -----------------------------------------------------------------------------------------------
 // --skinny : W4. The per-call cost of the shapes a square says nothing about.
 //
 // Two numbers per shape, because they answer different questions:
@@ -931,7 +1024,8 @@ void skinny_mode(hipblasHandle_t h, const Plan &plan, const std::vector<int> &Ms
                  int iters, int burst) {
     std::printf("SKINNY %s in / f32 compute / %s C — OP_T weights-as-stored, best-of-%d, steady_clock.\n"
                 "No threshold applied here: W4's bands are in §7 and read against the burst column,\n"
-                "the one measured the way the 1.85 µs dispatch floor was.\n", dt.name, dt.name, iters);
+                "the one measured the way the 1.85 µs dispatch floor was. The C is 16-bit, so a row here\n"
+                "is not comparable with an F32-C row elsewhere (see --cdtype-ab).\n", dt.name, dt.name, iters);
     std::printf("  %-5s %-20s %5s %6s %7s %23s %23s\n", "M", "shape", "N", "K", "calls",
                 "each-sync us min/med/max", "burst us/call min/med/max");
     for (int M : Ms) {
@@ -1016,7 +1110,7 @@ std::vector<std::string> split_list(const std::string &s) {
 void usage() {
     std::printf(
         "usage: tools/build/prefill_mix [--spec PATH] MODE [options]\n"
-        "  MODE   --list | --check | --mix-determinism | --smoke | --mix | --skinny\n"
+        "  MODE   --list | --check | --mix-determinism | --smoke | --mix | --skinny | --cdtype-ab\n"
         "  --spec PATH      census JSON (default tools/build/prefill_gemm_shapes.json), from\n"
         "                   .venv/bin/python tools/prefill_gemm_shapes.py --json\n"
         "  --dtypes LIST    bf16, fp16, or both (default bf16 — §6 item 3 lands the route in bf16)\n"
@@ -1050,7 +1144,7 @@ int main(int argc, char **argv) {
             return argv[++i];
         };
         if (a == "--list" || a == "--check" || a == "--mix-determinism" || a == "--smoke" ||
-            a == "--mix" || a == "--skinny") mode = a;
+            a == "--mix" || a == "--skinny" || a == "--cdtype-ab") mode = a;
         else if (a == "--spec") spec = next("--spec");
         else if (a == "--dtypes") want_dtypes = split_list(next("--dtypes"));
         else if (a == "--M") {
@@ -1111,6 +1205,8 @@ int main(int argc, char **argv) {
     if (mode == "--check") {
         for (const DType &dt : dtypes)
             if (!check_mode(h, census, {dt}, check_m, check_wide_m)) rc = 1;
+    } else if (mode == "--cdtype-ab") {
+        for (const DType &dt : dtypes) cdtype_ab_mode(h, census, Ms, dt, iters, warm);
     } else if (mode == "--mix-determinism") {
         std::printf("MIXDET — three identical passes of the mix, every C hashed in call order (FNV-1a).\n"
                     "§3.1 proved determinism per shape; this asks the question of the mix's call order\n"
