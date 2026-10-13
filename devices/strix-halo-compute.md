@@ -104,3 +104,41 @@ hand-tiled `rocwmma`/MFMA kernel reaches — `rocwmma.hpp` is installed on this 
 The claim that stands regardless: today's prefill at **1.55 TFLOP/s is ~10 % of even the FP32 vector rate and
 ~26 % of what one hipBLAS call at the same shape gets**, so the gap is structural (no matrix-unit tiling in
 the engine's projections) whether or not 5k is ultimately reachable.
+
+## Does precision buy compute on this part? Measured: yes, ~22–26 % — fp16 beats bf16
+
+Same probe, `--dtypes bf16,fp16,fp32` (hipBLAS, f32 accumulate in all three, selftest green), window
+`dtype2`, blocking, zero subagents, best of 25:
+
+| shape | bf16 | **fp16** | fp32 | fp16 vs bf16 |
+|---|---|---|---|---|
+| `square_4096` | 4.758 | **5.976** | 2.952 | **+25.6 %** |
+| `engine_q_shape` (1024×4096×1024) | 5.667 | **6.885** | 2.932 | **+21.5 %** |
+
+Three things follow, and the first is the one that reframes the whole prefill argument.
+
+1. **fp16 is faster than bf16 on this GPU's matrix units, at identical accumulate precision.** That is the
+   opposite of the usual intuition — and the reason is that bf16 and fp16 are the *same width*, so nothing is
+   saved in bandwidth; the difference is purely in how fast the matrix units chew each format. For a
+   compute-bound path like prefill, choosing fp16 is not a precision sacrifice at all: fp16 has **10 mantissa
+   bits against bf16's 7**, so at the magnitudes this model works at (weights ~0.01, logits ~±20) fp16 is
+   strictly *more* accurate than the bf16 the checkpoint ships in. It is a narrower format too (5 exponent
+   bits, max 65504), so the honest caveat is that a bf16→fp16 weight conversion needs a range check rather
+   than an assumption — values outside fp16's range, and very small ones that would go subnormal, have to be
+   counted before anyone calls the conversion exact.
+2. **fp32 lands at ~2.93 TFLOP/s, essentially half the fp16 rate**, which is what you would expect if the fp32
+   path is running the matrix units at half rate or falling back to the vector path. Either way it bounds what
+   our current kernels could reach *without* changing formats: the engine does bf16→f32 conversions and scalar
+   f32 FMAs, and 2.93 TFLOP/s is the ceiling of that style of code, not of the engine's tiling.
+3. **This does not retire the structural gap.** At the engine's own shape one hipBLAS call gets 5.7 (bf16) to
+   6.9 (fp16) TFLOP/s while the engine's whole prefill achieves 1.55 TFLOP/s in aggregate. Format choice is
+   worth ~1.25×; matrix-unit tiling is worth ~4×. They are independent and the second is much bigger.
+
+**Sustained clocks, because the spec sheet number was raised at me and deserved a direct answer.**
+`/sys/class/drm/card1/device/pp_dpm_sclk` reads `0: 600Mhz 1: 2206Mhz * 2: 2900Mhz` — the GPU sits at
+**2.206 GHz of a 2.9 GHz maximum** in ordinary operation, so ~24 % of the advertised peak is gone to clock
+state before any kernel runs. `rocm-smi --showclkfrq` is useless here (`Clock [fclk] … exists but EMPTY!
+Likely driver error!`), which is why this file quotes sysfs. So: my measured 4.76–6.89 TFLOP/s against the
+14.85 TFLOPS advertised is ~32–46 %, and part of that shortfall is clock state rather than kernel quality.
+5k prompt tok/s still needs ~8 TFLOP/s sustained, which is now **within sight of the fp16 rate at the engine's
+own shape (6.89)** rather than science fiction — it needs a good tiling *and* fp16 *and* the clocks to stay up.

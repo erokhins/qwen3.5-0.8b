@@ -133,6 +133,10 @@ bool selfcheck(hipblasHandle_t h) {
 int main(int argc, char **argv) {
     int iters = 20;
     bool check = false;
+    std::vector<std::pair<hipDataType, const char *>> dtypes = {
+        {HIP_R_16BF, "bf16"}, {HIP_R_16F, "fp16"}, {HIP_R_32F, "fp32"},
+    };
+    bool sample_clocks = false;
     std::vector<Row> rows = {
         {4096, 4096, 4096, "square_4096"},
         {2048, 2048, 2048, "square_2048"},
@@ -143,7 +147,20 @@ int main(int argc, char **argv) {
     };
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--check")) check = true;
-        else if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--clocks")) sample_clocks = true;
+        else if (!std::strcmp(argv[i], "--dtypes") && i + 1 < argc) {
+            dtypes.clear();
+            for (auto &tok : [] (const std::string &s) {
+                std::vector<std::string> out; size_t p = 0;
+                while (p <= s.size()) { size_t q = s.find(',', p); if (q == std::string::npos) q = s.size();
+                    out.push_back(s.substr(p, q - p)); p = q + 1; }
+                return out;
+            }(argv[++i])) {
+                if (tok == "bf16") dtypes.push_back({HIP_R_16BF, "bf16"});
+                else if (tok == "fp16") dtypes.push_back({HIP_R_16F, "fp16"});
+                else if (tok == "fp32") dtypes.push_back({HIP_R_32F, "fp32"});
+            }
+        } else if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--small"))
             rows = {{4096, 4096, 4096, "square_4096"}, {1024, 4096, 1024, "engine_q_shape"}};
     }
@@ -159,27 +176,34 @@ int main(int argc, char **argv) {
     CK(hipSetDevice(0));
     if (check && !selfcheck(h)) return 1;
 
-    std::printf("%-18s %10s %12s %12s %10s\n", "tag", "GFLOP", "best_ms", "TFLOP/s", "GB/s_of_C");
+    std::printf("%-18s %8s %12s %12s\n", "tag", "dtype", "best_ms", "TFLOP/s");
     for (auto &r : rows) {
         size_t na = (size_t)r.m * r.k, nb = (size_t)r.k * r.n, nc = (size_t)r.m * r.n;
-        std::vector<hip_bfloat16> ha(na), hb(nb);
-        std::mt19937 rng(7);
-        std::uniform_real_distribution<float> u(-0.5f, 0.5f);
-        for (auto &x : ha) x = __float2bfloat16(u(rng));
-        for (auto &x : hb) x = __float2bfloat16(u(rng));
-        hip_bfloat16 *da, *db;
-        float *dc;
-        CK(hipMalloc(&da, na * 2)); CK(hipMalloc(&db, nb * 2)); CK(hipMalloc(&dc, nc * 4));
-        CK(hipMemcpy(da, ha.data(), na * 2, hipMemcpyHostToDevice));
-        CK(hipMemcpy(db, hb.data(), nb * 2, hipMemcpyHostToDevice));
-        CK(hipMemset(dc, 0, nc * 4));
-        double best = run_gemm(h, r.m, r.n, r.k, iters, HIP_R_16BF, da, db, dc);
-        double flop = 2.0 * r.m * r.n * r.k;
-        double gb = (na * 2 + nb * 2 + nc * 4) / 1e9;
-        std::printf("%-18s %10.1f %12.3f %12.3f %10.1f\n", r.tag, flop / 1e9, best,
-                    flop / (best * 1e-3) / 1e12, gb / (best * 1e-3));
-        CK(hipFree(da)); CK(hipFree(db)); CK(hipFree(dc));
-        std::fflush(stdout);
+        for (auto &[dt, dname] : dtypes) {
+            size_t esz = (dt == HIP_R_32F) ? 4u : 2u;
+            std::vector<uint8_t> ha(na * esz), hb(nb * esz);
+            std::mt19937 rng(7);
+            std::uniform_real_distribution<float> u(-0.5f, 0.5f);
+            if (dt == HIP_R_32F) {
+                auto *pa = (float *)ha.data(); for (size_t i = 0; i < na; ++i) pa[i] = u(rng);
+                auto *pb = (float *)hb.data(); for (size_t i = 0; i < nb; ++i) pb[i] = u(rng);
+            } else {
+                auto *pa = (hip_bfloat16 *)ha.data(); for (size_t i = 0; i < na; ++i) pa[i] = __float2bfloat16(u(rng));
+                auto *pb = (hip_bfloat16 *)hb.data(); for (size_t i = 0; i < nb; ++i) pb[i] = __float2bfloat16(u(rng));
+            }
+            void *da, *db; float *dc;
+            CK(hipMalloc(&da, na * esz)); CK(hipMalloc(&db, nb * esz)); CK(hipMalloc(&dc, nc * 4));
+            CK(hipMemcpy(da, ha.data(), na * esz, hipMemcpyHostToDevice));
+            CK(hipMemcpy(db, hb.data(), nb * esz, hipMemcpyHostToDevice));
+            CK(hipMemset(dc, 0, nc * 4));
+            int it = sample_clocks ? std::max(iters, 200) : iters;
+            double best = run_gemm(h, r.m, r.n, r.k, it, dt, da, db, dc);
+            double flop = 2.0 * r.m * r.n * r.k;
+            std::printf("%-18s %8s %12.3f %12.3f\n", r.tag, dname, best,
+                        flop / (best * 1e-3) / 1e12);
+            std::fflush(stdout);
+            CK(hipFree(da)); CK(hipFree(db)); CK(hipFree(dc));
+        }
     }
     BK(hipblasDestroy(h));
     return 0;
