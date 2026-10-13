@@ -768,3 +768,17 @@ the memory system's floor, it is the engine failing to reach a floor the box dem
 one kernel into 96 serialized launches costs 9 % (expectation 6), an order of magnitude too small to be the
 answer. One row tripped the trap flag and is excluded (`D_20_arena2m`, 102.8 %, `suspect=1`), and the three
 cold-page rows are void by their own rule (`unverifiable_cold_pages`, exit 3).
+
+### Q9: the residue has a name — the weight-walk pattern itself (2026-10-13, zero subagents, foreground, lock `q9-mapping-locality`)
+
+The three-way hunt ends with a number that reproduces the engine. Replaying the engine's own per-thread
+weight arithmetic as pure reads at **byte-identical geometry** gives **0.470 / 0.472 / 0.629** of the
+contiguous sweep for `gate/up`, `gate/up`-with-writes and `down` — every pair inside the pre-registered
+confirmed band — while reordering an identical 424-launch multiset changes nothing (**1.005×**), so locality is
+out and the mapping is in. The combined row (`engine mapping + the step's spacing + the step's read budget`)
+lands at **59.3 % of probe** against the MLP's in-step **52 %** (§Q6.1): that is the gap accounted for, and
+LDS staging is exonerated (`nostage/eng = 1.098`, outside the band that would have blamed it), which points
+the finger at the two-stream row interleave and the row tail in `mlp_gateup`. Full table and thresholds:
+`devices/strix-halo-mixed-traffic.md` §Q9 Results. The prize is sized: MLP is **4.264 ms/token where its
+roofline is 2.230 ms**, and the probe says the difference is kernel-internal rather than memory-system — so
+the next package is a kernel mapping fix with the standard byte-identity proof, priced against the 4.264 row.

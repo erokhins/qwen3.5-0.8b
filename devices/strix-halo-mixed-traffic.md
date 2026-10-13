@@ -587,3 +587,53 @@ question) or "controller contention" (re-opened as a Q8 refinement), and the two
 
 Nothing here changes engine code, and nothing here is a number: the rows, the ratios and the two
 exit-criterion lines were written before the run, and the thresholds are unchanged by whatever it prints.
+
+## Q9 Results — taken 2026-10-13, window `q9-mapping-locality` (blocking, zero subagents, util 91 %→27 %)
+
+`--selftest` ran first in the same window and printed `SELFTEST ok fails=0` over **65 device cases**,
+including the byte-accounting injections for both new modes. 13 of 13 rows printed, all `checksum=ok`,
+no row flagged `suspect`. Raw lines: `tmp/q9/rows.log`. Thresholds below are the ones written in
+§"Thresholds" before the run, applied unchanged.
+
+| tag | what it is | GB/s | % of read probe |
+|---|---|---|---|
+| `A_read_512m` | reference: contiguous sweep | 235.0 | 99.2 |
+| `C_mixlaunch_62` | reference: the MLP's geometry, contiguous pattern | 213.0 | 89.9 |
+| `A_gu_eng` | **gate/up bytes, the engine's own per-thread mapping** | **103.3** | **43.6** |
+| `A_gu_plain` | same bytes, same grid, contiguous | 219.7 | 92.7 |
+| `A_gu_eng_nostage` | engine mapping, LDS staging off | 113.4 | 47.8 |
+| `A_mgu_eng` / `A_mgu_plain` | gate/up with the step's 62:1 writes | **100.6** / 212.9 | 42.5 / 89.8 |
+| `A_mdn_eng` / `A_mdn_plain` | `down` shape (3584), engine vs contiguous | **127.1** / 201.9 | 53.6 / 85.2 |
+| `B_blk` | 424 read launches, one launch multiset, **blocked** order | 183.3 | 77.3 |
+| `B_rr` | **identical multiset, round-robin order** | 184.2 | 77.7 |
+| `B_rr_nostandins` | round-robin with no stand-in traffic between | 207.0 | 87.4 |
+| `R_decisive` | engine mapping + the step's spacing + the step's read budget | **140.5** | **59.3** |
+
+**(A) confirmed, per family, at every pair.** `gbs(eng)/gbs(plain)` = **0.470** (gate/up), **0.472**
+(gate/up with writes), **0.629** (`down`) — all three inside the ≤ 0.70 "confirmed" band, none in the partial
+band, and the byte counts are identical on both sides of each pair by construction (336.0 MiB read-shape pair
+checked as `same_bytes_as_contiguous` in `--selftest`), so this cannot be a byte difference wearing a
+costume. Attribution inside (A): staging is *not* the fall — `nostage/eng = 1.098`, outside the ≤ 0.90 band
+that would have blamed LDS — so what costs the factor of two is the **two-stream row interleave and/or the row
+tail**, which is a kernel-internal question and the cheapest kind of thing to fix.
+
+**(B) refuted.** Identical launch multiset, two orders: `B_rr / B_blk = 1.005`. Reordering 424 read launches
+across a 1549 MiB footprint, with or without 376 stand-in launches interleaved, changes nothing. Inter-kernel
+locality is out, and with it the eviction-versus-contention branch (`B_rr_nostandins`, 87.4 % vs 77.7 %, is
+recorded but decides nothing since its premise never fired).
+
+**The decisive row lands on mapping, not on the two combined.** `R_decisive / A_read_512m = 0.598`: engine
+mapping, the step's spacing and the step's whole read budget together reproduce ~60 % of probe, and the
+engine's MLP in-step figure from §Q6.1 is **52 %**. So the multi-package residue — the ~3.2 ms that Q6.1
+located inside the kernels, that Q7 M1 refused to blame on warmth and Q8 refused to blame on traffic mix — is
+**the weight-walk itself**: same bytes, same grid, same coalescing at the transaction level (the CPU verdict
+above stands: 4/4 and 8/4 of every 128 B transaction used), and it arrives at half the rate. Contiguous
+streaming is not free on this box; a strided two-stream walk with a row tail is a memory-system pattern, and
+the pattern is the bottleneck.
+
+**What this funds.** MLP is 4.264 ms of a 12.4 ms step against a 2.230 ms roofline; the probe says the gap is
+reachable and kernel-internal. The next package is a mapping fix — the candidate named by the attribution is
+the two-stream interleave in `mlp_gateup`, i.e. read `gate` and `up` as two contiguous passes (or one
+contiguous pass over a co-allocated pair) instead of interleaving rows between them — with the usual proof
+standard: byte-identical outputs, `margin_delta` ×1.0000, gate counts unchanged, and a measured A/B in one
+locked window against the 4.264 ms in-step row it is meant to move.
