@@ -13,11 +13,13 @@ cd "$(dirname "$0")"
 mkdir -p build
 targets=("$@"); [ ${#targets[@]} -eq 0 ] && targets=(mixed_bw)
 for t in "${targets[@]}"; do
-    # gemm_peak needs hipBLAS (the library whose kernels are being measured); everything else links
-    # nothing beyond the HIP runtime. mfma_probe is rocwmma (header-only) and pins the arch on the
-    # command line, because "what does this target emit" is the question it asks.
+    # gemm_peak and prefill_mix need hipBLAS (the library whose kernels are being measured); everything
+    # else links nothing beyond the HIP runtime. mfma_probe is rocwmma (header-only) and pins the arch on
+    # the command line, because "what does this target emit" is the question it asks.
     libs=""
-    [ "$t" = "gemm_peak" ] && libs="-lhipblas"
+    case "$t" in
+        gemm_peak|prefill_mix) libs="-lhipblas" ;;
+    esac
     extra=""
     [ "$t" = "mfma_probe" ] && extra="--offload-arch=gfx1151"
     echo "hipcc -O3 -Wl,-rpath,/opt/rocm/lib $libs $extra -o build/$t $t.cpp"
