@@ -761,10 +761,215 @@ tools/gpu_lock.sh acquire q6-4032 && .venv/bin/python tools/context_sweep.py --l
 .venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --negative
 .venv/bin/python prototype/proj_gemv/run.py --fixture dec8 --layers all --steps all --rows 32
 
-# 6 · Q6.1, still unwritten and the only instrument that can close the 3.4 ms residue: a full-plan
-#     burst — the 424 launches in dependency order with one sync at the end — against the engine's
-#     own step, plus per-family clocks inside decode_step if the burst comes back under the step.
+# 6 · Q6.1, the full-plan burst against the engine's own step: BUILT (see the Q6.1 section below).
+#     `decode_run --time-stages` is that experiment and one more besides — it prices the same launches
+#     at burst, per-stage and per-kernel submission in one process, with the per-family clock inside
+#     `decode_step` that this line asked for if the burst came back under the step.
 ```
+
+### Q6.1 (2026-10-13): the stage clock exists — what it measures, and the one experiment to run
+
+A worker's shift, and it took no timings: there is no millisecond from this pass anywhere in this
+section, in either direction. What shipped is the instrument the Q6 table above named as "the cheapest
+number that changes strategy" — `engine/stage_clock.{h,cpp}`, the `decode_step.cpp` boundary markers, and
+`decode_run --time-stages` — plus the experiment specification and the command list at the bottom. Every
+number it can print belongs to a clean window, which means the main agent's.
+
+**Why a family burst cannot answer the question, which is why this had to be built.** The residue is
+≈3.4–3.6 ms of a 12.949 ms token (§6's differential row), and the two candidate stories need opposite
+fixes: exposed submission latency (fix: fewer, wider launches, or a graph) versus kernels that are
+simply slower in situ than their isolated bursts said (fix: memory behaviour, and no submission work at
+all). No per-family burst can see the first story in either direction, because a burst submits the same
+kernel hundreds of times back to back, so *its* queue is never empty and an exposed stall can never
+appear in it. The only measurement that separates them is the real step at different submission
+granularities.
+
+**What it measures.** One process, three extra passes over the run's own generation steps, replayed from
+a rebuilt state (§08.4 reset + the same prompt wave) with the *same* fed tokens, so the three passes price
+identical work at the same lanes and the only difference between them is how often the queue is drained:
+
+| `gran=` | what it is | what its number is allowed to be called |
+|---|---|---|
+| `burst` | the production shape: every launch of the step submitted to one stream, one wait (the logits D2H in `finish_token`) | the ledger's ms/token, warm |
+| `stage` | the same launches, drained at every family boundary (323 waits per step, measured on `dec8`) | the sum of the stages, each measured alone |
+| `kernel` | the same launches drained after every submission (425 waits per step) | the per-launch in-situ cost |
+
+plus `calib`, which prices the instrument's own wait (`idle_sync_us`, an idle `hipDeviceSynchronize`
+budged over 200 of them). Timings are `steady_clock` around a real wait, never events —
+`prototype/README.md` rule 7: `hipEventElapsedTime` returns exactly 0 below ~1 ms on this box, so a
+per-kernel event timing would report a column of zeros and look like fast kernels.
+
+The stages are the families the launch bill already names, so every row can be set against a row of the
+Q6 table: `glue` `proj` `gdn` `attn` `mlp` `cast` `copy` `lm_head` `host_tail`. And the clock *counts*
+submissions as well as timing them, so it audits its own segmentation against the gate-policed plan:
+`launches_per_step=424 plan_per_step=424 plan_match=1` with the family counts matching §07 line for line
+(glue 49, proj 114, gdn 72, attn 6, mlp 48, cast 115, copy 19, lm_head 1, host_tail 0 — the last is the
+D2H plus the argmax, which is not a launch). Above the attention lane staging an `attn` site legitimately
+issues 2 kernels where the plan says 1, and the totals then exceed the plan and say so rather than
+quietly agreeing.
+
+Lines it prints, in one go: `STAGEPASS gran=… steps=… ms_mean=… ms_min=… ms_max=… spread_pct=…`,
+`STAGEPARITY gran=… tokens_identical=… logits_bitidentical=… first_mismatch=…`, one
+`STAGE gran=… family=… ms_per_step=… ms_total=… launches_per_step=… segments_per_step=… us_per_launch=…`
+per family that ran, a `STAGE … TOTAL` line, `STAGESTEP gran=… step=… ms=…` per step, and for each
+serialized granularity
+`STAGEGAP gran=… burst_ms_mean=… serialized_ms_mean=… exposed_ms=… ratio=…`.
+`STAGEPARITY` is the load-bearing one: each pass must reproduce the run's sampled ids and the bit
+pattern of each step's top logit, or it prints `note=COMPARISON_VOID` and the gap numbers are meaningless.
+
+**The arithmetic that makes it a discriminator.** In the serialized passes a launch costs its host
+dispatch *plus* its execution *plus* the wait, so with N = 424 launches, per-launch dispatch h (§6's width
+curve, ≈2.9–3.8 µs, total **D ≈ 1.63 ms** per Q6's own table) and idle-wait cost s (the `calib` line):
+
+    K ≈ Σ exec_in_situ + D + N·s          S ≈ Σ exec_in_situ + D_stages + n_stages·s
+    B ≈ Σ exec_in_situ + (whatever dispatch the step fails to hide)
+
+so, for the per-kernel pass,
+
+    K − B ≈ D + N·s − (dispatch hidden by the production step).
+
+That gives two independent readings, which should agree:
+
+1. **`exposed` (the `STAGEGAP` line).** If `K − B` comes back near `D + N·s` (≈1.6–2.5 ms at the widths
+   the sites use), the production step was already hiding dispatch behind execution, so there is nothing
+   submission-side left to win and the residue is inside the kernels. If `K − B ≈ 0`, the queue is already
+   empty in the real step: every launch pays its dispatch in the open and the fix is submission-side.
+2. **In-situ execution vs the isolated sum.**
+   `Σ exec_in_situ ≈ K − (D + N·s)` compared against Q6's ≈9.4–9.6 ms of §6-measured family cost. A
+   match means the kernels are *not* slower in situ and the residue is dispatch or the never-measured
+   families; a match with B (≈12.9) instead means they are, by about the size of the residue.
+
+   ⚠️ **This is the opposite polarity from the one-line sketch in `bench/plan-2026-10-12.md` Q6.1** ("if
+   burst ≈ sum of stages, the residue is inside the kernels; if burst ≪ sum, the stall is exposed"). Read
+   as an empirical claim about *this* engine it is inverted: the pipelined burst is the one that *can*
+   overlap, so a large burst-to-serialized gap is evidence the pipeline was already overlapping, not a
+   stall still to be removed. The model above is three lines of algebra and worth arguing with before the
+   table below is trusted; the instrument itself is neutral between the two readings, which is the point.
+
+**The experiment, and the if/then table.** One locked window, a fixed 128-lane context (cheapest point
+that is pure one-row decode: under the 512-lane staging the attention site is one fused kernel and the
+plan is exactly 424 launches), three runs, medians and spread quoted the way §6 quotes everything. The
+4032-lane point goes in the same window because that is the one §6 could not settle (16.9 % spread over
+five runs, and more repetitions did not move it).
+
+| outcome (128-lane point, medians of 3) | reading | what to do |
+|---|---|---|
+| `K−B` within ~±0.4 ms of `D + N·s`, and `Σ exec_in_situ` ≈ 9.4 | dispatch is fully hidden; the kernels are ~3.5 ms slower in situ than the bursts said | **Story B. Stop all submission work** (packed projections, cast folding, graphs — §6's graph result of ~4 % is then explained, not a missed opportunity). The next move is the shape/memory work: Q6 lever 4 (the 5 %-efficient `in_proj_a/b`, 40 % `k/v_proj`, 46–49 % `o/out_proj`), and a re-examination of the burst-vs-situ cache asymmetry — `prototype/README.md` rule 8 says a burst that re-reads one weight 300× keeps it hot, so §6's op-sum is *expected* to flatter the step. |
+| `K−B ≲ 0.3 ms` | the queue is already empty in production: dispatch is exposed, launch for launch | **Story A. Go submission-side**, in Q6's own order: fold the 49 of 115 casts that a producer can write, then packed projections (114 → 48 launches). Expect ≈D ≈ 1.6 ms, *not* 3.5 — so whatever is left is a second finding, not this one. |
+| `0.3 ms ≲ K−B ≲ D + N·s` | partly hidden | the residue splits: the hidden part is inside the kernels, the exposed part is dispatch. Price each separately; do not fuse on a mixed signal. |
+| `S−B > K−B`, or `plan_match=0`, or any `STAGEPARITY` not `1` | the instrument or the window is broken — per-kernel serialization is a superset of per-stage, so it cannot be the cheaper one | **Stop and fix the instrument.** Do not interpret any number from that run. |
+| `burst` does not reproduce §6's 128-lane row (12.7–13.0) within ~5 % | contaminated window, or the warm-pass assumption is wrong | re-take; every serialized number is conditioned on the same warm state as the burst. |
+| 4032-lane `spread_pct` large while 128-lane is tight | the bimodality is the split attention path (8 blocks/site), not the memory system | the wide-context story becomes the attention split, and §6's "we do not yet know which" resolves in that direction. |
+
+Also free from the same run: `cast` and `copy` have never been measured at all (Q6's table says "never
+measured" for both, ≈0.35–0.49 ms of the residue is theirs by elimination). Their `stage`-granularity rows
+price them directly, for the first time, in the same window.
+
+**Proof it does not perturb the step.** Two directions, both byte-level, both on device:
+
+- the markers present, clock unarmed: all 50 files of a `dec8` run (32 steps, `--prefill-logits all`,
+  `--out`) are byte-identical to the same run on a binary built from `58580fd` — i.e. the parent commit,
+  before this file existed — and stdout is identical apart from the two lines that carry by-product ms;
+- the flag on versus off: all 50 files byte-identical, and stdout identical once the `STAGE*` lines are
+  stripped — including the `LAUNCHSTAT` counters, which is why the extra passes are placed after that
+  line is printed (§(h)'s reading of the counters must keep meaning the run alone).
+
+Structurally the off-path claim is one null-pointer read per marker (`stageclock::note` returns immediately
+when `armed()` is null): no sync, no launch, no reordering, no readback. The armed passes are a different
+quantity by construction and say so — which is the second half of the brief: a stage clock that synced
+after every stage and called the result "the step" would be measuring a serialized step, so the report
+carries the pipelined total and the serialized sum side by side and prints their difference as the
+finding.
+
+**What a worker ran on the device** (correctness only, no timing taken — nothing below is a duration of a
+kernel or a step; the wall figures are the wall of the whole command, as `AGENTS.md` requires):
+
+```bash
+tools/gpu_lock.sh acquire q61-ab3
+IDS=248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198,248068,271,248069,271   # dec8
+/tmp/q61-baseline/engine/build/decode_run --ids "$IDS" --steps 32 --prefill-logits all --out …/base
+./engine/build/decode_run            --ids "$IDS" --steps 32 --prefill-logits all --out …/off
+./engine/build/decode_run            --ids "$IDS" --steps 32 --prefill-logits all --time-stages --out …/on
+# diff -r: base==off (50 files) and off==on (50 files); stdout equal bar the by-product ms lines.
+tools/gpu_lock.sh release q61-ab3
+
+# and, in a second locked block:
+tools/gpu_lock.sh acquire q61-ab4 && .venv/bin/python engine/gate.py --fixture dec8   # ENGINE GATE PASS
+```
+
+`gpu util` read 0 % and 93 % at the two acquires and 77–78 % at the two releases, discounted as everywhere
+in §6. The three-run block took 4 s of wall and the gate-plus-three-runs block 7 s, which is the wall of
+the commands, not a timing of anything; **no kernel or step duration was taken or is quoted here**. The
+baseline binary came from `git worktree add /tmp/q61-baseline HEAD` + that worktree's own `engine/build.sh`,
+so "pre-change" means the parent commit's tree, not a hand-edited one.
+
+and the counters were read back structurally (launch counts, parity flags, `plan_match`) rather than as
+durations. `speccheck/run_all.py` was deliberately not re-run: nothing under `speccheck/` reads `engine/`
+(a grep for `decode_step|decode_run|engine/` across `speccheck/*.py` returns nothing), so no gate in it
+could have been affected by an engine edit — `AGENTS.md`'s budget rule says cite that instead of
+re-making a green suite.
+
+**Commands for the main agent, in the order that changes strategy.** Lines 1–3 are the one-window
+experiment; 4–5 are the two cheap hand-off items from Q6's list, which self-lock and therefore must not be
+run while the lock is held.
+
+```bash
+# 1 · the stage clock at the two points that matter. `ids_for` is `tools/context_sweep.py`'s own prompt
+#     recipe (repeated prose, truncated, stop-id-free), so "128 lanes" means here what it means in the
+#     ledger rows. 112 prompt lanes + 16 steps = 128 lanes at the last step; 4000 + 32 = 4032.
+tools/gpu_lock.sh acquire q61-stage && tools/gpu_lock.sh util
+ids_for() {
+  .venv/bin/python -c "
+import sys; sys.path.insert(0, 'tools')
+from context_sweep import build_prompt
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained('models/Qwen3.5-0.8B')
+print(','.join(str(t) for t in build_prompt(tok, $1)))"
+}
+IDS128=$(ids_for 112); IDS4032=$(ids_for 4000)
+mkdir -p tmp/q61
+for i in 1 2 3; do ./engine/build/decode_run --ids "$IDS128"  --steps 16 --time-stages > tmp/q61/stage128_$i.log;  done
+for i in 1 2 3; do ./engine/build/decode_run --ids "$IDS4032" --steps 32 --time-stages > tmp/q61/stage4032_$i.log; done
+tools/gpu_lock.sh release q61-stage
+tools/gpu_lock.sh util
+
+# 2 · quote, per point: the median of the three runs' STAGEPASS ms_mean (one per gran), the STAGEGAP
+#     exposed_ms and ratio, `Σ exec_in_situ = kernel.ms_mean − (D + syncs_per_step × idle_sync_us)` with
+#     D = 1.63 ms from the Q6 table, the family `ms_per_step` rows against Q6's measured column, and the
+#     spread across runs (the per-gran `spread_pct` is across *steps* within a run, which is a different
+#     spread and not the one §6 quotes). If a run prints `stopped=1` the prompt was too short: lengthen
+#     it rather than interpret a truncated step.
+
+# 3 · if the 4032 point is still bimodal after these three, five more rather than a bigger N: §6 took
+#     five runs of the differential and the spread did not move.
+tools/gpu_lock.sh acquire q61-4032
+IDS4032=$(ids_for 4000)     # redefine if this is a fresh shell; `ids_for` costs one tokenizer load
+for i in 4 5 6 7 8; do ./engine/build/decode_run --ids "$IDS4032" --steps 32 --time-stages > tmp/q61/stage4032_$i.log; done
+tools/gpu_lock.sh release q61-4032
+
+# 4 · hand-off item 2: ledger §2's two "not measured on their own" rows. `--only` needs `--time`, and
+#     run.py takes the lock itself — do NOT hold it across these two.
+.venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time --only gdn
+.venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time --only attn
+
+# 5 · hand-off item 3: the rows/block ladder inside ONE window. `--sweep` already runs the whole
+#     2/4/8/16/32 ladder from one locked process (`--rows-list 2,4,8,16,32`), so ONE run is the pair;
+#     `--rows 32` on top only changes which config is the headline timed one, i.e. the §5-recommended one.
+#     Also self-locking.
+.venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time --sweep
+.venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time --sweep --rows 32
+```
+
+**Left open, named.** (a) The polarity question above, which is the main agent's to settle before the
+table is used to pick a direction; (b) the serialized passes measure a warm step (they run after the run's
+own steps, which is deliberate — it is what makes the three comparable), so `burst` here is a warm
+pipelined step and should be sanity-checked against §6's differential row rather than quoted as it; (c)
+the wave path has no stage clock — `note()` ignores submissions outside a measured step on purpose, and
+`notes_ignored` in the report is what would say so out loud if it were ever armed on a wave; (d) the
+`attn` family's launch count per site is lane-dependent above the staging, so `plan_match` is expected to
+read 0 at the 4032 point and that is not a defect; (e) `D`, the dispatch anchor, is still §6's derived
+curve rather than a fresh measurement of this tree's widths — §6's item 4 (the `glue --time --threads
+256/1024` anchor) is what would replace it.
 
 ### Context, not action: there is no prefill
 
