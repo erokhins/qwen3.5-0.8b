@@ -1,0 +1,9 @@
+{
+  "wave_rows_cap": 512,
+  "hipblas_version": "3.6.0",
+  "recorded_on": "2026-10-13",
+  "recorded_by": "engine/gate.py --write-provenance, from a real decode_run NUMERICS line (gemm=hand, wave_rows=512)",
+  "provenance_of": "the pinned fixtures in data/refs/ as they stand. Captured on the hand route, so hipblas_version describes the environment the pins live in rather than a library any of them was produced by.",
+  "why_these_two": "D-11: with two GEMMs in the tree, cross-wave bit-identity is a claim about a specific library's solution per (m,n,k), not a law. See numerics_provenance_checks in engine/gate.py.",
+  "rerecord": "engine/gate.py --fixture <name> --write-provenance"
+}
