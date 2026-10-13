@@ -4312,3 +4312,74 @@ A gate-policy change is the one kind of change I do not take on trust, so the wh
 - `EXPECTED_RED` is now empty. **There is no knowingly-red fixture in this repository any more**, which is a
   different epistemic state than the one D-9 was written to protect, and a better one: every red line that
   remains anywhere would now be a bug rather than a policy.
+
+## Route (c) (2026-10-13): hipBLAS for the ten fat prefill matmuls — behind `--gemm`, default `hand`; W8 green; the bug was one stale operand, not the library
+
+**Scope correction, written here rather than in spike §7.** §6 item 1's list is the authority and it is
+**ten** shapes: `q_proj, k_proj, v_proj, o_proj, in_proj_qkv, in_proj_z, out_proj, gate_proj, up_proj,
+down_proj`. An earlier carve-out note kept `k_proj`/`v_proj` out on the strength of W4's "dead" verdict;
+that verdict is **width-scoped** — it bounds the library's per-call cost against the 1.85 µs dispatch
+floor at decode-like widths, and at 512 rows the hand launch costs ~1.46 ms. So `k_proj`/`v_proj` do go
+to the library for wave bodies. What still governs is the row count: `resolve_wave_gemm` returns the
+hand GEMV for `rows == 1` whatever the flag says, so no decode step changes shape or bits on either side
+of the flag, and `in_proj_a`/`in_proj_b` (N=16) stay in `proj_gemv` at every width — `proj_gemm` refuses
+`rows < 512` so the carve-out cannot rot.
+
+**The seam.** `submit_wave_body` resolves the route once (`lib_gemm`) and every one of the ten sites
+reads it. `proj_gemm` / `mlp_gateup_gemm` / `mlp_down_gemm` record the SAME launchstats family counters
+as the hand launchers, so `LAUNCHSTAT proj=114 mlp_gateup=24 mlp_down=24` per body holds on both sides
+and section (h) and `--time-waves'` counts_match witness stay comparable. The library route adds two
+scratch tiles (`mlp_gate_raw`, `mlp_up_raw`, 3.7 MiB each at 512 rows) and no new casts.
+
+**The bug, and why it looked like the library's.** With the route on, dec8 read 37 FAIL, step-0 logits
+cos 0.42. Three facts localised it: (1) `tmp/gemm_probe.cpp`, which links the engine's own
+`gemm_bf16`, gives **worst 1.00 ULP and cos 1.000000000 against a double reference** on all six engine
+shapes (8×4096×1024, 8×6144×1024, 295×512×1024, 295×3584×1024, 295×1024×3584, 512×1024×2048) with a
+row-swapped negative control that catches everything — so the call form, the pinned 128 MiB workspace,
+the handle and the default-stream choice are right; (2) routing the MLP alone to the library: dec8
+168/0 green; (3) routing everything except the mixer output projection: dec8 168/0 green. The culprit
+was the operand, not the GEMM: the attention mixer leaves its `[n,2048]` output in `sc.a_gated` and
+widens *that* straight into `block_out_f32`, so **`sc.block_out` is never written on an attention
+layer** — the hand GEMV only ever read the F32 widening and never noticed. A library `o_proj` pointed at
+`block_out` computed the output projection from whatever the last GDN layer left there. Fixed by naming
+the right tile per layer (`attn_layer ? sc.a_gated : sc.block_out`, both BF16 at ld = 2048). The trap
+class is the familiar one: a "same numbers either way" claim about an operand is only true if the tile
+the 16-bit route reads is actually produced at that site.
+
+**W8 (determinism) — green, and this is the check that could have killed the route.** Three separate
+process runs per leg, library route, `--prefill-logits all`: 295-token prompt, 1024-token prompt, and
+replay. Logits SHA-256 and sampled-token SHA-256 repeat exactly within each leg (`p300`
+`02794dec…`, `p1024` `227312f8…`, replay `0e5deaf8…`; sampled `3bc117be…`, `dd092b10…`, `3d3b8f8a…`).
+No split-K nondeterminism, no workspace aliasing, no stream surprise. Helper scripts live uncommitted in
+`tmp/` (`w8_run.py`, `route_ab.py`, `gate_ab.sh`, `gemm_probe.cpp`).
+
+**Hand path byte-identity.** Against a pre-route binary built at `40a87ab` in a detached worktree,
+`--gemm hand` reproduces the old logits SHA-256 and the old sampled stream on all three legs, and
+`--gemm hand`'s gate counts equal the pre-route counts.
+
+**Gate counts, both sides, four fixtures** (each a lock-held `engine/gate.py` run, correctness only, no
+timing taken; wall 3–8 s, `util` 1–92 %):
+
+| fixture | `--gemm hand` | `--gemm library` |
+|---|---|---|
+| dec8 | 168 PASS / 0 FAIL | 168 / 0 |
+| dec64f | 650 / 0 | 650 / 0 |
+| dec64t | 647 / 0 | 647 / 0 |
+| p128 | 197 / 0 | 197 / 0 |
+
+`tools/margin_delta.py tmp/margin/hand tmp/margin/library dec8 dec64f dec64t p128` reports **x1.0000 on
+every column** (worst cos deficit and meanrel identical to five decimals). That is not the library
+leaving the numerics untouched — it is the instrument: every row `margin_delta` reads is a *generation*
+step, and a generation step is a one-row body, which the row-count rule sends to the hand GEMV on both
+sides. **The prefill-wave margins are therefore still unmeasured**, and measuring them needs the
+per-row `--prefill-logits all` dumps compared against the pins, column by column, with `k_proj`/`v_proj`
+reported separately — the number §7 W2 wanted. No existing allowance moved, and none was needed for
+anything the current gates can see.
+
+**Unfinished, in order.** (1) the remaining four fixtures on both sides (`dec300f`, `wide520f`, `mt32f`,
+`chunk64b`); (2) the prefill-row margin table described above; (3) §7 W9's timing A/B, which is
+main-agent-only work (TTFT at 64/256/1024/3072 both paths, `--time-waves` attribution both paths — the
+wave attribution predicts proj+mlp's 74.4 % collapsing into single digits and ~305 ms at 1024); (4) the
+default stays `hand` until (1)–(3) exist and the parent decides otherwise; (5) the dead F32 widenings the
+library route leaves behind are still launched, deliberately, because deleting one moves the §07 launch
+bill that section (d) prices (that is §7 W5).
