@@ -24,6 +24,20 @@ int warp_width() {
     return w;
 }
 
+// Rows per block, and therefore the block width: `kRowsPerBlock * warpWidth` threads. ONE constant
+// for both, because the kernel indexes rows as `blockIdx.x*rpb + threadIdx.x/warpSize` — the two
+// must move together or every block silently recomputes the wrong rows.
+//
+// 32, not the prototype's default 8. `prototype/proj_gemv/results.md` swept rows/block on the cold
+// token plan and got 2.991 ms at 8 against 2.785 ms at 32 (+8 %, the best of 2/4/8/16/32), and
+// wrote that moving the default "is a separate, measurable decision for W5" — this is that decision.
+// `bench/performance-status.md` §4's width table says the same direction from the other side: a
+// launch costs 3.75 µs at 256 threads and 2.776 µs at 1024, and decode issues 114 of these launches
+// per token. The arithmetic per row does not depend on the width at all — one wavefront owns one row
+// from staging to `reduce_row`, which is a within-warp butterfly — so this is the rare width change
+// that is bit-identical by construction and needs no margin re-price.
+constexpr int kRowsPerBlock = 32;
+
 // The token tile of the batched form (P5). Shared memory is TPB*IN floats and 16 KiB/block is the
 // budget `prototype/mlp_gemv` settled its gated batched pair on, so 4 rows at in=1024 and 2 at
 // in=2048. A wave with ONE token uses TPB = 1: that is the k=1 launch shape, with the k=1 kernel's
@@ -40,7 +54,6 @@ constexpr int tpb_batch() {
 // decode step still launches (rows/rpb, 1) and a 295-token wave launches (rows/rpb, 74).
 template <int IN, int TPB>
 void launch(const void* weight, const float* x, uint16_t* out, int rows, int tokens, int threads) {
-    constexpr int kRowsPerBlock = 8;   // the prototype's default, and its gated width
     const dim3 grid((rows + kRowsPerBlock - 1) / kRowsPerBlock,
                     (unsigned)((tokens + TPB - 1) / TPB));
     ::proj_gemv_tokens<IN, TPB, false><<<grid, threads>>>(
@@ -87,7 +100,7 @@ void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int 
                                  " tokens=" + std::to_string(tokens) +
                                  "; a wave has at least one token in it");
     }
-    const int threads = 8 * warp_width();
+    const int threads = kRowsPerBlock * warp_width();
     if (in == 1024) {
         if (tokens == 1) {
             launch<1024, 1>(weight, x, out, rows, tokens, threads);
