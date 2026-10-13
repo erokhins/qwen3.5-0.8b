@@ -62,6 +62,12 @@ struct DecodeScratch {
     // nobody configured runs the row-count default, and `--mlp-map interleave|contig` pins one walk
     // for every body instead of asking. `submit_wave_body` resolves it where `n` is known.
     kernels::MlpGateMap mlp_gate_map = kernels::MlpGateMap::kAuto;
+    // Which GEMM a WIDE body uses (route (c): hipBLAS for the ten fat shapes, hand GEMVs for the rest
+    // of the tree's life). It rides here for `mlp_gate_map`'s reason — a run-shape choice that has to
+    // reach the one call site where the body's row count is known — with one difference worth naming:
+    // `resolve_wave_gemm` overrides it for a one-row body, always, because decode's byte-identity is
+    // not a setting. `decode_run --gemm hand` is the A/B side; `submit_wave_body` resolves per body.
+    kernels::WaveGemm wave_gemm = kernels::WaveGemm::kLibrary;
     // Residual ping-pong. NOT aliased into one buffer: `glue_add_norm`'s `s` and `s_out` are both
     // `__restrict__`, so writing the new residual over the one it is reading is a contract violation
     // even though the same thread touches the same index.
@@ -123,6 +129,11 @@ struct DecodeScratch {
     // gate is pinned against; both exist because the two kernels disagree about the dtype.
     uint16_t* mlp_act = nullptr;    // [wave_rows][3584]
     float* mlp_act_f32 = nullptr;   // [wave_rows][3584]
+    // The library route's two raw dots, the price of the one epilogue it unfuses (§3.3): hipBLAS
+    // writes `gate` and `up` as BF16 `C` and `mlp_silu_mul_kernel` reads them to write `mlp_act`.
+    // Untouched by the hand route, which fuses the epilogue inside the kernel that computes the dots.
+    uint16_t* mlp_gate_raw = nullptr;  // [wave_rows][3584]
+    uint16_t* mlp_up_raw = nullptr;    // [wave_rows][3584]
 
     float* logits = nullptr;        // [kVocab] F32 — §03.4's full-logit form, see kernels_lmhead.cpp
 

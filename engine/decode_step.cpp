@@ -276,6 +276,10 @@ DecodeScratch allocate_scratch(int wave_rows) {
 
     sc.mlp_act = alloc<uint16_t>(i);
     sc.mlp_act_f32 = alloc<float>(i);
+    // Route (c)'s two raw dots, same row family and the same argument as `mlp_act`: 3.7 MiB each at
+    // kMaxWaveRows, against a checkpoint of 1.55 GB and a pool this model uses 4 % of.
+    sc.mlp_gate_raw = alloc<uint16_t>(i);
+    sc.mlp_up_raw = alloc<uint16_t>(i);
     sc.logits = alloc<float>(kVocab);
     return sc;
 }
@@ -316,6 +320,8 @@ void free_scratch(DecodeScratch& sc) {
     (void)hipFree(sc.a_part);
     (void)hipFree(sc.mlp_act);
     (void)hipFree(sc.mlp_act_f32);
+    (void)hipFree(sc.mlp_gate_raw);
+    (void)hipFree(sc.mlp_up_raw);
     (void)hipFree(sc.logits);
     sc = DecodeScratch{};
 }
@@ -406,6 +412,34 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         }
     }
 
+    // ---- THE ROW-COUNT SEAM for route (c), in one place. A body of one row is the hand GEMV —
+    // always, whatever the run asked for, because "decode is byte-identical" is a property of the rule
+    // and not of each call site remembering it — and a wider body takes hipBLAS for the ten fat shapes
+    // when `sc.wave_gemm` says so. Same shape as `resolve_mlp_gate_map` below and `kernels_attn.cpp`'s
+    // plan choice: the row count decides, and it is decided here because this is where `n` is.
+    //
+    // `project` is the one spelling of "this projection, whichever GEMM won", because the two take the
+    // SAME tile in different widths: the hand GEMV is instantiated PACK_X=false and so reads the F32
+    // widening (`x_f32`), while a library call takes a 16-bit `A` operand and reads what glue wrote
+    // (`x_bf16`). Same numbers either way — a BF16 widened to F32 is exact — which is what makes the
+    // two interchangeable at a call site rather than a numerics change dressed as one.
+    //
+    // What deliberately does NOT go through it: `in_proj_a`/`in_proj_b` (N=16, below the ridge at every
+    // width, §3.2 and §7 W4) call `proj_gemv` directly at any width, and every mixer, glue, cast and
+    // `lm_head` site is untouched. The F32 widenings stay where they are even when this route makes one
+    // of them unread: deleting a launch is a change to the §07 launch bill (`planned_launch_counts()`,
+    // `gate.py` section (d), the wave plan in `stage_clock.cpp`), and §7 W5 prices that separately.
+    const bool lib_gemm =
+        kernels::resolve_wave_gemm(sc.wave_gemm, n) == kernels::WaveGemm::kLibrary;
+    const auto project = [&](const void* weight, const uint16_t* x_bf16, const float* x_f32,
+                             uint16_t* out, int rows, int in) {
+        if (lib_gemm) {
+            kernels::proj_gemm(weight, x_bf16, out, rows, in, n);
+        } else {
+            kernels::proj_gemv(weight, x_f32, out, rows, in, n);
+        }
+    };
+
     // ---- §02.3: x = E[y] for every row of the wave. One row of the tied table per token, one D2D
     // copy each (§01.1: there is no second table, so `lm_head.weight` and this are the same bytes).
     // A gather kernel would fold these n copies into one launch; that is P5's launch-bill question,
@@ -458,22 +492,24 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // §05.1. q_proj's 4096 rows stay interleaved [q|gate] per head because that is the stored
             // layout (§10.5 measured the split reading at cos −0.14), and the block de-interleaves it.
             stageclock::note(stageclock::kProj);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kQProj), sc.norm_f32, sc.a_q,
-                               kQprojRows, kHidden, n);
+            project(layer_dev(weights, layer, leaf::kQProj), sc.norm, sc.norm_f32, sc.a_q,
+                    kQprojRows, kHidden);
             stageclock::note(stageclock::kProj);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kKProj), sc.norm_f32, sc.a_k,
-                               kKvProjRows, kHidden, n);
+            project(layer_dev(weights, layer, leaf::kKProj), sc.norm, sc.norm_f32, sc.a_k,
+                    kKvProjRows, kHidden);
             stageclock::note(stageclock::kProj);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kVProj), sc.norm_f32, sc.a_v,
-                               kKvProjRows, kHidden, n);
+            project(layer_dev(weights, layer, leaf::kVProj), sc.norm, sc.norm_f32, sc.a_v,
+                    kKvProjRows, kHidden);
         } else {
-            // §04.1: four projections off the tile.
+            // §04.1: four projections off the tile. The two fat ones (qkv at N=6144, z at N=2048) take
+            // the route; the two 16-row ones are the §3.2 skinny pair and call `proj_gemv` directly at
+            // any width, which is the carve-out stated as a call rather than as a comment.
             stageclock::note(stageclock::kProj);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjQkv), sc.norm_f32, sc.g_raw,
-                               kQkvRows, kHidden, n);
+            project(layer_dev(weights, layer, leaf::kInProjQkv), sc.norm, sc.norm_f32, sc.g_raw,
+                    kQkvRows, kHidden);
             stageclock::note(stageclock::kProj);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjZ), sc.norm_f32, sc.g_z,
-                               kValueDim, kHidden, n);
+            project(layer_dev(weights, layer, leaf::kInProjZ), sc.norm, sc.norm_f32, sc.g_z,
+                    kValueDim, kHidden);
             stageclock::note(stageclock::kProj);
             kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjB), sc.norm_f32, sc.g_b,
                                kNumValueHeads, kHidden, n);
@@ -605,9 +641,9 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // `kValueDim` are both 2048 — so this is one call site, and it is the §03.2 addend that
         // `add_norm` below consumes for every row of the wave.
         stageclock::note(stageclock::kProj);
-        kernels::proj_gemv(layer_dev(weights, layer, attn_layer ? leaf::kOProj : leaf::kOutProj),
-                           sc.block_out_f32, sc.delta, kHidden,
-                           attn_layer ? kQwidth : kValueDim, n);
+        project(layer_dev(weights, layer, attn_layer ? leaf::kOProj : leaf::kOutProj),
+                sc.block_out, sc.block_out_f32, sc.delta, kHidden,
+                attn_layer ? kQwidth : kValueDim);
 
         // ---- §03.2 add #1: the mixer's output onto the residual, and the post-attention norm.
         add_norm(sc.delta, layer_dev(weights, layer, leaf::kPostAttnNorm));
@@ -627,14 +663,29 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // for every body.
         const kernels::MlpGateMap gate_up_map = kernels::resolve_mlp_gate_map(sc.mlp_gate_map, n);
         stageclock::note(stageclock::kMlpGateup);
-        kernels::mlp_gateup((const uint16_t*)layer_dev(weights, layer, leaf::kGateProj),
-                            (const uint16_t*)layer_dev(weights, layer, leaf::kUpProj), sc.norm_f32,
-                            sc.mlp_act, kIntermediate, kHidden, n, gate_up_map);
+        if (lib_gemm) {
+            // Two library dots and the epilogue they unfuse, counted as the one gateup site the §07 bill
+            // prices (`kernels_mlp.cpp` says why the count is per site, not per kernel).
+            kernels::mlp_gateup_gemm(layer_dev(weights, layer, leaf::kGateProj),
+                                     layer_dev(weights, layer, leaf::kUpProj), sc.norm,
+                                     sc.mlp_gate_raw, sc.mlp_up_raw, sc.mlp_act, kIntermediate,
+                                     kHidden, n);
+        } else {
+            kernels::mlp_gateup((const uint16_t*)layer_dev(weights, layer, leaf::kGateProj),
+                                (const uint16_t*)layer_dev(weights, layer, leaf::kUpProj),
+                                sc.norm_f32, sc.mlp_act, kIntermediate, kHidden, n, gate_up_map);
+        }
         stageclock::note(stageclock::kCast);
         kernels::cast_bf16_to_f32(sc.mlp_act, sc.mlp_act_f32, n * kIntermediate);
         stageclock::note(stageclock::kMlpDown);
-        kernels::mlp_down((const uint16_t*)layer_dev(weights, layer, leaf::kDownProj),
-                          sc.mlp_act_f32, sc.delta, kHidden, kIntermediate, n);
+        if (lib_gemm) {
+            // `sc.mlp_act`, not the widening above: the library reads a 16-bit `A` operand.
+            kernels::mlp_down_gemm(layer_dev(weights, layer, leaf::kDownProj), sc.mlp_act, sc.delta,
+                                   kHidden, kIntermediate, n);
+        } else {
+            kernels::mlp_down((const uint16_t*)layer_dev(weights, layer, leaf::kDownProj),
+                              sc.mlp_act_f32, sc.delta, kHidden, kIntermediate, n);
+        }
 
         // ---- §03.2 add #2: the MLP's output onto the residual, fused with the NEXT norm — the
         // next layer's input norm, or after layer 23 the final norm (§03.4). This is why the token
