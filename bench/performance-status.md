@@ -883,3 +883,39 @@ explained by "two streams" because there is only one stream now. The two candida
 leaves standing are the row tail (the `down` shape's 0.629 was never two-stream at all) and whatever Q9's
 `A_mdn_*` pair was actually measuring. Also unchanged and still owed: `chunk64b` step 0 with no sized rule,
 and the mixed one-pass/streaming wave grid priced only by engine self-consistency.
+
+### Wave-path attribution: what a 1024-token prefill actually spends its second on (2026-10-13, zero subagents, foreground, lock `waveattr2`)
+
+`--time-waves` (instrument `61a11dd`) replays a run's prompt wave from a fresh state, and the witnesses came
+out first: `WAVEPARITY tokens_identical=1 logits_bitidentical=1` at both granularities, `dec8 170/0` and
+`chunk64b 378/0` gate counts unchanged. Wave wall for a 1024-token prompt at `wave_rows=512`: **1013.07 ms**,
+which reconciles with the 1054.6 ms TTFT in §5 once the load and sample overhead is accounted for.
+
+| family | ms | **share** | launches | ms/launch |
+|---|---|---|---|---|
+| `proj` | 333.74 | **32.9 %** | 228 | 1.464 |
+| `mlp_down` | 218.98 | **21.6 %** | 48 | 4.562 |
+| `mlp_gateup` | 201.27 | **19.9 %** | 48 | 4.193 |
+| `gdn_rec` | 125.12 | **12.4 %** | 18432 | 0.0068 |
+| `attn` | 108.80 | **10.7 %** | 12 | 9.067 |
+| `gdn_conv` / `gdn_gated_norm` / `glue` / `gdn_gates` | 11.08 | 1.1 % | 206 | — |
+| unattributed | ~14.6 | 1.4 % | — | — |
+
+**Matmul is 74.4 % of the wave** (`proj` + `mlp_*` = 754.0 ms of 1013.1), which is the ≥70 % case the route
+spike pre-registered — so the library route is the whole first act and **P9 stays deferred rather than being
+funded in parallel.** The rest follows arithmetically, with the mix's own measured 22.3 TFLOP/s and 1017.9
+GFLOP per 1024-token wave:
+
+- **Library matmul alone:** 754 ms → **45.6 ms**, so TTFT ≈ **305 ms → ~3,350 prompt tok/s (3.4× today)**.
+- **Plus P9** halving the serial `gdn_rec`: ≈ 243 ms → **~4,200 tok/s**.
+- **Plus attention halved** (108.8 ms at 12 launches, the widest single line after matmul): ≈ 189 ms →
+  **~5,400 tok/s.** So the original 5k target is reachable, but only with all three; matmul alone tops out near
+  3.3k and everything after that is the non-matmul half.
+
+Two secondary findings worth their own lines. **The engine's hand GEMMs run at ~0.8–0.9 TFLOP/s** — `mlp_down`
+costs 4.562 ms per 512-row launch of a shape hipBLAS does in 0.112 ms, which is a **37× gap**, not the 6–8×
+the output-width story implied; the vector-path ceiling in `devices/strix-halo-compute.md` (~2.9 TFLOP/s) is
+what the hand kernels are approaching, and the matrix units are 8× above even that. And **`gdn_rec` is 18,432
+launches for 12.4 % of the time** — 6.8 µs each, so it is neither dispatch-bound nor arithmetic-bound; it is
+the serial recurrence doing small work many times, which is exactly the shape P9's chunked scan exists to
+break. The attribution is honest about its own residual: 1.4 % unattributed, stated rather than absorbed.
