@@ -56,6 +56,30 @@ void check_tokens(const char* what, int tokens) {
     }
 }
 
+// The unfused SwiGLU epilogue (route (c)): hipBLAS writes the two dots as BF16 `C`, and this turns
+// them into `act`. It is the fused kernel's per-element rule and nothing else — compare
+// `mlp_gemv_kernels.h`'s `float gf = bf(g); float sg = bf(fb(gf * (1/(1+expf(-gf))))); act = rnd(sg *
+// bf(u))`: three roundings, because HF's `F.silu` returns BF16 and the product is a BF16 tensor op,
+// and `prototype/mlp_gemv`'s F2 gate is what pinned that policy (the all-F32 reading differs from the
+// pin in 27 % of `act` elements). Given equal dots this and the fused kernel agree bit for bit; what
+// a library dot moves is the dot's own reassociation, which is a band question (§10.1), not this
+// kernel's.
+//
+// One element per thread with no cross-thread reduction, so — unlike every GEMV width in this
+// directory — the block width here cannot move a bit. 256 is what the other elementwise engine passes
+// (`kernels_cast.cpp`, `glue`) use.
+constexpr int kSiluThreads = 256;
+
+__global__ void mlp_silu_mul_kernel(const hip_bfloat16* __restrict__ gate,
+                                    const hip_bfloat16* __restrict__ up,
+                                    hip_bfloat16* __restrict__ act, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float gf = bf(gate[i]);
+    const float sg = bf(fb(gf * (1.0f / (1.0f + expf(-gf)))));
+    act[i] = rnd(sg * bf(up[i]), NEG_NONE);
+}
+
 }  // namespace
 
 MlpGateMap parse_mlp_gate_map(const std::string& name) {
@@ -213,6 +237,44 @@ void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows,
                                  " is not one of the two shapes the gated kernel instantiates");
     }
     launchstats::mlp_down().record(1);   // see the note in `mlp_gateup`
+}
+
+// The MLP's first half through hipBLAS (route (c)): two matmuls and the epilogue the library unfuses.
+// Three GPU submissions for what the hand form does in one, and it counts as ONE `mlp_gateup` site —
+// the same accounting `engine/launch_stats.h` already applies to the attention site, which submits
+// 1-3 kernels and counts once, because the number has to be a function of the wave width and not of
+// how each family happens to be spelled on this particular backend. `gate.py` section (h) and the
+// `--time-waves` attribution both price one gateup site per layer per body, and this keeps that true
+// for the library route.
+//
+// `gate_raw`/`up_raw` are the wave's [tokens, rows] dots and `act` is the SAME buffer the hand form
+// writes, so everything downstream (the widening that feeds `mlp_down`, and the library's own BF16
+// read of it) sees one `act`.
+void mlp_gateup_gemm(const void* w_gate, const void* w_up, const void* x, void* gate_raw,
+                     void* up_raw, uint16_t* act, int rows, int in, int tokens) {
+    check("gateup", rows, in);
+    check_tokens("gateup", tokens);
+    if (!gate_raw || !up_raw) {
+        throw std::runtime_error("mlp_gateup_gemm: the gate/up stage tiles are mandatory — without "
+                                 "them there is no epilogue input (rows=" + std::to_string(rows) +
+                                 " tokens=" + std::to_string(tokens) + ")");
+    }
+    gemm_bf16(w_gate, x, gate_raw, tokens, rows, in);
+    gemm_bf16(w_up, x, up_raw, tokens, rows, in);
+    const int elements = tokens * rows;
+    mlp_silu_mul_kernel<<<(elements + kSiluThreads - 1) / kSiluThreads, kSiluThreads>>>(
+        (const hip_bfloat16*)gate_raw, (const hip_bfloat16*)up_raw, (hip_bfloat16*)act, elements);
+    launchstats::mlp_gateup().record(tokens);
+}
+
+// The MLP's second half through hipBLAS. `act` is the BF16 tile itself, not the F32 widening the hand
+// kernel reads, for the reason given at every site of this route: a library call takes a 16-bit `A`.
+void mlp_down_gemm(const void* w_down, const void* act, uint16_t* out, int rows, int in,
+                   int tokens) {
+    check("down", rows, in);
+    check_tokens("down", tokens);
+    gemm_bf16(w_down, act, out, tokens, rows, in);
+    launchstats::mlp_down().record(tokens);
 }
 
 }  // namespace engine::kernels

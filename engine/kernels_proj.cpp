@@ -119,4 +119,32 @@ void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int 
     }
 }
 
+// The library form of the same projection (route (c)). One hipBLAS call per projection per body, and
+// it records the SAME family counter `proj_gemv` records: `LAUNCHSTAT family=proj` has to mean "one
+// projection site" whichever GEMM ran, or `gate.py` section (h) and the `--time-waves` attribution
+// split on the route instead of on the wave width — and those counters are the instrument this route
+// is graded with. `x` is BF16 here: the library takes a 16-bit `A` operand, so it reads the tile glue
+// wrote instead of the F32 widening the hand kernel needs (PACK_X=false, see the note above).
+//
+// The `rows` guard is W4's verdict written down rather than remembered: of the thirteen block matmuls
+// the two 16-row GDN projections are below the arithmetic-intensity ridge at every width (§3.2), and
+// the smallest shape the funded list contains is `k_proj`/`v_proj` at N=512. A call site that routed
+// `in_proj_a`/`in_proj_b` here would be paying 12–22× the dispatch floor for a 162 KiB call, so this
+// refuses instead of trusting the caller.
+void proj_gemm(const void* weight, const void* x, uint16_t* out, int rows, int in, int tokens) {
+    constexpr int kSmallestLibraryRows = 512;
+    if (rows < kSmallestLibraryRows) {
+        throw std::runtime_error("proj_gemm: N=" + std::to_string(rows) +
+                                 " is a skinny shape (in_proj_a/in_proj_b, N=16); §7 W4 measured the"
+                                 " library call there at 12-22x the dispatch floor and it stays in"
+                                 " proj_gemv whatever the body's width is");
+    }
+    if (tokens < 1) {
+        throw std::runtime_error("proj_gemm: tokens=" + std::to_string(tokens) +
+                                 "; a wave has at least one token in it");
+    }
+    gemm_bf16(weight, x, out, tokens, rows, in);
+    launchstats::proj().record(tokens);
+}
+
 }  // namespace engine::kernels
