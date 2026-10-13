@@ -919,3 +919,55 @@ what the hand kernels are approaching, and the matrix units are 8× above even t
 launches for 12.4 % of the time** — 6.8 µs each, so it is neither dispatch-bound nor arithmetic-bound; it is
 the serial recurrence doing small work many times, which is exactly the shape P9's chunked scan exists to
 break. The attribution is honest about its own residual: 1.4 % unattributed, stated rather than absorbed.
+
+### Route (c) measured: hipBLAS on wave bodies, and what it is still gated out on (2026-10-14, zero subagents, foreground, lock `W9b`)
+
+Implementation `77487e8..d475b8d` (five pieces, `--gemm library|hand`, **default `hand`**), W8 determinism green
+(§7 item 4: three separate process runs per leg, logits and sampled-token SHA-256 identical). Timings below are
+the main agent's, best-of-3, same window, same binary, one flag apart — a true A/B.
+
+| prompt lanes | TTFT `hand` | TTFT `library` | prompt tok/s `hand` | **`library`** | verdict vs §7 W9 |
+|---|---|---|---|---|---|
+| 64 | 79.2 ms | 85.7 ms | 808.5 | 747.0 | **regression, +8.2 %** |
+| 256 | 263.2 | **130.8** | 972.5 | **1,956.5** | **pass** |
+| 1024 | 1077.4 | **384.7** | 950.5 | **2,662.1** | **pass** (≤400 ms) |
+| 3072 | 3869.0 | **1797.8** | 794.0 | **1,708.7** | **pass** (2.15×) |
+
+The pre-registration said ~305 ms at 1024 and it came in at **384.7 ms** — 26 % off, in the right direction, and
+the attribution says why:
+
+| family | `hand` share | **`library` share** | ms after |
+|---|---|---|---|
+| matmul (`proj` + `mlp_*`) | **74.4 %** | **21.2 %** | 69.7 |
+| `gdn_rec` | 12.4 % | **38.2 %** | 125.4 |
+| `attn` | 10.7 % | **33.3 %** | 109.2 |
+| wave wall | 1013.1 ms | **328.5 ms** | — |
+
+Matmul did what the rate table said (754 ms → 69.7 ms, and the residual is dispatch, not arithmetic), which
+**inverts the profile exactly as predicted**: with matmul cheap, the serial GDN recurrence and attention are now
+71 % of prefill, so **P9 and the attention kernel are the next funded items** rather than deferred ones. §7 W9 is
+**passed** at 256/1024/3072 and **failed at 64** (small-body dispatch: the library path loses ~6 ms there, which
+is the same per-call floor W4 was about).
+
+**But the route is not admitted, and the default stays `hand`.** The worker tested four fixtures and reported
+green; the other four, which I ran, are red — `dec300f` 3 FAIL, `wide520f` 4, `mt32f` 5, `chunk64b` 7 — and they
+fail in three *different* ways, only one of which is mine to wave away:
+
+1. **Per-fixture route allowances exceeded** (`wide520f` step 17 cos deficit 1.2817e-04 vs allowance 1.1396e-04;
+   `mt32f` steps 3 and 24 meanrel 1.17 % and 1.49 % vs 1.16 %). Every one of these is **inside the flat §10 floors**
+   (5.0e-04 cos, 5.0e-02 meanrel) — the message says so explicitly — so this is the tightened D-2 allowance being
+   too tight for a reassociating matmul, which is a real band question I will decide from a prefill-row margin
+   table, not from these three numbers.
+2. **Wave-width dependence** — `the 59-wave side writes bit-identical logits to the one-wave side` now fails under
+   `library` and passed under `hand`. This is not a band issue: the hand kernels' dots are per-row, so a row's
+   result was independent of how rows were grouped into bodies; a library GEMM's reassociation depends on `M`, so
+   **the same prompt will produce different logits depending on the wave-row cap**. That is a new
+   reproducibility caveat, not a numerical error, and it needs stating before anyone ships on this path.
+3. **A real token flip** — `chunk64b` step 11: the pin ties exactly 2-way at 14.75 (ids 17024, 19177) and the
+   library side picks the other one, which the tie policy does not admit because the policy admits *ties the engine
+   reproduces*, not ties the engine resolves differently. One flipped token on a known-fragile fixture, and exactly
+   the chaos-floor behaviour A-18 warns about — but it is a **generation** step, so it is downstream drift, and I
+   do not get to call it noise without showing where it entered.
+
+So the honest state is: **a 2.8× prefill win is implemented, deterministic, and switched off**, gated out by two
+band-level questions and one token flip, all of them now measurable rather than speculative.
