@@ -127,3 +127,18 @@ speccheck's MTP is bit-lossless but *loses* on CPU (~21 vs ~24 tok/s, accept 0.6
 GPU the draft's 0.0409 GB is cheap against 1.605 GB, so the trade may flip. Gate = G8 accept
 rate plus a measured tok/s comparison with drafting off. If it does not win on GPU either, say
 so in the ledger and stop.
+
+### D-11 — **ACCEPTED: option A** for route (c)'s wave-width dependence (user, 2026-10-14)
+
+The dependence is accepted rather than engineered away: **freeze `kMaxWaveRows` as part of pin provenance,
+record the hipBLAS version alongside it, and replace the cross-wave-count *bit-identity* gate with a band check
+sized by a floor probe** (the `route_allowance.py` pattern — establish the legal drift by rotating the width
+yourself and measuring it, then bound that). Changing the wave cap becomes an explicit numerics change requiring
+re-pinning under the standing D-2 rule. Cost: gate-policy work plus a re-pinning pass; no speed given up. What is
+relinquished is a structural invariant that was never defended, replaced by a measured bound.
+
+**Conditional on the user's requirement, which is the gate on this decision:** *accepting* the dependence is not
+accepting the observed difference as rounding. Before the default flips, the hand↔library delta must be proved to
+be reassociation and nothing more, **element by element and step by step**, not by aggregate cos/meanrel — see
+`bench/plan-route-c-audit-2026-10-14.md`. If any element moves further than the isolated per-shape reassociation
+floor allows, that is a bug, not a band, and D-11 is void.
