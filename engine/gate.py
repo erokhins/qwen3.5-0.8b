@@ -6,6 +6,7 @@
     .venv/bin/python engine/gate.py --smoke 300     # free run, 300 tokens, smoke only
     .venv/bin/python engine/gate.py --no-engine     # fixture pairing + state sizes, zero device
     .venv/bin/python engine/gate.py --selftest      # proves THIS gate discriminates: no engine, no device
+    .venv/bin/python engine/gate.py --slack-region   # which steps this fixture's pin could not decide
     .venv/bin/python engine/gate.py --dry-run       # every section against a CPU stand-in
     .venv/bin/python engine/gate.py --build         # run engine/build.sh first
     .venv/bin/python engine/gate.py --binary P --model DIR --work DIR
@@ -30,10 +31,14 @@ top-two logits, 5 % logits noise that leaves the argmax alone, a §07.5 stop che
 prompt phase, a replay step fed the wrong token, and — at a step the pin ties — the engine landing on
 an untied id (must FAIL), on the pin's other tied id (must PASS as TIE), and on the pin's own top-1
 with its logit 1 BF16 ULP off the tied payload (must PASS, because a step where engine and pin agree
-is an ordinary match: D-1) — and requires each to fail at the step it was injected at, because a
-negative that every check would catch proves nothing (`prototype/mlp_gemv/results.md`). It is the only
-part of a gate that can be validated before the engine has ever run, and it is why a first device run
-need not double as a test of this file.
+is an ordinary match: D-1) — plus one quantization-slack perturbation aimed three ways: at a step the
+pin could not decide, where lifting the pin's runner-up one BF16 ULP over the pinned maximum must PASS
+as SLACK, at the nearest pinned id outside that step's margin (must FAIL), and at the same lift on the
+nearest step the pin DID decide (must FAIL, because that is the negative that catches a slack bound
+sized too generously). It requires each to fail at the step it was injected at, because a negative that
+every check would catch proves nothing (`prototype/mlp_gemv/results.md`). It is the only part of a gate
+that can be validated before the engine has ever run, and it is why a first device run need not double as
+a test of this file.
 
 Sections, in the order the task fixed them plus the ones the deep fixture needed:
 
@@ -51,11 +56,16 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       not a thing this gate does silently. `--selftest` injects each of those four cases.
   (a) SAMPLED IDS — the engine's sample after the prompt's last token plus its generation samples
       must equal the manifest's `greedy_continuation`, exactly. §10.1 G7 requires token-for-token
-      exactness, and a token id is an integer: there is no band to argue about. The ONE exception is a
-      step where the pin itself is an exact tie AND the engine picked one of the other tied ids, which
-      leaves an argmax with no defined winner to agree with; that is a named, proved exception (TIE
-      POLICY, next to the band rationale), every use of it is printed as a TIE line and counted in the
-      summary, and a step where the engine reproduced the pin's own id is never one of its uses.
+      exactness, and a token id is an integer: there is no band to argue about. There are TWO named,
+      proved exceptions, each printed with every number it used and counted in the summary:
+        * TIE — the pin itself is an exact tie AND the engine picked one of the other tied ids, which
+          leaves an argmax with no defined winner to agree with (TIE POLICY, next to the band
+          rationale). A step where the engine reproduced the pin's own id is never one of its uses.
+        * SLACK — the pin has a unique winner, but its margin is smaller than the element error that
+          step's own meanrel band licenses, so the pinned token is one the reference never decided
+          (QUANTIZATION SLACK, below the tie policy; sized by `engine/slack_size.py`, and the only
+          step in the corpus that uses it today is `chunk64b` step 0). Same scope rule as the tie
+          policy: an engine that reproduced the pin's id consults neither.
   (b) THE LOGITS — each step's logits against that step's pinned `logits_last.npy`, inside the band
       rule printed for that step: the measured ROUTE ALLOWANCE where `engine/route_allowance.py` has
       priced this fixture, the flat published §10 floors where it has not. The rule in force is named on
@@ -453,11 +463,92 @@ TIE_POLICY = ("exact tie in the pin (>= 2 ids share the max on the BF16 payload)
               " id other than the pin's top-1, that id is one of the tied ones, and the engine's own"
               " logit at it rounds back to the shared tied payload")
 
+# QUANTIZATION SLACK — the second named exception, and the one D-9 refused to invent until it was
+# sized. DECIDED 2026-10-13; the bands are untouched by it, and it is NOT a widened tolerance: the
+# vector band still binds at every step it excuses a token at, and the token exception has a number
+# under it, not a word.
+#
+# The shape it covers is the step next door to D-1's tie. `chunk64b` step 0: the pin puts 8337 at
+# 15.625 and 20619 at 15.500, so there IS a unique winner — by 0.125, which is 2 BF16 ULP at that
+# magnitude. The engine's legal element error at that step is larger than the margin it would have to
+# clear (maxabs 0.2509 measured, D-9), so "the engine must reproduce 8337" asks a bit-exact question
+# of a bit-tolerant fixture: any legal bf16 route can flip it, and demanding the pin's id is demanding
+# a coin-flip land a particular way. D-9 kept it RED rather than invent a threshold. This is the
+# threshold, derived.
+#
+# THE BOUND, per judged step j:
+#
+#     bound(j) = meanrel cap in force at step j  x  mean|pin_j|
+#
+# That is the band the gate already polices, read out in logits units instead of as a ratio. meanrel is
+# defined (§10.2) as mean|Δ| / mean|ref|, so `cap x mean|pin|` is the largest element error this step's
+# own meanrel check would pass if the error were spread evenly over the vocabulary — the same cap
+# `rule_for_step` prints on the step line, from this fixture's own `route_allowance.json` where one is
+# priced and from §10.2's flat 5 % ceiling where it is not. No new constant, no new measurement, no new
+# error model: the two inputs are a policed cap and a pinned tensor. `engine/slack_size.py` prints it
+# for every fixture and every step, and re-derives it from `gate.py` rather than keeping a copy, in the
+# spirit of `prototype/mlp_gemv/floor_probe.py` reading its band from `run.py`.
+#
+# Why the meanrel half and not the cos half: cos is scale-invariant, so it has no element-space reading
+# at all. Turning a cos deficit cap into a max-element bound (‖Δ‖ <= 2·sqrt(cap)·‖ref‖) yields ~83 at
+# `chunk64b` step 0 — a bound that excuses any token ever sampled. meanrel is the half of the policed
+# band with a unit, and the only one that can be quoted in logits.
+#
+# Why it is not a tolerance fitted to the case. At `chunk64b` step 0 the bound comes out 0.16205 and
+# the engine's own measured element error there is 0.2509: the bound is SMALLER than the error this
+# engine demonstrably carries at that step. (Measured mean is not the licence: mean|Δ| at that step is
+# 0.0389, well under the margin, which is exactly why the cap is used and the measurement is not.)
+#
+# One wrinkle, stated rather than hidden. meanrel is an AVERAGE, so read literally it licenses a single
+# element to be wrong by cap x mean|pin| x N — ~4x10^5 logits at `chunk64b` step 0, the same degeneracy
+# the cos half has. The reading used is the per-element average, cap x mean|pin|: it is the smaller figure
+# of the two, and the smaller of the two against what this step is measured to carry (0.2509), which is
+# what makes it defensible as the scale below which a pinned top-2 simply cannot be decided.
+#
+# What the bound moves with, because it will move: it is the licence IN FORCE, not a property of the pin.
+# `chunk64b` is unpriced, so its cap is §10.2's flat 5 %. Pricing it — D-2's standing offer, and the note
+# atop every `chunk64b` gate run says so — would put that fixture's own margin in place of 5 %, which at
+# step 0 is nearer the 1.1990 % the run itself reports. The bound would fall to ~0.04, below this step's
+# 0.125 margin, and step 0 would fall back OUT of the region and back to RED — correctly, because a tighter
+# licence is a narrower permission to be wrong. Anyone who prices `chunk64b` re-runs `engine/slack_size.py`
+# before concluding the slack rule broke: the licence changed, the rule did not.
+#
+# SCOPE, and it is deliberately tiny. Measured over all eight fixtures (`engine/slack_size.py`, the
+# whole table is in `engine/results.md`): the only steps in the corpus where a UNIQUE winner's margin
+# is inside the bound are four in `chunk64b` — steps 0, 1, 13 and 22, every one of them a 1-ULP pin
+# margin — and none anywhere else. The nearest decidable step in the corpus is `dec300f` step 30, whose
+# margin is 1.46x its own bound, and `dec64f` step 29 at 2.23x, so the line is not comfortably clear of
+# the nearest green step and a bound 46 % larger would start excusing `dec300f`. That is why the
+# injections are aimed at exactly those two steps. The exact-tie steps that also sit under the bound
+# (`dec64f` 17 and 18, `mt32f` 11, `chunk64b` 11) belong to D-1's proved-tie predicate — a pin with no
+# unique winner is a different question with a stricter answer (its leader set is payload-equality, and
+# at `chunk64b` 11 that set is 2 of the 4 ids inside this bound) — so `step_slack` refuses any step
+# whose pin does not have a single winner, and D-1 is never overridden silently.
+#
+# THE PREDICATE, admissible only if ALL of: the pin has a unique winner at the step; the engine's id is
+# NOT that winner (D-1's scope rule — a step where the engine reproduced the pin's id consults no
+# exception, and the step still gets a note when it sits inside the region); the pin's top-1/top-2
+# margin is smaller than bound(j); the engine's id is one of the pinned ids lying inside that margin
+# (printed, and at `chunk64b` step 0 it is exactly the pair 8337/20619); and every other judged step of
+# the generation still matches, which is the aggregate id-list check doing its usual job — one excused
+# token may not drag a changed chain with it. §06.5's `y0` row gets no slack: nothing polices a vector
+# band on that row, so there is no cap to read a bound from and the rule fails closed there.
+#
+# Everything it used is printed on the line — both pinned values, the margin, that margin in ULP, the
+# bound, the cap and mean|pin| it came from, which rule set the cap, the leader ids, and the engine's own
+# values at each. The engine's own gap between the two is printed and NOT gated: it is the engine's
+# business which way its coin landed, and gating it would be a new band. `report()` counts the uses.
+SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller than the element error"
+              " this step's own meanrel band licenses (cap x mean|pin|), and the engine's id is one of"
+              " the pinned ids inside that margin")
+
 fails: list[str] = []
 fail_names: list[str] = []    # the check NAME of every failure, for the D-9 expected-red split below
 notes: list[str] = []
 ties: list[str] = []        # one entry per generation step resolved by the tie policy; counted in report()
 tie_notes: list[str] = []   # tied steps the engine matched outright: printed, NOT policy decisions (D-1)
+slack: list[str] = []       # steps admitted by the quantization-slack rule; counted in report()
+slack_notes: list[str] = [] # steps inside the slack region the engine matched outright: notes, not uses
 
 
 def check(ok: bool, name: str, detail: object = "") -> bool:
@@ -650,6 +741,96 @@ def tie_verdict(step: int, eng, sampled: int) -> tuple[str, bool, str]:
             + ("" if held else " | NOT ADMISSIBLE"))
 
 
+def meanrel_cap(step: int, row=None):
+    """`(cap, the sentence naming where the cap comes from)` for step `step`, or None if there is none.
+
+    The cap is the meanrel band this gate already polices at that step — `rule_for_step`'s second slot —
+    read here so the slack rule can quote the same number the band line quotes. `row` is the fixture's
+    cached allowance row when the caller already has one; when it is None the file is read quietly with
+    `allowance_row`, which is what the CPU-side injections need (they run before section (b), and a
+    stale allowance must refuse rather than double-report the same FAIL). `PREFILL_ROW` gets None on
+    purpose: section (b) judges no vector band on §06.5's row, so there is no licensed element error
+    there and the slack rule has nothing honest to compare a margin against.
+    """
+    if step == PREFILL_ROW:
+        return None
+    if row is None:
+        row = allowance_row(step)
+    if row is None:
+        return (BAND["meanrel_hard"],
+                f"flat §10.2 cascade ceiling {BAND['meanrel_hard']:.2%}, because {REFS.name} carries no"
+                f" {ALLOWANCE_FILE}")
+    return (float(row["allowance_meanrel"]),
+            f"{REFS.name}'s own meanrel allowance at step {step}")
+
+
+def step_slack(step: int, ref, row=None):
+    """The quantization-slack facts for one judged step, or None when the rule does not apply.
+
+    Returns `{top1, top2, v1, v2, margin, ulps, bound, cap, cap_src, meanabs, leaders, numbers}` for a
+    step whose pin has a UNIQUE winner and a policed meanrel band, and None otherwise — None is the
+    fail-closed answer, and it is what keeps D-1's proved-tie predicate (a pin with no winner at all) and
+    §06.5's `y0` row out of this rule's reach instead of being quietly folded into it.
+
+    `ref` is the step's PINNED logits as `load_pin` widens them. The margin is a question about values,
+    not about payloads — payload equality is what a tie means, and that question is `pin_tie`'s — so
+    widening is the right reading here and it avoids re-reading a 1 MB tensor the caller has already
+    loaded. `numbers` is the sentence with every figure on it, built once so the admitting line and the
+    refusing line cannot quote different numbers.
+    """
+    cap_src = meanrel_cap(step, row)
+    if cap_src is None:
+        return None
+    cap, cap_src = cap_src
+    wide = np.asarray(ref, dtype=np.float32).reshape(-1)
+    order = np.argsort(wide)[::-1]
+    top1, top2 = int(order[0]), int(order[1])
+    v1, v2 = float(wide[top1]), float(wide[top2])
+    margin = v1 - v2
+    if margin <= 0.0:
+        return None                      # no unique winner: D-1's proved-tie predicate owns this step
+    meanabs = float(np.abs(wide).mean())
+    bound = cap * meanabs
+    # `order` is the id axis sorted by value, so the mask has to be taken on the SAME axis: `wide[order]`
+    # is the descending value list and `order[mask]` is the ids it belongs to. Masking `order` with a mask
+    # computed on `wide` (the id axis) is the kind of one-line slip that prints a plausible pair of wrong
+    # ids — at chunk64b step 0 it named 74123 and 57529 instead of 8337 and 20619.
+    leaders = [int(i) for i in order[wide[order] >= v1 - bound]]
+    label = ("the prefill row (§06.5's y0)" if step == PREFILL_ROW else f"step {step}")
+    numbers = (f"{label}: pin top1 {top1} ({v1}) over top2 {top2} ({v2}) — margin {margin:.6g}"
+               f" = {margin / bf16_ulp(v1):.1f} BF16 ULP at that magnitude, against this step's"
+               f" licensed element error {bound:.6g} = meanrel cap {cap:.4%} x mean|pin|"
+               f" {meanabs:.6g} ({cap_src})")
+    return {"top1": top1, "top2": top2, "v1": v1, "v2": v2, "margin": margin,
+            "ulps": margin / bf16_ulp(v1), "bound": bound, "cap": cap, "cap_src": cap_src,
+            "meanabs": meanabs, "leaders": leaders, "numbers": numbers, "label": label}
+
+
+def slack_verdict(sl: dict, eng, sampled: int) -> tuple[bool, str]:
+    """`(admissible, the line to print)` for one step already known to sit inside the slack region.
+
+    Fails closed on a missing engine logits vector (the choice cannot be attributed) and on an id outside
+    the pin's leader set. The engine's own values at the leaders are printed either way, with its own
+    gap between them, so a reader can see whether the engine saw the pair as near-tied; that gap is
+    printed and not gated, exactly as D-1 prints the engine's value at every tied id without gating it.
+    """
+    shown = ("(no engine logits)" if eng is None else
+             "; engine's values: " + ", ".join(f"{i} -> {float(eng[i]):.8g}" for i in sl["leaders"]))
+    head = "SLACK " + sl["numbers"]
+    if eng is None:
+        return False, (head + " | NOT ADMISSIBLE: no engine logits vector, so the engine's choice here"
+                       " cannot be checked against the margin")
+    if sampled not in sl["leaders"]:
+        return False, (head + f" | engine id {sampled} is NOT one of the pin's {len(sl['leaders'])}"
+                       f" ids inside that margin {sl['leaders']}" + shown + " | NOT ADMISSIBLE")
+    gap = float(eng[sampled]) - float(eng[sl["top1"]])
+    return True, (head + f" | the pin could not decide this token: engine id {sampled} is one of the"
+                  f" {len(sl['leaders'])} pinned ids inside the margin {sl['leaders']}" + shown
+                  + f"; the engine's own gap at those two ids is {gap:.6g} (printed, not gated — which"
+                    " way a legal route's coin landed is not a band)"
+                  + " | ADMITTED as tie-by-quantization-slack")
+
+
 def read_one_logits(work: Path, index: int, vocab: int) -> tuple:
     """One row's engine logits as `(array | None, why_not)`. Size-checked: a truncated dump read as a
     logits vector fails a step for the wrong reason."""
@@ -701,6 +882,166 @@ def y0_wrong_id() -> int:
     on a tied pin it is the case the policy must refuse: an id outside the tied set."""
     wide = load_pin(logits_pin(PREFILL_ROW))
     return int(np.flatnonzero(wide != np.float32(wide.max()))[0])
+
+
+def pin_row(step: int) -> np.ndarray:
+    """One step's pinned logits as a FLAT F32 vector — `load_pin` widened, then reshaped.
+
+    The dumps come off disk in whatever shape the dumper wrote them, and ranking a 2-D row goes wrong in
+    the loudest possible way: `np.argsort` on a (1, N) row, indexed back against that row, is a 230 GiB
+    fancy-index (measured, not hypothetical — it was this file's first attempt at `pin_runnerup`). A
+    logits vector is a vector; take the shape the code wants at the read.
+    """
+    return np.asarray(load_pin(logits_pin(step)), dtype=np.float32).reshape(-1)
+
+
+def bf16_above(x: float) -> float:
+    """The next BF16 value above `x`, on the payload bits — the smallest change that wins a near-tie.
+
+    Same guard as `bf16_bump`: payload order is numeric order only for non-negatives, so stepping a
+    negative would step it DOWN, and an injection that quietly moved the wrong way is worse than no
+    injection. The pinned maxima this is used on are positive logits.
+    """
+    if not np.isfinite(x) or x < 0:
+        raise SystemExit(f"gate: the lift only knows how to step a non-negative value up"
+                         f" (asked for {x!r})")
+    payload = int(bf16_payload(x)[0]) + 1
+    out = float(np.array([payload << 16], dtype=np.uint32).view(np.float32)[0])
+    if not out > x:
+        raise SystemExit(f"gate: the lift from {x!r} produced {out!r}, which is not one BF16 ULP up")
+    return out
+
+
+def pin_runnerup(step: int, flag: str = "--slack-alt") -> int:
+    """The pin's runner-up id — what an engine lands on when a near-tie goes the other way. Refuses a
+    step whose pin has no unique winner: that is D-1's case, and an injection aimed at a tie would be
+    caught by the tie policy no matter what the slack rule does (the vacuous-negative trap)."""
+    wide = pin_row(step)
+    order = np.argsort(wide)[::-1]
+    if float(wide[order[0]]) == float(wide[order[1]]):
+        raise SystemExit(f"gate: {flag} {step} names a step whose pin ties at its maximum"
+                         f" ({logits_pin(step)}); that is the proved-tie policy's case, not the"
+                         " quantization-slack rule's — pick a step with a unique winner")
+    return int(order[1])
+
+
+def outside_leader_id(step: int) -> int:
+    """The highest-valued pinned id NOT inside this step's slack leader set — what the rule must refuse.
+
+    The nearest miss rather than a random far-away id: an injection that lands just outside the line is
+    the one that shows the line is where the rule says it is. Refuses a step whose margin is not inside
+    the bound, for the same reason `--break-tie` refuses an untied step: outside the region every wrong
+    id is caught by the ordinary rule, so the injection would prove nothing about this one.
+    """
+    ref = pin_row(step)
+    sl = step_slack(step, ref)
+    if sl is None:
+        raise SystemExit(f"gate: --break-slack {step} names a step this rule does not reach"
+                         f" ({logits_pin(step)} has no unique winner, or no policed meanrel band"
+                         " there — §06.5's prefill row is judged by argmax alone and gets no slack)")
+    inside = set(sl["leaders"])
+    for i in np.argsort(ref)[::-1]:
+        if int(i) not in inside:
+            return int(i)
+    raise SystemExit(f"gate: --break-slack {step}: every id of the vocabulary is inside the bound"
+                     f" ({sl['bound']:.6g}), which means the bound is not a rule any more")
+
+
+def slack_region_steps(n_steps: int) -> tuple:
+    """`(steps inside the slack region, the narrowest step outside it)` for this fixture.
+
+    Both are needed to aim the injections: the admitting one has to sit inside, and the refusing one is
+    only worth anything at the DECIDABLE step closest to the line — an injection aimed at a step whose
+    margin is 100x its bound would be caught by anything. Reads the same caps the gate polices, through
+    the same `step_slack` the gate judges with, so the selftest aims at what the rule actually says.
+    """
+    inside, outside = [], []
+    for j in range(n_steps):
+        sl = step_slack(j, pin_row(j))
+        if sl is None:
+            continue                       # exact tie (D-1's) or no band: neither side of this rule
+        (inside if sl["margin"] < sl["bound"] else outside).append((sl["margin"] / sl["bound"], j))
+    return ([j for _, j in sorted(inside, key=lambda t: t[1])],
+            min(outside)[1] if outside else None)
+
+
+def slack_injection(step: int, mode: str, flag: str) -> int:
+    """The id a slack injection lifts over the pin's maximum, refusing a step on the wrong side of it.
+
+    `mode` is `"alt"` (the admitted case: a leader, at a step inside the region), `"outside"` (a
+    non-leader, still inside the region — the rule must refuse it) or `"decidable"` (the pin's runner-up
+    at a step the pin DID decide — the refusal that proves the bound is sized, not invented). Aiming any
+    of them at the wrong kind of step would produce a negative every check catches, which is the trap
+    `prototype/mlp_gemv/results.md` names, so it is an error rather than a silent no-op.
+    """
+    ref = pin_row(step)
+    sl = step_slack(step, ref)
+    inside = sl is not None and sl["margin"] < sl["bound"]
+    want_inside = mode != "decidable"
+    if inside != want_inside:
+        where = ("is inside the quantization-slack region" if inside else
+                 "is NOT inside the quantization-slack region"
+                 + ("" if sl else " (this step has no unique winner in the pin, or no policed meanrel"
+                              " band — §06.5's prefill row is the standing example)")
+                 + (f": margin {sl['margin']:.6g} vs bound {sl['bound']:.6g}" if sl else ""))
+        raise SystemExit(
+            f"gate: {flag} {step} names a step that {where}. The three slack injections are one"
+            " perturbation aimed at three different steps, and each only proves something on its own"
+            " side of the line: --slack-alt and --break-slack need a step whose margin is under its"
+            " bound (--slack-region prints them), --break-runnerup needs one over it (the narrowest"
+            " such step is what `--selftest` picks).")
+    return outside_leader_id(step) if mode == "outside" else pin_runnerup(step, flag)
+
+
+def lift_over_pin(step: int, vec, index: int) -> np.ndarray:
+    """A copy of `vec` with element `index` lifted one BF16 step above this step's pinned maximum.
+
+    The smallest change that makes that id the engine's own argmax. All three slack injections use it,
+    so they are one perturbation shape and the only thing that can change the verdict is the rule's own
+    line — which is what makes the pair a measurement of where that line sits.
+    """
+    out = np.array(vec, dtype=np.float32, copy=True).reshape(-1)
+    out[index] = bf16_above(float(pin_row(step).max()))
+    return out
+
+
+
+def print_slack_region() -> int:
+    """`--slack-region`: which of this fixture's steps the pin could not decide, and how near the line
+    the rest of them are. CPU-only — it reads pins and cached caps, starts no binary, touches no device.
+
+    The refusal messages in `slack_injection` point here, because an injection refused for sitting on the
+    wrong side of the line has to tell the operator where the line is. `engine/slack_size.py` is the same
+    arithmetic over all eight fixtures at once, which is where the corpus-wide claim is made; this is the
+    per-fixture view a gate log points at.
+    """
+    section("quantization slack — the steps this fixture's pin could not decide")
+    n = fixture_step_count()
+    inside, narrow_out, ties = [], None, []
+    for j in range(n):
+        sl = step_slack(j, pin_row(j))
+        if sl is None:
+            ties.append(j)
+            continue
+        if sl["margin"] < sl["bound"]:
+            inside.append(sl)
+        elif narrow_out is None or sl["margin"] / sl["bound"] < narrow_out["margin"] / narrow_out["bound"]:
+            narrow_out = sl
+    print(f"  {REFS.name}: {n} judged generation steps; {len(inside)} inside the slack region,"
+          f" {len(ties)} with no unique winner in the pin (D-1's proved-tie policy, not this one)"
+          f" and {n - len(inside) - len(ties)} decidable by the pin alone")
+    for sl in inside:
+        print("  [inside]  " + sl["numbers"] + f" — leaders inside the margin: {sl['leaders']}")
+    if narrow_out is not None:
+        print(f"  [closest-decidable] " + narrow_out["numbers"] + f" — the pin decides this one by"
+              f" {narrow_out['margin'] / narrow_out['bound']:.2f}x, so a bound"
+              f" {narrow_out['margin'] / narrow_out['bound']:.2f}x larger would start excusing it"
+              " (`--break-runnerup " + str(narrow_out["label"].split()[-1]) + "` is that test)")
+    else:
+        print("  [closest-decidable] none — every step of this fixture is inside the region, which"
+              " would mean the rule has stopped deciding anything")
+    print("  rule: " + SLACK_RULE)
+    return 0
 
 
 def metrics(got: np.ndarray, ref: np.ndarray) -> dict:
@@ -2381,7 +2722,8 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             replay: bool = False, break_feed: int = -1, break_tie: int = -1,
             tie_alt: int = -1, break_allow: int = -1, tie_same_ulp: int = -1,
             break_state_fp: str = "", prefill_logits: str = PREFILL_LOGITS_LAST,
-            break_y0: bool = False, y0_alt: bool = False) -> tuple[
+            break_y0: bool = False, y0_alt: bool = False,
+            slack_alt: int = -1, break_slack: int = -1, break_runnerup: int = -1) -> tuple[
                 str, int]:
     """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
 
@@ -2411,6 +2753,12 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
     be ADMITTED). The stand-in writes the pinned prefill logits as the engine's row for this, which is
     the honest shape of the second case — the policy asks whether the engine's logit at the id it chose
     keeps the pinned payload, and only a fixture whose pin ties can say yes.
+
+    `slack_alt`/`break_slack`/`break_runnerup` are the three aims of one quantization-slack injection, and
+    unlike the pins above they perturb the logits as well as the sample, because a step the pin could not
+    decide is a statement about the engine's own numbers: the lifted id has to be the engine's argmax for
+    the injection to look like the thing it is testing. All three refuse a step on the wrong side of the
+    slack line, so none of them can quietly degenerate into the ordinary wrong-id test.
     """
     greedy = man["greedy_continuation"]
     cfg = man["text_config"]
@@ -2505,6 +2853,23 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             logits = logits.copy()
             order = np.argsort(logits)[::-1]
             logits[order[1]] = logits[order[0]] + 1.0
+        if j in (slack_alt, break_slack, break_runnerup):
+            # The quantization-slack trio, and they are deliberately the SAME perturbation: lift one id
+            # one BF16 step above the pin's own maximum, so it really is the engine's argmax and the
+            # engine's own numbers are as innocent as they can be. What differs is only the step it is
+            # aimed at, and each needle refuses a step on the wrong side of the line (`slack_injection`):
+            #   --slack-alt        a leader, at a step whose margin is under its bound   -> ADMITTED
+            #   --break-slack      a non-leader, same kind of step                       -> must FAIL
+            #   --break-runnerup   a leader, at a step whose margin is OVER its bound    -> must FAIL
+            # The second and third are the two directions the brief asks for: a token the pin never
+            # tied, and a token that looks tied but was decided. Because the perturbation is identical in
+            # all three, the pair `--slack-alt` green / `--break-runnerup` red is a direct measurement of
+            # where the bound sits, not a proof that the gate can fail.
+            picked = (slack_injection(j, "alt", "--slack-alt") if j == slack_alt else
+                      slack_injection(j, "outside", "--break-slack") if j == break_slack else
+                      slack_injection(j, "decidable", "--break-runnerup"))
+            logits = lift_over_pin(j, logits, picked)
+            sampled = picked
         if j == break_noise:
             # Aggregate corruption that LEAVES the argmax alone: 5 % relative noise puts cos at
             # ≈ 1 − σ²/2 ≈ 0.9987, under G5's 0.9995 and over §10.2's 0.999 cascade floor. This is the
@@ -2897,6 +3262,43 @@ def selftest(fixture: str = "dec8") -> int:
                       " ADMITTED as a proved tie (D-8). The id is"
                       f" {tie_other(PREFILL_ROW, '--y0-alt')}, the pinned top-1 is"
                       f" {pin_tie(PREFILL_ROW)['top1']}"))
+    # The quantization-slack rule (D-9's sized rule), in three aims of ONE perturbation: lift a pinned id
+    # one BF16 step over the pin's own maximum and sample it. The lift is identical in all three, so the
+    # only thing that can change the verdict is where the rule's line sits — which is what makes the pair
+    # `--slack-alt` green / `--break-runnerup` red a measurement of the bound rather than a demonstration
+    # that the gate can fail. Each needle also refuses a step on the wrong side of that line, so none of
+    # them can decay into the ordinary wrong-id test (`prototype/mlp_gemv/results.md` again).
+    slack_in, slack_out = slack_region_steps(len(man["greedy_continuation"]) - 1)
+    if not slack_in:
+        print(f"  [SKIP] quantization-slack injections: no step of {fixture} has a unique pinned winner"
+              " sitting inside its own licensed element error. `--selftest --fixture chunk64b` is the"
+              " fixture that exercises the admitting half (its steps 0, 1, 13 and 22).")
+    else:
+        j_in = slack_in[0]
+        cases += [
+            (["--slack-alt", str(j_in)], 0,
+             [f"SLACK step {j_in}", "ADMITTED as tie-by-quantization-slack"],
+             f"the pin's runner-up at step {j_in}, lifted one BF16 step over the pinned maximum — a step"
+             " whose margin is smaller than the element error its own band licenses, so the rule must"
+             " ADMIT it. A slack rule that never fires would be the rubber stamp in reverse"),
+            (["--break-slack", str(j_in)], 1,
+             [f"[FAIL] generation step {j_in}: the pin's winner is unique but its margin is under",
+              "is NOT one of the pin's"],
+             f"the same lift at the same undecidable step {j_in}, aimed at the highest-valued pinned id"
+             " OUTSIDE the margin — a token the pin never tied at all, so the rule must refuse it"),
+        ]
+    if slack_in and slack_out is None:
+        print(f"  [SKIP] --break-runnerup: every step of {fixture} with a unique winner is inside the"
+              " slack region, so there is no decidable step to aim it at.")
+    elif slack_out is not None:
+        cases.append((["--break-runnerup", str(slack_out)], 1,
+                      [f"[FAIL] generation step {slack_out} samples greedy_continuation",
+                       f"[FAIL] step {slack_out}: argmax agrees with the pin"],
+                      f"the same one-ULP lift at step {slack_out}, the DECIDABLE step of this fixture"
+                      " closest to the line — the pin's runner-up, but here the margin clears the"
+                      " licensed element error, so the pin did decide this token and the rule must"
+                      " refuse it. This is the negative that fails if the bound is ever sized too"
+                      " generously, which is the failure D-9 was guarding against"))
     # The route allowance has to still bite, and bite where the old flat band could not: noise sized to
     # exceed this step's own measured spread while staying inside §10.1's flat 5e-4 deficit. Aimed at the
     # tightest priced allowance in the fixture (the step where the flat floor was most nearly blind), and
@@ -3320,6 +3722,26 @@ def main() -> int:
                     help="with --dry-run: the wave's LAST prefill row samples the pinned prefill row's"
                          " other tied id — must be ADMITTED as a TIE (D-8). Refused unless this"
                          " fixture's prefill pin really ties")
+    ap.add_argument("--slack-alt", type=int, default=-1, metavar="STEP",
+                    help="with --dry-run: at a step whose pin has a unique winner whose margin is"
+                         " smaller than that step's licensed element error, lift the pin's runner-up"
+                         " one BF16 step over the pinned maximum and sample it — the `chunk64b` step 0"
+                         " shape, and the gate must ADMIT it as tie-by-quantization-slack. Refused on a"
+                         " step the pin DID decide, so it cannot become the ordinary wrong-id test")
+    ap.add_argument("--break-slack", type=int, default=-1, metavar="STEP",
+                    help="with --dry-run: the same lift at the same kind of step, aimed at the"
+                         " highest-valued pinned id that is NOT inside the margin — a token the pin"
+                         " never tied at all. Must FAIL. Refused unless the step is inside the slack"
+                         " region (the vacuous-negative trap)")
+    ap.add_argument("--break-runnerup", type=int, default=-1, metavar="STEP",
+                    help="with --dry-run: the same lift, the pin's runner-up, at a step whose margin is"
+                         " LARGER than its licensed element error — a token that looks tied but that"
+                         " the pin did decide. Must FAIL, and this is the injection that catches a slack"
+                         " bound sized too generously. Refused unless the step is outside the region")
+    ap.add_argument("--slack-region", action="store_true",
+                    help="print this fixture's quantization-slack region — every step whose unique"
+                         " pinned winner sits inside its own licensed element error, with the margin,"
+                         " the bound and what set the bound — and exit. CPU-only, no engine, no device")
     ap.add_argument("--state-fp", dest="state_fp", action="store_true", default=True,
                     help="ask decode_run for its §08 state fingerprints (the default, because a"
                          " fixture that carries fingerprint pins cannot judge G5's state half"
@@ -3348,6 +3770,9 @@ def main() -> int:
         return rc
 
     set_fixture(args.fixture)
+
+    if args.slack_region:
+        return print_slack_region()
 
     if args.selftest:
         return selftest(args.fixture)
@@ -3435,7 +3860,9 @@ def main() -> int:
                              args.break_logits, args.break_noise, args.break_prompt_stop,
                              replay, args.break_feed, args.break_tie, args.tie_alt,
                              args.break_allow, args.tie_same_ulp, args.break_state_fp,
-                             args.prefill_logits, break_y0=args.break_y0, y0_alt=args.y0_alt)
+                             args.prefill_logits, break_y0=args.break_y0, y0_alt=args.y0_alt,
+                             slack_alt=args.slack_alt, break_slack=args.break_slack,
+                             break_runnerup=args.break_runnerup)
         notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
                      " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
                      " run is not also the first time this file parses a STEP line. Section (d) is"
@@ -3480,6 +3907,17 @@ def main() -> int:
         if args.y0_alt:
             notes.append("injected: the wave's last row sampled the pinned prefill row's OTHER tied"
                          " id — the case D-8 says the tie policy must admit")
+        for needle, what in ((args.slack_alt, "lifted the pin's runner-up one BF16 step over the pinned"
+                                              " maximum and sampled it at a step the pin could not"
+                                              " decide — the slack rule must ADMIT it"),
+                             (args.break_slack, "lifted a pinned id that is NOT inside the step's"
+                                                " margin, at a step inside the slack region — the slack"
+                                                " rule must refuse it"),
+                             (args.break_runnerup, "lifted the pin's runner-up at a step whose margin"
+                                                   " is over its licensed element error — the pin DID"
+                                                   " decide this token, so the slack rule must refuse")):
+            if needle >= 0:
+                notes.append(f"injected: generation step {needle} {what}")
     else:
         print("  $ " + " ".join(cmd))
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -3496,6 +3934,11 @@ def main() -> int:
         notes.append("no STEP lines at all: decode_run printed nothing the gate could parse — read"
                      " the raw log above (a load failure or a thrown HIP error exits before any step)")
         return report()
+
+    # The route allowance is read HERE, before section (a), not in (b): the quantization-slack rule needs
+    # each step's meanrel cap, and (b) judges its bands from the same read. One reader, one print, and the
+    # two sections cannot disagree about which rule a step is under.
+    allowance = load_allowance(n_decode)
 
     # ---- (a) sampled ids -----------------------------------------------------------------------
     section("(a) sampled token ids — §03.4 greedy, §10.1 G7 exactness")
@@ -3583,16 +4026,56 @@ def main() -> int:
               f"generation step {j}: exact tie in the pin and the engine picked a different id"
               " — tested against the tie policy", line)
         tie_ok[j] = admissible
+    # One slack decision per step, on the pin's VALUES this time (see QUANTIZATION SLACK). The tie
+    # policy already had its turn, and `step_slack` returns None on the steps it owns — a pin with no
+    # unique winner is D-1's question and it has a stricter answer there, so this rule narrows to the
+    # steps next door rather than overlapping. D-1's scope rule applies here too, for the same reason:
+    # a step where the engine reproduced the pin's own id is an ordinary match and consults nothing,
+    # even when the step sits inside the region — it gets a note, not a counted use.
+    slack_ok: dict[int, bool] = {}
+    allow_steps = (allowance or {}).get("steps", {})
+    for j in range(min(n_decode, len(got_ids))):
+        sl = step_slack(j, dec_logits[j], allow_steps.get(j))
+        if sl is None or sl["margin"] >= sl["bound"]:
+            continue           # D-1's case, no band to read, or a margin the pin DID decide — in which
+                               # case the ordinary exact-id rule below is the whole rule, and the honest
+                               # place for this step to fail is there, not under a slack check name
+        if got_ids[j] == sl["top1"]:
+            if sl["margin"] < sl["bound"]:
+                slack_notes.append(f"step {j} -> {got_ids[j]} (margin {sl['margin']:.6g}, bound"
+                                   f" {sl['bound']:.6g})")
+                print("  [info] " + sl["numbers"] + f" — and the engine reproduced the pin's own id"
+                      f" {got_ids[j]}, so no exception is consulted here (D-1's scope rule: the rule"
+                      " is an exception, and nothing is counted)")
+            continue
+        ok, line = slack_verdict(sl, eng_logits[j][0], got_ids[j])
+        check(ok,
+              f"generation step {j}: the pin's winner is unique but its margin is under the element"
+              " error this step's band licenses — tested against the quantization-slack rule", line)
+        if ok:
+            # Only ADMITTED steps are counted and named: a refused one is a FAIL line that says NOT
+            # ADMISSIBLE, and putting it in the same list as the admitted ones would make the summary
+            # claim a use of the rule that this run actually refused.
+            slack_ok[j] = True
+            slack.append(f"step {j} -> {got_ids[j]} (pin margin {sl['margin']:.6g}"
+                         f" = {sl['ulps']:.1f} ULP vs bound {sl['bound']:.6g})")
     for j, (g, w) in enumerate(zip(got_ids, greedy[1:])):
         by_tie = g != w and tie_ok.get(j, False)
-        check(g == w or by_tie, f"generation step {j} samples greedy_continuation[{j + 1}]",
-              f"{g} vs {w}" + (" — admitted as a proved tie, see the TIE line above" if by_tie else ""))
+        by_slack = g != w and slack_ok.get(j, False)
+        check(g == w or by_tie or by_slack, f"generation step {j} samples greedy_continuation[{j + 1}]",
+              f"{g} vs {w}" + (" — admitted as a proved tie, see the TIE line above" if by_tie else
+                               " — admitted as tie-by-quantization-slack, see the SLACK line above"
+                               if by_slack else ""))
     unresolved = [j for j, (g, w) in enumerate(zip(got_ids, greedy[1:]))
-                  if g != w and not tie_ok.get(j, False)]
+                  if g != w and not tie_ok.get(j, False) and not slack_ok.get(j, False)]
     check(not unresolved,
-          f"all {n_decode} generated ids match, in order — exactly, or as a tie proved from the pin",
+          f"all {n_decode} generated ids match, in order — exactly, or as a tie or a quantization"
+          " slack proved from the pin",
           f"{len(tie_ok)} step(s) resolved by the tie policy"
-          f" ({', '.join(sorted(ties)) if ties else 'none'}); unmatched steps {unresolved}"
+          f" ({', '.join(sorted(ties)) if ties else 'none'})"
+          + (f"; {len(slack)} admitted by quantization slack"
+             f" ({'; '.join(slack) if slack else 'none'})" if slack_ok else "")
+          + f" | unmatched steps {unresolved}"
           f" | engine {got_ids} / pinned {greedy[1:]}")
     fed = [int(s["input"]) for s in decode_steps]
     check(fed == greedy[:-1],
@@ -3631,7 +4114,6 @@ def main() -> int:
     print(f"  reported: cos vs {BAND['cos_report']} (G6 decode logits); ndiff and max ULP are "
           "reported but not gated (§10.1 F1–F4: a chained dot's legal ndiff is 29–47 %, and a "
           "max-ULP bound is blind to a whole-tensor 1-ULP shift)")
-    allowance = load_allowance(n_decode)
     per_step: list = [None] * n_decode
     under_g6: list = []
     ratios: list = []            # (engine deficit / that step's route spread), for the summary line
@@ -3679,12 +4161,15 @@ def main() -> int:
                   f"step {j}: meanrel {m['meanrel']:.4%} inside the route allowance {rel_cap:.4%}",
                   "" if ok_rel else _counterfactual(m["meanrel"], BAND["meanrel_hard"],
                                                     "§10.2 ceiling"))
-        check(argmax_ok or tie_ok.get(j, False), f"step {j}: argmax agrees with the pin",
+        check(argmax_ok or tie_ok.get(j, False) or slack_ok.get(j, False),
+              f"step {j}: argmax agrees with the pin",
               f"{argmax_low(eng)}" + ("" if argmax_ok else
                                       (" — but the pin is tied here and the engine's id is one of the"
                                        " tied ids, so the tie policy admits it"
                                        if tie_ok.get(j, False) else
-                                       decision_margin(ref, eng, m))))
+                                       " — but this is the step the quantization-slack rule admits: "
+                                       + step_slack(j, ref, allow_steps.get(j))["numbers"]
+                                       if slack_ok.get(j, False) else decision_margin(ref, eng, m))))
         if m["cos"] < BAND["cos_report"]:
             under_g6.append(f"{j}:{m['cos']:.6f}")
     if ratios:
@@ -3820,13 +4305,18 @@ def decision_margin(ref: np.ndarray, eng, m: dict) -> str:
 # nothing: a fixture listed here is still FAIL and still exits 1. It exists because a red that is absorbed
 # is a red nobody reads any more.
 #
-# `chunk64b` step 0 is unsatisfiable as shipped: the pinned winner is 8337 at
-# 15.625 and the runner-up is 20619 at 15.500 — a 2 BF16 ULP margin at that magnitude — while the
-# engine's legal element error at that step is maxabs 0.2509, larger than the margin. No legal bf16 route
-# can be held to that token. The step's LOGITS are gated and pass (cos 0.999919, deficit 8.06e-05
-# against §10.1 G5's 5e-04 floor; meanrel 1.199 %, maxabs 0.2509). D-9: an admitting rule for this shape
-# must be SIZED — the legal element error at that position, plus a route spread, the way D-3/D-5/D-6
-# sized their bands. Not a skip, not a silent tolerance, not a re-price.
+# The list is EMPTY as of 2026-10-13, and the way it emptied is the story. `chunk64b` step 0 was its only
+# entry: the pinned winner 8337 sat 2 BF16 ULP ahead of the runner-up 20619 while the engine's legal
+# element error there is larger (maxabs 0.2509), so no legal bf16 route could be held to that token and
+# D-9 kept the fixture RED rather than invent a threshold. What D-9 asked for was a SIZED rule — "the
+# legal element error at that position plus a route spread, the way D-3/D-5/D-6 sized their bands" — and
+# that is what the QUANTIZATION SLACK block above derives: bound = the meanrel cap this step is already
+# policed by x mean|pin|, which at that step is 0.16205 against a margin of 0.125. The three recorded red
+# lines did not go green by loosening anything; they go green because the token they demanded was one the
+# pin never decided, and each of the three now says so with the numbers on the line. `engine/slack_size.py`
+# prints the bound for every step of every fixture and `engine/results.md` carries the table; the rule
+# reaches no step outside `chunk64b`, and `--break-runnerup` at `dec300f` step 30 — the corpus's nearest
+# decidable step, 1.46x its own bound — is the injection that proves it.
 #
 # `wide520f` was on this list for exactly one commit and is not any more, which is worth recording because
 # the trip came out of the ceiling this package removed: 500 prompt + 24 generation = 524 lanes, the
@@ -3837,19 +4327,10 @@ def decision_margin(ref: np.ndarray, eng, m: dict) -> str:
 # observed with the entry still in place: `[expected-red] wide520f: all 2 recorded line(s) did NOT fail
 # this run — healed`, on a run of 320 checks with 0 failures. That reporting line is the reason a heal on
 # a fully green fixture is visible at all: without it a healed fixture and an unread list look identical.
-EXPECTED_RED: dict = {
-    "chunk64b": {
-        "why": ("step 0's pinned winner is 2 BF16 ULP ahead of the runner-up while the engine's legal"
-                " element error there is larger (D-9); its logits pass, its token cannot be promised"),
-        "checks": [
-            "generation step 0 samples greedy_continuation[1]",
-            "step 0: argmax agrees with the pin",
-            # The order-sensitive id list is the consequence of step 0, not a second bug: one wrong token
-            # anywhere shifts every later id, so the whole chain mismatches.
-            "all 30 generated ids match, in order — exactly, or as a tie proved from the pin",
-        ],
-    },
-}
+# The mechanism stays for that reason even with nothing on it: a recorded red that heals should still print
+# `healed` when somebody removes its entry after seeing it, and a NEW failure on a fixture that goes red
+# for a reason this list has not been told about still has to say so.
+EXPECTED_RED: dict = {}
 
 
 def report() -> int:
@@ -3864,6 +4345,15 @@ def report() -> int:
         print(f"  [TIE-NOTE] {len(tie_notes)} step(s) had an exact tie in the pin that the engine"
               " matched outright — ordinary id matches, tie policy not consulted (D-1):"
               " " + ", ".join(tie_notes))
+    if slack:
+        print(f"  [SLACK] {len(slack)} step(s) — a unique winner in the pin, but its margin was smaller"
+              " than the element error that step's own meanrel band licenses, so the pinned token was"
+              " not the pin's to decide and the engine's id was one of the pin's ids inside the margin"
+              " (D-9's sized rule; every figure it used is on the SLACK line itself): " + "; ".join(slack))
+    if slack_notes:
+        print(f"  [SLACK-NOTE] {len(slack_notes)} step(s) sat inside that region and the engine"
+              " reproduced the pin's own id anyway — ordinary id matches, the slack rule was not"
+              " consulted (D-1's scope rule): " + "; ".join(slack_notes))
     rec = EXPECTED_RED.get(REFS.name)
     if not fails and rec is not None:
         # The heal case D-9's reporting needs as much as the red case: a line goes on this list because it
@@ -3876,7 +4366,10 @@ def report() -> int:
               " this run — healed. Re-read why they were red before believing green: " + rec["why"])
     if fails:
         print(f"ENGINE GATE FAIL — {len(fails)} failed"
-              + (f" ({len(ties)} step(s) reported TIE and not counted as failures)" if ties else ""))
+              + (f" ({len(ties)} step(s) reported TIE and not counted as failures"
+                 if ties else "") + (f"{', ' if ties else '('}{len(slack)} step(s) admitted by the"
+                                      " slack rule" if slack else "")
+              + (")" if (ties or slack) else ""))
         for f in fails:
             print("  - " + f)
         # D-9's reporting half: name the recorded failures so a NEW one on an already-red fixture stays
@@ -3900,7 +4393,9 @@ def report() -> int:
                       " fixture or the engine moved, so re-read D-9 before believing green here: "
                       + "; ".join(healed))
         return 1
-    print("ENGINE GATE PASS" + (f" — with {len(ties)} step(s) reported TIE" if ties else ""))
+    reported = ([f"{len(ties)} step(s) reported TIE"] if ties else []) \
+        + ([f"{len(slack)} step(s) reported SLACK"] if slack else [])
+    print("ENGINE GATE PASS" + (f" — with {' and '.join(reported)}" if reported else ""))
     return 0
 
 
