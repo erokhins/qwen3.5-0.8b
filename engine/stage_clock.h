@@ -71,10 +71,54 @@
 // stage (or per kernel) to THAT PASS — which is exactly why the burst pass is a separate pass with no
 // clock at all, rather than the same pass with the clock switched off halfway.
 //
-// SCOPE, stated so nobody has to infer it: one-row bodies only. The clock is armed by the driver around
+// SCOPE, for a STEP clock: one-row bodies only. The clock is armed by the driver around
 // a generation step (`decode_step`, i.e. `submit_token_body` + `finish_token`); a wave body's notes are
 // ignored — see `Clock::note()`'s "outside a step" rule — so a mis-armed clock shows up as
 // `notes_ignored` in the report instead of as a plausible wrong number.
+//
+// WHY THERE IS A SECOND UNIT, and what a WAVE clock is allowed to claim. A wave is the same marker set
+// over `ceil(T / wave_rows)` fat bodies, and the question it has to answer is not "how much dispatch is
+// exposed" but "which FAMILY owns the wave's milliseconds" — the fork between replacing the hand
+// matmuls with a library route and chunking §04.4's recurrence (P9) turns on that split and nothing else
+// in the tree can produce it. Everything above applies unchanged, with three differences that come from
+// the wave being wide rather than from any new idea:
+//
+//   * FINER FAMILIES. A wave's bill is `engine/launch_stats.h`'s family list, not §07's per-token table,
+//     because the decision needs `gdn_conv`/`gdn_gates`/`gdn_gated_norm` (which batch, so P6 already made
+//     them cheap) separated from `gdn_rec` (which does not batch, so it is what P9 would change), and
+//     `mlp_gateup` from `mlp_down`. The markers name those fine families and a STEP clock folds them back
+//     to `gdn`/`mlp` in `note()` — see `coarse_stage()` — so `--time-stages` reports exactly the nine
+//     rows it always has, unchanged, while `--time-waves` gets the launcher's eleven.
+//   * `gdn_rec` HAS NO `LAUNCHSTAT` TWIN, deliberately (`engine/launch_stats.h`: a recurrence launch has
+//     no row width that could batch, so a launcher counter for it could not fail). For the wave report it
+//     is the opposite of decoration: the recurrence's own milliseconds ARE the P9 question, so the clock
+//     carries it as a family with `rows_total == launches` (one row per launch by construction) and
+//     `launchstats_calls=-1` (no twin). A reader who wants a launcher-side witness for the recurrence has
+//     to count launches, and `plan_launches`/`launches` is that comparison.
+//   * THE COST OF A DRAIN IS SMALLER HERE, WHICH IS WHY THIS INSTRUMENT CAN BE BELIEVED. In a one-row
+//     step a family is often a 30 us launch, so a several-microsecond wait inside it is a few percent of
+//     the number. A 512-row wave body's families are hundreds of microseconds to milliseconds each, so
+//     the same wait is a much smaller fraction — the serialized wave is a less distorted picture of its
+//     subject than the serialized step is of the step. That is an order-of-magnitude argument, not a
+//     proof, which is why `WAVEGAP` prints the serialized-vs-burst difference next to the shares and a
+//     reader can see the distortion instead of being told to trust it.
+//
+// WHY THERE IS NO `gran=kernel` FOR A WAVE, which is the one place this file refuses a question rather
+// than answering it. `gdn_rec` is 18 launches per token per body (§04.4, a scan), so a per-submission
+// drain on a 512-row body would add ~9 200 waits per layer-run — tens of milliseconds of instrument —
+// and, worse, would drain the very queue whose pipelining P9's chunked scan is trying to buy. The
+// recurrence's shape is the thing under test; measuring it with a wait after every one of its launches
+// measures the wait. `Clock::begin_wave()` therefore throws for `Mode::kKernel`.
+//
+// WHAT THE SHARES ARE SHARES OF, said before anyone quotes one. `ms` and `share_pct` come from the
+// SERIALIZED wave pass: family X's `ms` is what family X took when nothing else was in the queue. The
+// production wave is the burst pass, and per-family numbers are not obtainable from it without either a
+// drain (which makes it the serialized pass) or GPU events (untrustworthy below ~1 ms on this iGPU —
+// `prototype/README.md` rule 7). So a share is a share of `serialized_wall_ms`, and `burst_wall_ms` /
+// `exposed_ms` on the `WAVEGAP` line are what convert it: multiply a share by `burst_wall_ms` to put it
+// on the production wall, which assumes the serialization cost is spread in proportion to family time.
+// That assumption is exactly what `exposed_ms` sizes; if it is large, say so with the number rather than
+// quoting shares against the burst wall.
 
 #include <chrono>
 #include <cstdint>
@@ -88,16 +132,31 @@ namespace engine::stageclock {
 enum Stage : uint8_t {
     kGlue = 0,
     kProj,
-    kGdn,
+    kGdn,           // the §07 bill row: conv+gates+rec+gated_norm together
     kAttn,
-    kMlp,
+    kMlp,           // the §07 bill row: gateup+down together
     kCast,
     kCopy,
     kLmHead,
     kHostTail,
+    // The launcher families below spell themselves exactly as `engine/launch_stats.h` names them, so one
+    // word names one concept in both instruments and in `LAUNCHSTAT`. A step clock folds them into the
+    // rows above; a wave clock reports them as they are.
+    kGdnConv,
+    kGdnGates,
+    kGdnRec,        // §04.4's recurrence. Not a `LAUNCHSTAT` family, on purpose; see the header.
+    kGdnGatedNorm,
+    kMlpGateup,
+    kMlpDown,
     kStageCount,
 };
 const char* stage_name(Stage s);
+
+// Which §07 bill row a launcher family belongs to: the six families above map onto `kGdn`/`kMlp` and
+// every other stage is its own row. A STEP clock folds at `note()` time — before the segment comparison,
+// which is what keeps `--time-stages`' segments, sync count and nine report rows byte-for-byte what they
+// were before the fine names existed — and a WAVE clock does not fold.
+Stage coarse_stage(Stage s);
 
 // The three submission granularities. `kBurst` is not a clock mode — it is the production path, timed
 // by the driver around the whole step — but it belongs in this enum because the report compares all
@@ -111,12 +170,32 @@ class Clock;
 void arm(Clock* c);
 Clock* armed();
 
+// Which body of work a clock is segmenting. It changes two things and nothing else: whether the launcher
+// families are folded (§07's bill rows are the step's, the launcher's are the wave's) and which report
+// function may be called on it.
+enum class Unit : uint8_t { kStep, kWave };
+const char* unit_name(Unit u);
+
+// What a wave pass is, so the wave report can derive its own expected launch bill from §00's layer
+// counts instead of trusting a typed number or the instrument's own reading — the same reason
+// `plan_bill()` exists for a step. `bodies` is the piece a step plan does not have: `prefill_wave`
+// splits a prompt taller than the scratch into that many `submit_wave_body` calls, and every family
+// that batches is billed per body while `gdn_rec` and the embedding copies are billed per token.
+struct WaveShape {
+    int tokens = 0;        // prompt tokens the pass prefills
+    int bodies = 0;        // `submit_wave_body` calls that takes = ceil(tokens / wave_rows)
+    int wave_rows = 0;     // the scratch's row ceiling it split at (`sc.wave_rows`)
+    int priced_rows = 0;   // `finish_token` calls: 1 under `kLast`, `tokens` under `kAll`
+    double wall_ms = 0.0;  // the driver's wall around the pass, filled in after it ran
+};
+
 // One measured pass of serialized submission. Constructed per pass, armed for its duration; not
 // thread-safe because the engine submits from one host thread (`engine/launch_stats.h` makes the same
 // note about its counters).
 class Clock {
 public:
-    explicit Clock(Mode mode);
+    // A step clock folds the launcher families into §07's bill rows; a wave clock reports them.
+    explicit Clock(Mode mode, Unit unit = Unit::kStep);
 
     Clock(const Clock&) = delete;
     Clock& operator=(const Clock&) = delete;
@@ -125,6 +204,14 @@ public:
     // prefill wave or a stray body from being charged to a step that is not being measured.
     void begin_step();
     void end_step();
+
+    // Call around one whole wave pass (every body of `prefill_wave`, and the finish that prices it).
+    // One begin/end for the pass rather than one per body, because the families are what is being
+    // attributed and a body boundary is not a family boundary: the host work between bodies belongs to
+    // whichever segment is open and shows up in `ungaged`/the neighbour row, never as a hole.
+    // Throws for `Mode::kKernel` — see the header for why a wave refuses that granularity.
+    void begin_wave();
+    void end_wave();
 
     // "The submissions that follow belong to family `s`." Called immediately BEFORE each launch/memcpy
     // site; see the header note for why the order is load-bearing.
@@ -142,10 +229,21 @@ public:
     // to the sync's own cost, and a disagreement would be an unaccounted host gap between segments.
     std::string describe() const;
 
+    // `WAVE gran=… family=…` lines, the `TOTAL` line that reconciles them against `shape.wall_ms`, and
+    // the `GROUP` line that adds the families the funding decision is actually made on. Reads the shape
+    // the driver filled in (tokens/bodies/priced_rows/wall_ms), because the expected launch bill is a
+    // property of the pass, not of the clock. Only valid on a wave clock; throws otherwise so a caller
+    // cannot print a wave report of a step.
+    std::string describe_wave(const WaveShape& shape) const;
+
 private:
     void close_segment();   // the wait + the charge; see `note()` for when it runs
 
+    void begin_unit();
+    void end_unit(const char* what);
+
     Mode mode_;
+    Unit unit_;
     bool in_step_ = false;
     bool open_ = false;
     Stage stage_ = kStageCount;
@@ -155,6 +253,11 @@ private:
     double stage_us_[kStageCount] = {0.0};
     long long stage_subs_[kStageCount] = {0};
     long long stage_segs_[kStageCount] = {0};
+    // `launch_stats.h`'s counters as they stood at `begin_wave()`, so the wave report can price this
+    // pass by delta. Unused by a step clock (its plan cross-check is per step, and the run's own
+    // `LAUNCHSTAT` line is already the launcher-side witness there).
+    long long ls_calls_[kStageCount] = {0};
+    long long ls_rows_[kStageCount] = {0};
     int steps_ = 0;
     long long syncs_ = 0;
     long long notes_ignored_ = 0;

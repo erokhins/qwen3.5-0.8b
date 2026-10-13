@@ -54,6 +54,15 @@
 // Same always-compiled, cheap-when-idle choice as `engine/launch_stats.h`'s counters, for the same
 // reason: a probe that changes the shape of the thing it measures is not a probe, and the decision to
 // measure belongs to the driver, not to this file.
+//
+// The GDN and MLP sites name their OWN family — `gdn_conv`/`gdn_gates`/`gdn_rec`/`gdn_gated_norm`,
+// `mlp_gateup`/`mlp_down`, spelled as `engine/launch_stats.h` spells them — rather than the coarse `gdn`
+// and `mlp` of the table above, because a wave's attribution has to separate the three GDN launches that
+// batch (P6 made them cheap) from the recurrence that cannot (which is P9's entire subject), and the two
+// halves of the MLP prefer opposite weight walks (Q10b). A clock measuring a STEP folds these names back
+// to `gdn`/`mlp` in `note()` before it compares families (`stage_clock.h:coarse_stage`), so the two extra
+// names cost `--time-stages` nothing: same segments, same sync count, same nine report rows it printed
+// before the fine names existed. Nothing about a byte of output depends on which unit is being measured.
 #include "engine/decode_step.h"
 
 #include <hip/hip_runtime.h>
@@ -505,7 +514,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // copy, one per layer per wave: 18 × 73 728 B for the whole wave instead of 18 × T_w of
             // them. Cheaper than double-buffering 1.27 MiB of state per request, which is the
             // alternative §08.2's "in-place ring update" wording invites; results.md carries it.
-            stageclock::note(stageclock::kGdn);
+            stageclock::note(stageclock::kGdnConv);
             kernels::gdn_conv(sc.g_raw_f32, st.conv_window_layer(layer),
                               sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel,
                               sc.g_u, sc.conv_new, n);
@@ -515,7 +524,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                                      hipMemcpyDeviceToDevice));
             // §04.3, all n rows at once. `A_log` is one of the 36 tensors the checkpoint stores F32
             // (§01.6), so it goes to the kernel as-is; dt_bias came through the adapter.
-            stageclock::note(stageclock::kGdn);
+            stageclock::note(stageclock::kGdnGates);
             kernels::gdn_gates(sc.g_a_f32, sc.g_b_f32,
                                (const float*)layer_dev(weights, layer, leaf::kALog),
                                sc.g_dt_bias + (size_t)slot * kNumValueHeads,
@@ -565,7 +574,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 // §04.4's recurrence. q, k, v are the three 2048-wide slices of row t of the conv's
                 // output tile (§04.1's [q|k|v]); rec_kernel indexes its own slice as [head][dim], so
                 // the pointers are just offsets into that row.
-                stageclock::note(stageclock::kGdn);
+                stageclock::note(stageclock::kGdnRec);
                 kernels::gdn_rec(sc.g_u + (size_t)t * kQkvRows,
                                  sc.g_u + (size_t)t * kQkvRows + kValueDim,
                                  sc.g_u + (size_t)t * kQkvRows + 2 * kValueDim,
@@ -583,7 +592,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // reason `cast_bf16_to_f32_3` went over the projections' tile in P5: it is elementwise, so a
         // wider call is the same bits in fewer submissions.
         if (!attn_layer) {
-            stageclock::note(stageclock::kGdn);
+            stageclock::note(stageclock::kGdnGatedNorm);
             kernels::gdn_gated_norm(sc.g_o, sc.g_z,
                                     (const float*)layer_dev(weights, layer, leaf::kGatedNorm),
                                     sc.block_out, nullptr, n);
@@ -617,13 +626,13 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // plan-blind. An explicit `--mlp-map` comes back unchanged, so the flag still pins one walk
         // for every body.
         const kernels::MlpGateMap gate_up_map = kernels::resolve_mlp_gate_map(sc.mlp_gate_map, n);
-        stageclock::note(stageclock::kMlp);
+        stageclock::note(stageclock::kMlpGateup);
         kernels::mlp_gateup((const uint16_t*)layer_dev(weights, layer, leaf::kGateProj),
                             (const uint16_t*)layer_dev(weights, layer, leaf::kUpProj), sc.norm_f32,
                             sc.mlp_act, kIntermediate, kHidden, n, gate_up_map);
         stageclock::note(stageclock::kCast);
         kernels::cast_bf16_to_f32(sc.mlp_act, sc.mlp_act_f32, n * kIntermediate);
-        stageclock::note(stageclock::kMlp);
+        stageclock::note(stageclock::kMlpDown);
         kernels::mlp_down((const uint16_t*)layer_dev(weights, layer, leaf::kDownProj),
                           sc.mlp_act_f32, sc.delta, kHidden, kIntermediate, n);
 

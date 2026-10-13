@@ -96,6 +96,12 @@ struct Options {
     // them next to the pipelined step. A bench-only observation flag: the run it is attached to still
     // produces the same dumps and the same lines, and the extra passes print nothing but `STAGE*`.
     bool time_stages = false;
+    // The wave clock (`engine/stage_clock.h`'s second unit): replays the run's PROMPT wave twice more,
+    // once in the production shape and once drained at every family boundary, and attributes the
+    // serialized wave's wall across the launcher families. A separate flag from `--time-stages` on purpose:
+    // a wave pass is two full prefills of the prompt, so folding it into `--time-stages` would silently
+    // make every Q6 row several times more expensive, and the two instruments answer different questions.
+    bool time_waves = false;
     bool help = false;               // print_usage and exit 0, before anything is loaded
 };
 
@@ -153,6 +159,8 @@ Options parse_args(int argc, char** argv) {
             o.mlp_gate_map_given = true;
         } else if (a == "--time-stages") {
             o.time_stages = true;
+        } else if (a == "--time-waves") {
+            o.time_waves = true;
         } else if (a == "--help" || a == "-h") {
             o.help = true;
         } else {
@@ -203,6 +211,13 @@ Options parse_args(int argc, char** argv) {
     if (o.time_stages && o.steps < 1) {
         throw std::runtime_error("--time-stages needs --steps >= 1 (there is nothing to time in a"
                                  " run that generates nothing)");
+    }
+    if (o.time_waves && (o.session || o.sizes_only)) {
+        // A wave clock prices `prefill_wave` over the run's prompt. A session prefills per `feed` line and
+        // has no single prompt wave to replay, and --sizes-only prefills nothing, so neither has the object
+        // this flag measures. Refusing beats printing an empty report.
+        throw std::runtime_error("--time-waves measures a run's prompt wave; --session has no single"
+                                 " prompt wave to replay and --sizes-only prefills nothing");
     }
     // A replay must be able to answer every step it is asked for. Silently falling back to
     // self-feeding after the list runs out would produce a run that is half forced and half
@@ -353,7 +368,20 @@ void print_usage(FILE* out) {
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
                  " [--prefill-logits last|all] [--wave-rows N]"
                  " [--mlp-map auto|interleave|contig]"
-                 " [--time-stages] [--load-verify] [--sizes-only]\n"
+                 " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
+                 "  --time-waves After the run, replay its PROMPT wave from a fresh state at two"
+                 " submission granularities — the production shape, queued with one wait at the logits"
+                 " (burst), and one wait at every family boundary (stage) — and attribute the serialized"
+                 " wave's wall across the launcher families (`engine/stage_clock.h`'s wave unit)."
+                 " Prints `WAVEPASS`/`WAVEPARITY` per pass, one `WAVE gran=stage family=` row per"
+                 " family (`ms` the family's share of the SERIALIZED wall, `share_pct` that as a"
+                 " percent of it, `launches` sites as the marker saw them, `rows_total` the launcher's"
+                 " own width sum where one exists, `plan_launches` the derived bill, `counts_match`"
+                 " all three agreeing), a `TOTAL` line reconciling the family sum against the pass wall"
+                 " (`ungaged_ms`, `within_tol`), a `GROUP` line with `matmul_pct` and `gdn_rec_pct`, and"
+                 " `WAVEGAP` with the serialized-vs-burst distance. Timing instrument: its numbers are"
+                 " a measurement, so they belong to a clean window, and the run's own outputs and"
+                 " `RESULT` line are unchanged by it\n"
                  "  --time-stages After the run, replay its generation steps from a fresh state at"
                  " three submission granularities — one wait per step (burst), per family boundary"
                  " (stage), per submission (kernel) — and print per-stage wall time next to the"
@@ -679,6 +707,133 @@ PassResult stage_pass(const Options& o, const engine::WeightStore& store, engine
                     ref[i].fed, ref[i].sampled, i < out.step_ms.size() ? out.step_ms[i] : 0.0);
     }
     return out;
+}
+
+// ---- the wave clock's passes (`--time-waves`, `engine/stage_clock.h`) ----------------------
+// One pass = rebuild the state the run's prompt wave started from (§08.4 reset) and prefill the SAME
+// prompt through it, priced at one submission granularity. Two passes, not the step clock's three:
+// `burst` is the production wave (every body queued, one wait at the logits) and `stage` is the same
+// submissions with a wait at every family boundary. `kernel` is refused outright for a wave —
+// `Clock::begin_wave()` says why in the message — because §04.4's recurrence is 18 launches per token and
+// draining each of them measures the drain, not the queueing P9 exists to change.
+//
+// What the two passes are FOR, and what neither can give. Only the serialized pass can say which family
+// owns which milliseconds: in a queued wave nothing marks a family boundary except the host's own
+// submission order, so a per-family number for the production wave would need a drain (making it the
+// serialized pass) or GPU events (which read exactly 0 below ~1 ms on this iGPU — `prototype/README.md`
+// rule 7). The burst pass therefore yields ONE number, its wall, and `WAVEGAP` prints the distance between
+// the two so a reader can see how much of the serialized wave is the instrument before quoting any share
+// against the production wall.
+//
+// Like the step passes, these mutate `st` (reset + re-prefill) and write nothing to `--out`, so they run
+// after everything the run reports about itself; `decode_run` snapshots the `RESULT` fields they move.
+struct WavePassResult {
+    const char* gran = "";
+    double wall_ms = 0.0;
+    bool tokens_identical = true;
+    bool logits_bitidentical = true;
+    int first_mismatch = -1;
+    int compared = 0;
+};
+
+// One granularity, priced and printed. `ref` is the run's own prompt wave, whose last row is the only row
+// both sides price (a pass always prefills at `kLast` — §06.5's shape — because pricing T vocabularies in
+// order to compare them would be buying D2Hs the report never reads).
+WavePassResult wave_pass(const Options& o, const engine::WeightStore& store, engine::RequestState& st,
+                         engine::DecodeScratch& sc, const engine::PrefillResult& ref,
+                         engine::stageclock::Mode mode) {
+    using engine::stageclock::Clock;
+    using engine::stageclock::Mode;
+    using engine::stageclock::Unit;
+    WavePassResult out;
+    out.gran = engine::stageclock::mode_name(mode);
+
+    st.reset();
+    st.sampled_token = -1;
+    st.stopped = false;
+
+    std::unique_ptr<Clock> clock;
+    if (mode != Mode::kBurst) clock = std::make_unique<Clock>(mode, Unit::kWave);
+    engine::stageclock::arm(clock.get());
+    if (clock) clock->begin_wave();
+    const auto t0 = std::chrono::steady_clock::now();
+    const engine::PrefillResult pass =
+        engine::prefill_wave(store, st, sc, o.prompt, engine::PrefillLogits::kLast);
+    // `end_wave()` BEFORE the wall is read: the last segment is the host tail, whose wait is what lands the
+    // logits, so closing it here is what makes `sum_ms` and `wall_ms` two readings of one span rather than
+    // a sum plus a missing tail.
+    if (clock) clock->end_wave();
+    out.wall_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    engine::stageclock::arm(nullptr);   // never leave the marker armed for an unmeasured pass
+
+    const engine::PrefillRow* want = ref.y0();
+    const engine::PrefillRow* got = pass.y0();
+    if (!want || !got) {
+        out.tokens_identical = false;
+        out.first_mismatch = 0;
+    } else {
+        ++out.compared;
+        if (want->sampled != got->sampled) {
+            out.tokens_identical = false;
+            out.first_mismatch = got->index;
+        }
+        // Bit for bit, not to a tolerance: the whole point of the line is that arming a clock cannot move
+        // one bit of the answer, and 1 ULP at the argmax is exactly what a reordering would look like.
+        out.logits_bitidentical = want->logits.size() == got->logits.size() &&
+                                  std::memcmp(want->logits.data(), got->logits.data(),
+                                              want->logits.size() * sizeof(float)) == 0;
+    }
+
+    const int bodies =
+        (int)((o.prompt.size() + (size_t)sc.wave_rows - 1) / (size_t)sc.wave_rows);
+    // How many rows this pass PRICED, which is not how many it has: `pass.rows` is one row per token
+    // (§06.5's `PrefillRow`), and under `kLast` only the last of them was ever submitted to `finish_token`
+    // — so only the y0 row costs a cast, an `lm_head` and a D2H. Derived from the wave's own y0 rather than
+    // typed as 1, so a future `kAll` pass here would report its own bill instead of a stale constant.
+    const int priced_rows = pass.y0() ? 1 : 0;
+    std::printf("WAVEPASS gran=%s wall_ms=%.4f tokens=%zu bodies=%d wave_rows=%d priced_rows=%d\n",
+                out.gran, out.wall_ms, pass.size(), bodies, sc.wave_rows, priced_rows);
+    std::printf("WAVEPARITY gran=%s tokens_identical=%d logits_bitidentical=%d rows_compared=%d"
+                " first_mismatch=%s%s%s\n",
+                out.gran, out.tokens_identical ? 1 : 0, out.logits_bitidentical ? 1 : 0,
+                out.compared,
+                out.first_mismatch < 0 ? "none" : std::to_string(out.first_mismatch).c_str(),
+                (out.tokens_identical && out.logits_bitidentical) ? "" : " note=COMPARISON_VOID",
+                o.prefill_logits == engine::PrefillLogits::kAll ? " note=pass_priced_y0_row_only" : "");
+    if (clock) {
+        engine::stageclock::WaveShape shape;
+        shape.tokens = (int)o.prompt.size();
+        shape.bodies = bodies;
+        shape.wave_rows = sc.wave_rows;
+        shape.priced_rows = priced_rows;
+        shape.wall_ms = out.wall_ms;
+        std::printf("%s\n", clock->describe_wave(shape).c_str());
+    }
+    return out;
+}
+
+// The whole `--time-waves` report. Same placement rule as `time_stages_report`: it mutates `st`, it writes
+// nothing, and its lines sit above `RESULT` so the last line of a run stays the result line.
+void wave_report(const Options& o, const engine::WeightStore& store, engine::RequestState& st,
+                 engine::DecodeScratch& sc, const engine::PrefillResult& ref) {
+    // The instrument's own overhead, printed first, for the same reason the step clock prints it: every
+    // serialized segment ends in one of these waits, so a reader who knows the count (`syncs=` on the
+    // TOTAL line) can take the clock back out of the clock's number.
+    const double idle_sync_us = engine::stageclock::calibrate_idle_sync(200);
+    std::printf("WAVE gran=calib idle_sync_us=%.3f iters=200"
+                " note=one_of_these_sits_inside_every_serialized_segment\n", idle_sync_us);
+
+    const WavePassResult burst = wave_pass(o, store, st, sc, ref, engine::stageclock::Mode::kBurst);
+    const WavePassResult stage = wave_pass(o, store, st, sc, ref, engine::stageclock::Mode::kStage);
+
+    // The distance between the two waves. The shares on the `stage` rows are shares of
+    // `serialized_wall_ms`, and this line is what a reader needs before putting one of them on the
+    // production wall: `exposed_ms` is what a drain at every family boundary cost a wave that otherwise
+    // had to wait for nothing.
+    std::printf("WAVEGAP gran=%s burst_wall_ms=%.4f serialized_wall_ms=%.4f exposed_ms=%.4f ratio=%.3f\n",
+                stage.gran, burst.wall_ms, stage.wall_ms, stage.wall_ms - burst.wall_ms,
+                burst.wall_ms > 0.0 ? stage.wall_ms / burst.wall_ms : 0.0);
 }
 
 // The whole `--time-stages` report. Called after the run has printed everything it normally prints
@@ -1012,6 +1167,20 @@ int main(int argc, char** argv) {
         // running.
         std::printf("%s\n", engine::launchstats::describe_run().c_str());
 
+        // The measurement reports below mutate `st` (every pass resets and replays), so two `RESULT` fields
+        // are snapshotted here rather than read off the state afterwards: `prefix_len` is what the RUN's
+        // tokens left, and a timing pass must not be able to move a field of the result line. `--time-stages`
+        // happens to land its last pass back on the run's own end state (it replays every step the run took),
+        // but that was an accident of that instrument's shape, and `--time-waves` does not: a wave pass ends
+        // where the prompt ends. Same rule as `ms_total` above — a by-product of the run, never of the probe.
+        const int result_prefix_len = st.prefix_len;
+
+        // The wave clock's two passes. Placed before the step clock's because a wave is what the run did
+        // first, and after `LAUNCHSTAT` for the same load-bearing reason: the wave report prices ITS pass
+        // by delta, and `LAUNCHSTAT` must keep meaning the run (§2.4's section-(h) reading of it).
+        if (o.time_waves) {
+            wave_report(o, store, st, sc, wave);
+        }
         // The stage clock's three passes. Their position is load-bearing twice over: they `reset()` and
         // re-prefill `st`, so they run only after everything the RUN reports about its own state
         // (`--state-fp` above) has been taken and after `LAUNCHSTAT` has been printed — otherwise the
@@ -1028,7 +1197,7 @@ int main(int argc, char** argv) {
                     " prefix_len=%d stopped=%d\n",
                     o.feed.empty() ? "run" : "replay", total_steps, step_ms,
                     step_ms / (n > 0 ? n : 1), sampled,
-                    st.prefix_len, run_stopped ? 1 : 0);
+                    result_prefix_len, run_stopped ? 1 : 0);
         std::fflush(stdout);
         engine::free_scratch(sc);
         engine::free_state(st);
