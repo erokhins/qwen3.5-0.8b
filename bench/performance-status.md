@@ -817,3 +817,69 @@ DRAM behaviour is; on a single row there are no other rows to give locality to. 
 the row count — `contig` when a body is one row, `interleave` when it is a wave — and that is a code decision,
 not a flag flip, so **the shipped default stays `interleave`** until the split is made and re-measured. A
 step-level 9.5 % win and a 5 % prefill loss are not worth trading against each other blindly.
+
+### Q10b/Q10c: the mapping split ships, and the headline tables move with it (2026-10-13, zero subagents, foreground, locks `q10b-verify`, `q10b-confirm`, `q10c-*`)
+
+`d1703b0` makes the `gate`/`up` walk follow the body's row count — `contig` when a body is one row,
+`interleave` when it is a wave — with `--mlp-map auto|interleave|contig` kept as the explicit override and
+`MLPMAP` printed only when one is given (default logs stay byte-stable, verified: 0 `MLPMAP` lines across the
+confirmation logs). The worker's mechanism finding is an ISA fact plus a labelled candidate: the template
+parameter is **not inert on the wave path** (under `contig` both weight `global_load_b128`s collapse onto one
+destination quad, so one weight word is in flight instead of two, WAR-blocked behind four tokens' FMAs), and
+the footprint-versus-parallelism reading of *why* that helps one path and hurts the other is explicitly **not
+established by anything measured**. Fine to ship on; not fine to quote as hardware law.
+
+**The three pre-registered confirmations, measured before anything else was interpreted** (witnesses first:
+`STAGEPARITY … logits_bitidentical=1` on all rows, `plan_match=1`, medians of 3):
+
+| # | prediction | measured | verdict |
+|---|---|---|---|
+| **C1** | `mlp` family, 128 lanes ≈ 3.395 ms | **3.391** (3.388 / 3.391 / 3.411) | hit, within 0.15 % |
+| **C2** | step burst, 128 lanes ≈ 11.6 ms | **11.703** (11.376 / 11.703 / 11.727) | hit, +0.9 % |
+| **C3** | TTFT at 1024 ≈ 1044 ms, regression gone | **1051.9** (1049.5 / 1051.9 / 1051.9) | hit — +0.8 % vs the 1043.8 interleaved row, inside the ±2 % band, so the prefill loss is gone rather than traded |
+
+Headline tables re-taken from scratch under the new default, as the brief required (Q10's per-mapping rows are
+**not** comparable to these — a row-count-dependent default changed what "the default" means):
+
+| lanes at last step | ms/token, best of 3 | all three | spread | tok/s | was |
+|---|---|---|---|---|---|
+| 128 | **11.641** | 11.641 / 11.851 / 11.752 | 1.80 % | **85.9** | 12.949 / 77.2 |
+| 512 | **12.934** | 12.934 / 12.955 / 12.949 | 0.16 % | **77.3** | 13.784 / 72.5 |
+| 1024 | **12.169** | 12.676 / 12.854 / 12.169 | 5.63 % | **82.2** | 13.670 / 73.2 |
+| 2048 | **13.068** | 13.078 / 13.068 / 13.582 | 3.93 % | **76.5** | 13.781 / 72.6 |
+
+| prompt tokens | TTFT, best of 3 | all three | spread | prompt tok/s | was |
+|---|---|---|---|---|---|
+| 64 | **76.4** | 77.3 / 77.6 / 76.4 | 1.60 % | **837.8** | 79.4 / 806 |
+| 256 | **257.7** | 259.6 / 258.7 / 257.7 | 0.73 % | **993.3** | 258.6 / 990 |
+| 1024 | **1054.6** | 1057.1 / 1058.6 / 1054.6 | 0.39 % | **971.0** | 1054.6 / 971 |
+| 3072 | **3833.8** | 3845.3 / 3833.8 / 3850.0 | 0.42 % | **801.3** | 3841.2 / 800 |
+
+Prefill is where it was, within noise, at every length — which is the whole point of the split — and decode is
+**+8 to +11 % everywhere**. 1024 lanes still carries a 5.6 % spread and 2048 a 3.9 % one; I quote best-of-3
+as this file always has and those two points are the softest in the table.
+
+**4k needed its own A/B, because the first look looked like a regression.** A single stage-clock run read
+16.72 ms/token against the 15.35 I had been quoting, which would have been an 8.9 % loss. Three runs each side
+say otherwise, and say why: at 4032 lanes the new default measures **16.70 / 16.73 / 16.78** ms of stage-clock
+TOTAL against **17.19 / 17.77 / 17.77** interleaved — a 3–6 % *win*, with `mlp` moving 4.28–4.38 → 3.41–3.43
+and `attn` flat (3.12–3.13 vs 3.19–3.21, as it must be). The instrument error was mine: **15.35 was a burst
+row and 16.311 was a differential row**, two different rulers in one conversation. Like-for-like on the burst
+ruler the Q6.1 window measured 15.32 / 15.38 / 15.40 interleaved, today's interleaved side measures
+15.45 / 15.46 / 15.47 — a 0.8 % reproduction, so nothing drifted between eras — and the new default gives
+**14.50 / 14.51 / 14.54 ms = 68.9 tok/s (−5.8 %)**. The differential harness at 4032 remains unusable and now
+has a third datum: 11.243 / 14.586 / 14.483, spread 29.7 %, with a "best" faster than a 128-lane step at 32×
+the KV, which is not a physical result. **Quote 4k decode from the stage-clock burst, never from
+`tools/context_sweep.py`.**
+
+Gate state under the new default, run by me rather than taken on trust: `dec8` 170 PASS-lines / 0 FAIL-lines,
+`ENGINE GATE PASS`; `chunk64b` 373 / 5 with verdict `ENGINE GATE FAIL — 3 failed`, i.e. exactly the three D-9
+red lines this fixture is required to leave standing, unchanged. The worker's own proof covered all eight
+fixtures × both explicit mappings with `margin_delta` ×1.0000 and `band_history --check` green.
+
+**What is left of the gap, sized.** MLP in-step is now 3.391 ms against a 2.230 ms roofline: Q9's walk penalty
+was 2.034 ms and the split took 46 % of it, so **~1.09 ms/token is still unattributed**, and it is no longer
+explained by "two streams" because there is only one stream now. The two candidates the pre-registration
+leaves standing are the row tail (the `down` shape's 0.629 was never two-stream at all) and whatever Q9's
+`A_mdn_*` pair was actually measuring. Also unchanged and still owed: `chunk64b` step 0 with no sized rule,
+and the mixed one-pass/streaming wave grid priced only by engine self-consistency.
