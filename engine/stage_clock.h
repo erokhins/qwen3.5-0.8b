@@ -30,9 +30,15 @@
 //   `serialized_sum` — the sum of the stages of one step. Because a segment runs from the end of the
 //              previous sync to the end of this one, the segments tile the step: the sum IS that
 //              pass's wall clock, which is the cross-check the report prints.
-//   `exposed`  — `serialized_sum - burst`, for the SAME launches at the same lanes. If it is ~0 there
-//              is no overlap to win and the residue is inside the kernels (story B). If it is large,
-//              the stall is exposed and submission is where the time goes (story A).
+//   `exposed`  — `serialized_sum - burst`, for the SAME launches at the same lanes. In serialized
+//              passes a launch pays its dispatch, its execution and its wait without overlapping, so
+//              `serialized ≈ Σexec + dispatch + waits`, while the pipelined burst pays
+//              `Σexec + whatever dispatch it FAILS to hide`. A LARGE gap therefore means the queue was
+//              already hiding dispatch behind execution — nothing submission-side left to win, the
+//              residue is inside the kernels (story B). A gap of ~0 means the real step's queue is
+//              already empty launch by launch, so dispatch is exposed in the open and submission is
+//              where the time goes (story A). Same reasoning as `bench/plan-2026-10-12.md` Q6 item 1,
+//              whose first sketch had this polarity inverted; corrected in place 2026-10-13.
 //
 // WHY THE MARKER PRECEDES THE SUBMISSION, which is the one thing here that is easy to get wrong and
 // silently wrong. A segment has to be closed BEFORE the next one's work is queued: sync-after-note
