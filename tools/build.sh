@@ -13,6 +13,10 @@ cd "$(dirname "$0")"
 mkdir -p build
 targets=("$@"); [ ${#targets[@]} -eq 0 ] && targets=(mixed_bw)
 for t in "${targets[@]}"; do
-    echo "hipcc -O3 -Wl,-rpath,/opt/rocm/lib -o build/$t $t.cpp"
-    hipcc -O3 -Wl,-rpath,/opt/rocm/lib -o "build/$t" "$t.cpp"
+    # gemm_peak needs hipBLAS (the library whose kernels are being measured); everything else links
+    # nothing beyond the HIP runtime.
+    libs=""
+    [ "$t" = "gemm_peak" ] && libs="-lhipblas"
+    echo "hipcc -O3 -Wl,-rpath,/opt/rocm/lib $libs -o build/$t $t.cpp"
+    hipcc -O3 -Wl,-rpath,/opt/rocm/lib $libs -o "build/$t" "$t.cpp"
 done
