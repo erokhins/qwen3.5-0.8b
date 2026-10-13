@@ -25,7 +25,9 @@ This file settles it. Two instruments, both CPU-verifiable before any GPU is tou
 | `tools/step_traffic_model.py` | the step's real traffic budget from `engine/state.h`, the ceiling that implies, and the byte-reduction ladder |
 
 `tools/mixed_bw.cpp` is a timing tool: it is the main agent's to run, under `tools/gpu_lock.sh`,
-blocking. `--dry-run` and `--help` touch no device and are the CPU-side verification.
+blocking. `--dry-run` and `--help` touch no device and are the CPU-side verification; `--selftest-geom`
+(CPU) and `--selftest` (untimed device cases, ~2 s wall for all 20) are correctness gates that print
+no ms and no GB/s, and those two are what a worker is allowed to run.
 
 ## What one token actually moves (computed, not measured)
 
@@ -86,13 +88,27 @@ Geometry is `--nbuf N --buf-mib B` (the MLP's 48 × 11.01 MB walked once) vs one
 own row instead of averaging it into a warm number.
 
 Three self-checks, because "a bandwidth number above ~240 GB/s is evidence of skipped work" is a
-repo rule and a probe that skips work silently is the worst possible instrument for this question:
-the source buffers are filled with 1.0f and every read pass sums them in **double** (exact,
-integer-valued) against `4.0 × float4s-read`, so a short read is `checksum=FAIL` and a non-zero
-exit; `write` rows are verified by an untimed read-back that proves the writes landed; and any row
-above `--suspect-gbs` (default 240) carries `suspect=1` with a note on stderr (`--strict` makes it
-fail). A `pages=cold` row instead prints `fresh_zero_sum=1` as evidence the pages really were fresh
-— a non-zero sum there means the pages had been used before and the row must be thrown out.
+repo rule and a probe that skips work silently is the worst possible instrument for this question.
+Every read pass carries a byte account: the source buffers are filled with 1.0f, each block reduces
+its per-thread partials in **double** (exact, integer-valued) and the total must equal
+`4.0 × float4s-read`; a short or skipped read is `checksum=FAIL_reads_short` and a non-zero exit.
+The write side is verified by an untimed read-back against an arena pre-filled with a value the write
+stream never stores, so a missing write is visible instead of merely unwitnessed
+(`checksum=FAIL_writes_missing`). `checksum=ok` is the only passing value: a row prints
+`ok_writes_aliased` when its write side cannot be proven (`wthenr --overlap 1` reads back the lines it
+just dirtied) and `unverifiable_cold_pages` when proving it would have warmed the pages being
+measured — and in the cold case the process exits non-zero too, because rule 11 says no conclusion may
+be drawn from such a row. A cold **read** row additionally prints `fresh_zero_sum=1`, the one freshness
+witness cold pages allow (the bytes read were all zero); a non-zero sum means the pages had been used
+before and the row must be thrown out. A cold **write** row overwrites that evidence, so it prints
+`fresh_alloc_untouched=1` (structural: this process issued no access to those pages before the timed
+launch) rather than inventing a measurement. Any row above `--suspect-gbs` (default 240) carries
+`suspect=1` with a note on stderr (`--strict` makes it fail). `--selftest` is the same accounts turned
+into a gate: one child process per configuration, a poison guard band around every region, one untimed
+pass, and four injected bugs, each of which must be caught by exactly the account that owns it — a read
+one round short and a skipped final write (caught by the read account and the write account
+respectively, and by neither the other), and one float4 straying over each edge, which only the guard
+bands can see and which is their negative control.
 
 `mixlaunch` serializes its launches (one stream: the engine's own shape); `mix` overlaps them in
 one kernel. Those are two different questions and the rows carry `--mode` so they are never
@@ -183,6 +199,84 @@ parseable prefix and a suspect row must stay visible, not be silently consumed.
 | 11 | every `checksum` | `ok` | `FAIL` means the probe skipped work: no conclusion may be drawn from that run |
 | 12 | `suspect` | `0` everywhere at 528 MiB (it dwarfs the 18 MiB cache) | `suspect=1` at this footprint is the >240 GB/s trap, not a new record |
 
+### Row corrections after the first attempt
+
+The first attempt (`q8-mixedbw`, 13 of 23 rows printed, util 92 %→25 %) produced **no usable
+number**: every warm row failed its checksum, and every `mix` row with ratio > 1 faulted. Both were
+instrument bugs, not box behaviour, and both are fixed in `tools/mixed_bw.cpp`:
+
+1. `mix_k`'s loop bound was the solver's *grid-pass* count while `rounds` was meant to be the
+   ratio-loop trip count. rd_n4 was already `rounds*rrd*stride`, so the kernel read **`rrd` times
+   past the end of its own buffer** at any ratio above 1:1 — 62× at 62:1 — and faulted. Minimal repro
+   (pre-fix binary, 64 MiB, `--iters 1`): ratio 1 exits 3, ratios 2/4/62 each take
+   `HSA_STATUS_ERROR_MEMORY_FAULT`. It was ratio-dependent, not footprint-dependent.
+   `--selftest-geom` called all of those geometries `ok=1` because it checked the ratio and the
+   allocation but never the indexing the kernel runs; `plan_bounds()` now re-derives the kernel's
+   index arithmetic from the same `Plan` and `invariants()` rejects it, and `--selftest` (device)
+   proves the bytes instead of the arithmetic. One `--selftest` run now covers every configuration
+   that faulted — mix at 4/10/20/32/62/128:1 at 528 MiB, both `--wr-arena-mib 2` shapes, the
+   `mixlaunch` 48×11.01 MiB geometry, and a cold write — each in its own child process (a device
+   fault poisons the context, so one process could only ever report the first dead configuration).
+2. The read checksum was `sums[blockIdx.x] = per_thread_acc` — a per-thread store wearing a block
+   reduction's clothes. Every thread of a block wrote the same address and the surviving value was
+   one thread's partial, i.e. **1/blockDim of the bytes actually read** (measured pre-fix:
+   `sum=65520 want=16773120`, exactly 1/256). That is why *every* warm row failed and why no number
+   from that run may be quoted. It is now a real shared-memory block reduction, exact as before, and
+   it runs inside the timed burst (`--verify 1`), so a row cannot be printed without having proved
+   what it touched. The write side got the symmetric fix: the arena is pre-filled with a value the
+   write stream never stores, so the untimed read-back proves the writes **landed** rather than
+   finding a buffer that was already full of 1.0f.
+3. There was no third defect. **`--mode write --pages cold` did not fault.** The `mixed_bw.cpp:417`
+   lines belong to the *warm* `mix` rows and `:421` to `F_cold_mix62`; `tmp/q8/mixed_bw.err` has 11
+   `Memory Fault Error` lines — one from `--selftest`, nine from `B_mix_{4,10,20,32,62,128}` and the
+   three `D_*`, one from `F_cold_mix62` — and nothing after the cold-write banner, whose row is the
+   last line of `tmp/q8/mixed_bw.log`. What that row genuinely lacked was evidence, not a crash; see
+   the `F_cold_write` correction below.
+
+The expectations table above is **not** edited: a run that failed does not get to rewrite its test.
+What follows is the corrected command list, and why each line changed.
+
+| row | correction | why |
+|---|---|---|
+| `0a` | command unchanged | `--selftest-geom` still passes all 25 configurations, and it is now *allowed* to be cheap: the bounds model is in it, and the device witness in `0b` is what carries the load |
+| `0b` | command unchanged; now forks one child per device case and prints byte accounts | it is the gate for this whole sweep. If `--selftest` does not exit 0, no row below is worth tabulating |
+| `A_*`, `B_*`, `C_*`, `D_*` | **commands unchanged** | the geometry was right; the tool was wrong. Every one of these rows must now print `checksum=ok`; anything else means the instrument broke again, not that the box changed |
+| `E_same` | command unchanged; expect `checksum=ok_writes_aliased` | reading back the just-dirtied lines makes the write side *physically* unverifiable (the region was pre-filled with the same bytes the write stores). The field says so instead of printing a bare `ok`; the read side is verified |
+| `E_62_async`, `E_62_synced` | commands unchanged; both now print `checksum=ok rd_sum=… wr_landed=exact` | the worry that they "did nothing because there is no arena" is not the case: `--overlap 0` gives the write and the read **separate** regions (write 8.4 MiB into one, read a different 517.5 MiB), and `--pair-sync 1` inserts a real `hipDeviceSynchronize()` between the two launches. Note what that sync is: one whole-queue drain between the passes, not a per-launch fence — the engine never syncs per launch, so expectation 9 reads this row as "drain cost", not as an engine shape |
+| `F_cold_read` | command unchanged; expect `checksum=unverifiable_cold_pages fresh_zero_sum=1` and **exit 3** | verifying cold bytes would warm them, so the row is unverifiable *by construction* and now exits non-zero rather than printing `checksum=skipped_cold` for a reader to walk past. `fresh_zero_sum=1` stays the admissible freshness witness; `fresh_zero_sum=0` still means throw the row out (rule 10) |
+| `F_cold_mix62` | command unchanged | it faulted for defect 1 and never printed. Same unverifiable-cold treatment as `F_cold_read` |
+| `F_cold_write` | command unchanged; expect `checksum=unverifiable_cold_pages fresh_zero_sum=not_observable_write_pass fresh_alloc_untouched=1`, **exit 3** | a write pass overwrites the only evidence of freshness, so expectation 10's `fresh_zero_sum=1` is measurable only on rows that *read*. This row's freshness claim is structural — `alloc_dev(fill=false)` issues no access to those pages before the timed launch, so the flag is `fresh_alloc_untouched=1` — and its admissible conclusion is limited to "the first GPU pass over fresh pages costs this much for a write stream" |
+| **`G_step_1p5g_61p7`** (new) | `tools/build/mixed_bw --mode mixlaunch --ratio 617:10 --nbuf 48 --buf-mib 32.45 --pages warm --iters 8 --tag G_step_1p5g_61p7` | the **step's absolute traffic** in its own launch shape: 1531.9 MiB read + 24.83 MiB written at 61.70:1, i.e. the traffic model's totals rather than a footprint scaled to the MLP's 528 MiB. Ratio 617:10 is the step's 61.7:1 written as integers so `ratio_act` cannot drift |
+| **`G_step_1p5g_61p7_arena2m`** (new) | `tools/build/mixed_bw --mode mix --ratio 62 --footprint-mib 1557 --wr-arena-mib 2 --pages warm --iters 8 --tag G_step_1p5g_61p7_arena2m` | the same budget with the engine's write *shape*: 1530.6 MiB read while a 2 MiB arena is re-dirtied ~250 times (`fit=write_arena_cycled`), which is closer to 424 launches over a GDN-state-sized arena than any one-shot write. This is the row that would show dirty-line pressure from writes the cache never lets reach DRAM |
+| **`G_mlpshape_21p5`** (new) | `tools/build/mixed_bw --mode mixlaunch --ratio 43:2 --nbuf 48 --buf-mib 11.01 --pages warm --iters 8 --tag G_mlpshape_21p5` | the MLP read shape at the step's **absolute write volume** (504.0 MiB read + 23.44 MiB written = 21.50:1). With `C_mixlaunch_62` it brackets the same geometry at two write shares 3× apart; if the box is flat across 21.5→62:1 it is flat, and if it is not, this pair says by how much at the geometry the step actually walks |
+
+and after the sweep, gate the rows themselves rather than the exit codes a `tee` pipeline swallows:
+
+```bash
+# every warm row must read ok (E_same: ok_writes_aliased); every cold row unverifiable_cold_pages
+grep '^MIXEDBW' tmp/q8/mixed_bw.log | sed 's/.*tag=\([^ ]*\).*checksum=\([^ ]*\).*/\2  \1/' | sort
+# and the pricing step, unchanged:
+tools/step_traffic_model.py --probe-file tmp/q8/mixed_bw.log --lanes 128
+```
+
+**Which rows decide the question now.** `A_read_512m` first (if it is not 225–240 GB/s the
+instrument is wrong and nothing below it means anything), then four rows:
+`C_mixlaunch_62` (the step's ratio in the engine's serialized-launch shape), `B_mix_62` (the same
+ratio with both streams genuinely in flight inside one kernel — the only row that can show read/write
+interference as opposed to serialization), `G_step_1p5g_61p7` (the step's absolute bytes) and
+`G_step_1p5g_61p7_arena2m` (the step's write shape, one small arena re-dirtied). Expectations 4
+and 6 are read off the first two; the G rows are what the pre-registered list was missing.
+
+**Is `C_mixlaunch_62` the step's ratio row?** For the ratio and the launch shape, yes: it runs
+62.002:1 over 48 × 11.01 MiB read once, one stream, 96 launches — which is the step's ratio against
+the weight family that dominates it, and expectation 4's decisive number is read from it. It is not
+the step's *write* row: per iteration it writes 8.38 MiB of fresh arena where the step writes ~24.6 MB
+against 1.5 GB read, and the step's writes re-dirty a small arena rather than streaming a new one.
+So: yes, this question hinges on that one number — but only together with `B_mix_62` (overlap,
+not serialization) and the two G rows (absolute volume, arena cycling). If `C_mixlaunch_62` and
+`G_step_1p5g_61p7` land within a few % of each other and of `C_read_48x11`, the traffic-mix story is
+dead on those three numbers and nothing else in this file needs re-reading.
+
 **The prediction, in one sentence: the curve is flat.** Reads dominate the step so completely
 (61.7 : 1) that mixed traffic can only move the ceiling from 6.47 ms to ~6.7 ms, so the expected
 outcome is that 237 GB/s was the right denominator after all, the traffic-mix story dies next to
@@ -193,6 +287,13 @@ result that would change the plan's shape, and it is what rows B_62, C_mixlaunch
 ## Results
 
 _Not yet taken: these rows need a GPU pass with zero subagents active, taken by the main agent._
+
+_The first attempt (2026-10-13, tag `q8-mixedbw`, blocking, zero subagents, util 92 %→25 %) printed
+13 of 23 rows and yielded **no** number: every warm row failed a checksum that was itself broken, and
+every `mix` row with ratio > 1 faulted. Both instrument defects are diagnosed and fixed above (§"Row
+corrections after the first attempt"); the raw lines are in `tmp/q8/mixed_bw.log` and its stderr in
+`tmp/q8/mixed_bw.err`, kept as evidence about the instrument and not as data — by rule 11 none of
+those 13 rows may be tabulated, quoted, or used to pre-judge the re-run._
 
 | tag | mode | ratio_act | pages | ms | GB/s | %of 237 | suspect | checksum |
 |---|---|---|---|---|---|---|---|---|
