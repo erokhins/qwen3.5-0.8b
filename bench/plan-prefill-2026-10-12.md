@@ -536,3 +536,21 @@ Runner-up risk, stated so it is not discovered at P7: the claim that the prototy
 (`part` sizing, head-major `cap` strides, per-row positions in P8). The prototype ran it against
 pins in its own host (`attn_decode.hip.cpp:168,265-268,319`; kernels `:308-335`), so the arithmetic
 exists — the engineering is the engine launcher and the G6-shape band gate.
+
+## Queue order decided by the operator (2026-10-13)
+
+**debt → MLP residue → prefill speed.** Explicitly:
+
+1. **Debt first.** Both standing debts, in this order: **(a) D-9's sized rule** — `chunk64b` step 0 has been
+   knowingly red since it was recorded, and "the pin's 2-ULP margin is smaller than the engine's legal element
+   error at that step" is a description, not a rule. A rule has to say what evidence clears a step, in numbers,
+   sized from the floor probe rather than from taste. **(b) the wave-grid reference pin** — the mixed
+   one-pass/streaming grid is currently priced engine-against-engine, and closing that needs a >512-token-prompt
+   fixture with its own D-2 allowance, which P8b correctly declined to invent.
+2. **Then the MLP residue**: ~1.09 ms/token between the new 3.391 ms in-situ row and the 2.230 ms roofline, with
+   the two-stream explanation now spent (there is one stream).
+3. **Then re-open prefill throughput.** The operator's position is that **~1k prompt tok/s is too slow and
+   ~5k should be reachable.** Recorded as a target, not as an accepted claim: 5k tok/s at 1.6 GFLOP/token is
+   **8 TFLOP/s sustained**, so the first act of that package is to find out what this GPU's dense-matrix peak
+   actually is and what fraction of it the current path reaches. If the answer makes 5k arithmetically
+   impossible, the deliverable is that number and the honest ceiling, not a re-scoped target presented as a win.
