@@ -34,6 +34,15 @@ rows/block and x-packing sweeps. Both write outputs and correctness-check the ti
                                                [--negative] [--time] [--sweep] [--rows 8]
                                                [--iters 30] [--no-verify]
     .venv/bin/python prototype/proj_gemv/run.py --tokens p64      # P5: the token-batched form
+    .venv/bin/python prototype/proj_gemv/run.py --time --only gdn  # one ledger row at a time
+
+`--only gdn|attn` is a TIMING selector and needs `--time`: it narrows the cold timing path to the
+layers of one family, which is how `bench/performance-status.md` §2's two "not measured on its own"
+rows (GDN projections 0.3796 GB, attention projections 0.0881 GB) get measured instead of
+arithmetically apportioned — `bench/plan-2026-10-12.md` Q6 item 5. The P1/P2 correctness gate never
+narrows: it runs every projection of every layer whatever this flag says, because a gate that can be
+told to look at half the projections is not the gate the numbers above were taken with. Refusing the
+flag without `--time` is the same point: an inert `--only` would read like a subset gate.
 """
 from __future__ import annotations
 
@@ -595,14 +604,19 @@ def time_token(args, d: Path, layers, step: str, fails) -> None:
         js, _, _ = layer_jobs(layer, d, [step], files, outdir)
         jobs += js
     plan = write_plan(WORK / "plan_token.txt", jobs)
+    # The plan's own bytes, computed the way the launcher accounts for them (weights + x + output,
+    # one pass each at tokens = 1), so the roofline printed under `--only gdn|attn` is that family's
+    # roofline and not the whole 0.4677 GB that all 24 layers cost.
+    gb = sum(sum(Path(w).stat().st_size for w in wfiles) + Path(xfile).stat().st_size
+             + rows * 2 for _, rows, _, xfile, wfiles, _ in jobs) / 1e9
     print("\ncold token plan (%s): %d launches, every layer's packed input projection then its"
           " output projection, in token order" % (step, len(jobs)))
     t = run_bin(["--mode", "burst", "--plan", str(plan), "--rows", str(args.rows),
                  "--iters", str(max(args.iters, 20))], "token")
     print("  projections for one token: %.4f ms | %.1f GB/s | %.0f%% of the %.0f GB/s probe"
-          "  (roofline for 0.4677 GB: %.3f ms)"
+          "  (roofline for %.4f GB: %.3f ms)"
           % (float(t["ms_per_plan"]), float(t["gbs"]), 100.0 * float(t["gbs"]) / PROBE_GBS,
-             PROBE_GBS, 0.4677 / PROBE_GBS * 1e3))
+             PROBE_GBS, gb, gb / PROBE_GBS * 1e3))
     if args.sweep:
         run_bin(["--mode", "burst", "--plan", str(plan), "--rows-list", "2,4,8,16,32",
                  "--iters", str(max(args.iters, 20))], "token sweep", quiet=False)
@@ -630,9 +644,16 @@ def main() -> int:
                          " rows to be BIT-IDENTICAL to the k=1 kernel run one row at a time.")
     ap.add_argument("--time", action="store_true", help="cold timings (takes the GPU lock)")
     ap.add_argument("--sweep", action="store_true", help="with --time: rows/block + x packing")
+    ap.add_argument("--only", choices=["all", "gdn", "attn"], default="all",
+                    help="with --time: measure one family's layers only (needs --time; the P1/P2"
+                         " correctness gate always covers all nine projections of all 24 layers)")
     ap.add_argument("--no-verify", action="store_true",
                     help="skip the operand-rebuild proof (it is the gate's own foundation)")
     args = ap.parse_args()
+    if args.only != "all" and not args.time:
+        raise SystemExit("--only is a timing selector: it needs --time. Without it the flag would"
+                         " look like a correctness subset and do nothing, and the P1/P2 gate below"
+                         " runs every projection of every layer whatever it says.")
 
     d = ROOT / "data" / "refs" / args.fixture
     if not d.exists():
@@ -683,9 +704,20 @@ def main() -> int:
         run_tokens(args, fails, worst)
 
     if args.time:
+        # `--only` narrows the timed layers to one family and nothing else. `is_attn_layer` reads
+        # the fixture's own dump names, so the split is the checkpoint's (§01.3: 18 `linear_attn`
+        # layers, 6 `self_attn`), not a layer list hardcoded here that could drift from the shard.
+        timed = layers if args.only == "all" else [
+            L for L in layers if is_attn_layer(d, L) == (args.only == "attn")]
+        if not timed:
+            raise SystemExit("--only %s matched no layer in --layers %s; the fixture names the"
+                             " families in its dump files, so check the fixture"
+                             % (args.only, args.layers))
         with gpu_lock("proj_gemv timing (run.py)"):
-            time_families(args, d, layers, steps[0], fails)
-            time_token(args, d, layers, steps[0], fails)
+            print("\ntimed layers: %s (--only %s of %s); the gate above ran all %d"
+                  % (",".join(str(L) for L in timed), args.only, args.layers, len(layers)))
+            time_families(args, d, timed, steps[0], fails)
+            time_token(args, d, timed, steps[0], fails)
 
     print("\nworst BF16 ULP by output -- gated (large elements only) | raw (also the cancelling"
           " elements floor_probe.py attributes to arithmetic, not error) | most elements any one"
