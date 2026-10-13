@@ -128,17 +128,42 @@ GPU the draft's 0.0409 GB is cheap against 1.605 GB, so the trade may flip. Gate
 rate plus a measured tok/s comparison with drafting off. If it does not win on GPU either, say
 so in the ledger and stop.
 
-### D-11 — **ACCEPTED: option A** for route (c)'s wave-width dependence (user, 2026-10-14)
+### D-11 — **DONE (2026-10-14): option A shipped, and route (c) is the default** — accepted by the user, executed 2026-10-13/14
 
-The dependence is accepted rather than engineered away: **freeze `kMaxWaveRows` as part of pin provenance,
-record the hipBLAS version alongside it, and replace the cross-wave-count *bit-identity* gate with a band check
-sized by a floor probe** (the `route_allowance.py` pattern — establish the legal drift by rotating the width
-yourself and measuring it, then bound that). Changing the wave cap becomes an explicit numerics change requiring
-re-pinning under the standing D-2 rule. Cost: gate-policy work plus a re-pinning pass; no speed given up. What is
-relinquished is a structural invariant that was never defended, replaced by a measured bound.
+**What was actually done, item by item against the acceptance above.**
 
-**Conditional on the user's requirement, which is the gate on this decision:** *accepting* the dependence is not
-accepting the observed difference as rounding. Before the default flips, the hand↔library delta must be proved to
-be reassociation and nothing more, **element by element and step by step**, not by aggregate cos/meanrel — see
-`bench/plan-route-c-audit-2026-10-14.md`. If any element moves further than the isolated per-shape reassociation
-floor allows, that is a bug, not a band, and D-11 is void.
+1. **Frozen `kMaxWaveRows` + hipBLAS version as pin provenance** — `engine/numerics_provenance.json`
+   (`wave_rows_cap: 512`, `hipblas_version: 3.6.0`), printed by every run on its `NUMERICS` line and
+   asserted by `engine/gate.py:numerics_provenance_checks`; the version is asked of the loaded `.so` with
+   `hipblasGetVersion`, not read from a header macro, so a library swap is a numerics change and not a
+   rebuild detail (`d710a78`). The record still says it was captured on the hand route, and that is right:
+   the pins were produced there.
+2. **The cross-wave-count bit-identity gate is replaced by a band check on the library route** —
+   `CASCADE_BAND` in `engine/gate.py` (row 1-cos 2e-3, stage meanrel 3e-2, stage cos 0.9998, flip room
+   0.10) with the cross-width comparison walking every dumped row (`cross_width_ids`) and the wave band
+   checks pooling meanrel/cos per stage. `--gemm hand` keeps bit-identity; nothing about the hand route's
+   guarantee was relaxed (`0b30422`, exercised for real in `0fea0db`).
+3. **The tie rule was generalised** — an exact tie in a pin is admitted by D-9's sized slack bound instead
+   of refusing admission, which is what `chunk64b`'s tie needed (`0b30422`).
+4. **The cascade bands are policed** — `tools/band_history.py` now reads every gated dict
+   (`POLICED_BLOCKS` covers `CASCADE_BAND`), and all four values carry ledger lines under this decision
+   citing the A2/A3 measurement each came from (`ed56b79`). No band entered the tree without a record.
+5. **The condition was met**: `bench/route-c-audit-2026-10-14.md` proves the hand↔library delta to be
+   reassociation at the element level (every library shape ≤ 1 ULP above its own cancellation band at
+   M = 1, 88, 512, 1024; the three injected bugs separate from the legal delta by ≥ 492× on the least
+   flattering statistic), and `--gemm library` is now the default in the binary and in the gate
+   together (`0fea0db`), on a first genuine 8-fixture × 2-route matrix that is 16/16 green — see
+   `engine/results.md`, route (c), “Admitted”.
+
+**The weakened guarantee, said plainly.** On the library route the wave-boundary check is **inside a band,
+not byte-identical**. A reader who comes to the route-(c) sections expecting the pre-route invariant — the
+one that made “the same numbers at every width” true — must not read this decision as still granting it.
+
+**Cost actually paid, and the bill that came with it.** Two gate bugs were found only because flipping the
+default forced a genuine library run, and both were of the class “a checker that cannot fail”: the route
+echo compared the engine's handle spelling (`route=hipblas`) with the judging route while the dry-run
+stand-in printed the route word instead, and `cross_width_ids` mapped a decode row one prompt-length past
+the dump. They are written up in `engine/results.md` route (c) rather than fixed quietly, with the
+incident they hid: the “16/16 on both routes” claimed by `0b30422` was sixteen hand runs, because the A/B
+harness put the route in a wrapper binary whose flag the gate's own appended `--gemm` overrode.
+

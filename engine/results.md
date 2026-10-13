@@ -4313,7 +4313,11 @@ A gate-policy change is the one kind of change I do not take on trust, so the wh
   different epistemic state than the one D-9 was written to protect, and a better one: every red line that
   remains anywhere would now be a bug rather than a policy.
 
-## Route (c) (2026-10-13): hipBLAS for the ten fat prefill matmuls — behind `--gemm`, default `hand`; W8 green; the bug was one stale operand, not the library
+## Route (c) (2026-10-13): hipBLAS for the ten fat prefill matmuls — behind `--gemm`, default `hand` then, **`library` since D-11 was closed on 2026-10-14** — W8 green; the bug was one stale operand, not the library
+
+> **Read the end of this section first.** Everything above it describes the route while it was switched off.
+> It is now the shipped default, and the guarantee that ships is **a band, not byte-identity** — the last
+> subsection says exactly which claim got weaker and which did not.
 
 **Scope correction, written here rather than in spike §7.** §6 item 1's list is the authority and it is
 **ten** shapes: `q_proj, k_proj, v_proj, o_proj, in_proj_qkv, in_proj_z, out_proj, gate_proj, up_proj,
@@ -4377,9 +4381,113 @@ reported separately — the number §7 W2 wanted. No existing allowance moved, a
 anything the current gates can see.
 
 **Unfinished, in order.** (1) the remaining four fixtures on both sides (`dec300f`, `wide520f`, `mt32f`,
-`chunk64b`); (2) the prefill-row margin table described above; (3) §7 W9's timing A/B, which is
-main-agent-only work (TTFT at 64/256/1024/3072 both paths, `--time-waves` attribution both paths — the
-wave attribution predicts proj+mlp's 74.4 % collapsing into single digits and ~305 ms at 1024); (4) the
-default stays `hand` until (1)–(3) exist and the parent decides otherwise; (5) the dead F32 widenings the
+`chunk64b`) — **done 2026-10-14, see “Admitted” below**; (2) the prefill-row margin table described above;
+(3) §7 W9's timing A/B, which is main-agent-only work (TTFT at 64/256/1024/3072 both paths, `--time-waves`
+attribution both paths — the wave attribution predicts proj+mlp's 74.4 % collapsing into single digits and
+~305 ms at 1024); (4) ~~the default stays `hand` until (1)–(3) exist and the parent decides otherwise~~
+**the default is `library` since `0fea0db`, on the parent's decision closing D-11** — (2) and (3) are still
+open and the default flip did not settle them; (5) the dead F32 widenings the
 library route leaves behind are still launched, deliberately, because deleting one moves the §07 launch
 bill that section (d) prices (that is §7 W5).
+
+### Admitted (2026-10-14): the default is `library`, and the guarantee that ships is a band
+
+**The sentence a reader has to take away.** On the library route the wave-boundary check is **inside a
+band, not byte-identical**. That is the audit's own wording and it is deliberate: the pre-route claim —
+“the same numbers whatever the wave width” — is **not** what this route grants, and nothing in this
+section should be read as if it were. What is unchanged is the hand route: `--gemm hand` still means
+bit-identity against a pre-route binary, section (h) still judges it byte-for-byte, and the row-count rule
+still keeps every one-row body — so every decode bit, on both routes — out of the library path.
+
+**What made it admissible.** `bench/route-c-audit-2026-10-14.md`: each of the ten library shapes
+disagrees with the hand GEMV by **at most 1 ULP of any element above the cancellation band**, at every
+width it is used at (M = 1, 88, 512, 1024), while three injected bugs separate from that legal delta by
+≥ 492× on the least flattering statistic. Accumulated over a 24-layer body it stays at meanrel ≤ 1.7e-2
+per stage and 1-cos ≤ 1.9e-3 per logits row, and it flips **0 of 1 566 greedy decisions that had ≥ 0.10 of
+top-1-minus-top-2 room**, while all 24 flips that did happen sat below that line. D-11's condition was
+“prove it is reassociation and nothing more, element by element and step by step”; that is the proof, and
+the bands it produced are `CASCADE_BAND` in `engine/gate.py`, policed in `bench/band-history.jsonl`.
+
+**The first matrix that actually ran both routes — 16/16 PASS.** Each line is a lock-held
+`engine/gate.py` run, correctness only, **no timing taken**; wall 3–20 s as a by-product, `util` at
+acquire 34–93 %. The route each log was judged under is the `NUMERICS` line in the log, which is now
+printed in the harness output because after this week's incident nothing else in a log proves it:
+
+| fixture | `--gemm hand` | `--gemm library` | library `NUMERICS` |
+|---|---|---|---|
+| dec8 | 172 PASS / 0 FAIL | 180 / 0 | `gemm=library hipblas=3.6.0` |
+| dec64f | 654 / 0 | 662 / 0 | ″ |
+| dec64t | 651 / 0 | 659 / 0 | ″ |
+| p128 | 201 / 0 | 209 / 0 | ″ |
+| dec300f | 1160 / 0 | 1168 / 0 | ″ |
+| mt32f | 395 / 0 | 403 / 0 | ″ |
+| wide520f | 331 / 0 | 339 / 0 | ″ |
+| chunk64b | 380 / 0 | 389 / 0 (2 TIE, 1 SLACK) | ″ |
+
+Reproduce: `tmp/gate_ab.sh <hand|library> <fixture>`, which is
+`engine/gate.py --fixture <fixture> --binary engine/build/decode_run --gemm <side>` under
+`tools/gpu_lock.sh`. **The side flag goes to `gate.py` and nowhere else** — see the trap below.
+
+**Where the library route is green only because the band was admitted, said out loud.** Four steps of the
+priced corpus sit **outside their own fixture's D-2 allowance** and inside `CASCADE_BAND`: `dec64t` one
+step at ×1.091 of its allowance, `wide520f` one at ×1.125 (step 17: deficit 1.2817e-04 against an
+allowance of 1.1396e-04, floor 2e-3) and `mt32f` two at meanrel ×1.338. That is the whole point of the
+admission: judged by the hand route's allowances the library route would be red at those four steps, and
+judged by a band measured on the cascade it is green with room to spare — those four overshoot their own
+allowance by at most ×1.34, and the largest library deficit anywhere in the corpus, 1.705e-3 on `dec64f`'s
+excursion window, is admitted by that fixture's own allowance and never asks the floor at all. The hand
+route needs none of it: it was judged with no floor in force and stayed green at every step of all eight
+fixtures.
+
+**`chunk64b` is where the flip rule earns its keep.** With the row mapping fixed (below), section (h)
+compares 150 dumped rows across three wave widths on the library route: **0 of 150 are still
+bit-identical**, pooled meanrel 1.122e-02 and 1.141e-02 (band 3e-2), pooled 1-cos 8.065e-05 and
+8.794e-05 (band 2e-4), worst per-row 1-cos 1.087e-03 and 1.434e-03 (band 2e-3) — and it finds six
+argmax flips per side, every one of them thin-room: rooms 0.0166, 0.0389, 0.0103, 0.00254, 0.0545 and
+0.0119 (one set) / 0.0288, 0.0116, 0.0353, 0.0103, 0.0545, 0.00784 (the other), all under the 0.10 line,
+so each is admissible and the line prints both sides' ids and gaps. The historical `block_out`-class bug
+could not hide there: it would show as a flip at a row with room, and that is a RED the rule does not
+wave through.
+
+**Two gate bugs that only a real library run could find, and the false green they were hiding.** Both are
+fixed in `0fea0db`, and both are the same failure shape — a checker that cannot fail:
+
+1. **The route echo compared the wrong line.** `decode_run` prints its hipBLAS handle line as
+   `GEMM route=hipblas handle=1 workspace_mib=128 …`: that `route=` names the **library**, not the route
+   word, and the line only exists when `--gemm` was named (a default run prints no `GEMM` line at all).
+   `gate.py` compared that token with the route it was judging under, so **every genuine library run
+   failed it** — while the dry-run stand-in printed `GEMM route=library`, i.e. the value the check was
+   hunting for, so every `--dry-run` and `--selftest` was green. A stand-in that reproduces its own
+   expected value is worse than no stand-in: it retires the check while pretending to run it. The check
+   now reads the always-printed `NUMERICS gemm=` field (engine-generated, spelled `library|hand`, and
+   already the field D-11 made provenance-bearing), the engine's output format is left alone, the
+   stand-in echoes the engine's real spelling, and a new `--selftest` case pins both halves of what the
+   check prints so neither side can drift back into agreeing with the other.
+2. **`cross_width_ids` mapped decode rows to the wrong files.** It built `logits{prompt_len+index}.bin`,
+   but `decode_run` prints the **absolute** row position as `index=` and dumps `logits{index}.bin`, so
+   every cross-width flip pointed one prompt-length past the dump (`logits251.bin is missing`, chunk64b)
+   and, if the arithmetic had happened to land on a real file, it would have priced **the wrong row** and
+   admitted a flip on someone else's logits. The same expression also added an `int` to a string, because
+   only the prefill half of it had ever been evaluated. This code path is library-only, which is why three
+   commits of “green on both routes” never touched it.
+
+**And the claim that had to be retracted.** `0b30422` recorded “all eight fixtures PASS on both routes
+(16/16)”. That was **sixteen hand runs**: the A/B harness carried the route in a wrapper binary
+(`tmp/decode_run_library.sh` → `decode_run --gemm library "$@"`), `gate.py` appends its own
+`--gemm <route>` **after** the wrapper's flag, and `decode_run`'s parser is last-wins — so the “library”
+side ran the hand route. The log said so the whole time (`tmp/margin/library_dec300f.log`, header
+`--binary tmp/decode_run_library.sh`, `NUMERICS … gemm=hand`). There had never been a library-route gate
+run on any fixture before today; only `tools/route_c_audit.py a2-run`, which passes `--gemm` last and so
+was always correct. Two rules fall out of that, and they are the reason this subsection is long: **a
+route claim must be read from the engine's own echo, never inferred from a command line**, and **an A/B
+harness must put the switch where the judged process cannot override it**.
+
+**Still open after the flip.** The prefill-row margin table (item 2 above), §7 W9's timing A/B on the new
+default (item 3, main-agent work: the ledger's headline tables are re-taken with `library` as the default),
+the dead F32 widenings (item 5), and one known gap in the gate's own selftest:
+`--selftest --fixture chunk64b --gemm library` fails its `--break-ab-logits` case, because that
+negative's pooled-cos needle is sized for a 25-row stand-in corpus and `chunk64b`'s is 150 rows, so the
+injection is diluted out of the pooled statistic. It fails identically at the commit before the flip, so
+it is not a consequence of this change; it is reported rather than re-needled, because a negative that
+only bites at one corpus size is a question about the needle's sizing and not a band to move.
+
