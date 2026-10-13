@@ -690,16 +690,20 @@ one this file already has a row for in miniature ("warm-burst understates in-ste
 one kernel against the same buffers, so its ramp-up overlaps the next repeat and its DRAM pages stay hot,
 while a real step interleaves 424 launches across ~1.5 GB of weights. That is now the standing reason a
 burst number may not be quoted as a step cost, and it is the number to plan against: **the engine runs at
-~52 % of achievable bandwidth on MLP and ~47 % on projections inside a real step**, not 86 %.
+~52 % of achievable bandwidth on MLP and ~47 % on projections inside a real step**, not 86 %. `engine/results.md`
+§Q7 has since decided that candidate in that direction, with the arithmetic in `tools/instep_family_budget.py`.
 
 **Two things retired on the way.** The 4032-lane "bimodality" was mostly an artefact of the differential
 harness: measured directly, step means are 15.324 / 15.378 / 15.400 (**0.5 % across runs**) even though
 individual steps inside a run still jitter 11 %. The earlier 16.9 % spread came from differencing two runs
 per point, which amplifies noise; the honest figure for 4k decode is **15.35 ms (65.2 tok/s)**. And the
-instrument has one reporting bug to fix before it is used again: `syncs_per_step` prints 323 for `stage` but
-**42 for `kernel`**, where the spec says per-launch granularity is ~425 waits — the subtraction it feeds is
-immaterial (0.004 vs 0.042 ms), but a wrong field is a wrong field, and the parity and token checks were
-clean, so the numbers above stand.
+one reporting bug claimed against the instrument did not survive its own logs: `syncs_per_step` was said to
+print 323 for `stage` but **42 for `kernel`**, where the spec says ~425 waits. It prints **425** — all nine
+kernel-granularity `TOTAL` rows of that window say so (`tmp/q61/stage128_*.log`, `tmp/q61/stage4032_*.log`,
+`tmp/q61/on*.log`; re-checkable with `tools/instep_family_budget.py`, which prints the field per log), and
+`stage`'s 323 is segments rather than launches, as designed. The field was right; **this sentence was the
+bug**, and it is corrected here rather than left standing. The parity and token checks were clean, so the
+numbers above stand.
 
 Reproduce: `engine/results.md` §Q6.1 command block, one locked window `q61-stage`, three runs at 128 lanes
 (`--steps 16`) and three at 4032 (`--steps 32`), prompts from `context_sweep.build_prompt`.
