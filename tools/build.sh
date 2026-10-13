@@ -17,11 +17,24 @@ for t in "${targets[@]}"; do
     # else links nothing beyond the HIP runtime. mfma_probe is rocwmma (header-only) and pins the arch on
     # the command line, because "what does this target emit" is the question it asks.
     libs=""
+    extra=""
+    src="$t.cpp"
     case "$t" in
         gemm_peak|prefill_mix) libs="-lhipblas" ;;
+        # route_c_stages drives the engine's own wave body, so it links the engine TUs that
+        # engine/build.sh links for decode_run (minus decode_run's main). The include paths are
+        # repo-root-relative because this script runs from tools/.
+        route_c_stages)
+            libs="-lhipblas"
+            extra="-I.. -I../engine"
+            src="$t.cpp ../engine/decode_step.cpp ../engine/prefill.cpp ../engine/state.cpp \
+                 ../engine/loader.cpp ../engine/launch_stats.cpp ../engine/stage_clock.cpp \
+                 ../engine/kernels_glue.cpp ../engine/kernels_proj.cpp ../engine/kernels_mlp.cpp \
+                 ../engine/kernels_gdn.cpp ../engine/kernels_attn.cpp ../engine/kernels_lmhead.cpp \
+                 ../engine/kernels_cast.cpp ../engine/kernels_gemm.cpp"
+            ;;
     esac
-    extra=""
     [ "$t" = "mfma_probe" ] && extra="--offload-arch=gfx1151"
-    echo "hipcc -O3 -Wl,-rpath,/opt/rocm/lib $libs $extra -o build/$t $t.cpp"
-    hipcc -O3 -Wl,-rpath,/opt/rocm/lib $libs $extra -o "build/$t" "$t.cpp"
+    echo "hipcc -O3 -Wl,-rpath,/opt/rocm/lib $libs $extra -o build/$t $src"
+    hipcc -O3 -Wno-unused-command-line-argument -Wl,-rpath,/opt/rocm/lib $libs $extra -o "build/$t" $src
 done
