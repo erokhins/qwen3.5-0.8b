@@ -65,3 +65,42 @@ the prefill package before anyone commits to a number. Second, the ceiling above
 model's projections are 10–12 smaller products per layer with different shapes, and a real kernel plan has to
 show what it reaches at *those* shapes — `engine_gate_shape` is one of them and it is fine, but `k/v_proj`
 (N=256) is a shape this probe has not touched and is the one most likely to be bad.
+
+## Correction (same day): "above the hardware" was too strong, and the CU count I printed was wrong
+
+Two errors in the page above, both mine, both found by the operator asking for a spec cross-check instead of
+taking the measurement at face value.
+
+**1. `CUs=20` is a reporting artifact, not the device.** The probe printed `hipGetDeviceProperties`
+`multiProcessorCount = 20`; `rocminfo` on the same box reports `gfx1151 … Compute Unit: 40, SIMDs per CU: 2`,
+and AMD's spec for the Ryzen AI Max+ 395 says the Radeon 8060S has **40 CUs at up to 2.9 GHz** ([AMD product
+page](https://www.amd.com/en/products/processors/laptop/ryzen/ai-300-series/amd-ryzen-ai-max-plus-395.html),
+[TechPowerUp](https://www.techpowerup.com/gpu-specs/radeon-8060s.c4270)). So HIP is enumerating this SKU at
+half the physical CU count (or pairing them — `SIMDs per CU: 2`), and either way **20 must not be used for
+any roofline arithmetic here**. Quote 40 CUs with `rocminfo` as the source.
+
+**2. That changes what the measured ceiling means.** At 40 CUs × 2.9 GHz × 128 FP32 lanes the advertised dense
+rate is **14.85 TFLOPS FP32, and 14.85 TFLOPS FP16 at 1:1** (TechPowerUp lists FP16 = FP32 for this part;
+AMD's "up to 60 TFLOPS AI" is the 4× marketing number). My measured **4.7–6.0 TFLOP/s is therefore 32–40 % of
+the advertised dense rate**, not the machine's limit. Three candidate reasons, none of them yet tested:
+
+- **library immaturity on this SKU** — ROCm's `gfx1151` support is publicly reported as incomplete
+  ([ROCm issue 6348](https://github.com/ROCm/ROCm/issues/6348),
+  [rocm-libraries issue 4618](https://github.com/ROCm/rocm-libraries/issues/4618): "gfx1151 support is still
+  broken in practice as of February 2026"), so hipBLAS may simply be picking poor kernels here;
+- **sustained clocks** — this is a 120 W part whose iGPU shares that budget with 16 Zen 5 cores and a
+  bandwidth-hungry LPDDR5x fabric; if a big GEMM sustains ~1.0–1.2 GHz rather than 2.9 GHz, 4.7 TFLOP/s is
+  *exactly* what the silicon is allowed to do, and no kernel work fixes it;
+- **bf16 specifically** — if the matrix units run bf16 below fp16 on RDNA3.5, an fp16 path would be faster at
+  the same precision class.
+
+**What this does to the prefill target.** It re-opens it. 5,000 prompt tok/s needs ~8 TFLOP/s sustained, which
+is **54 % of the advertised dense rate** — that is not "above the hardware" as the paragraph above claimed; it
+is "above what hipBLAS sustains on this box today", which is a much weaker statement and could well be a
+driver problem rather than a wall. The honest position is: **5k is not excluded, ~2.0–2.6k is what a
+well-tuned kernel has demonstrable room to reach, and the discriminator is a device window** that measures
+(i) fp16 vs bf16 vs fp32 at the same shapes, (ii) the sustained SM clock during the GEMM, and (iii) what a
+hand-tiled `rocwmma`/MFMA kernel reaches — `rocwmma.hpp` is installed on this box, so that test is available.
+The claim that stands regardless: today's prefill at **1.55 TFLOP/s is ~10 % of even the FP32 vector rate and
+~26 % of what one hipBLAS call at the same shape gets**, so the gap is structural (no matrix-unit tiling in
+the engine's projections) whether or not 5k is ultimately reachable.
