@@ -59,13 +59,23 @@ void check_tokens(const char* what, int tokens) {
 }  // namespace
 
 MlpGateMap parse_mlp_gate_map(const std::string& name) {
+    if (name == "auto") return MlpGateMap::kAuto;
     if (name == "interleave") return MlpGateMap::kInterleave;
     if (name == "contig") return MlpGateMap::kContig;
-    throw std::runtime_error("--mlp-map takes interleave|contig, got '" + name + "'");
+    throw std::runtime_error("--mlp-map takes auto|interleave|contig, got '" + name + "'");
 }
 
 const char* mlp_gate_map_name(MlpGateMap map) {
+    if (map == MlpGateMap::kAuto) return "auto";
     return map == MlpGateMap::kContig ? "contig" : "interleave";
+}
+
+MlpGateMap resolve_mlp_gate_map(MlpGateMap want, int rows) {
+    // An explicit walk wins outright: `--mlp-map` is the A/B instrument and a row-count default must
+    // not leak into a run that named one side of it. Otherwise the body's row count decides, and the
+    // split is the measured one in `kernels.h` — one row contiguous, a wave interleaved.
+    if (want != MlpGateMap::kAuto) return want;
+    return rows == 1 ? MlpGateMap::kContig : MlpGateMap::kInterleave;
 }
 
 // The kernel spells the two walks `MAP_INTERLEAVE`/`MAP_CONTIG` (`mlp_gemv_kernels.h:MlpMap`), and
@@ -130,6 +140,12 @@ static void launch_down_batched(const uint16_t* w_down, const float* act, uint16
 
 void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, uint16_t* act,
                 int rows, int in, int tokens, MlpGateMap map) {
+    if (map == MlpGateMap::kAuto) {
+        // Would otherwise fall into the `else` branch below and launch `interleave` silently, i.e. an
+        // A/B row priced with the wrong walk and nothing printed to say so.
+        throw std::runtime_error("mlp_gateup: got kAuto, which is a request and not a walk; call "
+                                 "resolve_mlp_gate_map(want, rows) at the call site");
+    }
     check("gateup", rows, in);
     check_tokens("gateup", tokens);
     const int threads = kRowsPerBlock * warp_width();

@@ -57,9 +57,11 @@ struct DecodeScratch {
     int wave_rows = 0;
     // Which weight walk the MLP's gate/up launches use (Q10's A/B switch, `kernels.h:MlpGateMap`).
     // It rides here for the same reason `wave_rows` does: it is a run-shape choice, it has to reach
-    // the one call site in `submit_wave_body`, and `decode_run` is the only thing that sets it. The
-    // default is the shipped walk, so a scratch that nobody configured runs what it ran before.
-    kernels::MlpGateMap mlp_gate_map = kernels::MlpGateMap::kInterleave;
+    // the one call site in `submit_wave_body`, and `decode_run` is the only thing that sets it.
+    // The default is `kAuto` — the body's row count picks the walk, per body (Q10b) — so a scratch
+    // nobody configured runs the row-count default, and `--mlp-map interleave|contig` pins one walk
+    // for every body instead of asking. `submit_wave_body` resolves it where `n` is known.
+    kernels::MlpGateMap mlp_gate_map = kernels::MlpGateMap::kAuto;
     // Residual ping-pong. NOT aliased into one buffer: `glue_add_norm`'s `s` and `s_out` are both
     // `__restrict__`, so writing the new residual over the one it is reading is a contract violation
     // even though the same thread touches the same index.

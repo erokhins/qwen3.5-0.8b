@@ -70,8 +70,12 @@ void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int 
 // `devices/strix-halo-mixed-traffic.md` §Q9 measured this kernel's own walk at 0.470 of a contiguous
 // sweep at identical bytes, grid and launch count, with the LDS staging exonerated.
 enum class MlpGateMap {
-    // The shipped walk: one row loop, both weight streams' words fetched side by side. The default,
-    // so every run that does not ask for the other one is the run it was before this switch.
+    // The engine's default, and NOT a third walk: it is a request that the body's row count pick one,
+    // which is what `resolve_mlp_gate_map` below does. No launcher may see it — a launcher that
+    // received kAuto would have to guess, and a guessed walk in a timing A/B is the wrong side of it.
+    kAuto,
+    // One row loop, both weight streams' words fetched side by side. What shipped before the row-count
+    // default existed, and what `--mlp-map interleave` pins for every body regardless of its size.
     kInterleave,
     // The gate row end to end, then the up row end to end. Bit-identical to the above by construction
     // (same words, same order, same accumulators) — the walk is the only free variable, and
@@ -79,14 +83,30 @@ enum class MlpGateMap {
     kContig,
 };
 
-// "interleave" / "contig", the same two words the op's gate uses. Throws on anything else: this flag
-// selects which side of an A/B a run is, so a silently ignored typo would price the wrong thing.
+// "auto" / "interleave" / "contig", the latter two the same words the op's gate uses. Throws on
+// anything else: this flag selects which side of an A/B a run is, so a silently ignored typo would
+// price the wrong thing.
 MlpGateMap parse_mlp_gate_map(const std::string& name);
 const char* mlp_gate_map_name(MlpGateMap map);
 
+// THE ROW-COUNT RULE, in one place: a one-row body walks `contig`, a body of two or more rows walks
+// `interleave`, and an explicitly requested walk is returned unchanged (that is what keeps
+// `--mlp-map` an override rather than a second opinion). `rows` is the number of token rows in the
+// body about to launch, not the projection's row count.
+//
+// WHY THE TWO PATHS WANT OPPOSITE WALKS IS NOT ESTABLISHED, and the next reader should not invent a
+// reason. Both halves are measured, on an exclusive window, against the same bytes
+// (`bench/performance-status.md` §6 "Q10", `engine/results.md` §Q10b): `contig` recovers 0.945 ms of
+// the MLP's 2.034 ms in-step gap at 128 lanes of decode, and `interleave` is 5.1 % better on TTFT at
+// a 1024-token prompt. A per-path setting that is measured, bit-neutral and documented is what ships
+// here — the same shape of decision P7 made for attention's plan and P4 for glue's row batching, both
+// made from the call site because that is where the row count is. The mechanism, and what it would
+// take to test, are written up in `engine/results.md` §Q10b.
+MlpGateMap resolve_mlp_gate_map(MlpGateMap want, int rows);
+
+// `map` must already be resolved: kAuto throws rather than silently becoming one of the walks.
 void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, uint16_t* act,
-                int rows, int in, int tokens = 1,
-                MlpGateMap map = MlpGateMap::kInterleave);
+                int rows, int in, int tokens, MlpGateMap map);
 void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows, int in,
               int tokens = 1);
 

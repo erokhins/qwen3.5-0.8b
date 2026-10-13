@@ -3886,3 +3886,171 @@ confirms, making `contig` the default is a one-word change with no re-pin and no
 null, the switch stays as an A/B instrument and the walk hypothesis is dead for this kernel, which sends
 the MLP's residual back to the row tail — and the row tail is not bit-neutral. Either way the default flip
 is the main agent's call after the numbers, not a worker's now.
+
+---
+
+## Q10b (2026-10-13): the gate/up walk now follows the row count — `contig` for a one-row body, `interleave` for a wave; `--mlp-map` stays the explicit override
+
+§Q10 ended with the flag shipped and the default left alone, because the two paths wanted opposite walks
+and nothing in the code could say which one to run: `contig` recovered **0.945 ms** of the MLP's 2.034 ms
+in-step gap at 128 lanes of decode (**4.340 → 3.395 ms**, M2) and took the step from **12.699 → 11.607 ms**
+(+9.5 %, M3), while TTFT at a 1024-token prompt went the other way, **1043.8 → 1097.0 ms, +5.1 %** (M4).
+The decision on the record is that the engine may use different settings on the prefill and the generation
+path, so the split became a code decision instead of a global flag: **one-row body → `contig`, wave body →
+`interleave`, chosen at the call site, with `--mlp-map` still able to pin either one.**
+
+### The rule as it ships
+
+One enum value, one function, one call site. Nothing else about the MLP moved: `mlp_down` still has one
+weight stream and no mapping, rows-per-block is still 8 for both forms, the token tile is still `TPB = 4`,
+and the kernel source is byte-unchanged (`prototype/mlp_gemv/mlp_gemv_kernels.h` is untouched — both walks
+already existed there from Q10).
+
+| file | what it adds |
+|---|---|
+| `engine/kernels.h` | `MlpGateMap::kAuto` (a *request* for the row-count walk, not a third walk) and `resolve_mlp_gate_map(want, rows)`, which is the whole rule in three lines: an explicit walk is returned unchanged, else `rows == 1 → kContig`, `rows > 1 → kInterleave`. `mlp_gateup`'s map argument no longer has a default — a caller has to say which walk it means — and since default arguments must be trailing, `tokens` lost its default with it (one caller, and it passes both) |
+| `engine/kernels_mlp.cpp` | the definition of `resolve_mlp_gate_map`, `auto` accepted by `parse_mlp_gate_map` (still throws on anything else), and `mlp_gateup` **throws** if `kAuto` reaches it, so the split cannot silently degrade into "always interleave" |
+| `engine/decode_step.h` | `DecodeScratch::mlp_gate_map` now defaults to `kAuto` |
+| `engine/decode_step.cpp` | the one `mlp_gateup` call site resolves against `n`, the body's row count — the same seam attention uses to pick its plan (§Q5/P7+P8; the sentence in `engine/kernels_attn.cpp` is "TWO PLANS, and the thing that chooses between them is the row count"). The launcher stays plan-blind |
+| `engine/decode_run.cpp` | `--mlp-map auto\|interleave\|contig`; the default is `auto` and, as in Q10, a run that names no flag prints no `MLPMAP` line, so existing log diffs stay byte-stable. Naming `auto` prints `MLPMAP gate=auto`, which makes a ledger row self-describing |
+
+Two things the rule deliberately does **not** try to be. It is not "decode vs prefill": the input is the
+body's row count, so a prefill whose last body is one token (`prefill_wave` splits at `kMaxWaveRows`)
+gets `contig` for that body — a one-row body is a one-row body wherever it appears. And it is not a
+per-path settings framework: the mapping is the only knob here, because it is the only one with two
+measured numbers pulling in opposite directions (see the queue note at the end for the only other
+candidate, which is not this package).
+
+### Why the two paths want opposite walks — the one hard fact, and where the explanation stops
+
+The compiler gives one structural fact, from the engine's own TU at `-O3`/gfx1151 (nothing device-side):
+
+```bash
+R=$PWD; mkdir -p tmp/q10b/isa-eng && cd tmp/q10b/isa-eng
+hipcc -O3 -Wno-unused-command-line-argument --offload-arch=gfx1151 --save-temps \
+      -I"$R" -I"$R/engine" -c "$R/engine/kernels_mlp.cpp" -o k.o
+S=kernels_mlp-hip-amdgcn-amd-amdhsa-gfx1151.s
+# per instantiation: one body, then its weight loads' destination <- address pair, in order
+body() { awk -v k="$1" 'BEGIN{f=0} f&&/^[A-Za-z_].*:[ ;]/{exit} $0 ~ ("^"k){f=1;next} f{print}' $S; }
+for k in _Z10mlp_gateupILi1024ELi1E _Z10mlp_gateupILi1024ELi0E \
+         _Z17mlp_gateup_tokensILi1024ELi4ELi1E _Z17mlp_gateup_tokensILi1024ELi4ELi0E; do
+  printf '%s ' "$k"; body "$k" | grep global_load_b128 \
+      | sed -E 's/.*b128 ([^,]*), ([^,]*),.*/\1<-\2/' | tr -d ' ' | tr '\n' ' '; echo
+done
+```
+
+| instantiation | weight `global_load_b128`s in the loop the compiler left | live weight words |
+|---|---|---|
+| `mlp_gateup<1024, interleave>` (one row) | 8 loads off **two** bases, alternating `v[4:5]`, `v[2:3]`, `v[4:5]`, … | ≥ 2 |
+| `mlp_gateup<1024, contig>` (one row) | 8 loads off **one** base `v[17:18]`, offsets `0/512/1024/1536` per stream | 1 (dest reused within a stream) |
+| `mlp_gateup_tokens<1024,4, interleave>` (wave) | `v[21:24] ← v[21:22]`, then `v[25:28] ← v[12:13]` — two dests, two bases | **2 in flight** |
+| `mlp_gateup_tokens<1024,4, contig>` (wave) | `v[21:24] ← v[4:5]`, then `v[21:24] ← v[2:3]` — **the same destination twice**, so the second load is WAR-blocked behind the first's consumers | **1 in flight** |
+
+So, answering the question §Q10 left open: **the template parameter is not inert on the tokens path.** It
+changes the emitted schedule — under `contig` the two weight loads collapse onto one destination quad and
+the second cannot land until `TPB = 4` tokens' worth of FMAs have drained the first; under `interleave`
+both weight words are live at once. That is also why the wave loses something the one-row body does not
+miss: the batched kernel is the only one of the two whose whole per-iteration job is to hold a weight word
+still while four tokens consume it.
+
+The rest is a candidate, not a finding, and it is written as one. `contig` trades one kind of memory
+behaviour for another: it halves the instantaneous weight footprint a resident block set touches (one
+stream marched at a time instead of two 7.2 MiB allocations alternated 16 bytes at a time — the shape Q9
+measured at 0.470 of a contiguous sweep, and weights are 99.4 % of what a token reads), and it pays for
+that with less memory-level parallelism per iteration (one weight word in flight instead of two, visible in
+every row of the table above). A one-row body is the case where the first is worth most — the walk is the
+bottleneck there — and a wave body is the case where the second costs most and the first is worth least,
+because `TPB = 4` divides its weight bytes per token by four. The measured sizes fit that story in an
+instructive way: prefill moved **less** than decode (5.1 % against 9.5 %) and in the opposite direction,
+which is the same factor-of-four asymmetry arriving from the other side.
+
+**One sentence for the next reader, so nobody mistakes this for a law of the hardware: the mechanism is
+not established by anything measured here** — the destination-collapse is a fact about LLVM's `-O3`
+schedule on these two shapes, the footprint argument is inherited from Q9 rather than re-derived, and the
+split is encoded on two measured timings, not on this explanation. The falsifiable version, when someone
+wants the real reason: take a timed burst of the prototype at both shapes and both walks
+(`prototype/mlp_gemv/run.py`, `--tile` rows for k=1 and `--tokens p64` for the batched form). If the
+ordering flips between the two shapes — `contig` ahead at k=1, `interleave` ahead at `TPB = 4` — the story
+above has legs; if both shapes prefer the same walk in the prototype and only the engine disagrees, the
+story is wrong and the asymmetry lives in the engine's launch context, not in the walk.
+
+### The proof
+
+All bit-comparison, correctness-only, each command under `tools/gpu_lock.sh` (`util` 92–93 % at acquire,
+the serving engine, discounted per `AGENTS.md`), one device run at a time, **no timing taken** — the `ms`
+the harnesses print as a by-product were ignored and nothing below entered `bench/performance-status.md`.
+The three driver scripts live under `tmp/q10b/` (`engab.sh`, `run_gates.sh`, `counts_compare.sh`) and are
+not committed; every command they run is spelled out here.
+
+1. **Byte-identical engine outputs, old default vs new default.** Old binary = `engine/build/decode_run`
+   rebuilt at `ac248fd` (default `interleave` everywhere), new = this change. Same prompt (dec8's 17
+   ids), same 8 steps: **all 10 output files md5-identical**, and `--mlp-map auto` identical to both while
+   being the only one of the three that prints `MLPMAP gate=auto` (default runs print nothing, so old logs
+   still diff clean). wall 0.62 / 0.46 / 0.50 s. The last three edits to this change were comments and
+   this document; the rebuilt binary was then re-checked on this same comparison and on `dec8`'s gate
+   (168 pass, 0 red, PASS, wall 2.53 s) so the gated build and the committed source agree.
+2. **Gate counts, all eight fixtures, new default**, against Q10's `interleave`-default logs
+   (`tmp/q10/int_*.log`, taken from the binary at `3411539`; the only commit since touched
+   `bench/performance-status.md`, so those logs are still valid old-side witnesses and were cited rather
+   than re-made):
+
+   | fixture | old default | new default | same? | wall |
+   |---|---|---|---|---|
+   | `dec8` | 168 pass, 0 red, PASS | 168, 0, PASS | ✓ | 2.54 s |
+   | `dec64f` | 650, 0, PASS | 650, 0, PASS | ✓ | 6.18 s |
+   | `dec64t` | 647, 0, PASS | 647, 0, PASS | ✓ | 6.47 s |
+   | `dec300f` | 1156, 0, PASS | 1156, 0, PASS | ✓ | 16.61 s |
+   | `mt32f` | 391, 0, PASS | 391, 0, PASS | ✓ | 10.00 s |
+   | `p128` | 197, 0, PASS | 197, 0, PASS | ✓ | 6.10 s |
+   | `wide520f` | 327, 0, PASS | 327, 0, PASS | ✓ | 16.34 s |
+   | `chunk64b` | 372 pass, 3 red, FAIL | 372, 3, FAIL | ✓ | 7.07 s |
+
+   Stronger than the counts, as in Q10: md5 over each fixture's per-step decision lines (argmax +
+   cos-deficit + meanrel) is **identical old vs new for all eight**, and `chunk64b`'s three red lines are
+   the same three D-9 steps ("chunk64b: 3 of 3", step 0) with its committed FAIL intact.
+3. **`tools/margin_delta.py tmp/q10/int tmp/q10b/new <all eight>`: ×1.0000 on every column of every
+   fixture**, with the worst step per column unchanged in identity — including the tree's tightest lanes
+   (`dec64t` cos 0.9982, `dec300f` 0.9992 / 0.9997, `wide520f` 0.9996 / 0.9833, `mt32f` 0.9973).
+4. **`engine/gate.py --selftest --dry-run`: SELFTEST PASS** (3.15 s, CPU-only) — the injected needles the
+   gate is trusted to catch are still caught, which is what licenses reading item 2 as a real pass.
+5. **`tools/band_history.py --check` green** (15 band values against `bench/band-history.jsonl`): no band,
+   pin, allowance, plan or fixture was touched, and `speccheck/specimpl.py` was not touched (it cannot be
+   reached — `speccheck` is the torch reference and never sees a HIP kernel).
+6. **The wave body is bit-neutral under *both* walks**, which is what makes a default that mixes them per
+   body byte-neutral: `prototype/mlp_gemv/run.py --fixture dec8 --no-time --tile 0 --tokens p64
+   --mapping interleave` and the same with `--mapping contig` — each **23 040 elements compared, 0 differ**
+   against the k=1 kernel at layers [0, 3, 11, 23], with the F1–F4 gate PASSing under each. wall 14.41 s
+   and 14.19 s.
+7. **The split is live, and would fail loudly if it were not.** Bit-identical outputs cannot witness a
+   mapping change — that is the whole reason the two walks are legal — so the witnesses are: the ISA table
+   above, taken from the engine's own TU, which shows both instantiations present on both paths (
+   `mlp_gateup<1024|3584, 0|1>` and `mlp_gateup_tokens<1024,4,0|1>` / `<3584,2,0|1>`), and the throw in
+   `mlp_gateup` that fires if an unresolved `kAuto` ever reaches a launcher. **The confirming witness is
+   C1 below**: if the in-situ `mlp` row does not move, the default is inert, and the place to look is the
+   row count reaching the call site, not the memory system.
+
+### Pre-registered: the three numbers, with what a miss would mean (written before any of them ran)
+
+All three are the main agent's: exclusive window, blocking, zero subagents, medians of three, per
+`bench/performance-status.md` §6. Same commands as Q10-M2/M3/M4 with the `--mlp-map` flag simply absent.
+
+| # | row | prediction | if it misses |
+|---|---|---|---|
+| **C1** | stage-clock family `mlp`, 128 lanes, new default | **≈ 3.395 ms/token** — Q10's `contig` row, because a generation body is one row and now selects `contig` | ≥ 4.10 ms = the default is **inert**, not physically surprising: check that `n == 1` reaches `submit_wave_body` on the generation path and that the `--mlp-map` default really is `auto`. Landing between 3.30 and 4.10 while `--mlp-map contig` still reads 3.395 means the row count is right but something else differs between "auto" and "contig", which should be impossible (they are the same instantiation) and would be a bug. Below 2.230 ms is better than its own roofline and is a measurement error (Q10-M0) |
+| **C2** | step burst, 128 lanes, new default | **≈ 11.6 ms/token** (Q10 measured 11.607 with `contig`) | ≈ 12.7 ms = the one-row half did not take effect (same failure mode as C1). Below ~11.0 ms means something besides the MLP moved and this row cannot attribute it |
+| **C3** | TTFT, 1024-token prompt, new default | **≈ 1044 ms**, i.e. Q10's `interleave` side (1043.8) — the regression is gone, not traded away | ≈ 1097 ms = the wave half did not take effect. Anything in between is the one case worth chasing: it would mean a prefill body of exactly one row picked up `contig`. A 1024-token prompt at `kMaxWaveRows = 512` is two bodies of 512, so this fixture should be clean; a prompt length ≡ 1 (mod 512) is the shape that would legitimately mix the two walks inside one TTFT |
+
+**And the ledger consequence, stated plainly: a row-count-dependent default makes Q10's single-flag A/B
+rows non-comparable.** Q10's `interleave` row and `contig` row are each one global mapping; the new default
+is a third configuration that runs `contig` on the generation bodies and `interleave` on the wave bodies.
+So the new default's step/TTFT/family rows must be **measured from scratch and published as new rows**, not
+compared to or spliced into Q10's rows, and C1–C3 above are predictions against Q10's per-mapping rows
+precisely because those are the only two measurements that decompose it.
+
+What this leaves unexplained, named: even at C1's 3.395 ms the MLP still sits **1.09 ms above its 2.230 ms
+roofline**, which is the part of Q9's penalty the mapping was not — the row tail, and whatever `down`'s
+0.629 was made of (§Q10's "other shapes": not reachable by a bit-neutral mapping). One queue note:
+`kRowsPerBlock` (8, shared by both `mlp_gateup` forms) is the only other knob the same per-path argument
+could reach — Q6 established it is bit-identical by row ownership and swept it for the one-row shape only —
+but it has no second measured number pulling against it today, so it stays a queue decision rather than a
+package.

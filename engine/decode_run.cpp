@@ -87,9 +87,9 @@ struct Options {
     // prompt both ways and comparing counters AND dumps is `engine/gate.py` section (h).
     int wave_rows = engine::kMaxWaveRows;
     // Which weight walk the MLP's gate/up launches use (Q10's A/B; `kernels.h:MlpGateMap`). The
-    // default is the shipped walk, and only an explicit `--mlp-map` moves it, so every gate run that
-    // does not name the flag is the run it was before the switch existed.
-    engine::kernels::MlpGateMap mlp_gate_map = engine::kernels::MlpGateMap::kInterleave;
+    // default is kAuto, i.e. the body's row count picks the walk per body (Q10b); naming a walk pins
+    // it for every body, which is what makes the flag an override and not a second opinion.
+    engine::kernels::MlpGateMap mlp_gate_map = engine::kernels::MlpGateMap::kAuto;
     bool mlp_gate_map_given = false;
     // The stage clock (`engine/stage_clock.h`): re-runs the run's generation steps twice more, once
     // with a wait at every family boundary and once with a wait after every submission, and reports
@@ -351,7 +351,8 @@ void print_usage(FILE* out) {
     std::fprintf(out,
                  "usage: decode_run [--model DIR] [--ids ID,ID,...] [--steps N] [--out DIR]"
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
-                 " [--prefill-logits last|all] [--wave-rows N] [--mlp-map interleave|contig]"
+                 " [--prefill-logits last|all] [--wave-rows N]"
+                 " [--mlp-map auto|interleave|contig]"
                  " [--time-stages] [--load-verify] [--sizes-only]\n"
                  "  --time-stages After the run, replay its generation steps from a fresh state at"
                  " three submission granularities — one wait per step (burst), per family boundary"
@@ -372,13 +373,18 @@ void print_usage(FILE* out) {
                  " `1` forces one-row glue/MLP launches for every prompt token: the P4b comparison"
                  " run, whose launch counts must differ from the default's and whose outputs must"
                  " not (see engine/launch_stats.h)\n"
-                 "  --mlp-map W  which weight walk the MLP's gate/up launches use (Q10)."
-                 " `interleave` (the default, and what every ledger number was taken with) fetches"
-                 " both weight streams' words side by side; `contig` walks the gate row end to end"
-                 " and then the up row. The two are bit-identical by construction and proven so on"
+                 "  --mlp-map W  which weight walk the MLP's gate/up launches use (Q10, Q10b)."
+                 " `auto` (the default) lets the body's row count pick, per body: a one-row body"
+                 " walks `contig`, a wave walks `interleave`, because the two paths measurably"
+                 " prefer opposite walks (`engine/results.md` §Q10b). `interleave` fetches both"
+                 " weight streams' words side by side; `contig` walks the gate row end to end and"
+                 " then the up row. The two are bit-identical by construction and proven so on"
                  " device (`prototype/mlp_gemv/run.py --mapping-identity`), which is what makes the"
-                 " A/B a timing question and not a numerical one. `down` has one weight stream and"
-                 " is unaffected by this flag\n"
+                 " A/B a timing question and not a numerical one. Naming `interleave` or `contig`"
+                 " pins that walk for every body and prints `MLPMAP gate=W` (naming `auto` prints"
+                 " `MLPMAP gate=auto`; a run that names nothing prints nothing, so old logs still"
+                 " diff clean) - that is the A/B instrument. `down` has one weight stream and is"
+                 " unaffected by this flag\n"
                  "  --session resident feed/gen/reset/stats/quit protocol for engine/chat.sh\n");
 }
 

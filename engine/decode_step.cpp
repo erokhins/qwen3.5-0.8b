@@ -608,10 +608,19 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // rows and `act` are both widened, once for the tile rather than once per token.
         stageclock::note(stageclock::kCast);
         kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
+        // Which of the two bit-identical gate/up walks this body runs is decided HERE, by the body's
+        // row count, because the one-row and the many-row body measurably prefer opposite walks
+        // (Q10b; the numbers and the honest statement about the mechanism are in `engine/results.md`
+        // §Q10b and the rule itself lives in `kernels.h:resolve_mlp_gate_map`). This is the row-count
+        // seam attention's plan already runs on — except that attention branches inside its launcher,
+        // while the mapping is settled here, where `n` is already in scope, so the launcher stays
+        // plan-blind. An explicit `--mlp-map` comes back unchanged, so the flag still pins one walk
+        // for every body.
+        const kernels::MlpGateMap gate_up_map = kernels::resolve_mlp_gate_map(sc.mlp_gate_map, n);
         stageclock::note(stageclock::kMlp);
         kernels::mlp_gateup((const uint16_t*)layer_dev(weights, layer, leaf::kGateProj),
                             (const uint16_t*)layer_dev(weights, layer, leaf::kUpProj), sc.norm_f32,
-                            sc.mlp_act, kIntermediate, kHidden, n, sc.mlp_gate_map);
+                            sc.mlp_act, kIntermediate, kHidden, n, gate_up_map);
         stageclock::note(stageclock::kCast);
         kernels::cast_bf16_to_f32(sc.mlp_act, sc.mlp_act_f32, n * kIntermediate);
         stageclock::note(stageclock::kMlp);
