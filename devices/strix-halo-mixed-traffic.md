@@ -297,15 +297,78 @@ those 13 rows may be tabulated, quoted, or used to pre-judge the re-run._
 
 | tag | mode | ratio_act | pages | ms | GB/s | %of 237 | suspect | checksum |
 |---|---|---|---|---|---|---|---|---|
-| (fill from `MIXEDBW` lines; `tools/step_traffic_model.py --probe-file` renders the priced table) | | | | | | | | |
+| A_read_512m | read | 0.000 | warm | 2.3274 | 237.7 | 100.3 | 0 | ok |
+| A_write_512m | write | 0.000 | warm | 2.5863 | 214.1 | 90.3 | 0 | ok |
+| B_mix_1 | mix | 1.000 | warm | 2.6776 | 206.6 | 87.2 | 0 | ok |
+| B_mix_4 | mix | 4.000 | warm | 2.6013 | 212.6 | 89.7 | 0 | ok |
+| B_mix_10 | mix | 10.000 | warm | 2.4305 | 227.6 | 96.1 | 0 | ok |
+| B_mix_20 | mix | 20.000 | warm | 2.3939 | 231.2 | 97.6 | 0 | ok |
+| B_mix_32 | mix | 32.000 | warm | 2.5222 | 219.5 | 92.6 | 0 | ok |
+| B_mix_62 | mix | 62.000 | warm | 2.3546 | 235.0 | 99.1 | 0 | ok |
+| B_mix_128 | mix | 128.046 | warm | 2.3450 | 235.7 | 99.4 | 0 | ok |
+| C_read_48x11 | read | 0.000 | warm | 2.4656 | 224.4 | 94.7 | 0 | ok |
+| C_mixlaunch_1 | mixlaunch | 1.000 | warm | 2.7217 | 203.4 | 85.8 | 0 | ok |
+| C_mixlaunch_20 | mixlaunch | 19.999 | warm | 2.8088 | 197.1 | 83.2 | 0 | ok |
+| C_mixlaunch_62 | mixlaunch | 62.002 | warm | 2.6977 | 205.3 | 86.6 | 0 | ok |
+| C_mixlaunch_128 | mixlaunch | 128.046 | warm | 2.6726 | 207.1 | 87.4 | 0 | ok |
+| D_62_oneshot | mix | 62.000 | warm | 2.3484 | 235.6 | 99.4 | 0 | ok |
+| D_62_arena2m | mix | 62.000 | warm | 2.3616 | 234.3 | 98.8 | 0 | ok |
+| D_20_arena2m | mix | 20.000 | warm | 2.2714 | 243.7 | 102.8 | **1** | ok |
+| E_same | wthenr | 1.000 | warm | 4.8228 | 221.8 | 93.6 | 0 | ok_writes_aliased |
+| E_62_async | wthenr | 61.762 | warm | 2.3348 | 236.2 | 99.7 | 0 | ok |
+| E_62_synced | wthenr | 61.762 | warm | 2.3495 | 234.7 | 99.0 | 0 | ok |
+| F_cold_read | read | 0.000 | cold | 2.8529 | 193.9 | 81.8 | 0 | unverifiable_cold_pages |
+| F_cold_mix62 | mix | 62.000 | cold | 2.7981 | 197.7 | 83.4 | 0 | unverifiable_cold_pages |
+| F_cold_write | write | 0.000 | cold | 2.9308 | 188.9 | 79.7 | 0 | unverifiable_cold_pages |
+| G_step_1p5g_61p7 | mixlaunch | 61.699 | warm | 8.8869 | 183.7 | 77.5 | 0 | ok |
+| G_step_1p5g_61p7_arena2m | mix | 62.000 | warm | 7.4509 | 218.9 | 92.4 | 0 | ok |
+| G_mlpshape_21p5 | mixlaunch | 21.500 | warm | 2.8508 | 194.0 | 81.9 | 0 | ok |
+
+Taken 2026-10-13 in window `q8b-sweep`: blocking, zero subagents, `util` 34 % at acquire and 31 % at
+release (recorded, then discounted as everywhere else here), `--selftest` green first (`SELFTEST ok
+fails=0`, including all four anti-vacuity injections), 26 of 26 rows printed, raw lines in
+`tmp/q8/mixed_bw2.log`.
+
+**The prediction held: the curve is flat, so the traffic-mix story is dead.** Walking the pre-registered
+expectations one at a time, as written before the run: (1) `A_read_512m` **100.3 %** — the instrument agrees
+with the committed read probe, so it is not lying about anything else either; (2) `A_write_512m` 90.3 %
+(214 GB/s), above the ≥ 200 GB/s floor; (3) the `B_mix` curve is monotone toward read and flat where the
+step lives — **96–99 % of the read probe at every ratio ≥ 10:1**, and 87.2 % at 1:1, right on the ~210 GB/s
+the 1:1 copy number predicts; (4) the decisive 62:1 row came in at **235.0 GB/s (99.1 %)** against the ~230
+expected; (5) `C_read_48x11` is 94.7 % versus `A_read_512m`'s 100.3 %, i.e. **5.6 % outside** the ±5 % band —
+48 separate 11 MiB buffers walked once is genuinely a little worse than one big region, and that is recorded
+as a real (small) geometry effect, not smoothed; (6) `C_mixlaunch_62` reached **91.4 % of `C_read_48x11`
+against a ≥ 95 % bar**, so splitting one kernel into 96 serialized launches costs about **9 %** — a named
+finding, and Q6.1 already showed the same shape from the other side; (7) a 2 MiB arena re-dirtied 260×
+matched the one-shot write (98.8 % vs 99.4 %) as expected; (8) read-after-write on freshly dirtied lines was
+**free**: `E_same`'s pair took 4.8228 ms against 2.5863 + 2.3274 = 4.9137 ms written then read separately,
+−1.8 %, well inside ±10 %, which kills write-back pressure as a mechanism; (9) `E_62_synced` vs `E_62_async`
+differ by 0.6 %; (10) the three `--pages cold` rows are **void by their own rule** — they printed 79.7–83.4 %
+with `checksum=unverifiable_cold_pages` (exit 3), so this probe does not reproduce the 35 GB/s figure
+`strix-halo-unified-memory.md` records from a different tool, and neither number is used here; (11) every
+warm checksum is `ok`; (12) one row tripped the >240 GB/s trap — `D_20_arena2m` at **102.8 % with
+`suspect=1`**, flagged and excluded, exactly the small-arena-was-cache-resident case the flag exists for.
+
+Two rows are worth pulling out because they are the tightest apples-to-apples comparison this project has
+managed against the engine's own numbers. `C_mixlaunch_62` is the MLP's geometry — 48 × 11.01 MiB read once,
+96 serialized launches, the step's 62:1 ratio — and it runs at **86.6 % of the read probe**, where the same
+kernels inside a real decode step run at **52 %** (§Q6.1). And `G_step_1p5g_61p7_arena2m` is the whole step's
+traffic budget — 1530.6 MiB read against 24.7 MiB written into a small re-dirtied arena — at **218.9 GB/s
+(92.4 %)**, which prices one token's weight traffic at **7.06 ms**, not 12.4 ms. So the ceiling question is
+answered in the boring direction: **237 GB/s was approximately the right denominator after all**, and the
+remaining ~5.3 ms is neither dispatch (Q6.1), nor warmth (Q7 M1), nor traffic mix or write-back (this file).
+
 
 ## Consequences for the plan
 
-Written before the run so the conclusion cannot drift into it:
+Written before the run so the conclusion cannot drift into it — and item 1 is what happened:
 
-1. **If the curve is flat (expected):** the traffic-mix explanation is retired next to Q7's M1.
-   The roofline stays `bytes / 237 GB/s`; the ~5.8 ms residue stays attributed to launch count and
-   inter-launch gaps, which is what the byte-reduction ladder below independently says.
+1. **Struck — the curve was flat.** At the step's own ratio and geometry the box delivers 92–99 % of its
+   read-probe rate, so the roofline stays `bytes / 237 GB/s` (conservatively `bytes / 219 GB/s`, the
+   step-budget row), and the traffic-mix explanation is retired next to Q7's M1. What that leaves is
+   narrower and more specific than "launch count": the engine reads MLP-shaped traffic at **52 % of what the
+   identical geometry achieves in a probe**, and the one measured gap that does exist — 9 % for serialized
+   launches versus one kernel, §expectation 6 — is an order of magnitude too small to be it.
 2. **If there is a cliff at the step's ratio:** every roofline in `bench/performance-status.md`
    gets re-based on the measured mixed rate at 62:1, and the plan's #1 priority becomes making the
    step's traffic *more* read-pure (fold the casts, stop widening to F32, write the conv window in
