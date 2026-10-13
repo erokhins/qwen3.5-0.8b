@@ -27,8 +27,16 @@ plus the §10.1 `mlp` class cos ≥ 0.9999 / meanrel ≤ 1 %.
 Timing reports each kernel against the 237 GB/s probe (devices/) and folds the pair into a
 per-token MLP number against the 2.230 ms roofline of §01.7.
 
+Q10 added the WEIGHT-WALK switch. `mlp_gateup` can read its two weight streams interleaved (what
+has always shipped) or as two contiguous passes; `--mapping` picks which, and `--mapping-identity`
+is the stage that proves the two are BIT-identical — same `act`, same `pre`, same `out`, layer by
+layer — which is what makes the walk a free knob rather than a numerical decision. The claim, its
+measurement and the reason it holds are `MlpMap` in `mlp_gemv_kernels.h` and
+`devices/strix-halo-mixed-traffic.md` §Q9.
+
     .venv/bin/python prototype/mlp_gemv/run.py [--fixture dec8] [--mode gateup|down|all]
                                               [--layers 0,3,11,23|all] [--rows 8] [--no-time]
+                                              [--mapping interleave|contig] [--mapping-identity]
 """
 from __future__ import annotations
 
@@ -227,6 +235,7 @@ MUST_NOT = {
 def run_negatives(args, d, steps, layers, fails) -> None:
     """Inject each bug and assert the gate's own criteria reject it — where the bug is, and not
     where it is not."""
+    margs = mapping_args(args)
     l0, st = layers[0], steps[0]
     p0 = "%s.L%02d.mlp." % (st, l0)
     # Its own weights, into its own files: the main loop leaves the LAST layer's weights in
@@ -251,7 +260,8 @@ def run_negatives(args, d, steps, layers, fails) -> None:
         if "gateup" in modes:
             kernel(["--mode", "gateup", "--x", str(WORK / "x.bin"), "--wg", str(WORK / "Wg_n.bin"),
                     "--wu", str(WORK / "Wu_n.bin"), "--out", str(WORK / "nact.bin"),
-                    "--pre", str(WORK / "npre.bin"), "--iters", "1"] + extra, "", quiet=True)
+                    "--pre", str(WORK / "npre.bin"), "--iters", "1"] + margs + extra,
+                   "", quiet=True)
             pre_t = read_bf16(WORK / "npre.bin", 2 * FF)
             for nm, got, want, kw in (
                     ("gate_pre", pre_t[:FF], refs["gate_pre"], {}),
@@ -289,6 +299,104 @@ def run_negatives(args, d, steps, layers, fails) -> None:
         if wrong:
             fails.append("negative %s moved %s, which it should not touch"
                          % (neg, ",".join(wrong)))
+
+
+def mapping_args(args) -> list[str]:
+    """The `--mapping` flags for a GATEUP launch. Only gate/up has two weight streams, and the
+    binary refuses `--mapping` on `--mode down`, so down-side launches must never grow this list
+    (a flag that silently vanished from the gateup calls would make the A/B compare one walk against
+    itself)."""
+    return ["--mapping", args.mapping]
+
+
+def run_mapping_identity(args, d, steps, layers, fails, worst) -> None:
+    """Q10: the two gate/up weight walks must be BIT-identical, layer by layer.
+
+    The claim being proved is the one that makes the walk a free knob: `MAP_INTERLEAVE` and
+    `MAP_CONTIG` fetch the same `uint4` words in the same order into the same accumulators, so every
+    output bit must agree — `act`, both raw `pre` dumps, the batched form's `act`, and therefore the
+    chain's `out` (one `mlp_down`, which has no walk to choose, fed each side's own `act`). Any
+    differing byte is the claim failing, and there is no tolerance to argue about here: this compares
+    bits, not ULPs.
+
+    It is not vacuous by construction: the same two runs are ALSO judged against the reference pins
+    with the ordinary F1/F2/F3 rules, so "identical" is never allowed to mean "identically wrong".
+    """
+    print("\nmapping identity: interleave vs contig, on %s, layers %s, step %s"
+          % (args.fixture, "all 24" if args.layers == "all" else layers, steps[0]))
+    if args.mode == "down":
+        print("    skipped: --mode down never launches the gate/up kernel, so it has no walk to A/B")
+        return
+    st = steps[0]
+    tot = {"act": 0, "pre": 0, "out": 0, "act_batched": 0}
+    for l in layers:
+        p0 = "%s.L%02d.mlp." % (st, l)
+        if not (d / (p0 + "in.npy")).exists():
+            continue
+        dump_bf16(ckpt_tensor(WPK % l + "gate_proj.weight"), WORK / "Wg_m.bin")
+        dump_bf16(ckpt_tensor(WPK % l + "up_proj.weight"), WORK / "Wu_m.bin")
+        dump_bf16(ckpt_tensor(WPK % l + "down_proj.weight"), WORK / "Wd_m.bin")
+        x = torch.from_numpy(np.load(d / (p0 + "in.npy"))).to(torch.bfloat16).reshape(-1)
+        refs = {k: torch.from_numpy(np.load(d / (p0 + k + ".npy"))).to(torch.bfloat16).reshape(-1)
+                for k in ("gate_pre", "up_pre", "act", "out")}
+        dump_bf16(x, WORK / "x_m.bin")
+        outs = {}
+        for mp in ("interleave", "contig"):
+            tag = mp[0:3]
+            kernel(["--mode", "gateup", "--x", str(WORK / "x_m.bin"), "--wg", str(WORK / "Wg_m.bin"),
+                    "--wu", str(WORK / "Wu_m.bin"), "--out", str(WORK / f"act_{tag}.bin"),
+                    "--pre", str(WORK / f"pre_{tag}.bin"), "--iters", "1",
+                    "--mapping", mp], "", quiet=True)
+            # `down` takes each side's OWN act, so `out` identity is the chain's, not a rerun of the
+            # same launch on the same input.
+            kernel(["--mode", "down", "--x", str(WORK / f"act_{tag}.bin"),
+                    "--wd", str(WORK / "Wd_m.bin"), "--out", str(WORK / f"out_{tag}.bin"),
+                    "--iters", "1"], "", quiet=True)
+            outs[mp] = (read_bf16(WORK / f"act_{tag}.bin", FF),
+                        read_bf16(WORK / f"pre_{tag}.bin", 2 * FF),
+                        read_bf16(WORK / f"out_{tag}.bin", HID))
+        (act_i, pre_i, out_i), (act_c, pre_c, out_c) = outs["interleave"], outs["contig"]
+        # The batched form too: that is what a prefill wave launches, and one extra token-tile run at
+        # T=1 under each walk closes the square — batched@contig against single@interleave is the
+        # engine's own before/after pair, not two variants of the same instantiation.
+        for mp in ("interleave", "contig"):
+            tag = mp[0:3]
+            kernel(["--mode", "gateup", "--x", str(WORK / "x_m.bin"), "--in", str(HID),
+                    "--tokens", "1", "--wg", str(WORK / "Wg_m.bin"), "--wu", str(WORK / "Wu_m.bin"),
+                    "--out", str(WORK / f"actb_{tag}.bin"), "--iters", "1",
+                    "--mapping", mp], "", quiet=True)
+        actb_c = read_bf16(WORK / "actb_con.bin", FF)
+        actb_i = read_bf16(WORK / "actb_int.bin", FF)
+        bits = {"act": int((act_i != act_c).sum()), "pre": int((pre_i != pre_c).sum()),
+                "out": int((out_i != out_c).sum()),
+                # batched@contig vs single@interleave is the engine's own before/after pair; the
+                # second term keeps the batched interleaved form honest against the same baseline.
+                "act_batched": int((actb_c != act_i).sum()) + int((actb_i != act_i).sum())}
+        for k in tot:
+            tot[k] += bits[k]
+        print("    L%02d  act %d/%d differ | pre %d/%d | out %d/%d | act(batched) %d/%d"
+              % (l, bits["act"], FF, bits["pre"], 2 * FF, bits["out"], HID,
+                 bits["act_batched"], 2 * FF))
+        if any(bits.values()):
+            fails.append("L%02d %s: the two gate/up weight walks differ (%s) — the mapping is not"
+                         " bit-neutral" % (l, st, bits))
+        # ...and both sides still reproduce the reference, under the ordinary rules. `act`/`pre` are
+        # F1/F2 material (each side's own dots); `out` here is down fed the KERNEL's act, so it is the
+        # F4 chain and must be judged the way F4 is judged — aggregates only, because a legal 1-ULP
+        # `act` flip puts many ULP onto an `out` element (floor_probe.py; see the F4_* constants).
+        for mp, (act, pre, out) in (("interleave", outs["interleave"]), ("contig", outs["contig"])):
+            judge("L%02d %s F1 gate_pre" % (l, mp), compare(pre[:FF], refs["gate_pre"]),
+                  fails, worst)
+            judge("L%02d %s F1 up_pre " % (l, mp), compare(pre[FF:], refs["up_pre"]),
+                  fails, worst)
+            judge("L%02d %s F2 act    " % (l, mp),
+                  compare(act, refs["act"], ulp_max=2), fails, worst, ulp_max=2)
+            judge("L%02d %s F4 out(chain)" % (l, mp), compare(out, refs["out"]), fails, worst,
+                  ulp_gate=False, ndiff_pct_max=None, meanrel_max=F4_MEANREL_MAX,
+                  cos_min=F4_COS_MIN)
+    print("    total across %d layers: act %d, pre %d, out %d, act(batched) %d differing"
+          " elements (all must be 0)"
+          % (len(layers), tot["act"], tot["pre"], tot["out"], tot["act_batched"]))
 
 
 def judge_neg(c: dict) -> bool:
@@ -335,7 +443,9 @@ def run_tokens(args, layers, fails, worst) -> None:
         raise SystemExit("no prefill fixture %s (try p64)" % dp)
     T0 = int(np.load(dp / ("L%02d.mlp.in.npy" % layers[0])).shape[1])
     print("\ntoken-batched stage on %s: %d tokens x layers %s (shared-memory tile, not registers,"
-          " is what bounds the batch)" % (dp.name, T0, layers))
+          " is what bounds the batch) | mapping %s"
+          % (dp.name, T0, layers, args.mapping))
+    margs = mapping_args(args)
     sample = sorted({0, 1, T0 // 2, max(0, T0 - 2), T0 - 1})
     for l in layers:
         pre = "L%02d.mlp." % l
@@ -361,7 +471,7 @@ def run_tokens(args, layers, fails, worst) -> None:
         kernel(["--mode", "gateup", "--x", str(WORK / "x_tile.bin"), "--in", str(HID),
                 "--tokens", str(T), "--wg", str(Wg), "--wu", str(Wu),
                 "--out", str(WORK / "act_batched.bin"), "--pre", str(WORK / "pre_batched.bin"),
-                "--iters", "1"], "gateup x%d" % T, quiet=True)
+                "--iters", "1"] + margs, "gateup x%d" % T, quiet=True)
         kernel(["--mode", "down", "--x", str(WORK / "act_tile.bin"), "--in", str(FF),
                 "--tokens", str(T), "--wd", str(Wd), "--out", str(WORK / "out_batched.bin"),
                 "--iters", "1"], "down x%d (ref act)" % T, quiet=True)
@@ -385,12 +495,15 @@ def run_tokens(args, layers, fails, worst) -> None:
             c = worst_over_rows(got, ref, **ckw)
             judge("L%02d r%03d %s" % (l, c["row"], tag), c, fails, worst, **jkw)
 
-        # claim 1: the k=1 kernel's answer for a token IS the batched kernel's row for that token
+        # claim 1: the k=1 kernel's answer for a token IS the batched kernel's row for that token.
+        # The k=1 side runs under `args.mapping` too, so `--mapping contig` checks the batched contig
+        # walk against the single-token contig walk AND (by the identity stage) against the shipped
+        # interleaved one — one more place a walk that moved bits would show up.
         bad_bits = 0
         for t in sample:
             dump_bf16(xref[t:t + 1], WORK / "x_one.bin")
             kernel(["--mode", "gateup", "--x", str(WORK / "x_one.bin"), "--wg", str(Wg),
-                    "--wu", str(Wu), "--out", str(WORK / "act_one.bin"), "--iters", "1"],
+                    "--wu", str(Wu), "--out", str(WORK / "act_one.bin"), "--iters", "1"] + margs,
                    "", quiet=True)
             dump_bf16(read_bf16(WORK / "act_one.bin", FF), WORK / "act_one_f.bin")
             kernel(["--mode", "down", "--x", str(WORK / "act_one_f.bin"), "--wd", str(Wd),
@@ -431,6 +544,14 @@ def main() -> int:
     ap.add_argument("--negative", action="store_true",
                     help="inject each bug in --neg into the kernel and assert the gate stops "
                          "it (the G-neg convention: a gate that cannot fail verifies nothing)")
+    ap.add_argument("--mapping", default="interleave", choices=["interleave", "contig"],
+                    help="which gate/up weight walk to launch (Q10). `interleave` is the shipped"
+                         " one and the default; every gateup launch in this run uses the value, so"
+                         " `--mapping contig` re-runs the whole gate under the alternative walk")
+    ap.add_argument("--mapping-identity", action="store_true",
+                    help="Q10's proof stage: run gate/up under BOTH walks for each layer and"
+                         " require act/pre/out to be byte-identical, then judge each side against"
+                         " the pins so identity cannot mean 'identically wrong'")
     ap.add_argument("--no-time", action="store_true")
     args = ap.parse_args()
 
@@ -446,9 +567,10 @@ def main() -> int:
     if bf16_ulp.selftest():        # the comparator is part of the gate; check it first
         raise SystemExit("bf16_ulp selftest failed - the gate cannot be trusted")
     WORK.mkdir(parents=True, exist_ok=True)
-    print("fixture %s | steps %s | mode %s | layers %s | rows/block %d | iters %d"
+    print("fixture %s | steps %s | mode %s | layers %s | rows/block %d | iters %d | mapping %s"
           % (args.fixture, ",".join(steps), args.mode,
-             "all 24" if args.layers == "all" else layers, args.rows, args.iters))
+             "all 24" if args.layers == "all" else layers, args.rows, args.iters, args.mapping))
+    margs = mapping_args(args)
 
     pre = WPK
     fails: list[str] = []
@@ -488,7 +610,7 @@ def main() -> int:
                 t = kernel(["--mode", "gateup", "--x", str(xp), "--wg", str(wp[0]),
                             "--wu", str(wp[1]), "--out", str(WORK / "act.bin"),
                             "--pre", str(WORK / "pre.bin"), "--iters", str(args.iters),
-                            "--rows", str(args.rows)], "gateup")
+                            "--rows", str(args.rows)] + margs, "gateup")
                 timings["gateup"] = float(t["ms"])
                 pre_t = read_bf16(WORK / "pre.bin", 2 * FF)
                 act_kernelside = dump_bf16(read_bf16(WORK / "act.bin", FF),
@@ -531,6 +653,9 @@ def main() -> int:
         print("\nnegative tests (each must be rejected):")
         run_negatives(args, d, steps, layers, fails)
 
+    if args.mapping_identity:
+        run_mapping_identity(args, d, steps, layers, fails, worst)
+
     if args.tokens:
         run_tokens(args, layers, fails, worst)
 
@@ -540,7 +665,7 @@ def main() -> int:
             timings["gateup"] = float(kernel(
                 ["--mode", "gateup", "--x", str(WORK / "x.bin"), "--wg", str(WORK / "Wg.bin"),
                  "--wu", str(WORK / "Wu.bin"), "--out", str(WORK / "act.bin"),
-                 "--iters", str(max(args.iters, 60)), "--rows", str(args.rows)],
+                 "--iters", str(max(args.iters, 60)), "--rows", str(args.rows)] + margs,
                 "gateup")["ms"])
         if args.mode in ("down", "all"):
             timings["down"] = float(kernel(
@@ -577,7 +702,7 @@ def main() -> int:
                 t = kernel(["--mode", "gateup", "--x", str(WORK / "x.bin"),
                             "--wg", str(WORK / "Wg.bin"), "--wu", str(WORK / "Wu.bin"),
                             "--out", str(WORK / "act.bin"), "--iters",
-                            str(max(args.iters, 60)), "--rows", str(r)], "", quiet=True)
+                            str(max(args.iters, 60)), "--rows", str(r)] + margs, "", quiet=True)
                 c = compare(read_bf16(WORK / "act.bin", FF), aref, ulp_max=2)
                 line += " gateup %7.4f ms %6.1f GB/s act ndiff %d max %d ULP |"
                 line = line % (float(t["ms"]), float(t["gbs"]), c["ndiff"], c["maxulp"])
@@ -643,7 +768,7 @@ def main() -> int:
                             "--act", str(WORK / "act_ref.bin"), "--wg", str(WORK / "Wg_t.bin"),
                             "--wu", str(WORK / "Wu_t.bin"), "--wd", str(WORK / "Wd_t.bin"),
                             "--out", str(WORK / "out_t.bin"), "--actout", str(WORK / "act_t.bin"),
-                            "--iters", "30", "--rows", str(r)], "mlp", quiet=True)
+                            "--iters", "30", "--rows", str(r)] + margs, "mlp", quiet=True)
                 # Validate the LAST replica, not replica 0. Replica 0's bytes are the ones even
                 # a kernel that read too little would certainly touch; the last replica is the
                 # one whose traffic a skipped or short read would drop.
@@ -659,7 +784,7 @@ def main() -> int:
                 t = kernel(["--mode", "gateup", "--x", str(WORK / "x.bin"),
                             "--wg", str(WORK / "Wg_t.bin"), "--wu", str(WORK / "Wu_t.bin"),
                             "--out", str(WORK / "act_t.bin"), "--iters", "30",
-                            "--rows", str(r)], "gateup", quiet=True)
+                            "--rows", str(r)] + margs, "gateup", quiet=True)
                 c = compare(read_bf16(WORK / "act_t.bin", FF), aref, ulp_max=2)
                 line += (" gateup %7.4f ms %6.1f GB/s (%.0f%% of probe) ndiff %d max %d ULP |"
                          % (float(t["ms"]), float(t["gbs"]),

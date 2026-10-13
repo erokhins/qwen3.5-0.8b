@@ -65,10 +65,47 @@ __device__ __forceinline__ float reduce_row(float acc) {
     return acc;
 }
 
+// One `uint4` of weight (8 BF16 terms) against the staged x row, accumulated into `acc` in the
+// order the reference's dot visits them. Shared by every weight-walk mapping below so the
+// ARITHMETIC has exactly one spelling and only the walk can differ between them.
+__device__ __forceinline__ void accum_word(float& acc, uint4 u, const float* xp) {
+    const hip_bfloat16* p = reinterpret_cast<const hip_bfloat16*>(&u);
+#pragma unroll
+    for (int j = 0; j < 8; ++j) acc += bf(p[j]) * xp[j];
+}
+
+// The two weight walks `mlp_gateup` can launch. Which one runs is a mapping choice, not a numerical
+// one, and that is the whole reason the second one is legal to ship.
+//
+// WHY A SECOND ONE EXISTS. `devices/strix-halo-mixed-traffic.md` §Q9 Results: this kernel's own
+// per-thread weight arithmetic, replayed as pure reads at byte-identical bytes / grid / launch
+// count, runs at **0.470** of a contiguous sweep (0.629 for the single-stream `down` shape), and
+// `--stage 0` exonerates the LDS staging (nostage/eng = 1.098, outside the band that would have
+// blamed it). Transaction-level coalescing is already 100 % (§"CPU-side verdict on (A)"), so what
+// costs the factor of two is the WALK: a lane alternates between two weight blobs 7 MiB apart every
+// 16 bytes of each, and the grid covers its entire weight region in one grid pass instead of
+// marching a grid-sized window through it.
+//
+//   MAP_INTERLEAVE  one loop, both streams' words fetched side by side (what has always shipped;
+//                   the comment on that loop says why it looked like the right bet).
+//   MAP_CONTIG      the gate row end to end, then the up row end to end.
+//
+// WHY IT IS BIT-IDENTICAL. Inside a stream the loop is still `v = lane; v < words; v += ws` over the
+// same `uint4` words in the same order, accumulating into the same `ag`/`au`, and each row is still
+// owned end-to-end by one wavefront, so both dots are the same F32 sums in the same order. The only
+// free variable is which stream a lane touches when. Device proof:
+// `prototype/mlp_gemv/run.py --mapping-identity` (byte-identical `act`/`pre`, and therefore `out`,
+// layer by layer), and `--mapping contig` re-runs the whole F1-F4 gate and the negatives under the
+// new walk so the claim is not "identical to a wrong kernel" either.
+enum MlpMap { MAP_INTERLEAVE = 0, MAP_CONTIG = 1 };
+
 // One wavefront per intermediate row: both projections and the SwiGLU epilogue, so the
 // gate/up pair costs one launch and the 3584-element intermediates never reach memory
 // unless asked for (--pre, which exists so the gate can compare them).
-template <int IN>
+//
+// `MAP` picks the weight walk, not the arithmetic; see `MlpMap` above for what the two walks do and
+// why they cannot differ by a bit.
+template <int IN, int MAP = MAP_INTERLEAVE>
 __global__ void mlp_gateup(const hip_bfloat16* __restrict__ Wg,
                            const hip_bfloat16* __restrict__ Wu, const float* __restrict__ x,
                            hip_bfloat16* __restrict__ act, hip_bfloat16* __restrict__ pre,
@@ -82,8 +119,10 @@ __global__ void mlp_gateup(const hip_bfloat16* __restrict__ Wg,
     const int row = blockIdx.x * rpb + threadIdx.x / ws;
     if (row >= rows) return;
 
-    // Two independent streams: the compiler interleaves the loads, which is what keeps
-    // enough of them in flight to sit on the roofline at only 8 rows per block.
+    // Two independent streams. Under MAP_INTERLEAVE the compiler interleaves the two loads, which is
+    // what keeps enough of them in flight to sit near the roofline at only 8 rows per block — and is
+    // also the walk §Q9 measured at 0.470 of a contiguous sweep. MAP_CONTIG keeps the same two
+    // streams but visits one of them at a time.
     const uint4* wg = reinterpret_cast<const uint4*>(Wg + (size_t)row * IN);
     const uint4* wu = reinterpret_cast<const uint4*>(Wu + (size_t)row * IN);
     // NEG_HALF: half of K. NEG_TAIL: the last word of K (8 of 1024 terms), which is the shape an
@@ -91,16 +130,20 @@ __global__ void mlp_gateup(const hip_bfloat16* __restrict__ Wg,
     // per-element rule notices, unlike NEG_HALF.
     const int words = neg == NEG_HALF ? IN / 16 : (neg == NEG_TAIL ? IN / 8 - 1 : IN / 8);
     float ag = 0.f, au = 0.f;
+    if (MAP == MAP_CONTIG) {
+        // Two contiguous passes. Every word of the gate row first, then every word of the up row,
+        // so a lane's next load is the next 16 bytes of the stream it is already in rather than the
+        // same offset 7 MiB away in the other one. Same words, same order, same accumulators.
 #pragma unroll
-    for (int v = lane; v < words; v += ws) {
-        uint4 ug = wg[v], uu = wu[v];
-        const hip_bfloat16* pg = reinterpret_cast<const hip_bfloat16*>(&ug);
-        const hip_bfloat16* pu = reinterpret_cast<const hip_bfloat16*>(&uu);
-        const float* xp = &xs[v * 8];
+        for (int v = lane; v < words; v += ws) accum_word(ag, wg[v], &xs[v * 8]);
 #pragma unroll
-        for (int j = 0; j < 8; ++j) {
-            ag += bf(pg[j]) * xp[j];
-            au += bf(pu[j]) * xp[j];
+        for (int v = lane; v < words; v += ws) accum_word(au, wu[v], &xs[v * 8]);
+    } else {
+#pragma unroll
+        for (int v = lane; v < words; v += ws) {
+            const float* xp = &xs[v * 8];
+            accum_word(ag, wg[v], xp);
+            accum_word(au, wu[v], xp);
         }
     }
     ag = reduce_row(ag);
@@ -197,7 +240,9 @@ __device__ __forceinline__ void stage_tokens(const float* __restrict__ x, float 
     __syncthreads();
 }
 
-template <int IN, int TPB>
+// `MAP` picks the weight walk only, exactly as in `mlp_gateup` above; `run.py --tokens` plus
+// `--mapping-identity` is what proves the batched form keeps its bits under both.
+template <int IN, int TPB, int MAP = MAP_INTERLEAVE>
 __global__ void mlp_gateup_tokens(const hip_bfloat16* __restrict__ Wg,
                                   const hip_bfloat16* __restrict__ Wu,
                                   const float* __restrict__ x, hip_bfloat16* __restrict__ act,
@@ -223,17 +268,27 @@ __global__ void mlp_gateup_tokens(const hip_bfloat16* __restrict__ Wg,
     // `words` data, not a constant) and asking for a full unroll here only earns a compiler warning.
     // The arithmetic depends on the ORDER this loop visits words, which is the same order the
     // single-token kernel uses; whether the compiler rolls it is not observable in the result.
-    for (int v = lane; v < words; v += ws) {
-        uint4 ug = wg[v], uu = wu[v];            // once per row for the whole tile
-        const hip_bfloat16* pg = reinterpret_cast<const hip_bfloat16*>(&ug);
-        const hip_bfloat16* pu = reinterpret_cast<const hip_bfloat16*>(&uu);
+    if (MAP == MAP_CONTIG) {
+        // Two contiguous passes, same trade as `mlp_gateup`: one stream at a time, every token of
+        // the tile still accumulated per word in the same order.
+        for (int v = lane; v < words; v += ws) {
+            uint4 ug = wg[v];                    // once per row for the whole tile
 #pragma unroll
-        for (int t = 0; t < TPB; ++t) {
-            const float* xp = &xs[t][v * 8];
+            for (int t = 0; t < TPB; ++t) accum_word(ag[t], ug, &xs[t][v * 8]);
+        }
+        for (int v = lane; v < words; v += ws) {
+            uint4 uu = wu[v];
 #pragma unroll
-            for (int j = 0; j < 8; ++j) {
-                ag[t] += bf(pg[j]) * xp[j];
-                au[t] += bf(pu[j]) * xp[j];
+            for (int t = 0; t < TPB; ++t) accum_word(au[t], uu, &xs[t][v * 8]);
+        }
+    } else {
+        for (int v = lane; v < words; v += ws) {
+            uint4 ug = wg[v], uu = wu[v];        // once per row for the whole tile
+#pragma unroll
+            for (int t = 0; t < TPB; ++t) {
+                const float* xp = &xs[t][v * 8];
+                accum_word(ag[t], ug, xp);
+                accum_word(au[t], uu, xp);
             }
         }
     }

@@ -446,3 +446,89 @@ arithmetic (22 MiB per layer ÷ `TPB` instead of × 1), the x/L2 traffic is the 
 per-token path's, and whether the GPU turns the first into time is a measurement — and a measurement
 of a kernel this wide needs the box to itself, which is bench/performance-status.md §6's to take,
 not a worker's.
+
+## Q10: the gate/up weight walk, spelled twice — `--mapping interleave|contig`
+
+§Q9 of `devices/strix-halo-mixed-traffic.md` pinned the MLP's in-step deficit inside this kernel: the
+engine's own per-thread weight mapping reads at **0.470** of a contiguous sweep over the same bytes on
+the same grid (0.472 with the step's writes, 0.629 at the `down` shape), with transaction coalescing
+measured at 100 % on both sides and LDS staging exonerated (`--stage 0` ⇒ `nostage/eng = 1.098`). What
+that leaves is the shape of the walk, and the unusual thing about this kernel's walk is that it
+interleaves **two** weight streams: one row loop that fetches `wg[v]` and `wu[v]` side by side, so a
+warp's live addresses alternate between two separate 7.2 MiB allocations every instruction. Two
+contiguous passes over the same bytes is the cheap thing to try, and it is the shape `--mapping contig`
+selects.
+
+| mapping | what one warp does with one row | emitted weight loads, `IN=1024`/gfx1151 |
+|---|---|---|
+| `interleave` — default, exactly what has always shipped | one loop, `words = 128` iterations at `IN=1024` ÷ wave64; each iteration fetches `wg[v]` **and** `wu[v]` | 8 × `global_load_b128` off **two** live address pairs, alternating: `v4,v2,v4,v2,v4,v2,v4,v2` |
+| `contig` | the gate row end to end, then the up row end to end — same `v = lane; v < words; v += ws` stride, twice | 8 × `global_load_b128` off **one** live pair, re-based between the two walks: `v17,v17,v17,v17,v17,v17,v17,v17` |
+
+### Why this is the free kind of change, and what had to be proven anyway
+
+Inside one stream nothing moved: same word walk, same 8-element inner loop, same `reduce_row` ladder,
+same three SwiGLU roundings, same stores. An output element belongs to exactly one stream — `gate_pre[i]`
+comes from `gate`'s row *i* alone — so permuting *when* a warp touches the two streams cannot reach an
+element's accumulation order, and the epilogue reads `gate_pre[i]`/`up_pre[i]` after the block barrier,
+which does not care which of the two walks wrote them first. That is the argument. It is also exactly the
+kind of argument that hides a bug (a mis-set bound in the second walk would look like this and still
+"match" if the comparison were sloppy), so both halves are checked rather than trusted:
+
+* **The switch is not inert.** `mlp_gateup` is templated on the mapping (`mlp_gateup<IN, MAP>`,
+  `mlp_gateup_tokens<IN, TPB, MAP>`) and the host launches one instantiation or the other, so the two
+  mappings are two pieces of machine code. The table above is the witness, taken from the compiler:
+
+  ```bash
+  mkdir -p tmp/q10/isa && cd tmp/q10/isa
+  hipcc -O3 -Wno-unused-command-line-argument --offload-arch=gfx1151 --save-temps \
+        -I"$REPO" -I"$REPO/prototype/mlp_gemv" -c "$REPO/prototype/mlp_gemv/mlp_gemv.hip.cpp" -o x.o
+  # then, per instantiation, the address pairs feeding the weight loads, in program order:
+  awk '/^_Z10mlp_gateupILi1024ELi0EE/,/^\t\.size/' \
+      mlp_gemv.hip-hip-amdgcn-amd-amdhsa-gfx1151.s | grep -o 'global_load_b128.*v\[[0-9]*:[0-9]*\]'
+  ```
+
+  Two live bases alternating versus one base used eight times is the structural difference between "both
+  streams side by side" and "one stream, then the other", and it is visible without timing anything.
+* **The two walks agree bit for bit** — `run.py --mapping-identity`, a stage that runs both mappings (and
+  both the k=1 and the batched form) on the same operands and requires **0 differing elements** in `act`,
+  in `gate_pre`/`up_pre`, in `out`, and in the batched `act`. Zero is the rule: a mapping change that
+  moves one bit is a different kernel, not a faster one. Since the outputs are identical *by design*, the
+  identity stage is not the proof that the switch does something — the ISA dump above is; the stage is the
+  proof that the switch is free.
+
+### Device evidence (correctness only, no timing taken)
+
+`.venv/bin/python prototype/mlp_gemv/run.py --fixture dec8 --step decode0 --layers all --no-time --tile 0
+--mapping-identity` — wall 19.7 s, `gpu_lock util` 93 % at acquire (the serving engine; discounted per
+`AGENTS.md`), **no timing taken** (the harness's by-product `ms` lines were ignored, and `--tile 0`
+suppressed the cold sweep):
+
+| per layer, all 24 | rule | result |
+|---|---|---|
+| `act` interleave vs contig | 0 / 3584 differ | 0 at every layer |
+| `gate_pre`+`up_pre` interleave vs contig | 0 / 7168 differ | 0 at every layer |
+| `out` (chain) interleave vs contig | 0 / 1024 differ | 0 at every layer |
+| `act`, batched kernel under each mapping | 0 / 7168 differ | 0 at every layer |
+| the shipped gate, judged under each mapping | F1/F2/F3/F4 unchanged | `PASS` |
+
+Same window, same discipline:
+
+```bash
+.venv/bin/python prototype/mlp_gemv/run.py --fixture dec8 --no-time --tile 0 --mapping contig --negative
+.venv/bin/python prototype/mlp_gemv/run.py --fixture dec8 --no-time --tile 0 --tokens p64 --mapping contig
+```
+
+wall 10.6 s and 13.8 s. All six injections still localise to where the bug lives and nowhere else
+(`half`/`tail`/`rowswap`/`trunc` → `gate_pre,up_pre,act,out(down),out(chain)`; `preswap` → the two raw
+dumps only; `f32act` → `act,out(chain)`), so the contig walk did not smooth over anything the interleaved
+walk's negatives could reach. Under `--mapping contig` the batched form is still bit-identical to k=1:
+23 040 elements compared per layer, **0 differ**.
+
+`--mode down` refuses `--mapping` rather than ignoring it: `down` is one weight stream, so it has no
+mapping to choose, and a flag that silently did nothing on half the shapes would make a null A/B
+indistinguishable from a mis-typed one. `run.py` enforces the same rule.
+
+What this does **not** claim: that `contig` is faster. Every number above is a comparison of bits, and the
+warm table under §Performance is a cache ranking that this change cannot be judged with. The A/B rows,
+their thresholds and their null bands are pre-registered in `engine/results.md` §Q10 and belong to the
+main agent's exclusive window (`bench/performance-status.md` §6).

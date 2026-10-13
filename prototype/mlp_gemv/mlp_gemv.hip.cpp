@@ -31,6 +31,12 @@
  *
  * Build: prototype/mlp_gemv/build.sh
  * Run:   ./mlp_gemv --mode gateup --x x.bin --wg Wg.bin --wu Wu.bin --out act.bin [--pre pre.bin]
+ *                   [--mapping interleave|contig]
+ *            Q10: the gate/up weight walk. `interleave` (the default, and what has always shipped)
+ *            fetches both streams' words side by side; `contig` walks the gate row end to end, then
+ *            the up row. Same launch shape either way, and bit-identical output — the claim and its
+ *            device proof are `MlpMap` in mlp_gemv_kernels.h plus run.py --mapping-identity.
+ *            `down` has one weight stream, so it has no walk to choose and refuses the flag.
  *        ./mlp_gemv --mode down   --x act.bin --wd Wd.bin --out out.bin
  *        ./mlp_gemv --mode gateup --x xtile.bin --in 1024 --tokens T --wg Wg.bin --wu Wu.bin \
  *                                 --out act_tile.bin [--pre pre_tile.bin]
@@ -95,6 +101,35 @@ static size_t filesize(const std::string& p) {
     return (size_t)f.tellg();
 }
 
+// Q10's mapping switch, one line of it: `--mapping` picks which instantiation gets launched. The
+// walk is a template argument, so each mapping compiles exactly as it would on its own (no runtime
+// test in the row loop) and the two cannot drift into sharing code by accident. Everything else —
+// grid, threads, rows/block, argument list — is identical between them by construction: both sides
+// of the A/B are the same launch shape, which is what §Q9's pair held fixed.
+static const char* map_name(int map) { return map == MAP_CONTIG ? "contig" : "interleave"; }
+
+template <int IN>
+static void launch_gateup(const hip_bfloat16* wg, const hip_bfloat16* wu, const float* dx,
+                          hip_bfloat16* out, hip_bfloat16* pre, int rows, int rpb, int blocks,
+                          int threads, int neg, int map) {
+    if (map == MAP_CONTIG)
+        mlp_gateup<IN, MAP_CONTIG><<<blocks, threads>>>(wg, wu, dx, out, pre, rows, rpb, neg);
+    else
+        mlp_gateup<IN, MAP_INTERLEAVE><<<blocks, threads>>>(wg, wu, dx, out, pre, rows, rpb, neg);
+}
+
+template <int IN, int TPB>
+static void launch_gateup_tiles(const hip_bfloat16* wg, const hip_bfloat16* wu, const float* dx,
+                                hip_bfloat16* out, hip_bfloat16* pre, int rows, int tokens, int rpb,
+                                const dim3& grid, int threads, int neg, int map) {
+    if (map == MAP_CONTIG)
+        mlp_gateup_tokens<IN, TPB, MAP_CONTIG><<<grid, threads>>>(wg, wu, dx, out, pre, rows,
+                                                                   tokens, rpb, neg);
+    else
+        mlp_gateup_tokens<IN, TPB, MAP_INTERLEAVE><<<grid, threads>>>(wg, wu, dx, out, pre, rows,
+                                                                      tokens, rpb, neg);
+}
+
 int main(int argc, char** argv) {
     std::string mode = "gateup", xpath, wgpath, wupath, wdpath, opath, ppath, apath, aopath,
             negname = "none";
@@ -102,6 +137,8 @@ int main(int argc, char** argv) {
     int rows_per_block = ROWS_PER_BLOCK;
     int tok_in = 0, tok_n = 1;      // P4: the token-batched form (--in gives the width, so the
                                     // x file can hold several tokens; without --in this is k=1)
+    std::string mapping = "interleave";   // Q10: interleave | contig (see MlpMap in the kernel header)
+    bool mapping_given = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() { return std::string(argv[++i]); };
@@ -119,6 +156,10 @@ int main(int argc, char** argv) {
         else if (a == "--in") tok_in = atoi(next().c_str());
         else if (a == "--tokens") tok_n = atoi(next().c_str());
         else if (a == "--neg") negname = next();
+        else if (a == "--mapping") {
+            mapping = next();
+            mapping_given = true;
+        }
         else {
             fprintf(stderr, "unknown arg %s\n", a.c_str());
             return 1;
@@ -140,6 +181,18 @@ int main(int argc, char** argv) {
 
     const bool gateup = mode == "gateup";
     const bool pair = mode == "mlp";   // gateup and down ALTERNATED, one layer of a real step
+    // Only gate/up has two weight streams, so only gate/up has a mapping to choose. `down` is one
+    // stream by construction and says so by refusing the flag rather than pretending to switch.
+    const int map = mapping == "interleave" ? MAP_INTERLEAVE : mapping == "contig" ? MAP_CONTIG : -1;
+    if (map < 0) {
+        fprintf(stderr, "--mapping must be interleave|contig, got %s\n", mapping.c_str());
+        return 1;
+    }
+    if (mapping_given && mode == "down") {
+        fprintf(stderr, "--mapping is the gate/up weight walk; --mode down has one weight stream"
+                        " and no interleave to remove\n");
+        return 1;
+    }
     const size_t xbytes = filesize(xpath);
     // Without --in the x file is one token and everything is derived from its size, exactly as
     // before. With --in the file is a [tokens, in] tile and `--tokens` must agree with it.
@@ -174,8 +227,9 @@ int main(int argc, char** argv) {
         rows2 = (int)(filesize(wdpath) / (in2 * 2));
     }
     printf("mode %s | x in=%d | rows=%d | tokens=%d (tile %d) | warpSize=%d | rows/block=%d |"
-           " weights %.2f MiB%s\n",
-           mode.c_str(), in, rows, tokens, tpb, ws, rows_per_block, wbytes / 1048576.0,
+           " mapping=%s | weights %.2f MiB%s\n",
+           mode.c_str(), in, rows, tokens, tpb, ws, rows_per_block, map_name(map),
+           wbytes / 1048576.0,
            pair ? " (+down weights, pair burst)" : "");
 
     // x arrives as BF16 (the reference's own operands are BF16-valued). It is staged as F32
@@ -261,8 +315,8 @@ int main(int argc, char** argv) {
     auto launch = [&]() {
         if (pair) {          // one layer of a real decode step: gate/up, then down, alternated
             if (in == HID)
-                mlp_gateup<HID><<<blocks, threads>>>(dw, dw2, dx, dact, nullptr, rows,
-                                                     rows_per_block, neg);
+                launch_gateup<HID>(dw, dw2, dx, dact, nullptr, rows, rows_per_block, blocks,
+                                   threads, neg, map);
             else {
                 fprintf(stderr, "mlp: in=%d not implemented\n", in);
                 exit(1);
@@ -278,11 +332,11 @@ int main(int argc, char** argv) {
         if (gateup) {
             if (tokens > 1) {
                 if (in == HID)
-                    mlp_gateup_tokens<HID, 4><<<grid_t, threads>>>(dw, dw2, dx, dout, dpre, rows,
-                                                                    tokens, rows_per_block, neg);
+                    launch_gateup_tiles<HID, 4>(dw, dw2, dx, dout, dpre, rows, tokens,
+                                                rows_per_block, grid_t, threads, neg, map);
                 else if (in == FF)
-                    mlp_gateup_tokens<FF, 2><<<grid_t, threads>>>(dw, dw2, dx, dout, dpre, rows,
-                                                                   tokens, rows_per_block, neg);
+                    launch_gateup_tiles<FF, 2>(dw, dw2, dx, dout, dpre, rows, tokens,
+                                               rows_per_block, grid_t, threads, neg, map);
                 else {
                     fprintf(stderr, "gateup: in=%d not implemented\n", in);
                     exit(1);
@@ -290,11 +344,11 @@ int main(int argc, char** argv) {
                 return;
             }
             if (in == HID)
-                mlp_gateup<HID><<<blocks, threads>>>(dw, dw2, dx, dout, dpre, rows,
-                                                     rows_per_block, neg);
+                launch_gateup<HID>(dw, dw2, dx, dout, dpre, rows, rows_per_block, blocks, threads,
+                                   neg, map);
             else if (in == FF)
-                mlp_gateup<FF><<<blocks, threads>>>(dw, dw2, dx, dout, dpre, rows,
-                                                    rows_per_block, neg);
+                launch_gateup<FF>(dw, dw2, dx, dout, dpre, rows, rows_per_block, blocks, threads,
+                                  neg, map);
             else {
                 fprintf(stderr, "gateup: in=%d not implemented\n", in);
                 exit(1);
@@ -403,8 +457,9 @@ int main(int argc, char** argv) {
     double gbs = bytes / (best / 1e3) / 1e9;
     printf("kernel %.4f ms -> %.1f GB/s (%.1f%% of the 237 GB/s probe)\n", best, gbs,
            gbs / 237.0 * 100.0);
-    printf("RESULT mode=%s ms=%.4f gbs=%.1f rows=%d in=%d rows_per_block=%d tokens=%d tile=%d\n",
-           mode.c_str(), best, gbs, rows, in, rows_per_block, tokens, tpb);
+    printf("RESULT mode=%s ms=%.4f gbs=%.1f rows=%d in=%d rows_per_block=%d tokens=%d tile=%d"
+           " mapping=%s\n",
+           mode.c_str(), best, gbs, rows, in, rows_per_block, tokens, tpb, map_name(map));
 
     std::vector<hip_bfloat16> hout((size_t)(pair ? rows2 : rows) * tokens);
     CK(hipMemcpy(hout.data(), dout, hout.size() * 2, hipMemcpyDeviceToHost));
