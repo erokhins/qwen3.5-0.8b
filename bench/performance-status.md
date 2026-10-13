@@ -782,3 +782,38 @@ the finger at the two-stream row interleave and the row tail in `mlp_gateup`. Fu
 `devices/strix-halo-mixed-traffic.md` §Q9 Results. The prize is sized: MLP is **4.264 ms/token where its
 roofline is 2.230 ms**, and the probe says the difference is kernel-internal rather than memory-system — so
 the next package is a kernel mapping fix with the standard byte-identity proof, priced against the 4.264 row.
+
+### Q10: the mapping fix works, partially, and only on the decode path (2026-10-13, zero subagents, foreground, locks `q10-m1`, `q10-m2`)
+
+`--mlp-map interleave|contig` (`3411539`, prototype twin `9d8639f`) is bit-identical by construction and was
+gated on all eight fixtures × both mappings by the worker before I touched it. I priced it against the
+pre-registered thresholds (M1–M4 in `engine/results.md`), witnesses verified first: `STAGEPARITY …
+logits_bitidentical=1` on **18/18** rows and `plan_match=1` on both sides, so nothing below is void.
+
+**M1, prototype burst, `--tile 6` (the window the committed row was taken with):** `interleave` **2.575 ms =
+205.2 GB/s (87 %)**, `contig` **2.381 ms = 221.9 GB/s (94 %)** — contig clears the ≥ 215 GB/s "confirmed"
+line, and at `--tile 24` the ordering holds (2.376 → 2.271 ms, 94 % → 98 %). The built-in control behaved:
+`down` was 0.0127–0.0128 ms across all four runs, so the flag touched only what it should. Honest caveat from
+the pre-registration, restated because it matters: the prototype burst already ran at 84–87 % here, so it had
+far less headroom than the step's 52 %.
+
+**M2, the decisive row — MLP family in-situ at 128 lanes, medians of 3:** `interleave` **4.340 ms** (the
+4.264 baseline reproduces within 2 %) → `contig` **3.395 ms**. Against the bands written before the run (null
+≥ 4.10, partial 3.30–4.10, confirmed ≤ 3.30): **partial**, and reported as a share rather than rounded up —
+**0.945 ms recovered of the 2.034 ms gap** to the 2.230 ms roofline, i.e. **46 % of the walk penalty Q9 named
+is the two-stream interleave**, and the remaining ~1.09 ms is still unattributed (row tail, or whatever the
+`down` shape's 0.629 was made of).
+
+**M3, step level (the same runs' burst rows, so the same window):** 12.699 → **11.607 ms/token**, i.e.
+**78.7 → 86.2 tok/s (+9.5 %)**, against a predicted 11.454 from `12.399 − Δ` inside a ±0.6 ms null band — the
+prediction and the measurement agree. **This is the largest single decode win in the project so far.**
+
+**M4 is the reason it is not the default.** Prefill went the other way: TTFT at a 1024-token prompt, medians of
+3, **1043.8 ms → 1097.0 ms, +5.1 %** — outside the |Δ| < 2 % cross-check, and consistent across all three
+pairs (1042–1055 interleave, 1096–1108 contig), so it is a real regression on the wave path, not noise. Which
+is a coherent result once you know the mechanism: a wave reads the same `gate`/`up` rows for many queries, and
+whatever locality the interleaved walk had across those rows is worth more there than the contiguous walk's
+DRAM behaviour is; on a single row there are no other rows to give locality to. So the mapping should follow
+the row count — `contig` when a body is one row, `interleave` when it is a wave — and that is a code decision,
+not a flag flip, so **the shipped default stays `interleave`** until the split is made and re-measured. A
+step-level 9.5 % win and a 5 % prefill loss are not worth trading against each other blindly.
