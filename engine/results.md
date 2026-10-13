@@ -599,6 +599,173 @@ IDS=248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198,248068,271,
 .venv/bin/python prototype/glue/run.py --time --threads 1024 --iters 300
 ```
 
+### Q6 (2026-10-13): the 424-launch bill, priced at the widths each site actually uses
+
+The question this section owes `bench/plan-2026-10-12.md` Q6 is whether the step is launch-bound:
+**12.949 ms/token at 128 lanes against a 6.52 ms floor for 1.5457 GB of weights at the 237 GB/s probe**
+(all three figures are §6's, and the effective rate is 124 GB/s — half the probe). Everything below is
+either a §6 figure or arithmetic on one, and each row says which. Nothing here is a new device timing:
+the only device work in this pass was correctness-shaped (launch counters, byte-identity, the eight
+fixtures), and the by-product `ms_per_step` that `decode_run` prints in those runs is not quoted.
+
+First, what does *not* explain it, because the arithmetic is quick. At 128 lanes the §05 attention read
+is 128 × 12 KiB = 1.5 MB, which is 0.006 ms at the probe. The 18.66 MiB of per-request state is per
+request, not per token. The per-token GDN state pass is 0.054 GB = 0.228 ms of cold roofline, of which
+this file already priced +0.16 ms as candidate 2 above. Sum: 0.23 ms of a 6.43 ms gap.
+
+**The observed bill, not the planned one.** Two `decode_run` runs on a one-token prompt (`--steps 2` and
+`--steps 6`, `LAUNCHSTAT` differenced and divided by 4, so the prefill body and the `finish_token` tail
+cancel), lock `q6-launchcount`, `util` 94 % recorded and discounted, no timing taken:
+
+| family | launches per one-row step | block shape it launches | where the count comes from |
+|---|---|---|---|
+| `glue` | 49 | 1 block × 256 t | counter: `calls` 147 → 343 over 4 steps |
+| `proj` | 114 | `ceil(rows/8)` blocks × 256 t (now 32 / 1024 t, below) | counter: 342 → 798 |
+| `gdn` | 72 = conv 18 + gates 18 + rec 18 + gated_norm 18 | conv `dim3(24,1)` × 256 t; gates 1 × 16 t; rec 16 × 128 t; gated_norm 16 × 128 t | counters: 54 of the 72 — `rec` has no token width and is not a counted family (`engine/launch_stats.h`) |
+| `attn` | 6 | 8 blocks × 256 t, one fused site per attention layer (`split = 1` under `MAXSC`) | counter: 18 → 42 |
+| `mlp` | 48 = 24 gate_up + 24 down | 448 and 128 blocks × 256 t | counters: 72 → 168 each |
+| `cast` | 115 = 5 per GDN layer + 4 per attention layer + 1 final norm | ≤ 14 blocks × 256 t | `LAUNCH` plan line only — casts are not a launchstats family |
+| `other` | 20 = 1 embedding memcpy + 18 conv-window memcpys + 1 `lm_head` | — | plan line |
+| **total** | **424** | | matches `planned_launch_counts()` and `gate.py` section (d) |
+
+Now price it with §6's width curve — 2.776 / 3.06 / 3.75 / 5.30 µs per launch at 1024 / 512 / 256 / 128
+threads (`prototype/glue/results.md` §4), each family at the width its own launcher uses, which is the
+correction this task was asked for rather than a single guessed µs/launch:
+
+| family | launches | width | dispatch bill (derived) | §6 measured cost | roofline at 237 GB/s | verdict |
+|---|---|---|---|---|---|---|
+| `lm_head` | 1 | 256 t | 0.004 | **2.127** | 2.146 | at the ceiling (101 %). No lever |
+| MLP | 48 | 256 t | 0.180 | **2.594** | 2.230 | traffic-bound at 86 %; its +0.36 over roofline is kernel efficiency, not dispatch |
+| projections, engine's 114-launch plan | 114 | 256 t → 1024 t | 0.428 → 0.317 | not measured as the engine runs it; the 48-launch packed plan is **3.081**, and the per-shape table summed over this plan gives 3.54–3.60 (derived, §6's 1.0166 clean/contended ratio applied) | 1.973 | **the biggest named inefficiency: +1.6 ms over its own roofline**, and it is a shape problem — `in_proj_a`/`_b` 5 %, `k_proj`/`v_proj` 40 %, `o_proj`/`out_proj` 46–49 % of the probe |
+| `glue` | 49 | 256 t, one block each | 0.184 | **0.1904** | 0.002 | pure dispatch — and the only family where the curve can be checked against itself: derived 0.184 against measured 0.190, 3 % apart |
+| casts | 115 | 256 t | 0.431 (0.293 if §6's 2.545 µs re-take is the anchor) | never measured | 0.007 | dispatch and nothing else, whatever the anchor |
+| GDN recurrence | 18 | 16 blocks × 128 t | 0.095 | 0.0646 for the prototype's one-launch form; 0.115 as 18 launches (derived, 18 × the re-taken 6.4 µs) | 0.228 cold | the warm-burst figure understates an in-step cold pass; priced at +0.16 above |
+| §04.5 gated norm | 18 | 16 × 128 t | 0.095 | **0.053** | 0.0016 | pure dispatch — and the curve's weak spot: it prices this launch at 5.30 µs while the kernel's own measured cost is 2.958 µs, i.e. the curve over-prices small multi-block launches by up to 1.8× |
+| `gdn_conv` + `gdn_gates` | 36 | 256 t / 1 block × 16 t | ≈0.13 | never measured | ~0.01 | dispatch (the estimate this file already carried) |
+| attention | 6 | 8 blocks × 256 t | 0.023 | 0.114 at 128 lanes, derived from the re-taken 0.89 µs per lane per token (at the older ≤327-lane fit of 2.014 µs/lane the same 128 lanes price at 0.258) | 0.006 | latency-bound at low lane counts |
+| 19 D2D copies | 19 | — | ≈0.057 | never measured | 0.006 | dispatch |
+| host tail (argmax + alloc + D2H) | — | — | — | 0.14 (CPU-measured) | — | serial with the GPU, always paid |
+| **sum of the rows** | **424** | | **≈1.63 ms of dispatch** | **≈9.35–9.55 ms** | 6.52 | |
+
+**So the honest answer to Q6.1/Q6.2 is: launch overhead is not the gap.** All 424 launches, priced at
+the width each one uses, are ≈1.63 ms of a 12.949 ms token — 12.6 % — and most of that is already
+inside a §6 family cost (glue's 0.190 *is* its dispatch bill; so is gated norm's 0.053). The
+unaccounted launch items are the casts and the copies, ≈0.35–0.49 ms. The width curve is also biased
+high on the small multi-block launches, as its own `gdn_gated_norm` comparison shows, so the true bill
+is nearer 1.3 ms than 1.6.
+
+What the sum of the parts leaves over is **≈3.4–3.6 ms, 26–28 % of the token** — or ≈2.4–2.6 ms of
+*context-free* step if it is charged against §6's own fit (intercept 11.924 ms at zero context), which
+is the figure this file earlier called "the ~2.5 ms no existing measurement can attribute". Same residue,
+two framings. And this file's two candidate explanations above (an exposed bubble at each of the 237
+short launches, and state losing cache residency) are the only ones on the table. Note what that now
+implies: a bubble theory has to produce ≈8 µs of exposed stall per short launch to cover 3.4 ms, while
+the same launches price at 2.9–3.8 µs each when they are merely *queued*. That is a step-shape question,
+and the family bursts cannot answer it in either direction — which is what makes Q6.1's one full-plan
+burst (424 launches in dependency order, one sync) the cheapest number that changes strategy. It is a
+timing instrument that inserts a sync per stage or replaces the step, so it stays the main agent's to
+build.
+
+**What shipped from this pass: `proj` rows/block 8 → 32** (`engine/kernels_proj.cpp`, commit
+`engine/proj: launch at rows/block 32 …`). It is lever 1 above, and it is the only item in this file's
+lever list that is bit-identical *and* has a measured basis — `prototype/proj_gemv/results.md` swept
+2/4/8/16/32 on the cold plan and got 2.991 ms at 8 against 2.785 ms at 32, then left the default alone
+because "moving it is a separate, measurable decision". Proof on device, all eight fixtures, old binary
+against new: identical `LAUNCHSTAT` counters, `dec8` at 64 steps byte-identical across all 40 output
+files, `gate.py` check counts and failures identical (dec8 168/0 · dec64f 650/0 · dec64t 647/0 ·
+dec300f 1156/0 · mt32f 391/0 · p128 197/0 · wide520f 327/0 · chunk64b 372 PASS with the same three
+D-9 red lines), and `tools/margin_delta.py` **x1.0000** on every column of every fixture, including
+`dec300f` step 86 (0.9992 filled) and `wide520f` step 17 (0.9996). And because the engine now runs a
+width that op's gate had never been run at, the gate ran there too: `prototype/proj_gemv/run.py
+--fixture dec8 --layers all --steps decode0` gives **114 comparisons, 0 failures at `--rows 32`** and
+the same 114 / 0 at `--rows 8` — one verdict at both widths, which is that gate saying out loud that
+the width is not what decides the values. The honest caveat: §6 also records
+that the 71 %-of-probe rows/block-32 figure "never reproduced clean", and E2's same-window numbers
+(65.1 % at rpb 32) sit level with the 63–65 % this family produces at rpb 8 — so the −0.50 ms priced
+above may be noise, and the A/B in the command list below decides it. If it is slower, the revert is
+one constant (D-9).
+
+**Deliberately not changed, and why** (each of these is *not* free, which is the bar):
+
+- **`glue` 256 → 1024 threads** (≈−0.05 ms by the width curve). Thread count divides `PER = H/THREADS`
+  and therefore reorders the norm's F32 mean-of-squares, so it is not bit-identical: the raw ndiff
+  against the pins differs with the width (2 of 384 norm rows at 256 t, 1 at 1024 t — E1, §6), both
+  inside band. Moving bits for 0.4 % of the token, with `dec300f` step 86 at 0.9992 and `wide520f`
+  step 17 at 0.9996 filled, is a margin re-price, not a free win.
+- **Folding the casts into a producer** (49 of 115, −0.18 … −0.43 ms). `glue_add_norm` holds the norm
+  row in registers and could write the F32 copy for a 4 KB store, but `prototype/glue/glue_kernels.h`
+  is graduated code and editing it costs that op's device gate (≈2 min — outside a worker's allowance,
+  so it is written here rather than done). The consumer side already has a measured counter-example:
+  `PACK_X` cost **+0.278 ms** over 48 launches to save 48 casts.
+- **Packed multi-weight projections** (114 → 48 launches, −0.11 … −0.57 ms). The packed form writes
+  one `[tokens, 8224]` tile, so `gdn_conv`, `gdn_gates` and the cast sites would each need a row-stride
+  argument — and at `tokens = 1` the stride happens to collapse, which is exactly how a second, only-
+  ever-decode-tested code path gets born (P4's two-branch launcher is the cautionary precedent).
+  This is a plan change with a kernel-signature change and its own gate, not a constant.
+- **`mlp` rows/block**: 48 launches of 448/128 blocks in a family measured at 86 % of the probe, with
+  0.18 ms of dispatch inside 2.594 ms. Neither launch count nor traffic justifies touching it, and its
+  width belongs to that op's gated sweep — a width change has to be justified by launch count or
+  traffic, not by the fact that a knob exists.
+- **The 19 conv-window memcpys** (≈0.06 ms): batching them means changing §08 conv-window state
+  semantics for a rounding error of a saving.
+
+### Commands for the main agent, in the order that changes strategy
+
+Every line is a timing or a ≥1-minute device run, so none of them was run in this pass. `prototype/glue/run.py`,
+`prototype/proj_gemv/run.py` and `prototype/gdn_gated_norm/run.py` **take the lock themselves** — do not
+hold it across them (AGENTS.md trap row).
+
+```bash
+# 0 · A/B the width change on the same day, before anything else. `bc61dce` is the width commit, so
+#     the before-binary is one rebuild away and the tree is put back by the same four lines
+#     (`git diff --stat` must be empty afterwards). Both sweeps take --binary, and the WAVE path
+#     changed width too, so prefill has to be re-taken in the same window as decode.
+mkdir -p tmp/q6
+git show bc61dce~1:engine/kernels_proj.cpp > tmp/q6/proj_rpb8.cpp
+cp engine/kernels_proj.cpp tmp/q6/proj_rpb32.cpp
+cp tmp/q6/proj_rpb8.cpp  engine/kernels_proj.cpp && engine/build.sh && cp engine/build/decode_run tmp/q6/decode_run_rpb8
+cp tmp/q6/proj_rpb32.cpp engine/kernels_proj.cpp && engine/build.sh
+tools/gpu_lock.sh acquire q6-rpb-ab && tools/gpu_lock.sh util
+.venv/bin/python tools/context_sweep.py  --binary tmp/q6/decode_run_rpb8  --lanes 128,512,1024,2048,4032 --steps 32 --runs 3
+.venv/bin/python tools/context_sweep.py  --binary engine/build/decode_run --lanes 128,512,1024,2048,4032 --steps 32 --runs 3
+.venv/bin/python tools/prefill_sweep.py  --binary tmp/q6/decode_run_rpb8  --lanes 64,256,1024,3072 --runs 3
+.venv/bin/python tools/prefill_sweep.py  --binary engine/build/decode_run --lanes 64,256,1024,3072 --runs 3
+tools/gpu_lock.sh release q6-rpb-ab
+
+# 1 · the 4032-lane point, which §6 quotes at a 37.8 % spread and a median. Five runs, stated as
+#     median + spread again; if it stays bimodal the split attention path at 8 blocks/site is the
+#     suspect, not the memory system.
+tools/gpu_lock.sh acquire q6-4032 && .venv/bin/python tools/context_sweep.py --lanes 4032 --steps 32 --runs 5 && tools/gpu_lock.sh release q6-4032
+
+# 2 · ledger §2's two "not measured on their own" rows, now selectable (this commit's --only).
+#     GDN layers are 81 % of the projection bytes and own the 5 %-efficient shapes; if the GDN row
+#     comes back at the family's 63 % and attention at 85 %, the narrow-shape work has a target.
+#     run.py takes the lock itself.
+.venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time --only gdn
+.venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time --only attn
+
+# 3 · the rows/block ladder in ONE clean window, which is the only way to settle whether the -0.50 ms
+#     above is real: the 8-vs-32 pair has so far only ever been compared across windows.
+.venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time --sweep --rows 8
+
+# 4 · the dispatch anchor the small-kernel rows are priced from, at the two widths the engine now
+#     uses. This is the number that would replace the curve's 1.8× over-price on small launches.
+.venv/bin/python prototype/glue/run.py --time --threads 256  --iters 300
+.venv/bin/python prototype/glue/run.py --time --threads 1024 --iters 300
+
+# 5 · the correctness re-runs on the committed tree, since the engine now ships a width that op's gate
+#     defaulted away. Both were run in this pass (all-24-layer `--rows 32` and `--rows 8`: 114/0 each;
+#     the negatives and the eight engine fixtures as counted above, x1.0000 margins); they are here so
+#     the tree is re-checkable by anyone, and `--steps all` makes the first line the full 912-comparison
+#     gate rather than the 114-comparison slice this pass had time for.
+.venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --negative
+.venv/bin/python prototype/proj_gemv/run.py --fixture dec8 --layers all --steps all --rows 32
+
+# 6 · Q6.1, still unwritten and the only instrument that can close the 3.4 ms residue: a full-plan
+#     burst — the 424 launches in dependency order with one sync at the end — against the engine's
+#     own step, plus per-family clocks inside decode_step if the burst comes back under the step.
+```
+
 ### Context, not action: there is no prefill
 
 §07.1 has no chunked prefill, so all 17 prompt steps cost a full decode step — ≈0.2 s of prompt before the
