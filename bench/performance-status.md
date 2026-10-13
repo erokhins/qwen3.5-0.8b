@@ -994,3 +994,32 @@ What survives this: the route (c) **audit** (hand↔library element diffs, A1–
 document — the sweep harness passes `--gemm` last, so `384.7 ms` at 1024 tokens stands. What does not: any claim
 that the library route satisfies the pinned gates. That matrix is being re-run for real, and red is a permitted
 answer.
+
+### Headline tables after the route (c) flip (2026-10-14, default `--gemm library`, zero subagents, foreground, lock `FLIP-RETAKE`)
+
+These replace the Q10b tables above as the honest headline. Provenance for every number: `NUMERICS
+wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0`, recorded in `engine/numerics_provenance.json`.
+
+**Prefill — the win.** | prompt lanes | ms to first sampled token, best of 3 | spread | **prompt tok/s** | was |
+|---|---|---|---|---|
+| 64 | 83.1 | 14.0 % | 770.3 | 808.5 (regression, dispatch-bound) |
+| 256 | 129.9 | 11.2 % | **1,971.4** | 972.5 |
+| 1024 | 378.5 | 2.8 % | **2,705.6** | 950.5 |
+| 3072 | 1793.1 | 1.0 % | **1,713.3** | 794.0 |
+
+**Decode — unchanged, by design.** | lanes | ms/token | tok/s | was | 128 | **11.482** | 87.1 | 11.641 / 85.9 |
+| 512 | 12.591 | 79.4 | 12.934 / 77.3 | | 1024 | 12.785 | 78.2 | 12.169 / 82.2 | | 2048 | 13.039 | 76.7 |
+13.068 / 76.5. A one-row body resolves to the hand GEMV whatever the default says (`resolve_wave_gemm`,
+`rows <= 1`), so the flip cannot move decode; the ±2 % here is the usual spread, and the 4k row stays at the
+historical burst figure (14.52 ms / 68.9 tok/s) because `context_sweep` is unusable at 4032 lanes.
+
+**Prefill is now 2.85× the figure this session started from (971 → 2,706 prompt tok/s at 1024), and the route is
+gated, not merely audited:** eight fixtures PASS on both routes with the route provenance printed in each log,
+four steps green on the library route only because the cascade band was admitted (`dec64t` ×1.091, `wide520f`
+×1.125, `mt32f` ×1.338 meanrel). The weakened guarantee is stated in `engine/results.md`: on this route the
+wave-boundary check is inside a band, not byte-identical.
+
+**Next, from measurement, not narrative.** With matmul at 21.2 % of the wave, `gdn_rec` (38.2 %) and `attn`
+(33.3 %) are 71.4 % of prefill, which is over the 40 % threshold this repo pre-registered for funding **P9** (the
+chunked delta-rule scan). It is an algorithm change, not a bit-identical rewrite, so it enters as a band question
+with its own plan file, the same way route (c) did.
