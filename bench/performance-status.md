@@ -971,3 +971,26 @@ fail in three *different* ways, only one of which is mine to wave away:
 
 So the honest state is: **a 2.8× prefill win is implemented, deterministic, and switched off**, gated out by two
 band-level questions and one token flip, all of them now measurable rather than speculative.
+
+### Correction — the "16/16 both routes" claim (2026-10-14, `0b30422`) was false, and this is how it happened
+
+The gate admission commit states "all eight fixtures PASS on both `--gemm hand` and `--gemm library` (16/16)".
+**That was sixteen hand runs.** `engine/gate.py` appends its own `--gemm <route>` *after* the wrapper script's
+flag and `decode_run`'s parser is last-wins, so a `library` request was silently overridden by the gate's
+`hand` default. The evidence on disk: `tmp/margin/library_dec300f.log` header names
+`--binary tmp/decode_run_library.sh` and line 413 reads `NUMERICS … gemm=hand`. **The library route has never
+been gated against the pinned corpus on any fixture** — it had only ever been compared to the hand route by
+`tools/route_c_audit.py`, which does pass `--gemm` last and is unaffected.
+
+Two lessons, both structural rather than careless. **A wrapper that sets a flag the caller also sets is a
+silent precedence fight**, and the fix is one control point, not a careful wrapper. And **a dry-run stand-in that
+echoes the value its own checker expects cannot fail** — the route-mismatch check existed, was correct, and passed
+in `--selftest` because the stand-in printed `GEMM route=library` while the real engine prints
+`GEMM route=hipblas`. The check was re-pointed at the `NUMERICS gemm=` field (engine-generated,
+provenance-bearing, one spelling) and the stand-in was made to echo what the engine actually prints, so the
+selftest can now be wrong.
+
+What survives this: the route (c) **audit** (hand↔library element diffs, A1–A4) and every **timing** in this
+document — the sweep harness passes `--gemm` last, so `384.7 ms` at 1024 tokens stands. What does not: any claim
+that the library route satisfies the pinned gates. That matrix is being re-run for real, and red is a permitted
+answer.
