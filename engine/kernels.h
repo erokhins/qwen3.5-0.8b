@@ -75,6 +75,11 @@ enum class WaveGemm {
 WaveGemm parse_wave_gemm(const std::string& name);
 const char* wave_gemm_name(WaveGemm route);
 
+// hipBLAS's own version as "major.minor.patch", or "unknown" if the query fails. D-11 makes this
+// provenance: the library's solution per (m,n,k) is the numerics, and a bump can change it without
+// touching a line of this repository. Queried from the loaded library, not a build-time macro.
+std::string gemm_route_version();
+
 // THE ROW-COUNT RULE, in one place, next to `resolve_mlp_gate_map`'s: a one-row body is always the
 // hand GEMV — that is what makes "decode byte-identical" a property of the rule rather than of a
 // call site remembering it — and any wider body takes what the run asked for.

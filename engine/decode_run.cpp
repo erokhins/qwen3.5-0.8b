@@ -962,6 +962,17 @@ int main(int argc, char** argv) {
         // Printed in every mode, including --sizes-only: it is a statement about the code, not about
         // the run, and `gate.py` asserts it even when the run part is skipped.
         std::printf("LAUNCH %s\n", engine::planned_launch_counts().describe().c_str());
+        // D-11's provenance half. The wave-row ceiling and the hipBLAS version are the two numbers that
+        // decide what a pinned corpus means once more than one GEMM can produce it: `kMaxWaveRows`
+        // because the row-count rule makes it the last width that is still the hand GEMV, hipBLAS's
+        // version because §A1 found its solution per (m,n,k) is the numerics and it can change without
+        // this repository changing. Printed in every mode, like LAUNCH — a statement about the code and
+        // the library it is linked against, not about the run — and read by `gate.py`'s
+        // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
+        std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s\n",
+                    engine::kMaxWaveRows, o.wave_rows,
+                    engine::kernels::wave_gemm_name(o.wave_gemm),
+                    engine::kernels::gemm_route_version().c_str());
         if (o.sizes_only) {
             std::printf("RESULT mode=sizes-only tensors=%zu check_weights=PASS\n", stats.n_loaded);
             std::fflush(stdout);

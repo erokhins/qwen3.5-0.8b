@@ -128,6 +128,22 @@ const char* wave_gemm_name(WaveGemm route) {
     return route == WaveGemm::kLibrary ? "library" : "hand";
 }
 
+std::string gemm_route_version() {
+    // hipBLAS's own version, asked of the LIBRARY rather than read out of a header macro: D-11 makes
+    // this number pin provenance, and a macro from the header the binary was compiled against would
+    // describe a build input, not the .so whose kernels actually produced these logits (the two can
+    // disagree after a runtime-library swap, which is exactly the numerics change being guarded).
+    // `handle` may be NULL, so this works on a `--gemm hand` run too — the version is recorded even on
+    // the route that does not use it, because the pins are one corpus, not one corpus per route.
+    // Format is hipBLAS's own: major * 10000 + minor * 100 + patch, printed as a.b.c.
+    int version = 0;
+    if (hipblasGetVersion(nullptr, &version) != HIPBLAS_STATUS_SUCCESS || version <= 0) {
+        return "unknown";
+    }
+    return std::to_string(version / 10000) + "." + std::to_string(version / 100 % 100) + "."
+           + std::to_string(version % 100);
+}
+
 WaveGemm resolve_wave_gemm(WaveGemm want, int rows) {
     // One row is the hand GEMV whatever the run asked for. This is not a preference: decode's
     // byte-identity to every shipped pin is the thing that makes route (c) landable, and a one-row
