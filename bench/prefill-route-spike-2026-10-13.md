@@ -439,3 +439,48 @@ tools/gpu_lock.sh release prefill-spike
 `--check` and `--determinism` print no timing by construction, so a worker can run them (AGENTS.md):
 `--check` is under a second, `--determinism` about eight. Nothing in this file is a measurement of speed;
 the timing windows are §7's, and they belong to the main agent.
+
+## §7 results — W1, W2, W4 (main agent, window `prefill-Wclean`, blocking, zero subagents, clock 1857–2401 MHz)
+
+Everything below is **16-bit `C`**, and per the correction in `devices/strix-halo-compute.md` none of it is
+comparable with the `gemm_peak` rows in §4.3 or §7's own band arithmetic. `--check` and `--mix-determinism`
+were re-certified in this same window before any timing was taken (PASS both dtypes; recorded hashes
+reproduced exactly).
+
+| M | W1 bf16 mix, TFLOP/s (best / med / worst, spread) | W2 fp16 mix | fp16 vs bf16 |
+|---|---|---|---|
+| 64 | 4.80 / 4.75 / 4.63 (3.6 %) | 4.90 / 4.68 / 4.42 | **+2.2 %** |
+| 512 | 18.84 / 18.56 / 18.41 (2.3 %) | 19.06 / 18.39 / 18.23 | **+1.2 %** |
+| 1024 | 22.31 / 21.82 / 19.15 (16.5 %) | 17.82 / 12.90 / 11.62 (53.3 %) | **−20.1 %** |
+| 3072 | 23.26 / 23.01 / 19.51 (19.2 %) | 24.12 / 24.05 / 21.25 | **+3.7 %** |
+
+**W1 — passes its letter, and its basis is void.** The band was "≥ 3.4 TFLOP/s real, 2.3–3.4 wash, < 2.3 dead",
+written as 60 % of the then-recorded 5.667 TFLOP/s. Measured on the mix at `M=1024` it is **22.3**, which clears
+the "real" bar 6.6×. That is a **unit mismatch, not a verdict** — the anchor was an F32-`C` rate — so I am
+recording W1 as *satisfied and re-anchored*: the route is real, and the decision now belongs entirely to **W9**
+(engine TTFT ≤ 400 ms), which was always the row the rest were diagnostics for. I am not retro-fitting a new
+percentage bar after the fact; the honest statement is that a threshold anchored on a crippled call form cannot
+grade a fast one.
+
+**W2 — dead, per the pre-registered bands.** The bar was "aggregate gain ≥ +10 % and ≥ 5 % engine TTFT after
+the band work; +3…+10 % wash; < +3 % dead". Measured: **+2.2 / +1.2 / −20.1 / +3.7 %** across the four `M`
+values — never at or above the +3 % floor except once, and *negative* at `M=1024`, where the fp16 mix also
+carried a 53 % spread against bf16's 16.5 %. So **the fp16 half of route (a) is not funded further**, and it
+takes its premise with it: the "+21–26 % for fp16" that motivated it was itself an F32-`C` artifact. The
+fp16 *audit* (§4) still stands as a fact about the checkpoint — it is simply no longer buying anything, so the
+band re-sizing it implied is off the table. Route (a) collapses into route (c): **get the library path in, in
+bf16.**
+
+**W4 — dead for the skinny shapes, which confirms §6's carve-out rather than testing it.** Against the
+1.85 µs dispatch floor, burst times per call: `in_proj_a`/`in_proj_b` (N=16) **22.2–23.6 µs** = 12–13× the
+floor, the fused `a|b` (N=32) **22.8–24.4 µs** — no better than the pair, so the fusion §6 floated buys nothing
+at library rates — and `k_proj`/`v_proj` (N=512) **28.6–40.2 µs** = 15–22×. The band was ≤2× real, 2–4× wash,
+>4× dead: all five are **dead**. The small shapes stay in hand kernels, and it is worth naming why: at `N=16`
+the whole call is ~162 KiB of traffic, so a library kernel's tile machinery never pays for itself and the call
+is dispatch- and launch-bound before arithmetic enters. One caveat kept on purpose: each-sync `max` values on
+these rows run to 165–55,828 µs, which is scheduling noise on a busy box, and no verdict here reads them.
+
+**Net route after measurement.** hipBLAS for the ten fat shapes in **bf16 with a bf16 `C`** (W1 real, §6's list),
+hand kernels for `in_proj_a/b`, `k/v_proj` and one-row `lm_head` (W4 dead, §6's carve-out upheld), **no fp16**
+(W2 dead), and **W9 as the only remaining gate that can fund or kill this**. W3 (hand-tiled WMMA) is not
+triggered — it was conditional on W1 landing wash-or-dead, and W1 did not.
