@@ -13,12 +13,15 @@ into a failing command.
     .venv/bin/python tools/band_history.py --selftest       # CPU only: no fixture, no device, no write
     .venv/bin/python tools/band_history.py --since "2026-10-11 00:00"    # the original git walk
 
-WHY A HISTORY AT ALL. The numbers that decide pass/fail live in two places: `engine/gate.py`'s `BAND`
-(flat §10 floors plus the demoted global route margins) and each priced fixture's
-`data/refs/<fixture>/route_allowance.json` margin. Nothing mechanical noticed an edit to either one,
+WHY A HISTORY AT ALL. The numbers that decide pass/fail live in two places: `engine/gate.py`'s band
+blocks — `BAND` (flat §10 floors plus the demoted global route margins) and `CASCADE_BAND` (the
+measured hand<->library cascade, D-11) — and each priced fixture's
+`data/refs/<fixture>/route_allowance.json` margin. Nothing mechanical noticed an edit to any of them,
 so "the band was widened on evidence" and "the band was widened to make a bug go green" looked
 identical in a diff. `check` compares the working tree against the newest RECORDED value for every key
-and fails on anything that moved, appeared, or vanished without a line saying so.
+and fails on anything that moved, appeared, or vanished without a line saying so. Every numeric dict in
+the gate that gates is therefore listed in `POLICED_BLOCKS`: a band declared in some other dict is a
+band outside the ledger, which is exactly what `CASCADE_BAND` was before its four figures were admitted.
 
 The record is `bench/band-history.jsonl`, one JSON object per line — `data/` is gitignored and the
 allowance JSONs are regenerable artifacts, so a record that lived beside them would be untracked and
@@ -26,8 +29,10 @@ throwaway. The tracked file is the ledger:
 
     {ts, file, key, old, new, reason, decision, by}   + optional "event": applied|refused|removed
 
-A KEY is the pair (file, key). For `engine/gate.py` the keys are `BAND`'s field names prefixed `BAND.`;
-for an allowance file they are `margin` and `margin_rel`, and the fixture is in the file name — so each
+A KEY is the pair (file, key). For `engine/gate.py` the keys are a policed block's field names prefixed
+with that block (`BAND.cos_hard`, `CASCADE_BAND.stage_cos_min` — two dicts in one file, so the block has
+to be part of the name or a ledger line could not say which number it describes); for an allowance file
+they are `margin` and `margin_rel`, and the fixture is in the file name — so each
 fixture's margin is its own key, which is the whole point of D-2 (`bench/plan-2026-10-12.md` §3): one
 global margin key would let one fixture's measurement excuse every other fixture's.
 
@@ -87,10 +92,11 @@ GATE_FILE_REL = "engine/gate.py"
 ALLOWANCE_GLOB = "data/refs/*/route_allowance.json"
 PLAN_REL = "bench/plan-2026-10-12.md"
 
-# Keys where a LOWER number is the looser band. `cos_hard`/`cos_report` are cos FLOORS (a deficit
-# ceiling goes the other way); every other policed key is a ceiling or a multiplier, where higher is
-# looser. Without this the tool can say a number moved but not that it was widened.
-LOWER_IS_LOOSER = {"BAND.cos_hard", "BAND.cos_report"}
+# Keys where a LOWER number is the looser band. `BAND.cos_hard`/`BAND.cos_report` and
+# `CASCADE_BAND.stage_cos_min` are cos FLOORS (a deficit ceiling like `CASCADE_BAND.row_1cos_max` goes
+# the other way); every other policed key is a ceiling or a multiplier, where higher is looser. Without
+# this the tool can say a number moved but not that it was widened.
+LOWER_IS_LOOSER = {"BAND.cos_hard", "BAND.cos_report", "CASCADE_BAND.stage_cos_min"}
 
 
 class BandHistoryError(Exception):
@@ -124,40 +130,51 @@ def _same(a, b):
 
 # ---------------- the values in the working tree -------------------------------------------------
 
-BAND_BLOCK = re.compile(r"^BAND\s*=\s*\{(.*?)^\}\s*$", re.M | re.S)
+# Every `engine/gate.py` dict whose numbers gate. A block named here and missing from the file is a
+# failure, not an empty set: the point of the list is that a band cannot escape the ledger by being
+# renamed or folded into a prettier dict. `CASCADE_BAND` joined when the route-(c) audit admitted its
+# four figures (D-11); until then they were live numeric bands with no line behind them.
+POLICED_BLOCKS = ("BAND", "CASCADE_BAND")
 BAND_ENTRY = re.compile(r'^\s*"([A-Za-z_][A-Za-z_0-9]*)"\s*:\s*([^#,]+?)\s*(?:,\s*(?:#.*)?)?$')
 
 
+def _block_pattern(name):
+    # `^` with re.M is what keeps `BAND` from matching the `CASCADE_BAND = {` line below it.
+    return re.compile(r"^" + re.escape(name) + r"\s*=\s*\{(.*?)^\}\s*$", re.M | re.S)
+
+
 def gate_band_values(gate_path: Path) -> dict:
-    """Every number in `engine/gate.py`'s `BAND`, read out of the SOURCE TEXT, keyed `BAND.<name>`.
+    """Every number in `engine/gate.py`'s policed band blocks, keyed `<BLOCK>.<name>`.
 
     Parsed rather than imported, for two reasons. `engine/gate.py` imports numpy and this tool has to
     stay importable and cheap; and the value that decides pass/fail is the one in the file a reviewer
-    diffs, not one a running process could have rebound. Fails closed: no file, no `BAND = {` block, or
-    an entry that is not a bare number, is an error — a checker that quietly found zero keys would turn
-    a rename into a clean bill of health.
+    diffs, not one a running process could have rebound. Fails closed: no file, no block from
+    `POLICED_BLOCKS`, or an entry that is not a bare number, is an error — a checker that quietly found
+    zero keys would turn a rename into a clean bill of health.
     """
     gate_path = Path(gate_path)
     if not gate_path.exists():
         raise BandHistoryError(f"{gate_path} does not exist — there is no band to read, which is"
                                " judged a failure rather than an empty set")
     text = gate_path.read_text()
-    block = BAND_BLOCK.search(text)
-    if block is None:
-        raise BandHistoryError(f"{gate_path}: no top-level `BAND = {{ ... }}` block found — the band"
-                               " is what this tool exists to read, so a rename is a failure, not an"
-                               " empty set")
     out = {}
-    for line in block.group(1).splitlines():
-        if not line.strip() or line.strip().startswith("#"):
-            continue
-        m = BAND_ENTRY.match(line)
-        if m is None:
-            raise BandHistoryError(f"{gate_path}: cannot read a BAND entry from"
-                                   f" {line.strip()[:70]!r}")
-        out["BAND." + m.group(1)] = _num(m.group(2), "BAND." + m.group(1))
+    for block_name in POLICED_BLOCKS:
+        block = _block_pattern(block_name).search(text)
+        if block is None:
+            raise BandHistoryError(f"{gate_path}: no top-level `{block_name} = {{ ... }}` block found"
+                                   " — this tool exists to read that block, so a rename or a move is a"
+                                   " failure, not an empty set")
+        for line in block.group(1).splitlines():
+            if not line.strip() or line.strip().startswith("#"):
+                continue
+            m = BAND_ENTRY.match(line)
+            if m is None:
+                raise BandHistoryError(f"{gate_path}: cannot read a {block_name} entry from"
+                                       f" {line.strip()[:70]!r}")
+            key = block_name + "." + m.group(1)
+            out[key] = _num(m.group(2), key)
     if not out:
-        raise BandHistoryError(f"{gate_path}: the BAND block holds no numeric entries")
+        raise BandHistoryError(f"{gate_path}: the policed blocks hold no numeric entries")
     return out
 
 
@@ -653,7 +670,18 @@ BAND = {
     "meanrel_hard": 0.05,     # cascade ceiling
     "cos_report": 0.9999,     # reported, not gated
 }
+
+CASCADE_BAND = {
+    "row_1cos_max": 0.002,      # one logits row against another route's row
+    "stage_meanrel_max": 0.03,  # one stage tile, NOT a logits row
+    "stage_cos_min": 0.9998,    # the stage cos FLOOR: lower is looser
+    "flip_room_max": 0.10,      # room a flipped token is allowed to have had
+}
 '''
+
+# The scratch gate's cascade values, so a case can name the recorded number instead of retyping it.
+SYNTH_CASCADE = {"row_1cos_max": 0.002, "stage_meanrel_max": 0.03,
+                 "stage_cos_min": 0.9998, "flip_room_max": 0.10}
 
 
 def _set_band(text: str, key: str, value) -> str:
@@ -740,6 +768,11 @@ def selftest_main() -> int:
             rec(file=rel, key="margin_rel", old="absent", new=mr,
                 reason=f"seeded: {name}'s own worst meanrel ratio, rounded up at 2 dp",
                 decision="D-2")
+        for name, val in SYNTH_CASCADE.items():
+            rec(file=GATE_FILE_REL, key=f"CASCADE_BAND.{name}", old="absent", new=val,
+                reason="seeded from the shipped gate: CASCADE_BAND." + name + ", one figure from the"
+                       " route-(c) audit's measured hand<->library cascade",
+                decision="D-2")
 
         eq("1. a tree whose every value is recorded passes",
            [p.describe() for p in check_tree(tdp).problems], [])
@@ -775,7 +808,7 @@ def selftest_main() -> int:
                    lambda j=junk: rec(file=GATE_FILE_REL, key="BAND.meanrel_hard", old=0.05,
                                       new=0.06, reason=j, decision="D-2"))
         eq("   ... and nothing was appended by the refusals",
-           len(read_history(hist)), 3 + 1 + len(fx) * 2)
+           len(read_history(hist)), 3 + len(SYNTH_CASCADE) + 1 + len(fx) * 2)
         raises("6. a fluent reason cannot smuggle in a value the tree does not hold",
                lambda: rec(file=GATE_FILE_REL, key="BAND.meanrel_hard", old=0.05, new=0.06,
                            reason="measured on the dec300f prose fixture at step 86, where two legal"
@@ -863,11 +896,42 @@ def selftest_main() -> int:
         (fxd / "route_allowance.json").write_text(
             json.dumps({"fixture": "fxA", "margin": 4.0, "margin_rel": 0.42}))
 
+        # The second block. `CASCADE_BAND` shares the gate FILE with `BAND`, so the only way the ledger
+        # can tell "the §10 flat floor moved" from "the cascade band moved" is a key that names the
+        # block. These cases are what would catch a parser that read one dict and silently missed the
+        # other — the exact hole this extension closes.
+        gate.write_text(_set_band(gate.read_text(), "stage_meanrel_max", 0.05))
+        rep = check_tree(tdp)
+        eq("13a. a CASCADE_BAND edit with no line fails too (the second dict is policed)",
+           [p.label() for p in rep.problems], [f"{GATE_FILE_REL} :: CASCADE_BAND.stage_meanrel_max"])
+        eq("      ... and a ceiling going UP is the widening",
+           rep.problems[0].way(), "LOOSER than recorded")
+        gate.write_text(_set_band(gate.read_text(), "stage_meanrel_max", 0.03))
+        gate.write_text(_set_band(gate.read_text(), "stage_cos_min", 0.9995))
+        rep = check_tree(tdp)
+        eq("13b. a cascade cos FLOOR going DOWN is the widening, not the tightening",
+           [(p.label(), p.way()) for p in rep.problems],
+           [(f"{GATE_FILE_REL} :: CASCADE_BAND.stage_cos_min", "LOOSER than recorded")])
+        rec(file=GATE_FILE_REL, key="CASCADE_BAND.stage_cos_min", old=0.9998, new=0.9995,
+            reason="a re-measured stage ladder bottomed at cos 0.9995 on the scratch fixture, so the"
+                   " floor moved down with it",
+            decision="D-2")
+        eq("      ... recorded, and the scratch tree is clean again", check_tree(tdp).ok, True)
+        gate.write_text(_drop_band(gate.read_text(), "flip_room_max"))
+        rep = check_tree(tdp)
+        eq("13c. a cascade key that VANISHES fails like any other (the room rule would be gone)",
+           [p.label() for p in rep.problems], [f"{GATE_FILE_REL} :: CASCADE_BAND.flip_room_max"])
+        gate.write_text(_set_band(_drop_band(SYNTH_GATE, "cos_report"), "cos_hard", 0.9994)
+                        .replace('"stage_cos_min": 0.9998,', '"stage_cos_min": 0.9995,')
+                        .replace("}", '    "route_margin": 3.5,\n}', 1))
+        eq("13d. the scratch tree is back to what its ledger says before the shipped-tree case runs",
+           [p.describe() for p in check_tree(tdp).problems], [])
+
     shipped = check_tree(ROOT)
-    eq("13. the SHIPPED tree matches the SHIPPED ledger (the bootstrap is honest)",
+    eq("14. the SHIPPED tree matches the SHIPPED ledger (the bootstrap is honest)",
        (shipped.error, [p.describe() for p in shipped.problems]), ("", []))
-    eq("    ... and it found the real per-fixture keys, not just BAND",
-       shipped.keys >= 5 + 2 * len(list(Path(ROOT).glob(ALLOWANCE_GLOB))), True)
+    eq("    ... and it found the real per-fixture keys, not just BAND and CASCADE_BAND",
+       shipped.keys >= (5 + len(SYNTH_CASCADE)) + 2 * len(list(Path(ROOT).glob(ALLOWANCE_GLOB))), True)
     print("SELFTEST " + ("FAIL — " + "; ".join(bad) if bad else
                          "PASS (an unrecorded band move fails, a recorded one passes, and a reason"
                          " that only says 'we needed it to pass' is not a reason)"))

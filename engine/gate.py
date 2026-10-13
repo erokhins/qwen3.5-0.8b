@@ -603,20 +603,24 @@ SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller 
 #      side. This gate takes the literal reading, prints the other side's gap beside it, and names the
 #      disagreement in a note rather than resolving it silently in either direction.
 #
-# WHY THEY ARE NOT IN `BAND` ABOVE. `tools/band_history.py` parses the `BAND` block and refuses the gate
-# on a key that appeared with no line in `bench/band-history.jsonl`; that is the tool working, and the
-# ledger line for a new band is a decision somebody has to sign (`--decision D-11`), not something this
-# commit can invent from the numbers it is quoting. So the cascade figures are declared here, in the
-# policy that applies them, with their derivation and their source file, and moving these four keys into
-# `BAND` is a one-line follow-up once the ledger carries them:
 #
-#     .venv/bin/python tools/band_history.py record --file engine/gate.py --key BAND.cascade_row_1cos_max \
-#         --old absent --new 0.002 --decision D-11 --reason "route-c audit A2: 1694 hand-vs-library
-#         logits rows, worst per-row 1-cos 1.889e-3 (dec64f); band set 6 % above the worst legal row"
+# THEY ARE POLICED, IN PLACE. `tools/band_history.py` reads every block in its `POLICED_BLOCKS` list, so
+# these four are ledger keys named `CASCADE_BAND.<field>` (`BAND` and `CASCADE_BAND` share this file, so
+# the block has to be in the key or a ledger line could not say which number it describes). Each of the
+# four carries its own line in `bench/band-history.jsonl` under D-11, citing the A2/A3 measurement behind
+# the number above; `stage_cos_min` is listed in that tool's `LOWER_IS_LOOSER` because it is a FLOOR, so a
+# downward move there is the band widening. The lines spell their decision as the commit subject
+# ("D-11 accepted (option A), commit f3b2f6c") rather than the bare `D-11`, because `record` only resolves
+# a bare `D-x` against `bench/plan-2026-10-12.md`'s log and D-11 lives in `bench/build-queue.md`. Moving
+# a value here still takes a line first:
 #
-#     (and the same three times for cascade_stage_meanrel_max 0.03, cascade_stage_cos_min 0.9998,
-#      cascade_flip_room_max 0.10 — each reason naming the A2/A3 line it comes from)
+#     .venv/bin/python tools/band_history.py record --file engine/gate.py \
+#         --key CASCADE_BAND.row_1cos_max --old 0.002 --new 0.003 --decision <D-x> \
+#         --reason "<the new measurement, on which fixture, at which step>"
 #
+# STOP AND REPORT, do not widen. A fixture that lands outside one of these four gets its number printed
+# and handed to the operator; the audit derived them before this task from measurements already on disk,
+# and a band tuned to the fixture it is judging is the thing `AGENTS.md` forbids.
 # STOP AND REPORT, do not widen. A fixture that lands outside one of these four gets its number printed
 # and handed to the operator; the audit derived them before this task from measurements already on disk,
 # and a band tuned to the fixture it is judging is the thing `AGENTS.md` forbids.
@@ -4565,11 +4569,12 @@ def main() -> int:
     args = ap.parse_args()
 
     # (pre) BAND HISTORY — checked before a fixture is read, before a binary is started, before a
-    # device is touched. `tools/band_history.py` compares every number in `BAND`, and every priced
-    # fixture's route margin, against `bench/band-history.jsonl`; an unrecorded move and this gate
-    # refuses to run, because a gate must not be judged by a band nobody agreed to (`AGENTS.md`: bands
-    # are derived from measured floors and never loosened to pass). It reads the same small files this
-    # gate reads anyway — one `BAND` block and one margin per priced fixture.
+    # device is touched. `tools/band_history.py` compares every number in `BAND` and in `CASCADE_BAND`,
+    # and every priced fixture's route margin, against `bench/band-history.jsonl`; an unrecorded move
+    # and this gate refuses to run, because a gate must not be judged by a band nobody agreed to
+    # (`AGENTS.md`: bands are derived from measured floors and never loosened to pass). It reads the
+    # same small files this gate reads anyway — the policed band blocks and one margin per priced
+    # fixture.
     if (rc := band_history.for_gate(ROOT)):
         return rc
 
