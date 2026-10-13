@@ -4283,3 +4283,32 @@ tools/gate_log_diff.sh tmp/d9_sizing/base tmp/d9_sizing/new --diff    # …and t
 .venv/bin/python engine/gate.py --fixture dec300f --dry-run --break-runnerup 30 # rc 1
 tools/band_history.py --check                                         # 15 bands, unchanged by this
 ```
+
+### Q11 verification, run by the main agent (window `d9-verify`, blocking, zero subagents)
+
+A gate-policy change is the one kind of change I do not take on trust, so the whole thing was re-run here.
+
+- **All eight fixtures, my own runs:** `dec8 170/0`, `dec64f 652/0 (PASS — with 2 step(s) reported TIE)`,
+  `dec64t 649/0`, `dec300f 1158/0`, `mt32f 393/0`, `p128 199/0`, `wide520f 329/0`,
+  `chunk64b 378/0 (PASS — with 1 step(s) reported TIE and 1 step(s) reported SLACK)`. Nothing failed anywhere,
+  and the seven fixtures D-9 was protecting are unchanged.
+- **The rule reaches exactly what it names.** `engine/slack_size.py` over the corpus: four steps inside the
+  region, all of them `chunk64b` (0, 1, 13, 22), the `steps outside chunk64b the rule could reach: none` line
+  printed, and the nearest refused step in the whole corpus being `dec300f` step 30 at **1.46×** outside the
+  bound. That last number is the one I wanted most: it says the rule is not one unlucky step away from
+  reaching into another fixture.
+- **The rule can be cheated, and the gate notices.** `engine/gate.py --selftest --fixture chunk64b` passes,
+  including the injection that lifts the pin's runner-up one BF16 step over the pinned maximum: the gate fails
+  it rather than calling it a slack tie. On `dec8` the slack injections correctly report `SKIP` — no step there
+  has a unique pinned winner inside its own bound, which is the same fact the sizing table states from the
+  other direction.
+- **One judgment call of the worker's, which I endorse and want written down rather than buried.** At
+  `chunk64b` step 0 the engine's own element gap is **0.18446**, larger than the licence of **0.16205**, and
+  the worker chose to print that gap and not gate on it. That is right, and the reason matters: the licence is
+  derived from the step's *aggregate* policed band (meanrel × mean|pin|), and a per-element logit error
+  legitimately exceeds an aggregate bound — gating the element gap would have refused the exact case the rule
+  exists to admit. It stays printed for the same reason it would be wrong to hide: a reader should see the
+  margin, the licence and the gap on one line and be able to disagree.
+- `EXPECTED_RED` is now empty. **There is no knowingly-red fixture in this repository any more**, which is a
+  different epistemic state than the one D-9 was written to protect, and a better one: every red line that
+  remains anywhere would now be a bug rather than a policy.
