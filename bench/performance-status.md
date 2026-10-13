@@ -747,3 +747,24 @@ budget sink `AGENTS.md` warns about. **M3** (packed projections, proj 114 → 48
 gate edit is a bad trade until the ceiling question is settled. **M4** (captured-step check) needs a stream
 handle at the launch sites, which the engine does not have (default stream, so capture is impossible today);
 Q6.1 already priced the same question from the other side, and the graph result agreed with the drain test.
+
+### Q8: the memory system is not the excuse either (2026-10-13, zero subagents, foreground, lock `q8b-sweep`)
+
+The full 26-row sweep, all twelve pre-registered expectations, and the two instrument bugs that ate the first
+attempt live in `devices/strix-halo-mixed-traffic.md`; the four numbers that matter for the plan are these.
+At the engine's own read:write ratio the box runs at **99.1 % of its read probe** (235.0 GB/s at 62:1), and
+the ratio curve is flat — 96–99 % at every ratio ≥ 10:1, 87.2 % at 1:1. Reading freshly dirtied lines is
+**free** (`E_same` pair 4.8228 ms vs 4.9137 ms written-then-read separately, −1.8 %), so write-back pressure
+is not a mechanism on this box. And a single row that replays the whole step's traffic budget — 1530.6 MiB
+read against 24.7 MiB written into a small re-dirtied arena, 96 serialized launches — achieves **218.9 GB/s**,
+which prices one token's weight traffic at **7.06 ms**, against the engine's 12.4 ms.
+
+So the three candidate excuses are now each dead on their own measurement: dispatch (Q6.1: exposed cost is
+exactly the dispatch bill, nothing more), warmth and window size (Q7 M1: a 4× larger cold window makes MLP
+*faster*), and traffic mix / write-back (this section). What remains is pointed at by one comparison:
+`C_mixlaunch_62` is the MLP's own geometry — 48 × 11.01 MiB read once, 96 serialized launches, 62:1 — and it
+runs at **86.6 % of the read probe**, while the same kernels in a real step run at **52 %**. The gap is not
+the memory system's floor, it is the engine failing to reach a floor the box demonstrably offers. Splitting
+one kernel into 96 serialized launches costs 9 % (expectation 6), an order of magnitude too small to be the
+answer. One row tripped the trap flag and is excluded (`D_20_arena2m`, 102.8 %, `suspect=1`), and the three
+cold-page rows are void by their own rule (`unverifiable_cold_pages`, exit 3).
