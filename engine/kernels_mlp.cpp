@@ -55,7 +55,42 @@ void check_tokens(const char* what, int tokens) {
                                  "; a wave has at least one token in it");
     }
 }
+
 }  // namespace
+
+MlpGateMap parse_mlp_gate_map(const std::string& name) {
+    if (name == "interleave") return MlpGateMap::kInterleave;
+    if (name == "contig") return MlpGateMap::kContig;
+    throw std::runtime_error("--mlp-map takes interleave|contig, got '" + name + "'");
+}
+
+const char* mlp_gate_map_name(MlpGateMap map) {
+    return map == MlpGateMap::kContig ? "contig" : "interleave";
+}
+
+// The kernel spells the two walks `MAP_INTERLEAVE`/`MAP_CONTIG` (`mlp_gemv_kernels.h:MlpMap`), and
+// this is the one place the launcher's `MlpGateMap` becomes that. It is a TEMPLATE argument chosen by
+// a host-side branch, so each walk compiles as if it were the only one: the two sides of the A/B are
+// two instantiations, never one kernel with a test inside its row loop.
+template <int IN, int MAP>
+static void launch_gateup_single_kernel(const uint16_t* w_gate, const uint16_t* w_up, const float* x,
+                                        uint16_t* act, int rows, int threads, int blocks) {
+    ::mlp_gateup<IN, MAP><<<blocks, threads>>>((const hip_bfloat16*)w_gate,
+                                               (const hip_bfloat16*)w_up, x, (hip_bfloat16*)act,
+                                               nullptr, rows, kRowsPerBlock, NEG_NONE);
+}
+
+template <int IN>
+static void launch_gateup_single(const uint16_t* w_gate, const uint16_t* w_up, const float* x,
+                                 uint16_t* act, int rows, int threads, int blocks,
+                                 MlpGateMap map) {
+    if (map == MlpGateMap::kContig) {
+        launch_gateup_single_kernel<IN, MAP_CONTIG>(w_gate, w_up, x, act, rows, threads, blocks);
+    } else {
+        launch_gateup_single_kernel<IN, MAP_INTERLEAVE>(w_gate, w_up, x, act, rows, threads,
+                                                       blocks);
+    }
+}
 
 // The batched launch: grid.x is the row blocks and grid.y the token tiles, so a weight row is read
 // once per tile. Same per-output-element order as the single-token kernel, which is what makes the
@@ -63,13 +98,21 @@ void check_tokens(const char* what, int tokens) {
 // --tokens p64`.
 template <int IN>
 static void launch_gateup_batched(const uint16_t* w_gate, const uint16_t* w_up, const float* x,
-                                  uint16_t* act, int rows, int tokens, int threads) {
+                                  uint16_t* act, int rows, int tokens, int threads,
+                                  MlpGateMap map) {
     constexpr int TPB = tokens_per_block_for<IN>();
     const dim3 grid((rows + kRowsPerBlock - 1) / kRowsPerBlock,
                     (unsigned)((tokens + TPB - 1) / TPB));
-    ::mlp_gateup_tokens<IN, TPB><<<grid, threads>>>(
-        (const hip_bfloat16*)w_gate, (const hip_bfloat16*)w_up, x, (hip_bfloat16*)act, nullptr,
-        rows, tokens, kRowsPerBlock, NEG_NONE);
+    // Same template-argument choice as the single-token form above.
+    if (map == MlpGateMap::kContig) {
+        ::mlp_gateup_tokens<IN, TPB, MAP_CONTIG><<<grid, threads>>>(
+            (const hip_bfloat16*)w_gate, (const hip_bfloat16*)w_up, x, (hip_bfloat16*)act, nullptr,
+            rows, tokens, kRowsPerBlock, NEG_NONE);
+    } else {
+        ::mlp_gateup_tokens<IN, TPB, MAP_INTERLEAVE><<<grid, threads>>>(
+            (const hip_bfloat16*)w_gate, (const hip_bfloat16*)w_up, x, (hip_bfloat16*)act, nullptr,
+            rows, tokens, kRowsPerBlock, NEG_NONE);
+    }
     launchstats::mlp_gateup().record(tokens);
 }
 
@@ -86,7 +129,7 @@ static void launch_down_batched(const uint16_t* w_down, const float* act, uint16
 }
 
 void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, uint16_t* act,
-                int rows, int in, int tokens) {
+                int rows, int in, int tokens, MlpGateMap map) {
     check("gateup", rows, in);
     check_tokens("gateup", tokens);
     const int threads = kRowsPerBlock * warp_width();
@@ -96,9 +139,9 @@ void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, ui
     // write traffic for a dump no gate here reads.
     if (tokens > 1) {
         if (in == HID) {
-            launch_gateup_batched<HID>(w_gate, w_up, x, act, rows, tokens, threads);
+            launch_gateup_batched<HID>(w_gate, w_up, x, act, rows, tokens, threads, map);
         } else if (in == FF) {
-            launch_gateup_batched<FF>(w_gate, w_up, x, act, rows, tokens, threads);
+            launch_gateup_batched<FF>(w_gate, w_up, x, act, rows, tokens, threads, map);
         } else {
             throw std::runtime_error("mlp_gateup: input width " + std::to_string(in) +
                                      " is not one of the two shapes the gated kernel"
@@ -107,18 +150,12 @@ void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, ui
         return;
     }
     if (in == HID) {
-        ::mlp_gateup<HID><<<blocks, threads>>>((const hip_bfloat16*)w_gate,
-                                               (const hip_bfloat16*)w_up, x,
-                                               (hip_bfloat16*)act, nullptr, rows, kRowsPerBlock,
-                                               NEG_NONE);
+        launch_gateup_single<HID>(w_gate, w_up, x, act, rows, threads, blocks, map);
     } else if (in == FF) {
         // Instantiated by the gated host too (mlp_gemv.hip.cpp:249). Unused by this checkpoint's
         // MLP shapes — gate/up are [3584,1024] — but the kernel is one template line and a second
         // entry point would be a worse way to say "this shape exists".
-        ::mlp_gateup<FF><<<blocks, threads>>>((const hip_bfloat16*)w_gate,
-                                              (const hip_bfloat16*)w_up, x,
-                                              (hip_bfloat16*)act, nullptr, rows, kRowsPerBlock,
-                                              NEG_NONE);
+        launch_gateup_single<FF>(w_gate, w_up, x, act, rows, threads, blocks, map);
     } else {
         throw std::runtime_error("mlp_gateup: input width " + std::to_string(in) +
                                  " is not one of the two shapes the gated kernel instantiates");

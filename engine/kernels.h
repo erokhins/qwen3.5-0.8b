@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace engine::kernels {
 
@@ -64,8 +65,28 @@ void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int 
 // `tokens == 1` issues the single-token kernel and the single-token launch shape, i.e. exactly the
 // launch the decode ledger was measured on. The two forms are bit-identical per output element —
 // `prototype/mlp_gemv/run.py --tokens p64` requires it (23 040 elements per layer, 0 differing).
+
+// Which weight walk the gate/up launch uses. Q10's A/B switch, and it exists because
+// `devices/strix-halo-mixed-traffic.md` §Q9 measured this kernel's own walk at 0.470 of a contiguous
+// sweep at identical bytes, grid and launch count, with the LDS staging exonerated.
+enum class MlpGateMap {
+    // The shipped walk: one row loop, both weight streams' words fetched side by side. The default,
+    // so every run that does not ask for the other one is the run it was before this switch.
+    kInterleave,
+    // The gate row end to end, then the up row end to end. Bit-identical to the above by construction
+    // (same words, same order, same accumulators) — the walk is the only free variable, and
+    // `prototype/mlp_gemv/run.py --mapping-identity` proves that on device rather than asserting it.
+    kContig,
+};
+
+// "interleave" / "contig", the same two words the op's gate uses. Throws on anything else: this flag
+// selects which side of an A/B a run is, so a silently ignored typo would price the wrong thing.
+MlpGateMap parse_mlp_gate_map(const std::string& name);
+const char* mlp_gate_map_name(MlpGateMap map);
+
 void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, uint16_t* act,
-                int rows, int in, int tokens = 1);
+                int rows, int in, int tokens = 1,
+                MlpGateMap map = MlpGateMap::kInterleave);
 void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows, int in,
               int tokens = 1);
 

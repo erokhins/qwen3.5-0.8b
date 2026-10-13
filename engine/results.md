@@ -3671,3 +3671,218 @@ agent's call, not a worker's.
 **M4 — the contradiction check Q6.1 already specified: the captured step.** Under (b) it must buy
 **≈0.06 ms** (the §1 eager-vs-captured per-kernel figure), and anything ≥5 % of the step contradicts this
 section and is the result, not the section. Same window as M1/M2 if the stream-handle work is done.
+
+## Q10 (2026-10-13): the gate/up weight walk is switchable in the engine — `--mlp-map`, bit-identical on all eight fixtures; the projections have no such knob, and the residual there is not a mapping
+
+§Q9 ended with a named next package: read `gate` and `up` as two contiguous passes instead of
+interleaving their rows, at the usual proof standard — byte-identical outputs, `margin_delta` ×1.0000,
+gate counts unchanged, and a measured A/B against the **4.264 ms** in-step `mlp` row it is meant to move
+(§Q6.1's row; roofline **2.230 ms**, so the family sits at 52 %). This section lands the switch and its
+correctness proof. The timing A/B is pre-registered at the bottom and belongs to the main agent's window.
+
+### What ships
+
+One switch, default = what has always run. The walk itself lives in the op header — one spelling, the rule
+in `prototype/README.md` — and the engine only selects an instantiation of it:
+
+| file | what it adds |
+|---|---|
+| `prototype/mlp_gemv/mlp_gemv_kernels.h` | `MlpMap` (`MAP_INTERLEAVE`, `MAP_CONTIG`), one shared `accum_word()`, and both walks as a template parameter on `mlp_gateup<IN, MAP>` / `mlp_gateup_tokens<IN, TPB, MAP>` |
+| `engine/kernels.h` | `enum class MlpGateMap {kInterleave, kContig}`, `parse_mlp_gate_map` / `mlp_gate_map_name` (unknown words **throw** — this flag decides which side of an A/B a run is on, so a silently ignored typo would price the wrong thing), and `mlp_gateup(…, MlpGateMap map = kInterleave)` |
+| `engine/kernels_mlp.cpp` | `launch_gateup_single_kernel<IN, MAP>` and the batched equivalent, chosen by a host branch. The shipped mapping compiles exactly as it did before; nothing was added to its inner loop |
+| `engine/decode_step.h` | `DecodeScratch::mlp_gate_map`, defaulting to the shipped walk — it rides on the scratch for the same reasons `wave_rows` does |
+| `engine/decode_step.cpp` | the **one** `mlp_gateup` call site passes `sc.mlp_gate_map`, so the single-token and the wave paths cannot disagree about which walk ran |
+| `engine/decode_run.cpp` | `--mlp-map interleave|contig`. It prints `MLPMAP gate=…` **only when the flag was given**, so a default run's log stays byte-stable for anything that diffs these logs |
+
+`mlp_down` is deliberately uninvolved: one weight stream, no mapping to choose. Both the prototype binary
+and the engine refuse `--mapping`/`--mlp-map` together with a down-only shape rather than ignoring it, so a
+null A/B can never be a mis-typed flag wearing the costume of a result.
+
+### The proof
+
+All of it is bit-comparison, all of it correctness-only, each command under the lock, `util` 91–93 % at
+acquire (the serving engine, discounted per `AGENTS.md`), **no timing taken** — the by-product `ms` the
+harnesses print were ignored and nothing here entered `bench/performance-status.md`.
+
+1. **The switch is not inert — the compiler says so.** Same template, two instantiations, and their weight
+   loads differ in program order (`IN=1024`, gfx1151; command in `prototype/mlp_gemv/results.md` §Q10):
+
+   ```text
+   mlp_gateup<1024, interleave>: 8 × global_load_b128, 2 live address pairs, alternating v4,v2,v4,v2,…
+   mlp_gateup<1024, contig>:     8 × global_load_b128, 1 live address pair, re-based mid-kernel
+   ```
+
+   That is "both streams side by side" versus "one stream, then the other", read off the ISA. It matters
+   here more than usual precisely because the outputs are identical: the outputs cannot witness the switch.
+2. **Bit-identity in the prototype, all 24 layers** — `--mapping-identity`: `act` 0/3584, `gate_pre`+`up_pre`
+   0/7168, `out` 0/1024, batched `act` 0/7168 differing, at every layer; the shipped F1–F4 gate then passes
+   under each mapping. wall 19.7 s. The batched form is bit-identical to k=1 under `contig` too (23 040
+   elements per layer, 0 differ; wall 13.8 s), and the six `--negative` injections still localise to where
+   each bug lives and nowhere else under `contig` (wall 10.6 s). Details and the reasoning in
+   `prototype/mlp_gemv/results.md` §Q10.
+3. **Byte-identical engine outputs.** Same binary, same prompt, same 8 steps, only the flag differs:
+
+   ```bash
+   tools/gpu_lock.sh acquire q10-engab && tools/gpu_lock.sh util
+   IDS=$(cat /tmp/q10_ids_only.txt)          # dec8's 17 prompt ids
+   ./engine/build/decode_run --ids "$IDS" --steps 8 --out tmp/q10/A_inter
+   ./engine/build/decode_run --ids "$IDS" --steps 8 --mlp-map contig --out tmp/q10/A_contig
+   tools/gpu_lock.sh release q10-engab
+   (cd tmp/q10/A_inter && md5sum *) > tmp/q10/md5_A_int.txt
+   (cd tmp/q10/A_contig && md5sum *) > tmp/q10/md5_A_con.txt
+   diff tmp/q10/md5_A_int.txt tmp/q10/md5_A_con.txt   # no output: 10 files identical
+   ```
+
+   wall 0.61 s and 0.50 s. `MLPMAP gate=contig` appears in the second run's stdout and not the first.
+4. **Gate counts, all eight fixtures, both mappings.** `engine/gate.py` takes `--binary` but has no
+   engine-arg passthrough, so the alternative walk was gated through a two-line wrapper that adds the flag
+   (`tmp/q10/decode_run_contig.sh`, not committed) — the flag path itself is what got gated, which is the
+   stronger of the two ways to do it:
+
+   | fixture | interleave | contig | same? |
+   |---|---|---|---|
+   | `dec8` | 168 pass, 0 red, PASS | 168 pass, 0 red, PASS | ✓ |
+   | `dec64f` | 650, 0, PASS | 650, 0, PASS | ✓ |
+   | `dec64t` | 647, 0, PASS | 647, 0, PASS | ✓ |
+   | `dec300f` | 1156, 0, PASS | 1156, 0, PASS | ✓ |
+   | `mt32f` | 391, 0, PASS | 391, 0, PASS | ✓ |
+   | `p128` | 197, 0, PASS | 197, 0, PASS | ✓ |
+   | `wide520f` | 327, 0, PASS | 327, 0, PASS | ✓ |
+   | `chunk64b` | 372 pass, **3 D-9 red**, FAIL as committed | 372 pass, 3 red, FAIL | ✓ |
+
+   Stronger than the counts: md5 over each fixture's per-step decision lines (argmax + cos-deficit +
+   meanrel) is **identical between the two log sets for all eight fixtures**, and `tools/band_history.py
+   --check` — which the gate runs before it reads a fixture — stayed green throughout, i.e. no band, pin or
+   plan was touched. Walls per fixture run: 2.9–18.4 s per mapping.
+5. **`tools/margin_delta.py tmp/q10/int tmp/q10/con <all eight>`: ×1.0000 on every column of every
+   fixture**, including the tree's tightest lanes (dec64t cos filled 0.9982, dec300f 0.9992/0.9997,
+   wide520f 0.9996/0.9833). The worst step per column did not even change identity.
+6. **`engine/gate.py --selftest --dry-run`: SELFTEST PASS** (3.0 s, CPU-only, no device) — the injected-bug
+   needles the gate depends on are still caught, which is what licenses reading item 4 as a real pass.
+
+Nothing was loosened: no gate, band, pin, allowance or fixture was edited, and `speccheck/specimpl.py` was
+not touched (the change cannot reach it — `speccheck` is the torch reference and never sees a HIP kernel).
+
+### The other shapes: same mechanism, and is the same fix available?
+
+§Q9's three ratios say the exposure is not uniform, and reading the launchers says why: **the interleave
+takes two weight streams in one launch, and the engine has exactly one such launch** — `mlp_gateup`. Every
+`proj_gemv` call site passes one weight tensor (`PACK_X = false`, one `layer_dev(...)` per launch), so
+there is nothing for `contig` to un-interleave anywhere in the projection family; the prototype's
+two-weight `proj_gemv` form is not what the engine launches.
+
+| shape (decode path) | weight streams | is the Q10 mechanism present? | is the Q10 fix available? |
+|---|---|---|---|
+| `gate_proj` + `up_proj` (24 layers) | **2** | yes — this is the 0.470 pair | **yes, and it ships here** |
+| `down_proj` (24 layers) | 1 | no interleave; its 0.629 is the bare row-walk spread plus the row tail | no, not without moving bits — see below |
+| `in_proj_qkv` 6144×1024, `in_proj_z` 2048×1024, `q_proj` 4096×1024, `k_proj`/`v_proj` 512×1024, `o_proj`/`out_proj` 1024×2048 | 1 each | no | no, same reason as `down` |
+| `in_proj_a` / `in_proj_b` 16×1024 | 1 | no — and their deficit is not walk-shaped at all | different lever entirely, see below |
+
+Two things follow, and they are the useful part of this verdict.
+
+* **For `down` and every projection, a "contiguous" mapping would not be bit-neutral.** With one stream, the
+  only way to make a warp's walk more contiguous is to change which lanes own which elements of the row (or
+  split a row across wavefronts). That reorders the F32 accumulation of that row, which moves BF16 bits,
+  which is a **band question** — the margins are ledger-policed (`tools/band_history.py --check` runs ahead
+  of every fixture) and it is not a worker's call. The bit-neutral geometry knob in this family is the one
+  Q6 already established — rows per block, bit-identical by row ownership — and it is already swept and
+  shipped (8 for the MLP, 32 for the projections). The grid's instantaneous footprint is another way to say
+  the same constraint: `grid × rows_per_block = rows`, so any geometry that keeps one wavefront per row has
+  the whole weight region live at once, and no mapping does anything about that. If the pre-registered rows
+  below come back null for `down`-shaped traffic, that is the door this section could not open, and the
+  next package is a reduction-order change priced as such, not another walk.
+* **`in_proj_a`/`in_proj_b` are a separate, smaller, and cheaper question.** They are 16 rows at
+  `kRowsPerBlock = 32`: `grid.x = 1`, and half of every block's warps have no row. Their row in
+  `bench/performance-status.md` §4 is 5 % of probe for 32 KiB of weight per launch, which is launch and
+  occupancy, not walk pattern. The two available levers are the packed-projection change already costed as
+  M3 in §Q7 (a spec-table and gate-plan change, the main agent's call) or a per-shape width for the 16-row
+  launches (bit-identical by Q6's argument). Neither belongs in this commit, and neither is a mapping.
+
+### Pre-registered measurements, expectations written before any of them ran
+
+Every row is the main agent's: timing, exclusive window, blocking, zero subagents (`AGENTS.md`,
+`bench/performance-status.md` §6). Quoting medians of three, and voiding rather than discounting a run with
+a contender, is the rule this series has used since Q6.1.
+
+**Q10-M0 — the validity ceiling that binds all rows below.** This box's measured read roofline is
+237 GB/s; **any `contig` row above ~240 GB/s is skipped work, not speed** and must be treated as a broken
+measurement and re-taken, not booked as a win. The change moves bytes between two allocations, it does not
+reduce them, so a row that beats the roofline has found a bug in the measurement or in the kernel.
+
+**Q10-M1 — prototype burst, both mappings, both shapes; `down` as the built-in control.**
+
+```bash
+tools/gpu_lock.sh acquire q10-m1 && tools/gpu_lock.sh util
+for t in 6 24; do for m in interleave contig; do
+  .venv/bin/python prototype/mlp_gemv/run.py --fixture dec8 --step decode0 --layers all \
+      --mode all --rows-sweep 8 --tile $t --iters 30 --mapping $m
+done; done
+tools/gpu_lock.sh release q10-m1
+```
+
+Expectation, `--tile 6` (the window the committed cold line was taken with): `interleave` reproduces
+`results.md` §Performance's 195.2 GB/s (82 % of probe) within a few %, and **`contig` reaches toward the
+contiguous line Q9 measured at 92.7 % — call it confirmed at ≥ 215 GB/s (90 %), partially confirmed in
+201–215, null within ±3 % of the `interleave` row (≤ ~201)**. `--tile 24` is the same comparison at
+Q7-M1's window size, which is the row that behaves like the step; read it as a ratio, not as an absolute.
+`--mode down` must be unchanged between the two runs (±3 %) — it is the control that shows the flag did not
+touch anything it should not have, and it also prices how much of `down`'s 0.629 was ever walk-shaped.
+Honest caveat, stated before the run: the prototype burst already reaches 84 % of probe at this shape, so
+it has far less headroom than the engine's in-step 52 %. **A null here does not refute Q9**; M2 is the
+decisive row.
+
+**Q10-M2 — the decisive row: the stage-clock family `mlp` figure, in-situ, 128 lanes, three runs per side.**
+Same prompt recipe and command as Q7's M2, with `--mlp-map contig` added on the A side.
+
+```bash
+tools/gpu_lock.sh acquire q10-m2 && tools/gpu_lock.sh util
+ids_for() { .venv/bin/python -c "
+import sys; sys.path.insert(0, 'tools')
+from context_sweep import build_prompt
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained('models/Qwen3.5-0.8B')
+print(','.join(str(t) for t in build_prompt(tok, $1)))"; }
+IDS128=$(ids_for 112); mkdir -p tmp/q10/stage
+for i in 1 2 3; do timeout 900 ./engine/build/decode_run --ids "$IDS128" --steps 16 --time-stages \
+    > tmp/q10/stage/int128_$i.log 2>&1; done
+for i in 1 2 3; do timeout 900 ./engine/build/decode_run --ids "$IDS128" --steps 16 --time-stages \
+    --mlp-map contig > tmp/q10/stage/con128_$i.log 2>&1; done
+tools/gpu_lock.sh release q10-m2
+python3 tools/instep_family_budget.py tmp/q10/stage/int128_{1,2,3}.log
+python3 tools/instep_family_budget.py tmp/q10/stage/con128_{1,2,3}.log
+```
+
+Baseline **4.264 ms/token** (52 % of its 2.230 ms roofline). Bands, against the same roofline the row is
+published against: **null ≥ 4.10 ms** (within 4 % — nothing moved); **partial 3.30–4.10 ms**; **confirmed
+≤ 3.30 ms** (≥ 23 % of the gap closed); **landing 2.40–2.75 ms**, where the cold-burst figure says a fully
+streaming walk should sit. Anything **below 2.230 ms is better than its own roofline** and is a measurement
+error, not a result (Q10-M0). Witnesses required on both sides or the A/B is void: `plan_match=1`, both
+`STAGEPARITY` flags 1, identical `syncs_per_step`, and the contig logs carrying `MLPMAP gate=contig` while
+the interleave logs carry none. If the two sides differ in any witness, this row does not exist yet.
+
+**Q10-M3 — the step-level consequence.** With Δ = 4.264 − (M2's `contig` row), predict the step at 128
+lanes moves from **12.399 ms → ≈12.399 − Δ**, and the same Δ at 512 and 1024 lanes, with the *fractional*
+gain shrinking as the lane count grows (the non-MLP part of the step grows there). Read from
+`tools/context_sweep.py`. The null band is the step's own reproducibility, ≈ ±0.6 ms at this size: a Δ
+under that is not established by this row and should not be reported as a win. If the gain instead *grows*
+with lane count, the mechanism is not the weight walk (weight bytes per token are divided by `TPB = 4`
+regardless of lane count) and the result must be written up as a contradiction rather than a win.
+
+**Q10-M4 — cross-check that this is weight-walk-shaped and not x-shaped: prefill.** The wave path reads
+the weights once per 4-token tile, so whatever the walk costs, it costs about 4× less per token there.
+Predict **|Δ TTFT| < 2 %** on `tools/prefill_sweep.py` between the two mappings. A TTFT move over 5 % — in
+either direction — means the mapping is reaching into the x/L2 traffic rather than the weight stream, and
+that is a finding about the probe's model of the box, not about the MLP.
+
+**Q10-M5 — only if M1 confirms and M2 is null: price the mapping in the instrument that found it.** That
+would be the first disagreement in this series between the probe and the step, so the conclusion is not
+"the fix is inert"; it is that `tools/mixed_bw --pattern engine-mlp` (which produced the 0.470) has to grow
+a contiguous-walk mode of its own — same bytes, same grid, one stream per pass — and say whether `contig`
+reaches `plain` there at all. That is a probe change with its own byte-accounting selftest cases, not a
+quick flag.
+
+**And the decision this section deliberately does not make.** The two mappings are bit-identical, so if M2
+confirms, making `contig` the default is a one-word change with no re-pin and no margin re-price; if M2 is
+null, the switch stays as an A/B instrument and the walk hypothesis is dead for this kernel, which sends
+the MLP's residual back to the row tail — and the row tail is not bit-neutral. Either way the default flip
+is the main agent's call after the numbers, not a worker's now.

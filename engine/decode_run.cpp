@@ -86,6 +86,11 @@ struct Options {
     // code" case that bit-identical output cannot distinguish from a batched run. Running the same
     // prompt both ways and comparing counters AND dumps is `engine/gate.py` section (h).
     int wave_rows = engine::kMaxWaveRows;
+    // Which weight walk the MLP's gate/up launches use (Q10's A/B; `kernels.h:MlpGateMap`). The
+    // default is the shipped walk, and only an explicit `--mlp-map` moves it, so every gate run that
+    // does not name the flag is the run it was before the switch existed.
+    engine::kernels::MlpGateMap mlp_gate_map = engine::kernels::MlpGateMap::kInterleave;
+    bool mlp_gate_map_given = false;
     // The stage clock (`engine/stage_clock.h`): re-runs the run's generation steps twice more, once
     // with a wait at every family boundary and once with a wait after every submission, and reports
     // them next to the pipelined step. A bench-only observation flag: the run it is attached to still
@@ -141,6 +146,11 @@ Options parse_args(int argc, char** argv) {
             o.prefill_logits = engine::parse_prefill_logits(next());
         } else if (a == "--wave-rows") {
             o.wave_rows = std::atoi(next().c_str());
+        } else if (a == "--mlp-map") {
+            // Parses or throws: an unrecognised walk must not silently become the default one, or an
+            // A/B row would price the default twice and call it a null.
+            o.mlp_gate_map = engine::kernels::parse_mlp_gate_map(next());
+            o.mlp_gate_map_given = true;
         } else if (a == "--time-stages") {
             o.time_stages = true;
         } else if (a == "--help" || a == "-h") {
@@ -341,8 +351,8 @@ void print_usage(FILE* out) {
     std::fprintf(out,
                  "usage: decode_run [--model DIR] [--ids ID,ID,...] [--steps N] [--out DIR]"
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
-                 " [--prefill-logits last|all] [--wave-rows N] [--time-stages] [--load-verify]"
-                 " [--sizes-only]\n"
+                 " [--prefill-logits last|all] [--wave-rows N] [--mlp-map interleave|contig]"
+                 " [--time-stages] [--load-verify] [--sizes-only]\n"
                  "  --time-stages After the run, replay its generation steps from a fresh state at"
                  " three submission granularities — one wait per step (burst), per family boundary"
                  " (stage), per submission (kernel) — and print per-stage wall time next to the"
@@ -362,6 +372,13 @@ void print_usage(FILE* out) {
                  " `1` forces one-row glue/MLP launches for every prompt token: the P4b comparison"
                  " run, whose launch counts must differ from the default's and whose outputs must"
                  " not (see engine/launch_stats.h)\n"
+                 "  --mlp-map W  which weight walk the MLP's gate/up launches use (Q10)."
+                 " `interleave` (the default, and what every ledger number was taken with) fetches"
+                 " both weight streams' words side by side; `contig` walks the gate row end to end"
+                 " and then the up row. The two are bit-identical by construction and proven so on"
+                 " device (`prototype/mlp_gemv/run.py --mapping-identity`), which is what makes the"
+                 " A/B a timing question and not a numerical one. `down` has one weight stream and"
+                 " is unaffected by this flag\n"
                  "  --session resident feed/gen/reset/stats/quit protocol for engine/chat.sh\n");
 }
 
@@ -771,6 +788,14 @@ int main(int argc, char** argv) {
 
         engine::RequestState st = engine::allocate_state(cap);
         engine::DecodeScratch sc = engine::allocate_scratch(o.wave_rows);
+        sc.mlp_gate_map = o.mlp_gate_map;
+        if (o.mlp_gate_map_given) {
+            // Only printed when the flag was named: a default run's stdout has to stay byte-stable,
+            // because gate logs are diffed against logs taken before this switch existed. A run that
+            // did name it says which walk it ran, so no A/B row can be anonymous.
+            std::printf("MLPMAP gate=%s\n",
+                        engine::kernels::mlp_gate_map_name(sc.mlp_gate_map));
+        }
         engine::prepare_weight_adapters(store, sc);
 
         const std::string inv = st.check_invariants();

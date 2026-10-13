@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "engine/kernels.h"   // MlpGateMap: a run-shape choice the launchers take (see below)
 #include "engine/state.h"
 
 namespace engine {
@@ -54,6 +55,11 @@ struct DecodeScratch {
     // How many rows the row family below holds. `submit_wave_body` refuses a wave longer than this,
     // and `prefill_wave` splits at it, so no launcher here has to re-check.
     int wave_rows = 0;
+    // Which weight walk the MLP's gate/up launches use (Q10's A/B switch, `kernels.h:MlpGateMap`).
+    // It rides here for the same reason `wave_rows` does: it is a run-shape choice, it has to reach
+    // the one call site in `submit_wave_body`, and `decode_run` is the only thing that sets it. The
+    // default is the shipped walk, so a scratch that nobody configured runs what it ran before.
+    kernels::MlpGateMap mlp_gate_map = kernels::MlpGateMap::kInterleave;
     // Residual ping-pong. NOT aliased into one buffer: `glue_add_norm`'s `s` and `s_out` are both
     // `__restrict__`, so writing the new residual over the one it is reading is a contract violation
     // even though the same thread touches the same index.

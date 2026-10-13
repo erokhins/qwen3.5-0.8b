@@ -611,7 +611,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         stageclock::note(stageclock::kMlp);
         kernels::mlp_gateup((const uint16_t*)layer_dev(weights, layer, leaf::kGateProj),
                             (const uint16_t*)layer_dev(weights, layer, leaf::kUpProj), sc.norm_f32,
-                            sc.mlp_act, kIntermediate, kHidden, n);
+                            sc.mlp_act, kIntermediate, kHidden, n, sc.mlp_gate_map);
         stageclock::note(stageclock::kCast);
         kernels::cast_bf16_to_f32(sc.mlp_act, sc.mlp_act_f32, n * kIntermediate);
         stageclock::note(stageclock::kMlp);
