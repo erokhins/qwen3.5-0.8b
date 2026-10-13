@@ -484,3 +484,18 @@ these rows run to 165–55,828 µs, which is scheduling noise on a busy box, and
 hand kernels for `in_proj_a/b`, `k/v_proj` and one-row `lm_head` (W4 dead, §6's carve-out upheld), **no fp16**
 (W2 dead), and **W9 as the only remaining gate that can fund or kill this**. W3 (hand-tiled WMMA) is not
 triggered — it was conditional on W1 landing wash-or-dead, and W1 did not.
+
+### Scope correction to W4 (2026-10-13, after implementation started) — the verdict bounds per-call cost, not wave-width use
+
+W4's bands compare a **library call's per-call time against the 1.85 µs dispatch floor**, which is a
+*decode-shaped* yardstick: that floor is what a one-row body pays, so "≤2× the floor" asks whether a library
+call is cheap enough to issue once per token. It says **nothing about whether a library call beats the hand
+kernel at wave width**, and at `wave_rows=512` the hand `k/v_proj` launch costs ~1.46 ms, so a library call at
+15–22× the dispatch floor can still be ~20× faster than the thing it replaces.
+
+Therefore: **W4 dead ⇒ `in_proj_a/b` and `k/v_proj` stay out of the per-token decode path** (upheld, and
+`k/v_proj` were never proposed for it), and **W4 dead does not exclude `k_proj`/`v_proj` from wave bodies**.
+§6 item 1 named ten shapes and it remains the authority: the route is hipBLAS for those ten on `rows > 1`
+bodies, with `in_proj_a/b` (N=16 — ~162 KiB of traffic per call even at 512 rows, so tile machinery never pays
+for itself) and one-row `lm_head` in hand kernels. This is a scope restatement, not a re-grading: the W4
+numbers stand exactly as printed, and no band has moved.
