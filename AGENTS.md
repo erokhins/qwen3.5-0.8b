@@ -189,3 +189,19 @@ no child deadline fixes.
   lump, `git reset --soft` and re-commit it in topical pieces; nothing here is pushed, so
   splitting is free. A backup ref (`git branch backup-<something>`) before rewriting history is
   cheap and worth it.
+
+## Execution policy: keep moving, report at milestones (user, 2026-10-14)
+
+- **Do not stop between milestones to ask.** Once a funded package has its decision, execute through the queue:
+  dispatch, verify on device, commit, take the next item. Stop only for a decision that is genuinely the user's
+  (a new band wider than an accepted one, a scope change, or a destructive action) or when the queue is empty.
+- **After every milestone, report status and the tokens/s state.** A milestone = a landed and verified change to
+  engine behaviour, a gate/admission decision, or a measurement that changes a plan. The report must include, in
+  plain numbers: what was measured or shipped, and the current honest headline — decode tok/s at 128 lanes and
+  prefill tok/s at 1024 lanes — with the commit that earned the number. If the headline did not move, say so
+  explicitly; an unchanged number reported honestly is more useful than silence.
+- **Fix-first over speed, pre-authorised (the branch-2 rule).** If a correctness defect is proved on the shipping
+  path — e.g. the engine disagreeing with the pinned HF reference above `MAXSC` at a row with decision room to
+  spare — **it outranks all pending speed work** (P9, attention tiling, the 5k target) until fixed or explicitly
+  waived by the user in those words. Do not queue it, do not "bank the win first", and do not soften a gate to
+  route around it. Report which rows fail, how many, and their decision room before choosing the remedy.
