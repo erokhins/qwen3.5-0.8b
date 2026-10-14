@@ -655,3 +655,30 @@ Falsifier B: `attn` lands 40–80 ms ⇒ traffic fell and something else (issue,
 binds ⇒ report PARTIAL and price the block-level stage. `SQ_INSTS_VALU` must not *rise* on the tile form.
 No number from a worker run belongs in `bench/performance-status.md`; none was taken here, and the two
 `hipcc -c` calls and the Python gate above touched no device.
+
+## 13. §12's device pass, run by the parent (2026-10-14, lock `ATTN-P2`): **RED — the flip is refused**
+
+§12 was green on CPU and said so. The device pass on the same code is not green, and three separate things are
+wrong with it. Nothing was flipped: `--attn-tile` stays `0`.
+
+1. **The op gate on the tiled kernel FAILS.** `prototype/attn_decode/run.py --wave --tile-kernel` reports
+   `wave L03: 1098790 elements moved when the lane grid was deepened to 2 under --softmax full`, and the same
+   failure is the first thing `--negative` prints, so it is not a control artifact — the tiled form is **not
+   invariant to how the lane grid is cut**, which is the same class of property §12's whole "bit-identical below
+   MAXSC" claim rests on.
+2. **The engine A/B is not bit-identical where the claim said it would be, and it flips a token.** `--attn-tile 0`
+   vs `--attn-tile 1` on the 1024-token prompt differ in `logits1023.bin` **and in `sampled.txt`** — a changed
+   argmax on the last row, not a cosmetic drift. Row 1023 is a >MAXSC row so a *band* difference is admissible
+   there by the accepted condition, but a **token flip** is the outcome that condition was written to bound, and
+   it arrived as a bare `cmp` difference with no band measured against it.
+3. **The win cannot even be measured today.** Under `--time-waves` the tiled route fails closed: `attn_decode_layer:
+   the tiled wave form is unavailable: a wave's §05.7 append must fin…`. So there is no `attn` attribution line for
+   the tile side at all. Meanwhile the shipped side, re-measured in this window, is **116.29 ms / 33.60 % of a
+   346.05 ms wave** (`ms_per_launch 9.69`) — the same 33 % as before, so the byte-wall diagnosis still stands and
+   the prize is still there. It is just not collected by this kernel yet.
+
+**What this means and what it does not.** Phase 1's counter result is untouched — attention is still memory-pattern
+bound and still worth ~1/3 of prefill. Phase 2 as delivered is **not a candidate for default**: a gate that fails,
+a flipped token on the first fixture that exercises the band region, and an instrument that cannot price it. The
+correct next move is to fix (1), size (2) against §07.3's band with the worst element's location reported, and make
+(3) either work under `--time-waves` or say precisely why the replay path cannot satisfy §05.7.
