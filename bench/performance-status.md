@@ -1,5 +1,11 @@
 **Read this first if you are continuing the route (c) / P9 / attention work — session handoff: `bench/HANDOFF-2026-10-14.md`.**
 
+**If the question is "what have we already tried, and why did it not work?" — do not read this file for that.**
+`bench/speedup-routes-2026-10-14.md` is the index of every speed-up route tried, its verdict (shipped / dead
+/ held / unpriced), the line it had to clear and the number that decided it, plus what is left to try. This
+file below is the append-only ledger: the record of measurements in the order they happened, which is where
+the routes file's citations point.
+
 # Performance status — what is measured, what is projected
 
 Written after the second HIP kernel. The point of this file has always been the split between
