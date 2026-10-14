@@ -119,6 +119,43 @@ Therefore, as a hard rule:
   acceptable state — schedule a GPU pass after the workers drain, run the commands they handed over,
   and feed failures back.
 
+## Subagent run deadlines: pass 2 h explicitly, every launch
+
+`pi-subagents` has **no project-scoped timeout setting**. A run deadline resolves: per-call
+`options.timeoutMs` (alias `maxRuntimeMs`) → the agent's own frontmatter `timeoutMs` →
+the *user-global* `~/.pi/agent/extensions/subagent/config.json` `timeoutMs` → built-in 30 min.
+Project `.pi/settings.json` `subagents.agentOverrides.<name>` cannot carry it (`applyBuiltinOverride`
+in `pi-subagents/src/agents/agents.js` has no `timeoutMs` branch), and the only project-scoped
+*enforced* default is a `.pi/agents/worker.md` that **replaces** the builtin worker's prompt —
+not worth it. (This repo has no `.pi/` directory at all today.) So the lever here is the call:
+
+```js
+subagent({ agent: "worker", task: "...",
+           options: { timeoutMs: 7200000, checkpointBeforeDeadlineMs: 600000 } })
+```
+
+- **`timeoutMs: 7200000` (2 h) on every worker launch in this repo.** Omit it and you get
+  whatever the previous session guessed — lately 90 min, which is what has been killing workers.
+- `checkpointBeforeDeadlineMs: 600000` (async single-agent runs only) steers the child to
+  checkpoint and stop 10 min early, so a long task hands back changed files, build/test state
+  and remaining work instead of being killed mid-tool. Expiring the deadline is terminal: the
+  child session is disposed, its open tool call aborted, acceptance unevaluated.
+
+Why, from this repo's own artifacts (`~/.pi/agent/sessions/--home-erokhins-erokhins_projects-qwen3.5-0.8b--/subagent-artifacts`,
+73 recorded runs): **21 died on the run deadline** — 16 at 90 min, 2 at 80, 2 at 30, 1 at 120 —
+while *successful* workers ran up to 161 min, seven of them finishing at ≥80 min. 90 min sits
+inside the productive distribution, not above it. The killed runs were still emitting tool
+results at the deadline (one lost its report one line after its own gate printed `SELFTEST PASS`,
+the 120-min one died just after printing its `RESULT` lines), and their longest inter-event gaps
+were 7–18 min of model generation or one long device `bash` — this box serves its own tokens on
+the same GPU, so a `high`-thinking turn on an 80k-token context costs minutes. Task length, not
+a wedge, which is why the deadline (not `toolTimeoutMs`) is the right knob.
+
+Two honest caveats: the one run that already carried 120 min died at it too, so a 161-min-shaped
+task must be split or resumed rather than out-waited; and 12 of the 21 deaths also read "Child
+failure followed session compaction and agent settlement", a parent-side compaction effect that
+no child deadline fixes.
+
 ## Standing rules
 
 - **Budget verification to what a change can affect.** `speccheck/run_all.py` is 26 gates and ~20 min;
