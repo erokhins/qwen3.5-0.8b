@@ -999,6 +999,10 @@ answer.
 
 ### Headline tables after the route (c) flip (2026-10-14, default `--gemm library`, zero subagents, foreground, lock `FLIP-RETAKE`)
 
+> **Superseded on the same day** by the section at the end of this file (`Headline tables after the tiled
+> attention wave ships`): prefill at 1024 lanes is 3,326 prompt tok/s, not 2,705.6, and at 3072 it is
+> 3,320.9, not 1,713.3. The tables below stay as the record of what route (c) bought.
+
 These replace the Q10b tables above as the honest headline. Provenance for every number: `NUMERICS
 wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0`, recorded in `engine/numerics_provenance.json`.
 
@@ -1059,3 +1063,74 @@ device came in at **9.8× the instruction model**, the same failure as the chunk
 working wavefronts per CU an instruction is not issued per cycle, it waits. `#pragma unroll 8` on both
 `i` loops (bit-identical, one accumulator) changed 112.8 → 113.4 ms, confirming the loop is not
 LDS-latency-bound either; it was reverted. Detail in `prototype/gdn_collapse/results.md`.
+
+## Headline tables after the tiled attention wave ships (2026-10-14, default `--attn-tile 1`, zero subagents, foreground, locks `attn-tile-ab2`/`ledger-tile-default`/`attn-tile-3072`)
+
+The change is `prototype/attn_decode/attn_decode_kernels.h:attn_tile_body` — one K **and V** row load per
+lane per block instead of one per (row, head) pair, one query row per block (`M = 1`), and §19's aliased
+split-partial slot replaced by `attn_core`'s own address. Full write-up: `prototype/attn_decode/results.md`
+§20 (the fix, proved CPU-side) and §21 (the device verdict). Everything below is main-agent, blocking, with
+the lock held and no subagent active; `util` read 91–93 % and is quoted only because the rule says to record
+it, and per §6 it is not a usable gate.
+
+**Prefill — a second step, and it grows with context.** Paired A/B inside one lock hold (`--attn-tile 0` and
+`1` alternate in the same window, so no other job can sit between a pair), best-of-3, `RESULT ms_total`:
+
+| prompt lanes | shipped form ms | tiled form ms | **prompt tok/s: was → now** | gain |
+|---|---|---|---|---|
+| 64 | 83.26 | 80.91 | 768.7 → 791.0 | +2.9 % (dispatch-bound, spread 14 %) |
+| 256 | 131.78 | 122.12 | 1,942.6 → 2,096.3 | +7.9 % |
+| 300 | 147.27 | 140.15 | 2,037.0 → 2,140.6 | +5.1 % |
+| 640 | 258.65 | 235.58 | 2,474.4 → 2,716.7 | +9.8 % |
+| 1024 | 385.15 | 307.46 | 2,658.6 → **3,330.5** | **+25.3 %** |
+| 3072 | 1812.08 | 931.13 | 1,695.3 → **3,299.2** | **+94.6 %** |
+
+The 3072 row repeats a real 1024-token prompt three times (`tmp/tilefix/repeat_ids.py`), which is what
+`tools/prefill_sweep.py` does with its own synthetic prose: per-token cost at a lane count does not depend on
+the text's meaning. It is the largest gain in the table, and the reason is geometric — at 3072 lanes 2,560 of
+the 3,072 rows are above `MAXSC`, so nearly the whole wave is on the route whose traffic just fell 4×. The
+1024 row of the ruler now reads **3,326 tok/s** under `tools/prefill_sweep.py` (spread 4.96 %), against
+2,705.6 in the table above it, and 3072 reads 3,320.9 against 1,713.3. The short rows read *lower* in that
+sweep than in the previous table (64: 708.4 vs 770.3) while the paired A/B in one window shows the tiled form
+faster at the same widths; that is the dispatch-bound bimodality §6 warns about, and the paired number is the
+one to trust at 64 and 256 lanes.
+
+**Decode — unchanged, exactly as the construction says it must be.** A decode body is one query row, and a
+one-row body runs the fused single-row form under either flag (`engine/decode_run.cpp:104-116`), so the tile
+form cannot move it. The ruler agrees: | lanes | ms/token | tok/s | was | | 128 | **11.155** | 89.6 | 11.482 /
+87.1 | | 512 | 12.538 | 79.8 | 12.591 / 79.4 | | 1024 | 12.625 | 79.2 | 12.785 / 78.2 | | 2048 | 12.839 |
+77.9 | 13.039 / 76.7 |. Every row is inside the ledger's usual ±2–3 % spread; there is no decode claim here in
+either direction, and the differential `(ms_total(129) − ms_total(1))/128` at a 1024-token prompt reads 12.38
+(shipped) vs 12.42 (tiled) ms/token, which is the same statement from the other side.
+
+**Wave attribution at 1024 lanes, `--time-waves --gemm library`, best-of-3, both forms in one binary:**
+
+| quantity | `--attn-tile 0` | `--attn-tile 1` | change |
+|---|---|---|---|
+| `family=attn` | **107.67 ms** (108.34 / 107.67 / 109.35) | **26.70 ms** (27.05 / 26.90 / 26.70) | **−75.2 %, 4.03×** |
+| wave wall | 329.55 ms | **241.00 ms** | −26.9 % |
+| `family=gdn_rec` | 125.45 ms | 121.57 ms | unchanged (noise) |
+| `GROUP matmul_ms` | 68.66 ms | 72.04 ms | unchanged (noise) |
+
+The admission line for this work was `attn ≤ 40 ms` and the traffic model predicted 27.2 ms from the read
+census before the run; the device returned 26.70 ms, 1.8 % inside its own prediction. A number that lands
+*better* than a bandwidth-derived line but not better than the memory system allows (26.70 ms at 6.45 GB =
+241 GB/s against a measured 237 GB/s ceiling) is a number that has finished with this lever: the attention
+wave is now bandwidth-bound at the box's ceiling, and the remaining 4× claim is spent.
+
+**What the wave is made of now.** `attn` fell from 33 % to 11 % of the wave and `gdn_rec` is **~50 %** of it
+(121–126 ms of 241 ms) with matmul at 29 %. That is the second time in two days that a route died by becoming
+cheaper: the GDN recurrence is now past half the wave on a box whose §04.4 recurrence is latency-bound on
+2,048 dependent chains, and route A already showed that making it resident does not help. The next number
+worth chasing is not in attention at all.
+
+**Correctness the flip rests on.** `engine/gate.py` PASS on `wide640f` and `wide1024f` at `--scope form`
+*and* `--scope full` with the tiled form, and on `dec8`/`dec64f`/`dec300f`; `attn_form_band.py` reports
+**136/136 and 520/520 above-`MAXSC` rows bit-identical** between the two forms, 0 elements differing, argmax
+moved 0, pooled meanrel 0.000e+00 — so the two forms are not both inside a band, they emit the same bits.
+`prototype/attn_decode/run.py --wave` PASS on both forms with its device negatives PASS (the `carry`
+injection prints a skip reason under `--tile-kernel` instead of being silently dropped: one row per block has
+no row-to-row state to leak). CPU side: `attn_tile_model.py` selftest 13/13, `lds` PASS, `gate` and
+`gate --negative` 0 failures on 7 negative controls with derived blind sets, `speccheck/run_all.py --quick`
+11 gates PASS. Both defaults — `decode_run.cpp`'s and `gate.py`'s — moved in the same commit, and the gate's
+`NUMERICS` cross-check (`attn_tile=1` echoed and matched) is what proves they still agree.
