@@ -440,6 +440,17 @@ __global__ void attn_core(CoreArgs a) {
 //     `r0 = expf(0 - mn)`, and `l`/`acc` are 0 so they contribute nothing). A neutral of m=-1e30
 //     would NOT be an identity — `expf(-1e30 - m_s)` is 0 and would erase a row — so emitting
 //     nothing for an empty pair is load-bearing, not cosmetic.
+//   * THE K STAGE IS `L` SLOTS DEEP, SO THE SLOT INDEX IS SUB-BLOCK-RELATIVE (`rr - s_lo`), NOT THE
+//     WINDOW-ABSOLUTE LANE `rr`. This is the one index in the kernel that a reading of the algorithm
+//     cannot get wrong and a reading of the loop can: `s_k` holds `ATTN_TILE_L` rows and the sub-block
+//     loop steps `s_lo` by `ATTN_TILE_L`, so indexing it by `rr` walks `(span-1)*DH*2` bytes for a
+//     tile whose widest row spans `span` lanes — 141 KiB for a 277-lane window and 256 KiB for a
+//     MAXSC-wide one, against a kernel that reserves 20,480 B of LDS in total, and it does that for
+//     every sub-block after the first, i.e. for every row above 8 lanes. Out-of-range LDS does not
+//     fault on this part; the writes land on the score staging next door and the scores that survive
+//     are K bytes. That is what §13 read as "1,098,790 elements moved" and §14 identifies: a silent
+//     numerics difference produced by an address, which is why `attn_tile_model.py` now prices the
+//     stage's LDS reach from this loop's own expression instead of trusting the declared size.
 //   * Pass 1 stages K, pass 2 reads V from global, and BOTH do it per PAIR — so the re-use this kernel
 //     actually books is M = 4x, not G x M = 16x. Precisely: the four heads of a group read the
 //     identical rows and write them into the identical LDS slots with the identical bytes (benign, and
@@ -608,6 +619,8 @@ __device__ __forceinline__ void attn_tile_body(const CoreArgs a) {
             const int l_p = tile_lim(a, row, blo, span);
             for (int rr = s_lo; rr < s_hi && rr < l_p; ++rr) {
                 const int j = blo + rr;
+                const int slot = rr - s_lo;      // a SLOT in `s_k`, in [0, ATTN_TILE_L). Using `rr`
+                                                // here indexes past the array: see the header note.
                 // Lane `pos + row` is this wave's own §05.7 append for `row`; like `attn_core` the
                 // self lane comes from the staged buffers, not from the cache slot it may not be in
                 // yet. `NEG_SLOTK` lands on that slot and so shows up in the NEXT row's read side.
@@ -615,7 +628,7 @@ __device__ __forceinline__ void attn_tile_body(const CoreArgs a) {
                     (j == a.pos + row)
                         ? a.krope + (size_t)ROW_KV * row + (size_t)kv_write * DH
                         : a.kcache + ((size_t)kv_read * a.cap + (size_t)j) * DH;
-                *reinterpret_cast<uint4*>(&s_k[rr * DH + lane * 8]) =
+                *reinterpret_cast<uint4*>(&s_k[slot * DH + lane * 8]) =
                     *reinterpret_cast<const uint4*>(ksrc + lane * 8);
             }
         }
@@ -634,7 +647,7 @@ __device__ __forceinline__ void attn_tile_body(const CoreArgs a) {
                 for (int t = 0; t < 8; ++t) q[t] = bf(qq[t]);
             }
             for (int rr = s_lo; rr < s_hi && rr < l_p; ++rr) {
-                const hip_bfloat16* k = &s_k[rr * DH + lane * 8];
+                const hip_bfloat16* k = &s_k[(rr - s_lo) * DH + lane * 8];
                 float dot = 0.f;
                 for (int t = 0; t < nd; ++t) dot += bf(k[t]) * q[t];   // serial in t, §05.5
                 dot = warp_sum(dot);                                   // 5-step butterfly

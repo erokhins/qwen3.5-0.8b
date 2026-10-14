@@ -18,6 +18,10 @@ without one:
                actually reads is counted, and a read outside a row's causal prefix lands on poison
     compare    the mirror's two forms against each other, bit for bit, and against the pinned dumps
     isa        the compile-only resource census of the new kernel (hipcc -c; no device touched)
+    lds        what LDS the K stage's INDEX ARITHMETIC can reach, read off the source — a footprint
+               claim, which is not the declared-size claim `isa` prints (see §14 of results.md)
+    oob-bound  how many elements a stage that overruns `s_k` could move, against a device report —
+               turns "the grid moved 1.1 M elements" into a falsified-or-confirmed diagnosis
     selftest   the mirror's own invariants, including the ones a wrong geometry would break
     negative   the injections, each with a must-catch/must-not-catch set derived from the geometry
 
@@ -62,14 +66,14 @@ LINES = {"full": 0.0, "stream": 0.0}   # traffic lines read off the mirror, by r
 POISON = float("nan")        # see `CacheDoc`: a leaked mask must poison the output, not shrink it
 
 
-def kernel_consts() -> dict:
+def kernel_consts(path: Path = KERNEL_H) -> dict:
     """The kernel's own constants, read from the header (a copy here would drift). Covers both
     forms: `MAXSC`/`TILE` are the shipped form's and `ATTN_TILE_*` the tiled form's."""
-    raw = dict(re.findall(r"^#define\s+(\w+)\s+(\d+)\s*(?://.*)?$", KERNEL_H.read_text(), re.M))
+    raw = dict(re.findall(r"^#define\s+(\w+)\s+(\d+)\s*(?://.*)?$", path.read_text(), re.M))
     vals = {k: int(v) for k, v in raw.items()}
     for name in ("N_Q", "N_KV", "DH", "TILE", "MAXSC", "ATTN_TILE_M", "ATTN_TILE_L"):
         if name not in vals:
-            raise SystemExit(f"{KERNEL_H.name}: cannot read {name} — this model's copy is stale")
+            raise SystemExit(f"{path.name}: cannot read {name} — this model's copy is stale")
     vals["SCALE"] = 0.0625
     vals["G"] = vals["N_Q"] // vals["N_KV"]   # the header spells GQA as (N_Q / N_KV)
     vals["M"] = vals["ATTN_TILE_M"]
@@ -81,6 +85,11 @@ def kernel_consts() -> dict:
 
 C = kernel_consts()
 N_Q, N_KV, DH, MAXSC, TILEW = (C["N_Q"], C["N_KV"], C["DH"], C["MAXSC"], C["TILE"])
+
+# The two places the K stage indexes `s_k` (the write in pass 1 and the read in the score loop). The
+# declaration `s_k[ATTN_TILE_L * DH]` is deliberately NOT one of them, which is why `+ lane * 8` is
+# what identifies an index site rather than just `s_k[`.
+S_K_INDEX = re.compile(r"s_k\[([^\]]*?)\s*\+\s*lane \* 8\]")
 SCALE, G, M = C["SCALE"], C["G"], C["M"]
 
 
@@ -290,6 +299,37 @@ def tile_windows_of(nrows: int) -> int:
     return (nrows + M - 1) // M
 
 
+def k_stage_reach(src: str, c: dict, span_max: int) -> dict:
+    """How far the K stage's index arithmetic can walk into LDS, read off the kernel source.
+
+    This is a FOOTPRINT claim, not the declared-size claim the compile census prints. `s_k` is
+    `ATTN_TILE_L * DH` BF16 — `L` sub-block SLOTS, because the sub-block loop steps `s_lo` by `L` —
+    so the index into it must be the slot (`rr - s_lo`, or a named `slot` defined as exactly that),
+    not the window-absolute lane `rr`. With `rr` the same loop reaches `span * DH * 2` bytes for a row
+    tile whose widest row spans `span` lanes: 141,824 B for a 277-lane window and 262,144 B for a
+    MAXSC-wide one, against a kernel that reserves 20,480 B of LDS in total, on every sub-block after
+    the first. Out-of-range LDS does not fault on this part; the writes land on whatever else the block
+    reserved — here the 16 KiB of score staging — so the symptom is a numerics difference, not a
+    crash. That is §13's `1,098,790 elements moved`, and this census names it without a device (§14).
+
+    The spelling is read from the source rather than retyped here so the census fails when the source
+    regresses, and both spellings' footprints are reported so the size of the mistake is on the record.
+    """
+    exprs = S_K_INDEX.findall(src)
+    if not exprs:
+        raise SystemExit("no `s_k[... + lane * 8]` index site found — this model's pattern is stale")
+    # An expression is sub-block-relative iff it subtracts `s_lo`, or goes through a name whose one
+    # definition in the file is `rr - s_lo`. A bare `rr` is the absolute spelling.
+    named_slot = re.search(r"const int slot\s*=\s*rr\s*-\s*s_lo;", src) is not None
+    slot_relative = all(("- s_lo" in e) or ("slot" in e and named_slot) for e in exprs)
+    worst_slot = (c["ATTN_TILE_L"] - 1) if slot_relative else max(0, min(span_max, c["MAXSC"]) - 1)
+    bytes_worst = (worst_slot + 1) * c["DH"] * 2
+    return {"exprs": sorted(set(exprs)), "slot_relative": slot_relative, "span_max": span_max,
+            "bytes_worst": bytes_worst, "declared": c["k_stage_bytes"],
+            "block_lds": c["k_stage_bytes"] + c["score_staging_bytes"],
+            "ok": slot_relative and bytes_worst <= c["k_stage_bytes"]}
+
+
 def block_touches(lanes: list[int]) -> int:
     """(row, head, lane) triples a launch must produce — the shipped form's work, identical here."""
     return sum(n * N_Q for n in lanes)
@@ -464,6 +504,11 @@ def cmd_geometry(args) -> None:
               f"{fmt_b(C['k_stage_bytes'])} of K = {fmt_b(C['score_staging_bytes'] + C['k_stage_bytes'])}"
               f" per block; 64 KiB/CU admits "
               f"{int(65536 // (C['score_staging_bytes'] + C['k_stage_bytes']))} block(s)/CU")
+        reach = k_stage_reach(KERNEL_H.read_text(), C, max(lanes))
+        print(f"  LDS reach  the K stage's index arithmetic reaches {fmt_b(reach['bytes_worst'])} "
+              f"for a span of {reach['span_max']} lanes against {fmt_b(reach['declared'])} declared: "
+              f"{'ok' if reach['ok'] else 'OUT OF BOUNDS'} "
+              f"(spelling: {', '.join('`' + e + '`' for e in reach['exprs'])})")
 
 
 def cmd_traffic(args) -> None:
@@ -519,6 +564,103 @@ def cmd_traffic(args) -> None:
     print(f"    shipped form runs pass 2 in all {C['N_Q'] // G * M}... see results.md), and the byte")
     print(f"    claim is verified by the ms falling toward the traffic term above, not by a counter")
     print(f"    this box has never produced for DRAM bytes.")
+
+
+def cmd_lds(args) -> int:
+    """The K stage's LDS footprint, priced from a header's own index expression.
+
+    Defaults to the live kernel; `--kernel` points it at another copy of the same file, which is how
+    §14's before/after was taken without a device:
+
+        git show HEAD:prototype/attn_decode/attn_decode_kernels.h > /tmp/pre.h
+        .venv/bin/python prototype/attn_tile_model.py lds --kernel /tmp/pre.h   # FAIL
+        .venv/bin/python prototype/attn_tile_model.py lds                       # PASS
+    """
+    path = Path(args.kernel) if args.kernel else KERNEL_H
+    c, src = kernel_consts(path), path.read_text()
+    print(f"{path.name}: L={c['ATTN_TILE_L']} DH={c['DH']} MAXSC={c['MAXSC']} M={c['M']} | "
+          f"s_k {fmt_b(c['k_stage_bytes'])}, block LDS "
+          f"{fmt_b(c['k_stage_bytes'] + c['score_staging_bytes'])}")
+    r0 = k_stage_reach(src, c, 1)
+    print("  index spellings: " + ", ".join(f"`{e}`" for e in r0["exprs"])
+          + f"  -> {'sub-block slot' if r0['slot_relative'] else 'WINDOW-ABSOLUTE lane'}")
+    fails = 0
+    for label, span in (("a tile whose widest row is L lanes (the last span an "
+                         "absolute index cannot overrun)", c["ATTN_TILE_L"]),
+                        ("p300 --wave --wave-rows 64, widest row 277 lanes", 277),
+                        ("engine 1024-token wave, one MAXSC-wide window", c["MAXSC"])):
+        r = k_stage_reach(src, c, span)
+        fails += 0 if r["ok"] else 1
+        print(f"  {'ok  ' if r['ok'] else 'FAIL'}  {label:<48} reaches {fmt_b(r['bytes_worst']):>9}"
+              f"  (declared {fmt_b(r['declared'])}, block {fmt_b(r['block_lds'])})")
+    print(f"lds: {'PASS' if not fails else 'FAIL'} — the stage {'fits' if not fails else 'walks past'}"
+          f" `s_k`, so {fmt_b(c['k_stage_bytes'])} of LDS is {'really' if not fails else 'NOT really'}"
+          " what the kernel touches")
+    return 1 if fails else 0
+
+
+def cmd_oob_bound(args) -> int:
+    """How many elements the out-of-bounds `s_k` index COULD have moved, against what §13 saw.
+
+    §13 reported `1098790 elements moved when the lane grid was deepened` and read that as grid
+    dependence. If the real cause is the stage walking past `s_k` (§14), then the damage should be
+    bounded by the set of rows a wide row-tile can reach — a row-tile whose widest row is `<= L` lanes
+    cannot overrun at all, so those rows are provably untouched whatever the bug does — and §13's number
+    should sit just under that bound rather than somewhere in the middle of the range. That is what this
+    prices, from the fixture's own geometry and the header's own constants:
+
+        .venv/bin/python prototype/attn_tile_model.py oob-bound --observed 1098790
+
+    `--observed` is the number from the device report; it is a named input, not a constant, so the line
+    can be re-made against a different run.
+    """
+    dl = ROOT / "data" / "refs" / args.fixture
+    layer = R.ATTN_LAYERS[0]
+    seq = R.prefill_tokens(dl, layer)
+    spans = R.wave_spans(seq, args.wave_rows_gate)
+    L, M, DH = C["ATTN_TILE_L"], C["M"], R.DH
+    rows = sum(p1 - p0 + 1 for p0, p1 in spans)
+    untouched = 0
+    wide_tiles = tiles = 0
+    for p0, p1 in spans:
+        n = p1 - p0 + 1
+        lanes = [p0 + 1 + i for i in range(n)]        # lvalid = p0+1; row i sees lvalid+i lanes
+        for r0 in range(0, n, M):
+            hi = min(n, r0 + M)
+            span = max(lanes[r] for r in range(r0, hi))
+            tiles += 1
+            if span <= L:
+                untouched += hi - r0
+            else:
+                wide_tiles += 1
+    # Claim 2b compares the two reduction stages, each N_Q x DH per row (`WAVE_STAGE_ROWS` in run.py
+    # compares five; the two that a score change can move are attn_pre_gate and gated).
+    per_row = 2 * R.N_Q * DH
+    bound = (rows - untouched) * per_row
+    total = rows * per_row
+    print(f"layer L{layer:02d}  fixture {args.fixture}  prefill rows {seq}  waves of"
+          f" {args.wave_rows_gate} -> {spans}")
+    print(f"row-tiles with span > L (={L} lanes): {wide_tiles} of {tiles}; rows whose own tile is"
+          f" narrow enough to be unreachable: {untouched} of {rows}")
+    print(f"reduction elements the control compares: {total:,}")
+    print(f"upper bound if ONLY the unreachable-by-construction rows stayed clean: {bound:,}"
+          f"  ({100.0 * bound / total:.2f} % of the comparison)")
+    if args.observed < 0:
+        return 0
+    print(f"device report                        : {args.observed:,}")
+    print(f"observed / bound                   : {100.0 * args.observed / bound:.4f} %"
+          f"   (bound - observed = {bound - args.observed:,} elements that happened to agree)")
+    if not 0 <= args.observed <= bound:
+        print("oob-bound: NOT EXPLAINED — the report moves MORE elements than an out-of-bounds stage"
+              " can reach, so that diagnosis is incomplete and must not be accepted")
+        return 1
+    share = 100.0 * args.observed / bound
+    reach = "essentially all of it" if share > 95.0 else "only part of it"
+    tail = ("; the residue is small enough to be elements that coincidentally agreed" if share > 99.0
+            else "")
+    print(f"oob-bound: CONSISTENT — the reported movement is {share:.2f} % of what a stage that"
+          f" overruns `s_k` can reach, so {reach} is explained by the overrun{tail}")
+    return 0
 
 
 def cmd_isa(args) -> None:
@@ -602,6 +744,14 @@ def cmd_selftest(args) -> int:
     checks.append((f"block-level staging would give {(sh_k + sh_v) / (bs_k + bs_v):.2f}x, just under "
                    f"G*M = {G * M} (the residue is each row tile's masked tail)",
                    G * M * 0.9 < (sh_k + sh_v) / (bs_k + bs_v) <= G * M + 1e-9))
+    # 8. the K stage indexes its own L slots, so its LDS footprint is L rows deep and not span rows
+    #    deep. Read off the source, so this fails when the kernel regresses to a window-absolute
+    #    index (the §13 defect); the p300 tile and a full MAXSC window are both priced.
+    src = KERNEL_H.read_text()
+    for span in (277, MAXSC):
+        r = k_stage_reach(src, C, span)
+        checks.append((f"K stage reaches {fmt_b(r['bytes_worst'])} for a {span}-lane span, within the "
+                       f"{fmt_b(r['declared'])} `s_k` reserves (spelling {r['exprs']})", r["ok"]))
     fails = 0
     for name, ok in checks:
         print(f"  {'ok  ' if ok else 'FAIL'}  {name}")
@@ -789,7 +939,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", nargs="?", default="geometry",
-                    choices=["geometry", "traffic", "isa", "selftest", "gate"])
+                    choices=["geometry", "traffic", "lds", "oob-bound", "isa", "selftest", "gate"])
+    ap.add_argument("--observed", type=int, default=-1,
+                    help="for oob-bound: the element count a device report printed, to price the"
+                         " diagnosis against it; -1 prints only the bound")
+    ap.add_argument("--kernel", default="",
+                    help="price the LDS census against another copy of the kernel header "
+                         "(for a before/after); empty is the live one")
     ap.add_argument("--tokens", type=int, default=1024)
     ap.add_argument("--wave-rows", type=int, default=512)
     ap.add_argument("--fixture", default="p300")
@@ -807,6 +963,10 @@ def main() -> int:
         cmd_geometry(args)
     elif args.cmd == "traffic":
         cmd_traffic(args)
+    elif args.cmd == "lds":
+        return cmd_lds(args)
+    elif args.cmd == "oob-bound":
+        return cmd_oob_bound(args)
     elif args.cmd == "isa":
         cmd_isa(args)
     elif args.cmd == "selftest":
