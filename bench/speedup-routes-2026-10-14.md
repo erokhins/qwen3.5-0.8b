@@ -312,13 +312,21 @@ below a 15 % wave win.**
 
 ## 9. Housekeeping for the clean-up
 
-* **`tmp/` is 126 GB across 297 entries** and is all regenerable work output: gate dump directories
-  (`tmp/gdna` 23 G, `tmp/f` 18 G, `tmp/tilefull` 12 G, `tmp/q6` 11 G, `tmp/q10` 11 G, `tmp/tilefix1024f`
-  7.7 G, `tmp/form1024` 5.8 G, `tmp/q10b` 5.1 G, `tmp/d9_sizing` 5.1 G, `tmp/tilefix640f` 4.9 G …),
-  spike scratch, and built binaries. **Deleting it loses no recorded number** — every figure lives in
-  `bench/`, `devices/`, `specification/` or a `results.md`, and any dump set regenerates with
-  `tools/dump_fixtures.sh` + `engine/gate.py --work <dir>`. Disk is not tight (2.4 TB free), so this is
-  tidiness, not necessity.
+* **`tmp/` was cleaned on 2026-10-14: 126 GB → 83 MB** (disk free went 2.4 TB → 2.5 TB). What went was the
+  regenerable payload and nothing else: **132,683 `.bin` per-row logits dumps (121.2 GB) and 526 `.npy`
+  stage dumps (3.9 GB)**, then the emptied directories. What stays, and it is all small: the probe and
+  doc-builder scripts (`tmp/*.py`, `tmp/*.sh`, `tmp/tilefix/`), the gate and sweep logs, the id fixtures
+  (`tmp/q10/ids{64,128,256,300,640,1024,3072}.txt` — several commands in this repo's docs read them), the
+  `tmp/pre-route/` source snapshot the route-(c) claims were taken against, and the built A/B witnesses
+  (`q6/decode_run_rpb8`, `q10b/decode_run_old`, `q10/decode_run_contig`, …) — about 3 MB of binaries that are
+  the only *built* evidence for historical ledger rows, so they are cheaper to keep than to re-explain.
+  After the clean, `decode_run` on the kept 1024-id fixture reproduced 305.4 ms (3,353 prompt tok/s, i.e.
+  today's number) and `engine/gate.py --fixture dec8` PASSed, so nothing load-bearing went with the dumps.
+* **The habit that keeps it small: a `--work` directory is disposable.** Every `engine/gate.py --work <dir>`
+  run writes one `.bin` per pinned prefill row, which is ~1 MB × rows × fixtures — `wide1024f` alone is
+  1,024 rows × 6 layers × ~1 MB. Delete the work dir when the verdict is written into a doc; the verdict, not
+  the dump, is the artifact. (Even the sanity check in this session's clean-up left an 80 MB directory behind
+  until it was removed by hand.)
 * **Do not delete:** `data/refs/` (3.3 GB of pinned HF dumps, gitignored, the ground truth for every gate —
   and `wide640f`/`wide1024f` are the only >`MAXSC` pins on the box), `tools/band_history.py`'s
   `bench/band-history.jsonl`, or any `results.md`.
