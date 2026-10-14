@@ -87,16 +87,6 @@ const char* gdn_chunk_refusal(int tokens) {
            "claim, so it needs a new budget line, not a constant edit.";
 }
 
-std::size_t gdn_chunk_scratch_bytes(int rows) {
-    const std::size_t r = static_cast<std::size_t>(rows > 0 ? rows : 0);
-    const std::size_t chunks = (r + kGdnChunkTokens - 1) / kGdnChunkTokens;
-    const std::size_t hv = r * 16u * 128u;
-    return hv * 4u                       // nv     F32: a result, never a rounded operand
-           + hv * 2u * 3u                // kcd, qg, kh   BF16 operands
-           + r * 16u * 64u * 2u          // intra  BF16
-           + chunks * 16u * 4u;          // cdec   F32 per (chunk, head)
-}
-
 void gdn_chunk_prefill(const GdnChunkLayerArgs& a) {
     if (a.n < 2) {
         throw std::runtime_error("gdn_chunk_prefill: n=" + std::to_string(a.n) + "; a one-row body is"

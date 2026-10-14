@@ -254,7 +254,8 @@ GdnScan resolve_gdn_scan(GdnScan want, int rows);
 const char* gdn_chunk_refusal(int tokens);
 
 // One GDN layer, one body, chunked form: TWO launches (`prep` then `carry`). Everything except `S`
-// is body-scoped scratch (`engine/decode_step.h:gdn_chunk_scratch_bytes` sizes it), reused per layer
+// is body-scoped scratch (`decode_step.cpp:allocate_scratch` allocates the six of them and
+// `free_scratch` releases them), reused per layer
 // in stream order like `g_u`/`g_o`.
 struct GdnChunkLayerArgs {
     const float* u = nullptr;      // [n][6144] post-conv q|k|v, the tile `gdn_rec` reads row by row
@@ -262,7 +263,7 @@ struct GdnChunkLayerArgs {
     const float* beta = nullptr;   // [n][16]
     float* S = nullptr;            // [16][128][128] F32 state — the only thing that survives
     float* o = nullptr;            // [n][2048] F32, §04.5's input
-    float* nv = nullptr;           // staging, see gdn_chunk_scratch_bytes
+    float* nv = nullptr;           // staging: F32 because it is a result, never a rounded operand
     uint16_t* kcd = nullptr;
     uint16_t* qg = nullptr;
     uint16_t* kh = nullptr;
@@ -271,11 +272,6 @@ struct GdnChunkLayerArgs {
     int n = 0;                     // rows in the body; >= 2, because a 1-row body is kSeq
 };
 void gdn_chunk_prefill(const GdnChunkLayerArgs& a);
-
-// Bytes of body-scoped staging a chunked body of `rows` rows needs. Sized from the same expressions
-// the kernel indexes with, and `gate.py` reads the number out of the engine's own echo rather than
-// carrying a copy of it.
-std::size_t gdn_chunk_scratch_bytes(int rows);
 
 // ---- §04.5: the gated RMSNorm (prototype/gdn_gated_norm). `o` is the recurrence's F32 output
 // (the kernel rounds it to the activation dtype itself); `z` is in_proj_z's BF16 rows; `w_norm`
