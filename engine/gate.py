@@ -4020,7 +4020,10 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
                # sides silently ran different attention FORMS compares two things at once. §13's device
                # pass is exactly the pass that was read while one side had silently thrown inside
                # `prefill_wave`, so the form is named on the command line here too.
-               "--attn-tile", args.attn_tile]
+               "--attn-tile", args.attn_tile,
+               # The GDN scan too, for the identical reason: the two sides of a width A/B must differ
+               # in width and nothing else.
+               "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk)]
         if replay:
             cmd += ["--replay", ",".join(str(t) for t in greedy[:-1])]
         print("  $ " + " ".join(cmd))
@@ -5157,6 +5160,22 @@ def main() -> int:
                          " run and asserted against the run's own NUMERICS echo, because the open"
                          " question is which form is wrong above MAXSC and a judged run that cannot"
                          " say which form it ran is evidence about neither")
+    ap.add_argument("--gdn-scan", choices=("seq", "chunk"), default="seq",
+                    help="which §04.4 scan a GDN body runs, passed straight to `decode_run"
+                         " --gdn-scan` (P9, §04.7, bench/p9-phase1-2026-10-14.md): `seq` is the"
+                         " shipped recurrence (one launch per token per layer) and the form every"
+                         " decode pin is pinned through; `chunk` is the chunked scan (one prep and"
+                         " one carry launch per layer per body). P9's device matrix is this flag"
+                         " twice over the ten fixtures. Asserted against the run's own NUMERICS echo,"
+                         " for the same reason as --attn-tile: the two forms are owed only Phase 0's"
+                         " §2.1/§2.3 bands, so a run that cannot say which scan it ran is evidence"
+                         " about neither, and a silent fall back to `seq` would price the shipped"
+                         " form twice and report it as the chunked one")
+    ap.add_argument("--gdn-chunk", type=int, default=64,
+                    help="the chunk size in tokens, passed to `decode_run --gdn-chunk` and asserted"
+                         " against its echo. 64 is the value Phase 0's budget selected; 16 is"
+                         " measured and rejected (per-row 1-cos 3.388e-4 > the 3.2e-4 ceiling), so"
+                         " the refusal text matters more than the number")
     ap.add_argument("--break-wave", action="store_true",
                     help="with --dry-run: make the wide-wave side of section (h) report one-row-per-"
                          "token launch counters, which is what a refactor that silently drops back to "
@@ -5345,7 +5364,11 @@ def main() -> int:
            # The attention form, named for the same reason and asserted against the same kind of echo:
            # section (i) exists to decide §15's question, and a log that cannot say which form produced
            # its rows is not evidence about either of them.
-           "--attn-tile", args.attn_tile]
+           "--attn-tile", args.attn_tile,
+           # The GDN scan, named on every run and asserted below: P9's matrix is this flag twice over
+           # the ten fixtures, and a judged run that cannot say which scan produced its rows is
+           # evidence about neither.
+           "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk)]
     if args.state_fp:
         # On by default: a fixture that carries fingerprint pins cannot judge G5's state half without
         # them, and a section that silently did not run is the gap P1 was written to close (§2.6). The
@@ -5473,6 +5496,22 @@ def main() -> int:
                " claim about either form can be made from this log" if echoed_tile is None else
                f"NUMERICS echoed attn_tile={echoed_tile}, this gate was run with --attn-tile"
                f" {args.attn_tile}"))
+        # The GDN scan, read off the same line for the same reason (P9). This is also the check that
+        # catches a silent fall back: a `--gdn-scan chunk` run whose launcher decided to run `seq`
+        # after all would echo `seq` here and fail, rather than pricing the shipped form twice.
+        echoed_scan = run.get("numerics", {}).get("gdn_scan")
+        check(str(echoed_scan) == str(args.gdn_scan),
+              "the run ran the GDN scan this gate is judging it under",
+              ("its NUMERICS line carried no `gdn_scan=` — the binary predates --gdn-scan, so no claim"
+               " about either scan can be made from this log" if echoed_scan is None else
+               f"NUMERICS echoed gdn_scan={echoed_scan}, this gate was run with --gdn-scan"
+               f" {args.gdn_scan}"))
+        echoed_chunk = run.get("numerics", {}).get("gdn_chunk")
+        check(str(echoed_chunk) == str(args.gdn_chunk),
+              "the run named the chunk size this gate is judging it under",
+              ("its NUMERICS line carried no `gdn_chunk=`" if echoed_chunk is None else
+               f"NUMERICS echoed gdn_chunk={echoed_chunk}, this gate was run with --gdn-chunk"
+               f" {args.gdn_chunk}"))
     check(bool(run["steps"]), "one STEP line per token", f"{len(run['steps'])} lines")
     if not run["steps"]:
         notes.append("no STEP lines at all: decode_run printed nothing the gate could parse — read"
@@ -5900,6 +5939,8 @@ def main() -> int:
             "fixture": REFS.name,
             "scope": SCOPE,
             "attn_tile": args.attn_tile,
+            "gdn_scan": args.gdn_scan,
+            "gdn_chunk": args.gdn_chunk,
             "gemm": GEMM_ROUTE,
             "reason": WAVE_CARRY_REASON,
             "n_checks": len(deferred_records),
