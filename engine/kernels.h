@@ -209,10 +209,73 @@ void gdn_conv(const float* raw, const float* win, const float* conv_weight, floa
 void gdn_gates(const float* a_raw, const float* b_raw, const float* a_log, const float* dt_bias,
                float* g, float* beta, int tokens = 1);
 // One GDN layer: 16 blocks, thread j owns column j of S. `S` is the layer's [16][128][128] block.
-// Per TOKEN, and stays that way: the recurrence is a sequential scan (§04.4), so unlike the three
-// launchers above it has no token width. Chunking it is P9, conditionally.
+// Per TOKEN, and stays that way for the sequential form: the recurrence is a sequential scan
+// (§04.4), so unlike the three launchers above it has no token width.
 void gdn_rec(const float* q, const float* k, const float* v, const float* g, const float* beta,
              float* S, float* o);
+
+// ---- P9: which §04.4 scan a body runs ----------------------------------------------------------
+// Two forms of the same recurrence, from one binary, so a before/after attribution is one window.
+//
+//   kSeq    §04.4's recurrence, one `gdn_rec` launch per token per layer. THE DEFAULT and the shipped
+//           form: every decode pin is pinned through it, and `prototype/gdn_decode` gates it.
+//   kChunk  §04.7's chunked scan (`prototype/gdn_chunk/gdn_chunk_kernels.h`): one `prep` and one
+//           `carry` launch per layer per BODY instead of one launch per token. Its error budget was
+//           admitted on CPU by `prototype/gdn_chunk/phase1.py` against the pinned dumps; the form
+//           itself is band-gated, never bit-gated, because a chunked dot's association is not the
+//           sequential dot's (§10.1) — see the deviation list at the top of that header.
+//
+// `resolve_gdn_scan` is the one place the row-count rule lives, and it is deliberately shaped like
+// `resolve_wave_gemm`: a ONE-ROW body is kSeq whatever was asked for. That is not a performance
+// opinion. Chunking a scan of one token buys nothing (one chunk, no inter-chunk work) and it would
+// move every decode bit through the chunked form's rounding, which is the one thing §04.7's budget
+// was never allowed to do — phase1's `onerow` witness compares the two forms on a single state
+// update precisely so that this rule is checkable rather than assumed.
+enum class GdnScan { kSeq, kChunk };
+
+// The chunk size, in tokens, that the kernel is instantiated at. One value, compile-time:
+// `prototype/gdn_chunk/phase1.py` prices C=64 inside both budget lines and REJECTS C=16 outright
+// (per-row 1-cos 3.388e-4 against the 3.2e-4 ceiling), and a second instantiation of a form that is
+// already 0.3 % inside a budget line is not something to add without being asked for.
+inline constexpr int kGdnChunkTokens = 64;
+
+// Parse-or-throw, like `parse_wave_gemm`: this names which side of an A/B a run is, and a typo that
+// silently became the default would price the default twice and report it as the chunked one.
+GdnScan parse_gdn_scan(const std::string& name);
+const char* gdn_scan_name(GdnScan s);
+
+// The row-count rule, in one place. `rows` is the BODY's row count, known only where the body is
+// submitted, which is why this is a function and not a parsed value.
+GdnScan resolve_gdn_scan(GdnScan want, int rows);
+
+// Why a `--gdn-chunk` value is not accepted, or null for "accepted". The reason has to be printed
+// rather than implied: a bare "unsupported" would not tell a reader that C=16 was measured and
+// rejected on the numerics, which is the whole argument for why the default is 64.
+const char* gdn_chunk_refusal(int tokens);
+
+// One GDN layer, one body, chunked form: TWO launches (`prep` then `carry`). Everything except `S`
+// is body-scoped scratch (`engine/decode_step.h:gdn_chunk_scratch_bytes` sizes it), reused per layer
+// in stream order like `g_u`/`g_o`.
+struct GdnChunkLayerArgs {
+    const float* u = nullptr;      // [n][6144] post-conv q|k|v, the tile `gdn_rec` reads row by row
+    const float* g = nullptr;      // [n][16]
+    const float* beta = nullptr;   // [n][16]
+    float* S = nullptr;            // [16][128][128] F32 state — the only thing that survives
+    float* o = nullptr;            // [n][2048] F32, §04.5's input
+    float* nv = nullptr;           // staging, see gdn_chunk_scratch_bytes
+    uint16_t* kcd = nullptr;
+    uint16_t* qg = nullptr;
+    uint16_t* kh = nullptr;
+    uint16_t* intra = nullptr;
+    float* cdec = nullptr;
+    int n = 0;                     // rows in the body; >= 2, because a 1-row body is kSeq
+};
+void gdn_chunk_prefill(const GdnChunkLayerArgs& a);
+
+// Bytes of body-scoped staging a chunked body of `rows` rows needs. Sized from the same expressions
+// the kernel indexes with, and `gate.py` reads the number out of the engine's own echo rather than
+// carrying a copy of it.
+std::size_t gdn_chunk_scratch_bytes(int rows);
 
 // ---- §04.5: the gated RMSNorm (prototype/gdn_gated_norm). `o` is the recurrence's F32 output
 // (the kernel rounds it to the activation dtype itself); `z` is in_proj_z's BF16 rows; `w_norm`

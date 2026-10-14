@@ -109,6 +109,18 @@ struct Options {
     // that silently became the default would price the default twice and call it the tiled form.
     int attn_tile = 0;
     bool attn_tile_given = false;
+    // Which §04.4 scan a GDN body runs (P9, §04.7). `seq` is the shipped recurrence — one launch per
+    // token per layer, the form every decode pin is pinned through — and `chunk` is §04.7's chunked
+    // scan, two launches per layer per BODY. One binary carries both, so the before/after attribution
+    // is one window. A one-row body is `seq` under either setting (`resolve_gdn_scan` enforces that,
+    // not the parser), so no decode bit moves either way. Parse-or-throw like `--gemm`.
+    engine::kernels::GdnScan gdn_scan = engine::kernels::GdnScan::kSeq;
+    bool gdn_scan_given = false;
+    // The chunk size. Only 64 is accepted, and the refusal prints the measured reason rather than
+    // "unsupported": C=16 lost §2.3's per-row budget on the pinned dumps, which is the argument for
+    // why 64 is the default at all.
+    int gdn_chunk = engine::kernels::kGdnChunkTokens;
+    bool gdn_chunk_given = false;
     // The stage clock (`engine/stage_clock.h`): re-runs the run's generation steps twice more, once
     // with a wait at every family boundary and once with a wait after every submission, and reports
     // them next to the pipelined step. A bench-only observation flag: the run it is attached to still
@@ -189,6 +201,24 @@ Options parse_args(int argc, char** argv) {
             }
             o.attn_tile = v == "1";
             o.attn_tile_given = true;
+        } else if (a == "--gdn-scan") {
+            o.gdn_scan = engine::kernels::parse_gdn_scan(next());
+            o.gdn_scan_given = true;
+        } else if (a == "--gdn-chunk") {
+            const std::string v = next();
+            int n = 0;
+            try {
+                size_t used = 0;
+                n = std::stoi(v, &used);
+                if (used != v.size()) throw std::invalid_argument(v);
+            } catch (const std::exception&) {
+                throw std::runtime_error("--gdn-chunk takes a token count (64); got '" + v + "'");
+            }
+            if (const char* why = engine::kernels::gdn_chunk_refusal(n)) {
+                throw std::runtime_error("--gdn-chunk " + v + " is refused: " + why);
+            }
+            o.gdn_chunk = n;
+            o.gdn_chunk_given = true;
         } else if (a == "--time-stages") {
             o.time_stages = true;
         } else if (a == "--time-waves") {
@@ -421,7 +451,23 @@ void print_usage(FILE* out) {
                  " unchanged, only which block a K row comes from. Wave-only: a one-row body is the fused"
                  " single-row form under either setting, so no decode bit moves, and the tiled form"
                  " REFUSES (`score_f32`, a fused plan, a non-32 warp) rather than falling back, because a"
-                 " silent fallback would price the shipped form twice and report it as the tiled one"
+                 " silent fallback would price the shipped form twice and report it as the tiled one\n"
+                 "  --gdn-scan seq|chunk  which §04.4 scan a GDN body runs (P9, §04.7,"
+                 " bench/p9-phase1-2026-10-14.md). `seq`, the default, is the shipped recurrence: ONE"
+                 " launch per token per layer, 18,432 launches per 1024-token wave, and the form the"
+                 " decode pins are pinned through. `chunk` runs the chunked scan — intra-chunk work in"
+                 " one launch per body, the inter-chunk carry in a second one that parks the state"
+                 " strip in LDS instead of round-tripping it per token (72 launches for the same wave)."
+                 " Wave-only: a one-row body is `seq` under either setting, so no decode bit moves."
+                 " Band-gated, never bit-gated: a chunked dot's association is not the sequential dot's"
+                 " (§10.1), and the budget it was admitted against is Phase 0's §2.1/§2.3 lines as"
+                 " measured by prototype/gdn_chunk/phase1.py. It REFUSES rather than falling back, for"
+                 " the same reason the tiled attention core does\n"
+                 "  --gdn-chunk N  the chunk size in tokens, 64. Smaller is refused with the reason:"
+                 " C=16 is measured and outside §2.3's per-row ceiling (1-cos 3.388e-4 > 3.2e-4), and"
+                 " C=32 is inside that budget but unbuilt — the kernel is instantiated at one C, and a"
+                 " second instantiation of a form already 0.3 %% inside a stage line is not added"
+                 " unasked. Larger is unbudgeted: 16/32/64 are the sizes the CPU judge sweeps"
                  "  --time-waves After the run, replay its PROMPT wave from a fresh state at two"
                  " submission granularities — the production shape, queued with one wait at the logits"
                  " (burst), and one wait at every family boundary (stage) — and attribute the serialized"
@@ -861,6 +907,9 @@ WavePassResult wave_pass(const Options& o, const engine::WeightStore& store, eng
         shape.wave_rows = sc.wave_rows;
         shape.priced_rows = priced_rows;
         shape.wall_ms = out.wall_ms;
+        // Which scan the pass ran, so the plan bills `gdn_chunk` sites instead of `gdn_rec` launches.
+        // The single-row-body exception is derived from the shape inside `wave_plan_bill`, not here.
+        shape.gdn_chunked = (o.gdn_scan == engine::kernels::GdnScan::kChunk);
         std::printf("%s\n", clock->describe_wave(shape).c_str());
     }
     return out;
@@ -1001,10 +1050,12 @@ int main(int argc, char** argv) {
         // this repository changing. Printed in every mode, like LAUNCH — a statement about the code and
         // the library it is linked against, not about the run — and read by `gate.py`'s
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
-        std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d\n",
+        std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d"
+                    " gdn_scan=%s gdn_chunk=%d\n",
                     engine::kMaxWaveRows, o.wave_rows,
                     engine::kernels::wave_gemm_name(o.wave_gemm),
-                    engine::kernels::gemm_route_version().c_str(), o.attn_tile);
+                    engine::kernels::gemm_route_version().c_str(), o.attn_tile,
+                    engine::kernels::gdn_scan_name(o.gdn_scan), o.gdn_chunk);
         if (o.sizes_only) {
             std::printf("RESULT mode=sizes-only tensors=%zu check_weights=PASS\n", stats.n_loaded);
             std::fflush(stdout);
@@ -1016,6 +1067,8 @@ int main(int argc, char** argv) {
         sc.mlp_gate_map = o.mlp_gate_map;
         sc.wave_gemm = o.wave_gemm;
         sc.attn_tile = o.attn_tile;
+        sc.gdn_scan = o.gdn_scan;
+        sc.gdn_chunk = o.gdn_chunk;
         if (o.wave_gemm == engine::kernels::WaveGemm::kLibrary) {
             // Created here, once, before the first body: the handle and the pinned workspace must not
             // be first touched 400 launches into a prefill. Only when the route is actually on, so a

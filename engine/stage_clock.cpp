@@ -87,6 +87,25 @@ WavePlanBill wave_plan_bill(const WaveShape& sh) {
     p.subs[kGdnConv] = G * bodies;
     p.subs[kGdnGates] = G * bodies;
     p.subs[kGdnRec] = G * tokens;
+    p.subs[kGdnRec] = G * tokens;
+    // The two scan forms, billed by what each one submits. Sequential recurrence: one site per layer
+    // per TOKEN, because token t cannot start before t-1 finished writing S. Chunked scan: one site per
+    // layer per BODY, and the body's rows that fit in one chunk is where the serial part stops (§04.7).
+    // The one-row exception is derived here rather than trusted to the caller: with `bodies` and
+    // `wave_rows` this file can see that the FINAL body of a run is one row (tokens ==
+    // (bodies-1)*wave_rows + 1) and therefore ran `gdn_rec` for its one token even in a
+    // `--gdn-scan chunk` run — the same rule `resolve_gdn_scan` applies, restated from the shape the
+    // driver reports rather than from the flag, which is what makes the plan's row agree with the
+    // counted one when the two are compared.
+    if (sh.gdn_chunked) {
+        const long long last_body_rows =
+            sh.bodies > 0 ? sh.tokens - (sh.bodies - 1) * sh.wave_rows : 0;
+        const long long single = (last_body_rows == 1) ? 1 : 0;   // that body is seq's, by the rule
+        p.subs[kGdnRec] = G * single;        // its one token, and nothing else in a chunked run
+        p.subs[kGdnChunk] = G * (sh.bodies - single);
+    } else {
+        p.subs[kGdnChunk] = 0;
+    }
     p.subs[kGdnGatedNorm] = G * bodies;
     p.subs[kAttn] = A * bodies;
     p.subs[kMlpGateup] = L * bodies;
@@ -120,7 +139,7 @@ launchstats::Family* launchstats_twin(Stage s) {
 // the three non-launch rows last. Not the enum order, because the enum keeps §07's nine rows first so
 // the STEP report's row order is untouched.
 const Stage kWaveOrder[] = {kGlue,   kProj,   kGdnConv,        kGdnGates, kGdnRec,
-                            kGdnGatedNorm, kAttn, kMlpGateup,  kMlpDown,  kCast,
+                            kGdnChunk, kGdnGatedNorm, kAttn, kMlpGateup,  kMlpDown,  kCast,
                             kCopy,   kLmHead, kHostTail};
 
 // The reconciliation band for `ungaged_ms`: everything the segments do not cover — the host work before
@@ -156,6 +175,7 @@ const char* stage_name(Stage s) {
         case kGdnConv: return "gdn_conv";
         case kGdnGates: return "gdn_gates";
         case kGdnRec: return "gdn_rec";
+        case kGdnChunk: return "gdn_chunk";
         case kGdnGatedNorm: return "gdn_gated_norm";
         case kMlpGateup: return "mlp_gateup";
         case kMlpDown: return "mlp_down";
@@ -169,6 +189,7 @@ Stage coarse_stage(Stage s) {
         case kGdnConv:
         case kGdnGates:
         case kGdnRec:
+        case kGdnChunk:
         case kGdnGatedNorm:
             return kGdn;
         case kMlpGateup:
@@ -401,7 +422,7 @@ std::string Clock::describe_wave(const WaveShape& shape) const {
         // `gdn` and `mlp` are the two rows the tables spell differently: §07 bills them as 72 and 48 under
         // one name each, the wave bill carries them under six. Fold, then compare everything.
         const long long gdn_wave = w1.subs[kGdnConv] + w1.subs[kGdnGates] + w1.subs[kGdnRec] +
-                                   w1.subs[kGdnGatedNorm];
+                                   w1.subs[kGdnChunk] + w1.subs[kGdnGatedNorm];
         const long long mlp_wave = w1.subs[kMlpGateup] + w1.subs[kMlpDown];
         const bool same = w1.subs[kGlue] == tok[kGlue] && w1.subs[kProj] == tok[kProj] &&
                           gdn_wave == tok[kGdn] && w1.subs[kAttn] == tok[kAttn] &&

@@ -257,6 +257,18 @@ DecodeScratch allocate_scratch(int wave_rows) {
     sc.g_o = alloc<float>(vdim);
     sc.conv_new = alloc<float>(kConvWindow * kConvChannels);
 
+    // P9's chunked-scan staging (§04.7). Allocated unconditionally, like `a_part`: a `seq` run never
+    // touches it, and a conditional allocation here would be a branch in the hot path and a code path
+    // the default run cannot exercise. ~11 MiB at the 512-row ceiling — the same order as `a_part`'s
+    // 33.8 MB, and AGENTS.md is explicit that memory capacity is not this model's constraint.
+    sc.g_nv = alloc<float>((size_t)wave_rows * kNumValueHeads * kHeadDim);
+    sc.g_kcd = alloc<uint16_t>((size_t)wave_rows * kNumValueHeads * kHeadDim);
+    sc.g_qg = alloc<uint16_t>((size_t)wave_rows * kNumValueHeads * kHeadDim);
+    sc.g_kh = alloc<uint16_t>((size_t)wave_rows * kNumValueHeads * kHeadDim);
+    sc.g_intra = alloc<uint16_t>((size_t)wave_rows * kNumValueHeads * kernels::kGdnChunkTokens);
+    sc.g_cdec = alloc<float>(((size_t)wave_rows + kernels::kGdnChunkTokens - 1) /
+                             kernels::kGdnChunkTokens * kNumValueHeads);
+
     sc.a_q = alloc<uint16_t>(qprj);
     sc.a_k = alloc<uint16_t>(kprj);
     sc.a_v = alloc<uint16_t>(kprj);
@@ -309,6 +321,12 @@ void free_scratch(DecodeScratch& sc) {
     (void)hipFree(sc.g_u);
     (void)hipFree(sc.g_o);
     (void)hipFree(sc.conv_new);
+    (void)hipFree(sc.g_nv);
+    (void)hipFree(sc.g_kcd);
+    (void)hipFree(sc.g_qg);
+    (void)hipFree(sc.g_kh);
+    (void)hipFree(sc.g_intra);
+    (void)hipFree(sc.g_cdec);
     (void)hipFree(sc.a_q);
     (void)hipFree(sc.a_k);
     (void)hipFree(sc.a_v);
@@ -612,17 +630,47 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             stageclock::note(stageclock::kCast);
             kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32, (size_t)n * kQwidth);
         } else {
-            for (int t = 0; t < n; ++t) {
-                // §04.4's recurrence. q, k, v are the three 2048-wide slices of row t of the conv's
-                // output tile (§04.1's [q|k|v]); rec_kernel indexes its own slice as [head][dim], so
-                // the pointers are just offsets into that row.
-                stageclock::note(stageclock::kGdnRec);
-                kernels::gdn_rec(sc.g_u + (size_t)t * kQkvRows,
-                                 sc.g_u + (size_t)t * kQkvRows + kValueDim,
-                                 sc.g_u + (size_t)t * kQkvRows + 2 * kValueDim,
-                                 sc.g_g + (size_t)t * kNumValueHeads,
-                                 sc.g_beta + (size_t)t * kNumValueHeads,
-                                 st.gdn_state_layer(layer), sc.g_o + (size_t)t * kValueDim);
+            // The GDN mixer, and the one place the §04.4 scan FORM is chosen. `resolve_gdn_scan` is
+            // the whole rule: a one-row body is `rec_kernel` whatever the run asked for, so a
+            // generation step is the shipped sequential bits under either side of this A/B — the
+            // same "a decode bit cannot move" property `--attn-tile` and `--gemm` carry, and for the
+            // same reason (the decode pins are pinned through the sequential form).
+            //
+            // The chunked branch is ONE site per layer per body instead of n launches per layer, which
+            // is the entire point of P9: at 1024 lanes and two 512-row bodies that is 36 sites and 72
+            // launches where the sequential form issues 18,432 (§06.4 says count them, and the wave
+            // report's `gdn_chunk` row does). The scan is still serial; what got chunked is the
+            // intra-chunk work and the state traffic, not the dependency.
+            if (kernels::resolve_gdn_scan(sc.gdn_scan, n) == kernels::GdnScan::kChunk) {
+                kernels::GdnChunkLayerArgs c{};
+                c.u = sc.g_u;                 // [n][6144]; the kernel slices q|k|v itself (§04.1)
+                c.g = sc.g_g;
+                c.beta = sc.g_beta;
+                c.S = st.gdn_state_layer(layer);
+                c.o = sc.g_o;                 // [n][2048], §04.5's input, F32 as rec_kernel leaves it
+                c.nv = sc.g_nv;
+                c.kcd = sc.g_kcd;
+                c.qg = sc.g_qg;
+                c.kh = sc.g_kh;
+                c.intra = sc.g_intra;
+                c.cdec = sc.g_cdec;
+                c.n = n;
+                stageclock::note(stageclock::kGdnChunk);   // one SITE, two launches (prep then carry),
+                                                           // counted like the attention site is
+                kernels::gdn_chunk_prefill(c);
+            } else {
+                for (int t = 0; t < n; ++t) {
+                    // §04.4's recurrence. q, k, v are the three 2048-wide slices of row t of the conv's
+                    // output tile (§04.1's [q|k|v]); rec_kernel indexes its own slice as [head][dim], so
+                    // the pointers are just offsets into that row.
+                    stageclock::note(stageclock::kGdnRec);
+                    kernels::gdn_rec(sc.g_u + (size_t)t * kQkvRows,
+                                     sc.g_u + (size_t)t * kQkvRows + kValueDim,
+                                     sc.g_u + (size_t)t * kQkvRows + 2 * kValueDim,
+                                     sc.g_g + (size_t)t * kNumValueHeads,
+                                     sc.g_beta + (size_t)t * kNumValueHeads,
+                                     st.gdn_state_layer(layer), sc.g_o + (size_t)t * kValueDim);
+                }
             }
         }  // the mixer
 

@@ -75,6 +75,15 @@ struct DecodeScratch {
     // only), and a form that has not met the device does not become the engine's default by having been
     // written. `--attn-tile 1` is the A/B side.
     int attn_tile = 0;
+    // Which §04.4 scan a GDN body runs (P9, `kernels.h:GdnScan`). Same riding reason as the three
+    // above, and it too is overridden per body — a ONE-ROW body is `gdn_rec` whatever this says,
+    // because decode's bits are pinned through the sequential recurrence and a chunked scan of one
+    // token has nothing to win. The default is `kSeq`: the chunked form's device gate has not run,
+    // and a form that has not met the device does not become the engine's default by being written.
+    kernels::GdnScan gdn_scan = kernels::GdnScan::kSeq;
+    // The chunk size in tokens, echoed so a run states which chunk it claimed. Only 64 is accepted
+    // (`kernels.h:kGdnChunkTokens`); the refusal text carries the measured reason.
+    int gdn_chunk = kernels::kGdnChunkTokens;
     // Residual ping-pong. NOT aliased into one buffer: `glue_add_norm`'s `s` and `s_out` are both
     // `__restrict__`, so writing the new residual over the one it is reading is a contract violation
     // even though the same thread touches the same index.
@@ -110,6 +119,19 @@ struct DecodeScratch {
     float* g_u = nullptr;           // [6144] post-conv, q|k|v in one row (§07.2 slices it)
     float* g_o = nullptr;           // [2048] the recurrence's o, F32 (§04.5's input dtype)
     float* conv_new = nullptr;      // [kConvWindow][kConvChannels]
+
+    // P9's chunked-scan staging (§04.7). Body-scoped and reused per layer in stream order, exactly
+    // like `g_u`/`g_o`: nothing here is §08.1 state, because the only thing that survives a body is
+    // the [16][128][128] state block itself. Written by `gdn_chunk_prep`, read by `gdn_chunk_carry`.
+    // `nv` is F32 (a result being subtracted); the other four are BF16 because each is a matmul
+    // OPERAND on the carry side, which is where the CPU model rounds them. Allocated unconditionally
+    // (see `allocate_scratch`), so a `seq` run never touches it rather than not having it.
+    float* g_nv = nullptr;          // [wave_rows][16][128] F32
+    uint16_t* g_kcd = nullptr;      // [wave_rows][16][128] BF16
+    uint16_t* g_qg = nullptr;       // [wave_rows][16][128] BF16  q~ * Gamma
+    uint16_t* g_kh = nullptr;       // [wave_rows][16][128] BF16  k~ * (Gamma_C / Gamma)
+    uint16_t* g_intra = nullptr;    // [wave_rows][16][kGdnChunkTokens] BF16
+    float* g_cdec = nullptr;        // [ceil(wave_rows/kGdnChunkTokens)][16] F32
 
     // Attention (§07.3). The three stage buffers are required, not optional — `kernels_attn.cpp`
     // says why (the cache append lives behind the same null check as one of them). From P8 they are

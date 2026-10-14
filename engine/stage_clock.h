@@ -145,6 +145,11 @@ enum Stage : uint8_t {
     kGdnConv,
     kGdnGates,
     kGdnRec,        // §04.4's recurrence. Not a `LAUNCHSTAT` family, on purpose; see the header.
+    kGdnChunk,      // P9's §04.7 chunked scan: ONE site (two launches) per GDN layer per BODY, where
+                    // kGdnRec is one per layer per TOKEN. Which of the two rows is non-zero is the
+                    // resolved form's doing (`kernels.h:resolve_gdn_scan`), and a step — a one-token
+                    // body — can only ever fill kGdnRec, which is why the step plan bill above needs
+                    // no knowledge of the form at all.
     kGdnGatedNorm,
     kMlpGateup,
     kMlpDown,
@@ -187,6 +192,12 @@ struct WaveShape {
     int wave_rows = 0;     // the scratch's row ceiling it split at (`sc.wave_rows`)
     int priced_rows = 0;   // `finish_token` calls: 1 under `kLast`, `tokens` under `kAll`
     double wall_ms = 0.0;  // the driver's wall around the pass, filled in after it ran
+    // Which §04.4 scan the pass ran, as the RESOLVED form rather than as the flag: the plan needs the
+    // form because `gdn_rec` and `gdn_chunk` bill differently (per token vs per body), and it needs
+    // the resolved one because a one-row final body is `gdn_rec` even in a `--gdn-scan chunk` run.
+    // `wave_plan_bill` derives the split from `tokens`/`bodies`/`wave_rows`, so the plan and the
+    // dispatch cannot disagree about how many bodies were big enough to chunk.
+    bool gdn_chunked = false;
 };
 
 // One measured pass of serialized submission. Constructed per pass, armed for its duration; not
