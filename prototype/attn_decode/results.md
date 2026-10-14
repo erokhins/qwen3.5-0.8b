@@ -1459,7 +1459,7 @@ the geometry claimed.
 ### 21.3 The headline, and where the change does **not** reach
 
 Prefill, `RESULT ms_total` on the same 1024-token prompt, best-of-3: **385.153 → 307.464 ms = 2,660 →
-3,336 prompt tok/s, +25.4 %.** Today's shipped-side baseline reads 2,660 against the ledger's 2,706 (§6's
+3,330.5 prompt tok/s, +25.3 %.** Today's shipped-side baseline reads 2,659 against the ledger's 2,706 (§6's
 spread on an unpinned desktop), so quote the ratio, not the pair, against older rows.
 
 Width sweep, same shape (`--steps 1`, best-of-2 each side), which also bounds the regression risk of flipping

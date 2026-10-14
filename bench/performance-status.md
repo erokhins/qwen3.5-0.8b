@@ -1113,10 +1113,17 @@ either direction, and the differential `(ms_total(129) − ms_total(1))/128` at 
 | `GROUP matmul_ms` | 68.66 ms | 72.04 ms | unchanged (noise) |
 
 The admission line for this work was `attn ≤ 40 ms` and the traffic model predicted 27.2 ms from the read
-census before the run; the device returned 26.70 ms, 1.8 % inside its own prediction. A number that lands
-*better* than a bandwidth-derived line but not better than the memory system allows (26.70 ms at 6.45 GB =
-241 GB/s against a measured 237 GB/s ceiling) is a number that has finished with this lever: the attention
-wave is now bandwidth-bound at the box's ceiling, and the remaining 4× claim is spent.
+census before the run; the device returned 26.70 ms, 1.8 % inside its own prediction. **Read that as a bound
+met, not a mechanism proved.** 6.45 GB in 26.70 ms is 241.6 GB/s of *demanded* K/V bytes, which is a hair
+above the 237 GB/s this box's probe measured — and this repo's own trap says a bandwidth number north of
+~240 GB/s is evidence of skipped work. Here it is not, because correctness was established independently of
+this timing (bit-identity on every pinned row of both anchors, the op gate on both forms), so the honest
+reading is that the census **over-counts what reaches DRAM**: one lane row is demanded by G warps of its block
+*and* by every query row beneath it, and whatever the caches serve never appears in a demand model that counts
+every read. Two consequences, stated rather than glossed. The byte wall is now an upper bound on the time
+rather than the proven binding term. And the trap still bites: if a later pass quotes a higher effective
+bandwidth out of a lower demand model, the check that has to be re-run is correctness on the >MAXSC rows, not
+a friendlier arithmetic.
 
 **What the wave is made of now.** `attn` fell from 33 % to 11 % of the wave and `gdn_rec` is **~50 %** of it
 (121–126 ms of 241 ms) with matmul at 29 %. That is the second time in two days that a route died by becoming
