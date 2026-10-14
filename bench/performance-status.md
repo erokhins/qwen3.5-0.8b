@@ -1025,3 +1025,37 @@ wave-boundary check is inside a band, not byte-identical.
 (33.3 %) are 71.4 % of prefill, which is over the 40 % threshold this repo pre-registered for funding **P9** (the
 chunked delta-rule scan). It is an algorithm change, not a bit-identical rewrite, so it enters as a band question
 with its own plan file, the same way route (c) did.
+
+### Route A (the collapsed GDN recurrence) measured, and killed by its own line (2026-10-14, zero subagents, foreground, locks `hx routeA repro`/`hx routeA timing`/`hx routeA final verify`)
+
+The kernel in `3d838ea` faulted and produced no number. Two device-side defects later (the staging and
+write-back loops used `tid` as a column index into a 32-column strip — which read and wrote up to 96
+floats past every head's state and 65 cells past the end of its LDS array — and `q̃` was written as
+`qv * (rsqrtf(·) * Q_SCALE)` where the shipped kernel computes `(qv * rsqrtf(·)) * Q_SCALE`), the form
+is **bit-identical to `seq` everywhere it was checked**: 8 shapes in the new single-layer gate
+(`prototype/gdn_collapse/run.py`, `o bit-diff 0`, `state bit-diff 0`, guard bands clean, every `o`
+element written) and all ten fixtures end-to-end through `engine/gate.py`, including `wide1024f`'s
+4,132 files with every prefill row pinned — `diff_lines=0` on every one of them.
+
+And it is dead. `--time-waves` at 1024 lanes, best-of-3, both forms in one binary:
+
+| form | `gdn_rec` | runs (ms) | launches | ms/launch | wave wall (burst) |
+|---|---|---|---|---|---|
+| `seq` (shipped) | **125.36 ms** | 125.36 / 180.05 / 127.09 | 18,432 | 0.0068 | 322.83 ms |
+| `collapse` (route A) | **112.04 ms** | 112.04 / 112.37 / 113.28 | 36 | 3.112 | **316.07 ms** |
+
+D-12 fixed the lines before the kernel existed: **≤ 63 ms lives, > 84 ms dies.** Measured 112.04 ms, so
+the route is killed and `--gdn-scan` keeps `seq` as its default; `collapse` stays selectable because
+being bit-identical makes it a free A/B side, not because it is a win. End to end it buys 6.8 ms on a
+322 ms wave (2.1 %), which on the headline ruler would be 2,706 → ~2,755 prompt tok/s.
+
+The finding worth carrying is why the launch count was not the cost. The shipped form spends **6.8 µs
+per (token, layer)** on the recurrence; the resident form spends **6.1 µs** while issuing 36 launches
+instead of 18,432 and moving the state 38.7 GB → 75 MB per wave. The gap between the two is exactly the
+dispatch that was removed, which means `gdn_rec` is **latency-bound on §04.4's 2,048 dependent chains
+(40 % of this box's fp32 lanes), not launch-bound and not state-traffic-bound** — and no reshaping of
+launches or residency moves it. The bottom-up model priced 11.4 ms (1,370 instructions/token), i.e. the
+device came in at **9.8× the instruction model**, the same failure as the chunked route's 5.9×: at 1.6
+working wavefronts per CU an instruction is not issued per cycle, it waits. `#pragma unroll 8` on both
+`i` loops (bit-identical, one accumulator) changed 112.8 → 113.4 ms, confirming the loop is not
+LDS-latency-bound either; it was reverted. Detail in `prototype/gdn_collapse/results.md`.
