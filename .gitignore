@@ -15,14 +15,16 @@ models/
 # --- Cloned reference engines (external read-only checkouts) ---
 engines/
 
-# --- Agent scratch / cross-session notes ---
-thinking/
+# --- Agent scratch / IDE state ---
+# `thinking/` is GONE: the cross-session notes it once held moved to `progress/`
+# (dated one-shot docs) and to the `results.md` journals, and the directory was empty.
+# Do not recreate it; a new top-level dir here needs a .gitignore decision of its own.
 .junie/
 # Pi harness state, written by the harness itself — never authored here. The one
 # instance today is `engine/.pi/subagents.json`: the pi-subagents plugin's resolved
 # run settings (every value in it is a plugin default), written when a worker runs
 # with cwd=engine/. Two docs already require it to stay out of commits
-# (bench/HANDOFF-2026-10-14.md, bench/speedup-routes-2026-10-14.md). Blanket `.pi/`
+# (progress/2026-10-14/HANDOFF-2026-10-14.md, progress/2026-10-14/speedup-routes-2026-10-14.md). Blanket `.pi/`
 # at any depth; if this repo ever *authors* pi config (`.pi/settings.json`,
 # `.pi/agents/*.md`), replace this line with an explicit allowlist — git cannot
 # re-include a path whose parent directory is excluded.
@@ -70,6 +72,15 @@ results/
 tmp/
 .cache/
 
+# --- Cited evidence, and where it lives now -------------------------------------------
+# `tmp/` and `logs/` above are scratch-only since 2026-10-16: the 47 tracked files that
+# used to sit under them (39 in tmp/, 8 in logs/) moved to `progress/<owner>/evidence/`,
+# so `rm -rf tmp/` can no longer delete provenance and nothing here needs `git add -f`.
+# Both dirs STAY ignored, precisely because they are now scratch. Evidence files that kept
+# a `*.log` name must be re-allowed, because the `*.log` rule above is an unanchored
+# directory-independent pattern and bites at any depth (same class as `results/`, `refs/`).
+!progress/**/*.log
+
 # --- IDE / OS ---
 .idea/
 .vscode/
@@ -92,4 +103,3 @@ prototype/gdn_collapse/neg_*/
 # engine/build.sh writes its binary next to the sources; name the file exactly, never a
 # `engine/**/loader_test` pattern (that matches directories — see the block above).
 engine/loader_test
-*.o

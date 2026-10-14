@@ -123,11 +123,12 @@ speccheck/                   # independent Python implementation of that spec + 
 speccheck/chat.sh            # interactive chat on that path, with prefill/decode stats
 testdata/                    # engine-agnostic speed tests (long summarise, long poem) + schema
 bench/                       # engine-agnostic runner; bench.sh at the root drives it
+progress/                    # archive: dated one-shot docs in <YYYY-MM-DD>/ dirs, plus
+                             # progress/<owner>/evidence/ for the committed evidence files
 engine/                      # the engine: kernels, residency, scheduler, state pools, drivers
 prototype/                   # one subdir per op: standalone kernel + reference dump + gate
 engines/                     # cloned reference engines for cross-checking (gitignored, read-only)
 data/                        # reference dumps, fixtures, bench output (gitignored, regenerable)
-thinking/                    # gitignored per-chunk design notes (cross-session memory)
 devices/                     # measured platform facts
 ```
 
@@ -139,8 +140,11 @@ Conventions inherited from the old project:
 - Every `prototype/<op>/` ships with a reference-data tool, a test, and a
   `results.md`. Code graduates from `prototype/` into `engine/` only after its
   gate passes.
-- Start a chunk by reading the relevant `thinking/*.md`; those notes hold
+- Start a chunk by reading `progress/` (latest date folder first) and the
+  `results.md` journals, plus the current handoff note
+  `progress/2026-10-14/HANDOFF-2026-10-14.md`. Those documents hold
   on-hardware-verified facts and are the handoff memory. Do not re-derive them.
+  `progress/README.md` is the index and the rule for what goes there.
 - Never time anything against an `-O0` build (pin `-O2`; see
   `../qwen3.8-flash-next-old/thinking/p3d-4-slow-tests.md`).
 
@@ -162,7 +166,7 @@ Conventions inherited from the old project:
 - **M3 — useful.** quantized blobs (reuse the GGUF-import lessons), MTP
   speculative decode, minimal HTTP/serving shim.
   **Descoped 2026-10-12 by scope ruling** — quantization, MTP and any serving shim are dropped for
-  this project; the work that replaced them is `bench/plan-2026-10-12.md` (fixture breadth, prefill §06,
+  this project; the work that replaced them is `progress/2026-10-12/plan-2026-10-12.md` (fixture breadth, prefill §06,
   single-stream performance at a 4k context).
 - **M4 — scale-up (only after M2).** add the MoE block and a second engine
   model at `models/Qwen3.6-35B-A3B`, which needs no subsystem beyond what
