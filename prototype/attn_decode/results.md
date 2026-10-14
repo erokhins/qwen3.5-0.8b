@@ -1002,3 +1002,145 @@ form misses HF at row 1023 is wrong, not marginal. That is exactly the property 
 **Next step, stated as the fix rather than a re-run attempt:** the gate must actually pass `--prefill-logits all`
 when a fixture carries row pins, and the wave-carry checks must be scoped so a form A/B does not trip them for a
 reason unrelated to the form. Until then the four readings in §16 stay unopened, and `--attn-tile` stays `0`.
+
+## 18. §17's two instrument defects, fixed CPU-side (2026-10-14, worker pass: **no device touched, no timing taken**)
+
+§17 could not take §16's four readings because the instrument was wrong in two places, not because the engine
+was. Both are fixed in `engine/gate.py`, and each fix ships with a witness that has been shown to FAIL — this
+session has already produced three checkers that could not fail, and a fourth is one too many.
+
+### 18.1 Defect A — a fixture that pins every prefill row did not make the engine dump them
+
+Two bugs, one of them cosmetic-looking and one of them the reason §17 read as it did:
+
+1. **The forcing fired after the argv was built.** `main` assembled `cmd = [… "--prefill-logits",
+   args.prefill_logits, …]` and only on the *next* statement did `if rows_pin is not None:
+   args.prefill_logits = "all"`. The engine therefore received `last`, wrote one row, and the gate's own note
+   said `all`. The requirement now comes from the manifest (`prefill_logit_rows`) and is applied **before**
+   `cmd` exists, and the argv itself is asserted: `cmd_flag(cmd, "--prefill-logits") ==
+   args.prefill_logits`. Asserting on `cmd` rather than on `args` is the point — `args` is the variable the
+   old bug mutated, so a check on it could not have caught the old bug.
+2. **A coverage gap fell through into a numerics verdict.** Section (i) counted the missing rows, failed that
+   one line, and carried on to `check(not outside, "every judged prefill row is inside the floors")` — which
+   passes when nothing was judged. That is the second half of §17's shipped run: `1023 missing` next to a green
+   floor verdict computed over the one row that existed. A coverage gap must read as a coverage gap, so:
+
+   * a new pure predicate `prefill_row_coverage(n_rows, work, vocab, asked, echoed)` distinguishes the three
+     ways coverage is lost — the gate asked the wrong shape; the run's own `PREFILL logits=` echo disagrees
+     with the ask (the §17 shape, caught at the source rather than inferred from missing files); and the echo
+     says `all` but the files are absent or truncated;
+   * `main` runs it immediately after the run parses, **before** sections (a)/(b)/(g)/(h), and returns on a
+     gap: the failure names the side that owes the rows and the run prints no numerics section at all;
+   * section (i) re-proves it as its first line and returns before printing any rule or geometry preamble;
+   * the aggregate verdict is now `total == n_rows and not outside`, i.e. non-vacuous by construction, and a
+     row that goes unread after coverage passed ends the section instead of thinning the sample.
+
+**Witness.** `selftest_prefill_rows` went from 5 negatives to 16, all CPU, vocabulary 8 (§16's reason for
+staying in-process stands: a 1024-row stand-in dump is a disk benchmark). The seven new ones are the §17 shape
+(asked `all`, echoed `last`), asked-the-wrong-shape, no `PREFILL logits=` field at all, no rows at all, a
+truncated row dump, plus five direct `prefill_row_coverage` cases. The five numerics cases now *also* assert
+on what the section prints: `forbid=("was judged and is inside the floors",)`. Falsified by construction, in
+the direction that matters — with the coverage predicate stubbed to always pass, six of the new cases FAIL and
+two of them print exactly §17's symptom:
+
+```
+[PASS] every one of the 2 pinned prefill rows was judged and is inside the floors named above — 2 rows judged …
+it printed a verdict it had no business printing: ['was judged and is inside the floors']
+```
+
+The wiring was witnessed separately from the predicate, with a throwaway CPU stand-in for `decode_run`
+(`argv sink` + sparse row files, no engine, no device): asked `all` / echoed `last` → **1 failure, the coverage
+line, and not one numerics section printed**; echoed `all` / wrote nothing → same, with `640 missing, first at
+rows [0, 1, 2 …]`; echoed `all` / wrote all 640 → coverage PASSES and the gate proceeds into (a)…(h) (83
+failures from the stand-in's all-zero logits, i.e. the coverage gate is not a blanket refusal). That harness
+lives in `tmp/` and is not part of the tree; the in-process negatives are.
+
+### 18.2 Defect B — the wave-carry checks were counted as evidence about a form
+
+`--scope {full,form}` was added; the form A/B runs under `form`. Under `form`, section (h)'s **output**
+comparisons between wave widths (cross-width ids, the cascade-band rows, the batched-vs-carry bit-identity on
+the hand route) run, print as `[DEFERRED-PASS]`/`[DEFERRED-FAIL]`, and are written to
+`wave_carry_deferred.json` beside the dumps — but are not counted into that run's verdict, and the summary
+line says `PASS — with N wave-width check(s) DEFERRED and belonging to neither form` instead of a bare PASS.
+
+**The choice, stated: deferred, not "same form on both sides" — because that was already true and could not
+help.** `run_batched_ab` has passed `--attn-tile` to every side since §13's device pass was misread, so the
+batched/one-row/carried sides already differ only in `--wave-rows`. The reason those 26 failures cannot
+adjudicate the form question is not a mismatched pair of sides; it is that wave width is not the variable under
+test. So the fix is attribution, and it is deliberately not a silencer: nothing is deleted, no band moved, no
+check weakened, and `--scope full` — the default, and what every ordinary gate run uses — counts every one of
+them again. A carry check that fails identically on both forms stays a finding, and the sidecar makes it a
+*checkable* one rather than a rumour about whichever log was read last. The launch-counter half of section (h)
+is **not** deferred in any scope: it counts SITES, not lanes, so no attention form can move it, and it is the
+only thing in the tree that distinguishes "batching cost nothing" from "batching never ran".
+
+**Witness, on CPU with the existing injection** (`--break-ab-logits 3` on `dec8`, which differs one row on the
+one-row side of section (h)):
+
+| run | result |
+|---|---|
+| `--dry-run --break-ab-logits 3` (scope `full`) | `ENGINE GATE FAIL — 2 failed`, rc 1 — unchanged from before this change |
+| `--dry-run --attn-tile 1 --scope form --break-ab-logits 3` | rc 0, two `[DEFERRED-FAIL]` lines, summary names the deferral, sidecar records `n_failed 2 of 10` with `attn_tile: "1"` |
+
+`--selftest` (dec8) is green, including its own `--break-ab-logits` case, which still expects `[FAIL]` under
+the default scope; `engine/attn_form_band.py --selftest` is 15/15 (it imports `gate.py` for its bands, so this
+also proves the import path still works).
+
+### 18.3 What this pass ran (CPU only, no device, no timing)
+
+| command | result |
+|---|---|
+| `engine/gate.py --fixture wide1024f --no-engine` | PASS, row-block pairing proofs green |
+| `engine/gate.py --fixture wide1024f --dry-run --scope form` | PASS; forcing prints before `cmd`; argv assertion green; 10 wave-width checks deferred |
+| `engine/gate.py --fixture wide640f --dry-run [--scope form]` | PASS, same shape — the fix reads the manifest, so it is not keyed to 1024 |
+| `engine/gate.py --selftest --fixture dec8` | SELFTEST PASS (all sections, incl. the 16 section-(i) negatives) |
+| `engine/attn_form_band.py --selftest` | 15/15 |
+| `--break-ab-logits 3`, scope `full` vs `form` | rc 1 vs rc 0 + deferred-2 + sidecar, as above |
+| `tmp/stub_decode_run.py` coverage harness, three cases | see §18.1 |
+
+Nothing above produced a millisecond figure, and none of it entered a timing document.
+
+### 18.4 The device hand-off — exact commands, with §16's four readings restated one line each
+
+Blocking, one at a time, zero subagents, lock held across the pair. `--scope form` is new and required for the
+form question; `--prefill-logits all` is **not** typed — the manifest forces it, and the run's echo is checked.
+
+```bash
+# 1) the cheap generalisation check first: does the fix hold at 640 rows as well as 1024?
+tools/gpu_lock.sh acquire "attn-hf-anchor-640b"; tools/gpu_lock.sh util
+.venv/bin/python engine/gate.py --fixture wide640f  --attn-tile 0 --scope form --work tmp/form640/ship
+.venv/bin/python engine/gate.py --fixture wide640f  --attn-tile 1 --scope form --work tmp/form640/tile
+tools/gpu_lock.sh release "attn-hf-anchor-640b"
+.venv/bin/python engine/attn_form_band.py --ship tmp/form640/ship --tile tmp/form640/tile --prompt-len 640
+
+# 2) the one that decides §15
+tools/gpu_lock.sh acquire "attn-hf-anchor-1024b"; tools/gpu_lock.sh util
+.venv/bin/python engine/gate.py --fixture wide1024f --attn-tile 0 --scope form --work tmp/form1024/ship
+.venv/bin/python engine/gate.py --fixture wide1024f --attn-tile 1 --scope form --work tmp/form1024/tile
+tools/gpu_lock.sh release "attn-hf-anchor-1024b"
+.venv/bin/python engine/attn_form_band.py --ship tmp/form1024/ship --tile tmp/form1024/tile --prompt-len 1024
+
+# 3) is a deferred wave-carry failure a FORM finding or a wave-carry finding? diff the two sidecars:
+.venv/bin/python -c "import json;f=lambda p:json.load(open(p));a=f('tmp/form1024/ship/wave_carry_deferred.json');b=f('tmp/form1024/tile/wave_carry_deferred.json');print('ship',a['n_failed'],'of',a['n_checks'],'| tile',b['n_failed'],'of',b['n_checks']);print('same verdicts on both forms:',[(c['check'],c['ok']) for c in a['checks']]==[(c['check'],c['ok']) for c in b['checks']])"
+```
+
+Each gate run must print, in this order and no other: `raised to \`all\` BEFORE the command line was built` →
+`[PASS] the command line carries the prefill row shape…` → `[PASS] coverage: every prefill row this fixture
+pins was dumped…` → the row table → `[DEFERRED-*]` carry lines → a verdict line that names the deferral. If
+coverage is what fails, nothing after it prints, and that is the whole finding.
+
+**§16's four readings, one line each, and where a green or a red lands:**
+
+1. **both inside** — every judged row of both forms is inside the §10.1/§10.2 floors (floored by the cascade
+   band) with no inadmissible flip: the forms differ only from each other, the dispute is a non-defect, and the
+   tile form may be adopted on price with the form-vs-form difference recorded as an observation.
+2. **`--attn-tile 0` outside above row 511** — the SHIPPED streaming form is wrong against HF: a shipping-path
+   defect in the P7/P8 prefill wave with a witness at last; stop and report, do not route around it.
+3. **`--attn-tile 1` outside** — the tile form is wrong and §12's band was mis-sized; `--attn-tile` stays `0`.
+4. **both outside, differently** — both are wrong and the >MAXSC region has no correct implementation today.
+
+Two labels that are not readings, so they are not arguments either: a `COVERAGE GAP` line means the instrument,
+and the gate deliberately stopped before any numerics — fix the invocation, not the kernel; a
+`[DEFERRED-FAIL]` line belongs to neither form, and step 3 above says whether it is a wave-carry finding.
+Row 1023 has pin room 12.25 and row 512 has 13.25 (§16's census), so branch 2 or 3, if it fires at row 1023,
+fires on a row the reference decided with room — no flip-rule argument is available there.
