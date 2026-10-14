@@ -5153,13 +5153,18 @@ def main() -> int:
                          " is skipped or softened — `--scope full` counts them again, and a carry check"
                          " that fails on both forms is a separate finding, visible in both runs'"
                          " DEFERRED lines and in the two sidecar files.")
-    ap.add_argument("--attn-tile", choices=("0", "1"), default="0",
+    ap.add_argument("--attn-tile", choices=("0", "1"), default="1",
                     help="which attention FORM a wave body runs, passed straight to `decode_run"
-                         " --attn-tile`: `0` is the shipped per-(row,head) attn_core, `1` the tiled"
-                         " attn_tile_wave (prototype/attn_decode/results.md §12-§15). Named on every"
+                         " --attn-tile`: `1`, the default since results.md §21, is the tiled"
+                         " attn_tile_wave (the shipped path, 4.03x the old form and bit-identical to it"
+                         " on every above-MAXSC row of both wide anchors); `0` selects the per-(row,head)"
+                         " attn_core it was proved against (prototype/attn_decode/results.md §12-§21)."
+                         " Named on every"
                          " run and asserted against the run's own NUMERICS echo, because the open"
-                         " question is which form is wrong above MAXSC and a judged run that cannot"
-                         " say which form it ran is evidence about neither")
+                         " question was which form is wrong above MAXSC and a judged run that cannot"
+                         " say which form it ran is evidence about neither. This default and"
+                         " `decode_run.cpp`'s own are moved in one commit, or a gate would silently judge"
+                         " a different binary than the one the engine ships.")
     ap.add_argument("--gdn-scan", choices=("seq", "collapse"), default="seq",
                     help="which §04.4 scan a GDN body runs, passed straight to `decode_run"
                          " --gdn-scan` (P9, §04.7, route A is bench/p9-phase1-2026-10-14.md D-12):"

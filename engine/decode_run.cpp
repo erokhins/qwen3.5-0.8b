@@ -101,13 +101,16 @@ struct Options {
     // so this flag cannot move a decode bit either way.
     engine::kernels::WaveGemm wave_gemm = engine::kernels::WaveGemm::kLibrary;
     bool wave_gemm_given = false;
-    // Which attention FORM a wave body runs (Phase 2, `kernels.h:AttnLayerArgs::wave_tile`). 0 is the
-    // shipped per-(row,head) `attn_core`, 1 the G x M tiled `attn_tile_wave`; both come from one binary
-    // so a before/after attribution is one window, and a one-row body is the fused single-row form
-    // either way, so no decode bit can move under this flag (`attn_decode_layer` enforces that, not the
-    // flag parser). Parse-or-throw like `--gemm`: this names which side of an A/B a run is, and a typo
-    // that silently became the default would price the default twice and call it the tiled form.
-    int attn_tile = 0;
+    // Which attention FORM a wave body runs (Phase 2, `kernels.h:AttnLayerArgs::wave_tile`). 1 is the
+    // SHIPPED default since `prototype/attn_decode/results.md` §21: the G x 1 tiled `attn_tile_wave`, which
+    // measured 26.70 ms against the shipped form's 107.67 ms at 1024 lanes and is BIT-identical to it on
+    // all 656 above-MAXSC rows of both wide anchors. 0 selects the per-(row,head) `attn_core`, kept as the
+    // frozen witness the tile form was proved against, so a before/after attribution is still one flag and
+    // one binary. A one-row body is the fused single-row form either way, so no decode bit can move under
+    // this flag (`attn_decode_layer` enforces that, not the flag parser). Parse-or-throw like `--gemm`:
+    // this names which side of an A/B a run is, and a typo that silently became the default would price the
+    // default twice and call it the tiled form.
+    int attn_tile = 1;
     bool attn_tile_given = false;
     // Which §04.4 scan a GDN body runs (P9, §04.7; route A is D-12). `seq` is the shipped recurrence —
     // one launch per token per layer, the form every decode pin is pinned through — and `collapse` is
@@ -445,10 +448,12 @@ void print_usage(FILE* out) {
                  " body is the hand GEMV under either setting, so no decode step changes shape or bits"
                  " on either side of this flag\n"
                  "  --attn-tile 0|1  which attention FORM a WAVE body runs (Phase 2, bench/"
-                 "attn-wave-diagnosis-2026-10-14.md §9). `0`, the default, is the shipped per-(row,head)"
-                 " `attn_core`. `1` runs `attn_tile_wave`, in which one K row load feeds G=4 GQA heads x"
-                 " M=4 query rows instead of a single (row, head) pair, which is where the wave's K/V"
-                 " re-reads come from. The contract is bit-identity with the shipped form on both the"
+                 "attn-wave-diagnosis-2026-10-14.md §9). `1`, the default since results.md §21, runs"
+                 " `attn_tile_wave`, in which one K/V row load feeds the G=4 GQA heads of ONE query row"
+                 " (M is fixed at 1: with a per-row lane cut two rows share no window, so row tiling buys"
+                 " nothing — `static_assert(ATTN_TILE_M == 1)`), which is where the wave's K/V re-reads"
+                 " come from. `0` is the shipped per-(row,head)"
+                 " `attn_core`. The contract is bit-identity with the shipped form on both the"
                  " one-pass route and §07.3's streaming route — the five ordered reductions of §05.5 are"
                  " unchanged, only which block a K row comes from. Wave-only: a one-row body is the fused"
                  " single-row form under either setting, so no decode bit moves, and the tiled form"
