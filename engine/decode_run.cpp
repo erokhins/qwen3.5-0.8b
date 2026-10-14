@@ -109,11 +109,13 @@ struct Options {
     // that silently became the default would price the default twice and call it the tiled form.
     int attn_tile = 0;
     bool attn_tile_given = false;
-    // Which §04.4 scan a GDN body runs (P9, §04.7). `seq` is the shipped recurrence — one launch per
-    // token per layer, the form every decode pin is pinned through — and `chunk` is §04.7's chunked
-    // scan, two launches per layer per BODY. One binary carries both, so the before/after attribution
-    // is one window. A one-row body is `seq` under either setting (`resolve_gdn_scan` enforces that,
-    // not the parser), so no decode bit moves either way. Parse-or-throw like `--gemm`.
+    // Which §04.4 scan a GDN body runs (P9, §04.7; route A is D-12). `seq` is the shipped recurrence —
+    // one launch per token per layer, the form every decode pin is pinned through — and `collapse` is
+    // the same recurrence held resident, one launch per layer per BODY. `chunk` is refused at
+    // `parse_gdn_scan` and stays in the tree only as the record of why it was killed. One binary carries
+    // the forms that live, so the before/after attribution is one window. A one-row body is `seq` under
+    // either setting (`resolve_gdn_scan` enforces that, not the parser), so no decode bit moves either
+    // way — which is the property that makes it safe to A/B a scan from the same binary at all.
     engine::kernels::GdnScan gdn_scan = engine::kernels::GdnScan::kSeq;
     bool gdn_scan_given = false;
     // The chunk size. Only 64 is accepted, and the refusal prints the measured reason rather than
@@ -907,9 +909,11 @@ WavePassResult wave_pass(const Options& o, const engine::WeightStore& store, eng
         shape.wave_rows = sc.wave_rows;
         shape.priced_rows = priced_rows;
         shape.wall_ms = out.wall_ms;
-        // Which scan the pass ran, so the plan bills `gdn_chunk` sites instead of `gdn_rec` launches.
+        // Which scan the pass ran, so the plan bills the recurrence the way it was actually submitted:
+        // per token for `seq`, per body for the resident form, per chunk for the (refused) chunked one.
         // The single-row-body exception is derived from the shape inside `wave_plan_bill`, not here.
         shape.gdn_chunked = (o.gdn_scan == engine::kernels::GdnScan::kChunk);
+        shape.gdn_resident = (o.gdn_scan == engine::kernels::GdnScan::kCollapse);
         std::printf("%s\n", clock->describe_wave(shape).c_str());
     }
     return out;

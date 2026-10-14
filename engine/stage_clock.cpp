@@ -97,7 +97,13 @@ WavePlanBill wave_plan_bill(const WaveShape& sh) {
     // `--gdn-scan chunk` run — the same rule `resolve_gdn_scan` applies, restated from the shape the
     // driver reports rather than from the flag, which is what makes the plan's row agree with the
     // counted one when the two are compared.
-    if (sh.gdn_chunked) {
+    if (sh.gdn_resident) {
+        // Route A: one launch per GDN layer per body, on the `gdn_rec` row. The final body of a run can
+        // be one row, and `resolve_gdn_scan` sends a one-row body through the per-token form — which for
+        // one row is also exactly one launch, so the count is `G * bodies` with no exception to derive.
+        p.subs[kGdnRec] = G * bodies;
+        p.subs[kGdnChunk] = 0;
+    } else if (sh.gdn_chunked) {
         const long long last_body_rows =
             sh.bodies > 0 ? sh.tokens - (sh.bodies - 1) * sh.wave_rows : 0;
         const long long single = (last_body_rows == 1) ? 1 : 0;   // that body is seq's, by the rule

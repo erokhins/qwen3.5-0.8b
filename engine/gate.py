@@ -5160,17 +5160,22 @@ def main() -> int:
                          " run and asserted against the run's own NUMERICS echo, because the open"
                          " question is which form is wrong above MAXSC and a judged run that cannot"
                          " say which form it ran is evidence about neither")
-    ap.add_argument("--gdn-scan", choices=("seq", "chunk"), default="seq",
+    ap.add_argument("--gdn-scan", choices=("seq", "collapse"), default="seq",
                     help="which §04.4 scan a GDN body runs, passed straight to `decode_run"
-                         " --gdn-scan` (P9, §04.7, bench/p9-phase1-2026-10-14.md): `seq` is the"
-                         " shipped recurrence (one launch per token per layer) and the form every"
-                         " decode pin is pinned through; `chunk` is the chunked scan (one prep and"
-                         " one carry launch per layer per body). P9's device matrix is this flag"
-                         " twice over the ten fixtures. Asserted against the run's own NUMERICS echo,"
-                         " for the same reason as --attn-tile: the two forms are owed only Phase 0's"
-                         " §2.1/§2.3 bands, so a run that cannot say which scan it ran is evidence"
-                         " about neither, and a silent fall back to `seq` would price the shipped"
-                         " form twice and report it as the chunked one")
+                         " --gdn-scan` (P9, §04.7, route A is bench/p9-phase1-2026-10-14.md D-12):"
+                         " `seq` is the shipped recurrence (one launch per token per layer) and the"
+                         " form every decode pin is pinned through; `collapse` is the same recurrence"
+                         " held resident in LDS, one launch per layer per body, owed BIT identity"
+                         " rather than a band (prototype/gdn_collapse/collapse_mirror.py is the CPU"
+                         " proof, the byte-identical-logits diff is the device one). `chunk` is gone"
+                         " from these choices because the binary refuses it: D-12 killed the chunked"
+                         " scan on arithmetic and §1c.1 D6 found its carry form wrong (boundary decay"
+                         " as a quotient of two exps, NaN at S=0), so the gate does not offer a route"
+                         " that cannot run — `decode_run --gdn-scan chunk` prints the reason. Asserted"
+                         " against the run's own NUMERICS echo, for the same reason as --attn-tile: a"
+                         " run that cannot say which scan it ran is evidence about neither, and a"
+                         " silent fall back to `seq` would price the shipped form twice and report it"
+                         " as the other one")
     ap.add_argument("--gdn-chunk", type=int, default=64,
                     help="the chunk size in tokens, passed to `decode_run --gdn-chunk` and asserted"
                          " against its echo. 64 is the value Phase 0's budget selected; 16 is"

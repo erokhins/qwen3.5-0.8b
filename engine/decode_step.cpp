@@ -641,7 +641,17 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // launches where the sequential form issues 18,432 (§06.4 says count them, and the wave
             // report's `gdn_chunk` row does). The scan is still serial; what got chunked is the
             // intra-chunk work and the state traffic, not the dependency.
-            if (kernels::resolve_gdn_scan(sc.gdn_scan, n) == kernels::GdnScan::kChunk) {
+            if (kernels::resolve_gdn_scan(sc.gdn_scan, n) == kernels::GdnScan::kCollapse) {
+                // Route A (D-12): the sequential recurrence, resident. ONE launch per layer per body,
+                // and the SAME arithmetic per step — see `engine/gdn_collapse_kernels.h` for why that is
+                // a construction rather than a measurement, and `prototype/gdn_collapse/` for the CPU
+                // mirror and the geometry arithmetic. Billed on the `gdn_rec` row, not on a row of its
+                // own: the win line D-12 pre-registered is written against `gdn_rec`, and a route that
+                // moves the milliseconds to a different row has not moved them.
+                stageclock::note(stageclock::kGdnRec);      // one site, one launch, one row
+                kernels::gdn_rec_collapse(sc.g_u, sc.g_g, sc.g_beta, st.gdn_state_layer(layer),
+                                         sc.g_o, n);
+            } else if (kernels::resolve_gdn_scan(sc.gdn_scan, n) == kernels::GdnScan::kChunk) {
                 kernels::GdnChunkLayerArgs c{};
                 c.u = sc.g_u;                 // [n][6144]; the kernel slices q|k|v itself (§04.1)
                 c.g = sc.g_g;

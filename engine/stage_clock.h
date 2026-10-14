@@ -198,6 +198,12 @@ struct WaveShape {
     // `wave_plan_bill` derives the split from `tokens`/`bodies`/`wave_rows`, so the plan and the
     // dispatch cannot disagree about how many bodies were big enough to chunk.
     bool gdn_chunked = false;
+    // Route A (D-12): the resident sequential form. One launch per layer per BODY, but billed on the
+    // SAME `gdn_rec` row as the per-token form, because the win line was written against that row and
+    // because moving a route's milliseconds to a fresh row is how a before/after comparison lies.
+    // A one-row body routes to `gdn_rec` by `resolve_gdn_scan`'s rule and costs one launch either way,
+    // which is why the bill below needs no single-row special case.
+    bool gdn_resident = false;
 };
 
 // One measured pass of serialized submission. Constructed per pass, armed for its duration; not
