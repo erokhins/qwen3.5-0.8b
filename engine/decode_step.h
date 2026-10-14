@@ -68,6 +68,13 @@ struct DecodeScratch {
     // `resolve_wave_gemm` overrides it for a one-row body, always, because decode's byte-identity is
     // not a setting. `decode_run --gemm hand` is the A/B side; `submit_wave_body` resolves per body.
     kernels::WaveGemm wave_gemm = kernels::WaveGemm::kLibrary;
+    // Which attention FORM a wave body runs (Phase 2, `kernels.h:AttnLayerArgs`). Same riding reason as
+    // the two above, and it too is overridden for a one-row body — the fused single-row form is what
+    // decode runs whatever this says. The default is the SHIPPED form, not the tiled one: the tiled
+    // core's device gate has not been run yet (`prototype/attn_tile_model.py` has priced it on CPU
+    // only), and a form that has not met the device does not become the engine's default by having been
+    // written. `--attn-tile 1` is the A/B side.
+    int attn_tile = 0;
     // Residual ping-pong. NOT aliased into one buffer: `glue_add_norm`'s `s` and `s_out` are both
     // `__restrict__`, so writing the new residual over the one it is reading is a contract violation
     // even though the same thread touches the same index.

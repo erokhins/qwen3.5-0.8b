@@ -599,6 +599,11 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // The split-K partials (§07.3): unused by rows that fit the one-pass staging, and required
             // by any that does not — the launcher refuses rather than lose a partial.
             a.part = sc.a_part;
+            // Which wave core runs, from the run's own switch (`DecodeScratch::attn_tile`). A one-row
+            // body ignores it: `attn_decode_layer` keeps the fused single-row form for `rows == 1`, so
+            // a decode step is the shipped bits whatever this flag says — which is what lets the A/B
+            // be taken inside one binary without a decode rung moving.
+            a.wave_tile = sc.attn_tile;
             stageclock::note(stageclock::kAttn);
             kernels::attn_decode_layer(a);
             // One widening over the whole [n][2048] tile, for the same reason P5 packed the casts

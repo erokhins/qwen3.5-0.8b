@@ -261,6 +261,18 @@ struct AttnLayerArgs {
     float *part;                            // [nrows][8][split][258] split-K (max,sum,acc) partials;
                                             // null below the staging, REQUIRED above it — the launcher
                                             // refuses rather than drop a row's partials on the floor
+    // Which wave core runs (`--attn-tile`, Phase 2: §9 of bench/attn-wave-diagnosis-2026-10-14.md).
+    // 1 is `attn_tile_wave`, the G x M tiled form: one K row load feeds G=4 GQA heads x M=4 query rows
+    // instead of one (row, head) pair, which is where the wave's 25.79 GB of K/V re-reads come from.
+    // 0 is the shipped per-(row,head) `attn_core`. It is a WAVE-only knob: a one-row body is the fused
+    // single-row form whatever this says, which is what keeps a decode step untouched by it and lets one
+    // binary price both sides of the A/B. The default is 0 — the tiled form has been gated on CPU only
+    // (`prototype/attn_tile_model.py`: bit-identical to the shipped form on every pinned wave row) and a
+    // form that has not met the device does not become the engine's default by having been written.
+    // It also refuses, rather than silently degrading: `score_f32`, a fused plan, and a non-32 warp are
+    // each a refusal in `attn_tile_ok`, and the launcher turns a refusal into an error, not a fallback —
+    // a fallback would price the shipped form twice and report it as the tiled one.
+    int wave_tile = 0;
 };
 void attn_decode_layer(const AttnLayerArgs& a);
 

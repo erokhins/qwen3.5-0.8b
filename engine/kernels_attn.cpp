@@ -190,12 +190,25 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     c.split = split;
     c.neg = NEG_NONE;
     c.full = 1;
+    c.tile_kernel = 0;      // a zero-initialised struct is the shipped form; set per launch below
     // `fused` is the plan, not the row's lane width: 1 means the core stages its own q/k and appends
     // (§05.2-§05.3, §05.7 inline), 0 means it reads what `attn_prep` already staged and appended. It is
     // set per LAUNCH below, because that is the only thing that differs between the two plans; the
     // value here is the one-row plan's, which every caller gets unless it asked for a wave.
     c.fused = 1;
     c.score_f32 = 0;
+    // Which wave core runs (`AttnLayerArgs::wave_tile`). One-row bodies never consult it — the fused
+    // single-row form IS `attn_core`, so a generation step cannot be moved by this knob — and the
+    // refusal below is `attn_tile_ok`'s, the same list `prototype/attn_decode/attn_decode.hip.cpp`
+    // refuses, so the gate and the engine cannot disagree about what the tiled form supports.
+    const bool wave_tile = a.wave_tile != 0 && rows > 1;
+    if (wave_tile) {
+        const char* why = nullptr;
+        if (!attn_tile_ok(c.score_f32, c.fused, warp_width(), &why)) {
+            throw std::runtime_error("attn_decode_layer: the tiled wave form is unavailable: " +
+                                     std::string(why) + ". Pass wave_tile=0 for the shipped form.");
+        }
+    }
     // One cache lane per warp, capped by the block's warp count — `attn_decode.hip.cpp:226`
     // (`tile = std::min(TILE, nw)`), where nw is THREADS/warpSize. On this wave32 part that is 8.
     c.tile = std::min(TILE, THREADS / warp_width());
@@ -249,13 +262,25 @@ void attn_decode_layer(const AttnLayerArgs& a) {
         core.qrope_out = nullptr;       // no staging, no gate dump, no append from this launch
         core.krope_out = nullptr;
         core.gate_out = nullptr;
-        attn_core<<<dim3(N_Q, split, rows), THREADS>>>(core);
+        if (wave_tile) {
+            // Phase 2: the grid is (KV group, lane window, row tile), and `split` already IS the
+            // window count — `split_for(lanes_last)` here and `tile_split_of(lanes_last)` in the op
+            // header are the same expression, so the two forms cannot promise different partial
+            // counts from this launcher. The widest-row-first inversion lives inside the kernel.
+            core.tile_kernel = 1;
+            attn_tile_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
+        } else {
+            attn_core<<<dim3(N_Q, split, rows), THREADS>>>(core);
+        }
     }
     if (split > 1) {
         // The merge: `(max,sum,acc)` per (row, lane block) → one row, then §05.6's gate. Same algebra
         // as the tile loop, same lifetime (A-17: it never leaves this launch). A row the staging fits
         // is skipped here — its single core block already finished it — which is what lets a wave carry
-        // one-pass and streaming rows in the same grid.
+        // one-pass and streaming rows in the same grid. The grid's x extent is N_Q either way, because
+        // a group's G heads make N_KV*G = N_Q of them; only the partial LAYOUT differs, and
+        // `attn_combine` reads `tile_kernel` to pick which layout it is merging.
+        c.tile_kernel = wave_tile ? 1 : 0;
         attn_combine<<<dim3(N_Q, rows), THREADS>>>(c);
     }
     // One site per attention layer per body, whatever number of kernels that site submitted: the point

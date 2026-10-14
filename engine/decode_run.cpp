@@ -101,6 +101,14 @@ struct Options {
     // so this flag cannot move a decode bit either way.
     engine::kernels::WaveGemm wave_gemm = engine::kernels::WaveGemm::kLibrary;
     bool wave_gemm_given = false;
+    // Which attention FORM a wave body runs (Phase 2, `kernels.h:AttnLayerArgs::wave_tile`). 0 is the
+    // shipped per-(row,head) `attn_core`, 1 the G x M tiled `attn_tile_wave`; both come from one binary
+    // so a before/after attribution is one window, and a one-row body is the fused single-row form
+    // either way, so no decode bit can move under this flag (`attn_decode_layer` enforces that, not the
+    // flag parser). Parse-or-throw like `--gemm`: this names which side of an A/B a run is, and a typo
+    // that silently became the default would price the default twice and call it the tiled form.
+    int attn_tile = 0;
+    bool attn_tile_given = false;
     // The stage clock (`engine/stage_clock.h`): re-runs the run's generation steps twice more, once
     // with a wait at every family boundary and once with a wait after every submission, and reports
     // them next to the pipelined step. A bench-only observation flag: the run it is attached to still
@@ -172,6 +180,15 @@ Options parse_args(int argc, char** argv) {
             // that became the default would price the default twice and report it as a null.
             o.wave_gemm = engine::kernels::parse_wave_gemm(next());
             o.wave_gemm_given = true;
+        } else if (a == "--attn-tile") {
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--attn-tile takes 0 (the shipped attn_core) or 1 (the tiled "
+                                         "wave core); got '" + v + "'. Refusing rather than guessing, "
+                                         "because this flag names which side of an A/B the run is");
+            }
+            o.attn_tile = v == "1";
+            o.attn_tile_given = true;
         } else if (a == "--time-stages") {
             o.time_stages = true;
         } else if (a == "--time-waves") {
@@ -382,7 +399,7 @@ void print_usage(FILE* out) {
                  "usage: decode_run [--model DIR] [--ids ID,ID,...] [--steps N] [--out DIR]"
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
                  " [--prefill-logits last|all] [--wave-rows N]"
-                 " [--mlp-map auto|interleave|contig] [--gemm library|hand]"
+                 " [--mlp-map auto|interleave|contig] [--gemm library|hand] [--attn-tile 0|1]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -395,6 +412,16 @@ void print_usage(FILE* out) {
                  " there (engine/gate.py's CASCADE_BAND, bench/route-c-audit-2026-10-14.md). A one-row"
                  " body is the hand GEMV under either setting, so no decode step changes shape or bits"
                  " on either side of this flag\n"
+                 "  --attn-tile 0|1  which attention FORM a WAVE body runs (Phase 2, bench/"
+                 "attn-wave-diagnosis-2026-10-14.md §9). `0`, the default, is the shipped per-(row,head)"
+                 " `attn_core`. `1` runs `attn_tile_wave`, in which one K row load feeds G=4 GQA heads x"
+                 " M=4 query rows instead of a single (row, head) pair, which is where the wave's K/V"
+                 " re-reads come from. The contract is bit-identity with the shipped form on both the"
+                 " one-pass route and §07.3's streaming route — the five ordered reductions of §05.5 are"
+                 " unchanged, only which block a K row comes from. Wave-only: a one-row body is the fused"
+                 " single-row form under either setting, so no decode bit moves, and the tiled form"
+                 " REFUSES (`score_f32`, a fused plan, a non-32 warp) rather than falling back, because a"
+                 " silent fallback would price the shipped form twice and report it as the tiled one"
                  "  --time-waves After the run, replay its PROMPT wave from a fresh state at two"
                  " submission granularities — the production shape, queued with one wait at the logits"
                  " (burst), and one wait at every family boundary (stage) — and attribute the serialized"
@@ -974,10 +1001,10 @@ int main(int argc, char** argv) {
         // this repository changing. Printed in every mode, like LAUNCH — a statement about the code and
         // the library it is linked against, not about the run — and read by `gate.py`'s
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
-        std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s\n",
+        std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d\n",
                     engine::kMaxWaveRows, o.wave_rows,
                     engine::kernels::wave_gemm_name(o.wave_gemm),
-                    engine::kernels::gemm_route_version().c_str());
+                    engine::kernels::gemm_route_version().c_str(), o.attn_tile);
         if (o.sizes_only) {
             std::printf("RESULT mode=sizes-only tensors=%zu check_weights=PASS\n", stats.n_loaded);
             std::fflush(stdout);
@@ -988,6 +1015,7 @@ int main(int argc, char** argv) {
         engine::DecodeScratch sc = engine::allocate_scratch(o.wave_rows);
         sc.mlp_gate_map = o.mlp_gate_map;
         sc.wave_gemm = o.wave_gemm;
+        sc.attn_tile = o.attn_tile;
         if (o.wave_gemm == engine::kernels::WaveGemm::kLibrary) {
             // Created here, once, before the first body: the handle and the pinned workspace must not
             // be first touched 400 launches into a prefill. Only when the route is actually on, so a
