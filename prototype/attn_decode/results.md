@@ -1144,3 +1144,32 @@ and the gate deliberately stopped before any numerics — fix the invocation, no
 `[DEFERRED-FAIL]` line belongs to neither form, and step 3 above says whether it is a wave-carry finding.
 Row 1023 has pin room 12.25 and row 512 has 13.25 (§16's census), so branch 2 or 3, if it fires at row 1023,
 fires on a row the reference decided with room — no flip-rule argument is available there.
+
+## 19. §16's four readings, taken (2026-10-14, lock `ADJ`/`ADJ2`): **reading 3 — the tile form is wrong, the shipped streaming form is right**
+
+With coverage enforced, both anchors pass for the **shipped** form and fail for the **tiled** one, on exactly the
+streaming rows:
+
+| run | verdict |
+|---|---|
+| `wide640f --attn-tile 0` | **PASS** |
+| `wide640f --attn-tile 1` | **FAIL** — row 636 (streaming): pin top1 421 at **room 11.125**, engine said 393 |
+| `wide1024f --attn-tile 0` | **PASS** — `every one of the 1024 pinned prefill rows was judged and is inside the floors` |
+| `wide1024f --attn-tile 1` | **FAIL** — rows 512 (**room 13.25**), 518 (8.25), 519 (3.875), 1021 (10.875), 1023 and others |
+
+Three things worth writing down because each one is a decision rather than a result.
+
+**The shipping path is clean.** The shipped streaming form reproduces HF on **all 1024 rows**, including every
+row above `MAXSC`, at decision room up to 13.25. So branch 2 of the pre-authorised fix-first rule does **not** fire
+— there is no correctness defect above 512 lanes, and nothing queues ahead of P9 on that account.
+
+**The tile form is wrong, not marginal.** Room 13.25 at row 512 is not a rounding argument: a reassociation cannot
+move an argmax that far. The failure is structural — the fixed-window partials do not reproduce the reference's
+per-row softmax — which means **§12's accepted band was mis-sized for this kernel**, and the honest statement is
+that the tiled form must fix its streaming merge before it may be measured again, not that its band needs
+re-deriving. `--attn-tile` stays `0` indefinitely, not provisionally.
+
+**And the instrument now does what it was built to do.** `argv carries --prefill-logits 'all'` is asserted on the
+argv, the run's own echo is checked against it, and the verdict requires `total == n_rows`, so §17's silent zero-row
+coverage is structurally impossible. That is the fourth checker this session made capable of failing, and unlike
+the other three it was built *before* it was needed rather than after it lied.
