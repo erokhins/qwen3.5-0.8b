@@ -149,8 +149,11 @@ def chunked_scan(qn, kn, v, g, beta, S=None, C=64, mma=False, bug=""):
     """S04.7 chunked UT-transform form of the same recurrence. Same operands and return
     values as `recurrent_scan`; `C` is the chunk size, `mma` models BF16 matmul operands.
 
-    `bug` injects one plausible mistake per name, for the negative cases in `spike.py`
-    (a gate that cannot fail verifies nothing)."""
+    `bug` injects one plausible mistake per name, for the negative cases in `spike.py` and
+    `phase1.py` (a gate that cannot fail verifies nothing). The Phase-1 trio — `carry_stale_state`,
+    `decay_off_by_one`, `boundary_wrong_head` — is chosen so that each one is *invisible* on a set of
+    cells the geometry rules out (chunk 0's rows, chunk 0 row 0, chunks 0-1) and loud elsewhere;
+    `phase1.py negatives` derives those sets from (T, C, H) rather than listing them."""
     T, H, DK = kn.shape
     DV = v.shape[-1]
     NC = -(-T // C)
@@ -168,7 +171,10 @@ def chunked_scan(qn, kn, v, g, beta, S=None, C=64, mma=False, bug=""):
     cum = de.cumsum(-1)                            # log of Gamma_t, within the chunk
     upper = torch.ones(C, C, dtype=torch.bool).triu(1)
     # dec[t, s] = Gamma_t / Gamma_s for s <= t, 0 above the diagonal
-    dec = (cum[..., :, None] - cum[..., None, :]).masked_fill(upper, float("-inf")).exp()
+    cum_row = cum
+    if bug == "decay_off_by_one":                  # M_ij built one token short: the row's own
+        cum_row = torch.cat([cum[..., :1], cum[..., :-1]], -1)   # decay is missing from M
+    dec = (cum_row[..., :, None] - cum[..., None, :]).masked_fill(upper, float("-inf")).exp()
     if bug == "causality_upper":                   # keep the wrong triangle
         dec = (cum[..., :, None] - cum[..., None, :]).masked_fill(upper.flip(-1, -2),
                                                                  float("-inf")).exp()
@@ -191,13 +197,21 @@ def chunked_scan(qn, kn, v, g, beta, S=None, C=64, mma=False, bug=""):
     cdec = cum[..., -1].exp()[..., None, None]
     if bug == "no_chunk_decay":                    # the carry forgets the chunk's decay
         cdec = torch.ones_like(cdec)
+    if bug == "boundary_wrong_head":               # head h's state decayed by head h-1's chunk
+        cdec = torch.roll(cdec, 1, dims=0)         # total (dim 0 IS the head axis here)
 
     S = torch.zeros((H, DK, DV), dtype=torch.float32) if S is None else S.float().clone()
     out = torch.zeros((H, NC, C, DV), dtype=torch.float32)
     last = NC if bug != "drop_last_chunk" else NC - 1     # end condition: last chunk left
+    S_prev = None
     for i in range(last):                                  # out of the state and the output
-        v_new = nv[:, i] - _mm(kcd[:, i], S, mma)
-        out[:, i] = _mm(q[:, i], S, mma) + _mm(intra[:, i], v_new, mma)
+        # `carry_stale_state` reads the state as of two chunks back. Chunk 0 has no previous state
+        # of its own to be stale about, so its rows stay bit-identical — which is the property
+        # `phase1.py negatives` checks: a bug must be silent exactly where it cannot be seen.
+        s_read = S_prev if (bug == "carry_stale_state" and S_prev is not None) else S
+        v_new = nv[:, i] - _mm(kcd[:, i], s_read, mma)
+        out[:, i] = _mm(q[:, i], s_read, mma) + _mm(intra[:, i], v_new, mma)
+        S_prev = S
         S = S * cdec[:, i] + _mm(k[:, i].transpose(-1, -2), v_new, mma)
     o = out.reshape(H, NC * C, DV)[:, :T].transpose(0, 1).contiguous()
     return o, S
@@ -259,9 +273,14 @@ def _selftest() -> int:
     legal = max(meanrel(good_o, ref), meanrel(good_S, S_ref))
     print(f"  legal chunk-vs-sequential meanrel: {legal:.3e} "
           f"(every bug below must exceed {100 * legal:.1e})")
+    # The three Phase-1 injections are the shape of bug a chunked *kernel* contains (a stale carry,
+    # a decay product off by one, a boundary applied to the wrong head). Where each one is invisible
+    # is derived from the geometry in `prototype/gdn_chunk/phase1.py negatives`; here they only have
+    # to clear the legal route delta, which is the calibration, not the localisation.
     for name in ("no_inter_chunk_read", "causality_upper", "no_pairwise_decay",
                  "no_chunk_decay", "drop_last_chunk", "read_before_decay",
-                 "read_after_write"):
+                 "read_after_write", "carry_stale_state", "decay_off_by_one",
+                 "boundary_wrong_head"):
         fn = recurrent_scan if name.startswith("read_") else chunked_scan
         kw = {} if name.startswith("read_") else {"C": C}
         o, S = fn(qn, kn, v, g, beta, bug=name, **kw)
