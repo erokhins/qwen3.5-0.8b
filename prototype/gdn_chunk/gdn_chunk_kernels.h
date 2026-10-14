@@ -55,6 +55,26 @@
  *       carry then reads, which is `dec.tril()` in the model. Wasted flops, not wrong bits.
  *   D5  (NO BIT CHANGE) the intra-chunk cumsum is one thread walking 64 adds. It is a prefix sum;
  *       a block-wide scan would cost more synchronisation than the 64 adds it saves.
+ *   D6  (CHANGES BITS — DEFECT, UNFIXED AS COMMITTED) `khat`'s boundary decay is formed at :263 as
+ *       `gamC / gam[i]` — two F32 `expf`s divided — where the CPU contract forms it as ONE exp of a
+ *       difference (chunk_scan.py:196, `k * (cum[..., -1:] - cum).exp()`). They are equal in exact
+ *       arithmetic and not equal in F32: `cum` decreases (every gate is negative), so `gamC <= gam[i]`
+ *       and the two underflow TOGETHER, once the within-chunk gate sum passes about -104 (-87.3 with
+ *       denormals flushed). The quotient is then 0/0 = NaN — for EVERY row of that chunk, including
+ *       the last one, whose true ratio is exactly 1.0. The real pinned gates reach -163 (p64) and
+ *       -293 (p300). `khat` is read only by the state update, so the damage lands in the state the
+ *       NEXT chunk inherits: chunk 0's rows are right and every row of every later chunk is NaN,
+ *       which is exactly the Phase 1b device signature (first NaN output row 64 = start of chunk 1;
+ *       an all-NaN logits row argmaxes to token 0 under a strict `>`, hence "first answer token 0
+ *       vs pin 279"). `dec8` passes because its worst gate sum is -61, not because one chunk is
+ *       safe: p64 is a one-chunk fixture and is already poisoned (114,688 NaN state elements) with no
+ *       later chunk to show it. The fix is the model's expression, in place:
+ *           a.kh[off] = hip_bfloat16(kq * kr * expf(cum[GC_C - 1] - cum[i]));
+ *       It is NOT applied here because the decision this kernel belongs to is a kill
+ *       (bench/p9-phase1c-2026-10-14.md §1c.3) and it has not been run on a device. Reproduced and
+ *       bisected on CPU by `prototype/gdn_chunk/kernel_mirror.py` (`finiteness`, `candidates`).
+ *       The general trap, for AGENTS.md: rewriting a decay ratio as a quotient of two exps is NaN
+ *       where the original was 0 or 1. Keep the subtraction inside the exp.
  *
  * ONE-ROW BODIES DO NOT COME HERE. `engine/decode_step.cpp` routes a one-row body to `rec_kernel`
  * whatever this file offers, so every decode bit stays the shipped sequential form (§04.4 is what
@@ -376,7 +396,18 @@ __global__ void gdn_chunk_carry(GdnChunkArgs a) {
     const int x = blockIdx.x;              // which 32-column strip of d_v
     const int h = blockIdx.y;
     const int tid = threadIdx.x;
-    const int jl = tid & (GC_STRIP - 1);   // column inside the strip
+    const int jl = tid & (GC_STRIP - 1);   // column inside the strip — DECLARED AND NEVER READ.
+                                           // `hipcc -Wall` says so: "unused variable 'jl'". The
+                                           // mapping this block's comment claims (thread = row t,
+                                           // column j) is not the one coded: `acc[GC_STRIP]` means
+                                           // every lane of a row-group computes all 32 columns of
+                                           // `v_new` and of `out`, so the executed carry is 24.3x
+                                           // the modelled one and the wave executes 730 GFLOP
+                                           // against the 54.03 GFLOP Phase 0 priced. Wiring `jl`
+                                           // in (scalar accumulator, one column per lane) is the
+                                           // fix, and it drops 32x of the LDS instructions with it
+                                           // (32 broadcast reads per row today, one would do).
+                                           // bench/p9-phase1c-2026-10-14.md §1c.2.
     const int tg = tid / GC_STRIP;         // row group: 4 groups of 32 threads
     const int tstep = GC_THREADS / GC_STRIP;
     float* Sh = a.S + (size_t)h * GC_D * GC_D;
