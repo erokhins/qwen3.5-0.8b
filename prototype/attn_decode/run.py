@@ -432,12 +432,33 @@ def long_rows(spec: str, dl: Path) -> list[int]:
     return [int(x) for x in spec.split(",") if x.strip() != ""]
 
 
-def run_plan(cases, outroot: Path, tag: str, extra) -> Path:
-    """Write the case files, run one `--mode once` pass, return the output root."""
+def run_plan(cases, outroot: Path, tag: str, extra) -> dict:
+    """Write the case files, run one `--mode once` pass, and return the kernel's RESULT fields.
+
+    The caller already knows `outroot` — it passed it in — so the only thing it cannot get otherwise
+    is what the kernel REPORTED about the launch it made. That is what a control that claims to have
+    deepened a grid needs (`core_grid`), and it is why this returns the dict instead of the path.
+    """
     lines = [R.write_case(c, WORK / "in", outroot / c["name"]) for c in cases]
     plan = write_plan(WORK / ("plan_%s.txt" % tag), lines)
-    run_bin(["--mode", "once", "--plan", str(plan)] + list(extra), tag)
-    return outroot
+    return run_bin(["--mode", "once", "--plan", str(plan)] + list(extra), tag)
+
+
+def core_grid(res: dict) -> tuple[int, int, int]:
+    """The `(x, y, z)` core launch grid the kernel reported, parsed out of its RESULT line.
+
+    Read from the kernel rather than recomputed here: the two failures this serves are a run that was
+    CALLED deeper but was not LAUNCHED deeper, and a run that compared two DIFFERENT cores while
+    claiming to vary one knob — and §13 mistook the second for the first. Re-deriving any axis in
+    Python would reproduce the assumption the check exists to test. `x` is which core ran (the tiled
+    form grids over KV groups, the shipped one over query heads), `y` the lane depth, `z` the rows.
+    """
+    raw = res.get("core_grid", "")
+    parts = raw.split("x")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        raise SystemExit("kernel RESULT has no parseable core_grid=%r; the mixed-grid control cannot "
+                         "check what it compared" % (raw,))
+    return int(parts[0]), int(parts[1]), int(parts[2])
 
 
 # Stages a wave launch writes per row, with the element count one row of each occupies. Same numbers
@@ -575,31 +596,78 @@ def wave_stage(args, fails, worst, ncmp, online_route, band):
                 fails.append("wave L%02d row %d %s: over the §10.1 rule in a wave but NOT one row at"
                              " a time, so the wave itself caused it" % (layer, p, stage))
 
-        # Claim 2b: the mixed-grid mechanism, priced. `--split 2` under `--softmax full` must not move
-        # a single bit, because `blocks_for_row` hands every row that fits the staging EXACTLY ONE block
-        # whatever the grid's depth — the upper blocks return before touching anything, and
-        # `attn_combine` skips a row its core already finished. That is the shape the engine's launcher
-        # produces for a wave whose widest row is above the staging (deep y, one-pass rows underneath),
-        # so the mechanism is gated here even though no shipped fixture has a wave that needs it.
+        # Claim 2b: the mixed-grid mechanism, priced — on whichever core this run is testing.
+        # A deeper `--split` under `--softmax full` must not move a single bit, because both forms hand
+        # every row that fits the staging EXACTLY ONE block whatever the grid's depth — `blocks_for_row`
+        # for the shipped form, `tile_blocks_for_row` for the tiled one — the upper lane blocks return
+        # before touching anything, and `attn_combine` skips a row its core already finished. That is
+        # the shape the engine's launcher produces for a wave whose widest row is above the staging
+        # (deep y, one-pass rows underneath), so the mechanism is gated here even though no shipped
+        # fixture has a wave that needs it.
+        #
+        # BOTH sides are run here, in this claim, for the reason §13 supplies: the deep side used to be
+        # launched without `--tile-kernel`, so this line printed "the lane grid was deepened" about a
+        # run of a DIFFERENT KERNEL from the baseline, and a real out-of-bounds LDS index (§14) was
+        # reported as grid dependence. A control runs both of its own sides, and prints the grid depth
+        # each one actually launched, because a `--split 2` the core ignored would otherwise pass by
+        # being the same launch twice.
         if not online_route:
-            run_plan(wcases, WORK / "out_wave_deep", "wave_deep",
-                     ["--launch", "staged", "--split", "2", "--softmax", "full"])
+            base_knobs = ["--launch", "staged", "--split", str(args.split), "--softmax", "full"]
+            deep_knobs = ["--launch", "staged", "--split", str(max(2, args.split)),
+                          "--softmax", "full"]
+            if args.tile_kernel:
+                base_knobs.append("--tile-kernel")
+                deep_knobs.append("--tile-kernel")
+            res_base = run_plan(wcases, WORK / "out_wave_grid1", "wave_grid1", base_knobs)
+            res_deep = run_plan(wcases, WORK / "out_wave_grid2", "wave_grid2", deep_knobs)
+            g_base, g_deep = core_grid(res_base), core_grid(res_deep)
+            # Both sides must have run the core this run is about. §13's failure was a deep side that
+            # silently ran the OTHER form, so the comparison was tile-vs-shipped wearing the label
+            # "grid depth"; grid.x is the axis that says which core launched (KV groups tiled, query
+            # heads shipped), so a mismatch here is the mis-wiring itself, named instead of inferred.
+            want_x = R.N_KV if args.tile_kernel else R.N_Q
+            if g_base[0] != want_x or g_deep[0] != want_x:
+                fails.append("wave L%02d: the mixed-grid control compared %s against %s, but a %s core"
+                             " launches grid.x=%d. Both sides must run the core under test, or the"
+                             " line measures the two forms' difference and not the grid's"
+                             % (layer, "x".join(map(str, g_base)), "x".join(map(str, g_deep)),
+                                "tiled" if args.tile_kernel else "shipped", want_x))
+            y_base, y_deep = g_base[1], g_deep[1]
             bits_deep = 0
-            for wdir, wrows in wchunks:
+            for c in wcases:
+                n_rows = c["nrows"]
+                d_base = WORK / "out_wave_grid1" / c["name"]
+                d_deep = WORK / "out_wave_grid2" / c["name"]
                 for stage, row_elems in WAVE_STAGE_ROWS:
-                    a = R.read_out(wdir, stage, row_elems * len(wrows))
-                    b = R.read_out(WORK / "out_wave_deep" / wdir.name, stage, row_elems * len(wrows))
-                    bits_deep += int((a != b).sum())
-            print("  wave at --split 2 under --softmax full (L%02d): %d elements moved vs --split 1"
-                  " (%s)" % (layer, bits_deep,
+                    bits_deep += int((R.read_out(d_base, stage, row_elems * n_rows)
+                                      != R.read_out(d_deep, stage, row_elems * n_rows)).sum())
+            print("  wave at grid.y %d vs %d under --softmax full (%s core, L%02d): %d elements moved"
+                  " (%s)" % (y_base, y_deep, "tiled" if args.tile_kernel else "shipped", layer,
+                             bits_deep,
                              "one block per row that fits, as designed" if bits_deep == 0 else
                              "a deeper grid changed the arithmetic"))
-            if bits_deep:
-                fails.append("wave L%02d: %d elements moved when the lane grid was deepened to 2 under"
-                             " --softmax full. A row the staging fits must take exactly one block"
-                             " (blocks_for_row); if it moved, the one-pass form is reading the split"
-                             " grid and normalising per block — §07.3's trap, back again"
-                             % (layer, bits_deep))
+            if y_base >= max(2, args.split):
+                # The staging already forced this depth: a wave whose widest row exceeds MAXSC needs
+                # `tile_split_of`/`blocks_for_row` blocks whatever --split asks for, so the knob cannot
+                # vary this fixture's geometry and the control has nothing to compare. Said out loud
+                # rather than reported as a pass or as a vacuity failure, because both of those would
+                # be a lie about a fixture whose rows are simply too long.
+                print("  mixed-grid control not exercised (L%02d): the staging already pins grid.y=%d"
+                      " at or above the asked --split %d, so no deeper grid exists for these lane"
+                      " counts" % (layer, y_base, max(2, args.split)))
+            elif y_deep <= y_base:
+                fails.append("wave L%02d: the mixed-grid control is VACUOUS — asking for --split %d"
+                             " still launched grid.y=%d, no deeper than the baseline's %d, so nothing"
+                             " was compared. The knob has to reach the core that is being gated"
+                             % (layer, max(2, args.split), y_deep, y_base))
+            elif bits_deep:
+                fails.append("wave L%02d: %d elements moved when the lane grid was deepened from %d to"
+                             " %d under --softmax full (%s core). A row the staging fits must take"
+                             " exactly one block (blocks_for_row / tile_blocks_for_row); if it moved,"
+                             " the one-pass form is reading the split grid and normalising per block"
+                             " — §07.3's trap, back again"
+                             % (layer, bits_deep, y_base, y_deep,
+                                "tiled" if args.tile_kernel else "shipped"))
 
         # Claim 3: the wave's own anti-vacuity, online runs only.
         if online_route:

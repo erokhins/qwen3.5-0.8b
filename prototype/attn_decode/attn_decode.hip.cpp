@@ -370,11 +370,23 @@ int main(int argc, char** argv) {
     const int launches = (launch == "staged" ? 1 : 0) + 1 + (split > 1 ? 1 : 0);
     size_t plan_rows = 0;
     for (auto& c : cases) plan_rows += c.nrows;
+    // The deepest core grid this plan can launch, echoed on RESULT so a control that claims to have
+    // deepened the lane grid can be checked instead of believed. The tiled form's grid.y IS `a.split`,
+    // i.e. the max taken in `launch_case`, so the two spellings cannot drift.
+    const int core_x = tile_kernel ? N_KV : N_Q;
+    int core_y_max = 1, core_z_max = 1;
+    for (auto& c : cases) {
+        core_y_max = std::max(core_y_max, tile_kernel ? std::max(split, tile_split_of(c.lanes_last()))
+                                                      : split);
+        core_z_max = std::max(core_z_max, tile_kernel ? tile_rtiles_of(c.nrows) : c.nrows);
+    }
+    char core_grid[32];
+    std::snprintf(core_grid, sizeof core_grid, "%dx%dx%d", core_x, core_y_max, core_z_max);
     printf("plan %s | cases=%zu | rows=%zu | launch=%s (split %d) | softmax=%s | warps=%d tile=%d"
-           " | neg=%s | score=%s | replicas=%d | core=%s\n",
+           " | neg=%s | score=%s | replicas=%d | core=%s grid=%s\n",
            plan_path.c_str(), cases.size(), plan_rows, launch.c_str(), split, softmax.c_str(), nw,
            tile, negname.c_str(), score_f32 ? "f32" : "bf16", std::max(1, tile_rep),
-           tile_kernel ? "attn_tile_wave" : "attn_core");
+           tile_kernel ? "attn_tile_wave" : "attn_core", core_grid);
     if (neg != NEG_NONE) printf("NEGATIVE TEST: injected bug = %s\n", negname.c_str());
 
     auto launch_case = [&](Case& c, int rep, bool stages) {
@@ -393,10 +405,14 @@ int main(int argc, char** argv) {
         a.tile_kernel = tile_kernel ? 1 : 0;
         if (tile_kernel) {
             // The tiled form owns its lane geometry: its windows are MAXSC lanes wide by
-            // construction, so `split` means `tile_split_of(lanes_last)` here rather than the
-            // `--split` knob. Leaving the knob in charge would put a second, disagreeing authority
-            // over how many partials a row promises — `tile_blocks_for_row` clamps by this field.
-            a.split = tile_split_of(c.lanes_last());
+            // construction, so `split` can never be SMALLER than `tile_split_of(lanes_last)` here —
+            // leaving the knob in charge would put a second, disagreeing authority over how many
+            // partials a row promises, and `tile_blocks_for_row` clamps by this field. The knob can
+            // still DEEPEN the grid, and that is what `run.py`'s mixed-grid control needs: a row the
+            // staging fits must take exactly one block whatever the grid's depth, which is the same
+            // claim `blocks_for_row` makes for `attn_core`, and no control can test it on the tiled
+            // form while `--split 2` is a silent no-op here.
+            a.split = std::max(split, tile_split_of(c.lanes_last()));
         }
         if (stages) rope_table<<<1, ROT>>>(a);   // stage check, not part of the timed path
         if (launch == "staged") {
@@ -445,9 +461,9 @@ int main(int argc, char** argv) {
         CK(hipDeviceSynchronize());
         for (auto& c : cases) write_case(c);
         printf("RESULT mode=once cases=%zu rows=%zu launches=%d neg=%s split=%d launch=%s"
-               " softmax=%s core=%s\n",
+               " softmax=%s core=%s core_grid=%s\n",
                cases.size(), plan_rows, launches, negname.c_str(), split, launch.c_str(),
-               softmax.c_str(), tile_kernel ? "tile" : "attn_core");
+               softmax.c_str(), tile_kernel ? "tile" : "attn_core", core_grid);
         return 0;
     }
 
@@ -466,10 +482,10 @@ int main(int argc, char** argv) {
     const double ms = burst(std::max(1, iters)) / std::max(1, iters);
     const double gbs = (double)plan_bytes / (ms / 1e3) / 1e9;
     printf("RESULT mode=burst cases=%zu launches_per_case=%d ms_per_plan=%.6f us_per_case=%.3f"
-           " gbs=%.2f probe_pct=%.2f neg=%s split=%d launch=%s softmax=%s bytes=%.1f KiB/plan\n",
-           cases.size(), launches, ms, ms * 1e3 / cases.size(), gbs,
+           " gbs=%.2f probe_pct=%.2f neg=%s split=%d launch=%s softmax=%s bytes=%.1f KiB/plan"
+           " core_grid=%s\n", cases.size(), launches, ms, ms * 1e3 / cases.size(), gbs,
            100.0 * gbs / PROBE_GBS, negname.c_str(), split, launch.c_str(), softmax.c_str(),
-           plan_bytes / 1024.0);
+           plan_bytes / 1024.0, core_grid);
     if (write_out) {
         for (size_t i = 0; i < cases.size(); ++i) launch_case(cases[i], (int)i, true);
         CK(hipDeviceSynchronize());
