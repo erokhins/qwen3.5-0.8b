@@ -682,3 +682,186 @@ bound and still worth ~1/3 of prefill. Phase 2 as delivered is **not a candidate
 a flipped token on the first fixture that exercises the band region, and an instrument that cannot price it. The
 correct next move is to fix (1), size (2) against §07.3's band with the worst element's location reported, and make
 (3) either work under `--time-waves` or say precisely why the replay path cannot satisfy §05.7.
+
+## 14. §13's three defects, diagnosed and fixed CPU-side (2026-10-14, worker pass: **no device touched, no timing taken**)
+
+All three turn out to be one kernel bug, one guard bug, and two instruments that could not tell a crash from a
+measurement. None of them says the tiled core's arithmetic is wrong, and none of them was fixed by moving a band.
+`--attn-tile` stays `0`; the device re-take is §14.5.
+
+### 14.1 Defect 1: a **real defect** — `attn_tile_body` indexed its K stage by the window-absolute lane, so the stage walked out of LDS
+
+Position, with the evidence the parent asked for: **the tiled kernel was broken, and the control that reported it
+was also mis-wired.** Both halves matter, and the fix went to both.
+
+The bug. `s_k` is `ATTN_TILE_L * DH` = 8 x 256 BF16 = **4,096 B**, inside a kernel that reserves **20,480 B** of LDS
+in total (§12's `isa` census). The sub-block loop steps `s_lo` by `ATTN_TILE_L`, but both the stage write and the
+score read indexed `s_k[rr * DH + lane * 8]` with `rr` the **window-absolute** lane, not the slot `rr - s_lo`. So any
+row tile whose widest row exceeds 8 lanes writes past the array, at `(span - 1) * DH * 2` bytes: **141,824 B** for
+p300's 277-lane wave and **262,144 B** for an engine MAXSC-wide window, against a 4,096 B reservation. Out-of-range
+LDS does not fault on this part — the writes land on the 16 KiB of score staging next door, so the scores that
+survive are K bytes. That is a silent numerics difference produced by an address, and it fires for **every
+sub-block after the first**, i.e. for every row above 8 lanes, which is why it looked like the grid rather than the
+index. Correct now: `s_k[slot * DH + lane * 8]` with `slot = rr - s_lo`, and the same `(rr - s_lo)` on the read side.
+
+Why the CPU mirror could not see it, which is the trap worth keeping: **the mirror models lanes, not addresses.**
+`isa`'s `LDS Size` prints the *declared* sum and was green throughout; a footprint claim has to be priced from the
+loop's own index expression. So `attn_tile_model.py` gained `lds`, which reads this kernel source, finds the
+`s_k[...] + lane * 8` expressions, classifies the index as sub-block-relative or window-absolute, and reports the
+worst byte the stage can reach:
+
+```
+$ git show e44ed51:prototype/attn_decode/attn_decode_kernels.h > /tmp/pre.h   # the header as shipped
+$ attn_tile_model.py lds --kernel /tmp/pre.h   # index spellings: `rr * DH` -> WINDOW-ABSOLUTE lane
+  FAIL  a tile whose widest row is L lanes ...  reaches   4.10 kB (declared 4.10 kB, block 20.48 kB)
+  FAIL  p300 --wave --wave-rows 64, widest 277  reaches 141.82 kB
+  FAIL  engine 1024-token wave, MAXSC window    reaches 262.14 kB
+$ attn_tile_model.py lds                       # index spellings: `slot * DH`, `(rr - s_lo) * DH` -> sub-block slot
+  ok    ... all three reach 4.10 kB            lds: PASS
+```
+
+Note the first line goes FAIL even where the *size* happens to fit: an absolute index into a slot-indexed array is
+wrong by construction, and a census that only complains when it overflows would pass the same bug at a smaller
+fixture. Two `selftest` checks (12/12 now) pin both spellings at a 277- and a 512-lane span.
+
+The number §13 saw is the corruption's footprint, not grid dependence. `oob-bound` prices how much the control
+*could* have moved if the only damaged rows are the ones an absolute index can reach — a row whose own row-tile is
+`<= L` lanes cannot be touched by the overrun whatever it does:
+
+```
+$ attn_tile_model.py oob-bound --observed 1098790
+row-tiles with span > L (=8 lanes): 68 of 70; rows unreachable: 8 of 277
+reduction elements the control compares: 1,134,592
+upper bound if ONLY the unreachable rows stayed clean: 1,101,824  (97.11 % of the comparison)
+observed / bound                   : 99.7246 %   (bound - observed = 3,034 elements that happened to agree)
+oob-bound: CONSISTENT
+```
+
+99.72 % of the geometric bound, with the whole shortfall explained as elements that coincidentally agreed, is not
+what "deepening the grid changed the arithmetic of a row that fits the staging" would look like; it is what "almost
+every row above 8 lanes got hit" looks like. The check is falsifiable in the other direction too — feed it a bigger
+number and it says NOT EXPLAINED and exits 1.
+
+The control was wrong as well, and it was **tightened, not relaxed**. Claim 2b used to launch its deep side without
+`--tile-kernel`, so the line printed "the lane grid was deepened to 2" about a run of a **different core**: it
+compared the tiled form at split 1 against the **shipped** form at split 2, and §13 read a real address bug as grid
+dependence. Claim 2b now runs both of its own sides, passes the form flag to both, and reads `core_grid=(x,y,z)` off
+each side's own `RESULT` line (new report in `attn_decode.hip.cpp`, on the `plan`, `once` and `burst` lines alike),
+because a control that recomputes the depth in Python would reproduce the assumption it exists to test. It can now
+fail in three distinct ways instead of one: `grid.x` not the core under test (N_KV tiled, N_Q shipped — that is the
+mis-wiring itself, named), `grid.y` not actually deeper (a `--split` the core ignored would formerly have passed by
+being the same launch twice), and bits moved at a deeper grid (the §07.3 one-block-per-row property). `--split` also
+stopped being a silent no-op on the tiled path: `a.split = std::max(split, tile_split_of(lanes_last))`. Where a
+fixture's lane counts already pin `grid.y` at or above the asked split, the line says "control not exercised"
+instead of reporting a pass or a vacuity — that geometry has no deeper grid to compare, which is a fact about the
+fixture, not a verdict.
+
+CPU state after the fix: `lds` PASS (was FAIL), `selftest` 12/12, `gate` **unchanged at 567,296 elements, 0
+failures** — the arithmetic the mirror predicts was never the thing that was broken.
+
+### 14.2 Defect 3: the §05.7 refusal was reading the **one-row plan's** flag; wave replay satisfies §05.7 already
+
+The precondition was never unmet. `attn_decode_layer` asked `attn_tile_ok(c.score_f32, c.fused, ...)`, and `c.fused`
+is the **one-row** plan's value (1 = §05.2's fused launch, where the core stages and appends inline, so a second row
+could read the cache before the append lands — that is what the refusal protects). A wave cannot run that plan at
+all, and does not: the `rows > 1` branch launches `attn_prep`, which stages every row and performs every row's
+§05.7 append on the same stream, and then launches the core with `fused = 0` so it reads what prep wrote. Append
+finished before any row read the cache — the condition is met by the shape of the launch sequence, not by a waiver.
+The fix is one named value, `wave_fused = 0`, used by the guard **and** by the launch, so the guard cannot drift from
+the thing it guards. With it the guard's `fused` branch is dead on the wave path by construction, which is the correct
+state; the `warp != 32` and `score_f32` refusals still fire.
+
+That bug is also why defect 2 looked like numerics: `--attn-tile 1` threw on the **first wave body of every prefill**
+— every prompt goes through wave bodies — in every path, `--time-waves` included, so the tiled side wrote no logits
+at all (§14.3) and there was no milliseconds line because there was no run. If the guard ever has to stay shut, the
+fallback attribution is the prototype's own burst (`run.py --mode burst --tile-kernel`, x launches/wave) cross-checked
+against `rocprofv3` kernel ms for `attn_tile_wave` vs `attn_core` — but `--time-waves` now answers the question
+directly, so those are backups and were not needed or used here.
+
+### 14.3 Defect 2: **there was no flip to measure** — the tiled A/B produced no numbers at all
+
+`tmp/ab/tile/` contains **one file**: a 61-byte `sampled.txt` that is the header line and nothing else, and **no
+`logits*.bin` at all**. `tmp/ab/ship/` has both logits files and 1,025 sampled rows. `decode_run` opens the sampled
+log and writes its header *before* prefill and dumps logits only after prefill returns, so "header-only log, no
+logits" is the signature of a throw inside `prefill_wave` — which is exactly §14.2. §13's `cmp` loop then did what a
+`cmp` loop does: a missing file and a truncated log both print DIFF, and a crashed run was recorded as a numerics
+difference on row 1023.
+
+So: no token flip was observed, no band was entered, and §13 item 2 is **void rather than satisfied**. Row 1023
+remains unmeasured, and the claim "bit-identical below MAXSC, banded above" is untested on the device until the
+re-take below runs. `--attn-tile` staying `0` is therefore still the only defensible default.
+
+The instrument, so this cannot happen quietly again: **`engine/attn_form_band.py`** (new, CPU-only — it reads two
+dump directories and nothing else). Its two design rules are the two ways §13 went wrong:
+
+1. **A missing or short dump is a crashed run, never a band difference.** Every row is required on both sides before
+   anything is compared; an absent row prints `MISSING` with the side named and the two `sampled.txt` line counts
+   beside it, and exits 1 with "nothing in this A/B was measured". A `diff`/`cmp` loop over two directories cannot
+   tell "the bytes differ" from "one side died", and only one of those is a numerics question.
+2. **A flip is not a band event until its room has been measured.** Per dumped row it reports cos, meanrel, BF16- and
+   F32-lattice max ULP **with the cancellation band applied**, the worst element's index, both sides' values and
+   |ref|/max, both sides' top-1 id and top-1/top-2 room, whether the argmax moved, and the verdict. A flip at or
+   above `flip_room_max` prints BLOCKER and exits 1 — stop-and-report, not a line to file under "band".
+
+It judges only with numbers imported from the files that own them — `engine/gate.py`'s `CASCADE_BAND` and
+`flip_admissible`, `prototype/attn_decode/run.py`'s measured `CANCEL_REL`, `MAXSC` from the kernel header — and
+retypes none, so it cannot quietly invent a band. That choice is also what makes it honest about what is *not*
+judged: above MAXSC a row is judged by the published per-row shape number `row_1cos_max`, while meanrel and the ULP
+columns are **reported, not judged**, because `stage_meanrel_max`/`stage_cos_min` are published per stage tile and no
+per-row meanrel or ULP bound exists for a reassociating route; the pooled band rows are what the stage keys judge.
+At or below MAXSC any difference at all is a DEFECT, since bit-identity is the claim there (§12). A `sampled.txt`
+step that no judged row explains is red rather than band, and the alignment used to decide that is printed, not
+assumed — the ±1 between the §10.5 pairing and the REPL's is stated in the output because AGENTS.md records what
+getting it wrong once cost. `--selftest` runs 15 checks on synthetic rows, with teeth in both directions: the same
+0.2 perturbation is excused at an element under the cancellation band and held against the run at a large one; a
+wide-room flip is a blocker and the same flip at coin-toss room is admitted; a one-pass row that differs is a defect
+while a clean one stays green; a short `sampled.txt` is a run failure; and the preserved §13 dumps must come back
+"crashed run". All 15 pass, on CPU, device untouched.
+
+### 14.4 The two traps, for the index
+
+* **A guard that reads the other plan's flag turns a working path into a crash that looks like numerics.** The wave
+  satisfied §05.7 and was refused anyway; the refusal killed the run before it wrote a number, and the A/B reported
+  the absence as a difference. Price a precondition against the plan the launch actually uses, and make the guard and
+  the launch read one named value.
+* **A `cmp`-based A/B cannot distinguish "the bytes differ" from "the other side never wrote a file".** Require the
+  row on both sides, and print the row counts of the side's own log, before any number is compared.
+
+### 14.5 Device re-take, hand-off (the parent runs these; blocking, one at a time, zero subagents)
+
+No number here is mine and none of these was run by this pass. `run.py` takes `tools/gpu_lock.sh` itself, so hold the
+lock only around the `decode_run` lines (AGENTS.md's deadlock trap; check `grep -c gpu_lock prototype/attn_decode/run.py`).
+
+```sh
+bash prototype/attn_decode/build.sh && bash engine/build.sh
+
+# 1. DEFECT 1. Claim 2b now prints both grid depths and both grid.x values. Expect on the tiled core:
+#    "wave at grid.y 1 vs 2 under --softmax full (tiled core, L03): 0 elements moved", and
+#    `core_grid=2x1x..` / `2x2x..` on the two RESULT lines. A non-zero count now means the one-block-per-row
+#    property is really broken, because both sides demonstrably ran `attn_tile_wave`.
+.venv/bin/python prototype/attn_decode/run.py --wave --tile-kernel
+.venv/bin/python prototype/attn_decode/run.py --wave --tile-kernel --negative
+.venv/bin/python prototype/attn_decode/run.py --wave --tile-kernel --wave-rows 300
+#    then re-price the diagnosis against whatever the gate prints:
+.venv/bin/python prototype/attn_tile_model.py oob-bound --observed <the number the gate printed>
+
+# 2. DEFECT 2. The A/B, with EVERY prompt row dumped on both sides -- `--prefill-logits last` (what §12 used)
+#    leaves one row on each side, which is why there was no table to take. ~1 GB per side at 1024 tokens.
+tools/gpu_lock.sh acquire "attn p2b ab"; tools/gpu_lock.sh util
+./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --prefill-logits all \
+    --attn-tile 0 --out tmp/ab2/ship
+./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --prefill-logits all \
+    --attn-tile 1 --out tmp/ab2/tile
+tools/gpu_lock.sh release
+.venv/bin/python engine/attn_form_band.py --ship tmp/ab2/ship --tile tmp/ab2/tile --prompt-len 1024
+
+# 3. DEFECT 3. The attribution this could not price, both sides, best-of-3. This must now print an `attn`
+#    line for the tiled side too; §13's shipped baseline to beat is 116.29 ms / 33.60 % of 346.05 ms.
+for i in 1 2 3; do ./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --time-waves \
+    --gemm library --attn-tile 0 | grep -E "WAVE gran=stage|WAVEGAP"; done        # then --attn-tile 1
+```
+
+Order matters, and it is the order the defects depend on: if step 1 is still RED, steps 2 and 3 price a core that
+does not hold its own contract, and §12's pre-registered win line (<= 40 ms, with both falsifiers) should not be
+quoted against it. If `attn_form_band.py` comes back RED on a flip at room >= `flip_room_max`, that is a
+stop-and-report per §07.3 and this pass touched no band, so nothing here widens one.
