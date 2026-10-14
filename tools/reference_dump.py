@@ -56,6 +56,19 @@ Flags:
                    logits are already BF16-exact, so the round-trip moves no element (the
                    probe behind that claim is recorded in engine/results.md, dec64f section).
                    A reader with the old pins: `gate.py:load_pin` widens uint16 by <<16.
+  --prefill-logits L  `last` (default, every existing fixture) | `all`. `all` pins ONE more tensor,
+                   `logits_rows`: the whole [prompt_len, vocab] prefill logits block — every row, not
+                   only the wave's last one. It exists because `prototype/attn_decode/results.md` §15
+                   disputes ROW 1023 of a 1024-token prompt, and a fixture that pins only the last row
+                   cannot adjudicate a row that is not last. Deliberately the same spelling as the
+                   engine's `decode_run --prefill-logits`, because it is the same choice: row `i` of
+                   this pin pairs with the engine's `logits<i>.bin`, which is what makes the pairing
+                   check in `engine/gate.py` a check rather than a hope.
+                   SIZE IS THE CONSEQUENCE and is stated in bytes rather than left to discovery: one
+                   BF16 row is 0.4738 MiB, so `all` costs 0.4738 MiB x prompt_len on top of everything
+                   else (640 rows = 303 MiB, 1024 rows = 485 MiB). That is why it is a flag and not a
+                   default, and why `--logits-bits bf16` is the honest pairing: the same pin at f32 is
+                   double it, and the budget in `tools/dump_fixtures.sh` is in those units.
   --verify DIR     run, write NOTHING into DIR, and instead byte-compare the fresh run with
                    what is already pinned there (§10.5: a fresh run must reproduce the pin).
                    Exits 1 on any difference, including a file that exists on one side only.
@@ -122,9 +135,17 @@ def parse_args():
                         'a step beyond --decode is refused (nothing ran there)')
     p.add_argument("--logits-bits", default="f32", choices=["f32", "bf16"],
                    help="store logits_last as F32 (every existing fixture) or as BF16 bits")
+    p.add_argument("--prefill-logits", default="last", choices=["last", "all"],
+                   help="pin only the wave's last row (the default, and every fixture made before"
+                        " this flag) or EVERY prefill row in one `logits_rows` pin (0.4738 MiB per row"
+                        " at bf16). Row i pairs with the engine's logits<i>.bin, which is what makes a"
+                        " row above MAXSC adjudicable against ground truth")
     p.add_argument("--verify", default=None, metavar="DIR",
-                   help="generate into a scratch dir and byte-compare with DIR instead of "
-                        "writing pins (§10.5 reproduction check)")
+                   help="generate into a scratch dir and byte-compare with DIR instead of writing pins"
+                        " (§10.5 reproduction check). VERIFIES THE FLAGS YOU TYPE, not the flags the pin"
+                        " was made with: pass the recipe in the manifest's `provenance.recipe`, or every"
+                        " manifest value differs and a perfectly pinned fixture reads as broken (550"
+                        " 'mismatches' from one wrong flag, which is how this was first misread here)")
     p.add_argument("--keep-temp", action="store_true",
                    help="with --verify: leave the scratch dir in place for inspection")
     return p.parse_args()
@@ -228,6 +249,34 @@ def check_pin_policy(args, logit_steps: set[str] | None) -> None:
             " dump but not their `logits_last`, so the one expensive step of the run would carry no"
             " logits for section (b) to judge. Either add those steps to --logit-steps or drop them"
             " from --deep-steps.")
+
+
+def dump_recipe(argv: list[str]) -> list[str]:
+    """The invocation that made this fixture, minus the flags that describe the SCRATCH rather than
+    the fixture.
+
+    Recorded verbatim in the manifest (`provenance.recipe`) so a pin can be re-made by copy-paste, and
+    stripped of `--out/--verify/--tag/--keep-temp` plus their values because those differ between the
+    run that made a pin and the run that re-verifies it — and `tools/check_dump_reproduction.py`
+    compares the manifest with zero tolerance, so a recipe that carried a scratch path would make every
+    reproduction check fail on its own provenance. The prompt text itself stays: it is part of the
+    fixture's identity, and it is already in `sources`.
+    """
+    takes_value = {"--out", "--verify", "--tag"}
+    no_value = {"--keep-temp"}
+    out: list[str] = []
+    skip = False
+    for a in argv:
+        if skip:
+            skip = False
+            continue
+        if a in takes_value:
+            skip = True
+            continue
+        if a in no_value:
+            continue
+        out.append(a)
+    return out
 
 
 def cache_state_tensors(layer, attr: str) -> list[torch.Tensor]:
@@ -670,6 +719,18 @@ def main():
         print(f"prefill {time.time()-t0:.1f}s")
         rec.pin("logits_last", o.logits[:, -1, :], "logits over vocab at final position",
                 logits=True)
+        # Every prefill row, in ONE tensor, from the SAME forward output as `logits_last` — which is
+        # what makes its pairing with `logits_last` structural rather than something to hope about
+        # (§10.5's last-writer-wins trap is exactly a pairing asserted from names). Row i is the
+        # reference's answer after feeding prompt tokens 0..i, i.e. the row the engine's
+        # `logits<i>.bin` claims to reproduce, so a dispute about row 1023 of a 1024-token prompt can
+        # be settled against HF rather than between two engine builds.
+        if args.prefill_logits == "all":
+            rec.pin("logits_rows", o.logits[0],
+                    f"every prefill row's logits, [{input_ids.shape[1]}, vocab]; row i is the answer"
+                    " after prompt tokens 0..i and pairs with the engine's logits<i>.bin;"
+                    " row -1 IS `logits_last`, bit for bit",
+                    logits=True)
         nxt = int(o.logits[:, -1, :].argmax(-1))
         gen.append(nxt)
         rec.fingerprint(o.past_key_values, "")
@@ -702,10 +763,23 @@ def main():
             print(f"WARN non-finite values in {name}")
         np.save(out / f"{name}.npy", t.numpy() if isinstance(t, torch.Tensor) else t)
     cfg = model.config.get_text_config()
+    hf_version = __import__("transformers").__version__
     manifest = {
         "model": str(args.model), "dtype": args.dtype, "seed": args.seed,
-        "torch": torch.__version__, "transformers": __import__("transformers").__version__,
+        "torch": torch.__version__, "transformers": hf_version,
         "attn_implementation": "eager",
+        # §10.5 provenance, and the two questions it answers: WHICH reference made these bytes, and
+        # WHICH path made them. The recipe is argv with the scratch/output flags removed, so it is
+        # byte-identical across independent runs of the same recipe (a recorded `--out` path would
+        # differ every time and `check_dump_reproduction.py` compares the manifest with zero
+        # tolerance). `tools/dump_fixtures.sh` remains the single source of the recipe.
+        "provenance": {
+            "dumper": "tools/reference_dump.py",
+            "dump_path": "tools/dump_fixtures.sh",
+            "hf_version": hf_version,
+            "torch_version": torch.__version__,
+            "recipe": dump_recipe(sys.argv[1:]),
+        },
         # Every step above fed the reference's own previous argmax, which is what makes a deep
         # pin possible at all: a FREE 64-token run cannot be pinned, because two legal bf16
         # continuations of the same prompt agree only 0.8776 of the way over 24 tokens (A-18).
@@ -719,6 +793,12 @@ def main():
                           ("no step (logits + ids + fingerprints only)" if not rec.keep_steps
                            else ", ".join(sorted(rec.keep_steps))))),
         "logits_storage": args.logits_bits,
+        # Which PREFILL rows this fixture pins, in the same word the engine's flag uses
+        # (`decode_run --prefill-logits`), because they are the same choice: `last` is §06.5's y0 only
+        # (every fixture made before this flag), `all` also carries `logits_rows`. `engine/gate.py`
+        # reads this to tell "the fixture has no row pins" from "the fixture has row pins and this run
+        # did not dump the engine's half of them" — the second one is a failure, the first is not.
+        "prefill_logit_rows": args.prefill_logits,
         # Every decode step whose `logits_last` this run chose NOT to pin, named one per step. This is
         # what lets `engine/gate.py` section (0) skip a step instead of exiting 1 on it: an undeclared
         # missing file stays fatal, so "the pin chose not to carry it" and "the pin lost it" stay two
@@ -771,8 +851,14 @@ def main():
     mib = 1024 * 1024
     # `rec.tensors` keys are pin NAMES, not file names — `.npy` is added by np.save below.
     logits_b = sum(v for n, v in nbytes.items() if n.endswith("logits_last"))
+    rows_b = sum(v for n, v in nbytes.items() if n == "logits_rows")
     fp_b = sum(v for n, v in nbytes.items() if n.endswith(("state_fp", "conv_fp", "kv_fp")))
     print(f"wrote {len(rec.tensors)} tensors + manifest.json to {out}")
+    if rows_b:
+        n_rows = len(manifest["prefill_ids"])
+        print(f"  prefill rows pinned: logits_rows [{n_rows}, {manifest['text_config']['vocab_size']}]"
+              f" = {rows_b / mib:.1f} MiB as {args.logits_bits}; every row is adjudicable against"
+              " `decode_run`'s logits<i>.bin")
     if manifest.get("stop_probe"):
         print(f"  stop probe recorded: first stop id {manifest['stop_probe']['stop_id']}"
               f" at {manifest['stop_probe']['first_stop']}")
@@ -781,9 +867,11 @@ def main():
               " to pre-flight the prompt with tools/stop_probe.py and record the answer. Nothing"
               " here can tell a prompt that runs 300 tokens from one that stops at 12.")
     print(f"  total {sum(nbytes.values()) / mib:.1f} MiB of pins — logits"
-          f" {logits_b / mib:.1f} MiB stored as {args.logits_bits}, state fingerprints"
+          f" {logits_b / mib:.1f} MiB stored as {args.logits_bits}"
+          + (f", prefill rows {rows_b / mib:.1f} MiB" if rows_b else "")
+          + f", state fingerprints"
           f" {fp_b / 1024:.1f} KiB, per-layer+cache+ids"
-          f" {(sum(nbytes.values()) - logits_b - fp_b) / mib:.1f} MiB")
+          f" {(sum(nbytes.values()) - logits_b - fp_b - rows_b) / mib:.1f} MiB")
     if logits_declared_absent:
         print(f"  {len(logits_declared_absent)} step(s) declared without logits — named per step in"
               f" the manifest's logits_declared_absent: {', '.join(logits_declared_absent)}"

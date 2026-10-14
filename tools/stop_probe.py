@@ -19,6 +19,8 @@ the same way — and a multi-turn transcript can only be probed at all if the pr
     .venv/bin/python tools/stop_probe.py --message "..." --max-new 300
     .venv/bin/python tools/stop_probe.py --max-new 64 --turn user:"..." --turn assistant:"..." \
             --turn user:"..."        # the multi-turn fixture's pre-flight
+    .venv/bin/python tools/stop_probe.py --max-new 64 --prompt "$(cat speccheck/fixtures/wide640.txt)"
+            # the RAW-prompt fixtures: same tokenization `reference_dump.py --prompt` uses
 
 It generates through `model.generate`, and that is the trap this file exists to record: the first version
 hand-rolled the decode loop and fed one token at a time **without `past_key_values`**, so every step saw a
@@ -58,6 +60,11 @@ def main() -> int:
     ap.add_argument("--turn", action="append", default=[], metavar="ROLE:TEXT",
                     help="a full transcript, one `role:text` per occurrence — the multi-turn case"
                          " `--message` cannot express (see tools/chat_render.py)")
+    ap.add_argument("--prompt", action="append", default=[],
+                    help="a RAW prompt, tokenized exactly as `tools/reference_dump.py --prompt`"
+                         " tokenizes it (no chat template). A fixture whose ids went in raw can only"
+                         " be probed raw: rendering it through the template would probe a different"
+                         " prompt than the one that gets pinned.")
     ap.add_argument("--max-new", type=int, default=100)
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"])
     ap.add_argument("--enable-thinking", action="store_true",
@@ -75,20 +82,31 @@ def main() -> int:
           f" {getattr(model.config, 'eos_token_id', None)} | stop id used here {EOS_PRIMARY}"
           f" (legacy {EOS_LEGACY})")
 
-    cases = [[{"role": "user", "content": text}] for text in args.message]
+    # One (label, ids) per prompt to probe, each rendered the way the DUMPER would render it. That is
+    # the whole point of the three input modes: a probe that answers the question for a slightly
+    # different prompt than the one that gets pinned is worse than no probe, which is the sentence
+    # this file was written for.
+    cases: list[tuple[str, list[int]]] = []
+    for text in args.message:
+        messages = [{"role": "user", "content": text}]
+        cases.append((" / ".join(f"{m['role']}: {m['content'][:40]!r}" for m in messages),
+                      tok(render_transcript(tok, messages, thinking=args.enable_thinking),
+                          add_special_tokens=False)["input_ids"]))
     if args.turn:
-        cases.append([parse_turn(t) for t in args.turn])
+        messages = [parse_turn(t) for t in args.turn]
+        cases.append((" / ".join(f"{m['role']}: {m['content'][:40]!r}" for m in messages),
+                      tok(render_transcript(tok, messages, thinking=args.enable_thinking),
+                          add_special_tokens=False)["input_ids"]))
+    for raw in args.prompt:
+        cases.append((f"raw: {raw[:60]!r}", tok(raw, add_special_tokens=False)["input_ids"]))
     if not cases:
-        raise SystemExit("stop_probe: pass --message and/or --turn (see this file's docstring)")
+        raise SystemExit("stop_probe: pass --message, --turn and/or --prompt (see this file's docstring)")
 
-    for messages in cases:
-        label = " / ".join(f"{m['role']}: {m['content'][:40]!r}" for m in messages)
-        rendered = render_transcript(tok, messages, thinking=args.enable_thinking)
-        ids = tok(rendered, add_special_tokens=False)["input_ids"]
-        # The rendered prompt's own specials are counted here rather than printed: a transcript
-        # legitimately contains the stop id once per closed turn, and the number this probe exists for
-        # is where the GENERATED chain first produces one (engine/gate.py's §07.5 note is the same
-        # distinction on the engine's side).
+    for label, ids in cases:
+        # The prompt's own specials are counted here rather than printed: a transcript legitimately
+        # contains the stop id once per closed turn, and the number this probe exists for is where the
+        # GENERATED chain first produces one (engine/gate.py's §07.5 note is the same distinction on
+        # the engine's side).
         in_prompt = [i for i, t in enumerate(ids) if t in (EOS_PRIMARY, EOS_LEGACY)]
         print(f"\n=== {label}\n  prompt: {len(ids)} tokens; stop ids"
               f" {(EOS_PRIMARY, EOS_LEGACY)} appear at prompt index {in_prompt}"

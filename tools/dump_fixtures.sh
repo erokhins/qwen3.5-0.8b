@@ -77,6 +77,30 @@ want_tokens() {  # <prompt-file> <expected rendered token count>
   echo "  prompt renders to $2 tokens, as the recipe claims: $1"
 }
 
+# The same guard for the two `--prompt` fixtures, which are RAW prompt text: no chat template is
+# rendered, so counting them means tokenizing the file itself. These two are the only fixtures whose
+# token count is an IDENTITY rather than a topic — their pinned rows are only ground truth for the
+# disputed lanes if the ids are the ones `tmp/q10/ids1024.txt` holds, so a prompt that drifts by one
+# token silently stops being an anchor for the argument it was dumped for.
+raw_tokens() {
+  "$PY" - "$1" <<'PY'
+import sys
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained("models/Qwen3.5-0.8B")
+print(len(tok(open(sys.argv[1]).read(), add_special_tokens=False)["input_ids"]))
+PY
+}
+
+want_raw_tokens() {  # <prompt-file> <expected tokenized token count>
+  local got; got=$(raw_tokens "$1")
+  if [ "$got" != "$2" ]; then
+    echo "FATAL: $1 tokenizes to $got tokens, but the recipe says $2 — the lane anchor is gone." >&2
+    echo "       Re-dump both wide fixtures together, or restore the prompt; do not edit the number." >&2
+    exit 1
+  fi
+  echo "  raw prompt tokenizes to $2 tokens, as the recipe claims: $1"
+}
+
 if want smoke; then
   run smoke --message "The capital of France is" --decode 2
 fi
@@ -152,4 +176,44 @@ if want wide520f; then
   # legacy 248044 either), so nothing in the 24-step window is a turn the model had already finished.
   run wide520f --message "$(cat "$FIX/wide520f.txt")" --decode 24 --lean --deep-steps 23 \
       --logits-bits bf16 --first-stop "none in 300 (probed to 300 generated tokens; legacy stop 248044 also none)"
+fi
+
+# ---- the >512-lane HF anchors (attn_form dispute, prototype/attn_decode/results.md §15) ----------
+# Everything above this line pins ONE prefill row (logits_last, §06.5), so not one of them can say what
+# HF's own logits look like at lane 513 or lane 1023. That is the gap §15 called blocking: with two
+# engine forms of the >MAXSC streaming path disagreeing at rows 1023-1024 and no reference above 512
+# lanes, "the tile form is wrong" and "the shipped form is wrong" are not distinguishable. These two
+# fixtures are that reference: `--prefill-logits all` pins EVERY prefill row (logits_rows.npy), so the
+# disputed streaming rows sit inside pinned ground truth rather than inside an A/B between two builds.
+#
+# THE IDS ARE AN IDENTITY, NOT A TOPIC. Both prompts are the raw text whose tokenization is exactly
+# `tmp/q10/ids1024.txt` — wide640f is the first 640 of that same list, wide1024f is all of it — chosen
+# so the rows the dispute names (1023, and 1024 once the decode step is counted) are pinned rows. Proved
+# by `tmp/pinwork/check_ids_match.py`-style comparison and by `tools/check_fixture_prefix.py`, which
+# shows wide640f's whole block is a bit-exact prefix of wide1024f's: one prompt at two lengths, so a
+# row that moves when the prompt grows is a streaming artifact and not a different prompt.
+#
+# Cost, because these are the two biggest pins in the tree and that is a decision worth stating:
+# logits_rows is [rows, 248320] BF16-as-uint16 = 0.4738 MiB per row, so 303.1 MiB (640) and 485.0 MiB
+# (1024) on top of the ordinary pins. `--decode 8 --lean --deep-steps 7` keeps the decode side at the
+# same shape as the other wide fixture; the row block is where the money went and it is what the
+# argument needs. Neither carries a route_allowance.json (band_history.py keys on path; a carried margin
+# file would read as unpriced band keys), so both ride the flat §10.1 floors until someone prices them.
+if want wide640f; then
+  want_raw_tokens "$FIX/wide640f.txt" 640
+  # 640 = 512 + 128 = 5 × 128: just above the staging ceiling AND a whole number of §04.7 chunks, so
+  # the first row the one-pass stage cannot serve (row 512) is inside the pin with 127 rows of margin
+  # above it, and the prompt still ends on a chunk boundary rather than mid-tile.
+  run wide640f --prompt "$(cat "$FIX/wide640f.txt")" --decode 8 --lean --deep-steps 7 \
+      --logits-bits bf16 --prefill-logits all \
+      --first-stop "none in 300 (probed to 300 generated tokens; legacy stop 248044 also none)"
+fi
+if want wide1024f; then
+  want_raw_tokens "$FIX/wide1024f.txt" 1024
+  # The fixture §15 named: 1024 lanes is 2 × MAXSC, so the streaming path runs a full staging cycle
+  # plus the tail, and the two rows the tile-vs-shipped A/B disagreed on are pinned rows 1022-1023 with
+  # the run's first generated token sitting at lane 1024.
+  run wide1024f --prompt "$(cat "$FIX/wide1024f.txt")" --decode 8 --lean --deep-steps 7 \
+      --logits-bits bf16 --prefill-logits all \
+      --first-stop "none in 300 (probed to 300 generated tokens; legacy stop 248044 also none)"
 fi
