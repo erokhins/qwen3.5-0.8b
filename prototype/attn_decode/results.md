@@ -492,3 +492,166 @@ comparison counts, same 0 failures, same 67-of-68 anti-vacuity, same 12 negative
 stages — including G4's de-interleave (`--neg gatehalf`, caught by `gate_vec`+`gated` and nowhere else)
 and `--neg qswap`. A single-row case with `nrows` absent behaves exactly as it did before: the row
 strides are the strides a one-row launch already used, and `grid.z = 1` costs nothing.
+
+## 12. P9 Phase 2 (2026-10-14): the tiled wave core — `attn_tile_wave`, gated on CPU, not yet on device
+
+Phase 1 (`bench/attn-wave-diagnosis-2026-10-14.md`) closed with the byte wall binding: 25.79 GB of K/V
+re-read for 25.79 GFLOP, 1.000 byte/flop, 108.8 ms of traffic against 109.2 ms measured. §9's lever is
+re-use: one K row loaded once and fed to more than one score dot. This section is the tiled form that
+does it, everything that could be proven without a device, and the command list for the device pass.
+
+**What was built.** `attn_tile_wave` (`attn_decode_kernels.h`, after `attn_core`), behind the existing
+wave entry point in both launchers:
+
+| knob | what it selects |
+|---|---|
+| `run.py --wave --tile-kernel` | the op's own A/B; every core launch of the run goes through the tile form |
+| `decode_run --attn-tile 0\|1` | the engine's A/B, echoed as `attn_tile=` on the `NUMERICS` line |
+
+Geometry: block = (one KV group's G=4 query heads) x (M=4 consecutive query rows) x (one MAXSC-wide lane
+window); grid = `dim3(N_KV, split_for_lanes(lanes_last), ceil(nrows/M))`, `blockIdx.z` inverted so the
+widest row tiles launch first (§2's dispatch tail). `L=8` K lanes resident per sub-block. The five
+ordered reductions of §05.5 are untouched — same 8 MACs/thread, same 5-step butterfly, same single BF16
+round site, same serial `m`/`l`/weight/P·V order — so the contract is bit-for-bit equality with the
+shipped form, not agreement within a band.
+
+**Priced, not discovered** (compile-only census, `attn_tile_model.py isa`, which is `hipcc -O3
+--offload-arch=gfx1151 -Rpass-analysis=kernel-resource-usage -c` on the header — no device touched):
+
+| kernel | VGPR | spill | scratch | occupancy | LDS/block |
+|---|---|---|---|---|---|
+| `attn_core` (shipped) | 53 | 0 | 0 | 16 waves/SIMD | 38,944 B |
+| `attn_tile_wave` | **49** | 0 | 0 | 16 waves/SIMD | **20,480 B** |
+
+* registers came in *cheaper* than §5 priced (49, not 53+32). The +32 was for holding G or GxM query
+  rows live; the pair-first work rule (warp w takes pairs w, w+nw, …) means a warp ever holds ONE pair's
+  query, 8 floats, so occupancy is unchanged and registers are not the limit.
+* LDS is exactly the sum of the source's own `__shared__` arrays — 16,384 B of score staging (G x M x
+  MAXSC BF16 scores) + 4,096 B of K at L=8 — so **3 blocks/CU**, while `attn_core` in the same
+  translation unit reserves 38,944 B for arrays summing to 6,176 B. That asymmetry is new evidence for
+  §3: the 6.3x inflation is kernel-specific, not a code-object or toolchain property, and if §3's
+  residency query answers 1 block/CU for `attn_core` then this form also relieves it.
+* The score staging is 2 bytes and not 4 because §05.5's score is `bf(fb(dot)) * SCALE` with
+  `SCALE = 1/16`, and a BF16 value times a power of two is exact — so the score *is* a BF16 value and
+  reads back as the identical F32. That halves §5's budget and is the only reason M=4 fits; it is also
+  why `--score-f32` is a *refusal* in `attn_tile_ok` rather than a silent rounding.
+* M=16 is not reachable on this boundary: staging is G x M x MAXSC scores, so M=16 is 64 KiB on a CU that
+  has 64 KiB total, and shrinking the window below MAXSC to buy M would push rows the shipped form
+  computes exactly into §07.3's streaming band — a band decision, not a kernel knob.
+
+**Traffic, as written vs as it could be.** `attn_tile_model.py traffic --tokens 1024 --wave-rows 512`:
+
+```
+  touches          25,190,400   flops 25.79 GFLOP (the ledger's 25.79)
+  shipped K/V read 25.79 GB  = 1.000 byte/flop
+  tiled   K/V read  6.47 GB  = 0.251 byte/flop   (4.0x less, = M: pairs stage per pair)
+  block-staged      1.62 GB  = 0.063 byte/flop   (16.0x less, = G*M: the next lever)
+
+  shipped bytes / 237 GB/s       108.8 ms   <- predicts the measured line (109.2)
+  tiled bytes / 237 GB/s          27.3 ms
+  block-staged / 237 GB/s          6.8 ms
+  arithmetic at the hand-GEMM rate 30.3 ms   <- what binds once bytes stop binding
+  arithmetic at the vector rate     8.8 ms
+```
+
+The honest reading of the first asterisk: this version stages K per *pair*, so the four heads of a group
+issue four identical 512-byte loads and write them into the same LDS slots with the same bytes. That is
+benign and probably cheap (L1 likely serves three of the four), but a traffic claim may not rest on an L1
+hit, so the model books all four and the numbers above are the pessimistic ones: **the re-use actually
+booked is M = 4x, not G x M = 16x.** Hoisting the stage to block level — stage the group's rows once per
+sub-block, let a pair substitute only its own appended lane at the use site, the one lane where pairs
+differ — is the remaining factor of G, ~15 lines in pass 1 plus a pass-2 sub-block loop, and it is worth
+running *only if* the device says bytes still bind, because at M=4 the traffic term (27.3 ms) is already
+under the arithmetic term (30.3 ms) and §7's ≤40 ms win line does not depend on it.
+
+**Where bit-identity stops — one place, and it is pre-registered here rather than discovered later.**
+For a row wider than MAXSC, the shipped form cuts the row into `split` *equal* slices
+(`span = ceil(n/split)`, per row) while the tile form owns *fixed MAXSC-wide* windows, because a window
+is what a block shares a K load over. Both are §07.3's streaming form and both sit inside its
+pre-authorized band, but the two groupings are not bit-identical to *each other*: different partial
+boundaries are a different F32 sum. So the bit-for-bit claim is exact for every row the one-pass route
+serves (lanes ≤ MAXSC) and is a **band** claim above it. No pinned fixture reaches 512 lanes — p300 tops
+out at 277 — so neither this gate nor `run.py --wave` can exercise it; the engine's 1024-token body 1
+(lanes 513..1024) is the first place it exists. If an engine gate step moves there, it is this, it is
+inside §07.3's band by construction, and it is a band question for the parent, not a bug to chase. The
+mirror models the two groupings separately so it cannot quietly agree with itself.
+
+**CPU gate, run and green** (`prototype/attn_tile_model.py`, CPU-only, no device, no timing; p300 L03,
+waves of 64 rows, G=4 M=4 MAXSC=512):
+
+```
+gate:            567,296 elements, 0 failures
+  per wave:      ref-vs-pin 0 | tile-vs-shipped 0 | mirror-vs-pin ndiff 63/12/111/7/1, cos 1.00000000
+selftest:        10/10
+gate --negative: 6 injections over the prompt wave and a carried wave, mis-localisations 0
+```
+
+Three things in that output are load-bearing and none of them is the headline:
+
+1. **The tile-vs-shipped column is the claim** (0 differing elements over 567,296), and it is a claim
+   about the mirror's arithmetic. What makes the mirror worth believing is the `ref-vs-pin` column:
+   `reference.attend`'s pinned form reproduces `attn_out_pre_gate` **bit-exactly, 0 of 131,072**, on
+   every wave, which proves the positions, the pre-append cache and the row/head layout are right
+   (§10.5's trap is exactly a gate that cannot see a mis-pairing). The mirror's own residue against the
+   pins — 194 elements, 0.034 %, max 10 ULP, cos 1.00000000, meanrel ≤ 1.6e-6 — is the ordering floor of
+   §10.4: it sums `l` and `acc` serially in lane order, which is what the *kernel* does, whereas torch's
+   softmax reduces in its own order. Per AGENTS.md the chain aggregate judges a chain, so the gate's
+   bar is `cos ≥ 0.9999999 and meanrel ≤ 1e-5` and `ndiff` is printed, not gated. A real arithmetic bug
+   moves thousands of elements and drops the cosine.
+2. **The poison tripwire is real, not a count.** The mirror reads K/V through an instrumented cache whose
+   unbuilt lanes hold NaN, so a mask leak produces a NaN in the output rather than a number a reader
+   has to trust (`mixed_bw`'s lesson). It reports 0 poison here for a specific reason worth knowing: on
+   these spans `cap == lanes_last`, so `--neg readpast` cannot step outside the built region at all.
+3. **Every must-catch set is derived from the geometry, and two of them are not "everything"** — which is
+   the `mlp_gemv` rule (a negative that catches everything measures nothing) applied one layer up, after
+   two FAILs rather than by inspection:
+
+| injection | caught | blind | blind because |
+|---|---|---|---|
+| `readpast` (mask gone) | 1008/1024 | 16 | a row that already attended `cap` lanes cannot see the mask disappear |
+| `dropcurrent` (§05.7 append forgotten) | 1024/1024 | 0 | — |
+| `gqaoff` (whole group reads the neighbour) | 1024/1024 | 0 | — (N_KV=2, offset 1 mod 2 moves both) |
+| `dimhalf` (128 of 256 dims) | 1016/1024 | 8 | **softmax of a singleton is 1.0 whatever the score**, so no score-only bug can move row 0 of a span |
+| `gqa_head0` (one head reads the neighbour) | 128/1024 | 896 | only head 0's K/V changes — the shared-load wiring test |
+| `tilecarry` (state leaks from the previous row of a block) | 768/1024 | 256 | only rows that are not the first of their row tile can inherit |
+
+`tilecarry` is §07.3's bug in its new shape: with M rows per block the leak is *between rows of one
+block*, which the shipped per-(row,head) form cannot express — so `run.py --neg carry` is refused under
+`--tile-kernel` and its tile analogue lives here instead.
+
+**Device pass, hand-off (the parent runs these; `run.py` self-locks, `decode_run` does not).**
+Correctness first, then timing, blocking, zero subagents, best-of-3, and §7 item 3's contamination check
+(`proj`/`mlp_down`/`mlp_gateup`/`gdn_rec` must not move):
+
+```sh
+# 1. the op gate on the tiled form — the pins are the same pins, so this IS the §5 contract
+.venv/bin/python prototype/attn_decode/run.py --wave --tile-kernel
+.venv/bin/python prototype/attn_decode/run.py --wave --tile-kernel --negative
+.venv/bin/python prototype/attn_decode/run.py --wave --tile-kernel --wave-rows 300
+# 2. engine A/B, bit-for-bit, one window (default 0 must equal the pre-Phase-2 binary)
+tools/gpu_lock.sh acquire "attn phase2 ab"; tools/gpu_lock.sh util
+./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --attn-tile 0 --out tmp/ab/ship
+./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --attn-tile 1 --out tmp/ab/tile
+tools/gpu_lock.sh release
+diff <(cd tmp/ab/ship && ls) <(cd tmp/ab/tile && ls) && for f in tmp/ab/ship/*; do cmp -s "$f" "tmp/ab/tile/${f##*/}" || echo "DIFF ${f##*/}"; done
+# 3. §7 attribution, both sides, best-of-3 (the `attn` line is the measure; the four siblings are the
+#    contamination check)
+for i in 1 2 3; do ./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --time-waves \
+    --gemm library --attn-tile 0 | grep -E "WAVE gran=stage|WAVEGAP"; done   # then --attn-tile 1
+# 4. §9's counters over both cores, to check the read census instead of assuming it
+rocprofv3 --kernel-include-regex "attn_tile|attn_core" --pmc SQ_INSTS SQ_INSTS_VALU SQ_INSTS_LDS \
+    SQ_WAVES GRBM_COUNT GRBM_RUN_BUSY_STATS --output-format csv -d tmp/rocp2 -o tile \
+    -- ./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --attn-tile 1
+```
+
+Pre-registered before any of it runs, as §7 demands: the measure is `WAVE gran=stage family=attn ms` on
+the library route at 1024 tokens, `wave_rows=512`, baseline 109.2 ms re-taken in the same window; **a win
+is ≤ 40 ms absolute**; 40–80 ms is "traffic fell, something else binds" and must be reported PARTIAL; > 80
+ms is not a win. The model's own expectation is **27.3 ms of traffic against a 30.3 ms arithmetic floor**,
+i.e. a line that should land in the high-20s to low-40s depending on how well the two overlap — so a
+number near 40 ms is the model being right, not the kernel being slow. Falsifier A: bytes fall 4x and
+`attn` does not fall at all ⇒ §4's verdict was wrong and the redundant pass-2 loops are the wall.
+Falsifier B: `attn` lands 40–80 ms ⇒ traffic fell and something else (issue, LDS, or the 4x-pair staging)
+binds ⇒ report PARTIAL and price the block-level stage. `SQ_INSTS_VALU` must not *rise* on the tile form.
+No number from a worker run belongs in `bench/performance-status.md`; none was taken here, and the two
+`hipcc -c` calls and the Python gate above touched no device.
