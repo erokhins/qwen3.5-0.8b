@@ -1,7 +1,7 @@
 # ASSUMPTIONS
 
 Every `[REF]`/`[ASSUMPTION]` used by `specification/`. Sources: HF-ref =
-`transformers 5.19.0` `models/qwen3_5/modeling_qwen3_5.py`; vLLM-ref =
+`transformers 5.19.0` `transformers/models/qwen3_5/modeling_qwen3_5.py`; vLLM-ref =
 `../qwen3.8-flash-next-old/engines/vllm/vllm/model_executor/models/qwen3_5*.py`;
 ckpt = this checkpoint's `config.json` + safetensors header.
 

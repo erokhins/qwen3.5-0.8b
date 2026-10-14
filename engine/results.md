@@ -491,9 +491,9 @@ the kind G7 exists to tolerate. That retires the "small real discrepancy" readin
 
 What it does not do is prove the engine's difference *is* only the route — the route spread is a lower bound
 on what a legal reimplementation may be doing, not an identity. Separating any remainder still wants the
-engine's stage dumps against the per-step pins: `decode_run --dump-stages` already writes
-`norm_out`/`q_rope`/`k_rope`/`gate_out`, `speccheck/specimpl.py::stage_pairs` already names the pins, and
-`engine/gen_watch.py --all` is already the comparator; nothing currently connects the first to the last.
+engine's stage dumps against the per-step pins, and that comparator was never wired: `decode_run` writes
+only logits (`--time-stages` is a timer, not a dump), so no engine stage reaches disk to compare; what
+exists today reads a gate log (`engine/curve_probe.py`) or the pins alone (`engine/pin_bits_probe.py`).
 
 Bands unchanged either way — and this exchange is the argument for leaving them alone: a per-stage bar applied
 to an end-to-end quantity produced a non-failing flag that measurement then put inside the legal band.
@@ -3248,8 +3248,8 @@ per fixture. No fixture was re-pinned, no `BAND` constant in `engine/gate.py` mo
 **`wide520f` priced its own margin, per D-2** — never a hand-written number:
 
 ```
-engine/route_price.py --fixture wide520f --engine-log <gate log> --out tmp/route_wide520f.json
-engine/route_allowance.py --table tmp/route_wide520f.json
+engine/route_price.py --fixture wide520f --engine-log <gate log> --out progress/engine/evidence/route_wide520f.json
+engine/route_allowance.py --table progress/engine/evidence/route_wide520f.json
 ```
 
 worst engine/route 1-cos ratio **2.11916 at step 17** → `margin 2.12`; worst meanrel ratio **0.38352 at
@@ -3736,7 +3736,7 @@ harnesses print were ignored and nothing here entered `bench/performance-status.
    wall 0.61 s and 0.50 s. `MLPMAP gate=contig` appears in the second run's stdout and not the first.
 4. **Gate counts, all eight fixtures, both mappings.** `engine/gate.py` takes `--binary` but has no
    engine-arg passthrough, so the alternative walk was gated through a two-line wrapper that adds the flag
-   (`progress/engine/evidence/q10/decode_run_contig.sh`, not committed) — the flag path itself is what got gated, which is the
+   (`progress/engine/evidence/q10/decode_run_contig.sh`, tracked) — the flag path itself is what got gated, which is the
    stronger of the two ways to do it:
 
    | fixture | interleave | contig | same? |

@@ -120,7 +120,7 @@ Three consequences, none of them mine to decide:
    `fc444d0` retracted the claim in `bench/gate-audit.md` (G2 amendment); the probe now *asserts*
    its oracle row at ndiff 0 and asserts the ladder is ordered, so the retraction is checked on
    every run instead of remembered. One caveat the ladder exposes: bit-exactness is a property of
-   the **call**, not of the function — `speccheck/run.py --keep-f32-scalars` (the A-02 A/B knob)
+   the **call**, not of the function — `speccheck/specimpl.py --keep-f32-scalars` (the A-02 A/B knob)
    leaves `linear_attn.norm.weight` in F32, and then the oracle's `n = w * n` promotes to F32 and
    lands in the 74 860 class. The engine keeps that weight F32 as well (§01.6, §3 below), so it
    must round it to the activation dtype before the multiply — which is what the kernel does.
