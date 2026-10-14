@@ -201,10 +201,20 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     // single-row form IS `attn_core`, so a generation step cannot be moved by this knob — and the
     // refusal below is `attn_tile_ok`'s, the same list `prototype/attn_decode/attn_decode.hip.cpp`
     // refuses, so the gate and the engine cannot disagree about what the tiled form supports.
+    // THE GUARD PRICES THE WAVE'S OWN PLAN, NOT `c.fused`. `c.fused` above is the ONE-ROW plan's value
+    // (1), and a wave cannot run that plan at all: the `rows > 1` branch below stages every row's
+    // §05.7 append in an `attn_prep` launch that has finished before the core starts, and launches the
+    // core with `fused = 0` — which is exactly the precondition the fused refusal exists to protect ("a
+    // wave's §05.7 append must finish before any row reads the cache"). Reading the guard off `c.fused`
+    // refused the tiled wave form unconditionally, in every path including `--time-waves`: each
+    // `--attn-tile 1` run threw on its first wave body and wrote no logits file at all, which §13 then
+    // read as a token flip inside the band region (§14). One named value now decides the wave's plan,
+    // and the launch below uses it, so the guard cannot drift from the thing it guards.
+    const int wave_fused = 0;
     const bool wave_tile = a.wave_tile != 0 && rows > 1;
     if (wave_tile) {
         const char* why = nullptr;
-        if (!attn_tile_ok(c.score_f32, c.fused, warp_width(), &why)) {
+        if (!attn_tile_ok(c.score_f32, wave_fused, warp_width(), &why)) {
             throw std::runtime_error("attn_decode_layer: the tiled wave form is unavailable: " +
                                      std::string(why) + ". Pass wave_tile=0 for the shipped form.");
         }
@@ -256,7 +266,8 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     } else {
         attn_prep<<<dim3(N_Q + N_KV, rows), THREADS>>>(c);
         CoreArgs core = c;
-        core.fused = 0;                 // read the staged rows instead of recomputing them
+        core.fused = wave_fused;        // read the staged rows instead of recomputing them: the plan
+                                        // the guard above was priced against
         core.qrope = bf16(a.q_rope);    // what `attn_prep` wrote at ROW_H * qrow
         core.krope = bf16(a.k_rope);    // what it wrote at ROW_KV * qrow, and appended
         core.qrope_out = nullptr;       // no staging, no gate dump, no append from this launch
