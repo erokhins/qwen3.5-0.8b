@@ -890,3 +890,115 @@ there is no ground truth for any streaming path in this engine. Two implementati
 region cannot be settled by more comparison between them — it needs the >512-token HF reference fixture that was
 promoted to blocking in §12's acceptance conditions. Until that exists, "the tile form is wrong" and "the shipped
 streaming form is wrong" are indistinguishable, and neither is a safe default.
+
+*Correction made while §16 pinned the anchor: "no pinned fixture exceeds 512 lanes" is too broad as written —
+`data/refs/wide520f` crosses 512 and pins logits at lanes 513..524. Those are single-token DECODE steps
+(§07.3's decode streaming), not prefill-wave rows above the staging ceiling, so the sentence's load-bearing
+content — no HF ground truth for prefill rows above `MAXSC` — was true, and §16 is what closed it.*
+
+## 16. The >512-lane HF anchor now exists (2026-10-14, worker pass: **CPU only — no device touched, no timing taken**)
+
+§15's blocking gap was that neither attention form was anchored above 512 lanes. Two fixtures close it, made by
+the dumper the repository already had (`tools/reference_dump.py`, extended with `--prefill-logits last|all`, the
+switch `decode_run` has carried since §06.5 — no second dumper was invented), with their recipes and their
+token-count guards committed in `tools/dump_fixtures.sh`.
+
+| fixture | prompt | what is pinned | on disk | what it makes adjudicable |
+|---|---|---|---|---|
+| `data/refs/wide640f` | the first 640 tokens of `tmp/q10/ids1024.txt` (640 = 512 + 128 = 5 × §04.7's chunk) | **every prefill row**: `logits_rows.npy` = [640, 248320] BF16-as-uint16, 303.1 MiB — plus 8 replayed steps, `--deep-steps 7`, state fingerprints | 356 MiB | rows 512…639, the first rows the one-pass stage cannot serve |
+| `data/refs/wide1024f` | `tmp/q10/ids1024.txt` verbatim — proved, not asserted: the manifest's `sources[0].ids` **is** that list, 1024 of 1024 | [1024, 248320], 485.0 MiB, same decode side | 551 MiB | rows 512…1023, **including row 1023, the row §15's A/B disagreed on** |
+
+Both carry `prefill_logit_rows: all`, `logits_storage: bf16`, the §10.5 stop probe (`none in 300`, probed before
+dumping, legacy stop 248044 also absent), and a `provenance` block: dumper, dump path, **transformers 5.19.0**,
+torch 2.14.1+cpu, and the normalized recipe (scratch-only flags stripped so an independent run can reproduce it).
+
+**Reproduced before trusted.** Two independent A/B dumps per fixture compared with `tools/check_dump_reproduction.py`:
+PASS both, and a third run after installation — `reference_dump.py --verify` with the recorded recipe — came back
+`REPRODUCE PASS — every pinned byte and every pinned manifest value came back identical` (548 files each, ~4 s of
+CPU per dump). One trap worth recording, because it read as a broken fixture: **`--verify` verifies the flags you
+type, not the flags the pin was made with** — verify wide1024f without the recipe and it reports 550 manifest
+mismatches on a fixture that is pinned perfectly. `--verify`'s own help now says so.
+
+**The nesting is real, checked, and has a negative control.** `tools/check_fixture_prefix.py data/refs/wide640f
+data/refs/wide1024f --rows 640` → **PASS**: rows 0..639 of the 1024-row pin are bit-identical to the 640-row pin,
+so HF's chunked scan is length-local over this prompt and the two anchors corroborate each other. Its negative
+control, `--shift 1`, **FAILS** as it must (639/639 rows differ, first difference named with both bit patterns) —
+without that the PASS would be worth nothing, which is the same rule §12's negatives obey.
+
+**What the reference itself decides.** `tools/prefill_row_rooms.py data/refs/wide1024f`: 2 rows of 1024 tie at
+their maximum (61, 84) and 4 rows have top-1/top-2 room under `flip_room_max` 0.10 (61, 73, 84, 104), so **1020 of
+1024 rows were decided by HF with room to spare** — median gap 10.44. Row 512's room is 13.25 and **row 1023's is
+12.25**. That is the number that makes this anchor able to settle anything: the disputed row is not a coin toss in
+the reference, so a form that flips it cannot be excused by the room rule.
+
+**The gate now judges rows, by the floors already in force.** `engine/gate.py` gained section (i): every pinned
+row against the engine's own per-row dump (`logits<i>.bin` ↔ row *i*, the §06.5 pairing), judged by the §10.1
+`cos_hard` 0.9995 / `meanrel_hard` 0.05 floors, floored on the library route by the existing `CASCADE_BAND`
+`row_1cos_max` 2e-3 / `stage_meanrel_max` 3e-2 — **no band moved, nothing was widened, `tools/band_history.py`
+still reports its 19 recorded values green.** Rows ≤ MAXSC are labelled one-pass and rows above it the streaming
+form of §07.3, and the boundary rows (511, 512, last) are printed by name. A moved argmax goes through the same
+`flip_admissible` room rule sections (a)/(b) use; the D-8 tie policy is keyed to a per-step pin file and was
+**not** generalized to a row block, so a tied row is judged by the narrower fail-closed clause (the engine's id
+must be one of the pinned tied ids) and the tie set is printed. `--attn-tile 0|1` is now passed to every
+`decode_run` the gate starts **and asserted against that run's `NUMERICS attn_tile=`** — a log that cannot say
+which form ran is evidence about neither. The fixture's row pins force `--prefill-logits all`, because a fixture
+that pins rows against a run that dumps one row is a gate that looks like it ran and measured nothing. Its teeth
+are five in-process negatives in `--selftest` at vocabulary 8 (bit-identical clean; wide-room flip RED; thin-room
+flip ADMITTED with the shape floors demonstrably untouched; shape-only damage RED on cos; missing row reported).
+
+**The two device commands, and the reading decided in advance.** Both belong to the main agent (a 1024-row
+comparison is numpy over 254 M elements, and a worker's device budget is a minute):
+
+```bash
+tools/gpu_lock.sh acquire "attn-hf-anchor-1024" && tools/gpu_lock.sh util
+# Two --work dirs, not one: the gate clears its work directory before every run (a run must be judged
+# against the dumps it wrote, §10.5), so one directory cannot hold both forms' rows.
+.venv/bin/python engine/gate.py --fixture wide1024f --attn-tile 0 --work tmp/form1024/ship   # SHIPPED form vs HF
+.venv/bin/python engine/gate.py --fixture wide1024f --attn-tile 1 --work tmp/form1024/tile   # TILED form vs HF
+tools/gpu_lock.sh release "attn-hf-anchor-1024"
+# and, if both are green and still disagree with each other, the form-vs-form view of the same bits:
+.venv/bin/python engine/attn_form_band.py --ship tmp/form1024/ship --tile tmp/form1024/tile --prompt-len 1024
+```
+
+Four outcomes, and they are different findings, not four spellings of one:
+
+- **both inside** → §15's two differing steps are inside HF tolerance and the forms differ only from each other.
+  The dispute is then a non-defect and the tile form may be adopted on price alone, with the form-vs-form
+  difference recorded as an observation rather than a gate.
+- **`--attn-tile 0` outside above 512** → **the shipped streaming form is wrong.** That is a shipping-path defect
+  in the P7/P8 prefill wave, with a witness for the first time, and it is worse than anything §13–§15 found;
+  stop and report it rather than routing around it.
+- **`--attn-tile 1` outside** → the tile form is wrong and §12's band was mis-sized; `--attn-tile` stays 0.
+- **both outside, differently** → both wrong; the region has no correct implementation today.
+
+No branch licenses a band change: the floors section (i) uses are the ones already published, and it says so in
+its own output. What is still missing after this pass, stated plainly: **none of the four readings above is known
+yet**, because nothing in this pass touched a device — the pins, the guards and the instrument are what was built.
+
+## 17. The HF anchor, run on device by the parent (2026-10-14, lock `ANCHOR`): **the anchor is real; the adjudication is not yet possible**
+
+The four pre-registered readings in §16 could not be taken, because the two runs failed in **different,
+non-comparable ways**:
+
+| run | result |
+|---|---|
+| `--attn-tile 0` vs HF, `wide1024f` | **1 FAIL**: `the engine wrote all 1024 prefill row dumps — 1023 missing, first at rows [0..7]` |
+| `--attn-tile 1` vs HF, `wide1024f` | **26 FAIL**, headed by the batched-vs-carry cascade-band checks (`1032 rows, 0 of them still bit-identical`) rather than by the HF row comparison |
+| `attn_form_band.py` ship-vs-tile | `sampled.txt: 1032 steps compared, **0 differ**`, still **RED** on rows |
+
+Read carefully, because the tempting summary is wrong twice over. **The shipped run produced no prefill-row dumps
+at all**, so it says nothing about whether the shipped streaming form is numerically wrong — it is an instrument
+gap: §16 says the fixture's row pins force `--prefill-logits all`, and evidently that forcing does not happen on
+the path I ran. **The tiled run's failures are the wave-carry checks, not the HF row checks**, so its 26 failures
+likewise do not yet price the tile form against HF either. And the `0 differ` on `sampled.txt` while rows are RED
+means the two forms now agree on the *continuation* and differ only deeper — the opposite of §15's picture, and a
+sign the two runs are not comparing the same thing.
+
+**What the anchor already bought us, which is the reason it was worth building.** `tools/prefill_row_rooms.py`:
+of 1024 pinned rows, **1020 are decided by HF with room to spare**, and specifically **row 1023 has room 12.25**
+(row 512: 13.25). The disputed row is nowhere near a coin toss, so the form question is *answerable* — whichever
+form misses HF at row 1023 is wrong, not marginal. That is exactly the property the unanchored comparison lacked.
+
+**Next step, stated as the fix rather than a re-run attempt:** the gate must actually pass `--prefill-logits all`
+when a fixture carries row pins, and the wave-carry checks must be scoped so a form A/B does not trip them for a
+reason unrelated to the form. Until then the four readings in §16 stay unopened, and `--attn-tile` stays `0`.
