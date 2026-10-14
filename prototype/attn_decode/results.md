@@ -865,3 +865,28 @@ Order matters, and it is the order the defects depend on: if step 1 is still RED
 does not hold its own contract, and §12's pre-registered win line (<= 40 ms, with both falsifiers) should not be
 quoted against it. If `attn_form_band.py` comes back RED on a flip at room >= `flip_room_max`, that is a
 stop-and-report per §07.3 and this pass touched no band, so nothing here widens one.
+
+## 15. §14's fixes, re-run by the parent (2026-10-14, lock `ATTN-P2B`/`ATTN-NEG`): **two fixed, one still blocking — `--attn-tile` stays 0**
+
+| §13 item | re-run result |
+|---|---|
+| 1. not lane-grid invariant | **FIXED.** `run.py --wave --tile-kernel` → `4112 stage comparisons, 0 failures`, and the negatives are real: `qswap`, `gatehalf`, `ropefull`, `ropenone`, `gqaoff` each caught **only** at their declared stages, so the green is not vacuity. `attn_tile_model.py oob-bound --observed 1098790` → **99.7246 %** of what an `s_k` overrun can reach, which is why "real kernel bug, not grid dependence" is the right call rather than a convenient one. |
+| 2. token flip | **VOID as written — §13's own `cmp` loop was the artifact**, and §14 caught it: the tiled run threw inside `prefill_wave`, so `tile/` held a 61-byte header and no logits, and `cmp` called a missing file a numerics difference. Corrected here, in my own section, because I wrote §13. |
+| 3. unpriceable under `--time-waves` | **MEASURABLE now.** Both forms produce 1,026-row `sampled.txt` and full logits dumps. |
+
+**But the underlying claim is still RED, and with a real instrument rather than my broken `cmp`.**
+`engine/attn_form_band.py --ship tmp/ab2/ship --tile tmp/ab2/tile --prompt-len 1024`:
+
+> `sampled.txt: 1025 steps compared, 2 differ at steps [1023, 1024]` … `2 differing step(s) are NOT explained by any
+> judged row flipping within the flip rule` … **RED**
+
+Rows 1023–1024 are the tail of body 1 — the >MAXSC streaming region — so the difference is exactly where §12's
+accepted band was supposed to live, and it is **not** inside the flip rule as written. The band question is therefore
+**unresolved, not answered**, and the tile form stays opt-in.
+
+**The reason it cannot be resolved yet, and the thing to fund.** `attn_form_band.py` is judging **tile against
+shipped**, but above 512 lanes neither of them is anchored to anything: **no pinned fixture exceeds 512 lanes**, so
+there is no ground truth for any streaming path in this engine. Two implementations disagreeing in an unanchored
+region cannot be settled by more comparison between them — it needs the >512-token HF reference fixture that was
+promoted to blocking in §12's acceptance conditions. Until that exists, "the tile form is wrong" and "the shipped
+streaming form is wrong" are indistinguishable, and neither is a safe default.
