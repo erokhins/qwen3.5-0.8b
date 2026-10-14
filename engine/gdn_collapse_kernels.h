@@ -121,13 +121,26 @@ rec_collapse_kernel(const float* __restrict__ u,
 
     // ---- stage the state strip: 128 rows x 32 columns. `S` is [d_k][d_v] row-major, so a row is 32
     // contiguous floats = one 128 B transaction, and it lands on its swizzled slot.
-    for (int i = 0; i < D; ++i) {
+    //
+    // The cells are striped over the threads, the threads are NOT the columns. This block has 128
+    // threads and the strip has 32 columns, so `tid` is not a column index here: a loop that walked
+    // `i` and used `tid` as the column asked `Sh` for 128 columns of a 32-column strip, which read (and
+    // in the write-back, wrote) up to 96 floats past every head's state — 96 floats past the END of the
+    // tensor for the last head, i.e. an illegal access — and it wrote up to 65 cells past the end of
+    // `Sst`, which on this device does not fault, it just silently corrupts whatever the allocator put
+    // after the state array (`ks`, `qs`, `block_sum`'s `red`). Both halves of that are why the strip is
+    // covered by a strided cell loop instead: every one of the 4096 cells is staged exactly once, by
+    // exactly one thread, and within a warp the 32 lanes share `i` and own `c = 0..31`, so the global
+    // read is one contiguous 128 B row and the swizzled LDS write hits 32 distinct banks.
+    for (int idx = tid; idx < D * kColumns; idx += kBlockDim) {
+        const int i = idx / kColumns;
+        const int c = idx - i * kColumns;      // exact: idx, i are ints and kColumns is 32
 #ifdef NEG_RC_STATE_BF16
         // The same rounding helper the shipped kernels use, so the defect is "the state got rounded",
         // not "a different rounding than the engine's".
-        Sst[slot(i, tid)] = bf16_round(Sh[(size_t)i * D + cbase + tid]);
+        Sst[slot(i, c)] = bf16_round(Sh[(size_t)i * D + cbase + c]);
 #else
-        Sst[slot(i, tid)] = Sh[(size_t)i * D + cbase + tid];
+        Sst[slot(i, c)] = Sh[(size_t)i * D + cbase + c];
 #endif
     }
     __syncthreads();
@@ -137,19 +150,27 @@ rec_collapse_kernel(const float* __restrict__ u,
         const float kv = row[kValueDim + h * D + tid];
         const float qv = row[h * D + tid];
 
-        // ---- k̃ and q̃: the shipped kernel's expressions at the shipped reduction width. Every
-        // thread still reduces its own element, so `sum` is bit-identical per (token, head); the four
-        // strips of a head each redo the same tree — four times the reduction, zero extra memory
-        // traffic, which is the trade §04.7's carry made in the opposite direction.
+        // ---- k̃ and q̃: the shipped kernel's expressions at the shipped reduction width, AND its
+        // association. `kn`/`qn` below are `rec_kernel`'s `float kn = kq * rsqrtf(..)` and
+        // `float qn = qq * rsqrtf(..) * Q_SCALE` character for character, and that matters more than it
+        // looks: hoisting the `Q_SCALE` factor out of the per-thread multiply — writing
+        // `qs[tid] = qv * (rsqrtf(..) * Q_SCALE)` — is a different product tree, and on the device it
+        // moved 93,522 of 131,072 `o` elements while leaving the STATE bit-exact, because only q̃
+        // carries the extra factor. `block_sum` is bit-identical per (token, head) either way: every
+        // thread still reduces its own element, and the four strips of a head each redo the same tree —
+        // four times the reduction, zero extra memory traffic, which is the trade §04.7's carry made in
+        // the opposite direction.
 #ifdef NEG_RC_NORM_HALF
-        const float knorm = rsqrtf(block_sum(tid < (D / 2) ? kv * kv : 0.0f, red) + 1e-6f);
-        const float qnorm = rsqrtf(block_sum(tid < (D / 2) ? qv * qv : 0.0f, red) + 1e-6f) * Q_SCALE;
+        const float ksq = tid < (D / 2) ? kv * kv : 0.0f;
+        const float qsq = tid < (D / 2) ? qv * qv : 0.0f;
 #else
-        const float knorm = rsqrtf(block_sum(kv * kv, red) + 1e-6f);
-        const float qnorm = rsqrtf(block_sum(qv * qv, red) + 1e-6f) * Q_SCALE;
+        const float ksq = kv * kv;
+        const float qsq = qv * qv;
 #endif
-        ks[tid] = kv * knorm;
-        qs[tid] = qv * qnorm;
+        const float kn = kv * rsqrtf(block_sum(ksq, red) + 1e-6f);
+        const float qn = qv * rsqrtf(block_sum(qsq, red) + 1e-6f) * Q_SCALE;
+        ks[tid] = kn;
+        qs[tid] = qn;
         __syncthreads();
 
         if (tid < kColumns) {
@@ -160,6 +181,12 @@ rec_collapse_kernel(const float* __restrict__ u,
             const float bet = beta[(size_t)t * kNH + h];
 
             // step 2: Pt = (k̃ ⊙ S_prev)ᵀ — ascending i, F32, one accumulator per column.
+            //
+            // No `#pragma unroll` here, and that is a measured choice: unrolling both `i` loops 8-wide
+            // is bit-identical (one accumulator, `i` ascending — an unroll is not a re-association) and
+            // it changed nothing, `gdn_rec` 112.8 → 113.4 ms at 1024 lanes (`prototype/gdn_collapse/
+            // results.md` §4). The loop is therefore not LDS-latency-bound at this occupancy, and a
+            // pragma that buys nothing is a claim about the kernel that no longer holds.
             float r = 0.f;
 #ifdef NEG_RC_I_DESC
             for (int i = D - 1; i >= 0; --i) r += Sst[slot(i, tid)] * ks[i];
@@ -197,8 +224,12 @@ rec_collapse_kernel(const float* __restrict__ u,
                        // returned, so without this they would read state cells warp 0 is still writing
                        // for the final token. One barrier per body instead of one per token is the
                        // saving; one per token would be the bug the previous line used to guard.
-    for (int i = 0; i < D; ++i) {
-        Sh[(size_t)i * D + cbase + tid] = Sst[slot(i, tid)];
+    // Same strided cell loop as the staging, for the same reason and in the same order — a row at a
+    // time, 32 contiguous floats per warp, so the write-back is the staging with the arrows reversed.
+    for (int idx = tid; idx < D * kColumns; idx += kBlockDim) {
+        const int i = idx / kColumns;
+        const int c = idx - i * kColumns;
+        Sh[(size_t)i * D + cbase + c] = Sst[slot(i, c)];
     }
 }
 
