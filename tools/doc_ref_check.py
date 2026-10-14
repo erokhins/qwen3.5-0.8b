@@ -3,7 +3,7 @@
 
 Why this exists: the docs in this repo are the command lists. A sentence like
 "reproduce with `speccheck/run.py --keep-f32-scalars`" is only worth what the
-file behind it is worth, and `bench/cleanup-audit-2026-10-16.md` §4 had to
+file behind it is worth, and `progress/2026-10-16/cleanup-audit-2026-10-16.md` §4 had to
 hand-tabulate ten such paths. This is that tabulation, as a script, so the next
 audit is one command instead of a pass.
 
@@ -16,9 +16,9 @@ Method (CPU only, no device, no build):
    `.gitignore` (`git check-ignore`), then report.
 
 Two scanner bugs fixed here, both from the part-1 audit (§1 finding 1 of
-`bench/cleanup-audit-2026-10-16.md`). A path extension is matched as an
+`progress/2026-10-16/cleanup-audit-2026-10-16.md`). A path extension is matched as an
 alternation, and a regex alternation is first-match-wins, so `o` before `out`
-recorded `tmp/p9/stage.out` as a missing `tmp/p9/stage.o`, and `json` before
+recorded `progress/bench/evidence/p9/stage.out` as a missing `tmp/p9/stage.o`, and `json` before
 `jsonl` recorded tracked `bench/band-history.jsonl` as a missing
 `bench/band-history.json`. Neither was a doc error; two of thirteen reported
 MISSING rows were phantoms, and the real file went uncommitted. The fix is
@@ -67,10 +67,13 @@ from collections import defaultdict
 
 # Repo-rooted path prefixes. Only these can start a citation, which is what keeps
 # prose ("the engine/", "in tools/") from being read as a path.
+# `progress/` was added by the 2026-10-16 reorganization (dated one-shot docs and
+# committed evidence); `thinking/` stays listed although the directory is gone, so a
+# citation to it is still reported rather than silently ignored.
 ROOTS = (
     "bench", "data", "devices", "engine", "engines", "logs", "models",
-    "prototype", "speccheck", "specification", "testdata", "thinking", "tmp",
-    "tools",
+    "progress", "prototype", "speccheck", "specification", "testdata",
+    "thinking", "tmp", "tools",
 )
 
 # Extension alternation. LONGEST FIRST on purpose — see the module docstring.
@@ -101,7 +104,7 @@ EXT_CITE_RE = re.compile(
     % (_ROOT, _SEG, "|".join(re.escape(e) for e in EXTS_SORTED)))
 # `tmp/q10`, `prototype/gdn_chunk`, `bench/plan-2026-10-12` (a .md shorthand).
 # The trailing guards keep it from matching a stem: `tmp/p9/stage` must not be
-# reported beside `tmp/p9/stage.out`.
+# reported beside `progress/bench/evidence/p9/stage.out`.
 BARE_CITE_RE = re.compile(
     r"(?<![\w./~-])((?:%s)(?:/%s)+)(?![\w+-])(?!\.\w)" % (_ROOT, _SEG))
 # `engine/prefill.{h,cpp}`, `state.{h,cpp}` — brace shorthand, expanded to the
@@ -142,7 +145,7 @@ def cite_tokens(line: str) -> list[str]:
     """Every path a line cites: brace shorthand expanded, each path once.
 
     The bare pattern can stop short of a longer citation that shares its prefix
-    (`tmp/p9` inside `tmp/p9/stage.out`), and brace shorthand names files rather
+    (`tmp/p9` inside `progress/bench/evidence/p9/stage.out`), and brace shorthand names files rather
     than its stem, so both are filtered against the longer forms found on the
     same line.
     """
@@ -270,9 +273,10 @@ def report(classes: dict[str, dict], *, show_all: bool, list_broken: bool) -> in
 
 SELFTEST_CASES = [
     # (text, expected path tokens) — the four audit cases from §1 of
-    # `bench/cleanup-audit-2026-10-16.md`, then the shapes docs really write.
+    # `progress/2026-10-16/cleanup-audit-2026-10-16.md`, then the shapes docs really write.
     ("see bench/band-history.jsonl for the bands", ["bench/band-history.jsonl"]),
-    ("full text in tmp/p9/stage.out here", ["tmp/p9/stage.out"]),
+    ("full text in progress/bench/evidence/p9/stage.out here", ["progress/bench/evidence/p9/stage.out"]),
+    ("the probe log is progress/devices/evidence/q8/mixed_bw.log now", ["progress/devices/evidence/q8/mixed_bw.log"]),
     ("was bench/band-history.json once", ["bench/band-history.json"]),
     ("and tmp/p9/stage.o was never built", ["tmp/p9/stage.o"]),
     ("engine/prefill.{h,cpp} are both tracked",
