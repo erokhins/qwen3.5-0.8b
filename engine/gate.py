@@ -96,6 +96,24 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       print bit-identical outputs too. `--selftest` injects each half alone (`--break-wave`,
       `--break-ab-logits`) and requires the other to stay green.
 
+  (i) THE PREFILL ROWS — every pinned row of the prompt wave against the engine's own per-row dump
+      (`logits<i>.bin` ↔ row *i*, §06.5's pairing), judged by the floors section (b) already uses and by
+      the same flip rule. Only `wide640f`/`wide1024f` carry the row block
+      (`reference_dump.py --prefill-logits all`), and they are this tree's only ground truth above MAXSC
+      lanes — which is exactly where §15's form dispute sits. COVERAGE is proved first and is not a
+      numerics question: the manifest's `prefill_logit_rows` decides the row shape `cmd` is built with,
+      the run's own `PREFILL logits=` echo is then checked against that ask, and a gap stops the gate
+      before (a)/(b)/(g)/(h). A missing row dump has to read as a missing row dump — never as a floor
+      verdict over whatever survived, which is what §17's shipped run did (`1023 missing` next to a green
+      `every judged row is inside the floors` over the one row that existed).
+
+SCOPE — `--scope full` (the default) counts every check that fails. `--scope form` is the attention-FORM
+A/B of §16/§17: section (h)'s wave-width OUTPUT comparisons still run and still print, as
+`[DEFERRED-PASS]`/`[DEFERRED-FAIL]`, and every one of them is recorded in `wave_carry_deferred.json`
+beside the dumps, but they are not counted into that run's verdict, because their independent variable
+is `--wave-rows` while the form is held identical on every side. Nothing is skipped or softened: the
+summary line says how many were deferred, and `--scope full` counts them again.
+
 The two phases, and the line protocol that shows them. Since P2 the prompt is fed as ONE prefill wave
 (`engine/prefill.h`, §06.1) and its STEP lines say `kind=prefill`; generation steps say `kind=decode`.
 §07.5's stop check is armed in the second phase only, and this gate asserts both halves of that rule:
@@ -669,16 +687,90 @@ slack_notes: list[str] = [] # steps inside the slack region the engine matched o
 rooms: list[str] = []       # flips admitted by the cascade room rule (library route only); counted
 room_notes: list[str] = []  # flips whose two readings of `room` disagree: printed, not decided twice
 
+# ---- the judging scope ------------------------------------------------------------------------
+# What a run is being asked to adjudicate. `full` (the default) is the ordinary gate: a check that
+# fails is a gate failure. `form` is §16/§17's attention-FORM A/B — one fixture, the same pinned rows,
+# run once per `--attn-tile`, asking which form is right above MAXSC.
+#
+# Why a scope has to exist at all. §17's `--attn-tile 1` run came back with 26 failures headed by
+# section (h)'s wave-width comparisons ("batched and carry ... 1032 rows, 0 of them still
+# bit-identical"). Those checks vary the WAVE WIDTH; the A/B varies the attention FORM. A check whose
+# independent variable is not the thing under test cannot answer the question being asked, and worse,
+# it buries the two readings that could. Two ways out were on the table:
+#
+#   (a) run each wave-width comparison against the same form on both sides. This is ALREADY true —
+#       `run_batched_ab` passes `--attn-tile` to every side precisely so that an A/B of widths cannot
+#       smuggle a form difference in — so it cannot help: the defect is attribution, not a mismatched
+#       pair of sides.
+#   (b) DEFER them under `--scope form`: still run, still printed, still recorded in a file beside the
+#       dumps — but not counted into that run's verdict, and labelled as belonging to neither form.
+#
+# (b) is what is implemented, and it is not a silencer: the checks run on every side, their lines print
+# as `[DEFERRED-PASS]`/`[DEFERRED-FAIL]`, every one of them (pass or fail) goes to
+# `wave_carry_deferred.json` beside the run's dumps so the two forms' carry results can be diffed
+# mechanically, and the summary says how many were deferred rather than printing a bare PASS. A carry
+# check that genuinely fails identically on both forms therefore shows up as what it is — a separate
+# finding about the wave carry, not a verdict about either form. `--scope full`, the default and what
+# every ordinary gate run uses, still counts every one of them as a failure.
+SCOPES = ("full", "form")
+SCOPE = "full"
+# The reason attached to the `defer()` block currently open; None when nothing is being deferred.
+DEFER_REASON: str | None = None
+deferred: list[str] = []           # failed checks that ran, printed, and are attributed elsewhere
+deferred_records: list[dict] = []  # every check inside a defer block, pass or fail, for the sidecar
+
+# One spelling of the reason, so both deferred regions of section (h) say the same thing.
+WAVE_CARRY_REASON = ("wave-width claim, not a form claim: this comparison holds the attention form "
+                     "fixed on both sides and varies --wave-rows, so under --scope form it cannot "
+                     "adjudicate which form is wrong above MAXSC")
+
+
+def set_scope(name: str) -> None:
+    """Declare what this run is adjudicating. Refuses anything else for `set_route`'s reason: a typo
+    here would wave away a class of failures by spelling its scope wrong."""
+    global SCOPE
+    if name not in SCOPES:
+        raise SystemExit(f"gate: --scope takes {'|'.join(SCOPES)}, got {name!r}")
+    SCOPE = name
+
+
+@contextlib.contextmanager
+def defer(reason: str, *, on: bool = True):
+    """Run the checks inside, but attribute a failure to `reason` instead of to this run's verdict.
+
+    Only ever opened around checks whose independent variable is not the thing under test. It cannot
+    make a check vacuous: the block runs the check, prints its line, records it in the sidecar, and
+    counts it in the summary as deferred.
+    """
+    global DEFER_REASON
+    prev = DEFER_REASON
+    DEFER_REASON = reason if on else None
+    try:
+        yield
+    finally:
+        DEFER_REASON = prev
+
 
 def check(ok: bool, name: str, detail: object = "") -> bool:
     # `detail` is stringified rather than typed as str because several call sites pass a list of ids,
     # which is exactly the thing an operator needs to see when a step fails.
     text = detail if isinstance(detail, str) else repr(detail)
-    print(("  [PASS] " if ok else "  [FAIL] ") + name + ((" — " + text) if text else ""))
+    ok = bool(ok)
+    # Inside a `defer()` block the line still prints and is still recorded; only the bucket changes, and
+    # the tag says so so that no reader can mistake a deferred line for a pass or quietly for a failure.
+    tag = (("[DEFERRED-PASS] " if ok else "[DEFERRED-FAIL] ") if DEFER_REASON is not None
+           else ("[PASS] " if ok else "[FAIL] "))
+    print("  " + tag + name + ((" — " + text) if text else ""))
+    if DEFER_REASON is not None:
+        deferred_records.append({"check": name, "ok": ok, "reason": DEFER_REASON, "detail": text})
     if not ok:
-        fails.append(name + (": " + text if text else ""))
-        fail_names.append(name)
-    return bool(ok)
+        line = name + (": " + text if text else "")
+        if DEFER_REASON is None:
+            fails.append(line)
+            fail_names.append(name)
+        else:
+            deferred.append(line)
+    return ok
 
 
 def section(title: str) -> None:
@@ -686,15 +778,24 @@ def section(title: str) -> None:
 
 
 def load_pin(name: str) -> np.ndarray:
-    """One pinned dump. numpy has no BF16, so a uint16 payload is widened by the bit shift (§10.5:
-    a bitcast, never a numeric cast — `Tensor.to(uint16)`-style truncation is the bug that ate the
-    first §04.5 device run)."""
+    """One pinned dump. numpy has no BF16, so a uint16 payload is widened by the bit shift (§10.5: a
+    bitcast, never a numeric cast — `Tensor.to(uint16)`-style truncation is the bug that ate the first
+    §04.5 device run)."""
     path = REFS / name
     if not path.exists():
         raise SystemExit(f"gate: pinned dump missing: {path}")
-    a = np.load(path, allow_pickle=False)
+    return widen_pin(np.load(path, allow_pickle=False))
+
+
+def widen_pin(a: np.ndarray) -> np.ndarray:
+    """A pinned array as floats: a uint16 payload is BF16 bits and gets `load_pin`'s bit shift.
+
+    One spelling of the widening because two would be two chances to get it wrong: the per-step logits
+    pins and the [rows, vocab] `logits_rows` block are read through here, and a row block read with a
+    numeric cast instead of a bitcast is the `gdn_gated_norm` garbage-memory trap (§10.5) at 485 MiB.
+    """
     if a.dtype == np.uint16:
-        a = (a.astype(np.uint32) << 16).view(np.float32)
+        return (a.astype(np.uint32) << 16).view(np.float32)
     return a
 
 
@@ -2518,6 +2619,489 @@ def pairing_checks(man: dict) -> tuple[list, list, np.ndarray]:
     return prompt_ids, dec_logits, dec_inputs
 
 
+# ---- (i) the pinned PREFILL ROWS — every row of the wave, not only §06.5's last one --------------
+# Why this section exists: `prototype/attn_decode/results.md` §15 is a dispute about ROW 1023 of a
+# 1024-token prompt, and every fixture made before `reference_dump.py --prefill-logits all` carries one
+# prefill logits vector — the last one. Above 512 lanes there was therefore no ground truth in this tree
+# for ANY route: two engine forms could be compared with each other (`engine/attn_form_band.py`) and
+# nothing else. `wide640f` (640 rows) and `wide1024f` (1024 rows) are that ground truth, and this is the
+# section that judges an engine run against them.
+#
+# It judges with the floors that already exist and adds none. Which ones, and why those:
+#
+#   * `BAND["cos_hard"]` (§10.1 G5, "logits cos >= 0.9995") and `BAND["meanrel_hard"]` (§10.2 cascade
+#     ceiling, meanrel <= 5 %) are the published floors for "one logits vector, engine against the
+#     reference", and a prefill row IS one logits vector. They are what section (b) applies to a fixture
+#     with no priced route allowance, and these two fixtures have none.
+#   * On the library route both caps then pass through `cascade_floor`, which can only widen them (to
+#     `CASCADE_BAND`'s measured hand<->library cascade). That is the correct floor here for a sharper
+#     reason than usual: rows above MAXSC are the STREAMING form of §07.3, i.e. a deliberately
+#     reassociated sum, and demanding a tighter deficit than a legal reassociation produces is demanding
+#     the route not be itself.
+#   * A moved argmax is judged by `flip_admissible`, the same room rule section (a)/(b) use, on the same
+#     grounds (§A2's 1694 rows are prefill rows too).
+#
+# What a ROW cannot consult, and what happens instead — said here because a silent hole in an argmax rule
+# is how a gate goes quietly wrong: the D-8 tie policy is keyed to a per-step pin FILE
+# (`pin_tie(step)` opens `logits_pin(step)`), so a tie inside a row BLOCK has no predicate to consult.
+# Rather than invent a second tie policy, a row whose pin ties is judged by the one clause that needs no
+# slack bound — the engine's id must be one of the pinned tied ids — and anything else FAILS. That is
+# fail-closed: the worst it can do is report a real-looking divergence on a row where the reference
+# itself did not choose, and it prints the tie set so the reader can see that is what happened.
+PREFILL_ROWS_PIN = "logits_rows.npy"
+
+
+def prefill_row_pin_checks(man: dict, prompt_len: int, vocab: int):
+    """Prove what the fixture's pinned prefill-row block claims, before anything is judged against it.
+
+    Runs in BOTH modes (`--no-engine` included): it is a statement about the dump, not about the engine.
+    The load-bearing one is that row -1 of `logits_rows` IS `logits_last`, bit for bit — the two come
+    from one forward, so if they ever differ the block is not what its name says. §10.5 is written
+    because a bare dump name once paired with the wrong thing and cost a debugging session; a block pin
+    is the same failure with more rows, and the pairing must be proved from bytes rather than from the
+    fact that both were written by one script.
+
+    Returns the memmapped block for the engine section, or None when the fixture pins no rows.
+    """
+    declared = str(man.get("prefill_logit_rows", "last"))
+    path = REFS / PREFILL_ROWS_PIN
+    if declared != "all":
+        check(not path.exists(), f"{REFS.name} pins prefill rows: {declared}",
+              f"the manifest says prefill_logit_rows={declared!r} but {PREFILL_ROWS_PIN} sits beside"
+              " it. Which half is the lie is not this gate's to guess: either the dumper wrote a"
+              " manifest that does not describe its own output, or a file was copied in by hand."
+              if path.exists() else
+              f"no {PREFILL_ROWS_PIN}, as the manifest says — only §06.5's last row is judged for"
+              " this fixture, which is every fixture made before the flag existed")
+        return None
+    if not check(path.exists(), f"{PREFILL_ROWS_PIN} is present, as the manifest claims",
+                 f"{path.stat().st_size / (1024 ** 2):.1f} MiB beside the manifest"
+                 if path.exists() else
+                 "the manifest says every prefill row is pinned and the file is gone — a"
+                 " half-installed fixture, and section (i) would have nothing to judge"):
+        return None
+    raw = np.load(path, allow_pickle=False)
+    shape_ok = list(raw.shape) == [prompt_len, vocab]
+    check(shape_ok,
+          f"{PREFILL_ROWS_PIN} is [{prompt_len}, {vocab}] — one row per prompt token, one column per"
+          " vocabulary id",
+          f"{list(raw.shape)}" if shape_ok else
+          f"{list(raw.shape)}; a row count that is not the prompt length means the block and the"
+          " prompt ids came from different runs, which is §10.5's trap in block form")
+    stored = str(man.get("logits_storage", "f32"))
+    storage_ok = (raw.dtype == np.uint16) == (stored == "bf16")
+    check(storage_ok, f"{PREFILL_ROWS_PIN} storage matches the manifest's logits_storage ({stored})",
+          f"file dtype {raw.dtype}" if storage_ok else
+          f"file dtype {raw.dtype} does not match the declared {stored!r}: the block is being widened"
+          " by the wrong rule, which is how a BF16 pin ends up read as garbage (§10.5)")
+    last = np.asarray(load_pin("logits_last.npy"), dtype=np.float32).reshape(-1)
+    row_last = np.asarray(widen_pin(raw[-1]), dtype=np.float32).reshape(-1)
+    same = np.array_equal(row_last, last)
+    check(same, f"{PREFILL_ROWS_PIN} row -1 IS `logits_last`, bit for bit — the block's own pairing"
+                " proof (§10.5)",
+          "" if same else f"{int(np.count_nonzero(row_last != last))} of {row_last.size} elements"
+          " differ, so the block was not produced by the forward that produced the pinned last row")
+    gib = raw.nbytes / (1024 ** 2)
+    print(f"  [info] {PREFILL_ROWS_PIN}: {raw.shape[0]} rows x {raw.shape[1]} ({raw.dtype},"
+          f" a BF16 bitcast) = {gib:.1f} MiB. Row i pairs with the engine's logits<i>.bin, so"
+          f" {raw.shape[0] - 1} rows above §06.5's are now adjudicable against the reference"
+          " instead of only against another engine build.")
+    return raw
+
+
+def prefill_row_coverage(n_rows: int, work: Path, vocab: int, asked: str,
+                         echoed: str | None) -> tuple[bool, str]:
+    """Did the run deliver the row coverage this fixture's pins require? A coverage verdict, never a
+    numerics one — the caller stops here rather than carrying a gap into a comparison.
+
+    Three distinct ways to lose coverage, and they must not read as one another:
+
+      * the gate asked for `last` while the fixture pins every row — a forcing/command-line gap, so the
+        engine could only ever have written one row;
+      * the gate asked for `all` and the run's own `PREFILL logits=` echo says `last` — the flag did not
+        reach `decode_run`. That is exactly §17's defect: the forcing was written *after* the command
+        line had been assembled, so it moved the gate's bookkeeping and left the engine running `last`.
+        Nothing downstream could tell, and 1023 missing rows read as an engine failure;
+      * the echo says `all` and the files are still absent or short — the engine priced rows it did not
+        write, or died part-way through the prompt.
+
+    Why this is a separate verdict instead of one more row inside section (i): with a coverage gap, every
+    aggregate over the rows that DID arrive is a number over an arbitrary subset, and section (i)'s
+    existing `check(not outside, "every judged prefill row is inside the floors")` passes when nothing
+    was judged. §17's shipped run is that failure: `1023 missing` sat next to a green floor verdict, which
+    is a numerics result made out of nothing. Pure (no globals, no prints) so `--selftest` can give it
+    teeth at vocabulary 8.
+    """
+    if n_rows <= 0:
+        return False, f"the row block pins {n_rows} rows — a block with no rows is not coverage"
+    if asked != PREFILL_LOGITS_ALL:
+        return False, (f"COVERAGE GAP: the gate asked `decode_run` for `--prefill-logits {asked}` but"
+                       f" {REFS.name} pins all {n_rows} prefill rows, so at most row {n_rows - 1} can"
+                       " exist. This is the instrument's command line, not an engine defect: the"
+                       " fixture's `prefill_logit_rows` must drive the invocation.")
+    if echoed is None:
+        return False, (f"COVERAGE GAP: the run printed no `PREFILL logits=` field, so nothing in its"
+                       " log says which row shape it ran (a pre-P2 binary, or a `--out` it could not"
+                       " write). A run that cannot say what it dumped cannot be judged on what it"
+                       " dumped")
+    if echoed != PREFILL_LOGITS_ALL:
+        return False, (f"COVERAGE GAP: the gate asked for `all` and the run's own PREFILL line says"
+                       f" logits={echoed}, so the flag did not reach decode_run — §17's exact defect"
+                       " (a forcing that fires after the command line is built changes nothing the"
+                       " engine sees). No numerics verdict follows from a row shape this gate did not"
+                       " run")
+    missing, short = [], []
+    for i in range(n_rows):
+        path = work / f"logits{i}.bin"
+        if not path.exists():
+            missing.append(i)
+        elif path.stat().st_size != vocab * 4:
+            short.append((i, path.stat().st_size))
+    if missing or short:
+        parts = []
+        if missing:
+            parts.append(f"{len(missing)} missing, first at rows {missing[:8]}")
+        if short:
+            parts.append(f"{len(short)} truncated, first "
+                         f"logits{short[0][0]}.bin={short[0][1]} B, expected {vocab * 4} B")
+        return False, (f"COVERAGE GAP: {n_rows} row dumps were asked for and {n_rows - len(missing)}"
+                       f" are readable — " + "; ".join(parts) + ". Nothing was compared, so no numerics"
+                       " verdict is issued: a coverage gap that falls through into a row comparison"
+                       " turns into a floor verdict over whatever survived")
+    return True, (f"{n_rows}/{n_rows} row dumps present, one per pinned row"
+                  f" ({n_rows * vocab * 4 / (1024 ** 2):.0f} MiB of logits)")
+
+
+def prefill_row_checks(work: Path, vocab: int, rows_pin, asked: str,
+                       echoed: str | None) -> None:
+    """Every pinned prefill row against the engine's own dump, judged by the floors already in force.
+
+    The row count comes from the pin block, not from a prompt length passed in: `prefill_row_pin_checks`
+    has already proved that block's shape against the prompt ids, and a second source for the same number
+    is a second chance to disagree.
+
+    `asked`/`echoed` are the row shape this gate requested and the row shape the run's own PREFILL line
+    says it ran; the coverage proof runs on them before a single row is read, and a gap ends the section.
+    """
+    section("(i) the prefill rows — every pinned row against the engine's dump (§10.1 G5, §07.3)")
+    n_rows = rows_pin.shape[0]
+    # Coverage first, and nothing else prints until it passes. A gap here is not a numerics question and
+    # must not arrive dressed as one: §17's shipped run printed its floors/geometry preamble and a green
+    # `every judged prefill row is inside the floors` on top of `1023 missing`.
+    cov_ok, cov_why = prefill_row_coverage(n_rows, work, vocab, asked, echoed)
+    if not check(cov_ok, f"coverage: the engine delivered all {n_rows} pinned prefill rows", cov_why):
+        return
+    staging, _, _ = lane_geometry()
+    cos_cap, rel_cap, floor_clause = cascade_floor(1.0 - BAND["cos_hard"], BAND["meanrel_hard"])
+    rule = (f"  rule: per row, cos deficit <= {cos_cap:.4e} and meanrel <= {rel_cap:.4%}"
+            + (f" — floored there, not chosen: {floor_clause}" if floor_clause else
+               " — the flat §10.1 G5 and §10.2 floors; no route allowance is priced for prefill rows"
+                 " (route_allowance.json prices decode steps)"))
+    print(rule)
+    print("  a moved argmax is judged by "
+          + (CASCADE_RULE if route_is_library() else
+             "the room rule, which is not armed on the hand route: an argmax that moved there is a"
+             " defect, because bit-identity is the claim on that route"))
+    if n_rows > staging:
+        print(f"  geometry: MAXSC {staging} lanes is the one-pass/streaming boundary, so rows"
+              f" 0..{staging - 1} are one-pass and rows {staging}..{n_rows - 1} are the streaming"
+              f" form §07.3 bands — {n_rows - staging} of the {n_rows} pinned rows")
+    else:
+        print(f"  geometry: MAXSC {staging} lanes, and every row of this {n_rows}-row prompt fits"
+              " it — this fixture does not exercise the streaming form")
+
+    # Streaming accumulators, one row in memory at a time: the block is 303-485 MiB of BF16 and the
+    # engine's dumps are 968 KiB each, so holding both sides of the whole comparison would be a
+    # gigabyte for no benefit. `why` from read_one_logits is not re-quoted per row: a missing row is
+    # counted and named once, below, and 1024 identical reasons would hide that count.
+    regions: dict[str, dict] = {}
+    worst_cos, worst_rel = (0.0, -1), (0.0, -1)
+    at_row: dict[int, float] = {}       # deficit at the boundary rows worth printing by name
+    outside: list[str] = []
+    missing: list[int] = []
+    flips: list[str] = []
+    tied_rows: list[str] = []
+    pin_thin: list[int] = []      # pinned rows whose own top-1/top-2 room is under the flip threshold
+    pin_tied: list[int] = []      # pinned rows that tie at their own maximum
+    pooled = dict(n=0, dot=0.0, na=0.0, nb=0.0, sad=0.0, sar=0.0)
+    for i in range(n_rows):
+        eng, _why = read_one_logits(work, i, vocab)
+        if eng is None:
+            missing.append(i)
+            continue
+        ref = np.asarray(widen_pin(np.asarray(rows_pin[i])), dtype=np.float32).reshape(-1)
+        m = metrics(eng, ref)
+        region = "one-pass" if i + 1 <= staging else "streaming"
+        r = regions.setdefault(region, dict(n=0, identical=0, over_cos=0, over_rel=0, moved=0))
+        r["n"] += 1
+        if m["ndiff"] == 0:
+            r["identical"] += 1
+        deficit = 1.0 - m["cos"]
+        if i in (staging - 1, staging, n_rows - 1):
+            at_row[i] = deficit
+        if deficit > cos_cap:
+            r["over_cos"] += 1
+            outside.append(f"row {i} ({region}): cos deficit {deficit:.4e} > {cos_cap:.4e}"
+                           f" (cos {m['cos']:.8f}), meanrel {m['meanrel']:.4%},"
+                           f" ndiff {m['ndiff']}/{ref.size}, maxabs {m['maxabs']:.4g}")
+        if m["meanrel"] > rel_cap:
+            r["over_rel"] += 1
+            outside.append(f"row {i} ({region}): meanrel {m['meanrel']:.4%} > {rel_cap:.4%}"
+                           f" (cos deficit {deficit:.4e}), ndiff {m['ndiff']}/{ref.size}")
+        if deficit > worst_cos[0]:
+            worst_cos = (deficit, i)
+        if m["meanrel"] > worst_rel[0]:
+            worst_rel = (m["meanrel"], i)
+        pin_id, _, pin_room = top2(ref)
+        eng_id, _, eng_room = top2(eng)
+        # A census of the PIN alone, taken before anything is compared: how many of these rows is the
+        # reference itself ill-equipped to decide. It is printed with the verdict because the flip rule
+        # forgives a move on exactly this class of row, and a reader who cannot see how large that class
+        # is cannot tell a green run from a green run that had a lot of room to be green.
+        if pin_room < CASCADE_BAND["flip_room_max"]:
+            pin_thin.append(i)
+        if int(np.count_nonzero(ref == ref.max())) > 1:
+            pin_tied.append(i)
+        if eng_id != pin_id:
+            r["moved"] += 1
+            tied = np.flatnonzero(ref == ref.max())
+            if len(tied) > 1:
+                ok = int(eng_id) in {int(t) for t in tied}
+                line = (f"row {i} ({region}): the PIN TIES {len(tied)} ways at {float(ref.max())!r}"
+                        f" among {intlist(tied)}; the engine picked {eng_id}"
+                        + (" — one of the tied ids, so the reference had not decided this row"
+                           if ok else " — NOT one of the tied ids, so this is a divergence, not a"
+                           " tie"))
+                if ok:
+                    tied_rows.append(line)
+                check(ok, f"row {i}: the engine's argmax moved against a TIED pinned row", line)
+            else:
+                ok = flip_admissible(pin_room, eng_room)
+                line = (f"row {i} ({region}): pin top1 {pin_id} (room {pin_room:.6g}) vs engine"
+                        f" {eng_id} (room {eng_room:.6g})"
+                        + (f" — ADMITTED as a thin-room flip: the smaller gap is under"
+                           f" {CASCADE_BAND['flip_room_max']:.2f}, which is §A2's class"
+                           if ok else
+                           f" — RED: neither side had under {CASCADE_BAND['flip_room_max']:.2f} of"
+                           " room, so no band in force covers this flip. Stop and report; this"
+                           " section does not widen one"))
+                if ok:
+                    rooms.append(f"prefill row {i}: {pin_id} -> {eng_id}"
+                                 f" (room {min(pin_room, eng_room):.6g})")
+                flips.append(line)
+                check(ok, f"row {i}: the engine's argmax moved against the pinned row", line)
+        e = eng.astype(np.float64)
+        f64 = ref.astype(np.float64)
+        pooled["n"] += f64.size
+        pooled["dot"] += float(e @ f64)
+        pooled["na"] += float(e @ e)
+        pooled["nb"] += float(f64 @ f64)
+        pooled["sad"] += float(np.abs(e - f64).sum())
+        pooled["sar"] += float(np.abs(f64).sum())
+
+    if missing:
+        # Unreachable once `prefill_row_coverage` has passed — it counts the same files, same sizes — and
+        # still wrong to let fall through: a row that went unread between the count and the read means
+        # this section is about to issue a floor verdict over fewer rows than it claims to have judged.
+        # Deliberately not a second copy of the coverage PASS line: one claim, one name.
+        check(False, "the engine wrote every prefill row the coverage check counted",
+              f"{len(missing)} became unreadable after the coverage pass, first at rows {missing[:8]}"
+              " — the section stops here rather than judging a subset")
+        return
+    for name in ("one-pass", "streaming"):
+        r = regions.get(name)
+        if not r:
+            continue
+        print(f"  {name:9s} rows: {r['n']:5d} judged, bit-identical {r['identical']:5d},"
+              f" outside the cos cap {r['over_cos']:4d}, outside the meanrel cap {r['over_rel']:4d},"
+              f" argmax moved {r['moved']:4d}")
+    for i in sorted(at_row):
+        which = {staging - 1: "last one-pass row", staging: "first streaming row",
+                 n_rows - 1: "last row of the prompt (the one §15 disputes)"}[i]
+        print(f"  boundary row {i} ({which}): cos deficit {at_row[i]:.4e}")
+    print(f"  the pin's own fragile rows, counted on the reference alone: {len(pin_tied)} tie at their"
+          f" maximum {intlist(pin_tied)}, {len(pin_thin)} have top-1/top-2 room under"
+          f" {CASCADE_BAND['flip_room_max']:.2f} {intlist(pin_thin)} — on the other"
+          f" {n_rows - len(set(pin_tied) | set(pin_thin))} of the {n_rows} pinned rows an argmax move is"
+          " a defect by the rule already in force, which is what makes a green run here a claim about the"
+          " engine rather than a tautology about the fixture (census: tools/prefill_row_rooms.py)")
+    total = sum(r["n"] for r in regions.values())
+    # `total == n_rows` is in the check on purpose: a verdict about "every judged row" must not be
+    # issuable when the judging was empty. That is the vacuous-pass half of §17's artifact — 1 row of
+    # 1024 judged, 0 outside, and a green line that read like a numerics result.
+    check(total == n_rows and not outside,
+          f"every one of the {n_rows} pinned prefill rows was judged and is inside the floors named"
+          " above",
+          ("; ".join(outside[:6]) + (f" … ({len(outside)} lines in all)" if len(outside) > 6 else "")
+           if outside else f"{total} rows judged: worst cos deficit {worst_cos[0]:.4e} at row"
+           f" {worst_cos[1]}, worst meanrel {worst_rel[0]:.4%} at row {worst_rel[1]}"))
+    if pooled["n"] and pooled["na"] and pooled["nb"] and pooled["sar"]:
+        pcos = pooled["dot"] / (pooled["na"] ** 0.5 * pooled["nb"] ** 0.5)
+        prel = pooled["sad"] / pooled["sar"]
+        print(f"  pooled over all {pooled['n']:,} compared elements — REPORTED, not judged, because"
+              " the published floors are per logits vector: cos "
+              f"{pcos:.8f} (1-cos {1 - pcos:.3e}), meanrel {prel:.3e}")
+    for line in flips:
+        print("  [flip] " + line)
+    if tied_rows:
+        print(f"  [ROW-TIE] {len(tied_rows)} row(s) where the pin itself tied and the engine picked"
+              " one of the pinned tied ids. D-8's tie policy is keyed to a per-step pin file and was"
+              " NOT generalised to a row block, so the narrower clause (the engine's id must be one of"
+              " the tied ids, with no quantization-slack allowance) is what judged them: "
+              + "; ".join(tied_rows))
+
+
+def intlist(a) -> str:
+    """An id list, capped: a tied row in a 248 320-wide vocabulary could print a thousand numbers."""
+    ids = [int(x) for x in a]
+    return str(ids[:8]) + (f" … {len(ids)} in all" if len(ids) > 8 else "")
+
+
+def selftest_prefill_rows() -> list[str]:
+    """The teeth of section (i), on synthetic rows — no engine, no device, no fixture read.
+
+    Section (i) judges 640-1024-row blocks, which is too big to inject through the stand-in (the
+    dry-run stand-in dumps only §06.5's row, and a ~1 GiB stand-in dump would make every dry run a disk
+    benchmark). So its negatives live here, at vocabulary 8: same predicates, same code path, and each
+    case names the one thing it must and must not call a failure — the rule that a negative which catches
+    everything measures nothing applies to a new section exactly as it applies to a new kernel.
+
+    The second half of this function is the §17 witness, and it is the one this repo cannot skip: a
+    coverage gap must fail, and it must fail WITHOUT issuing a numerics verdict. Three checkers on this
+    box have already been able to pass while measuring nothing; a fourth is one too many. So the coverage
+    cases assert on the printed output as well as on the failure list — a green `every one of the N
+    pinned prefill rows was judged…` line while rows are missing is the specific thing that must be
+    impossible, not merely accompanied by a warning.
+    """
+    bad: list[str] = []
+    vocab = 8
+    # Two pinned rows, built so each case isolates ONE predicate. `wide` is won by id 7 with 14 of room,
+    # so anything that beats it beat it with room to spare — a wide-room flip. `near` is won by id 7 with
+    # 0.05 of room, so a flip off it is a thin-room flip and NOTHING ELSE: swapping the two top values
+    # moves cos by ~2e-5 and meanrel by 0.25 %, both well inside the floors, so if the thin case goes red
+    # the flip rule is what broke, not the shape test.
+    wide = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 20.0], dtype=np.float32)
+    near = np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 19.95, 20.0], dtype=np.float32)
+    # The line that may never print over a coverage gap. Named once here rather than pasted per case.
+    VERDICT = "was judged and is inside the floors"
+
+    def run_case(name: str, pins: list[np.ndarray], rows: list[np.ndarray | None], *,
+                 want_fail: bool, needle: str = "", forbid: tuple[str, ...] = (),
+                 asked: str = PREFILL_LOGITS_ALL, echoed: str | None = PREFILL_LOGITS_ALL,
+                 truncate: tuple[int, ...] = ()) -> None:
+        """Judge `rows` against `pins` (None = the engine wrote no such file).
+
+        `asked`/`echoed` are what the gate requested and what the run's PREFILL line claims it ran, so a
+        case can reproduce §17 exactly: asked `all`, echoed `last`, i.e. a forcing that never reached the
+        engine. `truncate` writes those rows short, which is a third way to lose a row and must read as
+        coverage rather than as a numerics failure at that row.
+        """
+        before = list(fails)
+        shown = io.StringIO()
+        with tempfile.TemporaryDirectory(prefix="gate_rows_") as td:
+            work = Path(td)
+            for i, r in enumerate(rows):
+                if r is not None:
+                    raw = r.astype("<f4")
+                    if i in truncate:
+                        raw = raw[:max(1, raw.size // 2)]
+                    (work / f"logits{i}.bin").write_bytes(raw.tobytes())
+            pin = np.vstack(pins)
+            keep = sys.stdout
+            sys.stdout = shown
+            try:
+                prefill_row_checks(work, vocab, pin, asked, echoed)
+            finally:
+                sys.stdout = keep
+            new = fails[len(before):]
+            fails[:] = before
+        text = shown.getvalue()
+        got = bool(new)
+        named = (not needle) or any(needle in f for f in new) or needle in text
+        offenders = [f for f in forbid if f in text]
+        ok = got == want_fail and named and not offenders
+        print(f"  [{'PASS' if ok else 'FAIL'}] section (i) {name}"
+              + (f" — {'failed' if got else 'clean'}, as it had to" if ok else
+                 f" — wanted {'a failure' if want_fail else 'clean'}, got"
+                 f" {(new[:1] or text.splitlines()[-2:])}"
+                 + (f"; it printed a verdict it had no business printing: {offenders}"
+                    if offenders else "")))
+        if not ok:
+            bad.append(f"section (i) {name}")
+
+    run_case("judges a bit-identical row as clean", [wide, wide], [wide.copy(), wide.copy()],
+             want_fail=False)
+    moved = wide.copy()
+    moved[6] = 21.0                       # wins, and leaves 1.0 of room on the engine side
+    run_case("REDs a moved argmax whose room is wide", [wide, wide], [wide.copy(), moved],
+             want_fail=True, needle="neither side had under")
+    swapped = near.copy()
+    swapped[6], swapped[7] = near[7], near[6]     # the engine's winner is the pin's runner-up
+    run_case("admits a moved argmax whose room is thin", [near, near], [near.copy(), swapped],
+             want_fail=False)
+    loud = wide.copy()
+    loud[0] = 200.0                       # argmax untouched, whole-vector shape destroyed
+    run_case("REDs a row outside the cos/meanrel floors", [wide, wide], [wide.copy(), loud],
+             want_fail=True, needle="cos deficit")
+
+    # ---- the §17 witness: a coverage gap fails, and issues no numerics verdict ------------------
+    run_case("reports a row the engine never dumped", [wide, wide], [wide.copy(), None],
+             want_fail=True, needle="missing",
+             forbid=(VERDICT, "rows:     1 judged"))
+    run_case("reports a run that dumped NO rows at all", [wide, wide], [None, None],
+             want_fail=True, needle="COVERAGE GAP", forbid=(VERDICT, "bit-identical"))
+    run_case("reports a row-shaped mismatch with the engine's own echo (§17's defect: asked `all`,"
+             " the run says `last`)", [wide, wide], [wide.copy(), wide.copy()],
+             want_fail=True, needle="did not reach decode_run",
+             echoed=PREFILL_LOGITS_LAST, forbid=(VERDICT,))
+    run_case("names a gate that asked for the wrong row shape at all", [wide, wide],
+             [wide.copy(), None], want_fail=True, needle="prefill_logit_rows",
+             asked=PREFILL_LOGITS_LAST, forbid=(VERDICT,))
+    run_case("reports a run whose log never said which row shape it ran", [wide, wide],
+             [wide.copy(), wide.copy()], want_fail=True, needle="no `PREFILL logits=` field",
+             echoed=None, forbid=(VERDICT,))
+    run_case("treats a truncated row dump as coverage, not as a numerics failure at that row",
+             [wide, wide], [wide.copy(), wide.copy()], truncate=(1,),
+             want_fail=True, needle="truncated", forbid=(VERDICT, "cos deficit"))
+
+    # The coverage predicate on its own, so a regression in it cannot hide behind section (i)'s prints.
+    def cov(rows: list[np.ndarray | None], *, asked: str = PREFILL_LOGITS_ALL,
+            echoed: str | None = PREFILL_LOGITS_ALL) -> tuple[bool, str]:
+        with tempfile.TemporaryDirectory(prefix="gate_cov_") as td:
+            work = Path(td)
+            for i, r in enumerate(rows):
+                if r is not None:
+                    (work / f"logits{i}.bin").write_bytes(r.astype("<f4").tobytes())
+            return prefill_row_coverage(len(rows), work, vocab, asked, echoed)
+
+    for what, (ok, why) in {
+            "full coverage passes": cov([wide.copy(), wide.copy()]),
+            "a hole fails": cov([wide.copy(), None]),
+            "asking `last` fails": cov([wide.copy(), None], asked=PREFILL_LOGITS_LAST),
+            "an echo that disagrees with the ask fails": cov([wide.copy(), wide.copy()],
+                                                            echoed=PREFILL_LOGITS_LAST),
+            "an empty block fails rather than passing vacuously": cov([]),
+    }.items():
+        want_ok = what == "full coverage passes"
+        print(f"  [{'PASS' if ok == want_ok else 'FAIL'}] prefill_row_coverage: {what}"
+              + ("" if ok == want_ok else f" — got ok={ok}: {why}"))
+        if ok != want_ok:
+            bad.append(f"prefill_row_coverage: {what}")
+    # A row whose dump is the wrong size is not coverage either, or a truncated corpus would pass the
+    # count and then fail every floor for a reason that has nothing to do with the engine.
+    with tempfile.TemporaryDirectory(prefix="gate_cov_") as td:
+        work = Path(td)
+        (work / "logits0.bin").write_bytes(wide.astype("<f4").tobytes()[:-4])
+        (work / "logits1.bin").write_bytes(wide.astype("<f4").tobytes())
+        short_ok, short_why = prefill_row_coverage(2, work, vocab, PREFILL_LOGITS_ALL,
+                                                   PREFILL_LOGITS_ALL)
+        print(f"  [{'FAIL' if short_ok else 'PASS'}] prefill_row_coverage: a short dump is not"
+              + ("" if not short_ok else f" coverage — it passed: {short_why}"))
+        if short_ok:
+            bad.append("prefill_row_coverage: a short dump")
+    return bad
+
+
 # ---- (c) state sizes ---------------------------------------------------------------------------
 def state_checks(state_line: dict | None) -> None:
     section("(c) state sizes — against engine/state_sizes.py, which is run rather than retyped")
@@ -2627,6 +3211,17 @@ def parse_run(text: str) -> dict:
         elif line.startswith("RESULT "):
             out["result"] = dict(re.findall(r'(\w+)=(".*?"|[^\s]+)', line))
     return out
+
+
+def cmd_flag(cmd: list, flag: str) -> str | None:
+    """The value a flag carries in an argv this gate is about to run, or None if it is not there.
+
+    Exists so a requirement can be asserted on the argv rather than on the variable that decided it:
+    §17's row-shape forcing mutated `args.prefill_logits` after `cmd` had been assembled, so the gate's
+    own notes said `all`, the engine received `last`, and 1023 missing rows read as an engine defect.
+    """
+    i = cmd.index(flag) if flag in cmd else -1
+    return cmd[i + 1] if 0 <= i + 1 < len(cmd) else None
 
 
 # ---- (h) the batched-path proof (P4b) -----------------------------------------------------------
@@ -3302,23 +3897,34 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
     # byte-identity and every id must agree. On `--gemm library` the widths are three different
     # summation orders (§A1: hipBLAS picks a different solution at every N), so the rule is the measured
     # cascade band plus the flip rule, and the lines say so.
+    #
+    # WHY THIS BLOCK IS THE DEFERRED HALF OF SECTION (h), AND THE LAUNCH COUNTERS ABOVE IT ARE NOT. These
+    # are the checks whose independent variable is the WAVE WIDTH: batched vs one-row vs carried, same
+    # form on every side, different number of rows per launch. Under `--scope form` the question is which
+    # attention FORM is right above MAXSC, and a wave-width verdict cannot answer it — §17 is the exhibit,
+    # where 26 failures here outran the two HF-row readings that could. The launch counters above stay
+    # armed in every scope: they count SITES, not lanes, so no attention form can move them, and they are
+    # the only thing in the tree that can tell "batching cost nothing" from "batching never ran".
+    # See the `SCOPES` comment for why deferral (with the results still printed and still written to
+    # `wave_carry_deferred.json`) was chosen over re-running the same form on both sides.
     keys = lambda s: [(st.get("kind"), st.get("index"), st.get("input"), st.get("sampled"),
                        st.get("pos_before"), st.get("pos_after")) for st in s["run"]["steps"]]
-    if route_is_library():
-        cross_width_ids([("batched", batched), ("one-row", perrow)]
-                        + ([("carry", sides["carry"])] if "carry" in sides else []),
-                        "D-11, from §A2's 24 flips in 1694 rows, all of them thin-room")
-        wave_band_checks(batched["dir"], perrow["dir"], "batched", "one-row",
-                         "the route (c) wave-width band (D-11)")
-    else:
-        check(keys(batched) == keys(perrow) and bool(keys(batched)),
-              "both sides sample the same token ids",
-              f"{len(keys(batched))} prefill rows + generation steps compared"
-              + (" — 0 lines, which is a broken run, not a match" if not keys(batched) else ""))
-        nfiles, nbytes, differing = compare_dump_dirs(batched["dir"], perrow["dir"])
-        check(not differing and nfiles > 0, "both sides write bit-identical logits",
-              f"{nfiles} files, {nbytes} bytes compared, {len(differing)} differing"
-              + (f": {differing[:5]}" if differing else ""))
+    with defer(WAVE_CARRY_REASON, on=SCOPE == "form"):
+        if route_is_library():
+            cross_width_ids([("batched", batched), ("one-row", perrow)]
+                            + ([("carry", sides["carry"])] if "carry" in sides else []),
+                            "D-11, from §A2's 24 flips in 1694 rows, all of them thin-room")
+            wave_band_checks(batched["dir"], perrow["dir"], "batched", "one-row",
+                             "the route (c) wave-width band (D-11)")
+        else:
+            check(keys(batched) == keys(perrow) and bool(keys(batched)),
+                  "both sides sample the same token ids",
+                  f"{len(keys(batched))} prefill rows + generation steps compared"
+                  + (" — 0 lines, which is a broken run, not a match" if not keys(batched) else ""))
+            nfiles, nbytes, differing = compare_dump_dirs(batched["dir"], perrow["dir"])
+            check(not differing and nfiles > 0, "both sides write bit-identical logits",
+                  f"{nfiles} files, {nbytes} bytes compared, {len(differing)} differing"
+                  + (f": {differing[:5]}" if differing else ""))
 
     # ---- P6: the conv window CARRIED across wave boundaries (§2.4's end condition, A-04's `T > 1`).
     # This is the check the wide run cannot make for itself: at `--wave-rows 512` a shipped fixture is
@@ -3346,27 +3952,33 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
                   " carried between waves)",
                   f"{fam} {c}, expected rows_max={min(prompt_len, c_rows)} on every interior wave")
         if route_is_library():
-            wave_band_checks(batched["dir"], carry["dir"], "batched", "carry",
-                             "the carried conv window, A-04's T>1 end condition (D-11)")
+            with defer(WAVE_CARRY_REASON, on=SCOPE == "form"):
+                wave_band_checks(batched["dir"], carry["dir"], "batched", "carry",
+                                 "the carried conv window, A-04's T>1 end condition (D-11)")
             notes.append(f"conv window carried across {len(sizes) - 1} interior wave boundary(ies) at"
                          f" --wave-rows {c_rows}, logits inside the cascade band rather than"
                          " byte-identical to the single-wave run. That is a WEAKER claim than the"
                          " `--gemm hand` row above, and it has to be read as one: a window read from"
                          " the wrong rows still moves logits by orders more than the band allows, but"
                          " the band no longer proves the bytes are the same bytes, because on this"
-                         " route they are not. This is A-04's `T > 1` clause tested, not assumed.")
+                         " route they are not. This is A-04's `T > 1` clause tested, not assumed."
+                         + (" DEFERRED under --scope form: a wave-width claim, attributed to neither"
+                            " attention form." if SCOPE == "form" else ""))
         else:
-            nk, nb, diff = compare_dump_dirs(batched["dir"], carry["dir"])
-            check(not diff and nk > 0,
-                  f"the {len(sizes)}-wave side writes bit-identical logits to the one-wave side"
-                  " — the carried conv window is exact (A-04's T>1 end condition)",
-                  f"{nk} files, {nb} bytes compared, {len(diff)} differing"
-                  + (f": {diff[:5]}" if diff else "")
-                  + ". A difference here is the window, not rounding: both sides read the same weights in"
-                    " the same order and every other family is already proven bit-identical above")
+            with defer(WAVE_CARRY_REASON, on=SCOPE == "form"):
+                nk, nb, diff = compare_dump_dirs(batched["dir"], carry["dir"])
+                check(not diff and nk > 0,
+                      f"the {len(sizes)}-wave side writes bit-identical logits to the one-wave side"
+                      " — the carried conv window is exact (A-04's T>1 end condition)",
+                      f"{nk} files, {nb} bytes compared, {len(diff)} differing"
+                      + (f": {diff[:5]}" if diff else "")
+                      + ". A difference here is the window, not rounding: both sides read the same weights in"
+                        " the same order and every other family is already proven bit-identical above")
             notes.append(f"conv window carried across {len(sizes) - 1} interior wave boundary(ies) at"
                          f" --wave-rows {c_rows}, logits bit-identical to the single-wave run"
-                         f" ({nk} files). This is A-04's `T > 1` clause tested rather than assumed.")
+                         f" ({nk} files). This is A-04's `T > 1` clause tested rather than assumed."
+                         + (" DEFERRED under --scope form: a wave-width claim, attributed to neither"
+                            " attention form." if SCOPE == "form" else ""))
     if stand_in:
         notes.append("section (h) in dry-run mode is the gate's own arithmetic compared with itself"
                      " (the stand-in emits both sides), exactly as section (d) is: it proves the"
@@ -3403,7 +4015,12 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
                # The same route on every side of the A/B, and said out loud rather than left to the
                # default: section (h) chooses bit-identity or the cascade band on this, and the three
                # sides have to be the same route for either reading to mean anything.
-               "--gemm", GEMM_ROUTE]
+               "--gemm", GEMM_ROUTE,
+               # Same argument as the main run, one level down: an A/B of WAVE WIDTHS in which the two
+               # sides silently ran different attention FORMS compares two things at once. §13's device
+               # pass is exactly the pass that was read while one side had silently thrown inside
+               # `prefill_wave`, so the form is named on the command line here too.
+               "--attn-tile", args.attn_tile]
         if replay:
             cmd += ["--replay", ",".join(str(t) for t in greedy[:-1])]
         print("  $ " + " ".join(cmd))
@@ -4267,6 +4884,9 @@ def selftest(fixture: str = "dec8") -> int:
         if len(fails) > before:
             bad.append("fp-of-pins identity (section (g)'s mechanical case): " + fails[-1][:160])
     bad += selftest_declared_gaps(fixture)
+    section("(i) the prefill-row section's own negatives — synthetic rows, in process")
+    row_bad = selftest_prefill_rows()
+    bad += row_bad
     # The band history has to bite here too, and bite before anything runs: an unrecorded edit to `BAND`
     # must stop the gate, not merely look suspicious in review. The injection is the real thing — a
     # scratch tree whose engine/gate.py carries a looser flat floor, sitting beside the shipped ledger —
@@ -4517,6 +5137,26 @@ def main() -> int:
                          " `sampled=-1`) or `all` (every row priced, which is what the wave's"
                          " byte-identity comparison against the pre-P2 per-token prompt loop runs in,"
                          " and the only shape where a prompt-phase argmax exists mid-wave)")
+    ap.add_argument("--scope", choices=list(SCOPES), default="full",
+                    help="what this run is adjudicating. `full` (the default) counts every check that"
+                         " fails. `form` is the §16/§17 attention-FORM A/B: the same fixture run once"
+                         " per --attn-tile, asking which form is right above MAXSC. Under `form`,"
+                         " section (h)'s wave-width OUTPUT comparisons (batched vs one-row vs carried"
+                         " — cascade band / bit-identity / cross-width ids) still run, still print, and"
+                         " are still written to `wave_carry_deferred.json` beside the dumps, but they"
+                         " are labelled DEFERRED and not counted, because their independent variable"
+                         " is --wave-rows, not the form: §17's --attn-tile 1 run reported 26 failures"
+                         " of that kind ahead of the two readings that could decide anything. Nothing"
+                         " is skipped or softened — `--scope full` counts them again, and a carry check"
+                         " that fails on both forms is a separate finding, visible in both runs'"
+                         " DEFERRED lines and in the two sidecar files.")
+    ap.add_argument("--attn-tile", choices=("0", "1"), default="0",
+                    help="which attention FORM a wave body runs, passed straight to `decode_run"
+                         " --attn-tile`: `0` is the shipped per-(row,head) attn_core, `1` the tiled"
+                         " attn_tile_wave (prototype/attn_decode/results.md §12-§15). Named on every"
+                         " run and asserted against the run's own NUMERICS echo, because the open"
+                         " question is which form is wrong above MAXSC and a judged run that cannot"
+                         " say which form it ran is evidence about neither")
     ap.add_argument("--break-wave", action="store_true",
                     help="with --dry-run: make the wide-wave side of section (h) report one-row-per-"
                          "token launch counters, which is what a refactor that silently drops back to "
@@ -4607,6 +5247,7 @@ def main() -> int:
 
     set_fixture(args.fixture)
     set_route(args.gemm)
+    set_scope(args.scope)
 
     if args.slack_region:
         return print_slack_region()
@@ -4627,6 +5268,12 @@ def main() -> int:
     prompt_ids, dec_logits, dec_inputs = pairing_checks(man)
     greedy = man["greedy_continuation"]
     n_decode = len(dec_logits)
+    # The row block, if this fixture carries one, is proved here (in both modes) and read again by
+    # section (i) after the run. Its vocabulary width is taken from the block's own shape when the block
+    # exists, so a row-pinned fixture is never sized by a decode-step pin it might not carry.
+    seen_pin = first_pinned_logits(dec_logits)
+    vocab_pin = (int(man["text_config"]["vocab_size"]) if seen_pin is None else int(seen_pin.size))
+    rows_pin = prefill_row_pin_checks(man, len(prompt_ids), vocab_pin)
 
     if args.no_engine:
         state_checks(None)
@@ -4670,6 +5317,20 @@ def main() -> int:
     check(lanes <= ceiling, "the planned run fits the attention stage's lane ceiling",
           f"{len(prompt_ids)} prompt + {n_decode} generation = {lanes} lanes vs"
           f" {lane_ceiling_note()}")
+    # THE ROW PINS DRIVE THE INVOCATION, and they have to be read before the command line is built, not
+    # after. `prefill_logit_rows` in the manifest is the only sensible source for "which rows must
+    # exist": the pins are what section (i) judges, so a fixture that pins every prefill row requires
+    # `--prefill-logits all` and the caller is not permitted to forget it. §17 is what happens when the
+    # requirement is written down one statement too late: this forcing sat *below* the `cmd = [...]`
+    # it now precedes, so it raised `args.prefill_logits` after `--prefill-logits last` had already been
+    # appended, the engine ran `last` and wrote one row, and the gate then reported `1023 missing` as
+    # though the engine had failed to produce them. Deciding the shape here, and proving afterwards that
+    # the run's own echo agrees, is what makes a gap read as a gap.
+    rows_required = str(man.get("prefill_logit_rows", "last")) == PREFILL_LOGITS_ALL
+    if rows_required and args.prefill_logits != PREFILL_LOGITS_ALL:
+        args.prefill_logits = PREFILL_LOGITS_ALL
+        print("  [note] the manifest pins every prefill row (prefill_logit_rows=all), so"
+              " --prefill-logits was raised to `all` BEFORE the command line was built")
     cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
            "--steps", str(n_decode), "--out", str(work),
            # Named on every run rather than left to the binary's default, so the echoed command says
@@ -4680,7 +5341,11 @@ def main() -> int:
            # Named on every run too, for the same reason and a stronger one: this file judges a
            # different band per route (CASCADE_BAND), so a run whose route came from the binary's own
            # default could be judged by the wrong rule. The echo is checked right after the run.
-           "--gemm", GEMM_ROUTE]
+           "--gemm", GEMM_ROUTE,
+           # The attention form, named for the same reason and asserted against the same kind of echo:
+           # section (i) exists to decide §15's question, and a log that cannot say which form produced
+           # its rows is not evidence about either of them.
+           "--attn-tile", args.attn_tile]
     if args.state_fp:
         # On by default: a fixture that carries fingerprint pins cannot judge G5's state half without
         # them, and a section that silently did not run is the gap P1 was written to close (§2.6). The
@@ -4689,6 +5354,14 @@ def main() -> int:
         cmd.append("--state-fp")
     if replay:
         cmd += ["--replay", ",".join(str(t) for t in greedy[:-1])]
+    # The argv is the contract, not the variable that decided it. Asserted on `cmd`, the object the
+    # subprocess actually receives, because that is precisely where §17's bug lived: a forcing that fires
+    # after the list is built changes the gate's bookkeeping and nothing the engine sees.
+    check(cmd_flag(cmd, "--prefill-logits") == args.prefill_logits,
+          "the command line carries the prefill row shape this gate decided on",
+          f"argv carries --prefill-logits {cmd_flag(cmd, '--prefill-logits')!r} and the gate decided"
+          f" {args.prefill_logits!r}" + (" — required by this fixture's row pins"
+                                          if rows_required else ""))
     feeding = ("REPLAY — the reference's own token is fed at every step, because this fixture is"
                f" deeper than A-18's {FREE_RUN_BOUND}-token bound and a self-fed run past that"
                " could not be pinned (a divergence then shows at one step, not in all of them)"
@@ -4789,11 +5462,40 @@ def main() -> int:
     # D-11's provenance half, immediately after the route echo and for the same reason: with two GEMMs
     # in the tree, what produced the bits is part of what they mean.
     numerics_provenance_checks(run, stand_in=args.dry_run, write=args.write_provenance)
+    # Which attention FORM produced these bits, read off the run's own NUMERICS line rather than from
+    # the command line this gate printed, for the same reason the route is: the two forms are allowed to
+    # differ only inside §07.3's band, so a log that cannot say which one ran adjudicates nothing.
+    if not args.dry_run:
+        echoed_tile = run.get("numerics", {}).get("attn_tile")
+        check(str(echoed_tile) == str(args.attn_tile),
+              "the run ran the attention form this gate is judging it under",
+              ("its NUMERICS line carried no `attn_tile=` — the binary predates --attn-tile, so no"
+               " claim about either form can be made from this log" if echoed_tile is None else
+               f"NUMERICS echoed attn_tile={echoed_tile}, this gate was run with --attn-tile"
+               f" {args.attn_tile}"))
     check(bool(run["steps"]), "one STEP line per token", f"{len(run['steps'])} lines")
     if not run["steps"]:
         notes.append("no STEP lines at all: decode_run printed nothing the gate could parse — read"
                      " the raw log above (a load failure or a thrown HIP error exits before any step)")
         return report()
+    # ---- the coverage the row pins asked for, proved before a single number is compared ----------
+    # Section (i) re-proves this and would refuse there too; it is checked HERE because a run that did
+    # not deliver the rows this fixture pins has no numerics for sections (a)/(b)/(g)/(h) to judge, and
+    # §17 is the exhibit for what happens when they run anyway: one coverage failure surrounded by other
+    # sections' red lines, none of which say anything about the question. A coverage gap stops the gate,
+    # names the side that owes the rows, and prints no verdict of any other kind. (`--dry-run` is exempt
+    # for the standing reason: the stand-in dumps §06.5's row only, by design.)
+    if rows_pin is not None and not args.dry_run:
+        cov_ok, cov_why = prefill_row_coverage(rows_pin.shape[0], work, vocab_pin,
+                                               args.prefill_logits,
+                                               run.get("prefill", {}).get("logits"))
+        if not check(cov_ok, "coverage: every prefill row this fixture pins was dumped, before any"
+                             " numerics section runs", cov_why):
+            notes.append("COVERAGE GAP: the gate stops here on purpose. Sections (a)/(b)/(g)/(h) were"
+                         " not run, because a run that did not produce the rows its fixture pins cannot"
+                         " answer a numerics question about them. Nothing in this output is a numerics"
+                         " result.")
+            return report()
 
     # The route allowance is read HERE, before section (a), not in (b): the quantization-slack rule needs
     # each step's meanrel cap, and (b) judges its bands from the same read. One reader, one print, and the
@@ -5114,6 +5816,17 @@ def main() -> int:
 
     state_checks(run["state"])
     curve_checks(per_step, n_decode)
+    if rows_pin is not None:
+        if args.dry_run:
+            notes.append("section (i) did NOT run in this dry run: the stand-in dumps only §06.5's"
+                         f" row, and a {rows_pin.shape[0]}-row stand-in dump would be a disk"
+                         " benchmark rather than a cross-check. The section's own negatives are"
+                         " `selftest_prefill_rows`, which --selftest runs in process, and they include"
+                         " the coverage proof `prefill_row_coverage` that a real run passes through "
+                         " here — so the gap §17 fell into is tested at vocabulary 8 instead.")
+        else:
+            prefill_row_checks(work, vocab_pin, rows_pin,
+                               args.prefill_logits, run.get("prefill", {}).get("logits"))
     fingerprint_checks(man, n_decode)
     deep_matches_shallow(n_decode)
     state_fp_checks(man, len(prompt_ids), n_decode, len(decode_steps), run["statefp"],
@@ -5177,6 +5890,27 @@ def main() -> int:
                                carry_rows)
     batched_proof_checks(sides, counts, len(prompt_ids), n_decode, wave_rows,
                          stand_in=args.dry_run)
+    # The deferred half, written where the two forms' dumps already are. `--scope form` produces one of
+    # these per run, so the question "did the wave carry fail identically on both forms?" is a diff of
+    # two small files rather than a reading of two long logs — which is how a carry failure stays a
+    # separate finding instead of becoming a rumour about whichever form ran last.
+    if deferred_records:
+        record = work / "wave_carry_deferred.json"
+        record.write_text(json.dumps({
+            "fixture": REFS.name,
+            "scope": SCOPE,
+            "attn_tile": args.attn_tile,
+            "gemm": GEMM_ROUTE,
+            "reason": WAVE_CARRY_REASON,
+            "n_checks": len(deferred_records),
+            "n_failed": sum(1 for r in deferred_records if not r["ok"]),
+            "checks": deferred_records,
+        }, indent=1) + "\n")
+        notes.append(f"{len(deferred)} wave-width check(s) DEFERRED under --scope {SCOPE}"
+                     f" (of {len(deferred_records)} run) — attributed to neither attention form, and"
+                     f" recorded with every pass beside them in {record.name}. Re-run with"
+                     " `--scope full` to have them counted; compare the two forms' files to see whether"
+                     " a carry failure is a form finding or a wave-carry finding.")
     return report()
 
 
@@ -5295,6 +6029,16 @@ def report() -> int:
         # that way, after seeing this line print with the entry still in place).
         print(f"  [expected-red] {REFS.name}: all {len(rec['checks'])} recorded line(s) did NOT fail"
               " this run — healed. Re-read why they were red before believing green: " + rec["why"])
+    # The deferred checks print here as well as in place, so a reader who jumps to the bottom cannot
+    # mistake a deferred failure for a pass — and cannot mistake it for a form finding either.
+    if deferred:
+        print(f"  [DEFERRED] {len(deferred)} check(s) ran and are reported here but are NOT counted in"
+              f" this verdict, because this gate was invoked with --scope {SCOPE}: "
+              + WAVE_CARRY_REASON + ". They are neither form's result: `--scope full` counts them, and"
+              " comparing the two forms' wave_carry_deferred.json files says whether a failure here is"
+              " a form finding or a separate one about the wave carry.")
+        for d in deferred:
+            print("  - [DEFERRED] " + d)
     if fails:
         print(f"ENGINE GATE FAIL — {len(fails)} failed"
               + (f" ({len(ties)} step(s) reported TIE and not counted as failures"
@@ -5329,6 +6073,11 @@ def report() -> int:
     reported = ([f"{len(ties)} step(s) reported TIE"] if ties else []) \
         + ([f"{len(slack)} step(s) reported SLACK"] if slack else []) \
         + ([f"{len(rooms)} flip(s) reported ROOM"] if rooms else [])
+    if deferred:
+        # Never a bare PASS while a wave-width check went red: the count and the reason are on the
+        # verdict line itself, so the exit code cannot be the only place the deferral is visible.
+        reported.append(f"{len(deferred)} wave-width check(s) DEFERRED and belonging to neither form"
+                        " (--scope form; see the [DEFERRED] lines above)")
     print("ENGINE GATE PASS" + (f" — with {' and '.join(reported)}" if reported else ""))
     return 0
 
