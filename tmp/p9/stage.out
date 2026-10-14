@@ -1,0 +1,230 @@
+
+=== stage: p64 — T=46 tokens, 18 GDN layers, pin widths {'o_pre_norm': 'BF16-valued', 'state_new': 'true F32', 'gated_out': 'BF16-valued', 'out_proj_out': 'BF16-valued'}
+    (the reference's own prefill is chunked at C=64: `torch_chunk_gated_delta_rule`, so chunk-vs-pin is not a form-vs-form proxy)
+
+  --- vs PINS (data/refs); worst over the 18 layers, band 3e-05 of tensor max
+    form                       stage                cos    meanrel     maxrel  BF16 ULP
+    sequential S04.4 (today's engine) (worst L04/L00/L10) o_pre_norm    0.99999847   1.45e-03   3.23e-03    0.0% differ | band  12.4% | >1ULP      1 (off-band     0) | worst_off_rel 3.3e-08 | worst 2 ULP, off-band 0
+    sequential S04.4 (today's engine) (worst L17/L20/L22) state_new     1.00000000   3.18e-07   4.00e-07    0.0% differ | band  21.7% | >1ULP      9 (off-band     0) | worst_off_rel 1.6e-08 | worst 665 ULP, off-band 0
+    sequential S04.4 (today's engine) (worst L18/L00/L08) gated_out     1.00000000   3.00e-06   4.43e-04    0.0% differ | band   1.4% | >1ULP      4 (off-band     2) | worst_off_rel 3.5e-03 | worst 13 ULP, off-band 3
+    sequential S04.4 (today's engine) (worst L08/L08/L22) out_proj_out  0.99999995   2.56e-05   1.33e-03    1.2% differ | band   0.1% | >1ULP    117 (off-band   113) | worst_off_rel 5.3e-03 | worst 255 ULP, off-band 141
+    chunked C=16, F32 operands (worst L04/L00/L10) o_pre_norm    0.99999847   1.45e-03   3.23e-03    0.0% differ | band  12.4% | >1ULP      1 (off-band     0) | worst_off_rel 3.3e-08 | worst 2 ULP, off-band 0
+    chunked C=16, F32 operands (worst L02/L02/L06) state_new     1.00000000   2.32e-07   3.72e-07    0.0% differ | band  21.7% | >1ULP      8 (off-band     0) | worst_off_rel 8.5e-09 | worst 517 ULP, off-band 0
+    chunked C=16, F32 operands (worst L14/L14/L14) gated_out     1.00000000   1.06e-06   9.80e-04    0.0% differ | band   3.3% | >1ULP      5 (off-band     3) | worst_off_rel 7.8e-03 | worst 5 ULP, off-band 3
+    chunked C=16, F32 operands (worst L08/L08/L22) out_proj_out  0.99999996   2.08e-05   1.33e-03    0.8% differ | band   0.1% | >1ULP     61 (off-band    58) | worst_off_rel 1.6e-02 | worst 163 ULP, off-band 74
+    chunked C=32, F32 operands (worst L04/L00/L10) o_pre_norm    0.99999847   1.45e-03   3.23e-03    0.0% differ | band  12.4% | >1ULP      1 (off-band     0) | worst_off_rel 3.3e-08 | worst 2 ULP, off-band 0
+    chunked C=32, F32 operands (worst L02/L02/L04) state_new     1.00000000   2.30e-07   3.78e-07    0.0% differ | band  21.7% | >1ULP      8 (off-band     0) | worst_off_rel 8.5e-09 | worst 485 ULP, off-band 0
+    chunked C=32, F32 operands (worst L18/L18/L08) gated_out     1.00000000   8.30e-07   4.43e-04    0.0% differ | band   3.3% | >1ULP      4 (off-band     3) | worst_off_rel 7.8e-03 | worst 14 ULP, off-band 3
+    chunked C=32, F32 operands (worst L08/L08/L22) out_proj_out  0.99999996   1.80e-05   1.33e-03    0.6% differ | band   0.1% | >1ULP     57 (off-band    55) | worst_off_rel 1.6e-02 | worst 163 ULP, off-band 74
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L04/L00/L10) o_pre_norm    0.99999847   1.45e-03   3.23e-03    0.0% differ | band  12.4% | >1ULP      0 (off-band     0) | worst_off_rel 0.0e+00 | worst 0 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L17/L20/L05) state_new     1.00000000   1.59e-07   2.01e-07    0.0% differ | band  21.7% | >1ULP      1 (off-band     0) | worst_off_rel 1.9e-10 | worst 633 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L18/L10/L21) gated_out     1.00000000   3.29e-07   2.17e-04    0.0% differ | band   1.5% | >1ULP      2 (off-band     1) | worst_off_rel 4.9e-05 | worst 2 ULP, off-band 2
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L18/L10/L08) out_proj_out  0.99999999   8.41e-06   8.28e-04    0.4% differ | band   0.1% | >1ULP     36 (off-band    34) | worst_off_rel 2.0e-03 | worst 51 ULP, off-band 51
+    chunked C=16, BF16 matmul operands (device shape) (worst L04/L08/L22) o_pre_norm    0.99999488   3.52e-03   7.37e-03   52.2% differ | band   4.8% | >1ULP  15711 (off-band 12028) | worst_off_rel 1.1e-01 | worst 28587 ULP, off-band 28587
+    chunked C=16, BF16 matmul operands (device shape) (worst L16/L20/L16) state_new     0.99999457   2.91e-03   7.74e-03   49.6% differ | band  31.8% | >1ULP  38840 (off-band 16342) | worst_off_rel 4.0e-02 | worst 30430 ULP, off-band 30430
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L09) gated_out     0.99998308   4.01e-03   1.27e-02   46.9% differ | band   1.8% | >1ULP  21529 (off-band 20471) | worst_off_rel 1.0e+00 | worst 30036 ULP, off-band 30036
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99997097   7.17e-03   9.93e-03   69.4% differ | band   0.1% | >1ULP  16673 (off-band 16644) | worst_off_rel 3.4e-01 | worst 29745 ULP, off-band 29745
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L22) o_pre_norm    0.99999347   4.11e-03   8.24e-03   54.6% differ | band   2.1% | >1ULP  16549 (off-band 15023) | worst_off_rel 4.6e-01 | worst 29206 ULP, off-band 29206
+    chunked C=32, BF16 matmul operands (device shape) (worst L16/L20/L16) state_new     0.99999482   2.91e-03   7.73e-03   49.6% differ | band  31.8% | >1ULP  38791 (off-band 16240) | worst_off_rel 4.8e-02 | worst 30277 ULP, off-band 30277
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L01) gated_out     0.99997648   4.45e-03   1.27e-02   56.4% differ | band   1.7% | >1ULP  28125 (off-band 27116) | worst_off_rel 4.0e-01 | worst 30163 ULP, off-band 30163
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99995834   8.42e-03   1.99e-02   69.7% differ | band   0.1% | >1ULP  16887 (off-band 16859) | worst_off_rel 3.4e-01 | worst 29773 ULP, off-band 29773
+    chunked C=64, BF16 matmul operands (device shape) (worst L22/L08/L22) o_pre_norm    0.99999234   4.63e-03   8.51e-03   56.8% differ | band   2.1% | >1ULP  18245 (off-band 16717) | worst_off_rel 4.6e-01 | worst 29206 ULP, off-band 29206
+    chunked C=64, BF16 matmul operands (device shape) (worst L18/L20/L06) state_new     0.99999436   3.39e-03   4.79e-03   50.3% differ | band  31.8% | >1ULP  39319 (off-band 16754) | worst_off_rel 3.8e-02 | worst 29864 ULP, off-band 29864
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L21) gated_out     0.99996978   4.95e-03   1.39e-02   57.0% differ | band   1.7% | >1ULP  28920 (off-band 27920) | worst_off_rel 4.0e-01 | worst 30163 ULP, off-band 30163
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99994524   9.87e-03   1.99e-02   70.7% differ | band   0.1% | >1ULP  17381 (off-band 17353) | worst_off_rel 3.4e-01 | worst 29887 ULP, off-band 29887
+
+  --- vs SEQUENTIAL (the route delta); worst over the 18 layers, band 3e-05 of tensor max
+    form                       stage                cos    meanrel     maxrel  BF16 ULP
+    chunked C=16, F32 operands (worst L04/L08/L08) o_pre_norm    1.00000000   3.52e-07   1.01e-06    0.0% differ | band  12.4% | >1ULP      0 (off-band     0) | worst_off_rel 0.0e+00 | worst 0 ULP, off-band 0
+    chunked C=16, F32 operands (worst L20/L20/L12) state_new     1.00000000   2.80e-07   3.98e-07    0.0% differ | band  21.7% | >1ULP      4 (off-band     0) | worst_off_rel 1.6e-08 | worst 148 ULP, off-band 0
+    chunked C=16, F32 operands (worst L14/L00/L14) gated_out     1.00000000   3.01e-06   9.80e-04    0.0% differ | band   1.4% | >1ULP      5 (off-band     3) | worst_off_rel 3.6e-03 | worst 5 ULP, off-band 3
+    chunked C=16, F32 operands (worst L00/L00/L08) out_proj_out  0.99999997   2.46e-05   8.28e-04    1.2% differ | band   0.1% | >1ULP    119 (off-band   111) | worst_off_rel 5.3e-03 | worst 255 ULP, off-band 58
+    chunked C=32, F32 operands (worst L04/L08/L08) o_pre_norm    1.00000000   3.75e-07   1.01e-06    0.0% differ | band  12.4% | >1ULP      0 (off-band     0) | worst_off_rel 0.0e+00 | worst 0 ULP, off-band 0
+    chunked C=32, F32 operands (worst L20/L20/L02) state_new     1.00000000   2.92e-07   4.48e-07    0.0% differ | band  21.7% | >1ULP      3 (off-band     0) | worst_off_rel 1.6e-08 | worst 180 ULP, off-band 0
+    chunked C=32, F32 operands (worst L10/L00/L00) gated_out     1.00000000   3.00e-06   3.81e-04    0.0% differ | band   1.4% | >1ULP      4 (off-band     2) | worst_off_rel 3.4e-03 | worst 13 ULP, off-band 3
+    chunked C=32, F32 operands (worst L10/L00/L08) out_proj_out  0.99999997   2.45e-05   8.28e-04    1.2% differ | band   0.1% | >1ULP    118 (off-band   110) | worst_off_rel 5.3e-03 | worst 255 ULP, off-band 58
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L04/L08/L18) o_pre_norm    1.00000000   4.20e-07   8.25e-07    0.0% differ | band  12.4% | >1ULP      1 (off-band     0) | worst_off_rel 3.3e-08 | worst 2 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L20/L20/L22) state_new     1.00000000   3.27e-07   4.00e-07    0.0% differ | band  21.7% | >1ULP      9 (off-band     0) | worst_off_rel 1.6e-08 | worst 32 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L18/L00/L08) gated_out     1.00000000   3.00e-06   4.43e-04    0.0% differ | band   1.4% | >1ULP      4 (off-band     2) | worst_off_rel 3.4e-03 | worst 13 ULP, off-band 3
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L08/L18/L22) out_proj_out  0.99999995   2.82e-05   1.33e-03    0.9% differ | band   0.1% | >1ULP     74 (off-band    66) | worst_off_rel 1.6e-02 | worst 387 ULP, off-band 163
+    chunked C=16, BF16 matmul operands (device shape) (worst L04/L08/L22) o_pre_norm    0.99999613   3.13e-03   6.58e-03   52.2% differ | band   4.8% | >1ULP  15710 (off-band 12023) | worst_off_rel 1.1e-01 | worst 28587 ULP, off-band 28587
+    chunked C=16, BF16 matmul operands (device shape) (worst L16/L20/L16) state_new     0.99999457   2.91e-03   7.74e-03   49.6% differ | band  31.8% | >1ULP  38836 (off-band 16339) | worst_off_rel 4.0e-02 | worst 30430 ULP, off-band 30430
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L09) gated_out     0.99998308   4.01e-03   1.27e-02   46.9% differ | band   1.8% | >1ULP  21528 (off-band 20470) | worst_off_rel 1.0e+00 | worst 30036 ULP, off-band 30036
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99997097   7.17e-03   9.93e-03   69.4% differ | band   0.1% | >1ULP  16683 (off-band 16654) | worst_off_rel 3.4e-01 | worst 29745 ULP, off-band 29745
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L22) o_pre_norm    0.99999525   3.74e-03   7.54e-03   54.6% differ | band   2.1% | >1ULP  16549 (off-band 15027) | worst_off_rel 4.6e-01 | worst 29206 ULP, off-band 29206
+    chunked C=32, BF16 matmul operands (device shape) (worst L16/L20/L16) state_new     0.99999482   2.91e-03   7.73e-03   49.6% differ | band  31.8% | >1ULP  38790 (off-band 16240) | worst_off_rel 4.8e-02 | worst 30277 ULP, off-band 30277
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L01) gated_out     0.99997648   4.45e-03   1.27e-02   56.4% differ | band   1.7% | >1ULP  28128 (off-band 27119) | worst_off_rel 4.0e-01 | worst 30163 ULP, off-band 30163
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99995833   8.42e-03   1.99e-02   69.7% differ | band   0.1% | >1ULP  16891 (off-band 16863) | worst_off_rel 3.4e-01 | worst 29773 ULP, off-band 29773
+    chunked C=64, BF16 matmul operands (device shape) (worst L22/L08/L22) o_pre_norm    0.99999340   4.36e-03   7.97e-03   56.7% differ | band   2.1% | >1ULP  18245 (off-band 16721) | worst_off_rel 4.6e-01 | worst 29206 ULP, off-band 29206
+    chunked C=64, BF16 matmul operands (device shape) (worst L18/L20/L06) state_new     0.99999436   3.39e-03   4.79e-03   50.3% differ | band  31.8% | >1ULP  39315 (off-band 16752) | worst_off_rel 3.8e-02 | worst 29864 ULP, off-band 29864
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L21) gated_out     0.99996978   4.95e-03   1.39e-02   57.0% differ | band   1.7% | >1ULP  28921 (off-band 27921) | worst_off_rel 4.0e-01 | worst 30163 ULP, off-band 30163
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99994523   9.87e-03   1.99e-02   70.7% differ | band   0.1% | >1ULP  17383 (off-band 17355) | worst_off_rel 3.4e-01 | worst 29887 ULP, off-band 29887
+
+  --- vs PIN-o-THROUGH-THIS-FILE'S S04.5 (downstream control); worst over the 18 layers, band 3e-05 of tensor max
+    form                       stage                cos    meanrel     maxrel  BF16 ULP
+    sequential S04.4 (today's engine) (worst L04/L00/L10) o_pre_norm    0.99999847   1.45e-03   3.23e-03    0.0% differ | band  12.4% | >1ULP      1 (off-band     0) | worst_off_rel 3.3e-08 | worst 2 ULP, off-band 0
+    sequential S04.4 (today's engine) (worst L17/L20/L22) state_new     1.00000000   3.18e-07   4.00e-07    0.0% differ | band  21.7% | >1ULP      9 (off-band     0) | worst_off_rel 1.6e-08 | worst 665 ULP, off-band 0
+    sequential S04.4 (today's engine) (worst L18/L00/L08) gated_out     1.00000000   3.00e-06   4.43e-04    0.0% differ | band   1.4% | >1ULP      4 (off-band     2) | worst_off_rel 3.5e-03 | worst 13 ULP, off-band 3
+    sequential S04.4 (today's engine) (worst L08/L08/L22) out_proj_out  0.99999995   2.56e-05   1.33e-03    1.2% differ | band   0.1% | >1ULP    117 (off-band   113) | worst_off_rel 5.3e-03 | worst 255 ULP, off-band 141
+    chunked C=16, F32 operands (worst L04/L00/L10) o_pre_norm    0.99999847   1.45e-03   3.23e-03    0.0% differ | band  12.4% | >1ULP      1 (off-band     0) | worst_off_rel 3.3e-08 | worst 2 ULP, off-band 0
+    chunked C=16, F32 operands (worst L02/L02/L06) state_new     1.00000000   2.32e-07   3.72e-07    0.0% differ | band  21.7% | >1ULP      8 (off-band     0) | worst_off_rel 8.5e-09 | worst 517 ULP, off-band 0
+    chunked C=16, F32 operands (worst L14/L14/L14) gated_out     1.00000000   1.06e-06   9.80e-04    0.0% differ | band   3.3% | >1ULP      5 (off-band     3) | worst_off_rel 7.8e-03 | worst 5 ULP, off-band 3
+    chunked C=16, F32 operands (worst L08/L08/L22) out_proj_out  0.99999996   2.08e-05   1.33e-03    0.8% differ | band   0.1% | >1ULP     61 (off-band    58) | worst_off_rel 1.6e-02 | worst 163 ULP, off-band 74
+    chunked C=32, F32 operands (worst L04/L00/L10) o_pre_norm    0.99999847   1.45e-03   3.23e-03    0.0% differ | band  12.4% | >1ULP      1 (off-band     0) | worst_off_rel 3.3e-08 | worst 2 ULP, off-band 0
+    chunked C=32, F32 operands (worst L02/L02/L04) state_new     1.00000000   2.30e-07   3.78e-07    0.0% differ | band  21.7% | >1ULP      8 (off-band     0) | worst_off_rel 8.5e-09 | worst 485 ULP, off-band 0
+    chunked C=32, F32 operands (worst L18/L18/L08) gated_out     1.00000000   8.30e-07   4.43e-04    0.0% differ | band   3.3% | >1ULP      4 (off-band     3) | worst_off_rel 7.8e-03 | worst 14 ULP, off-band 3
+    chunked C=32, F32 operands (worst L08/L08/L22) out_proj_out  0.99999996   1.80e-05   1.33e-03    0.6% differ | band   0.1% | >1ULP     57 (off-band    55) | worst_off_rel 1.6e-02 | worst 163 ULP, off-band 74
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L04/L00/L10) o_pre_norm    0.99999847   1.45e-03   3.23e-03    0.0% differ | band  12.4% | >1ULP      0 (off-band     0) | worst_off_rel 0.0e+00 | worst 0 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L17/L20/L05) state_new     1.00000000   1.59e-07   2.01e-07    0.0% differ | band  21.7% | >1ULP      1 (off-band     0) | worst_off_rel 1.9e-10 | worst 633 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L18/L10/L21) gated_out     1.00000000   3.29e-07   2.17e-04    0.0% differ | band   1.5% | >1ULP      2 (off-band     1) | worst_off_rel 4.9e-05 | worst 2 ULP, off-band 2
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L18/L10/L08) out_proj_out  0.99999999   8.41e-06   8.28e-04    0.4% differ | band   0.1% | >1ULP     36 (off-band    34) | worst_off_rel 2.0e-03 | worst 51 ULP, off-band 51
+    chunked C=16, BF16 matmul operands (device shape) (worst L04/L08/L22) o_pre_norm    0.99999488   3.52e-03   7.37e-03   52.2% differ | band   4.8% | >1ULP  15711 (off-band 12028) | worst_off_rel 1.1e-01 | worst 28587 ULP, off-band 28587
+    chunked C=16, BF16 matmul operands (device shape) (worst L16/L20/L16) state_new     0.99999457   2.91e-03   7.74e-03   49.6% differ | band  31.8% | >1ULP  38840 (off-band 16342) | worst_off_rel 4.0e-02 | worst 30430 ULP, off-band 30430
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L09) gated_out     0.99998308   4.01e-03   1.27e-02   46.9% differ | band   1.8% | >1ULP  21529 (off-band 20471) | worst_off_rel 1.0e+00 | worst 30036 ULP, off-band 30036
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99997097   7.17e-03   9.93e-03   69.4% differ | band   0.1% | >1ULP  16673 (off-band 16644) | worst_off_rel 3.4e-01 | worst 29745 ULP, off-band 29745
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L22) o_pre_norm    0.99999347   4.11e-03   8.24e-03   54.6% differ | band   2.1% | >1ULP  16549 (off-band 15023) | worst_off_rel 4.6e-01 | worst 29206 ULP, off-band 29206
+    chunked C=32, BF16 matmul operands (device shape) (worst L16/L20/L16) state_new     0.99999482   2.91e-03   7.73e-03   49.6% differ | band  31.8% | >1ULP  38791 (off-band 16240) | worst_off_rel 4.8e-02 | worst 30277 ULP, off-band 30277
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L01) gated_out     0.99997648   4.45e-03   1.27e-02   56.4% differ | band   1.7% | >1ULP  28125 (off-band 27116) | worst_off_rel 4.0e-01 | worst 30163 ULP, off-band 30163
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99995834   8.42e-03   1.99e-02   69.7% differ | band   0.1% | >1ULP  16887 (off-band 16859) | worst_off_rel 3.4e-01 | worst 29773 ULP, off-band 29773
+    chunked C=64, BF16 matmul operands (device shape) (worst L22/L08/L22) o_pre_norm    0.99999234   4.63e-03   8.51e-03   56.8% differ | band   2.1% | >1ULP  18245 (off-band 16717) | worst_off_rel 4.6e-01 | worst 29206 ULP, off-band 29206
+    chunked C=64, BF16 matmul operands (device shape) (worst L18/L20/L06) state_new     0.99999436   3.39e-03   4.79e-03   50.3% differ | band  31.8% | >1ULP  39319 (off-band 16754) | worst_off_rel 3.8e-02 | worst 29864 ULP, off-band 29864
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L21) gated_out     0.99996978   4.95e-03   1.39e-02   57.0% differ | band   1.7% | >1ULP  28920 (off-band 27920) | worst_off_rel 4.0e-01 | worst 30163 ULP, off-band 30163
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99994524   9.87e-03   1.99e-02   70.7% differ | band   0.1% | >1ULP  17381 (off-band 17353) | worst_off_rel 3.4e-01 | worst 29887 ULP, off-band 29887
+
+  --- BF16 ULP histogram, all 18 layers pooled into ONE array per stage (count total / of those off-band); band is 3e-05 of the tensor max
+    seq        o_pre_norm   n=  1695744 band   7.6% >1ULP      24 off-band       0 worst off-band 0 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 1695253 [1-1] 467 [2-4] 17/0 [5-16] 3/0 [17-128] 4/0 [129-4096] 0/0 [4097-max] 0/0
+    seq        state_new    n=  4718592 band  14.7% >1ULP     105 off-band       0 worst off-band 0 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 4717190 [1-1] 1297 [2-4] 66/0 [5-16] 27/0 [17-128] 8/0 [129-4096] 3/0 [4097-max] 1/0
+    chunk64    o_pre_norm   n=  1695744 band   7.6% >1ULP       7 off-band       0 worst off-band 0 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 1695647 [1-1] 90 [2-4] 5/0 [5-16] 2/0 [17-128] 0/0 [129-4096] 0/0 [4097-max] 0/0
+    chunk64    state_new    n=  4718592 band  14.7% >1ULP      34 off-band       0 worst off-band 0 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 4718212 [1-1] 346 [2-4] 22/0 [5-16] 9/0 [17-128] 2/0 [129-4096] 1/0 [4097-max] 0/0
+    chunk64mma o_pre_norm   n=  1695744 band   7.6% >1ULP  336688 off-band  265692 worst off-band 29206 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 749746 [1-1] 609310 [2-4] 229729/199999 [5-16] 78162/54735 [17-128] 25067/10575 [129-4096] 2519/302 [4097-max] 1211/81
+    chunk64mma state_new    n=  4718592 band  14.7% >1ULP  804612 off-band  530649 worst off-band 29864 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 2260205 [1-1] 1653775 [2-4] 544309/413266 [5-16] 189094/101368 [17-128] 61831/15625 [129-4096] 6250/338 [4097-max] 3128/52
+
+  --- injected bugs, and where each one is visible (locality: a negative that catches everything proves nothing)
+    no_inter_chunk_read    per-chunk max|Δo| 0.0e+00 | state meanrel 0.00e+00 
+    causality_upper        per-chunk max|Δo| nan | state meanrel 2.09e+00 (non-finite: caught outright)
+    no_pairwise_decay      per-chunk max|Δo| 3.6e-02 | state meanrel 1.57e-01 
+    no_chunk_decay         per-chunk max|Δo| 0.0e+00 | state meanrel 0.00e+00 
+    drop_last_chunk        per-chunk max|Δo| 2.9e-01 | state meanrel 1.00e+00 
+    read_before_decay      per-chunk max|Δo| 0.0e+00 | state meanrel 4.88e-02 
+    read_after_write       per-chunk max|Δo| 0.0e+00 | state meanrel 6.99e-01 
+
+=== stage: p300 — T=277 tokens, 18 GDN layers, pin widths {'o_pre_norm': 'BF16-valued', 'state_new': 'true F32', 'gated_out': 'BF16-valued', 'out_proj_out': 'BF16-valued'}
+    (the reference's own prefill is chunked at C=64: `torch_chunk_gated_delta_rule`, so chunk-vs-pin is not a form-vs-form proxy)
+
+  --- vs PINS (data/refs); worst over the 18 layers, band 3e-05 of tensor max
+    form                       stage                cos    meanrel     maxrel  BF16 ULP
+    sequential S04.4 (today's engine) (worst L01/L01/L05) o_pre_norm    0.99999846   1.42e-03   3.47e-03    0.0% differ | band  13.5% | >1ULP     11 (off-band     0) | worst_off_rel 1.5e-08 | worst 51 ULP, off-band 0
+    sequential S04.4 (today's engine) (worst L00/L00/L04) state_new     1.00000000   5.23e-07   1.06e-06    0.0% differ | band  22.4% | >1ULP      4 (off-band     0) | worst_off_rel 8.5e-07 | worst 3 ULP, off-band 0
+    sequential S04.4 (today's engine) (worst L16/L16/L00) gated_out     0.99999999   2.30e-06   1.52e-03    0.0% differ | band   3.3% | >1ULP     38 (off-band    18) | worst_off_rel 2.2e-02 | worst 343 ULP, off-band 3
+    sequential S04.4 (today's engine) (worst L18/L16/L18) out_proj_out  0.99999995   1.94e-05   3.65e-03    0.7% differ | band   0.1% | >1ULP    382 (off-band   355) | worst_off_rel 2.5e-02 | worst 419 ULP, off-band 419
+    chunked C=16, F32 operands (worst L01/L01/L05) o_pre_norm    0.99999846   1.42e-03   3.47e-03    0.0% differ | band  13.5% | >1ULP     11 (off-band     0) | worst_off_rel 4.2e-08 | worst 52 ULP, off-band 0
+    chunked C=16, F32 operands (worst L17/L20/L00) state_new     1.00000000   2.57e-07   3.30e-07    0.0% differ | band  22.4% | >1ULP      0 (off-band     0) | worst_off_rel 0.0e+00 | worst 0 ULP, off-band 0
+    chunked C=16, F32 operands (worst L16/L16/L14) gated_out     0.99999999   2.20e-06   1.39e-03    0.0% differ | band   3.3% | >1ULP     26 (off-band    10) | worst_off_rel 1.1e-02 | worst 175 ULP, off-band 3
+    chunked C=16, F32 operands (worst L16/L16/L18) out_proj_out  0.99999997   1.57e-05   3.65e-03    0.5% differ | band   0.1% | >1ULP    313 (off-band   291) | worst_off_rel 2.5e-02 | worst 419 ULP, off-band 419
+    chunked C=32, F32 operands (worst L01/L01/L05) o_pre_norm    0.99999846   1.42e-03   3.47e-03    0.0% differ | band  13.5% | >1ULP      5 (off-band     0) | worst_off_rel 4.2e-08 | worst 20 ULP, off-band 0
+    chunked C=32, F32 operands (worst L17/L20/L04) state_new     1.00000000   2.08e-07   2.45e-07    0.0% differ | band  22.4% | >1ULP      0 (off-band     0) | worst_off_rel 0.0e+00 | worst 0 ULP, off-band 0
+    chunked C=32, F32 operands (worst L14/L01/L14) gated_out     1.00000000   8.83e-07   1.39e-03    0.0% differ | band   2.8% | >1ULP     14 (off-band     5) | worst_off_rel 4.6e-02 | worst 15 ULP, off-band 3
+    chunked C=32, F32 operands (worst L21/L21/L21) out_proj_out  0.99999997   1.31e-05   1.43e-03    0.5% differ | band   0.1% | >1ULP    251 (off-band   234) | worst_off_rel 1.1e-02 | worst 28719 ULP, off-band 28719
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L01/L01/L05) o_pre_norm    0.99999846   1.42e-03   3.47e-03    0.0% differ | band  13.5% | >1ULP      2 (off-band     0) | worst_off_rel 2.3e-09 | worst 6 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L17/L20/L17) state_new     1.00000000   1.60e-07   2.36e-07    0.0% differ | band  22.4% | >1ULP      0 (off-band     0) | worst_off_rel 0.0e+00 | worst 0 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L16/L16/L16) gated_out     0.99999999   2.01e-06   1.01e-03    0.0% differ | band   2.6% | >1ULP     23 (off-band    10) | worst_off_rel 1.9e-02 | worst 24649 ULP, off-band 3
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L16/L16/L21) out_proj_out  0.99999998   1.10e-05   1.43e-03    0.3% differ | band   0.1% | >1ULP    192 (off-band   183) | worst_off_rel 2.5e-02 | worst 419 ULP, off-band 419
+    chunked C=16, BF16 matmul operands (device shape) (worst L09/L08/L22) o_pre_norm    0.99999548   3.21e-03   6.31e-03   50.0% differ | band   2.4% | >1ULP  90882 (off-band 79874) | worst_off_rel 2.9e-01 | worst 28858 ULP, off-band 28858
+    chunked C=16, BF16 matmul operands (device shape) (worst L00/L20/L10) state_new     0.99999648   2.93e-03   3.81e-03   54.1% differ | band   8.2% | >1ULP  49527 (off-band 40729) | worst_off_rel 1.1e-01 | worst 29815 ULP, off-band 29815
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L13) gated_out     0.99998580   3.99e-03   1.62e-02   42.0% differ | band   1.4% | >1ULP 116407 (off-band 110584) | worst_off_rel 4.4e-01 | worst 30272 ULP, off-band 30272
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99997443   6.70e-03   1.10e-02   68.2% differ | band   0.1% | >1ULP  96277 (off-band 96102) | worst_off_rel 3.4e-01 | worst 29853 ULP, off-band 29853
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L20) o_pre_norm    0.99999589   3.37e-03   7.70e-03   52.0% differ | band   2.4% | >1ULP 102049 (off-band 91034) | worst_off_rel 6.6e-01 | worst 29001 ULP, off-band 29001
+    chunked C=32, BF16 matmul operands (device shape) (worst L00/L20/L00) state_new     0.99999660   3.08e-03   3.65e-03   49.2% differ | band   7.9% | >1ULP  38355 (off-band 28537) | worst_off_rel 1.2e-01 | worst 29987 ULP, off-band 29987
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L13) gated_out     0.99998297   4.30e-03   1.62e-02   49.1% differ | band   3.2% | >1ULP 122883 (off-band 112557) | worst_off_rel 2.6e-01 | worst 30433 ULP, off-band 30433
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99996921   7.40e-03   1.10e-02   69.4% differ | band   0.1% | >1ULP 100310 (off-band 100135) | worst_off_rel 3.9e-01 | worst 29820 ULP, off-band 29820
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L20) o_pre_norm    0.99999437   3.97e-03   7.70e-03   54.4% differ | band   2.4% | >1ULP 113838 (off-band 102740) | worst_off_rel 6.6e-01 | worst 29185 ULP, off-band 29185
+    chunked C=64, BF16 matmul operands (device shape) (worst L17/L20/L13) state_new     0.99999647   3.06e-03   3.46e-03   49.3% differ | band   7.9% | >1ULP  38419 (off-band 28587) | worst_off_rel 1.2e-01 | worst 29791 ULP, off-band 29791
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L13) gated_out     0.99997673   4.86e-03   1.62e-02   58.0% differ | band   2.6% | >1ULP 179602 (off-band 168962) | worst_off_rel 3.1e-01 | worst 30431 ULP, off-band 30431
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99995679   8.81e-03   1.38e-02   70.0% differ | band   0.1% | >1ULP 102703 (off-band 102528) | worst_off_rel 4.3e-01 | worst 29828 ULP, off-band 29828
+
+  --- vs SEQUENTIAL (the route delta); worst over the 18 layers, band 3e-05 of tensor max
+    form                       stage                cos    meanrel     maxrel  BF16 ULP
+    chunked C=16, F32 operands (worst L08/L08/L12) o_pre_norm    1.00000000   4.10e-07   1.08e-06    0.0% differ | band  13.4% | >1ULP      7 (off-band     0) | worst_off_rel 2.5e-09 | worst 15 ULP, off-band 0
+    chunked C=16, F32 operands (worst L00/L00/L04) state_new     1.00000000   5.29e-07   9.82e-07    0.0% differ | band  22.4% | >1ULP      4 (off-band     0) | worst_off_rel 8.4e-07 | worst 2 ULP, off-band 0
+    chunked C=16, F32 operands (worst L18/L17/L00) gated_out     1.00000000   7.16e-07   1.52e-03    0.0% differ | band   3.3% | >1ULP     41 (off-band    18) | worst_off_rel 2.2e-02 | worst 168 ULP, off-band 3
+    chunked C=16, F32 operands (worst L02/L08/L18) out_proj_out  0.99999996   1.55e-05   3.65e-03    0.3% differ | band   0.1% | >1ULP    197 (off-band   181) | worst_off_rel 1.9e-02 | worst 28242 ULP, off-band 28242
+    chunked C=32, F32 operands (worst L04/L08/L04) o_pre_norm    1.00000000   4.20e-07   1.09e-06    0.0% differ | band  13.4% | >1ULP     10 (off-band     0) | worst_off_rel 2.2e-08 | worst 51 ULP, off-band 0
+    chunked C=32, F32 operands (worst L04/L00/L04) state_new     1.00000000   5.33e-07   1.06e-06    0.0% differ | band  22.4% | >1ULP      4 (off-band     0) | worst_off_rel 8.4e-07 | worst 3 ULP, off-band 0
+    chunked C=32, F32 operands (worst L16/L16/L00) gated_out     0.99999999   2.16e-06   1.52e-03    0.0% differ | band   2.8% | >1ULP     29 (off-band    13) | worst_off_rel 1.5e-01 | worst 48 ULP, off-band 3
+    chunked C=32, F32 operands (worst L18/L18/L18) out_proj_out  0.99999994   2.03e-05   3.65e-03    0.8% differ | band   0.1% | >1ULP    390 (off-band   369) | worst_off_rel 1.1e-02 | worst 28719 ULP, off-band 28719
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L08/L08/L04) o_pre_norm    1.00000000   4.78e-07   1.22e-06    0.0% differ | band  13.4% | >1ULP     12 (off-band     0) | worst_off_rel 2.2e-08 | worst 51 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L04/L00/L04) state_new     1.00000000   5.28e-07   9.82e-07    0.0% differ | band  22.4% | >1ULP      5 (off-band     0) | worst_off_rel 8.4e-07 | worst 3 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L14/L00/L00) gated_out     1.00000000   8.31e-07   1.52e-03    0.0% differ | band   3.3% | >1ULP     39 (off-band    17) | worst_off_rel 2.2e-02 | worst 296 ULP, off-band 3
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L18/L08/L18) out_proj_out  0.99999995   2.12e-05   3.65e-03    0.5% differ | band   0.1% | >1ULP    302 (off-band   285) | worst_off_rel 1.9e-02 | worst 28242 ULP, off-band 28242
+    chunked C=16, BF16 matmul operands (device shape) (worst L09/L08/L21) o_pre_norm    0.99999686   2.78e-03   5.58e-03   50.0% differ | band   2.4% | >1ULP  90880 (off-band 79865) | worst_off_rel 2.9e-01 | worst 28858 ULP, off-band 28858
+    chunked C=16, BF16 matmul operands (device shape) (worst L00/L20/L10) state_new     0.99999648   2.93e-03   3.81e-03   54.1% differ | band   8.2% | >1ULP  49524 (off-band 40726) | worst_off_rel 1.1e-01 | worst 29815 ULP, off-band 29815
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L13) gated_out     0.99998580   3.99e-03   1.62e-02   42.0% differ | band   1.4% | >1ULP 116411 (off-band 110588) | worst_off_rel 4.4e-01 | worst 30272 ULP, off-band 30272
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99997445   6.70e-03   1.10e-02   68.2% differ | band   0.1% | >1ULP  96276 (off-band 96101) | worst_off_rel 3.4e-01 | worst 29853 ULP, off-band 29853
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L22) o_pre_norm    0.99999727   2.95e-03   7.51e-03   52.0% differ | band   2.4% | >1ULP 102048 (off-band 91025) | worst_off_rel 6.6e-01 | worst 29001 ULP, off-band 29001
+    chunked C=32, BF16 matmul operands (device shape) (worst L00/L20/L00) state_new     0.99999660   3.08e-03   3.65e-03   49.2% differ | band   7.9% | >1ULP  38355 (off-band 28537) | worst_off_rel 1.2e-01 | worst 29987 ULP, off-band 29987
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L13) gated_out     0.99998297   4.30e-03   1.62e-02   49.1% differ | band   3.2% | >1ULP 122883 (off-band 112558) | worst_off_rel 2.6e-01 | worst 30433 ULP, off-band 30433
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99996922   7.40e-03   1.10e-02   69.4% differ | band   0.1% | >1ULP 100307 (off-band 100132) | worst_off_rel 3.9e-01 | worst 29820 ULP, off-band 29820
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L22) o_pre_norm    0.99999563   3.60e-03   7.10e-03   54.4% differ | band   2.4% | >1ULP 113844 (off-band 102738) | worst_off_rel 6.6e-01 | worst 29185 ULP, off-band 29185
+    chunked C=64, BF16 matmul operands (device shape) (worst L17/L20/L13) state_new     0.99999647   3.06e-03   3.46e-03   49.3% differ | band   7.9% | >1ULP  38420 (off-band 28588) | worst_off_rel 1.2e-01 | worst 29791 ULP, off-band 29791
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L13) gated_out     0.99997673   4.86e-03   1.62e-02   58.0% differ | band   2.6% | >1ULP 179594 (off-band 168954) | worst_off_rel 3.1e-01 | worst 30431 ULP, off-band 30431
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99995679   8.81e-03   1.38e-02   70.0% differ | band   0.1% | >1ULP 102691 (off-band 102516) | worst_off_rel 4.3e-01 | worst 29828 ULP, off-band 29828
+
+  --- vs PIN-o-THROUGH-THIS-FILE'S S04.5 (downstream control); worst over the 18 layers, band 3e-05 of tensor max
+    form                       stage                cos    meanrel     maxrel  BF16 ULP
+    sequential S04.4 (today's engine) (worst L01/L01/L05) o_pre_norm    0.99999846   1.42e-03   3.47e-03    0.0% differ | band  13.5% | >1ULP     11 (off-band     0) | worst_off_rel 1.5e-08 | worst 51 ULP, off-band 0
+    sequential S04.4 (today's engine) (worst L00/L00/L04) state_new     1.00000000   5.23e-07   1.06e-06    0.0% differ | band  22.4% | >1ULP      4 (off-band     0) | worst_off_rel 8.5e-07 | worst 3 ULP, off-band 0
+    sequential S04.4 (today's engine) (worst L16/L16/L00) gated_out     0.99999999   2.30e-06   1.52e-03    0.0% differ | band   3.3% | >1ULP     38 (off-band    18) | worst_off_rel 2.2e-02 | worst 343 ULP, off-band 3
+    sequential S04.4 (today's engine) (worst L18/L16/L18) out_proj_out  0.99999995   1.94e-05   3.65e-03    0.7% differ | band   0.1% | >1ULP    382 (off-band   355) | worst_off_rel 2.5e-02 | worst 419 ULP, off-band 419
+    chunked C=16, F32 operands (worst L01/L01/L05) o_pre_norm    0.99999846   1.42e-03   3.47e-03    0.0% differ | band  13.5% | >1ULP     11 (off-band     0) | worst_off_rel 4.2e-08 | worst 52 ULP, off-band 0
+    chunked C=16, F32 operands (worst L17/L20/L00) state_new     1.00000000   2.57e-07   3.30e-07    0.0% differ | band  22.4% | >1ULP      0 (off-band     0) | worst_off_rel 0.0e+00 | worst 0 ULP, off-band 0
+    chunked C=16, F32 operands (worst L16/L16/L14) gated_out     0.99999999   2.20e-06   1.39e-03    0.0% differ | band   3.3% | >1ULP     26 (off-band    10) | worst_off_rel 1.1e-02 | worst 175 ULP, off-band 3
+    chunked C=16, F32 operands (worst L16/L16/L18) out_proj_out  0.99999997   1.57e-05   3.65e-03    0.5% differ | band   0.1% | >1ULP    313 (off-band   291) | worst_off_rel 2.5e-02 | worst 419 ULP, off-band 419
+    chunked C=32, F32 operands (worst L01/L01/L05) o_pre_norm    0.99999846   1.42e-03   3.47e-03    0.0% differ | band  13.5% | >1ULP      5 (off-band     0) | worst_off_rel 4.2e-08 | worst 20 ULP, off-band 0
+    chunked C=32, F32 operands (worst L17/L20/L04) state_new     1.00000000   2.08e-07   2.45e-07    0.0% differ | band  22.4% | >1ULP      0 (off-band     0) | worst_off_rel 0.0e+00 | worst 0 ULP, off-band 0
+    chunked C=32, F32 operands (worst L14/L01/L14) gated_out     1.00000000   8.83e-07   1.39e-03    0.0% differ | band   2.8% | >1ULP     14 (off-band     5) | worst_off_rel 4.6e-02 | worst 15 ULP, off-band 3
+    chunked C=32, F32 operands (worst L21/L21/L21) out_proj_out  0.99999997   1.31e-05   1.43e-03    0.5% differ | band   0.1% | >1ULP    251 (off-band   234) | worst_off_rel 1.1e-02 | worst 28719 ULP, off-band 28719
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L01/L01/L05) o_pre_norm    0.99999846   1.42e-03   3.47e-03    0.0% differ | band  13.5% | >1ULP      2 (off-band     0) | worst_off_rel 2.3e-09 | worst 6 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L17/L20/L17) state_new     1.00000000   1.60e-07   2.36e-07    0.0% differ | band  22.4% | >1ULP      0 (off-band     0) | worst_off_rel 0.0e+00 | worst 0 ULP, off-band 0
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L16/L16/L16) gated_out     0.99999999   2.01e-06   1.01e-03    0.0% differ | band   2.6% | >1ULP     23 (off-band    10) | worst_off_rel 1.9e-02 | worst 24649 ULP, off-band 3
+    chunked C=64, F32 operands (= the reference's own prefill form) (worst L16/L16/L21) out_proj_out  0.99999998   1.10e-05   1.43e-03    0.3% differ | band   0.1% | >1ULP    192 (off-band   183) | worst_off_rel 2.5e-02 | worst 419 ULP, off-band 419
+    chunked C=16, BF16 matmul operands (device shape) (worst L09/L08/L22) o_pre_norm    0.99999548   3.21e-03   6.31e-03   50.0% differ | band   2.4% | >1ULP  90882 (off-band 79874) | worst_off_rel 2.9e-01 | worst 28858 ULP, off-band 28858
+    chunked C=16, BF16 matmul operands (device shape) (worst L00/L20/L10) state_new     0.99999648   2.93e-03   3.81e-03   54.1% differ | band   8.2% | >1ULP  49527 (off-band 40729) | worst_off_rel 1.1e-01 | worst 29815 ULP, off-band 29815
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L13) gated_out     0.99998580   3.99e-03   1.62e-02   42.0% differ | band   1.4% | >1ULP 116407 (off-band 110584) | worst_off_rel 4.4e-01 | worst 30272 ULP, off-band 30272
+    chunked C=16, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99997443   6.70e-03   1.10e-02   68.2% differ | band   0.1% | >1ULP  96277 (off-band 96102) | worst_off_rel 3.4e-01 | worst 29853 ULP, off-band 29853
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L20) o_pre_norm    0.99999589   3.37e-03   7.70e-03   52.0% differ | band   2.4% | >1ULP 102049 (off-band 91034) | worst_off_rel 6.6e-01 | worst 29001 ULP, off-band 29001
+    chunked C=32, BF16 matmul operands (device shape) (worst L00/L20/L00) state_new     0.99999660   3.08e-03   3.65e-03   49.2% differ | band   7.9% | >1ULP  38355 (off-band 28537) | worst_off_rel 1.2e-01 | worst 29987 ULP, off-band 29987
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L13) gated_out     0.99998297   4.30e-03   1.62e-02   49.1% differ | band   3.2% | >1ULP 122883 (off-band 112557) | worst_off_rel 2.6e-01 | worst 30433 ULP, off-band 30433
+    chunked C=32, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99996921   7.40e-03   1.10e-02   69.4% differ | band   0.1% | >1ULP 100310 (off-band 100135) | worst_off_rel 3.9e-01 | worst 29820 ULP, off-band 29820
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L20) o_pre_norm    0.99999437   3.97e-03   7.70e-03   54.4% differ | band   2.4% | >1ULP 113838 (off-band 102740) | worst_off_rel 6.6e-01 | worst 29185 ULP, off-band 29185
+    chunked C=64, BF16 matmul operands (device shape) (worst L17/L20/L13) state_new     0.99999647   3.06e-03   3.46e-03   49.3% differ | band   7.9% | >1ULP  38419 (off-band 28587) | worst_off_rel 1.2e-01 | worst 29791 ULP, off-band 29791
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L13) gated_out     0.99997673   4.86e-03   1.62e-02   58.0% differ | band   2.6% | >1ULP 179602 (off-band 168962) | worst_off_rel 3.1e-01 | worst 30431 ULP, off-band 30431
+    chunked C=64, BF16 matmul operands (device shape) (worst L08/L08/L08) out_proj_out  0.99995679   8.81e-03   1.38e-02   70.0% differ | band   0.1% | >1ULP 102703 (off-band 102528) | worst_off_rel 4.3e-01 | worst 29828 ULP, off-band 29828
+
+  --- BF16 ULP histogram, all 18 layers pooled into ONE array per stage (count total / of those off-band); band is 3e-05 of the tensor max
+    seq        o_pre_norm   n= 10211328 band   7.3% >1ULP     216 off-band       0 worst off-band 0 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 10207734 [1-1] 3378 [2-4] 133/0 [5-16] 59/0 [17-128] 17/0 [129-4096] 5/0 [4097-max] 2/0
+    seq        state_new    n=  4718592 band  14.2% >1ULP      75 off-band       0 worst off-band 0 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 4717319 [1-1] 1198 [2-4] 52/0 [5-16] 16/0 [17-128] 6/0 [129-4096] 1/0 [4097-max] 0/0
+    chunk64    o_pre_norm   n= 10211328 band   7.3% >1ULP      58 off-band       0 worst off-band 0 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 10210324 [1-1] 946 [2-4] 38/0 [5-16] 12/0 [17-128] 7/0 [129-4096] 0/0 [4097-max] 1/0
+    chunk64    state_new    n=  4718592 band  14.2% >1ULP      20 off-band       0 worst off-band 0 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 4718202 [1-1] 370 [2-4] 13/0 [5-16] 6/0 [17-128] 1/0 [129-4096] 0/0 [4097-max] 0/0
+    chunk64mma o_pre_norm   n= 10211328 band   7.3% >1ULP 2014793 off-band 1577797 worst off-band 29185 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 4706130 [1-1] 3490405 [2-4] 1346099/1171352 [5-16] 485330/338942 [17-128] 159028/65154 [129-4096] 16095/1828 [4097-max] 8241/521
+    chunk64mma state_new    n=  4718592 band  14.2% >1ULP  776138 off-band  515117 worst off-band 29791 ULP
+               cells total[/off-band, offending buckets only]: [0-0] 2315882 [1-1] 1626572 [2-4] 525394/400298 [5-16] 182523/99064 [17-128] 59327/15415 [129-4096] 5942/279 [4097-max] 2952/61
+
+  --- injected bugs, and where each one is visible (locality: a negative that catches everything proves nothing)
+    no_inter_chunk_read    per-chunk max|Δo| 0.0e+00 1.9e-01 4.0e-01 5.9e-01 7.0e-01 | state meanrel 2.08e+00 
+    causality_upper        per-chunk max|Δo| nan nan nan nan 3.0e+30 | state meanrel 2.79e+02 (non-finite: caught outright)
+    no_pairwise_decay      per-chunk max|Δo| 5.3e-02 3.9e-02 3.3e-02 3.4e-02 1.6e-02 | state meanrel 6.56e-02 
+    no_chunk_decay         per-chunk max|Δo| 0.0e+00 0.0e+00 2.8e-02 3.2e-02 3.8e-02 | state meanrel 5.37e-01 
+    drop_last_chunk        per-chunk max|Δo| 0.0e+00 0.0e+00 0.0e+00 0.0e+00 3.3e-01 | state meanrel 5.59e-01 
+    read_before_decay      per-chunk max|Δo| 0.0e+00 | state meanrel 4.37e-02 
+    read_after_write       per-chunk max|Δo| 0.0e+00 | state meanrel 6.45e-01 

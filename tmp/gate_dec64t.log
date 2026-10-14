@@ -1,0 +1,836 @@
+
+== (0) fixture pairing — proved from the dumps (§10.5)
+  manifest: /home/erokhins/erokhins_projects/qwen3.5-0.8b/data/refs/dec64t/manifest.json
+  sources[0].ids        = [248045, 846, 198, 2427, 494, 220, 16, 310, 220, 23, 15, 11, 47781, 279, 4947, 440, 73982, 13, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271]
+  greedy_continuation   = [16, 11, 220, 17, 11, 220, 18, 11, 220, 19, 11, 220, 20, 11, 220, 21, 11, 220, 22, 11, 220, 23, 11, 220, 24, 11, 220, 16, 15, 11, 220, 16, 16, 11, 220, 16, 17, 11, 220, 16, 18, 11, 220, 16, 19, 11, 220, 16, 20, 11, 220, 16, 21, 11, 220, 16, 22, 11, 220, 16, 23, 11, 220, 16, 24]
+  [PASS] manifest declares decode0.logits_last step — decode0 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode0.input_ids == greedy_continuation[0] — [16]
+  [PASS] argmax(decode0.logits_last) == greedy_continuation[1] — 11 vs 11
+  [PASS] manifest declares decode1.logits_last step — decode1 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode1.input_ids == greedy_continuation[1] — [11]
+  [PASS] argmax(decode1.logits_last) == greedy_continuation[2] — 220 vs 220
+  [PASS] manifest declares decode2.logits_last step — decode2 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode2.input_ids == greedy_continuation[2] — [220]
+  [PASS] argmax(decode2.logits_last) == greedy_continuation[3] — 17 vs 17
+  [PASS] manifest declares decode3.logits_last step — decode3 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode3.input_ids == greedy_continuation[3] — [17]
+  [PASS] argmax(decode3.logits_last) == greedy_continuation[4] — 11 vs 11
+  [PASS] manifest declares decode4.logits_last step — decode4 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode4.input_ids == greedy_continuation[4] — [11]
+  [PASS] argmax(decode4.logits_last) == greedy_continuation[5] — 220 vs 220
+  [PASS] manifest declares decode5.logits_last step — decode5 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode5.input_ids == greedy_continuation[5] — [220]
+  [PASS] argmax(decode5.logits_last) == greedy_continuation[6] — 18 vs 18
+  [PASS] manifest declares decode6.logits_last step — decode6 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode6.input_ids == greedy_continuation[6] — [18]
+  [PASS] argmax(decode6.logits_last) == greedy_continuation[7] — 11 vs 11
+  [PASS] manifest declares decode7.logits_last step — decode7 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode7.input_ids == greedy_continuation[7] — [11]
+  [PASS] argmax(decode7.logits_last) == greedy_continuation[8] — 220 vs 220
+  [PASS] manifest declares decode8.logits_last step — decode8 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode8.input_ids == greedy_continuation[8] — [220]
+  [PASS] argmax(decode8.logits_last) == greedy_continuation[9] — 19 vs 19
+  [PASS] manifest declares decode9.logits_last step — decode9 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode9.input_ids == greedy_continuation[9] — [19]
+  [PASS] argmax(decode9.logits_last) == greedy_continuation[10] — 11 vs 11
+  [PASS] manifest declares decode10.logits_last step — decode10 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode10.input_ids == greedy_continuation[10] — [11]
+  [PASS] argmax(decode10.logits_last) == greedy_continuation[11] — 220 vs 220
+  [PASS] manifest declares decode11.logits_last step — decode11 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode11.input_ids == greedy_continuation[11] — [220]
+  [PASS] argmax(decode11.logits_last) == greedy_continuation[12] — 20 vs 20
+  [PASS] manifest declares decode12.logits_last step — decode12 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode12.input_ids == greedy_continuation[12] — [20]
+  [PASS] argmax(decode12.logits_last) == greedy_continuation[13] — 11 vs 11
+  [PASS] manifest declares decode13.logits_last step — decode13 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode13.input_ids == greedy_continuation[13] — [11]
+  [PASS] argmax(decode13.logits_last) == greedy_continuation[14] — 220 vs 220
+  [PASS] manifest declares decode14.logits_last step — decode14 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode14.input_ids == greedy_continuation[14] — [220]
+  [PASS] argmax(decode14.logits_last) == greedy_continuation[15] — 21 vs 21
+  [PASS] manifest declares decode15.logits_last step — decode15 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode15.input_ids == greedy_continuation[15] — [21]
+  [PASS] argmax(decode15.logits_last) == greedy_continuation[16] — 11 vs 11
+  [PASS] manifest declares decode16.logits_last step — decode16 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode16.input_ids == greedy_continuation[16] — [11]
+  [PASS] argmax(decode16.logits_last) == greedy_continuation[17] — 220 vs 220
+  [PASS] manifest declares decode17.logits_last step — decode17 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode17.input_ids == greedy_continuation[17] — [220]
+  [PASS] argmax(decode17.logits_last) == greedy_continuation[18] — 22 vs 22
+  [PASS] manifest declares decode18.logits_last step — decode18 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode18.input_ids == greedy_continuation[18] — [22]
+  [PASS] argmax(decode18.logits_last) == greedy_continuation[19] — 11 vs 11
+  [PASS] manifest declares decode19.logits_last step — decode19 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode19.input_ids == greedy_continuation[19] — [11]
+  [PASS] argmax(decode19.logits_last) == greedy_continuation[20] — 220 vs 220
+  [PASS] manifest declares decode20.logits_last step — decode20 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode20.input_ids == greedy_continuation[20] — [220]
+  [PASS] argmax(decode20.logits_last) == greedy_continuation[21] — 23 vs 23
+  [PASS] manifest declares decode21.logits_last step — decode21 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode21.input_ids == greedy_continuation[21] — [23]
+  [PASS] argmax(decode21.logits_last) == greedy_continuation[22] — 11 vs 11
+  [PASS] manifest declares decode22.logits_last step — decode22 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode22.input_ids == greedy_continuation[22] — [11]
+  [PASS] argmax(decode22.logits_last) == greedy_continuation[23] — 220 vs 220
+  [PASS] manifest declares decode23.logits_last step — decode23 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode23.input_ids == greedy_continuation[23] — [220]
+  [PASS] argmax(decode23.logits_last) == greedy_continuation[24] — 24 vs 24
+  [PASS] manifest declares decode24.logits_last step — decode24 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode24.input_ids == greedy_continuation[24] — [24]
+  [PASS] argmax(decode24.logits_last) == greedy_continuation[25] — 11 vs 11
+  [PASS] manifest declares decode25.logits_last step — decode25 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode25.input_ids == greedy_continuation[25] — [11]
+  [PASS] argmax(decode25.logits_last) == greedy_continuation[26] — 220 vs 220
+  [PASS] manifest declares decode26.logits_last step — decode26 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode26.input_ids == greedy_continuation[26] — [220]
+  [PASS] argmax(decode26.logits_last) == greedy_continuation[27] — 16 vs 16
+  [PASS] manifest declares decode27.logits_last step — decode27 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode27.input_ids == greedy_continuation[27] — [16]
+  [PASS] argmax(decode27.logits_last) == greedy_continuation[28] — 15 vs 15
+  [PASS] manifest declares decode28.logits_last step — decode28 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode28.input_ids == greedy_continuation[28] — [15]
+  [PASS] argmax(decode28.logits_last) == greedy_continuation[29] — 11 vs 11
+  [PASS] manifest declares decode29.logits_last step — decode29 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode29.input_ids == greedy_continuation[29] — [11]
+  [PASS] argmax(decode29.logits_last) == greedy_continuation[30] — 220 vs 220
+  [PASS] manifest declares decode30.logits_last step — decode30 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode30.input_ids == greedy_continuation[30] — [220]
+  [PASS] argmax(decode30.logits_last) == greedy_continuation[31] — 16 vs 16
+  [PASS] manifest declares decode31.logits_last step — decode31 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode31.input_ids == greedy_continuation[31] — [16]
+  [PASS] argmax(decode31.logits_last) == greedy_continuation[32] — 16 vs 16
+  [PASS] manifest declares decode32.logits_last step — decode32 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode32.input_ids == greedy_continuation[32] — [16]
+  [PASS] argmax(decode32.logits_last) == greedy_continuation[33] — 11 vs 11
+  [PASS] manifest declares decode33.logits_last step — decode33 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode33.input_ids == greedy_continuation[33] — [11]
+  [PASS] argmax(decode33.logits_last) == greedy_continuation[34] — 220 vs 220
+  [PASS] manifest declares decode34.logits_last step — decode34 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode34.input_ids == greedy_continuation[34] — [220]
+  [PASS] argmax(decode34.logits_last) == greedy_continuation[35] — 16 vs 16
+  [PASS] manifest declares decode35.logits_last step — decode35 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode35.input_ids == greedy_continuation[35] — [16]
+  [PASS] argmax(decode35.logits_last) == greedy_continuation[36] — 17 vs 17
+  [PASS] manifest declares decode36.logits_last step — decode36 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode36.input_ids == greedy_continuation[36] — [17]
+  [PASS] argmax(decode36.logits_last) == greedy_continuation[37] — 11 vs 11
+  [PASS] manifest declares decode37.logits_last step — decode37 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode37.input_ids == greedy_continuation[37] — [11]
+  [PASS] argmax(decode37.logits_last) == greedy_continuation[38] — 220 vs 220
+  [PASS] manifest declares decode38.logits_last step — decode38 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode38.input_ids == greedy_continuation[38] — [220]
+  [PASS] argmax(decode38.logits_last) == greedy_continuation[39] — 16 vs 16
+  [PASS] manifest declares decode39.logits_last step — decode39 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode39.input_ids == greedy_continuation[39] — [16]
+  [PASS] argmax(decode39.logits_last) == greedy_continuation[40] — 18 vs 18
+  [PASS] manifest declares decode40.logits_last step — decode40 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode40.input_ids == greedy_continuation[40] — [18]
+  [PASS] argmax(decode40.logits_last) == greedy_continuation[41] — 11 vs 11
+  [PASS] manifest declares decode41.logits_last step — decode41 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode41.input_ids == greedy_continuation[41] — [11]
+  [PASS] argmax(decode41.logits_last) == greedy_continuation[42] — 220 vs 220
+  [PASS] manifest declares decode42.logits_last step — decode42 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode42.input_ids == greedy_continuation[42] — [220]
+  [PASS] argmax(decode42.logits_last) == greedy_continuation[43] — 16 vs 16
+  [PASS] manifest declares decode43.logits_last step — decode43 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode43.input_ids == greedy_continuation[43] — [16]
+  [PASS] argmax(decode43.logits_last) == greedy_continuation[44] — 19 vs 19
+  [PASS] manifest declares decode44.logits_last step — decode44 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode44.input_ids == greedy_continuation[44] — [19]
+  [PASS] argmax(decode44.logits_last) == greedy_continuation[45] — 11 vs 11
+  [PASS] manifest declares decode45.logits_last step — decode45 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode45.input_ids == greedy_continuation[45] — [11]
+  [PASS] argmax(decode45.logits_last) == greedy_continuation[46] — 220 vs 220
+  [PASS] manifest declares decode46.logits_last step — decode46 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode46.input_ids == greedy_continuation[46] — [220]
+  [PASS] argmax(decode46.logits_last) == greedy_continuation[47] — 16 vs 16
+  [PASS] manifest declares decode47.logits_last step — decode47 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode47.input_ids == greedy_continuation[47] — [16]
+  [PASS] argmax(decode47.logits_last) == greedy_continuation[48] — 20 vs 20
+  [PASS] manifest declares decode48.logits_last step — decode48 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode48.input_ids == greedy_continuation[48] — [20]
+  [PASS] argmax(decode48.logits_last) == greedy_continuation[49] — 11 vs 11
+  [PASS] manifest declares decode49.logits_last step — decode49 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode49.input_ids == greedy_continuation[49] — [11]
+  [PASS] argmax(decode49.logits_last) == greedy_continuation[50] — 220 vs 220
+  [PASS] manifest declares decode50.logits_last step — decode50 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode50.input_ids == greedy_continuation[50] — [220]
+  [PASS] argmax(decode50.logits_last) == greedy_continuation[51] — 16 vs 16
+  [PASS] manifest declares decode51.logits_last step — decode51 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode51.input_ids == greedy_continuation[51] — [16]
+  [PASS] argmax(decode51.logits_last) == greedy_continuation[52] — 21 vs 21
+  [PASS] manifest declares decode52.logits_last step — decode52 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode52.input_ids == greedy_continuation[52] — [21]
+  [PASS] argmax(decode52.logits_last) == greedy_continuation[53] — 11 vs 11
+  [PASS] manifest declares decode53.logits_last step — decode53 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode53.input_ids == greedy_continuation[53] — [11]
+  [PASS] argmax(decode53.logits_last) == greedy_continuation[54] — 220 vs 220
+  [PASS] manifest declares decode54.logits_last step — decode54 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode54.input_ids == greedy_continuation[54] — [220]
+  [PASS] argmax(decode54.logits_last) == greedy_continuation[55] — 16 vs 16
+  [PASS] manifest declares decode55.logits_last step — decode55 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode55.input_ids == greedy_continuation[55] — [16]
+  [PASS] argmax(decode55.logits_last) == greedy_continuation[56] — 22 vs 22
+  [PASS] manifest declares decode56.logits_last step — decode56 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode56.input_ids == greedy_continuation[56] — [22]
+  [PASS] argmax(decode56.logits_last) == greedy_continuation[57] — 11 vs 11
+  [PASS] manifest declares decode57.logits_last step — decode57 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode57.input_ids == greedy_continuation[57] — [11]
+  [PASS] argmax(decode57.logits_last) == greedy_continuation[58] — 220 vs 220
+  [PASS] manifest declares decode58.logits_last step — decode58 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode58.input_ids == greedy_continuation[58] — [220]
+  [PASS] argmax(decode58.logits_last) == greedy_continuation[59] — 16 vs 16
+  [PASS] manifest declares decode59.logits_last step — decode59 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode59.input_ids == greedy_continuation[59] — [16]
+  [PASS] argmax(decode59.logits_last) == greedy_continuation[60] — 23 vs 23
+  [PASS] manifest declares decode60.logits_last step — decode60 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode60.input_ids == greedy_continuation[60] — [23]
+  [PASS] argmax(decode60.logits_last) == greedy_continuation[61] — 11 vs 11
+  [PASS] manifest declares decode61.logits_last step — decode61 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode61.input_ids == greedy_continuation[61] — [11]
+  [PASS] argmax(decode61.logits_last) == greedy_continuation[62] — 220 vs 220
+  [PASS] manifest declares decode62.logits_last step — decode62 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode62.input_ids == greedy_continuation[62] — [220]
+  [PASS] argmax(decode62.logits_last) == greedy_continuation[63] — 16 vs 16
+  [PASS] manifest declares decode63.logits_last step — decode63 / [1, 248320] / bfloat16(bits:uint16)
+  [PASS] decode63.input_ids == greedy_continuation[63] — [16]
+  [PASS] argmax(decode63.logits_last) == greedy_continuation[64] — 24 vs 24
+  [PASS] argmax(bare logits_last.npy) == greedy_continuation[0] — so the bare name is the PREFILL — 16 vs 16
+  [PASS] bare input_ids.npy is decode63's input, NOT the prompt — recorded so it is never used as one (§10.5's last-writer-wins trap) — [16] == greedy_continuation[-2] == 16
+  [info] prompt ids come from the manifest's sources[0].ids; the prompt's own logits come from the bare logits_last.npy, whose argmax was just proved to be greedy_continuation[0]. Pinned logits read as float32, shape (248320,), stored as bf16.
+  [info] the prompt itself contains the stop id 248046 at index [18], so a prompt-phase step can legitimately sample it. §07.5 is a generation-phase rule and such a match must be ignored (section (a) asserts both halves of that).
+
+== (run) decode_run — one decode_step per token: the prompt, then generation
+  [PASS] the planned run fits the attention stage's lane ceiling — 27 prompt + 64 generation = 91 lanes vs MAXSC 512 (read from `prototype/attn_decode/attn_decode_kernels.h`; `kernels_attn.cpp` throws above it rather than truncating)
+  feeding: REPLAY — the reference's own token is fed at every step, because this fixture is deeper than A-18's 8-token bound and a self-fed run past that could not be pinned (a divergence then shows at one step, not in all of them)
+  $ /home/erokhins/erokhins_projects/qwen3.5-0.8b/engine/build/decode_run --model /home/erokhins/erokhins_projects/qwen3.5-0.8b/models/Qwen3.5-0.8B --ids 248045,846,198,2427,494,220,16,310,220,23,15,11,47781,279,4947,440,73982,13,248046,198,248045,74455,198,248068,271,248069,271 --steps 64 --out /home/erokhins/erokhins_projects/qwen3.5-0.8b/tmp/engine_gate --replay 16,11,220,17,11,220,18,11,220,19,11,220,20,11,220,21,11,220,22,11,220,23,11,220,24,11,220,16,15,11,220,16,16,11,220,16,17,11,220,16,18,11,220,16,19,11,220,16,20,11,220,16,21,11,220,16,22,11,220,16,23,11,220,16
+      loaded 335 tensors, 1.5457 GB resident in 433.9 ms (335 allocations)
+      check_weights: PASS
+      state: cap=92 GDN state 18.000 MiB + conv window 1.266 MiB + KV 1.078 MiB = 20.344 MiB (KV 12288 B/token, constant 19.266 MiB/request)
+      STATE cap=92 gdn=18874368 conv=1327104 kv=1130496 total=21331968 per_token=12288
+      LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
+      prompt 0 | fed  248045 | sampled     846 | top 15.012097 | P 0 -> 1
+      STEP kind=prompt index=0 input=248045 sampled=846 top_logit=15.0120974 pos_before=0 pos_after=1 stop=0
+      prompt 1 | fed     846 | sampled     198 | top 23.070530 | P 1 -> 2
+      STEP kind=prompt index=1 input=846 sampled=198 top_logit=23.0705299 pos_before=1 pos_after=2 stop=0
+      prompt 2 | fed     198 | sampled    3710 | top 16.759628 | P 2 -> 3
+      STEP kind=prompt index=2 input=198 sampled=3710 top_logit=16.7596283 pos_before=2 pos_after=3 stop=0
+      prompt 3 | fed    2427 | sampled     279 | top 18.714495 | P 3 -> 4
+      STEP kind=prompt index=3 input=2427 sampled=279 top_logit=18.7144947 pos_before=3 pos_after=4 stop=0
+      prompt 4 | fed     494 | sampled     220 | top 17.227907 | P 4 -> 5
+      STEP kind=prompt index=4 input=494 sampled=220 top_logit=17.2279072 pos_before=4 pos_after=5 stop=0
+      prompt 5 | fed     220 | sampled      16 | top 22.109600 | P 5 -> 6
+      STEP kind=prompt index=5 input=220 sampled=16 top_logit=22.1096001 pos_before=5 pos_after=6 stop=0
+      prompt 6 | fed      16 | sampled     310 | top 19.748283 | P 6 -> 7
+      STEP kind=prompt index=6 input=16 sampled=310 top_logit=19.7482834 pos_before=6 pos_after=7 stop=0
+      prompt 7 | fed     310 | sampled     220 | top 19.028763 | P 7 -> 8
+      STEP kind=prompt index=7 input=310 sampled=220 top_logit=19.0287628 pos_before=7 pos_after=8 stop=0
+      prompt 8 | fed     220 | sampled      16 | top 22.441586 | P 8 -> 9
+      STEP kind=prompt index=8 input=220 sampled=16 top_logit=22.4415855 pos_before=8 pos_after=9 stop=0
+      prompt 9 | fed      23 | sampled  248046 | top 18.538605 | P 9 -> 10 [stop id in prompt phase — ignored]
+      STEP kind=prompt index=9 input=23 sampled=248046 top_logit=18.5386047 pos_before=9 pos_after=10 stop=0
+      prompt 10 | fed      15 | sampled  248046 | top 18.697472 | P 10 -> 11 [stop id in prompt phase — ignored]
+      STEP kind=prompt index=10 input=15 sampled=248046 top_logit=18.6974716 pos_before=10 pos_after=11 stop=0
+      prompt 11 | fed      11 | sampled     321 | top 17.204830 | P 11 -> 12
+      STEP kind=prompt index=11 input=11 sampled=321 top_logit=17.2048302 pos_before=11 pos_after=12 stop=0
+      prompt 12 | fed   47781 | sampled     279 | top 17.537279 | P 12 -> 13
+      STEP kind=prompt index=12 input=47781 sampled=279 top_logit=17.5372791 pos_before=12 pos_after=13 stop=0
+      prompt 13 | fed     279 | sampled    4947 | top 16.735126 | P 13 -> 14
+      STEP kind=prompt index=13 input=279 sampled=4947 top_logit=16.7351265 pos_before=13 pos_after=14 stop=0
+      prompt 14 | fed    4947 | sampled     539 | top 19.105925 | P 14 -> 15
+      STEP kind=prompt index=14 input=4947 sampled=539 top_logit=19.1059246 pos_before=14 pos_after=15 stop=0
+      prompt 15 | fed     440 | sampled   73982 | top 16.747738 | P 15 -> 16
+      STEP kind=prompt index=15 input=440 sampled=73982 top_logit=16.7477379 pos_before=15 pos_after=16 stop=0
+      prompt 16 | fed   73982 | sampled  248046 | top 20.528645 | P 16 -> 17 [stop id in prompt phase — ignored]
+      STEP kind=prompt index=16 input=73982 sampled=248046 top_logit=20.5286446 pos_before=16 pos_after=17 stop=0
+      prompt 17 | fed      13 | sampled  248046 | top 22.037115 | P 17 -> 18 [stop id in prompt phase — ignored]
+      STEP kind=prompt index=17 input=13 sampled=248046 top_logit=22.0371151 pos_before=17 pos_after=18 stop=0
+      prompt 18 | fed  248046 | sampled     198 | top 28.597427 | P 18 -> 19
+      STEP kind=prompt index=18 input=248046 sampled=198 top_logit=28.5974274 pos_before=18 pos_after=19 stop=0
+      prompt 19 | fed     198 | sampled  248045 | top 31.903538 | P 19 -> 20
+      STEP kind=prompt index=19 input=198 sampled=248045 top_logit=31.9035378 pos_before=19 pos_after=20 stop=0
+      prompt 20 | fed  248045 | sampled   74455 | top 24.878620 | P 20 -> 21
+      STEP kind=prompt index=20 input=248045 sampled=74455 top_logit=24.8786201 pos_before=20 pos_after=21 stop=0
+      prompt 21 | fed   74455 | sampled     198 | top 22.761543 | P 21 -> 22
+      STEP kind=prompt index=21 input=74455 sampled=198 top_logit=22.7615433 pos_before=21 pos_after=22 stop=0
+      prompt 22 | fed     198 | sampled  248068 | top 26.464005 | P 22 -> 23
+      STEP kind=prompt index=22 input=198 sampled=248068 top_logit=26.4640045 pos_before=22 pos_after=23 stop=0
+      prompt 23 | fed  248068 | sampled     271 | top 21.172590 | P 23 -> 24
+      STEP kind=prompt index=23 input=248068 sampled=271 top_logit=21.1725903 pos_before=23 pos_after=24 stop=0
+      prompt 24 | fed     271 | sampled  248069 | top 30.388451 | P 24 -> 25
+      STEP kind=prompt index=24 input=271 sampled=248069 top_logit=30.3884506 pos_before=24 pos_after=25 stop=0
+      prompt 25 | fed  248069 | sampled     271 | top 22.955654 | P 25 -> 26
+      STEP kind=prompt index=25 input=248069 sampled=271 top_logit=22.9556541 pos_before=25 pos_after=26 stop=0
+      prompt 26 | fed     271 | sampled      16 | top 22.879761 | P 26 -> 27
+      STEP kind=prompt index=26 input=271 sampled=16 top_logit=22.8797607 pos_before=26 pos_after=27 stop=0
+      decode 27 | fed      16 | sampled      11 | top 23.170506 | P 27 -> 28
+      STEP kind=decode index=27 input=16 sampled=11 top_logit=23.1705055 pos_before=27 pos_after=28 stop=0
+      decode 28 | fed      11 | sampled     220 | top 25.196247 | P 28 -> 29
+      STEP kind=decode index=28 input=11 sampled=220 top_logit=25.1962471 pos_before=28 pos_after=29 stop=0
+      decode 29 | fed     220 | sampled      17 | top 29.914223 | P 29 -> 30
+      STEP kind=decode index=29 input=220 sampled=17 top_logit=29.9142227 pos_before=29 pos_after=30 stop=0
+      decode 30 | fed      17 | sampled      11 | top 27.865616 | P 30 -> 31
+      STEP kind=decode index=30 input=17 sampled=11 top_logit=27.8656158 pos_before=30 pos_after=31 stop=0
+      decode 31 | fed      11 | sampled     220 | top 26.640446 | P 31 -> 32
+      STEP kind=decode index=31 input=11 sampled=220 top_logit=26.6404457 pos_before=31 pos_after=32 stop=0
+      decode 32 | fed     220 | sampled      18 | top 29.320076 | P 32 -> 33
+      STEP kind=decode index=32 input=220 sampled=18 top_logit=29.320076 pos_before=32 pos_after=33 stop=0
+      decode 33 | fed      18 | sampled      11 | top 26.670849 | P 33 -> 34
+      STEP kind=decode index=33 input=18 sampled=11 top_logit=26.6708488 pos_before=33 pos_after=34 stop=0
+      decode 34 | fed      11 | sampled     220 | top 25.415951 | P 34 -> 35
+      STEP kind=decode index=34 input=11 sampled=220 top_logit=25.4159508 pos_before=34 pos_after=35 stop=0
+      decode 35 | fed     220 | sampled      19 | top 28.570421 | P 35 -> 36
+      STEP kind=decode index=35 input=220 sampled=19 top_logit=28.5704212 pos_before=35 pos_after=36 stop=0
+      decode 36 | fed      19 | sampled      11 | top 26.846453 | P 36 -> 37
+      STEP kind=decode index=36 input=19 sampled=11 top_logit=26.8464527 pos_before=36 pos_after=37 stop=0
+      decode 37 | fed      11 | sampled     220 | top 26.167513 | P 37 -> 38
+      STEP kind=decode index=37 input=11 sampled=220 top_logit=26.1675129 pos_before=37 pos_after=38 stop=0
+      decode 38 | fed     220 | sampled      20 | top 29.129524 | P 38 -> 39
+      STEP kind=decode index=38 input=220 sampled=20 top_logit=29.1295242 pos_before=38 pos_after=39 stop=0
+      decode 39 | fed      20 | sampled      11 | top 27.154148 | P 39 -> 40
+      STEP kind=decode index=39 input=20 sampled=11 top_logit=27.1541481 pos_before=39 pos_after=40 stop=0
+      decode 40 | fed      11 | sampled     220 | top 26.833637 | P 40 -> 41
+      STEP kind=decode index=40 input=11 sampled=220 top_logit=26.8336372 pos_before=40 pos_after=41 stop=0
+      decode 41 | fed     220 | sampled      21 | top 29.766594 | P 41 -> 42
+      STEP kind=decode index=41 input=220 sampled=21 top_logit=29.7665939 pos_before=41 pos_after=42 stop=0
+      decode 42 | fed      21 | sampled      11 | top 27.785818 | P 42 -> 43
+      STEP kind=decode index=42 input=21 sampled=11 top_logit=27.7858181 pos_before=42 pos_after=43 stop=0
+      decode 43 | fed      11 | sampled     220 | top 27.311417 | P 43 -> 44
+      STEP kind=decode index=43 input=11 sampled=220 top_logit=27.3114166 pos_before=43 pos_after=44 stop=0
+      decode 44 | fed     220 | sampled      22 | top 30.429998 | P 44 -> 45
+      STEP kind=decode index=44 input=220 sampled=22 top_logit=30.4299984 pos_before=44 pos_after=45 stop=0
+      decode 45 | fed      22 | sampled      11 | top 27.043432 | P 45 -> 46
+      STEP kind=decode index=45 input=22 sampled=11 top_logit=27.0434322 pos_before=45 pos_after=46 stop=0
+      decode 46 | fed      11 | sampled     220 | top 26.142660 | P 46 -> 47
+      STEP kind=decode index=46 input=11 sampled=220 top_logit=26.1426601 pos_before=46 pos_after=47 stop=0
+      decode 47 | fed     220 | sampled      23 | top 28.718403 | P 47 -> 48
+      STEP kind=decode index=47 input=220 sampled=23 top_logit=28.7184029 pos_before=47 pos_after=48 stop=0
+      decode 48 | fed      23 | sampled      11 | top 23.899868 | P 48 -> 49
+      STEP kind=decode index=48 input=23 sampled=11 top_logit=23.899868 pos_before=48 pos_after=49 stop=0
+      decode 49 | fed      11 | sampled     220 | top 23.386795 | P 49 -> 50
+      STEP kind=decode index=49 input=11 sampled=220 top_logit=23.386795 pos_before=49 pos_after=50 stop=0
+      decode 50 | fed     220 | sampled      24 | top 27.232140 | P 50 -> 51
+      STEP kind=decode index=50 input=220 sampled=24 top_logit=27.2321396 pos_before=50 pos_after=51 stop=0
+      decode 51 | fed      24 | sampled      11 | top 25.400875 | P 51 -> 52
+      STEP kind=decode index=51 input=24 sampled=11 top_logit=25.4008751 pos_before=51 pos_after=52 stop=0
+      decode 52 | fed      11 | sampled     220 | top 24.148682 | P 52 -> 53
+      STEP kind=decode index=52 input=11 sampled=220 top_logit=24.1486816 pos_before=52 pos_after=53 stop=0
+      decode 53 | fed     220 | sampled      16 | top 27.832544 | P 53 -> 54
+      STEP kind=decode index=53 input=220 sampled=16 top_logit=27.8325443 pos_before=53 pos_after=54 stop=0
+      decode 54 | fed      16 | sampled      15 | top 27.878742 | P 54 -> 55
+      STEP kind=decode index=54 input=16 sampled=15 top_logit=27.8787422 pos_before=54 pos_after=55 stop=0
+      decode 55 | fed      15 | sampled      11 | top 25.624378 | P 55 -> 56
+      STEP kind=decode index=55 input=15 sampled=11 top_logit=25.6243782 pos_before=55 pos_after=56 stop=0
+      decode 56 | fed      11 | sampled     220 | top 24.167162 | P 56 -> 57
+      STEP kind=decode index=56 input=11 sampled=220 top_logit=24.1671619 pos_before=56 pos_after=57 stop=0
+      decode 57 | fed     220 | sampled      16 | top 27.646162 | P 57 -> 58
+      STEP kind=decode index=57 input=220 sampled=16 top_logit=27.646162 pos_before=57 pos_after=58 stop=0
+      decode 58 | fed      16 | sampled      16 | top 27.742962 | P 58 -> 59
+      STEP kind=decode index=58 input=16 sampled=16 top_logit=27.7429619 pos_before=58 pos_after=59 stop=0
+      decode 59 | fed      16 | sampled      11 | top 27.042206 | P 59 -> 60
+      STEP kind=decode index=59 input=16 sampled=11 top_logit=27.0422058 pos_before=59 pos_after=60 stop=0
+      decode 60 | fed      11 | sampled     220 | top 26.906193 | P 60 -> 61
+      STEP kind=decode index=60 input=11 sampled=220 top_logit=26.9061928 pos_before=60 pos_after=61 stop=0
+      decode 61 | fed     220 | sampled      16 | top 30.124435 | P 61 -> 62
+      STEP kind=decode index=61 input=220 sampled=16 top_logit=30.1244354 pos_before=61 pos_after=62 stop=0
+      decode 62 | fed      16 | sampled      17 | top 30.476830 | P 62 -> 63
+      STEP kind=decode index=62 input=16 sampled=17 top_logit=30.4768295 pos_before=62 pos_after=63 stop=0
+      decode 63 | fed      17 | sampled      11 | top 27.445137 | P 63 -> 64
+      STEP kind=decode index=63 input=17 sampled=11 top_logit=27.445137 pos_before=63 pos_after=64 stop=0
+      decode 64 | fed      11 | sampled     220 | top 26.612186 | P 64 -> 65
+      STEP kind=decode index=64 input=11 sampled=220 top_logit=26.6121864 pos_before=64 pos_after=65 stop=0
+      decode 65 | fed     220 | sampled      16 | top 29.814289 | P 65 -> 66
+      STEP kind=decode index=65 input=220 sampled=16 top_logit=29.8142891 pos_before=65 pos_after=66 stop=0
+      decode 66 | fed      16 | sampled      18 | top 29.853252 | P 66 -> 67
+      STEP kind=decode index=66 input=16 sampled=18 top_logit=29.8532524 pos_before=66 pos_after=67 stop=0
+      decode 67 | fed      18 | sampled      11 | top 27.876417 | P 67 -> 68
+      STEP kind=decode index=67 input=18 sampled=11 top_logit=27.8764172 pos_before=67 pos_after=68 stop=0
+      decode 68 | fed      11 | sampled     220 | top 27.097456 | P 68 -> 69
+      STEP kind=decode index=68 input=11 sampled=220 top_logit=27.097456 pos_before=68 pos_after=69 stop=0
+      decode 69 | fed     220 | sampled      16 | top 30.561245 | P 69 -> 70
+      STEP kind=decode index=69 input=220 sampled=16 top_logit=30.561245 pos_before=69 pos_after=70 stop=0
+      decode 70 | fed      16 | sampled      19 | top 32.183601 | P 70 -> 71
+      STEP kind=decode index=70 input=16 sampled=19 top_logit=32.1836014 pos_before=70 pos_after=71 stop=0
+      decode 71 | fed      19 | sampled      11 | top 28.076618 | P 71 -> 72
+      STEP kind=decode index=71 input=19 sampled=11 top_logit=28.0766182 pos_before=71 pos_after=72 stop=0
+      decode 72 | fed      11 | sampled     220 | top 27.098858 | P 72 -> 73
+      STEP kind=decode index=72 input=11 sampled=220 top_logit=27.0988579 pos_before=72 pos_after=73 stop=0
+      decode 73 | fed     220 | sampled      16 | top 30.666225 | P 73 -> 74
+      STEP kind=decode index=73 input=220 sampled=16 top_logit=30.6662254 pos_before=73 pos_after=74 stop=0
+      decode 74 | fed      16 | sampled      20 | top 30.731884 | P 74 -> 75
+      STEP kind=decode index=74 input=16 sampled=20 top_logit=30.731884 pos_before=74 pos_after=75 stop=0
+      decode 75 | fed      20 | sampled      11 | top 28.240448 | P 75 -> 76
+      STEP kind=decode index=75 input=20 sampled=11 top_logit=28.240448 pos_before=75 pos_after=76 stop=0
+      decode 76 | fed      11 | sampled     220 | top 27.489048 | P 76 -> 77
+      STEP kind=decode index=76 input=11 sampled=220 top_logit=27.489048 pos_before=76 pos_after=77 stop=0
+      decode 77 | fed     220 | sampled      16 | top 30.504499 | P 77 -> 78
+      STEP kind=decode index=77 input=220 sampled=16 top_logit=30.5044994 pos_before=77 pos_after=78 stop=0
+      decode 78 | fed      16 | sampled      21 | top 29.918669 | P 78 -> 79
+      STEP kind=decode index=78 input=16 sampled=21 top_logit=29.9186687 pos_before=78 pos_after=79 stop=0
+      decode 79 | fed      21 | sampled      11 | top 28.591850 | P 79 -> 80
+      STEP kind=decode index=79 input=21 sampled=11 top_logit=28.5918503 pos_before=79 pos_after=80 stop=0
+      decode 80 | fed      11 | sampled     220 | top 28.058983 | P 80 -> 81
+      STEP kind=decode index=80 input=11 sampled=220 top_logit=28.0589828 pos_before=80 pos_after=81 stop=0
+      decode 81 | fed     220 | sampled      16 | top 31.204473 | P 81 -> 82
+      STEP kind=decode index=81 input=220 sampled=16 top_logit=31.2044735 pos_before=81 pos_after=82 stop=0
+      decode 82 | fed      16 | sampled      22 | top 30.879873 | P 82 -> 83
+      STEP kind=decode index=82 input=16 sampled=22 top_logit=30.8798733 pos_before=82 pos_after=83 stop=0
+      decode 83 | fed      22 | sampled      11 | top 29.129642 | P 83 -> 84
+      STEP kind=decode index=83 input=22 sampled=11 top_logit=29.1296425 pos_before=83 pos_after=84 stop=0
+      decode 84 | fed      11 | sampled     220 | top 28.398998 | P 84 -> 85
+      STEP kind=decode index=84 input=11 sampled=220 top_logit=28.3989983 pos_before=84 pos_after=85 stop=0
+      decode 85 | fed     220 | sampled      16 | top 31.826441 | P 85 -> 86
+      STEP kind=decode index=85 input=220 sampled=16 top_logit=31.8264408 pos_before=85 pos_after=86 stop=0
+      decode 86 | fed      16 | sampled      23 | top 31.104118 | P 86 -> 87
+      STEP kind=decode index=86 input=16 sampled=23 top_logit=31.1041183 pos_before=86 pos_after=87 stop=0
+      decode 87 | fed      23 | sampled      11 | top 28.349548 | P 87 -> 88
+      STEP kind=decode index=87 input=23 sampled=11 top_logit=28.3495483 pos_before=87 pos_after=88 stop=0
+      decode 88 | fed      11 | sampled     220 | top 28.401201 | P 88 -> 89
+      STEP kind=decode index=88 input=11 sampled=220 top_logit=28.4012012 pos_before=88 pos_after=89 stop=0
+      decode 89 | fed     220 | sampled      16 | top 30.929329 | P 89 -> 90
+      STEP kind=decode index=89 input=220 sampled=16 top_logit=30.9293289 pos_before=89 pos_after=90 stop=0
+      decode 90 | fed      16 | sampled      24 | top 29.158958 | P 90 -> 91
+      STEP kind=decode index=90 input=16 sampled=24 top_logit=29.1589584 pos_before=90 pos_after=91 stop=0
+      RESULT mode=replay steps=91 ms_total=1051.841 ms_per_step=11.559 last_sampled=24 prefix_len=91 stopped=0
+  [PASS] decode_run exits 0
+  [PASS] one STEP line per token — 91 lines
+
+== (a) sampled token ids — §03.4 greedy, §10.1 G7 exactness
+  [PASS] one step per prompt token — 27 vs 27
+  [PASS] no prompt-phase step fires §07.5's stop check
+  [PASS] 64 generation steps — 64
+  [PASS] the prompt's last token samples greedy_continuation[0] — 16 vs 16
+  [PASS] generation step 0 samples greedy_continuation[1] — 11 vs 11
+  [PASS] generation step 1 samples greedy_continuation[2] — 220 vs 220
+  [PASS] generation step 2 samples greedy_continuation[3] — 17 vs 17
+  [PASS] generation step 3 samples greedy_continuation[4] — 11 vs 11
+  [PASS] generation step 4 samples greedy_continuation[5] — 220 vs 220
+  [PASS] generation step 5 samples greedy_continuation[6] — 18 vs 18
+  [PASS] generation step 6 samples greedy_continuation[7] — 11 vs 11
+  [PASS] generation step 7 samples greedy_continuation[8] — 220 vs 220
+  [PASS] generation step 8 samples greedy_continuation[9] — 19 vs 19
+  [PASS] generation step 9 samples greedy_continuation[10] — 11 vs 11
+  [PASS] generation step 10 samples greedy_continuation[11] — 220 vs 220
+  [PASS] generation step 11 samples greedy_continuation[12] — 20 vs 20
+  [PASS] generation step 12 samples greedy_continuation[13] — 11 vs 11
+  [PASS] generation step 13 samples greedy_continuation[14] — 220 vs 220
+  [PASS] generation step 14 samples greedy_continuation[15] — 21 vs 21
+  [PASS] generation step 15 samples greedy_continuation[16] — 11 vs 11
+  [PASS] generation step 16 samples greedy_continuation[17] — 220 vs 220
+  [PASS] generation step 17 samples greedy_continuation[18] — 22 vs 22
+  [PASS] generation step 18 samples greedy_continuation[19] — 11 vs 11
+  [PASS] generation step 19 samples greedy_continuation[20] — 220 vs 220
+  [PASS] generation step 20 samples greedy_continuation[21] — 23 vs 23
+  [PASS] generation step 21 samples greedy_continuation[22] — 11 vs 11
+  [PASS] generation step 22 samples greedy_continuation[23] — 220 vs 220
+  [PASS] generation step 23 samples greedy_continuation[24] — 24 vs 24
+  [PASS] generation step 24 samples greedy_continuation[25] — 11 vs 11
+  [PASS] generation step 25 samples greedy_continuation[26] — 220 vs 220
+  [PASS] generation step 26 samples greedy_continuation[27] — 16 vs 16
+  [PASS] generation step 27 samples greedy_continuation[28] — 15 vs 15
+  [PASS] generation step 28 samples greedy_continuation[29] — 11 vs 11
+  [PASS] generation step 29 samples greedy_continuation[30] — 220 vs 220
+  [PASS] generation step 30 samples greedy_continuation[31] — 16 vs 16
+  [PASS] generation step 31 samples greedy_continuation[32] — 16 vs 16
+  [PASS] generation step 32 samples greedy_continuation[33] — 11 vs 11
+  [PASS] generation step 33 samples greedy_continuation[34] — 220 vs 220
+  [PASS] generation step 34 samples greedy_continuation[35] — 16 vs 16
+  [PASS] generation step 35 samples greedy_continuation[36] — 17 vs 17
+  [PASS] generation step 36 samples greedy_continuation[37] — 11 vs 11
+  [PASS] generation step 37 samples greedy_continuation[38] — 220 vs 220
+  [PASS] generation step 38 samples greedy_continuation[39] — 16 vs 16
+  [PASS] generation step 39 samples greedy_continuation[40] — 18 vs 18
+  [PASS] generation step 40 samples greedy_continuation[41] — 11 vs 11
+  [PASS] generation step 41 samples greedy_continuation[42] — 220 vs 220
+  [PASS] generation step 42 samples greedy_continuation[43] — 16 vs 16
+  [PASS] generation step 43 samples greedy_continuation[44] — 19 vs 19
+  [PASS] generation step 44 samples greedy_continuation[45] — 11 vs 11
+  [PASS] generation step 45 samples greedy_continuation[46] — 220 vs 220
+  [PASS] generation step 46 samples greedy_continuation[47] — 16 vs 16
+  [PASS] generation step 47 samples greedy_continuation[48] — 20 vs 20
+  [PASS] generation step 48 samples greedy_continuation[49] — 11 vs 11
+  [PASS] generation step 49 samples greedy_continuation[50] — 220 vs 220
+  [PASS] generation step 50 samples greedy_continuation[51] — 16 vs 16
+  [PASS] generation step 51 samples greedy_continuation[52] — 21 vs 21
+  [PASS] generation step 52 samples greedy_continuation[53] — 11 vs 11
+  [PASS] generation step 53 samples greedy_continuation[54] — 220 vs 220
+  [PASS] generation step 54 samples greedy_continuation[55] — 16 vs 16
+  [PASS] generation step 55 samples greedy_continuation[56] — 22 vs 22
+  [PASS] generation step 56 samples greedy_continuation[57] — 11 vs 11
+  [PASS] generation step 57 samples greedy_continuation[58] — 220 vs 220
+  [PASS] generation step 58 samples greedy_continuation[59] — 16 vs 16
+  [PASS] generation step 59 samples greedy_continuation[60] — 23 vs 23
+  [PASS] generation step 60 samples greedy_continuation[61] — 11 vs 11
+  [PASS] generation step 61 samples greedy_continuation[62] — 220 vs 220
+  [PASS] generation step 62 samples greedy_continuation[63] — 16 vs 16
+  [PASS] generation step 63 samples greedy_continuation[64] — 24 vs 24
+  [PASS] all 64 generated ids match, in order — exactly, or as a tie proved from the pin — 0 step(s) resolved by the tie policy (none); unmatched steps [] | engine [11, 220, 17, 11, 220, 18, 11, 220, 19, 11, 220, 20, 11, 220, 21, 11, 220, 22, 11, 220, 23, 11, 220, 24, 11, 220, 16, 15, 11, 220, 16, 16, 11, 220, 16, 17, 11, 220, 16, 18, 11, 220, 16, 19, 11, 220, 16, 20, 11, 220, 16, 21, 11, 220, 16, 22, 11, 220, 16, 23, 11, 220, 16, 24] / pinned [11, 220, 17, 11, 220, 18, 11, 220, 19, 11, 220, 20, 11, 220, 21, 11, 220, 22, 11, 220, 23, 11, 220, 24, 11, 220, 16, 15, 11, 220, 16, 16, 11, 220, 16, 17, 11, 220, 16, 18, 11, 220, 16, 19, 11, 220, 16, 20, 11, 220, 16, 21, 11, 220, 16, 22, 11, 220, 16, 23, 11, 220, 16, 24]
+  [PASS] the tokens the engine fed itself are the ones the reference fed (the engine feeds itself, so this is the chain being re-derived, not replayed) — [16, 11, 220, 17, 11, 220, 18, 11, 220, 19, 11, 220, 20, 11, 220, 21, 11, 220, 22, 11, 220, 23, 11, 220, 24, 11, 220, 16, 15, 11, 220, 16, 16, 11, 220, 16, 17, 11, 220, 16, 18, 11, 220, 16, 19, 11, 220, 16, 20, 11, 220, 16, 21, 11, 220, 16, 22, 11, 220, 16, 23, 11, 220, 16]
+  [PASS] no generation step ended a replay run (§07.5 is a free-run rule) — 64 replayed steps
+  [info] the pinned chain samples the stop id 248046 at generation step(s) none; teacher forcing feeds that token straight back in, so the engine prints it and keeps going — that is why a replay does not arm §07.5.
+  [PASS] positions run 27..90 (§02.4's P) — [27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90]
+
+== (b) logits vs the pinned dumps — band from §10.1 G5 and §10.2
+  hard: cos >= 0.9995 (G5 incremental==batch), meanrel <= 5% (§10.2 cascade ceiling)
+  reported: cos vs 0.9999 (G6 decode logits); ndiff and max ULP are reported but not gated (§10.1 F1–F4: a chained dot's legal ndiff is 29–47 %, and a max-ULP bound is blind to a whole-tensor 1-ULP shift)
+  [PASS] step 0: metrics — cos 0.999863 meanrel 1.6391% ndiff 248320/248320 maxabs 0.26 | ref top1−top2 gap 5.625 = 22× the largest element error
+  [PASS] step 0: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 0: meanrel <= 5% (§10.2)
+  [PASS] step 0: argmax agrees with the pin — 11
+  [PASS] step 1: metrics — cos 0.999892 meanrel 1.6104% ndiff 248320/248320 maxabs 0.2644 | ref top1−top2 gap 3.625 = 14× the largest element error
+  [PASS] step 1: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 1: meanrel <= 5% (§10.2)
+  [PASS] step 1: argmax agrees with the pin — 220
+  [PASS] step 2: metrics — cos 0.999759 meanrel 2.1840% ndiff 248320/248320 maxabs 0.2616 | ref top1−top2 gap 8.375 = 32× the largest element error
+  [PASS] step 2: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 2: meanrel <= 5% (§10.2)
+  [PASS] step 2: argmax agrees with the pin — 17
+  [PASS] step 3: metrics — cos 0.999905 meanrel 1.7282% ndiff 248320/248320 maxabs 0.2288 | ref top1−top2 gap 11.000 = 48× the largest element error
+  [PASS] step 3: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 3: meanrel <= 5% (§10.2)
+  [PASS] step 3: argmax agrees with the pin — 11
+  [PASS] step 4: metrics — cos 0.999893 meanrel 2.0331% ndiff 248319/248320 maxabs 0.2919 | ref top1−top2 gap 8.125 = 28× the largest element error
+  [PASS] step 4: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 4: meanrel <= 5% (§10.2)
+  [PASS] step 4: argmax agrees with the pin — 220
+  [PASS] step 5: metrics — cos 0.999907 meanrel 1.3471% ndiff 248320/248320 maxabs 0.232 | ref top1−top2 gap 9.750 = 42× the largest element error
+  [PASS] step 5: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 5: meanrel <= 5% (§10.2)
+  [PASS] step 5: argmax agrees with the pin — 18
+  [PASS] step 6: metrics — cos 0.999869 meanrel 1.8595% ndiff 248320/248320 maxabs 0.251 | ref top1−top2 gap 9.125 = 36× the largest element error
+  [PASS] step 6: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 6: meanrel <= 5% (§10.2)
+  [PASS] step 6: argmax agrees with the pin — 11
+  [PASS] step 7: metrics — cos 0.999934 meanrel 1.2689% ndiff 248320/248320 maxabs 0.2136 | ref top1−top2 gap 5.625 = 26× the largest element error
+  [PASS] step 7: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 7: meanrel <= 5% (§10.2)
+  [PASS] step 7: argmax agrees with the pin — 220
+  [PASS] step 8: metrics — cos 0.999852 meanrel 2.0580% ndiff 248320/248320 maxabs 0.2555 | ref top1−top2 gap 11.000 = 43× the largest element error
+  [PASS] step 8: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 8: meanrel <= 5% (§10.2)
+  [PASS] step 8: argmax agrees with the pin — 19
+  [PASS] step 9: metrics — cos 0.999900 meanrel 1.3683% ndiff 248320/248320 maxabs 0.2086 | ref top1−top2 gap 9.750 = 47× the largest element error
+  [PASS] step 9: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 9: meanrel <= 5% (§10.2)
+  [PASS] step 9: argmax agrees with the pin — 11
+  [PASS] step 10: metrics — cos 0.999942 meanrel 0.9827% ndiff 248318/248320 maxabs 0.2003 | ref top1−top2 gap 9.000 = 45× the largest element error
+  [PASS] step 10: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 10: meanrel <= 5% (§10.2)
+  [PASS] step 10: argmax agrees with the pin — 220
+  [PASS] step 11: metrics — cos 0.999901 meanrel 1.4332% ndiff 248319/248320 maxabs 0.2408 | ref top1−top2 gap 10.750 = 45× the largest element error
+  [PASS] step 11: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 11: meanrel <= 5% (§10.2)
+  [PASS] step 11: argmax agrees with the pin — 20
+  [PASS] step 12: metrics — cos 0.999906 meanrel 1.3061% ndiff 248318/248320 maxabs 0.1962 | ref top1−top2 gap 9.500 = 48× the largest element error
+  [PASS] step 12: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 12: meanrel <= 5% (§10.2)
+  [PASS] step 12: argmax agrees with the pin — 11
+  [PASS] step 13: metrics — cos 0.999947 meanrel 0.9514% ndiff 248318/248320 maxabs 0.1779 | ref top1−top2 gap 9.375 = 53× the largest element error
+  [PASS] step 13: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 13: meanrel <= 5% (§10.2)
+  [PASS] step 13: argmax agrees with the pin — 220
+  [PASS] step 14: metrics — cos 0.999895 meanrel 1.4541% ndiff 248319/248320 maxabs 0.2269 | ref top1−top2 gap 11.875 = 52× the largest element error
+  [PASS] step 14: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 14: meanrel <= 5% (§10.2)
+  [PASS] step 14: argmax agrees with the pin — 21
+  [PASS] step 15: metrics — cos 0.999922 meanrel 1.2054% ndiff 248320/248320 maxabs 0.2008 | ref top1−top2 gap 10.125 = 50× the largest element error
+  [PASS] step 15: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 15: meanrel <= 5% (§10.2)
+  [PASS] step 15: argmax agrees with the pin — 11
+  [PASS] step 16: metrics — cos 0.999900 meanrel 1.3826% ndiff 248320/248320 maxabs 0.2404 | ref top1−top2 gap 9.000 = 37× the largest element error
+  [PASS] step 16: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 16: meanrel <= 5% (§10.2)
+  [PASS] step 16: argmax agrees with the pin — 220
+  [PASS] step 17: metrics — cos 0.999860 meanrel 1.9522% ndiff 248320/248320 maxabs 0.2206 | ref top1−top2 gap 12.250 = 56× the largest element error
+  [PASS] step 17: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 17: meanrel <= 5% (§10.2)
+  [PASS] step 17: argmax agrees with the pin — 22
+  [PASS] step 18: metrics — cos 0.999883 meanrel 1.4621% ndiff 248319/248320 maxabs 0.2866 | ref top1−top2 gap 8.375 = 29× the largest element error
+  [PASS] step 18: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 18: meanrel <= 5% (§10.2)
+  [PASS] step 18: argmax agrees with the pin — 11
+  [PASS] step 19: metrics — cos 0.999933 meanrel 1.1119% ndiff 248319/248320 maxabs 0.2055 | ref top1−top2 gap 9.625 = 47× the largest element error
+  [PASS] step 19: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 19: meanrel <= 5% (§10.2)
+  [PASS] step 19: argmax agrees with the pin — 220
+  [PASS] step 20: metrics — cos 0.999868 meanrel 1.6597% ndiff 248319/248320 maxabs 0.2303 | ref top1−top2 gap 11.250 = 49× the largest element error
+  [PASS] step 20: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 20: meanrel <= 5% (§10.2)
+  [PASS] step 20: argmax agrees with the pin — 23
+  [PASS] step 21: metrics — cos 0.999824 meanrel 1.9098% ndiff 248319/248320 maxabs 0.2326 | ref top1−top2 gap 2.875 = 12× the largest element error
+  [PASS] step 21: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 21: meanrel <= 5% (§10.2)
+  [PASS] step 21: argmax agrees with the pin — 11
+  [PASS] step 22: metrics — cos 0.999918 meanrel 1.2713% ndiff 248320/248320 maxabs 0.2161 | ref top1−top2 gap 6.125 = 28× the largest element error
+  [PASS] step 22: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 22: meanrel <= 5% (§10.2)
+  [PASS] step 22: argmax agrees with the pin — 220
+  [PASS] step 23: metrics — cos 0.999829 meanrel 1.8070% ndiff 248319/248320 maxabs 0.2632 | ref top1−top2 gap 8.125 = 31× the largest element error
+  [PASS] step 23: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 23: meanrel <= 5% (§10.2)
+  [PASS] step 23: argmax agrees with the pin — 24
+  [PASS] step 24: metrics — cos 0.999898 meanrel 1.4758% ndiff 248320/248320 maxabs 0.2721 | ref top1−top2 gap 8.250 = 30× the largest element error
+  [PASS] step 24: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 24: meanrel <= 5% (§10.2)
+  [PASS] step 24: argmax agrees with the pin — 11
+  [PASS] step 25: metrics — cos 0.999945 meanrel 1.0008% ndiff 248320/248320 maxabs 0.2418 | ref top1−top2 gap 7.500 = 31× the largest element error
+  [PASS] step 25: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 25: meanrel <= 5% (§10.2)
+  [PASS] step 25: argmax agrees with the pin — 220
+  [PASS] step 26: metrics — cos 0.999902 meanrel 1.4407% ndiff 248319/248320 maxabs 0.2171 | ref top1−top2 gap 6.250 = 29× the largest element error
+  [PASS] step 26: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 26: meanrel <= 5% (§10.2)
+  [PASS] step 26: argmax agrees with the pin — 16
+  [PASS] step 27: metrics — cos 0.999940 meanrel 1.0322% ndiff 248319/248320 maxabs 0.1893 | ref top1−top2 gap 8.375 = 44× the largest element error
+  [PASS] step 27: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 27: meanrel <= 5% (§10.2)
+  [PASS] step 27: argmax agrees with the pin — 15
+  [PASS] step 28: metrics — cos 0.999893 meanrel 1.3843% ndiff 248319/248320 maxabs 0.2659 | ref top1−top2 gap 8.125 = 31× the largest element error
+  [PASS] step 28: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 28: meanrel <= 5% (§10.2)
+  [PASS] step 28: argmax agrees with the pin — 11
+  [PASS] step 29: metrics — cos 0.999945 meanrel 0.9921% ndiff 248319/248320 maxabs 0.2339 | ref top1−top2 gap 6.500 = 28× the largest element error
+  [PASS] step 29: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 29: meanrel <= 5% (§10.2)
+  [PASS] step 29: argmax agrees with the pin — 220
+  [PASS] step 30: metrics — cos 0.999861 meanrel 1.6263% ndiff 248320/248320 maxabs 0.222 | ref top1−top2 gap 12.188 = 55× the largest element error
+  [PASS] step 30: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 30: meanrel <= 5% (§10.2)
+  [PASS] step 30: argmax agrees with the pin — 16
+  [PASS] step 31: metrics — cos 0.999950 meanrel 1.0610% ndiff 248318/248320 maxabs 0.1986 | ref top1−top2 gap 8.875 = 45× the largest element error
+  [PASS] step 31: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 31: meanrel <= 5% (§10.2)
+  [PASS] step 31: argmax agrees with the pin — 16
+  [PASS] step 32: metrics — cos 0.999888 meanrel 1.7354% ndiff 248320/248320 maxabs 0.2424 | ref top1−top2 gap 9.875 = 41× the largest element error
+  [PASS] step 32: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 32: meanrel <= 5% (§10.2)
+  [PASS] step 32: argmax agrees with the pin — 11
+  [PASS] step 33: metrics — cos 0.999950 meanrel 1.1154% ndiff 248319/248320 maxabs 0.2255 | ref top1−top2 gap 9.125 = 40× the largest element error
+  [PASS] step 33: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 33: meanrel <= 5% (§10.2)
+  [PASS] step 33: argmax agrees with the pin — 220
+  [PASS] step 34: metrics — cos 0.999887 meanrel 1.5402% ndiff 248320/248320 maxabs 0.2527 | ref top1−top2 gap 13.125 = 52× the largest element error
+  [PASS] step 34: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 34: meanrel <= 5% (§10.2)
+  [PASS] step 34: argmax agrees with the pin — 16
+  [PASS] step 35: metrics — cos 0.999910 meanrel 1.2500% ndiff 248319/248320 maxabs 0.2443 | ref top1−top2 gap 10.750 = 44× the largest element error
+  [PASS] step 35: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 35: meanrel <= 5% (§10.2)
+  [PASS] step 35: argmax agrees with the pin — 17
+  [PASS] step 36: metrics — cos 0.999897 meanrel 1.8602% ndiff 248318/248320 maxabs 0.2571 | ref top1−top2 gap 10.375 = 40× the largest element error
+  [PASS] step 36: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 36: meanrel <= 5% (§10.2)
+  [PASS] step 36: argmax agrees with the pin — 11
+  [PASS] step 37: metrics — cos 0.999942 meanrel 1.0757% ndiff 248318/248320 maxabs 0.2055 | ref top1−top2 gap 9.125 = 44× the largest element error
+  [PASS] step 37: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 37: meanrel <= 5% (§10.2)
+  [PASS] step 37: argmax agrees with the pin — 220
+  [PASS] step 38: metrics — cos 0.999871 meanrel 1.6864% ndiff 248320/248320 maxabs 0.2704 | ref top1−top2 gap 13.500 = 50× the largest element error
+  [PASS] step 38: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 38: meanrel <= 5% (§10.2)
+  [PASS] step 38: argmax agrees with the pin — 16
+  [PASS] step 39: metrics — cos 0.999933 meanrel 1.0682% ndiff 248317/248320 maxabs 0.2189 | ref top1−top2 gap 12.000 = 55× the largest element error
+  [PASS] step 39: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 39: meanrel <= 5% (§10.2)
+  [PASS] step 39: argmax agrees with the pin — 18
+  [PASS] step 40: metrics — cos 0.999929 meanrel 1.2470% ndiff 248320/248320 maxabs 0.1991 | ref top1−top2 gap 10.375 = 52× the largest element error
+  [PASS] step 40: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 40: meanrel <= 5% (§10.2)
+  [PASS] step 40: argmax agrees with the pin — 11
+  [PASS] step 41: metrics — cos 0.999951 meanrel 0.9297% ndiff 248318/248320 maxabs 0.2069 | ref top1−top2 gap 10.000 = 48× the largest element error
+  [PASS] step 41: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 41: meanrel <= 5% (§10.2)
+  [PASS] step 41: argmax agrees with the pin — 220
+  [PASS] step 42: metrics — cos 0.999907 meanrel 1.3332% ndiff 248320/248320 maxabs 0.2156 | ref top1−top2 gap 14.375 = 67× the largest element error
+  [PASS] step 42: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 42: meanrel <= 5% (§10.2)
+  [PASS] step 42: argmax agrees with the pin — 16
+  [PASS] step 43: metrics — cos 0.999925 meanrel 1.2162% ndiff 248318/248320 maxabs 0.2302 | ref top1−top2 gap 12.750 = 55× the largest element error
+  [PASS] step 43: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 43: meanrel <= 5% (§10.2)
+  [PASS] step 43: argmax agrees with the pin — 19
+  [PASS] step 44: metrics — cos 0.999905 meanrel 1.3212% ndiff 248319/248320 maxabs 0.2575 | ref top1−top2 gap 10.250 = 40× the largest element error
+  [PASS] step 44: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 44: meanrel <= 5% (§10.2)
+  [PASS] step 44: argmax agrees with the pin — 11
+  [PASS] step 45: metrics — cos 0.999945 meanrel 0.9753% ndiff 248318/248320 maxabs 0.2129 | ref top1−top2 gap 9.375 = 44× the largest element error
+  [PASS] step 45: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 45: meanrel <= 5% (§10.2)
+  [PASS] step 45: argmax agrees with the pin — 220
+  [PASS] step 46: metrics — cos 0.999848 meanrel 1.6797% ndiff 248319/248320 maxabs 0.3021 | ref top1−top2 gap 14.500 = 48× the largest element error
+  [PASS] step 46: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 46: meanrel <= 5% (§10.2)
+  [PASS] step 46: argmax agrees with the pin — 16
+  [PASS] step 47: metrics — cos 0.999912 meanrel 1.4026% ndiff 248319/248320 maxabs 0.2255 | ref top1−top2 gap 12.125 = 54× the largest element error
+  [PASS] step 47: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 47: meanrel <= 5% (§10.2)
+  [PASS] step 47: argmax agrees with the pin — 20
+  [PASS] step 48: metrics — cos 0.999894 meanrel 1.6121% ndiff 248319/248320 maxabs 0.2133 | ref top1−top2 gap 10.250 = 48× the largest element error
+  [PASS] step 48: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 48: meanrel <= 5% (§10.2)
+  [PASS] step 48: argmax agrees with the pin — 11
+  [PASS] step 49: metrics — cos 0.999952 meanrel 0.8939% ndiff 248319/248320 maxabs 0.1896 | ref top1−top2 gap 8.750 = 46× the largest element error
+  [PASS] step 49: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 49: meanrel <= 5% (§10.2)
+  [PASS] step 49: argmax agrees with the pin — 220
+  [PASS] step 50: metrics — cos 0.999887 meanrel 1.4951% ndiff 248320/248320 maxabs 0.2229 | ref top1−top2 gap 14.375 = 64× the largest element error
+  [PASS] step 50: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 50: meanrel <= 5% (§10.2)
+  [PASS] step 50: argmax agrees with the pin — 16
+  [PASS] step 51: metrics — cos 0.999931 meanrel 1.1226% ndiff 248319/248320 maxabs 0.1913 | ref top1−top2 gap 12.125 = 63× the largest element error
+  [PASS] step 51: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 51: meanrel <= 5% (§10.2)
+  [PASS] step 51: argmax agrees with the pin — 21
+  [PASS] step 52: metrics — cos 0.999919 meanrel 1.1988% ndiff 248319/248320 maxabs 0.2739 | ref top1−top2 gap 10.625 = 39× the largest element error
+  [PASS] step 52: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 52: meanrel <= 5% (§10.2)
+  [PASS] step 52: argmax agrees with the pin — 11
+  [PASS] step 53: metrics — cos 0.999949 meanrel 0.9241% ndiff 248320/248320 maxabs 0.2816 | ref top1−top2 gap 9.125 = 32× the largest element error
+  [PASS] step 53: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 53: meanrel <= 5% (§10.2)
+  [PASS] step 53: argmax agrees with the pin — 220
+  [PASS] step 54: metrics — cos 0.999767 meanrel 2.2452% ndiff 248318/248320 maxabs 0.3504 | ref top1−top2 gap 14.750 = 42× the largest element error
+  [PASS] step 54: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 54: meanrel <= 5% (§10.2)
+  [PASS] step 54: argmax agrees with the pin — 16
+  [PASS] step 55: metrics — cos 0.999885 meanrel 1.8322% ndiff 248320/248320 maxabs 0.2704 | ref top1−top2 gap 11.750 = 43× the largest element error
+  [PASS] step 55: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 55: meanrel <= 5% (§10.2)
+  [PASS] step 55: argmax agrees with the pin — 22
+  [PASS] step 56: metrics — cos 0.999836 meanrel 2.4692% ndiff 248320/248320 maxabs 0.2726 | ref top1−top2 gap 10.875 = 40× the largest element error
+  [PASS] step 56: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 56: meanrel <= 5% (§10.2)
+  [PASS] step 56: argmax agrees with the pin — 11
+  [PASS] step 57: metrics — cos 0.999953 meanrel 0.8773% ndiff 248319/248320 maxabs 0.1923 | ref top1−top2 gap 9.875 = 51× the largest element error
+  [PASS] step 57: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 57: meanrel <= 5% (§10.2)
+  [PASS] step 57: argmax agrees with the pin — 220
+  [PASS] step 58: metrics — cos 0.999894 meanrel 1.4881% ndiff 248320/248320 maxabs 0.2415 | ref top1−top2 gap 14.000 = 58× the largest element error
+  [PASS] step 58: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 58: meanrel <= 5% (§10.2)
+  [PASS] step 58: argmax agrees with the pin — 16
+  [PASS] step 59: metrics — cos 0.999939 meanrel 1.0446% ndiff 248318/248320 maxabs 0.2011 | ref top1−top2 gap 12.375 = 62× the largest element error
+  [PASS] step 59: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 59: meanrel <= 5% (§10.2)
+  [PASS] step 59: argmax agrees with the pin — 23
+  [PASS] step 60: metrics — cos 0.999909 meanrel 1.3228% ndiff 248320/248320 maxabs 0.2026 | ref top1−top2 gap 10.375 = 51× the largest element error
+  [PASS] step 60: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 60: meanrel <= 5% (§10.2)
+  [PASS] step 60: argmax agrees with the pin — 11
+  [PASS] step 61: metrics — cos 0.999943 meanrel 1.1138% ndiff 248319/248320 maxabs 0.2355 | ref top1−top2 gap 10.000 = 42× the largest element error
+  [PASS] step 61: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 61: meanrel <= 5% (§10.2)
+  [PASS] step 61: argmax agrees with the pin — 220
+  [PASS] step 62: metrics — cos 0.999911 meanrel 1.3606% ndiff 248320/248320 maxabs 0.2179 | ref top1−top2 gap 13.125 = 60× the largest element error
+  [PASS] step 62: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 62: meanrel <= 5% (§10.2)
+  [PASS] step 62: argmax agrees with the pin — 16
+  [PASS] step 63: metrics — cos 0.999900 meanrel 1.5306% ndiff 248319/248320 maxabs 0.2483 | ref top1−top2 gap 11.875 = 48× the largest element error
+  [PASS] step 63: cos >= 0.9995 (§10.1 G5)
+  [PASS] step 63: meanrel <= 5% (§10.2)
+  [PASS] step 63: argmax agrees with the pin — 24
+
+== (c) state sizes — against engine/state_sizes.py, which is run rather than retyped
+  [PASS] engine/state_sizes.py PASS — imported clean; its own §00.5/spec-page checks passed
+  [PASS] GDN recurrent state is 18.0 MiB — 18874368 B
+  [PASS] KV is 12288 B/token = 2 caches × 2 kv-heads × 256 × 2 B × 6 layers — 12288 B
+  [PASS] decode_run's STATE conv matches state_sizes.py — engine 1327104 vs python 1327104 (cap 92)
+  [PASS] decode_run's STATE gdn matches state_sizes.py — engine 18874368 vs python 18874368 (cap 92)
+  [PASS] decode_run's STATE kv matches state_sizes.py — engine 1130496 vs python 1130496 (cap 92)
+  [PASS] decode_run's STATE per_token matches state_sizes.py — engine 12288 vs python 12288 (cap 92)
+  [PASS] decode_run's STATE total matches state_sizes.py — engine 21331968 vs python 21331968 (cap 92)
+
+== (e) the curve — logits and reference state deltas against step count
+  step  fed        sampled    cos        meanrel   |  S n2      S dn2     conv n2  conv dn2   kv dn2
+     0        16        11  0.999863   1.6391%  |       3635      117.4  1.171e+06  6.628e+05          0
+     1        11       220  0.999892   1.6104%  |       3701      115.3   1.14e+06  6.009e+05          0
+     2       220        17  0.999759   2.1840%  |       3754      55.28  1.127e+06  4.749e+05          0
+     3        17        11  0.999905   1.7282%  |       3797      36.46  1.103e+06   4.54e+05          0
+     4        11       220  0.999893   2.0331%  |       3812      36.67  1.079e+06  3.517e+05          0
+     5       220        18  0.999907   1.3471%  |       3838      30.33  1.079e+06  2.877e+05          0
+     6        18        11  0.999869   1.8595%  |       3860      21.96  1.102e+06  3.206e+05          0
+     7        11       220  0.999934   1.2689%  |       3865      21.28  1.101e+06    3.2e+05          0
+     8       220        19  0.999852   2.0580%  |       3880      19.05  1.097e+06   2.79e+05          0
+     9        19        11  0.999900   1.3683%  |       3887      16.83  1.116e+06  3.078e+05          0
+    10        11       220  0.999942   0.9827%  |       3884      17.64  1.115e+06  3.164e+05          0
+    11       220        20  0.999901   1.4332%  |       3897      18.04  1.106e+06  2.793e+05          0
+    12        20        11  0.999906   1.3061%  |       3904      16.34  1.124e+06   3.04e+05          0
+    13        11       220  0.999947   0.9514%  |       3898      17.35  1.123e+06   3.11e+05          0
+    14       220        21  0.999895   1.4541%  |       3907      19.96  1.112e+06   2.72e+05          0
+    15        21        11  0.999922   1.2054%  |       3912      17.04  1.124e+06  2.969e+05          0
+    16        11       220  0.999900   1.3826%  |       3904      17.63  1.121e+06  3.084e+05          0
+    17       220        22  0.999860   1.9522%  |       3912      16.34  1.108e+06  2.728e+05          0
+    18        22        11  0.999883   1.4621%  |       3914      17.67  1.121e+06  3.021e+05          0
+    19        11       220  0.999933   1.1119%  |       3902      19.03  1.117e+06  3.185e+05          0
+    20       220        23  0.999868   1.6597%  |       3915      18.32  1.105e+06  2.852e+05          0
+    21        23        11  0.999824   1.9098%  |       3907      21.03  1.123e+06  3.173e+05          0
+    22        11       220  0.999918   1.2713%  |       3894      31.42  1.125e+06  3.391e+05          0
+    23       220        24  0.999829   1.8070%  |       3907      22.44  1.119e+06  3.095e+05          0
+    24        24        11  0.999898   1.4758%  |       3914      23.18  1.137e+06  3.458e+05          0
+    25        11       220  0.999945   1.0008%  |       3902      23.43  1.135e+06  3.582e+05          0
+    26       220        16  0.999902   1.4407%  |       3915      18.04  1.129e+06   3.14e+05          0
+    27        16        15  0.999940   1.0322%  |       3917      15.63   1.14e+06  3.163e+05          0
+    28        15        11  0.999893   1.3843%  |       3932       22.7  1.139e+06  2.849e+05          0
+    29        11       220  0.999945   0.9921%  |       3917      19.64  1.147e+06  2.834e+05          0
+    30       220        16  0.999861   1.6263%  |       3921       16.3  1.146e+06  2.839e+05          0
+    31        16        16  0.999950   1.0610%  |       3920      15.07  1.144e+06  2.803e+05          0
+    32        16        11  0.999888   1.7354%  |       3938       18.7  1.155e+06  2.776e+05          0
+    33        11       220  0.999950   1.1154%  |       3924         16  1.155e+06  2.768e+05          0
+    34       220        16  0.999887   1.5402%  |       3927      16.18  1.157e+06  2.742e+05          0
+    35        16        17  0.999910   1.2500%  |       3926      14.88  1.159e+06  2.714e+05          0
+    36        17        11  0.999897   1.8602%  |       3940      19.61  1.151e+06  2.728e+05          0
+    37        11       220  0.999942   1.0757%  |       3926      17.16  1.152e+06  2.689e+05          0
+    38       220        16  0.999871   1.6864%  |       3929       15.9  1.154e+06  2.668e+05          0
+    39        16        18  0.999933   1.0682%  |       3924      14.81  1.151e+06  2.671e+05          0
+    40        18        11  0.999929   1.2470%  |       3940      19.77  1.154e+06  2.687e+05          0
+    41        11       220  0.999951   0.9297%  |       3926      18.49   1.15e+06  2.699e+05          0
+    42       220        16  0.999907   1.3332%  |       3929      15.34  1.148e+06  2.703e+05          0
+    43        16        19  0.999925   1.2162%  |       3924       14.6  1.153e+06  2.701e+05          0
+    44        19        11  0.999905   1.3212%  |       3936      18.26  1.148e+06  2.723e+05          0
+    45        11       220  0.999945   0.9753%  |       3923      18.55  1.144e+06  2.731e+05          0
+    46       220        16  0.999848   1.6797%  |       3928      15.58  1.144e+06  2.725e+05          0
+    47        16        20  0.999912   1.4026%  |       3924      14.55  1.146e+06  2.721e+05          0
+    48        20        11  0.999894   1.6121%  |       3936      17.71  1.145e+06  2.714e+05          0
+    49        11       220  0.999952   0.8939%  |       3920       18.8  1.144e+06  2.705e+05          0
+    50       220        16  0.999887   1.4951%  |       3926      15.52   1.14e+06  2.705e+05          0
+    51        16        21  0.999931   1.1226%  |       3923      14.46   1.14e+06  2.699e+05          0
+    52        21        11  0.999919   1.1988%  |       3936      20.38  1.145e+06  2.696e+05          0
+    53        11       220  0.999949   0.9241%  |       3918      20.84  1.147e+06  2.716e+05          0
+    54       220        16  0.999767   2.2452%  |       3924      14.91  1.149e+06   2.71e+05          0
+    55        16        22  0.999885   1.8322%  |       3920      14.32  1.145e+06  2.698e+05          0
+    56        22        11  0.999836   2.4692%  |       3933      18.18  1.147e+06   2.69e+05          0
+    57        11       220  0.999953   0.8773%  |       3916      20.93  1.144e+06  2.706e+05          0
+    58       220        16  0.999894   1.4881%  |       3923      15.11  1.145e+06  2.698e+05          0
+    59        16        23  0.999939   1.0446%  |       3919      14.29  1.145e+06  2.697e+05          0
+    60        23        11  0.999909   1.3228%  |       3932      18.56   1.14e+06  2.725e+05          0
+    61        11       220  0.999943   1.1138%  |       3916      19.92   1.14e+06  2.704e+05          0
+    62       220        16  0.999911   1.3606%  |       3921       15.4  1.138e+06  2.711e+05          0
+    63        16        24  0.999900   1.5306%  |       3915      14.51   1.14e+06  2.732e+05          0
+  drift reading: 1-cos median over steps 0..7 is 1.073e-04, over the last 8 steps 9.017e-05 (ratio 0.84); least-squares slope -4.196e-07 per step; worst step 2 at cos 0.999759 (248320/248320 elements differing).
+  [info] read it as: flat means the depth bought nothing beyond dec8's 8 steps; a rise means state carry-over is decaying and the step index names where. Neither is gated — (b) already applies §10.1 G5 per step, and a second threshold for "how much drift by step 64" would be the taste-based band §10.1 F1–F4 forbids.
+
+== (f) fixture integrity — the pinned state deltas must describe a real cache
+  [PASS] fingerprint rows map to the §03.5 layer routing read from the manifest — state 18 conv 18 kv 6 vs routing 18+6
+  [PASS] every fingerprint value is finite — []
+  [PASS] the pinned KV delta is exactly 0 at every step (append-only cache) — []
+  [info] the S/conv delta columns are REPORTED, not gated: a moment-sum fingerprint catches a state that decayed, was zeroed, was scaled or was left behind, and cannot see a corruption that preserves the multiset of values. Full per-element state gating would cost 18 MiB per step, which is the 1.7 GB this fixture exists to avoid.
+
+== (f2) the deep fixture must extend the shallow one, not merely resemble it
+
+== (d) the launch plan — §07's structure, counted in Python
+  [PASS] launch count attn — engine 6 vs §07 6
+  [PASS] launch count cast — engine 115 vs §07 115
+  [PASS] launch count gdn — engine 72 vs §07 72
+  [PASS] launch count glue — engine 49 vs §07 49
+  [PASS] launch count mlp — engine 48 vs §07 48
+  [PASS] launch count other — engine 20 vs §07 20
+  [PASS] launch count proj — engine 114 vs §07 114
+  [PASS] launch total — 424 vs 424
+  [PASS] glue is the 49 `prototype/glue/run.py` pins its token plan against — 49
+  [PASS] layer routing read from the manifest matches §03.5 — 18+6 of 24
+
+== summary
+  [note] 28 of 64 steps sit under G6's decode-logits figure 0.9999 (step:cos — 0:0.999863, 1:0.999892, 2:0.999759, 4:0.999893, 6:0.999869, 8:0.999852, 14:0.999895, 16:0.999900, 17:0.999860, 18:0.999883, 20:0.999868, 21:0.999824 …). G6 is ADVISORY here by decision, not an open question: an end-to-end token carries the whole 24-layer cascade, so it is not judged by a figure belonging to a narrower comparison — see the BAND comment above and the two measured floors in engine/results.md: last-op reassociation 0.99999862 (engine/logits_floor.py) and end-to-end two-legal-routes 1-cos 4.7e-5..1.9e-4 (engine/route_price.py).
+  [note] dec64t has a different prompt from dec8, so the overlap check does not apply.
+  [note] decode_run reported 11.559 ms/step. Timing from a gate run is a by-product, not a measurement: see bench/performance-status.md §6 for what a clean window takes.
+ENGINE GATE PASS

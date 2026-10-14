@@ -1,0 +1,10 @@
+1d6f5ab4a598ab7b1332c95ce927f07f  logits16.bin
+184efc6d479e1192218a226cfab5a245  logits17.bin
+c7685eff87da49924018bc1ee46a35ae  logits18.bin
+637709f1ee5cc53ea1849077019a9c93  logits19.bin
+6ae5b02980a85a28543e27ae2fb95b99  logits20.bin
+3fd98ce533632ccbb72415d44ed4d7fc  logits21.bin
+63e60b4d5f90edfe9920659c261b2081  logits22.bin
+140d0c77ca100d92ca8db45bf9118dc7  logits23.bin
+3eef5403ef5cd327b7b4eaa88a3d1e81  logits24.bin
+224f5caae53d8d8ec7a45c7e5a69b751  sampled.txt

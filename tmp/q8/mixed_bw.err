@@ -1,0 +1,78 @@
+Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT
+VGPU(0x63feba96c9c0) hang analysis:
+SWq=0x7f2ad29ae000, HWq=0x7f2ab5e00000, id=1, priority=1, Dispatch Header = 0xb02 (type=2, barrier=1, acquire=1, release=1), setup=3, grid=[99840, 1, 1], workgroup=[256, 1, 1], private_seg_size=0, group_seg_size=0, kernel_obj=0x7f2ad4db56c0, kernarg_address=0x7f29ab600000, completion_signal=0x0, rptr=9, wptr=11
+:0:rocdevice.cpp            :3905: 119107742833 us:  Memory Fault Error [host: erokhins-Desktop-Framework, GPU index: 0, faulting addr: 0x7f29afca9000, kernel: (anonymous namespace)::mix_k(HIP_vector_type<float, 4u> const*, HIP_vector_type<float, 4u>*, unsigned long, int, int, unsigned long, double*, int)]
+hip error an illegal memory access was encountered at mixed_bw.cpp:643
+# AMD Radeon 8060S Graphics | mode=read ratio=20:1 footprint=527.5 MiB pages=warm
+# AMD Radeon 8060S Graphics | mode=write ratio=20:1 footprint=528.0 MiB pages=warm
+# AMD Radeon 8060S Graphics | mode=mix ratio=1:1 footprint=527.5 MiB pages=warm
+# AMD Radeon 8060S Graphics | mode=mix ratio=4:1 footprint=527.4 MiB pages=warm
+Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT
+VGPU(0x623aa14bb7b0) hang analysis:
+SWq=0x7f1e97a98000, HWq=0x7f1e7a600000, id=1, priority=1, Dispatch Header = 0xb02 (type=2, barrier=1, acquire=1, release=1), setup=3, grid=[160768, 1, 1], workgroup=[256, 1, 1], private_seg_size=0, group_seg_size=0, kernel_obj=0x7f1e97ab16c0, kernarg_address=0x7f1e78c00000, completion_signal=0x0, rptr=3, wptr=5
+:0:rocdevice.cpp            :3905: 119108533124 us:  Memory Fault Error [host: erokhins-Desktop-Framework, GPU index: 0, faulting addr: 0x7f1d73c31000, kernel: (anonymous namespace)::mix_k(HIP_vector_type<float, 4u> const*, HIP_vector_type<float, 4u>*, unsigned long, int, int, unsigned long, double*, int)]
+hip error an illegal memory access was encountered at mixed_bw.cpp:417
+# AMD Radeon 8060S Graphics | mode=mix ratio=10:1 footprint=527.7 MiB pages=warm
+Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT
+VGPU(0x55e96aaac7b0) hang analysis:
+SWq=0x73352aaf4000, HWq=0x73350da00000, id=1, priority=1, Dispatch Header = 0xb02 (type=2, barrier=1, acquire=1, release=1), setup=3, grid=[157184, 1, 1], workgroup=[256, 1, 1], private_seg_size=0, group_seg_size=0, kernel_obj=0x73352ab0d6c0, kernarg_address=0x7333e6400000, completion_signal=0x0, rptr=3, wptr=5
+:0:rocdevice.cpp            :3905: 119108689384 us:  Memory Fault Error [host: erokhins-Desktop-Framework, GPU index: 0, faulting addr: 0x733407c0e000, kernel: (anonymous namespace)::mix_k(HIP_vector_type<float, 4u> const*, HIP_vector_type<float, 4u>*, unsigned long, int, int, unsigned long, double*, int)]
+hip error an illegal memory access was encountered at mixed_bw.cpp:417
+# AMD Radeon 8060S Graphics | mode=mix ratio=20:1 footprint=527.9 MiB pages=warm
+Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT
+VGPU(0x61cdbdff77b0) hang analysis:
+SWq=0x7ecb83fcc000, HWq=0x7ecb6c800000, id=1, priority=1, Dispatch Header = 0xb02 (type=2, barrier=1, acquire=1, release=1), setup=3, grid=[149760, 1, 1], workgroup=[256, 1, 1], private_seg_size=0, group_seg_size=0, kernel_obj=0x7ecb83fe16c0, kernarg_address=0x7ecb6c200000, completion_signal=0x0, rptr=3, wptr=5
+:0:rocdevice.cpp            :3905: 119108834540 us:  Memory Fault Error [host: erokhins-Desktop-Framework, GPU index: 0, faulting addr: 0x7eca5fd2f000, kernel: (anonymous namespace)::mix_k(HIP_vector_type<float, 4u> const*, HIP_vector_type<float, 4u>*, unsigned long, int, int, unsigned long, double*, int)]
+hip error an illegal memory access was encountered at mixed_bw.cpp:417
+# AMD Radeon 8060S Graphics | mode=mix ratio=32:1 footprint=527.9 MiB pages=warm
+Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT
+VGPU(0x5f703a4427b0) hang analysis:
+SWq=0x7a8bb821e000, HWq=0x7a8ba0a00000, id=1, priority=1, Dispatch Header = 0xb02 (type=2, barrier=1, acquire=1, release=1), setup=3, grid=[149760, 1, 1], workgroup=[256, 1, 1], private_seg_size=0, group_seg_size=0, kernel_obj=0x7a8bb82356c0, kernarg_address=0x7a8ba0400000, completion_signal=0x0, rptr=3, wptr=5
+:0:rocdevice.cpp            :3905: 119108974038 us:  Memory Fault Error [host: erokhins-Desktop-Framework, GPU index: 0, faulting addr: 0x7a8a93c3c000, kernel: (anonymous namespace)::mix_k(HIP_vector_type<float, 4u> const*, HIP_vector_type<float, 4u>*, unsigned long, int, int, unsigned long, double*, int)]
+hip error an illegal memory access was encountered at mixed_bw.cpp:417
+# AMD Radeon 8060S Graphics | mode=mix ratio=62:1 footprint=527.6 MiB pages=warm
+Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT
+VGPU(0x5dac2797d7b0) hang analysis:
+SWq=0x7eae2a864000, HWq=0x7eae0cc00000, id=1, priority=1, Dispatch Header = 0xb02 (type=2, barrier=1, acquire=1, release=1), setup=3, grid=[137216, 1, 1], workgroup=[256, 1, 1], private_seg_size=0, group_seg_size=0, kernel_obj=0x7eae2ca596c0, kernarg_address=0x7eae0c600000, completion_signal=0x0, rptr=3, wptr=5
+:0:rocdevice.cpp            :3905: 119109120177 us:  Memory Fault Error [host: erokhins-Desktop-Framework, GPU index: 0, faulting addr: 0x7ead07d85000, kernel: (anonymous namespace)::mix_k(HIP_vector_type<float, 4u> const*, HIP_vector_type<float, 4u>*, unsigned long, int, int, unsigned long, double*, int)]
+hip error an illegal memory access was encountered at mixed_bw.cpp:417
+# AMD Radeon 8060S Graphics | mode=mix ratio=128:1 footprint=527.1 MiB pages=warm
+Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT
+VGPU(0x55fb95d257b0) hang analysis:
+SWq=0x79897ad82000, HWq=0x798964100000, id=1, priority=1, Dispatch Header = 0xb02 (type=2, barrier=1, acquire=1, release=1), setup=3, grid=[133888, 1, 1], workgroup=[256, 1, 1], private_seg_size=0, group_seg_size=0, kernel_obj=0x79897d1896c0, kernarg_address=0x798836a00000, completion_signal=0x0, rptr=3, wptr=5
+:0:rocdevice.cpp            :3905: 119109251391 us:  Memory Fault Error [host: erokhins-Desktop-Framework, GPU index: 0, faulting addr: 0x798857d49000, kernel: (anonymous namespace)::mix_k(HIP_vector_type<float, 4u> const*, HIP_vector_type<float, 4u>*, unsigned long, int, int, unsigned long, double*, int)]
+hip error an illegal memory access was encountered at mixed_bw.cpp:417
+# AMD Radeon 8060S Graphics | mode=read ratio=20:1 footprint=527.6 MiB pages=warm
+# AMD Radeon 8060S Graphics | mode=mixlaunch ratio=1:1 footprint=528.0 MiB pages=warm
+# AMD Radeon 8060S Graphics | mode=mixlaunch ratio=20:1 footprint=528.0 MiB pages=warm
+# AMD Radeon 8060S Graphics | mode=mixlaunch ratio=62:1 footprint=528.1 MiB pages=warm
+# AMD Radeon 8060S Graphics | mode=mixlaunch ratio=128:1 footprint=527.8 MiB pages=warm
+# AMD Radeon 8060S Graphics | mode=mix ratio=62:1 footprint=527.6 MiB pages=warm
+Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT
+VGPU(0x62edb28b5760) hang analysis:
+SWq=0x768cf5488000, HWq=0x768cdcc00000, id=1, priority=1, Dispatch Header = 0xb02 (type=2, barrier=1, acquire=1, release=1), setup=3, grid=[137216, 1, 1], workgroup=[256, 1, 1], private_seg_size=0, group_seg_size=0, kernel_obj=0x768cf54a16c0, kernarg_address=0x768cdc600000, completion_signal=0x0, rptr=3, wptr=5
+:0:rocdevice.cpp            :3905: 119110172525 us:  Memory Fault Error [host: erokhins-Desktop-Framework, GPU index: 0, faulting addr: 0x768bcfdb9000, kernel: (anonymous namespace)::mix_k(HIP_vector_type<float, 4u> const*, HIP_vector_type<float, 4u>*, unsigned long, int, int, unsigned long, double*, int)]
+hip error an illegal memory access was encountered at mixed_bw.cpp:417
+# AMD Radeon 8060S Graphics | mode=mix ratio=62:1 footprint=527.6 MiB pages=warm
+Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT
+VGPU(0x5cbacb3777f0) hang analysis:
+SWq=0x777e52422000, HWq=0x777d10200000, id=1, priority=1, Dispatch Header = 0xb02 (type=2, barrier=1, acquire=1, release=1), setup=3, grid=[137216, 1, 1], workgroup=[256, 1, 1], private_seg_size=0, group_seg_size=0, kernel_obj=0x777e546956c0, kernarg_address=0x777d0e800000, completion_signal=0x0, rptr=3, wptr=5
+:0:rocdevice.cpp            :3905: 119110301742 us:  Memory Fault Error [host: erokhins-Desktop-Framework, GPU index: 0, faulting addr: 0x777d32d78000, kernel: (anonymous namespace)::mix_k(HIP_vector_type<float, 4u> const*, HIP_vector_type<float, 4u>*, unsigned long, int, int, unsigned long, double*, int)]
+hip error an illegal memory access was encountered at mixed_bw.cpp:417
+# AMD Radeon 8060S Graphics | mode=mix ratio=20:1 footprint=527.9 MiB pages=warm
+Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT
+VGPU(0x5fcdbe6f07f0) hang analysis:
+SWq=0x73e4981a8000, HWq=0x73e480400000, id=1, priority=1, Dispatch Header = 0xb02 (type=2, barrier=1, acquire=1, release=1), setup=3, grid=[149760, 1, 1], workgroup=[256, 1, 1], private_seg_size=0, group_seg_size=0, kernel_obj=0x73e4981c16c0, kernarg_address=0x73e479200000, completion_signal=0x0, rptr=3, wptr=5
+:0:rocdevice.cpp            :3905: 119110426819 us:  Memory Fault Error [host: erokhins-Desktop-Framework, GPU index: 0, faulting addr: 0x73e373d73000, kernel: (anonymous namespace)::mix_k(HIP_vector_type<float, 4u> const*, HIP_vector_type<float, 4u>*, unsigned long, int, int, unsigned long, double*, int)]
+hip error an illegal memory access was encountered at mixed_bw.cpp:417
+# AMD Radeon 8060S Graphics | mode=wthenr ratio=20:1 footprint=1020.0 MiB pages=warm
+# AMD Radeon 8060S Graphics | mode=wthenr ratio=62:1 footprint=525.9 MiB pages=warm
+# AMD Radeon 8060S Graphics | mode=wthenr ratio=62:1 footprint=525.9 MiB pages=warm
+# AMD Radeon 8060S Graphics | mode=read ratio=20:1 footprint=527.5 MiB pages=cold
+# AMD Radeon 8060S Graphics | mode=mix ratio=62:1 footprint=527.6 MiB pages=cold
+Warning: Queue error - HSA_STATUS_ERROR_MEMORY_FAULT
+VGPU(0x5ccebb6928b0) hang analysis:
+SWq=0x736dd5ad0000, HWq=0x736dbc200000, id=1, priority=1, Dispatch Header = 0xb02 (type=2, barrier=1, acquire=1, release=1), setup=3, grid=[137216, 1, 1], workgroup=[256, 1, 1], private_seg_size=0, group_seg_size=0, kernel_obj=0x736dd5ae96c0, kernarg_address=0x736db7a00000, completion_signal=0x0, rptr=0, wptr=2
+:0:rocdevice.cpp            :3905: 119111195883 us:  Memory Fault Error [host: erokhins-Desktop-Framework, GPU index: 0, faulting addr: 0x736cafd8a000, kernel: (anonymous namespace)::mix_k(HIP_vector_type<float, 4u> const*, HIP_vector_type<float, 4u>*, unsigned long, int, int, unsigned long, double*, int)]
+hip error an illegal memory access was encountered at mixed_bw.cpp:421
+# AMD Radeon 8060S Graphics | mode=write ratio=20:1 footprint=528.0 MiB pages=cold
