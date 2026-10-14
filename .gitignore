@@ -78,6 +78,8 @@ prototype/proj_gemv/proj_gemv
 prototype/attn_decode/attn_decode
 prototype/glue/glue
 prototype/gdn_gated_norm/gdn_gated_norm
+prototype/gdn_collapse/gdn_collapse_check
+prototype/gdn_collapse/neg_*/
 # engine/build.sh writes its binary next to the sources; name the file exactly, never a
 # `engine/**/loader_test` pattern (that matches directories — see the block above).
 engine/loader_test
