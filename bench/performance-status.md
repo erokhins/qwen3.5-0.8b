@@ -1,3 +1,5 @@
+**Read this first if you are continuing the route (c) / P9 / attention work — session handoff: `bench/HANDOFF-2026-10-14.md`.**
+
 # Performance status — what is measured, what is projected
 
 Written after the second HIP kernel. The point of this file has always been the split between
