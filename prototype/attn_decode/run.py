@@ -710,10 +710,12 @@ def main() -> int:
     ap.add_argument("--wave-rows", type=int, default=64,
                     help="rows per wave for --wave (default 64, plan §2.1's chunk width)")
     ap.add_argument("--tile-kernel", action="store_true",
-                    help="Phase 2: run the G x M tiled wave core (`attn_tile_wave`) instead of the "
+                    help="Phase 2: run the tiled wave core (`attn_tile_wave`) instead of the "
                          "shipped per-(row,head) `attn_core`. Wave-only — the host refuses it with "
-                         "--launch fused, --score-f32 or --neg carry. `run.py` takes the GPU lock "
-                         "itself, so hold `tools/gpu_lock.sh` before invoking it (see AGENTS.md)")
+                         "--launch fused or --score-f32. This script does NOT take the GPU lock "
+                         "(only glue/proj_gemv/gdn_gated_norm do), so acquire `tools/gpu_lock.sh` "
+                         "before invoking it — the opposite of the AGENTS.md deadlock rule for the "
+                         "self-locking drivers")
     ap.add_argument("--negative", action="store_true")
     ap.add_argument("--no-verify", action="store_true",
                     help="skip the operand-rebuild proof (it is the gate's own foundation)")
@@ -920,6 +922,16 @@ def run_negatives(args, d: Path, fails) -> None:
     layer = R.ATTN_LAYERS[0]
     print("\nnegative tests (rejected where declared, and nowhere else):")
     for name, (why, form, must, must_not) in NEG_KERNEL.items():
+        if args.tile_kernel and name == "carry":
+            # SKIPPED with a reason, not dropped silently. The tiled form is one query ROW per block
+            # (results.md §20), so there is no row-to-row softmax state for `carry` to leak and the host
+            # refuses the injection outright. The boundary M=1 does leave open is head→head INSIDE a
+            # block, and that control exists: `attn_tile_model.py gate --negative` runs `headcarry`,
+            # localised by `h % G`. Printing the skip is what keeps "six injections ran" from being read
+            # as "all seven ran" — the vacuous-negative trap in AGENTS.md.
+            print("  %-13s SKIPPED under --tile-kernel: one row per block has no row-to-row state to "
+                  "leak (§20); the head->head analogue is `headcarry` in attn_tile_model.py" % name)
+            continue
         # Injected at THIS run's split, not at a forced 1. That is what makes `nomax` the
         # anti-vacuity for a split row: the un-rescaled running max lives inside the online tile loop
         # each split block runs, so an injection that moves nothing at --split 4 means the split

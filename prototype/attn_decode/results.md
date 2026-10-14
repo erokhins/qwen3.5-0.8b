@@ -558,7 +558,10 @@ The honest reading of the first asterisk: this version stages K per *pair*, so t
 issue four identical 512-byte loads and write them into the same LDS slots with the same bytes. That is
 benign and probably cheap (L1 likely serves three of the four), but a traffic claim may not rest on an L1
 hit, so the model books all four and the numbers above are the pessimistic ones: **the re-use actually
-booked is M = 4x, not G x M = 16x.** Hoisting the stage to block level — stage the group's rows once per
+booked is M = 4x, not G x M = 16x.** [Superseded by §20: the re-use actually available as shipped was
+**1x**, not 4x — staging per pair fetches each lane row G times per block, and pass 2 had no V stage at
+all. Block-level staging of both K and V is what makes the honest number G = 4x.] Hoisting the stage to
+block level — stage the group's rows once per
 sub-block, let a pair substitute only its own appended lane at the use site, the one lane where pairs
 differ — is the remaining factor of G, ~15 lines in pass 1 plus a pass-2 sub-block loop, and it is worth
 running *only if* the device says bytes still bind, because at M=4 the traffic term (27.3 ms) is already
@@ -617,7 +620,10 @@ Three things in that output are load-bearing and none of them is the headline:
 
 `tilecarry` is §07.3's bug in its new shape: with M rows per block the leak is *between rows of one
 block*, which the shipped per-(row,head) form cannot express — so `run.py --neg carry` is refused under
-`--tile-kernel` and its tile analogue lives here instead.
+`--tile-kernel` and its tile analogue lives here instead. [Superseded by §20: one row per block makes a
+row-to-row leak unrepresentable, so this row is retired. Its successor `headcarry` leaks a head's state
+into the next head of the SAME block, which is the boundary M=1 actually leaves open, and it is localised
+by `h % G` rather than by row index.]
 
 **Device pass, hand-off (the parent runs these; `run.py` self-locks, `decode_run` does not).**
 Correctness first, then timing, blocking, zero subagents, best-of-3, and §7 item 3's contamination check
@@ -1173,3 +1179,331 @@ re-deriving. `--attn-tile` stays `0` indefinitely, not provisionally.
 argv, the run's own echo is checked against it, and the verdict requires `total == n_rows`, so §17's silent zero-row
 coverage is structurally impossible. That is the fourth checker this session made capable of failing, and unlike
 the other three it was built *before* it was needed rather than after it lied.
+
+## 20. §19's cause, fixed CPU-side (2026-10-14, worker pass: **no device touched, no timing taken**): the partial slot had no KV-group term
+
+§19 ended with the tile form barred from measurement until its streaming merge was fixed. This section names
+the cause, fixes it, and re-establishes the claim on the CPU mirror. **No device was touched and no timing was
+taken**; the device commands are handed over in §20.8.
+
+### 20.1 The cause is an address, not a rounding
+
+`attn_core` writes a split row's partial to `((qrow*N_Q + head)*a.split + y)*(DH+2)` — the **full** head
+index, so the two KV groups of one row own different slots. §12's tiled form wrote
+`((row*ATTN_TILE_G + h)*windows + y)*(DH+2)` — the head-**in-group**, with no KV-group term — and
+`attn_combine` had a second branch that read back exactly that layout. Above `MAXSC`, `blockIdx.x = 0` and
+`blockIdx.x = 1` of one row therefore wrote the same `(2 + DH)` floats, and the merge read one of them for
+**both** heads: half of every streaming row's heads came out as the other KV group's answer, bit for bit, with
+the row's own gate applied on top. Two self-consistent layouts, joined by a branch, so nothing could notice.
+
+| site | §12 (what §19 ran) | §20 |
+|---|---|---|
+| `attn_tile_body` epilogue | `a.part + ((row*ATTN_TILE_G + h)*windows + y)*(DH+2)` | `a.part + ((row*N_Q + head)*a.split + y)*(DH+2)` — `attn_core`'s expression, same file, line 382 vs 702 |
+| `attn_combine` | two branches, one per layout, chosen by `a.tile_kernel` | **one** merge; `tile_kernel` decides which CORE ran and must not choose an address |
+| `tile_part_floats` | `nrows*ATTN_TILE_G*split*(DH+2)` (half the shipped footprint) | `nrows*N_Q*split*(DH+2)` — the footprint `engine/kernels_attn.cpp:attn_part_floats` already allocates |
+| lane cut | `blo = y * MAXSC` (fixed windows) | `blocks_for_row(a, row)` then `span = ceil(n/s_row)` — a CALL into the shipped form's own rule, so the one-pass/streaming boundary cannot drift |
+
+### 20.2 The reproduction had to be built first, because nothing on the box reaches MAXSC
+
+Every pinned prompt is under 512 tokens, so every element §12's gate ever compared came from the one-pass
+route — `gate` prints `windows 1` on all five spans, and that line was the whole tell. Built:
+
+* `wide_case` — a **SYNTHETIC-WIDE** wave (named as such in its own output): real pinned L03 stage rows,
+  cycled to fill 1024 positions, so geometry, addressing and reduction order are real and the *content* is
+  not HF ground truth. It takes a `start` so a wave can be placed exactly on the boundary.
+* `decode_steps` — the only HF-pinned rows above `MAXSC` on the box: `wide640f`/`wide1024f`'s `decode7` L03,
+  re-shaped as one-row waves at 648 and 1032 lanes, with `attn_out_pre_gate` pinned.
+* `PartBuf` — the partial scratch modelled as an **address space** with last-writer-wins and an alias report,
+  because the defect was an address; a mirror that hands each row a Python list cannot express two blocks
+  writing one slot.
+
+Two defects in the mirror surfaced on the way, and both are the kind that hide behind a green gate:
+
+* `merge_partials` returned `(m, acc)` and its caller divided by 1. On the one-pass route that is harmless
+  (the weights were already normalised); on the streaming route it is §07.3's mis-normalisation, and it had
+  been sitting in the mirror since §12 because no pinned fixture reaches 512 lanes. The first straddling
+  anchor printed `cos 0.449` and that is what gave it up. **A path a gate cannot reach has no tests,
+  including tests of the gate.**
+* The first version of `compare` modelled the *shipped* side with the layout read from the tile header, so it
+  compared two aliased waves and reported the fixed geometry as the one that moved 512 rows. The frozen form
+  is the reference and is now always modelled with its own spelling; a check whose reference side is derived
+  from the variable under test cannot adjudicate it.
+
+### 20.3 The two candidate causes, priced apart
+
+Same operands, same mirror, four geometries, judged against the published floor `row_1cos_max = 2e-3`
+(imported from `engine/gate.py`, not retyped). "group-COLLAPSED" is §12's slot expression, re-injected:
+
+| lane cut / partial layout | rows moved | elements moved | worst row 1-cos | against the floor |
+|---|---|---|---|---|
+| per-row-slice / group-dimensioned (**as §20 ships**) | 0/1024 | 0/2,097,152 | — | identical |
+| fixed-window / group-dimensioned (§12's grouping **alone**) | 64/1024 | 65/2,097,152 | 4.768e-07 | inside, ~4,200x |
+| per-row-slice / group-collapsed (the **aliasing alone**) | 512/1024 | 523,929 | 1.137 | OUTSIDE, ~570x |
+| fixed-window / group-collapsed (§12 exactly) | 512/1024 | 523,961 | 1.137 | OUTSIDE, ~570x |
+
+So §19's hypothesis was not wrong, it was small: re-windowing a streaming row is a reassociation, worth 65
+elements and a worst 1-cos of 4.8e-07 — four decades inside a band it never needed. The aliasing is what
+§19's room-13.25 rows were. Three witnesses, all exact rather than banded:
+
+* the collapse writes 4,096 of the 8,192 distinct slots that 8,192 writers ask for — an alias by count;
+* every one of the 512 streaming rows comes out with its four head-pairs **bit-identical to each other**, and
+  in 500 of them group 0's answer equals group 1's *correct* answer bit for bit (the 12 exceptions are exactly
+  the rows where the window grouping also moved a bit, which is itself the proof the causes separate);
+* **0** rows at or below `MAXSC` are touched — a one-pass row writes no partial, so it has no slot to steal.
+  That is the derived must-not-catch set, and it is why §19's failures were all above 512.
+
+Boundary rows, priced by both forms: row 511 (512 lanes) → 1 block `[(0, 512)]`; row 512 (513 lanes) → 2
+blocks `[(0, 257), (257, 513)]`. §12's fixed windows cut the same row at 512/1, which is the grouping
+difference in one line.
+
+### 20.4 The geometry, and why `M = 1`
+
+`attn_core` is frozen, so everything below is in `attn_tile_body` and its launcher.
+
+| | §12 | §20 |
+|---|---|---|
+| block | G=4 heads x M=4 rows, 8 warps, 2 warps per (row,head) pair | G=4 heads of **one** row, 4 warps, **one warp per head** |
+| lane range per block | window ∩ widest row of the tile | the row's own slice `[y*span, min(n, (y+1)*span))` |
+| K stage | per pair — G identical fetches per lane row | **per block** — one warp stages one lane, all G warps read it |
+| V stage | **none**: pass 2 read `a.vcache` at the use site, per pair | staged per block, same shape as K, `static_assert(ATTN_TILE_L >= TILE)` |
+| pass 2 | run redundantly by both warps of a pair | run once per head, by that head's warp |
+| grid | `(N_KV, split, ceil(rows/M))`, 256 threads | `(N_KV, split, rows)`, 128 threads |
+
+Why no row tiling: with a per-row slice, two rows in one block do not share a lane range — a 1024-lane row and
+a 513-lane row both cut into two blocks, but their slice `y=1` is `[512,1024)` and `[257,513)`, a union of 767
+lanes, above `MAXSC`. A row tile would size the K/V stage and the score staging by the widest *pair* rather
+than by the staging, and would reopen §16's cross-row carry question to buy nothing: the byte lever lives in G,
+and G is taken. `static_assert(ATTN_TILE_M == 1)` says so at compile time, and the mirror's
+`tile_lane_segments` declines the same request rather than modelling a geometry the kernel refuses.
+
+The bit-identity contract is now stronger than §12's, not weaker: the same five ordered reductions, **and** the
+same lane cut, so the tiled form is bit-identical on the streaming route too rather than merely banded. On the
+real >MAXSC anchors (`wide1024f` 1032 lanes / 3 blocks, `wide640f` 648 / 2) the two forms differ in
+**0 of 2,048** elements each; before the fix it was 1,023 and 1,025. Mirror-vs-pin on those rows is
+1529/2,048 at cos 0.99977 and 1790/2,048 at cos 0.99758 — printed and **not judged**: `attn_form_band.py`'s
+published rule is that above MAXSC the row is judged by `row_1cos_max` and meanrel is reported, because no
+per-row bound exists for a route that reassociates. Judging those columns against `stage_meanrel_max` — which
+an earlier version of this line did — invented a per-row bound and turned a legal §07.3 row red.
+
+### 20.5 The traffic claim, re-derived from the staging loops
+
+`stage_copies()` reads which staging loop the header contains instead of assuming one, because traffic is
+multiplicity of *global* requests:
+
+| header | staging shape | fetches per lane row per block | re-use |
+|---|---|---|---|
+| §12, as shipped | `for (int p = w; p < pairs; p += nw)` — per pair | 4 | **1x** |
+| §20, as shipped | `for (int rr = s_lo + w; rr < s_hi; rr += nw)` — per block | 1 | **4x = G** |
+
+So §12's booked "M = 4x" was the traffic model's assumption, not the kernel's behaviour, and the header
+declared no `s_v` at all: V was a global read per touch, exactly the shipped form's. §20's numbers, from the
+same closed-form census (`traffic`): 25.79 GB → **6.45 GB**, 1.000 → 0.250 byte/flop, and the traffic term
+108.8 ms → **27.2 ms** at the measured 237 GB/s. The V-per-pair counterfactual — hoist K, leave V where §12
+left it — is 16.12 GB / 68.0 ms, i.e. half-staging buys a fifth of the lever, because V is half the bytes.
+These are arithmetic on the read census, not measurements.
+
+### 20.6 Negative controls, with derived sets — including one that could not fail
+
+Cases: p300 spans `0-63` and `64-127`, the two real >MAXSC decode anchors, and a **tile-boundary wave**
+(`wide_case(start=MAXSC-1)`: rows of exactly 512, 513, 514, 515 lanes). 1,072 (row,head) pairs per control.
+
+| control | caught | blind | why the blind set is blind |
+|---|---|---|---|
+| `readpast` (mask gone) | 1040/1072 | 32 | a row that already attended `cap` lanes cannot see the mask disappear; 20 reads land on poison |
+| `dropcurrent` (§05.7 append forgotten) | 1072/1072 | 0 | — |
+| `gqaoff` (whole group reads the neighbour) | 1072/1072 | 0 | — |
+| `dimhalf` (128 of 256 dims) | 1064/1072 | 8 | softmax of a singleton is 1.0 whatever the score |
+| `gqa_head0` (one head reads the neighbour) | 134/1072 | 938 | only head 0's K/V changes — the shared-stage wiring test |
+| `headcarry` (head h seeded from head h-1) | 804/1072 | 268 | a block's first head in a group (`h % G == 0`) has no predecessor to leak from |
+| `partalias` (§19's bug, re-injected) | 20/1072 | 1052 | a one-pass row writes no partial, so it has no slot to steal |
+
+Every row is **must-not-hit 0** except where derived, and the whole matrix is derived from geometry: §16's
+`tilecarry` is retired because one row per block has no row-to-row state to leak (the host now says so when
+asked), and `headcarry` replaces it at the boundary M=1 actually leaves open.
+
+The lesson that cost the most: run over pinned spans alone, `partalias` caught **0 of 1024** with an empty
+must-catch set — a negative that cannot fail, in exactly the shape `mlp_gemv` and `mixed_bw` filed. The
+streaming controls are only meaningful above `MAXSC`, so the wide anchors and the boundary wave are now
+mandatory cases, and `--neg-wide` names them.
+
+### 20.7 Census, compile-only (`hipcc -O3 --offload-arch=gfx1151 -Rpass-analysis=kernel-resource-usage -c`)
+
+| kernel | VGPRs | SGPRs | scratch | spill | LDS per block |
+|---|---|---|---|---|---|
+| `attn_core` (frozen, 512 threads) | 53 | 75 | 0 | 0 | 38,944 B |
+| `attn_tile_wave` (§12, 256 threads) | — | — | — | — | 20,480 B, and `lds` FAILs it |
+| `attn_tile_wave` (§20, 128 threads) | 47 | 52 | 0 | 0 | **12,288 B** |
+
+The descriptor's 12,288 B is exactly the source's own `__shared__` sum — `s_sc` 4,096 + `s_k` 4,096 +
+`s_v` 4,096 — so §3's LDS inflation is `attn_core`-specific, and the tile form reserves about a third of the
+shipped core's LDS while staging more of the row. `lds` before/after, on the two headers:
+
+```
+head.h (§12):  declares s_sc 16.38 kB, s_k 4.10 kB | NOT DECLARED: s_v
+               FAIL V is staged and a streaming tile fits it: NO V STAGE AT ALL  -> lds: FAIL
+live header:   declares s_sc 4.10 kB, s_k 4.10 kB, s_v 4.10 kB, block LDS 12.29 kB
+               ok    reach 4.10 kB of 4.10 kB declared, spellings `(rr - s_lo) * DH`, `slot * DH`
+               ok    static_assert(ATTN_TILE_L >= TILE) present                   -> lds: PASS
+```
+
+`selftest` is 13/13, including the three `__shared__` sizes derived from their own bracket factors, and
+`gate` is green on all five pinned spans (567,296 elements, `tile-vs-shipped 0`, `ref-vs-pin 0`, poison 0;
+mirror-vs-pin 194/567,296 at §10.4's ordering floor).
+
+### 20.8 What this pass does **not** claim, and the device hand-off
+
+Not claimed: any timing, any device confirmation, or that M>1 was ever priced on device (it was not, and the
+`static_assert` now refuses it). `--attn-tile` stays `0` in the engine default until the four §19 readings come
+back for the fixed form. The mirror's bit-identity is between the two mirrored forms; the device gates below
+are what decide whether it survives the compiler and the grid.
+
+Locks: `engine/gate.py` and `prototype/attn_decode/run.py` do **not** self-lock (run.py's `--tile-kernel` help
+claimed the opposite and has been corrected), so hold the lock across the A/B pair; the self-locking drivers
+listed in AGENTS.md are not involved here.
+
+```bash
+# 1) the two fixtures §19 used, both forms, one lock per pair so ship and tile cannot be split by another job
+tools/gpu_lock.sh acquire "attn-tile-fix-640"; tools/gpu_lock.sh util
+.venv/bin/python engine/gate.py --fixture wide640f  --attn-tile 0 --scope form --work tmp/tilefix640/ship
+.venv/bin/python engine/gate.py --fixture wide640f  --attn-tile 1 --scope form --work tmp/tilefix640/tile
+tools/gpu_lock.sh release "attn-tile-fix-640"
+.venv/bin/python engine/attn_form_band.py --ship tmp/tilefix640/ship --tile tmp/tilefix640/tile --prompt-len 640
+
+tools/gpu_lock.sh acquire "attn-tile-fix-1024"; tools/gpu_lock.sh util
+.venv/bin/python engine/gate.py --fixture wide1024f --attn-tile 0 --scope form --work tmp/tilefix1024/ship
+.venv/bin/python engine/gate.py --fixture wide1024f --attn-tile 1 --scope form --work tmp/tilefix1024/tile
+tools/gpu_lock.sh release "attn-tile-fix-1024"
+.venv/bin/python engine/attn_form_band.py --ship tmp/tilefix1024/ship --tile tmp/tilefix1024/tile --prompt-len 1024
+
+# 2) the op's own wave gate, including its device-side negatives (§16's refusal is unchanged for `--neg carry`)
+tools/gpu_lock.sh acquire "attn-tile-fix-op"; tools/gpu_lock.sh util
+.venv/bin/python prototype/attn_decode/run.py --wave --wave-rows 64 --long-fixture p300
+.venv/bin/python prototype/attn_decode/run.py --wave --wave-rows 64 --long-fixture p300 --tile-kernel
+.venv/bin/python prototype/attn_decode/run.py --wave --wave-rows 64 --long-fixture p300 --tile-kernel --negative
+tools/gpu_lock.sh release "attn-tile-fix-op"
+```
+
+What each must say: `attn_form_band` must print `bit-identical` on every above-MAXSC row — after §20 the two
+forms agree by construction, so a single differing element there is a defect and not a band. §19's five
+failing rows (`512, 518, 519, 1021, 1023` at 1024; `636` at 640) must move from OUTSIDE to inside with their
+decision room unchanged. If the forms differ on device but not in the mirror, the suspect is the compile, not
+the arithmetic: re-take `isa` and diff the descriptor.
+
+### 20.9 Traps, for the index
+
+* **Two layouts joined by a branch are invisible to both sides.** The tile form's slot expression and its merge
+  agreed with each other, and the shipped form's agreed with itself, so every per-form check passed and only a
+  cross-form comparison could see it — which is why the gate that matters compares the two forms' bits, and why
+  `part_layout()` now reads every `a.part +` site out of the header and refuses a row multiplied by anything but
+  `N_Q`.
+* **A check whose reference side is derived from the thing under test cannot adjudicate it.** The first
+  straddling `compare` read the partial layout once and applied it to both sides, and reported the *fixed*
+  geometry as the one that moved 512 rows.
+* **A negative with an empty must-catch set is not a negative.** `partalias` scored a clean 0/1024 on the
+  pinned spans alone; only rows above `MAXSC` can be hit by it, so the cases that make it meaningful are now
+  mandatory arguments of the gate rather than an optional extra.
+
+
+## 21. §20 confirmed on device (2026-10-14, main agent: blocking, lock held, zero subagents) — **4.03×, inside the win line, and the default now flips**
+
+All numbers below were taken by the main agent in the foreground with `tools/gpu_lock.sh` held and **no
+subagent active**, in the window 15:32–16:10 UTC. `gpu_lock.sh util` read 91–93 % throughout, which per
+`bench/performance-status.md` §6 is not a usable gate for this box (identical clean runs read 24–91 %); the
+guarantee being relied on is the zero-subagent foreground shape, not the util figure.
+
+### 21.1 Correctness first, on both fixtures §19 used, both forms
+
+| run | result |
+|---|---|
+| `run.py --wave --wave-rows 64 --long-fixture p300` (shipped form) | 4112 stage comparisons, **0 failures** |
+| same `--tile-kernel` | 4112 stage comparisons, **0 failures** |
+| same `--tile-kernel --negative` | **0 failures**, with `carry` SKIPPED with a printed reason (§20.4: one row per block has no row-to-row state; the head→head analogue is the mirror's `headcarry`) |
+| `gate.py --fixture wide640f --attn-tile 1 --scope form` | **ENGINE GATE PASS**, 640/640 pinned prefill rows inside the floors (worst cos deficit 4.6100e-04, worst meanrel 3.1672 %, both at row 2) |
+| `gate.py --fixture wide1024f --attn-tile 1 --scope form` | **ENGINE GATE PASS**, 1024/1024 rows, same worst rows |
+| `gate.py --fixture wide{640,1024}f --attn-tile 1 --scope full` | **ENGINE GATE PASS** on both — the §19 batched-vs-carried wave-width comparisons that `--scope form` deferred also pass with the form held at `1` |
+| `gate.py --fixture dec8 / dec64f / dec300f --attn-tile 1` | **PASS / PASS (2 TIE steps, as on the shipped form) / PASS** |
+
+Then the comparison §19 was built for, `attn_form_band.py --ship …/ship0 --tile …/ship1`:
+
+| anchor | rows judged above `MAXSC` | bit-identical | elements differing | argmax moved | pooled over band elements |
+|---|---|---|---|---|---|
+| `wide640f` (lanes 648) | 136 | **136** | **0** | 0 | cos 1.00000000 (1-cos 1.110e-16), meanrel 0.000e+00 |
+| `wide1024f` (lanes 1032) | 520 | **520** | **0** | 0 | cos 1.00000000 (1-cos 0.000e+00), meanrel 0.000e+00 |
+
+§20 predicted this from the mirror and the device agreed: after the slot fix the two forms do not merely sit
+inside §07.3's band above `MAXSC`, they produce the **same bits** there. §19's five failing rows
+(`512, 518, 519, 1021, 1023` at 1024 lanes; `636` at 640) are gone — not waived, not re-banded: there is
+nothing left to judge, because nothing differs. That is a stronger gate than the one §19 applied, and it is
+the one §07.3 always wanted.
+
+### 21.2 The measurement: 1024-lane prefill, `attn` row, best-of-3, alternating
+
+`./engine/build/decode_run --ids <1024 ids> --steps 1 --time-waves --gemm library --attn-tile {0,1}`, run
+`t0 t1 t0 t1 t0 t1` in one lock hold so no other job can sit between a pair:
+
+| quantity | `--attn-tile 0` (shipped) | `--attn-tile 1` (tiled) | change |
+|---|---|---|---|
+| `WAVE gran=stage family=attn ms` | 108.340 / 107.672 / 109.352 → **107.67 best** | 27.053 / 26.896 / 26.703 → **26.70 best** | **−75.2 %, 4.03×** |
+| `WAVE gran=stage … wall_ms` (whole wave) | 331.588 / 331.716 / 329.549 → **329.55 best** | 247.870 / 240.997 / 246.011 → **241.00 best** | **−26.9 %** |
+| `family=gdn_rec ms` (unchanged by this change) | 129.363 / 128.683 / 125.447 | 123.134 / 121.571 / 125.678 | within run-to-run noise |
+| `GROUP matmul_ms` | 68.66 / 71.52 / 70.12 | 72.04 / 70.15 / 71.66 | unchanged, as expected |
+
+**The win line (§07.3 admission, `traffic` FALSIFIER pair): attn ≤ 40 ms. It is met at 26.70 ms.** And the
+model is what makes this number trustworthy rather than lucky: §20.5 predicted the traffic term at 6.45 GB /
+237 GB/s = **27.2 ms**, and the device returned **26.70 ms** — 1.8 % inside a prediction made before the run.
+FALSIFIER A (bytes fall 4×, attn does not move) is refuted; FALSIFIER B (40–80 ms, something else binds) is
+not reached. §4's "traffic is not the wall" verdict, written when the stage was per-pair and V was never
+staged at all, is now superseded: traffic *was* the wall, and the stage was the reason traffic was 4× what
+the geometry claimed.
+
+### 21.3 The headline, and where the change does **not** reach
+
+Prefill, `RESULT ms_total` on the same 1024-token prompt, best-of-3: **385.153 → 307.464 ms = 2,660 →
+3,336 prompt tok/s, +25.4 %.** Today's shipped-side baseline reads 2,660 against the ledger's 2,706 (§6's
+spread on an unpinned desktop), so quote the ratio, not the pair, against older rows.
+
+Width sweep, same shape (`--steps 1`, best-of-2 each side), which also bounds the regression risk of flipping
+the default for short prompts:
+
+| prompt lanes | `--attn-tile 0` ms | `--attn-tile 1` ms | change |
+|---|---|---|---|
+| 300 (all rows below `MAXSC`) | 147.274 | 140.151 | −4.8 % |
+| 640 | 258.646 | 235.580 | −8.9 % |
+| 1024 | 385.153 | 307.464 | −20.2 % |
+
+Every width improved; the gain grows with the share of rows above the staging, exactly as the traffic model
+has it. The sub-`MAXSC` gain at 300 lanes is the block-level stage paying for itself even on the one-pass
+route, where the shipped form still reads each K row once per (row,head) pair.
+
+**Decode is unchanged, by construction rather than by measurement.** A decode body is one query row, and
+`attn_decode_layer` runs the fused single-row form under either flag (`engine/decode_run.cpp:104-109` says so
+explicitly), so the ledger's decode ruler is untouched by this commit. The differential confirms it rather
+than contradicting it: prefill 1024 + 128 decode steps, `(ms_total(129) − ms_total(1)) / 128` = 12.46 / 12.38
+ms/token shipped vs 12.43 / 12.42 tiled — a difference inside the run-to-run noise, and in no case a
+regression. The honest headline stays **decode 87.1 tok/s @128 lanes** (ledger, unchanged) and the prefill
+ruler is the one that moved.
+
+### 21.4 The default flips to the tiled form, and why that was the pre-registered condition
+
+§20.8: *"`--attn-tile` stays `0` in the engine default until the four §19 readings come back for the fixed
+form."* They came back: both anchors, both scopes, the three short fixtures, the op's own wave gate and its
+device-side negatives, and the form-vs-form bit-identity on 656 above-`MAXSC` rows. So `decode_run.cpp`
+(`int attn_tile`) and `engine/gate.py` (`--attn-tile` default) both move to `1` **in the same commit** — two
+defaults that can disagree is the failure mode §19 already filed once, and `gate.py`'s NUMERICS cross-check
+(`str(echoed_tile) == str(args.attn_tile)`) is what proves they still agree after the flip.
+
+`--attn-tile 0` remains selectable and is no longer the shipped recommendation; it is the frozen witness the
+tile form was proved against, and the A/B stays one flag wide.
+
+### 21.5 What is still open
+
+* **`M > 1` was never priced.** §20.4 refuses it at compile time on the argument that two rows in one block do
+  not share a lane range, so row tiling buys nothing once G is taken. That argument is arithmetic, not a
+  measurement, and it has not been falsified — but it also has not been tested against the real cost of a
+  128-thread block (occupancy is 16 either way per the `isa` census, so the block size is not obviously the
+  binding term). If a future pass wants more than 26.70 ms it has to say which term of
+  max(27.2 traffic, 30.3 arithmetic-at-hand-GEMM-rate) it is attacking, and 26.70 is already at both of them:
+  the remaining headroom in *this* shape is small, and the next win is elsewhere (GDN recurrence, 125 ms, 39 %
+  of the wave).
+* The CPU suite `speccheck/run_all.py --quick` (11 gates) was re-run after the change and passed, and nothing
+  in `speccheck/` consumes this path anyway. `M > 1` was never priced.

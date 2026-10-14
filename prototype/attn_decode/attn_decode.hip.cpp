@@ -248,13 +248,17 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (neg == NEG_CARRY) {
-            // `carry` seeds a row's softmax state from the PREVIOUS query's, and in the tiled form
-            // consecutive queries are pairs of ONE block, so the shipped injection's plumbing (one
-            // stale buffer per launch, keyed by head) cannot express it here. Refusing is the honest
-            // answer: the tile form's analogue — a state leaking between two rows of the same row
-            // tile — is injected and gated in the CPU mirror instead (`attn_tile_model.py
-            // --negative tilecarry`), where the same must-catch rule can be checked row by row.
-            fprintf(stderr, "--tile-kernel refuses --neg carry; see attn_tile_model.py tilecarry\n");
+            // `carry` seeds a row's softmax state from the PREVIOUS query's. In the shipped form
+            // consecutive queries are blocks of one launch and that is expressible; in the tiled form
+            // since §20 ONE QUERY ROW IS ONE BLOCK, so there is no row-to-row leak left to inject —
+            // the only state a tile block carries is its own row's, per warp. Refusing is still the
+            // honest answer rather than silently no-oping, and the surviving analogue (a state leaking
+            // between two HEADS of the one block, which is what §12's row tiling would have permitted)
+            // is injected and gated in the CPU mirror as `headcarry`, where the must-catch set follows
+            // from the block geometry: heads with h%G != 0 move, the group's first head cannot.
+            fprintf(stderr, "--tile-kernel refuses --neg carry: at one row per block (results.md §20) "
+                            "there is no row-to-row state to leak; the head-to-head analogue is "
+                            "`attn_tile_model.py gate --negative` (`headcarry`)\n");
             return 1;
         }
     }

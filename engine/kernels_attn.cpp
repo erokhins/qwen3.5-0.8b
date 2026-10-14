@@ -274,10 +274,11 @@ void attn_decode_layer(const AttnLayerArgs& a) {
         core.krope_out = nullptr;
         core.gate_out = nullptr;
         if (wave_tile) {
-            // Phase 2: the grid is (KV group, lane window, row tile), and `split` already IS the
-            // window count — `split_for(lanes_last)` here and `tile_split_of(lanes_last)` in the op
-            // header are the same expression, so the two forms cannot promise different partial
-            // counts from this launcher. The widest-row-first inversion lives inside the kernel.
+            // Phase 2: the grid is (KV group, lane slice, query row) and `split` already IS the slice
+            // count — `split_for(lanes_last)` here and `tile_split_of(lanes_last)` in the op header are
+            // the same expression, so the two forms cannot promise different partial counts from this
+            // launcher. One row per block since §20, so the row extent is `rows`, and the widest-row-
+            // first inversion lives inside the kernel.
             core.tile_kernel = 1;
             attn_tile_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
         } else {
@@ -288,9 +289,11 @@ void attn_decode_layer(const AttnLayerArgs& a) {
         // The merge: `(max,sum,acc)` per (row, lane block) → one row, then §05.6's gate. Same algebra
         // as the tile loop, same lifetime (A-17: it never leaves this launch). A row the staging fits
         // is skipped here — its single core block already finished it — which is what lets a wave carry
-        // one-pass and streaming rows in the same grid. The grid's x extent is N_Q either way, because
-        // a group's G heads make N_KV*G = N_Q of them; only the partial LAYOUT differs, and
-        // `attn_combine` reads `tile_kernel` to pick which layout it is merging.
+        // one-pass and streaming rows in the same grid. The grid's x extent is N_Q either way, AND SO IS
+        // THE PARTIAL LAYOUT: `attn_tile_wave` writes `attn_core`'s slot expression, keyed by the FULL
+        // head, so one merge serves both forms (results.md §20 — two layouts that each agreed with
+        // themselves is exactly what §19's aliasing was). `tile_kernel` is bookkeeping for the negative
+        // controls and for which CORE ran; it must not decide an address.
         c.tile_kernel = wave_tile ? 1 : 0;
         attn_combine<<<dim3(N_Q, rows), THREADS>>>(c);
     }
