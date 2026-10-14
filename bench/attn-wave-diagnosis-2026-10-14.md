@@ -308,3 +308,38 @@ Stated before any measurement, against the numbers in §0:
 * Anything that reads `attn`'s 0.236 TF/s as "attention is small, leave it" is now contradicted with
   arithmetic: it is 33.3 % of the post-flip wave, the largest single non-matmul item after GDN, and
   it grows `O(T²)` in context while GDN is linear.
+
+## 9. The counter pass, run by the parent (2026-10-14, lock `ATTN-C5`, `rocprofv3`)
+
+§2 left one question open on principle: the byte wall (108.8 ms predicted, 109.2 ms measured) and the
+instruction wall (≤106 ms static bound) both land on the measured line, and a paper argument cannot separate
+them. It ran, and it separates them decisively.
+
+```
+rocprofv3 --kernel-include-regex "attn" --pmc SQ_INSTS SQ_INSTS_VALU SQ_INSTS_LDS SQ_WAVES \
+    --output-format csv -d tmp/rocp -o attn3 -- ./engine/build/decode_run --ids <1024-token prompt> --steps 1
+```
+
+| counter, `attn_core` only | measured | reading |
+|---|---|---|
+| `SQ_INSTS_VALU` | **6.528 G** warp-instructions | issue floor ≈ **20 ms** at 4 inst/CU/clk × 40 CU × ~2 GHz |
+| `SQ_INSTS_LDS` | 534.7 M | 8 % of VALU — LDS is not the problem either |
+| `SQ_WAVES` | 2.135 M waves | matches the geometry in §1 |
+
+**So the instruction wall is ~19 % of the line, not the wall.** Even reading `SQ_INSTS_VALU` as a strict subset of
+all issued instructions and doubling it for SALU/VMEM/branch overhead, the issue floor is ~40 ms against a
+109 ms kernel, while the byte wall predicts 108.8 ms against a measured 109.2 ms. **The kernel is
+memory-pattern bound on redundant K/V traffic, as §4 said, and the redundant-softmax instruction win is a
+secondary effect worth maybe a fifth of the line, not the main prize.**
+
+Two caveats recorded rather than hidden. `rocprofv3` logged `Timeout while waiting for queue sync: 32 kernels
+still active`, so the profiled run's tail may be truncated — which biases the instruction total *down*, and since
+the conclusion is "instructions are not binding", a truncated count makes the finding conservative rather than
+optimistic. And the same run cannot be timed (profiling changes everything); the 109.2 ms comes from the
+unprofiled attribution, and the counters are being compared to it, not measured by it.
+
+**Consequence for Phase 2, stated as a requirement rather than an idea:** tile for `G × M` re-use. That is the
+change with the byte wall underneath it — `G=4 × M=16` drives the 25.79 GB to 403 MB and the traffic term to
+**1.7 ms**, at which point arithmetic (8.8 ms vector, 1.4 ms matrix) becomes the wall. Deduplicating the softmax
+across warps is worth doing in the same rewrite, but it is now priced as ~1/5 of the line, and anyone reading the
+Phase 2 spec should not expect it to carry the win on its own.
