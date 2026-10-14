@@ -219,11 +219,15 @@ void gdn_rec(const float* q, const float* k, const float* v, const float* g, con
 //
 //   kSeq    §04.4's recurrence, one `gdn_rec` launch per token per layer. THE DEFAULT and the shipped
 //           form: every decode pin is pinned through it, and `prototype/gdn_decode` gates it.
-//   kChunk  §04.7's chunked scan (`prototype/gdn_chunk/gdn_chunk_kernels.h`): one `prep` and one
-//           `carry` launch per layer per BODY instead of one launch per token. Its error budget was
-//           admitted on CPU by `prototype/gdn_chunk/phase1.py` against the pinned dumps; the form
-//           itself is band-gated, never bit-gated, because a chunked dot's association is not the
-//           sequential dot's (§10.1) — see the deviation list at the top of that header.
+//   kChunk  §04.7's chunked scan (`prototype/gdn_chunk/gdn_chunk_kernels.h`). KILLED by D-12
+//           (`bench/p9-phase1-2026-10-14.md`) and now refuses to be selected, so this enumerator is a
+//           record rather than a choice: the chunked form's error budget was admitted on CPU by
+//           `prototype/gdn_chunk/phase1.py`, but `bench/p9-phase1c-2026-10-14.md` §1c.1 D6 found its
+//           carry forming the chunk-boundary decay as a quotient of two exps — not the contract's one
+//           exp of a difference — returning NaN wherever the incoming state was zero. A form that fails
+//           the wave's own §04.4 budget because of an expression bug cannot carry an error budget, so
+//           `parse_gdn_scan` refuses the name instead of routing to it. The kernel, `phase1.py` and
+//           `kernel_price.py` stay in the tree so the route can be re-funded rather than reconstructed.
 //
 // `resolve_gdn_scan` is the one place the row-count rule lives, and it is deliberately shaped like
 // `resolve_wave_gemm`: a ONE-ROW body is kSeq whatever was asked for. That is not a performance

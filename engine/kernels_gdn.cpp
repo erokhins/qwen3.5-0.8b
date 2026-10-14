@@ -49,11 +49,26 @@ void gdn_rec(const float* q, const float* k, const float* v, const float* g, con
 // orders them, exactly as `attn_prep`/`attn_core` are ordered in `kernels_attn.cpp`.
 GdnScan parse_gdn_scan(const std::string& name) {
     if (name == "seq") return GdnScan::kSeq;
-    if (name == "chunk") return GdnScan::kChunk;
-    throw std::runtime_error("--gdn-scan takes `seq` (§04.4's recurrence, one launch per token) or "
-                             "`chunk` (§04.7's chunked scan, two launches per body); got '" + name +
-                             "'. Refusing rather than guessing, because this flag names which side of"
-                             " an A/B the run is");
+    if (name == "chunk") {
+        // FAILED CLOSED, deliberately, and this is the note rather than a comment on a throw: the
+        // chunked scan is a killed route, not an experimental one. `bench/p9-phase1-2026-10-14.md` D-12
+        // dropped it for launch-bound arithmetic (54.03 GFLOP per wave against the sequential form's
+        // 33.94), and `bench/p9-phase1c-2026-10-14.md` §1c.1 D6 found the reason it could not simply be
+        // repaired: `gdn_chunk_carry` formed the chunk-boundary decay as a quotient of two exps, which is
+        // not the contract's one exp of a difference, and it returned NaN where the incoming state was
+        // zero. A form that fails its own §04.4 budget because of an expression bug cannot carry an error
+        // budget, so it does not get to look selectable from a flag. The kernel, `phase1.py` and
+        // `kernel_price.py` stay in the tree as the record; the one-line repair D6 names is written there
+        // for whoever re-funds the route.
+        throw std::runtime_error(
+            "--gdn-scan chunk is refused: the chunked scan was killed by bench/p9-phase1-2026-10-14.md "
+            "D-12 and its carry form is known-wrong (bench/p9-phase1c-2026-10-14.md §1c.1 D6: boundary "
+            "decay as gamC/gam[i] underflows to NaN at S=0). Use `seq`. The prototype still runs it: "
+            "prototype/gdn_chunk/run.py.");
+    }
+    throw std::runtime_error("--gdn-scan takes `seq` (§04.4's recurrence, one launch per token); got '"
+                             + name + "'. Refusing rather than guessing, because this flag names which "
+                             "side of an A/B the run is");
 }
 
 const char* gdn_scan_name(GdnScan s) {
@@ -87,6 +102,9 @@ const char* gdn_chunk_refusal(int tokens) {
            "claim, so it needs a new budget line, not a constant edit.";
 }
 
+// NOTE: unreachable from a flag since `parse_gdn_scan` refuses `chunk` (see the D-12 note there). The
+// launcher and its scratch contract stay, because D-12 dropped the route for arithmetic reasons and the
+// next funding round needs the form to be re-runnable, not reconstructed.
 void gdn_chunk_prefill(const GdnChunkLayerArgs& a) {
     if (a.n < 2) {
         throw std::runtime_error("gdn_chunk_prefill: n=" + std::to_string(a.n) + "; a one-row body is"
