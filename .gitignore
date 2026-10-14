@@ -18,6 +18,15 @@ engines/
 # --- Agent scratch / cross-session notes ---
 thinking/
 .junie/
+# Pi harness state, written by the harness itself — never authored here. The one
+# instance today is `engine/.pi/subagents.json`: the pi-subagents plugin's resolved
+# run settings (every value in it is a plugin default), written when a worker runs
+# with cwd=engine/. Two docs already require it to stay out of commits
+# (bench/HANDOFF-2026-10-14.md, bench/speedup-routes-2026-10-14.md). Blanket `.pi/`
+# at any depth; if this repo ever *authors* pi config (`.pi/settings.json`,
+# `.pi/agents/*.md`), replace this line with an explicit allowlist — git cannot
+# re-include a path whose parent directory is excluded.
+.pi/
 
 # --- Build output ---
 build/

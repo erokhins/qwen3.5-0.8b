@@ -137,7 +137,8 @@ the *user-global* `~/.pi/agent/extensions/subagent/config.json` `timeoutMs` → 
 Project `.pi/settings.json` `subagents.agentOverrides.<name>` cannot carry it (`applyBuiltinOverride`
 in `pi-subagents/src/agents/agents.js` has no `timeoutMs` branch), and the only project-scoped
 *enforced* default is a `.pi/agents/worker.md` that **replaces** the builtin worker's prompt —
-not worth it. (This repo has no `.pi/` directory at all today.) So the lever here is the call:
+not worth it. (The only `.pi/` in this repo is `engine/.pi/subagents.json` — harness-written
+plugin state, now gitignored — and there is no `.pi/agents/`.) So the lever here is the call:
 
 ```js
 subagent({ agent: "worker", task: "...",
