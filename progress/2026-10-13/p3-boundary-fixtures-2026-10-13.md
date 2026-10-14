@@ -1,6 +1,6 @@
 # P3 — the three boundary fixtures, and what each one can falsify
 
-Date 2026-10-13. Plan Q5 package **P3** (`bench/plan-prefill-2026-10-12.md` §5.1, finding **F3**).
+Date 2026-10-13. Plan Q5 package **P3** (`progress/2026-10-12/plan-prefill-2026-10-12.md` §5.1, finding **F3**).
 CPU-only: torch dumper plus the CPU gate paths. **No device run in this package**, and no timing taken.
 
 ## Why these three exist

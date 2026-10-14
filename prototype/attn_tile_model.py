@@ -3,7 +3,7 @@
 
 WHY THIS FILE EXISTS (and why it is not just a rerun of `run.py`). Phase 2 replaces the wave's
 `attn_core` with `attn_tile_wave`, whose whole point is that ONE K row is loaded once and fed to
-G x M = 16 score dots (§4/§9 of bench/attn-wave-diagnosis-2026-10-14.md: the wave reads 25.79 GB of
+G x M = 16 score dots (§4/§9 of progress/2026-10-14/attn-wave-diagnosis-2026-10-14.md: the wave reads 25.79 GB of
 K/V to do 25.79 GFLOP, 1.0 byte/flop, and the byte count alone prices the line). The contract is
 §5's: the five ordered reductions of §05.5 survive verbatim, so the tiled form must agree with the
 shipped form BIT FOR BIT on both the one-pass route and §07.3's streaming route — no new band, and
@@ -821,7 +821,7 @@ def cmd_traffic(args) -> None:
     print("\n  Counter to verify the read census, not assume it (§9's line, plus the byte counter):")
     print("    rocprofv3 --kernel-include-regex \"attn_tile\" --pmc SQ_INSTS SQ_INSTS_VALU "
           "SQ_INSTS_LDS SQ_WAVES GRBM_COUNT GRBM_RUN_BUSY_STATS --output-format csv -d tmp/rocp "
-          "-o tile -- ./engine/build/decode_run --ids \"$(cat tmp/q10/ids1024.txt)\" --steps 1")
+          "-o tile -- ./engine/build/decode_run --ids \"$(cat progress/bench/evidence/q10/ids1024.txt)\" --steps 1")
     print(f"    SQ_INSTS_VALU must NOT rise with the tile form (the softmax dedup should cut it: the")
     print(f"    shipped form runs pass 2 in all {C['warps']} warps of its block; the tile form runs")
     print(f"    it once per head ({C['warps']} warps = {G} heads, one warp each, results.md §20), and the byte")

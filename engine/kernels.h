@@ -42,7 +42,7 @@ void glue_add_norm_rows(const uint16_t* s, const uint16_t* delta, const uint16_t
 
 // ---- route (c): the wave matmul route (hipBLAS for the ten fat shapes at wave width).
 //
-// WHAT THIS IS. `bench/prefill-route-spike-2026-10-13.md` §6 item 1 funds hipBLAS for ten shapes
+// WHAT THIS IS. `progress/2026-10-13/prefill-route-spike-2026-10-13.md` §6 item 1 funds hipBLAS for ten shapes
 // (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `in_proj_qkv`, `in_proj_z`, `out_proj`, `gate_proj`,
 // `up_proj`, `down_proj` — 150 of a wave's 186 matmul calls) and §"Wave-path attribution" of
 // `bench/performance-status.md` says why: matmul is 74.4 % of a 1024-token prefill and the hand
@@ -64,7 +64,7 @@ enum class WaveGemm {
     // The shipped default since D-11 admitted it: hipBLAS for a wave body, hand GEMV for a one-row
     // body. Admitted on the audit's terms, and the guarantee is one the reader has to read as weaker
     // than the hand route's: on this route the wave-boundary check is INSIDE A BAND, not
-    // byte-identical — see `bench/route-c-audit-2026-10-14.md` and `engine/results.md`, route (c).
+    // byte-identical — see `progress/2026-10-14/route-c-audit-2026-10-14.md` and `engine/results.md`, route (c).
     kLibrary,
     // Still first-class, and deleted by nothing: with this set every body takes the hand kernel
     // whatever its width, which is how the old path stays measurable in the same window (§7 W9 is an
@@ -234,7 +234,7 @@ void gdn_rec_collapse(const float* u, const float* g, const float* beta, float* 
 //              the same `blockDim.x`, fed the same element-per-thread mapping) are the shipped
 //              kernel's, verbatim — only the residency and the launch count move. Why the association
 //              cannot move is §04.4's cancellation measurement (one in 286 `o` elements lose 84 % of
-//              their magnitude), and `bench/p9-phase1c-2026-10-14.md` D-12 priced the chunked
+//              their magnitude), and `progress/2026-10-14/p9-phase1c-2026-10-14.md` D-12 priced the chunked
 //              alternative at 54.03 GFLOP against this route's 33.94.
 //   kChunk     §04.7's chunked scan (`prototype/gdn_chunk/gdn_chunk_kernels.h`). KILLED by D-12 and
 //              now refuses to be selected: its carry formed the chunk-boundary decay as a quotient of
@@ -341,7 +341,7 @@ struct AttnLayerArgs {
     float *part;                            // [nrows][8][split][258] split-K (max,sum,acc) partials;
                                             // null below the staging, REQUIRED above it — the launcher
                                             // refuses rather than drop a row's partials on the floor
-    // Which wave core runs (`--attn-tile`, Phase 2: §9 of bench/attn-wave-diagnosis-2026-10-14.md).
+    // Which wave core runs (`--attn-tile`, Phase 2: §9 of progress/2026-10-14/attn-wave-diagnosis-2026-10-14.md).
     // 1 is `attn_tile_wave`, the G x M tiled form: one K row load feeds G=4 GQA heads x M=4 query rows
     // instead of one (row, head) pair, which is where the wave's 25.79 GB of K/V re-reads come from.
     // 0 is the shipped per-(row,head) `attn_core`. It is a WAVE-only knob: a one-row body is the fused

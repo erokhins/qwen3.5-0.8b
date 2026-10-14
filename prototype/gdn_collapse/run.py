@@ -5,7 +5,7 @@ WHAT IT RUNS, and what it does not. Everything here is a single GDN layer in a s
 (`gdn_collapse_check.hip.cpp`): both scan forms over the same operands and the same starting state,
 compared BIT for BIT, plus the byte-touch checks (every `o` element written, guard bands untouched).
 It does NOT take timings — route A's milliseconds come from the engine's `--time-waves` report, on
-the `gdn_rec` row, where D-12's win line is written (`bench/p9-route-a-2026-10-14.md` §5). It does
+the `gdn_rec` row, where D-12's win line is written (`progress/2026-10-14/p9-route-a-2026-10-14.md` §5). It does
 not replace `engine/gate.py --gdn-scan collapse`, which is the end-to-end authority on the shipped
 path; this is the fast loop that catches a staging index or an association bug in seconds instead of
 a five-minute HSA hang-analysis through the engine.

@@ -159,10 +159,10 @@ device once; what is still missing is the token result and every timing.
 # whether an engine's whole-token cos deficit needs a bug to explain it: the engine's is smaller than this
 # spread at every step. ~90 s, torch CPU.
 
-`.venv/bin/python engine/route_allowance.py --table tmp/route_dec300f.json`   # one `--table` per fixture
+`.venv/bin/python engine/route_allowance.py --table progress/engine/evidence/route_dec300f.json`   # one `--table` per fixture
 # Turns `route_price.py`'s tables into the per-fixture `data/refs/<fixture>/route_allowance.json` files the
 # gate READS (the gate never re-prices). Each fixture's margin is `ceil2(max engine/route ratio inside that
-# fixture alone)` — PER FIXTURE since D-2 of `bench/plan-2026-10-12`, because while the margin was one global
+# fixture alone)` — PER FIXTURE since D-2 of `progress/2026-10-12/plan-2026-10-12`, because while the margin was one global
 # max, pricing `dec300f` (own worst ratio 7.98) would have moved the constant every other fixture is judged
 # by. Naming a subset of fixtures is therefore normal now: the run prints which files it did not touch and
 # why they cannot be affected. `--selftest` proves that non-interference (and that it is falsifiable — a
@@ -243,7 +243,7 @@ device once; what is still missing is the token result and every timing.
 # dumper. `engine/results.md` has the size table, why BF16 logits lose no bits here, and what the
 # fingerprint can and cannot see.
 
-`.venv/bin/python engine/pin_bits_probe.py` and `.venv/bin/python engine/curve_probe.py tmp/gate_dec64f.log`
+`.venv/bin/python engine/pin_bits_probe.py` and `.venv/bin/python engine/curve_probe.py progress/engine/evidence/gate_dec64f.log`
 # The two claims about the deep fixture that would otherwise be taken on faith, as runnable checks.
 # pin_bits_probe round-trips EVERY pinned logit value of every step through torch's BF16 cast and proves
 # the bf16-bit storage in dec64f lost nothing (0 of 2.23 M in dec8, 0 of 16.14 M in dec64f moved) — i.e. it

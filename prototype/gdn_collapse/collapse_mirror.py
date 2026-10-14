@@ -22,7 +22,7 @@ hits both sides identically and cancels in the comparison; what the mirror there
 difference in FMA contraction or in the intrinsics. Those rest on the collapsed kernel using the shipped
 kernel's SOURCE EXPRESSIONS verbatim (a textual claim; `collapse_price.py --isa` prints the instruction
 census that supports it) and on the device gate (byte-identical logits — commands in
-`bench/p9-route-a-2026-10-14.md`). What the mirror does prove, and no amount of review does: that the
+`progress/2026-10-14/p9-route-a-2026-10-14.md`). What the mirror does prove, and no amount of review does: that the
 residency, the strip partition, the staging layout, the swizzle, the write-back and the per-token scalar
 reads carry no arithmetic consequence — including at a BODY BOUNDARY, which is the second control.
 
@@ -313,7 +313,7 @@ def run_selftest(q, k, v, g, beta, S0, rows) -> int:
     the trap `prototype/attn_tile_model.py` and the mlp_gemv results note are both about a must-catch
     set that has to be derived from the geometry, and here the geometry says a defect living in the
     staging is only visible when there is something in the state to stage. The device counterpart of
-    that rule is written in `bench/p9-route-a-2026-10-14.md`: the same negative must be run on a wave
+    that rule is written in `progress/2026-10-14/p9-route-a-2026-10-14.md`: the same negative must be run on a wave
     with MORE THAN ONE body, where the second body stages the first one's state."""
     qs, ks, vs, gs, bs = (a[:rows] for a in (q, k, v, g, beta))
     print(f"\n== negatives and controls ({rows} tokens, carried non-zero starting state)")

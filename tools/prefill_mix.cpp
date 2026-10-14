@@ -1,5 +1,5 @@
 // tools/prefill_mix.cpp — the measurement instrument for §7 W1/W2/W4 of
-// bench/prefill-route-spike-2026-10-13.md. It produces rows; it does not produce verdicts.
+// progress/2026-10-13/prefill-route-spike-2026-10-13.md. It produces rows; it does not produce verdicts.
 //
 // What it measures is the engine's own WAVE MATMUL MIX, not a square: the ten library shapes of §6
 // item 1 at their real per-layer counts (6 self-attn layers, 18 linear-attn, 24 MLP), plus the

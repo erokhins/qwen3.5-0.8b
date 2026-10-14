@@ -4,7 +4,7 @@
 // comparison prefill_mix --check makes IS the comparison gemm_peak --check makes rather than a
 // near-copy of it (AGENTS.md: do not duplicate logic). gemm_peak's behaviour is unchanged by the
 // move, including the byte patterns its --determinism hashes, which are quoted in
-// bench/prefill-route-spike-2026-10-13.md §3.1 and must keep reproducing.
+// progress/2026-10-13/prefill-route-spike-2026-10-13.md §3.1 and must keep reproducing.
 //
 // Build: this is a header; the probes that use it are built by tools/build.sh.
 #ifndef TOOLS_GEMM_COMMON_H

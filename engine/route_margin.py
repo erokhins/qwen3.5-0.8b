@@ -2,8 +2,8 @@
 """D-3 / Q4b: what is a legal route worth, measured with NO engine in the numerator?
 
     # one fixture, its own gate log for the engine column, three alternative §04.7 chunk widths
-    .venv/bin/python engine/route_margin.py --fixture dec64f --engine-log tmp/d6_gate_dec64f.log \
-            --chunk-alt 8,16,32,128 --out tmp/route_margin_dec64f.json
+    .venv/bin/python engine/route_margin.py --fixture dec64f --engine-log progress/engine/evidence/d6_gate_dec64f.log \
+            --chunk-alt 8,16,32,128 --out progress/engine/evidence/route_margin_dec64f.json
     .venv/bin/python engine/route_margin.py --selftest          # synthetic: no weights, no device
 
 WHY THIS EXISTS. Every margin `engine/gate.py` applies is `max over steps of engine_deficit(j) /
@@ -304,7 +304,7 @@ def verdict(inforce: float, fitted: float, lo: float, hi: float) -> dict:
         return {"action": "keep (adopting would LOOSEN)",
                 "why": f"legal routes explain the engine, but even the conservative multiplier"
                        f" {lo:.4f} is looser than the {inforce:.2f} in force; adopting it is a band"
-                       " move, so it needs a recorded decision in bench/plan-2026-10-12.md §3 and a"
+                       " move, so it needs a recorded decision in progress/2026-10-12/plan-2026-10-12.md §3 and a"
                        " tools/band_history.py line — neither of which this script may make"}
     return {"action": "keep (width-sensitive)",
             "why": f"the multiplier straddles what the engine needs (lo {lo:.4f} < fitted {fitted:.4f}"

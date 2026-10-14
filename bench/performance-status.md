@@ -1,7 +1,7 @@
-**Read this first if you are continuing the route (c) / P9 / attention work — session handoff: `bench/HANDOFF-2026-10-14.md`.**
+**Read this first if you are continuing the route (c) / P9 / attention work — session handoff: `progress/2026-10-14/HANDOFF-2026-10-14.md`.**
 
 **If the question is "what have we already tried, and why did it not work?" — do not read this file for that.**
-`bench/speedup-routes-2026-10-14.md` is the index of every speed-up route tried, its verdict (shipped / dead
+`progress/2026-10-14/speedup-routes-2026-10-14.md` is the index of every speed-up route tried, its verdict (shipped / dead
 / held / unpriced), the line it had to clear and the number that decided it, plus what is left to try. This
 file below is the append-only ledger: the record of measurements in the order they happened, which is where
 the routes file's citations point.
@@ -106,7 +106,7 @@ sweep takes the best tile *per shape* (`PACK_inproj` 92.68 µs, `q_proj` 58.31, 
 3.081 ms. That gap is a finding, not a rounding error: **best-config-per-shape is not the shipped
 plan**, so per-shape numbers cannot be recombined into a plan total. Closing those two rows properly
 needs a `--only gdn|attn` selector in `proj_gemv` and one clean timing run each — cheap, and queued in
-`bench/plan-2026-10-12.md`.
+`progress/2026-10-12/plan-2026-10-12.md`.
 
 So **1.5588 / 1.605 = 97 %** of the token's bytes are now covered by a kernel that has been
 measured on this box — `lm_head`, the MLP, every projection, the GDN recurrence, and the norms.
@@ -247,7 +247,7 @@ Method, because it is the point: every row below was measured while **no subagen
 supervisor's own turn was blocked inside the measurement command**. A blocking tool call pauses token
 generation, so `flash_serve` — which otherwise busy-polls at ~130 % CPU — was not emitting work during
 the burst. This is the first set taken under the serialization rule, and it refutes what
-`bench/review-2026-10-11.md` §4 claimed: a clean-enough window *is* reachable from inside the session,
+`progress/2026-10-11/review-2026-10-11.md` §4 claimed: a clean-enough window *is* reachable from inside the session,
 you just have to be the one holding the turn. `gpu use` read 24–91 % across these runs and did **not**
 predict the numbers, so util is recorded and then discounted.
 
@@ -563,7 +563,7 @@ now **512 × 8 = 4096** and it refuses fail-closed past it: the first attempt at
 shipped means a window that the whole exchange fits inside, not 4k of prompt *plus* 4k of generation.
 Raising it means raising `attn_part_floats()` scratch alongside the constant, and
 `engine/gate.py::lane_ceiling()` reads both rather than trusting a number; P8b priced that and left the
-constant at 8 with the arithmetic in `bench/plan-prefill-2026-10-12.md` §3.1.
+constant at 8 with the arithmetic in `progress/2026-10-12/plan-prefill-2026-10-12.md` §3.1.
 
 Reproduce:
 
@@ -622,7 +622,7 @@ Two debts from this pass, both written up by the worker rather than glossed: the
 wave grid is priced by engine-vs-engine self-consistency, **not** by a reference pin — pinning it needs a
 >512-token-prompt fixture with its own D-2 allowance, and P8b declined to invent one; and `kAttnMaxSplit`
 stays 8 with the scratch arithmetic (129 KiB per wave-row, ~64.5 MiB per request at `kMaxWaveRows`) recorded
-in `bench/plan-prefill-2026-10-12.md` §3.1 instead of a silent constant bump.
+in `progress/2026-10-12/plan-prefill-2026-10-12.md` §3.1 instead of a silent constant bump.
 
 ### Q6: the decode step is not launch-bound, and the width change that follows from that (2026-10-13, zero subagents, foreground, lock `q6-rpb-ab`)
 
@@ -985,8 +985,8 @@ band-level questions and one token flip, all of them now measurable rather than 
 The gate admission commit states "all eight fixtures PASS on both `--gemm hand` and `--gemm library` (16/16)".
 **That was sixteen hand runs.** `engine/gate.py` appends its own `--gemm <route>` *after* the wrapper script's
 flag and `decode_run`'s parser is last-wins, so a `library` request was silently overridden by the gate's
-`hand` default. The evidence on disk: `tmp/margin/library_dec300f.log` header names
-`--binary tmp/decode_run_library.sh` and line 413 reads `NUMERICS … gemm=hand`. **The library route has never
+`hand` default. The evidence on disk: `progress/engine/evidence/margin/library_dec300f.log` header names
+`--binary progress/engine/evidence/decode_run_library.sh` and line 413 reads `NUMERICS … gemm=hand`. **The library route has never
 been gated against the pinned corpus on any fixture** — it had only ever been compared to the hand route by
 `tools/route_c_audit.py`, which does pass `--gemm` last and is unaffected.
 
@@ -1091,7 +1091,7 @@ it, and per §6 it is not a usable gate.
 | 1024 | 385.15 | 307.46 | 2,658.6 → **3,330.5** | **+25.3 %** |
 | 3072 | 1812.08 | 931.13 | 1,695.3 → **3,299.2** | **+94.6 %** |
 
-The 3072 row repeats a real 1024-token prompt three times (`tmp/tilefix/repeat_ids.py`), which is what
+The 3072 row repeats a real 1024-token prompt three times (`progress/bench/evidence/tilefix/repeat_ids.py`), which is what
 `tools/prefill_sweep.py` does with its own synthetic prose: per-token cost at a lane count does not depend on
 the text's meaning. It is the largest gain in the table, and the reason is geometric — at 3072 lanes 2,560 of
 the 3,072 rows are above `MAXSC`, so nearly the whole wave is on the route whose traffic just fell 4×. The

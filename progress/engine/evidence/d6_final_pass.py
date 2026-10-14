@@ -4,8 +4,8 @@ Correctness only. The wall figures below are the cost of running a check, printe
 each fit inside the `<60 s` worker allowance in `AGENTS.md`; they are NOT engine timings and nothing here
 goes near `bench/performance-status.md`. `decode_run`'s own `ms_per_step` line is deliberately not parsed.
 
-    .venv/bin/python tmp/d6_final_pass.py            # device gates + CPU selftests, ~30 s total
-    .venv/bin/python tmp/d6_final_pass.py --cpu      # selftests only, no device
+    .venv/bin/python progress/engine/evidence/d6_final_pass.py            # device gates + CPU selftests, ~30 s total
+    .venv/bin/python progress/engine/evidence/d6_final_pass.py --cpu      # selftests only, no device
 """
 import json
 import re

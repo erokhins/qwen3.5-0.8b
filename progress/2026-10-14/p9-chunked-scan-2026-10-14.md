@@ -11,7 +11,7 @@ i.e. 3× and 6× inside D-11's admitted `meanrel ≤ 3e-2` / `1-cos ≤ 2e-3`. T
 ≥ 0.10 of top-1/top-2 room** at C=64 and for every BF16-operand model (1 of 417 at C=16/C=32, and that row lands
 on HF's own pinned token — §2.3). No product decision is made here; §5 proposes numbers for the parent to price.
 
-Plan: `bench/plan-p9-chunked-scan-2026-10-14.md`. Nothing here touched `engine/gate.py`,
+Plan: `progress/2026-10-14/plan-p9-chunked-scan-2026-10-14.md`. Nothing here touched `engine/gate.py`,
 `engine/route_allowance.py`, `tools/band_history.py`, a pin, or `speccheck/specimpl.py`, and `--check` is green
 (§6). **No device execution**: this spike is CPU-only per `AGENTS.md`; §6 hands the device command lines to the
 main agent. Every number below is a CPU measurement or arithmetic on numbers already measured in `bench/` and
@@ -49,7 +49,7 @@ free-run fixtures' token streams (`dec300f` 295-tok prompt / 129 pinned tokens, 
 continuations. `p300` carries the stage tables (T ≫ C, so every chunk size is multi-chunk); `p64` is in the logs
 as the ragged-tail case (T=46 < C=64 → the §04.7 padding path).
 
-**Pin widths are measured, not assumed** (`tmp/p9/probe_pinwidth.py`): `gdn.o_pre_norm` is stored float32 but
+**Pin widths are measured, not assumed** (`progress/bench/evidence/p9/probe_pinwidth.py`): `gdn.o_pre_norm` is stored float32 but
 **every element is BF16-representable** — HF casts its output back to the activation dtype. `gdn.state_new` is
 genuine F32; `gdn.gated_out` and `out_proj.out` are BF16 dtype. Consequence, and it is the most load-bearing
 fact in this document: an F32 candidate compared to the `o_pre_norm` pin *in F32* scores the pin's own
@@ -111,7 +111,7 @@ chunking: §2 shows the chunking itself is free and the operands are what cost.
 
 `spike.py stage --fixtures p64,p300 --hist --negatives`; worst of the 18 GDN layers; `band` = 3e-5 of the tensor
 max (§10.1's cancellation band, sized by `prototype/mlp_gemv/floor_probe.py`); ULP columns compare at the width
-the pin carries. Full text in `tmp/p9/stage.out`.
+the pin carries. Full text in `progress/bench/evidence/p9/stage.out`.
 
 vs **PINS** (p300, T=277):
 
@@ -216,7 +216,7 @@ What that says, in order:
 Two runs, both with **replay**: the chunked side is fed exactly the tokens the sequential side generated, so
 every row is comparable and a difference cannot be blamed on a diverged token stream. Row 0 is the last prefill
 row (it decides the first generated token); row *i* is the logits after feeding token *i−1*. `room` is the
-**smaller** of the two sides' top1−top2 gaps, as in `bench/route-c-audit-2026-10-14.md` §A2.
+**smaller** of the two sides' top1−top2 gaps, as in `progress/2026-10-14/route-c-audit-2026-10-14.md` §A2.
 
 Long prompts (`dec300f, wide520f, chunk64b, mt32f, p128, dec64f`, 16 steps, 95 rows per form; the sequential
 side reproduces 75/89 of the pinned continuation tokens on the same anchor):
@@ -377,7 +377,7 @@ attention item is a kernel-shape item, not a numerics item.
 
 ## 5. The band, **proposed and not adopted**
 
-Reference point: **D-11** as admitted in `bench/route-c-audit-2026-10-14.md` — per-stage `meanrel ≤ 3e-2`, per
+Reference point: **D-11** as admitted in `progress/2026-10-14/route-c-audit-2026-10-14.md` — per-stage `meanrel ≤ 3e-2`, per
 stage `cos ≥ 0.9998`, per logits row `1-cos ≤ 2e-3`, and flips admitted only below 0.10 of top1−top2 room.
 
 **Proposed band for a chunked GDN prefill (any C in {16, 32, 64}, BF16 matmul operands):**
@@ -432,9 +432,9 @@ from this spike may enter a timing doc):
 
 ```bash
 tools/gpu_lock.sh acquire "p9 phase1 gdn_rec baseline"; tools/gpu_lock.sh status
-# the baseline the model above is priced against, re-taken with the current tree (same invocation as tmp/w9.sh):
-timeout 1200 ./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --time-waves
-timeout 1200 ./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --time-waves --gemm library
+# the baseline the model above is priced against, re-taken with the current tree (same invocation as progress/bench/evidence/w9.sh):
+timeout 1200 ./engine/build/decode_run --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" --steps 1 --time-waves
+timeout 1200 ./engine/build/decode_run --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" --steps 1 --time-waves --gemm library
 tools/gpu_lock.sh release "p9 phase1 gdn_rec baseline"
 ```
 

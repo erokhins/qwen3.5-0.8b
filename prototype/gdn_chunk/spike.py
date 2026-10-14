@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """P9 Phase 0 — price the chunked GDN delta-rule scan against the pinned dumps. CPU only.
 
-Four subcommands, one deliverable each, from `bench/plan-p9-chunked-scan-2026-10-14.md`:
+Four subcommands, one deliverable each, from `progress/2026-10-14/plan-p9-chunked-scan-2026-10-14.md`:
 
     .venv/bin/python prototype/gdn_chunk/spike.py stage    # per-stage error vs data/refs
     .venv/bin/python prototype/gdn_chunk/spike.py carry    # initial-state / end-condition vs pins

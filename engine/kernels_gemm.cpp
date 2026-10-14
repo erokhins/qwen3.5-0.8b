@@ -1,5 +1,5 @@
 // The hipBLAS route of route (c): one handle, one pinned workspace, and the one call form the whole
-// engine uses for a wave-width matmul (§6 item 1 of bench/prefill-route-spike-2026-10-13.md).
+// engine uses for a wave-width matmul (§6 item 1 of progress/2026-10-13/prefill-route-spike-2026-10-13.md).
 //
 // Why this is its own TU: hipBLAS is the only thing in the engine that links `-lhipblas`, and the
 // handle is process state — keeping it in one file means "what allocates, when, on which stream" has

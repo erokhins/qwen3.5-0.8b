@@ -37,7 +37,7 @@
 //              already hiding dispatch behind execution — nothing submission-side left to win, the
 //              residue is inside the kernels (story B). A gap of ~0 means the real step's queue is
 //              already empty launch by launch, so dispatch is exposed in the open and submission is
-//              where the time goes (story A). Same reasoning as `bench/plan-2026-10-12.md` Q6 item 1,
+//              where the time goes (story A). Same reasoning as `progress/2026-10-12/plan-2026-10-12.md` Q6 item 1,
 //              whose first sketch had this polarity inverted; corrected in place 2026-10-13.
 //
 // WHY THE MARKER PRECEDES THE SUBMISSION, which is the one thing here that is easy to get wrong and

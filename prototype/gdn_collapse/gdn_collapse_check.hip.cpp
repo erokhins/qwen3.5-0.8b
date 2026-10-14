@@ -4,7 +4,7 @@
  *
  * WHAT IT JUDGES. `engine/gdn_collapse_kernels.h`'s claim is BIT identity with the shipped
  * sequential form, not closeness — the recurrence is the same arithmetic and only the residency and
- * the launch shape moved (`bench/p9-route-a-2026-10-14.md` D-12). So this file runs BOTH forms over
+ * the launch shape moved (`progress/2026-10-14/p9-route-a-2026-10-14.md` D-12). So this file runs BOTH forms over
  * the SAME operands and the SAME starting state and compares `o` and the resulting state bit for
  * bit: no band, no cos, no max-ULP. A band here would be a way of not checking the claim.
  *
@@ -45,7 +45,7 @@
  *
  * NO TIMING. This answers "same bits?" and nothing else (AGENTS.md). The milliseconds for this route
  * are taken from `--time-waves` in the engine, where the win line is written against the `gdn_rec`
- * row; `bench/p9-route-a-2026-10-14.md` §5 carries those commands.
+ * row; `progress/2026-10-14/p9-route-a-2026-10-14.md` §5 carries those commands.
  */
 #include <hip/hip_runtime.h>
 

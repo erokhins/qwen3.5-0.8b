@@ -23,7 +23,7 @@ Flags:
   --decode N       greedy continuation steps after prefill (default 1). Each step feeds the
                    reference's OWN argmax back in, i.e. it is a forced (teacher-forced) chain,
                    not a free run: see "decode_mode" in the manifest and P1 of
-                   bench/plan-2026-10-12.md for why depth can only be pinned that way (A-18).
+                   progress/2026-10-12/plan-2026-10-12.md for why depth can only be pinned that way (A-18).
   --no-layer-io    omit per-layer input/output dumps
   --no-mlp-io      omit the per-layer MLP operands (§03.3); they are the widest pins
                    ([T, 3584] x 3 x 24 layers) and exist to gate the MLP kernel
@@ -171,7 +171,7 @@ def step_tags(spec: str, flag: str, n_decode: int) -> set[str] | None:
     stay byte-identical. Neither flag takes a range or a ratio: the lists are comma-separated step
     indices only, so that what lands in the manifest is a LIST OF STEPS and never a policy like "keep
     one in eight", which is a weaker gate wearing a knob (`engine/gate.py` reads the declared gaps
-    per step, and `bench/plan-prefill-2026-10-12.md` §5.1 is where that rule is written down).
+    per step, and `progress/2026-10-12/plan-prefill-2026-10-12.md` §5.1 is where that rule is written down).
 
     `"none"` means the empty set. What it MEANS differs per flag, so it is checked by the caller: for
     `--deep-steps` it is how `dec300f` fits the budget (one full step is 26 MiB, 18 MiB of it the GDN

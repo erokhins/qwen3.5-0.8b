@@ -5,7 +5,7 @@ file exists to answer "what does the kernel AS WRITTEN compute", the way
 `prototype/attn_tile_model.py` does for the tiled attention core.
 
 Why a second CPU form beside `chunk_scan.py`: the device run of `--gdn-scan chunk` produced chunk 0
-correctly and NaN in every row of every later chunk (bench/p9-phase1-2026-10-14.md, Phase 1b device
+correctly and NaN in every row of every later chunk (progress/2026-10-14/p9-phase1-2026-10-14.md, Phase 1b device
 window). A model that agrees with itself cannot localise that; only a mirror that keeps the kernel's
 staging can. What is mirrored, and what cannot be:
 

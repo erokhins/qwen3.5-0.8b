@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The route (c) audit's arithmetic — A1/A2/A3/A4 of `bench/plan-route-c-audit-2026-001.md`.
+"""The route (c) audit's arithmetic — A1/A2/A3/A4 of `progress/2026-10-13/plan-route-c-audit-2026-10-13.md`.
 
 Everything here is element-level and bounded against a measured floor, which is the standard the plan
 sets ("not 'the aggregates look small'"). No number in this file is a band and no band is set here:

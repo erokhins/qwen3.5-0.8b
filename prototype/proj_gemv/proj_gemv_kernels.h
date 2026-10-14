@@ -144,7 +144,7 @@ __global__ void proj_gemv(const hip_bfloat16* __restrict__ W, const void* __rest
 }
 
 /*
- * ── the token-batched form (P5, bench/plan-prefill-2026-10-12.md §4 row P5) ───────────────────
+ * ── the token-batched form (P5, progress/2026-10-12/plan-prefill-2026-10-12.md §4 row P5) ───────────────────
  *
  * One block owns `rpb` output rows AND a tile of `TPB` tokens, so each weight row is read ONCE for
  * the whole tile instead of once per token. That is the entire point: the nine projections are

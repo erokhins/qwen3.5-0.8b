@@ -172,14 +172,14 @@ tools/build/mixed_bw --mode mix --ratio 62 --footprint-mib 528 --pages cold --ta
 tools/build/mixed_bw --mode write --footprint-mib 528 --pages cold --tag F_cold_write
 
 tools/gpu_lock.sh release q8-mixedbw
-} 2> tmp/q8/mixed_bw.err | tee tmp/q8/mixed_bw.log
+} 2> progress/devices/evidence/q8/mixed_bw.err | tee progress/devices/evidence/q8/mixed_bw.log
 
 # and finally, with the log in hand:
-tools/step_traffic_model.py --probe-file tmp/q8/mixed_bw.log --lanes 128
+tools/step_traffic_model.py --probe-file progress/devices/evidence/q8/mixed_bw.log --lanes 128
 ```
 
 The stderr side (device banner, `NOTE:` lines for any suspect row) belongs in
-`tmp/q8/mixed_bw.err`, which is why the pricing step reads the stdout log only: `MIXEDBW` is the
+`progress/devices/evidence/q8/mixed_bw.err`, which is why the pricing step reads the stdout log only: `MIXEDBW` is the
 parseable prefix and a suspect row must stay visible, not be silently consumed.
 
 ### Expected, before the run
@@ -227,10 +227,10 @@ instrument bugs, not box behaviour, and both are fixed in `tools/mixed_bw.cpp`:
    write stream never stores, so the untimed read-back proves the writes **landed** rather than
    finding a buffer that was already full of 1.0f.
 3. There was no third defect. **`--mode write --pages cold` did not fault.** The `mixed_bw.cpp:417`
-   lines belong to the *warm* `mix` rows and `:421` to `F_cold_mix62`; `tmp/q8/mixed_bw.err` has 11
+   lines belong to the *warm* `mix` rows and `:421` to `F_cold_mix62`; `progress/devices/evidence/q8/mixed_bw.err` has 11
    `Memory Fault Error` lines — one from `--selftest`, nine from `B_mix_{4,10,20,32,62,128}` and the
    three `D_*`, one from `F_cold_mix62` — and nothing after the cold-write banner, whose row is the
-   last line of `tmp/q8/mixed_bw.log`. What that row genuinely lacked was evidence, not a crash; see
+   last line of `progress/devices/evidence/q8/mixed_bw.log`. What that row genuinely lacked was evidence, not a crash; see
    the `F_cold_write` correction below.
 
 The expectations table above is **not** edited: a run that failed does not get to rewrite its test.
@@ -254,9 +254,9 @@ and after the sweep, gate the rows themselves rather than the exit codes a `tee`
 
 ```bash
 # every warm row must read ok (E_same: ok_writes_aliased); every cold row unverifiable_cold_pages
-grep '^MIXEDBW' tmp/q8/mixed_bw.log | sed 's/.*tag=\([^ ]*\).*checksum=\([^ ]*\).*/\2  \1/' | sort
+grep '^MIXEDBW' progress/devices/evidence/q8/mixed_bw.log | sed 's/.*tag=\([^ ]*\).*checksum=\([^ ]*\).*/\2  \1/' | sort
 # and the pricing step, unchanged:
-tools/step_traffic_model.py --probe-file tmp/q8/mixed_bw.log --lanes 128
+tools/step_traffic_model.py --probe-file progress/devices/evidence/q8/mixed_bw.log --lanes 128
 ```
 
 **Which rows decide the question now.** `A_read_512m` first (if it is not 225–240 GB/s the
@@ -291,8 +291,8 @@ _Not yet taken: these rows need a GPU pass with zero subagents active, taken by 
 _The first attempt (2026-10-13, tag `q8-mixedbw`, blocking, zero subagents, util 92 %→25 %) printed
 13 of 23 rows and yielded **no** number: every warm row failed a checksum that was itself broken, and
 every `mix` row with ratio > 1 faulted. Both instrument defects are diagnosed and fixed above (§"Row
-corrections after the first attempt"); the raw lines are in `tmp/q8/mixed_bw.log` and its stderr in
-`tmp/q8/mixed_bw.err`, kept as evidence about the instrument and not as data — by rule 11 none of
+corrections after the first attempt"); the raw lines are in `progress/devices/evidence/q8/mixed_bw.log` and its stderr in
+`progress/devices/evidence/q8/mixed_bw.err`, kept as evidence about the instrument and not as data — by rule 11 none of
 those 13 rows may be tabulated, quoted, or used to pre-judge the re-run._
 
 | tag | mode | ratio_act | pages | ms | GB/s | %of 237 | suspect | checksum |
@@ -327,7 +327,7 @@ those 13 rows may be tabulated, quoted, or used to pre-judge the re-run._
 Taken 2026-10-13 in window `q8b-sweep`: blocking, zero subagents, `util` 34 % at acquire and 31 % at
 release (recorded, then discounted as everywhere else here), `--selftest` green first (`SELFTEST ok
 fails=0`, including all four anti-vacuity injections), 26 of 26 rows printed, raw lines in
-`tmp/q8/mixed_bw2.log`.
+`progress/devices/evidence/q8/mixed_bw2.log`.
 
 **The prediction held: the curve is flat, so the traffic-mix story is dead.** Walking the pre-registered
 expectations one at a time, as written before the run: (1) `A_read_512m` **100.3 %** — the instrument agrees
@@ -543,7 +543,7 @@ resolved `blocks=` in the row is the number to compare, and each pair resolves t
 tag="q9-mapping-locality"; tools/gpu_lock.sh acquire "$tag"; tools/gpu_lock.sh util
 tools/build/mixed_bw --selftest            # gate: must print `SELFTEST ok fails=0` before any timing
 mkdir -p tmp/q9
-r() { tools/build/mixed_bw "$@" | tee -a tmp/q9/rows.log; }
+r() { tools/build/mixed_bw "$@" | tee -a progress/devices/evidence/q9/rows.log; }
 
 # references, same window (the two committed rows the sections above quote)
 r --tag A_read_512m     --mode read --footprint-mib 512 --threads 256 --pages warm --iters 8
@@ -592,7 +592,7 @@ exit-criterion lines were written before the run, and the thresholds are unchang
 
 `--selftest` ran first in the same window and printed `SELFTEST ok fails=0` over **65 device cases**,
 including the byte-accounting injections for both new modes. 13 of 13 rows printed, all `checksum=ok`,
-no row flagged `suspect`. Raw lines: `tmp/q9/rows.log`. Thresholds below are the ones written in
+no row flagged `suspect`. Raw lines: `progress/devices/evidence/q9/rows.log`. Thresholds below are the ones written in
 §"Thresholds" before the run, applied unchanged.
 
 | tag | what it is | GB/s | % of read probe |

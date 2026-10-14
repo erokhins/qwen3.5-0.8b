@@ -12,7 +12,7 @@
  * `gates` and `conv` take `--tokens N` (default 1) and `--neg NAME` (default none). At N = 1 both
  * launch exactly the grids they launched before P6 and read/write the same single-token files, so
  * the four original checks are the T = 1 cases unchanged; N > 1 is the prefill-wave shape (P6,
- * `bench/plan-prefill-2026-10-12.md` §4 row P6) and is gated by `check.py --tokens <fixture>`.
+ * `progress/2026-10-12/plan-prefill-2026-10-12.md` §4 row P6) and is gated by `check.py --tokens <fixture>`.
  * The window is the part that is NOT a trivial batch: see the `GdnConvNeg` block in
  * `gdn_decode_kernels.h` for what the injections are and which of them no downstream output can see.
  *

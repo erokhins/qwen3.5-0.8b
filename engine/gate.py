@@ -84,7 +84,7 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       makes exact — append-only Δ² of 0.0, one lane per token, a state that moved, a window that
       rolled, no family left at the §08.4 zero — plus every row's geometry and the shared helper
       proved against the pins themselves. The engine-vs-pin DISTANCES are printed and not gated: plan
-      `bench/plan-prefill-2026-10-12.md` §2.6 ships this as "a measurement and a tripwire, not a
+      `progress/2026-10-12/plan-prefill-2026-10-12.md` §2.6 ships this as "a measurement and a tripwire, not a
       band", and the band is a main-agent decision with a `D-x` and a ledger line behind it.
 
   (h) THE BATCHED PATH (P4b) — the same prompt run twice, once at the wave scratch's full width and
@@ -121,7 +121,7 @@ no prefill row may carry `stop=1`, and the wave's LAST row must carry the fixtur
 (`greedy_continuation[0]`, §06.5's `y0`). Under `--prefill-logits last` — §06.5's shape, and the default
 — the wave argmaxes only that last row, so the earlier prefill rows print `sampled=-1`; `all` prices
 every row and is the shape the wave's byte-identity comparison against the pre-P2 per-token prompt loop
-is made in (`bench/plan-prefill-2026-10-12.md` §4, row P2).
+is made in (`progress/2026-10-12/plan-prefill-2026-10-12.md` §4, row P2).
 
 Why this file contains no engine arithmetic. Its value is independence. A Python mirror of the
 kernels would check the engine against the engine, which is the failure `bench/gate-audit.md` exists
@@ -562,8 +562,8 @@ SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller 
               " the pinned ids inside that margin")
 
 # THE CASCADE BAND — what a reassociating GEMM route is entitled to look like at the END of the
-# cascade, and the fourth named exception. ADOPTED 2026-10-14 from `bench/route-c-audit-2026-10-14.md`;
-# the measurements are in that file and in `tmp/rc_a1/a1.json` (reproduced independently in
+# cascade, and the fourth named exception. ADOPTED 2026-10-14 from `progress/2026-10-14/route-c-audit-2026-10-14.md`;
+# the measurements are in that file and in `progress/bench/evidence/rc_a1/a1.json` (reproduced independently in
 # `tmp/rcv_a1/a1.json`), and D-11 (`bench/build-queue.md`) is the decision that asks for them here.
 #
 # WHY A FOURTH POLICY WAS NEEDED. Everything this file policed before was measured either one op deep
@@ -629,7 +629,7 @@ SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller 
 # the number above; `stage_cos_min` is listed in that tool's `LOWER_IS_LOOSER` because it is a FLOOR, so a
 # downward move there is the band widening. The lines spell their decision as the commit subject
 # ("D-11 accepted (option A), commit f3b2f6c") rather than the bare `D-11`, because `record` only resolves
-# a bare `D-x` against `bench/plan-2026-10-12.md`'s log and D-11 lives in `bench/build-queue.md`. Moving
+# a bare `D-x` against `progress/2026-10-12/plan-2026-10-12.md`'s log and D-11 lives in `bench/build-queue.md`. Moving
 # a value here still takes a line first:
 #
 #     .venv/bin/python tools/band_history.py record --file engine/gate.py \
@@ -1400,7 +1400,7 @@ def room_verdict(step_label: str, pin: np.ndarray, eng: np.ndarray | None,
 
     `room` is the PIN's top-1/top-2 gap, and the pin is the hand route's own answer sheet: the hand
     route reproduces this fixture's pinned ids (that is what its green gate means), so the room the pin
-    had IS the room the hand route had, and the audit's flip table (`bench/route-c-audit-2026-10-14.md`
+    had IS the room the hand route had, and the audit's flip table (`progress/2026-10-14/route-c-audit-2026-10-14.md`
     §A2: 24 flips, every one of them below 0.10 of hand-side room, 0 of 1566 rows at or above it)
     transfers to this comparison unchanged. The ENGINE's own gap is printed next to it and not gated —
     which way a legal route's coin landed is not a band, exactly as D-9 prints the engine's gap at a
@@ -1937,7 +1937,7 @@ def deep_matches_shallow(n_decode: int) -> None:
 # sides of the comparison, and the helper identity below.
 #
 # What is NOT gated is how far the engine's state is ALLOWED to be from the dump's.
-# `bench/plan-prefill-2026-10-12.md` §2.6 assigns that in terms: "P1 ships a measurement and a
+# `progress/2026-10-12/plan-prefill-2026-10-12.md` §2.6 assigns that in terms: "P1 ships a measurement and a
 # tripwire, not a band", and whether the recurrent-route state is "close enough" to the chunk-route
 # state is "decided by the main agent against those printed numbers" in the D-3/D-5 idiom, with the
 # route spread at the same position as the natural denominator — which needs `route_price` extended
@@ -5167,7 +5167,7 @@ def main() -> int:
                          " a different binary than the one the engine ships.")
     ap.add_argument("--gdn-scan", choices=("seq", "collapse"), default="seq",
                     help="which §04.4 scan a GDN body runs, passed straight to `decode_run"
-                         " --gdn-scan` (P9, §04.7, route A is bench/p9-phase1-2026-10-14.md D-12):"
+                         " --gdn-scan` (P9, §04.7, route A is progress/2026-10-14/p9-phase1-2026-10-14.md D-12):"
                          " `seq` is the shipped recurrence (one launch per token per layer) and the"
                          " form every decode pin is pinned through; `collapse` is the same recurrence"
                          " held resident in LDS, one launch per layer per body, owed BIT identity"
@@ -5765,7 +5765,7 @@ def main() -> int:
           + (" The cascade floor is ARMED: no step is judged by a cap tighter than the measured"
              f" hand<->library cascade (cos deficit {CASCADE_BAND['row_1cos_max']:.0e}, meanrel"
              f" {CASCADE_BAND['stage_meanrel_max']:.0%}), because a route whose dots reassociate cannot"
-             " be held to a smaller deficit than its own reassociation (bench/route-c-audit-2026-10-14.md"
+             " be held to a smaller deficit than its own reassociation (progress/2026-10-14/route-c-audit-2026-10-14.md"
              " §A2), and the per-matmul floor behind it is 1 ULP at every width (A1). Each step line"
              " names the floor when it is what made the cap wider." if route_is_library() else
              " The hand route is judged by exactly the caps it has always been judged by; the cascade"

@@ -1,6 +1,6 @@
 # Repo structure survey and reorganization proposal (2026-10-16)
 
-Part 2 of the cleanup. Part 1 (`bench/cleanup-audit-2026-10-16.md`) settled *which cited files are
+Part 2 of the cleanup. Part 1 (`progress/2026-10-16/cleanup-audit-2026-10-16.md`) settled *which cited files are
 missing*; this settles *where things live and what moving them costs*. CPU-only: no build, no gate,
 no device command, no timing, no move, no edit of a tracked file. Two files come out of this pass:
 this document and `tools/doc_ref_check.py` (standing checker for stale path citations; real output
@@ -28,7 +28,7 @@ Ignored-but-present: **52,909** files (`.venv/` 31,216; `data/` 20,350; `tmp/` 1
 | root | 4 | 0 | 40 KB | `AGENTS.md` scope+traps, `README.md` pitch+layout, `bench.sh`, `.gitignore` | README's Layout block (lines 115–131) lists 13 entries and **omits `tools/`, `logs/`, `tmp/`** — `tools/` is 41 tracked files, 15 % of the repo |
 | `specification/` | 13 | 0 | 108 KB | the spec: `00`–`10`, `ASSUMPTIONS.md`, README | none; the only dir with a numbering scheme, and it holds it |
 | `speccheck/` | 29 | 14 | 416 KB | the independent checker (`specimpl.py`, `gates/`, `run_all.py`, `fixtures/`) | two fixture homes: `speccheck/fixtures/corpus.txt` is **byte-identical** (md5 `08b6de40…`) to the ignored `data/corpus.txt`, which docs cite by name |
-| `prototype/` | 65 | 31 | 3.3 MB | one dir per op: kernel + gate + `results.md`, graduating into `engine/` | (i) `prototype/README.md`'s "Current contents" table lists **4 ops**, the dir holds **9**; (ii) `prototype/gdn_chunk/` (6 files) has **no `run.py`, no `results.md`, no `build.sh`** — its verdict lives in `bench/p9-phase1-2026-10-14.md`, so the stated convention is false for 1 of 9; (iii) 3 shared modules sit loose at the root (`bf16_ulp.py`, `attn_tile_model.py`, `weight_names.py`) and are reached through `sys.path.insert(ROOT/"prototype")`, an idiom in **27 tracked `.py` files**, 18 of which import these three modules |
+| `prototype/` | 65 | 31 | 3.3 MB | one dir per op: kernel + gate + `results.md`, graduating into `engine/` | (i) `prototype/README.md`'s "Current contents" table lists **4 ops**, the dir holds **9**; (ii) `prototype/gdn_chunk/` (6 files) has **no `run.py`, no `results.md`, no `build.sh`** — its verdict lives in `progress/2026-10-14/p9-phase1-2026-10-14.md`, so the stated convention is false for 1 of 9; (iii) 3 shared modules sit loose at the root (`bf16_ulp.py`, `attn_tile_model.py`, `weight_names.py`) and are reached through `sys.path.insert(ROOT/"prototype")`, an idiom in **27 tracked `.py` files**, 18 of which import these three modules |
 | `engine/` | 42 | 16 | 3.1 MB | the deliverable | flat mix of the engine (16 `.cpp`, 8 `.h`), **13 CPU python tools** (`gate.py`, `route_price.py`, `weights_contract.py`, `curve_probe.py`, …) whose siblings live in `tools/`, the journal, and `numerics_provenance.json`. `engine/gate.py` is the most-cited path in the repo: **185 doc lines in 22 files** |
 | `bench/` | 23 | 0 | 668 KB | ledgers + plans + verdicts | four genres in 20 `.md` (1 living ledger, 2 undated one-shots, 17 dated), 2 machine-readable data files, **1 driver script** (`run.py`, invoked by `bench.sh`, cited only by `testdata/README.md`), and one filename whose date field is a sequence number |
 | `devices/` | 4 | 0 | 92 KB | measured platform facts, each reproducible with a `tools/` probe | none; the transcripts its tables were read from sit in `logs/` and `tmp/` — correct, but invisible from `devices/` |
@@ -39,7 +39,7 @@ Ignored-but-present: **52,909** files (`.venv/` 31,216; `data/` 20,350; `tmp/` 1
 | `data/` | 0 | 20,350 | 5.3 GB | the HF pins + generated bench output | correct by decision B; 9 cited paths absent by design (part 1 §3) |
 | `models/` | 0 | 42 | 1.7 GB | the checkpoint | correct by decision B |
 | `engines/` | 0 | 0 | 4 KB | README: "cloned reference engines for cross-checking" | **empty**, and README's layout block still lists it as a live destination |
-| `thinking/` | 0 | 0 | 4 KB | README: "Start a chunk by reading the relevant `thinking/*.md`" | **empty**: the convention migrated to `bench/HANDOFF-2026-10-14.md` + the `results.md` journals. A session following README reads an empty dir |
+| `thinking/` | 0 | 0 | 4 KB | README: "Start a chunk by reading the relevant `thinking/*.md`" | **empty**: the convention migrated to `progress/2026-10-14/HANDOFF-2026-10-14.md` + the `results.md` journals. A session following README reads an empty dir |
 
 Journal corpus, since PLAN B touches it: `engine/results.md` **4,493** lines; the 8
 `prototype/*/results.md` **3,667** (attn_decode 1,509; mlp_gemv 534; gdn_gated_norm 517; proj_gemv
@@ -116,7 +116,7 @@ plans (`plan-2026-10-12`, `plan-prefill-2026-10-12`, `plan-p9-chunked-scan-2026-
   calls `"$here/bench/run.py"` at lines 66/73/80. Cited by **2 doc lines in 1 file**. This is the
   cheapest real move in the repo (B2).
 - Naming: `plan-route-c-audit-2026-001.md` is the one file whose date field is a sequence number,
-  cited by exactly **1 doc line** (`bench/route-c-audit-2026-10-14.md:12`).
+  cited by exactly **1 doc line** (`progress/2026-10-14/route-c-audit-2026-10-14.md:12`).
 
 ### (d) The journals: growth is real, line-cites are fewer than feared, and the prototype journals must not be renumbered
 
@@ -124,7 +124,7 @@ plans (`plan-2026-10-12`, `plan-prefill-2026-10-12`, `plan-p9-chunked-scan-2026-
 |---|---|
 | doc lines citing `engine/results.md` | **86** in 16 files (+42 msg) |
 | …carrying a line number `engine/results.md:NNNN` | **27** occurrences / 25 distinct lines (101…4478) |
-| …of those, inside `bench/cleanup-audit-2026-10-16.md` | **26** (the other is `bench/commit-review-2026-10-11.md`) |
+| …of those, inside `progress/2026-10-16/cleanup-audit-2026-10-16.md` | **26** (the other is `progress/2026-10-11/commit-review-2026-10-11.md`) |
 | line-cites below line 2204 | 15 |
 | `prototype/*/results.md:NNNN` | 7 |
 | `bench/*.md:NNNN` | 24 · `tools/…:NNNN` 2 |
@@ -146,7 +146,7 @@ Structure, which decides *how* a split could work:
    `bench/performance-status.md`; 54 `§6` refs). So a split breaks no label addressing — there is none.
 4. The **prototype journals are the opposite**: numbered H2s (`## 18. …`, `## 20.5 …`) and 25
    citations by that number — `AGENTS.md` cites `prototype/attn_decode/results.md §20.1–§20.3, §18,
-   §18.2, §20.6`; `bench/HANDOFF-2026-10-14.md` cites `§20.4, §21`. **Splitting or renumbering a
+   §18.2, §20.6`; `progress/2026-10-14/HANDOFF-2026-10-14.md` cites `§20.4, §21`. **Splitting or renumbering a
    prototype journal silently breaks the traps index.**
 
 Recommendation (A7/B3): **split forward, never backward.** Freeze `engine/results.md` at 4,493 lines
@@ -179,7 +179,7 @@ The correspondence exists but lives in journal first lines, not filenames:
 | §03 glue+norm, **and §03.3 MLP** | `glue`, **`mlp_gemv`** | `kernels_glue.cpp`, `kernels_cast.cpp`, `kernels_mlp.cpp` | `mlp_gemv/results.md` H1 says "§03.3 MLP decode path" — `mlp_gemv` ↔ `specification/03-block-glue-and-normalization.md` is unguessable |
 | §04 GDN | `gdn_decode` §04.2–4.4, `gdn_gated_norm` §04.5, `gdn_chunk` §04.7, `gdn_collapse` §04.4 | `kernels_gdn.cpp`, `gdn_collapse_kernels.h` | each results.md H1; `gdn_chunk` has **no journal at all** |
 | §05 attention | `attn_decode` §05, `proj_gemv` §04.1+§04.5+§05.1+§05.6 | `kernels_attn.cpp`, `kernels_proj.cpp` | H1s; `proj_gemv` spans four sections, so no 1:1 map exists |
-| §06 prefill | — (built straight into the engine) | `prefill.cpp`; `tools/route_c_stages.cpp` | `bench/plan-prefill-2026-10-12.md` |
+| §06 prefill | — (built straight into the engine) | `prefill.cpp`; `tools/route_c_stages.cpp` | `progress/2026-10-12/plan-prefill-2026-10-12.md` |
 | §07 decode step | `lm_head_gemv` | `decode_step.cpp`, `decode_run.cpp`, `kernels_lmhead.cpp` | `lm_head_gemv/results.md` H1 names **no §** |
 | §08 state | — | `state.cpp`, `engine/state_sizes.py` | — |
 | §09 MTP | — (descoped) | `speccheck/mtp.py` | README milestone |
@@ -248,7 +248,7 @@ Per-move accounting — the git mv, the citation counts, and the doc files that 
 | move | command | doc cites | msg cites | code refs | doc files to edit | verdict |
 |---|---|---:|---:|---:|---|---|
 | MOVE-1 | `git mv bench/run.py testdata/run.py` | 2 | 1 | 3 (`bench.sh:66,73,80`) | `testdata/README.md` | **do it** — the last non-doc file leaves `bench/`, the runner sits with its corpus; verify with `./bench.sh --quick` (CPU) |
-| MOVE-2 | `git mv bench/plan-route-c-audit-2026-001.md bench/plan-route-c-audit-2026-10-13.md` | 1 | 1 | 0 | `bench/route-c-audit-2026-10-14.md` | **do it** — the dated set then sorts |
+| MOVE-2 | `git mv` the malformed-name plan doc to `progress/2026-10-13/plan-route-c-audit-2026-10-13.md` (done 2026-10-16, into `progress/` rather than a new `bench/` name) | 1 | 1 | 0 | `progress/2026-10-14/route-c-audit-2026-10-14.md` | **do it** — the dated set then sorts |
 | MOVE-3 | journal volume rule: new `engine/results-<phase>.md`; pointer in `engine/README.md` (or appended at the very end of `results.md`) | 0 | 0 | 0 | `engine/README.md` | **do it** — the only journal split that breaks none of the 27 line-cites |
 | MOVE-4 | `rm -rf tmp/pre-route/` | 1 | 0 | 0 | the part-1 audit §4 row 5 sentence | optional; it is the only pre-route snapshot of the docs |
 | dated → `bench/2026-10/` | 17 × `git mv bench/<dated>.md bench/2026-10/` | **75** | 25 | ~35 | 22 files: AGENTS.md, README.md, 18 bench docs, engine/results.md, prototype/attn_decode/results.md, prototype/gdn_collapse/results.md | **leave it** — the index (A2) gives the same readability at 0 path cost |
@@ -287,11 +287,11 @@ re-generated whenever `doc_ref_check.py` is run, or generated by a flag instead 
 
 | # | step | cost | rollback | what could break |
 |---|---|---|---|---|
-| B1 | MOVE-2, the date-pattern rename | 1 `git mv`, 1 doc line | revert the commit | `bench/route-c-audit-2026-10-14.md:12` + one immutable commit message |
+| B1 | MOVE-2, the date-pattern rename | 1 `git mv`, 1 doc line | revert the commit | `progress/2026-10-14/route-c-audit-2026-10-14.md:12` + one immutable commit message |
 | B2 | MOVE-1, `bench/run.py` → `testdata/run.py` | 1 `git mv`, 2 doc lines, 3 lines of `bench.sh` | revert | `./bench.sh` breaks **silently** if `bench.sh` is not edited in the same commit — run `./bench.sh --quick` in the same pass (CPU, no device) |
 | B3 | MOVE-3, journal volume rule | 3 doc lines + a new file when the phase closes | delete the appended line | if the pointer is inserted above existing content all 27 line-cites shift — append at the end or keep it in `engine/README.md` |
 | B4 | MOVE-4, prune `tmp/pre-route/` (4.4 MB doc snapshots) | 1 doc line | irreversible (untracked) | it is the only pre-route snapshot; delete only if not wanted as a witness |
-| B5 | *only if the user asks*: dated docs → `bench/2026-10/` | 17 `git mv` + **75 doc lines in 22 files** + ~35 code lines; 25 msgs unfixable | one commit per month-dir, `git revert`; `git mv` + rewrite in the **same** commit so the tree is never half-moved | the 24 `bench/*.md:NNNN` line-cites survive (line numbers do not move), but every reproduce block reading `bench/plan-2026-10-12.md` silently stops working — these docs are the command list |
+| B5 | *only if the user asks*: dated docs → `bench/2026-10/` | 17 `git mv` + **75 doc lines in 22 files** + ~35 code lines; 25 msgs unfixable | one commit per month-dir, `git revert`; `git mv` + rewrite in the **same** commit so the tree is never half-moved | the 24 `bench/*.md:NNNN` line-cites survive (line numbers do not move), but every reproduce block reading `progress/2026-10-12/plan-2026-10-12.md` silently stops working — these docs are the command list |
 | B6 | everything else in §3's leave-it column | not worth it | — | see the numbers |
 
 The hazard that governs both plans: **a path move without a reference rewrite silently breaks the
@@ -356,7 +356,7 @@ glob stem `engine/kernels_*.cpp` (→ no path) and the section shorthand `specif
 ```
 $ python3 tools/doc_ref_check.py --selftest
 ok    see bench/band-history.jsonl for the bands           -> ['bench/band-history.jsonl']
-ok    full text in tmp/p9/stage.out here                   -> ['tmp/p9/stage.out']
+ok    full text in progress/bench/evidence/p9/stage.out here                   -> ['progress/bench/evidence/p9/stage.out']
 ok    was bench/band-history.json once                     -> ['bench/band-history.json']
 ok    and tmp/p9/stage.o was never built                   -> ['tmp/p9/stage.o']
 ok    engine/prefill.{h,cpp} are both tracked              -> ['engine/prefill.h', 'engine/prefill.cpp']
@@ -401,7 +401,7 @@ each extra is explained:
 | extra path | why |
 |---|---|
 | `bench/band-history.json`, `tmp/p9/stage.o` | quoted-artifact noise: part 1's own §4 table writes the two phantom names literally, so a path scanner legitimately finds them. Documented, not suppressed — a checker that hides them cannot prove the fix |
-| `engine/prefill.h/.cpp` | real prose looseness: `bench/plan-prefill-2026-10-12.md:367` writes `engine/prefill.h/.cpp` (not the brace form). The checker prints `engine/prefill.cpp` and `engine/prefill.h` as the candidates |
+| `engine/prefill.h/.cpp` | real prose looseness: `progress/2026-10-12/plan-prefill-2026-10-12.md:367` writes `engine/prefill.h/.cpp` (not the brace form). The checker prints `engine/prefill.cpp` and `engine/prefill.h` as the candidates |
 | `tmp/engine_gate/logits119.bin` | **new find**: cited by `engine/results.md:3063`; part 1's extension set had no `.bin`, so it could not see it. A purged F32 logits dump — the class the next audit would have lost again |
 
 `--list-broken` prints the 14 paths one per line and exits 1, so it is usable as a gate; on a tree

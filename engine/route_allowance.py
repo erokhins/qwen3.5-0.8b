@@ -4,11 +4,11 @@
     # 1. the engine column comes from a gate run (device, correctness only, ~5 s)
     .venv/bin/python engine/gate.py --fixture dec300f > tmp/gate_dec300f.log
     .venv/bin/python engine/route_price.py --fixture dec300f --engine-log tmp/gate_dec300f.log \
-            --out tmp/route_dec300f.json                             # CPU, minutes, no device
+            --out progress/engine/evidence/route_dec300f.json                             # CPU, minutes, no device
     # ... the same pair for every fixture being priced ...
 
     # 2. derive each fixture's own margin from its own table and write one file per fixture
-    .venv/bin/python engine/route_allowance.py --table tmp/route_dec300f.json
+    .venv/bin/python engine/route_allowance.py --table progress/engine/evidence/route_dec300f.json
     .venv/bin/python engine/route_allowance.py --table tmp/route_mt32f.json --dry-run
 
     .venv/bin/python engine/route_allowance.py --selftest   # the per-fixture property, CPU, no files
@@ -37,7 +37,7 @@ the measured disagreement between the reference's own two legal GDN prompt forms
 — the tightest constant that admits every step THAT FIXTURE was measured on, rounded UP at two decimals
 with no safety factor.
 
-PER-FIXTURE, and why (D-2 of `bench/plan-2026-10-12.md`, 2026-10-12). This file used to derive ONE global
+PER-FIXTURE, and why (D-2 of `progress/2026-10-12/plan-2026-10-12.md`, 2026-10-12). This file used to derive ONE global
 constant as a max over the whole priced set, and that turned out to be a hazard rather than a rigour:
 `dec300f` (295-token prompt, 128 steps) has ratios up to 7.98 while its route spread is *tighter* than
 the 64-step fixtures', so pricing it would have jumped the shared constant 3.50 → 7.99 and loosened the

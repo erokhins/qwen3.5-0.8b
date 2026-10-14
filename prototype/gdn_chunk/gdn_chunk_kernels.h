@@ -10,7 +10,7 @@
  * 1-cos 3.388e-4 (> 3.2e-4) and C=32 is inside the budget but not built, so the launcher accepts
  * 64 and refuses everything else with the reason printed.
  *
- * TWO LAUNCHES per (layer, body), which is what P9 is for (bench/p9-phase1-2026-10-14.md §6:
+ * TWO LAUNCHES per (layer, body), which is what P9 is for (progress/2026-10-14/p9-phase1-2026-10-14.md §6:
  * gdn_rec is 18,432 launches and 33.2 ms of dispatch per 1024-token wave):
  *
  *   `gdn_chunk_prep`   grid (chunks, heads) — one block per (chunk, head). Embarrassingly parallel,
@@ -71,7 +71,7 @@
  *       later chunk to show it. The fix is the model's expression, in place:
  *           a.kh[off] = hip_bfloat16(kq * kr * expf(cum[GC_C - 1] - cum[i]));
  *       It is NOT applied here because the decision this kernel belongs to is a kill
- *       (bench/p9-phase1c-2026-10-14.md §1c.3) and it has not been run on a device. Reproduced and
+ *       (progress/2026-10-14/p9-phase1c-2026-10-14.md §1c.3) and it has not been run on a device. Reproduced and
  *       bisected on CPU by `prototype/gdn_chunk/kernel_mirror.py` (`finiteness`, `candidates`).
  *       The general trap, for AGENTS.md: rewriting a decay ratio as a quotient of two exps is NaN
  *       where the original was 0 or 1. Keep the subtraction inside the exp.
@@ -407,7 +407,7 @@ __global__ void gdn_chunk_carry(GdnChunkArgs a) {
                                            // in (scalar accumulator, one column per lane) is the
                                            // fix, and it drops 32x of the LDS instructions with it
                                            // (32 broadcast reads per row today, one would do).
-                                           // bench/p9-phase1c-2026-10-14.md §1c.2.
+                                           // progress/2026-10-14/p9-phase1c-2026-10-14.md §1c.2.
     const int tg = tid / GC_STRIP;         // row group: 4 groups of 32 threads
     const int tstep = GC_THREADS / GC_STRIP;
     float* Sh = a.S + (size_t)h * GC_D * GC_D;

@@ -148,7 +148,7 @@ so in the ledger and stop.
 4. **The cascade bands are policed** — `tools/band_history.py` now reads every gated dict
    (`POLICED_BLOCKS` covers `CASCADE_BAND`), and all four values carry ledger lines under this decision
    citing the A2/A3 measurement each came from (`ed56b79`). No band entered the tree without a record.
-5. **The condition was met**: `bench/route-c-audit-2026-10-14.md` proves the hand↔library delta to be
+5. **The condition was met**: `progress/2026-10-14/route-c-audit-2026-10-14.md` proves the hand↔library delta to be
    reassociation at the element level (every library shape ≤ 1 ULP above its own cancellation band at
    M = 1, 88, 512, 1024; the three injected bugs separate from the legal delta by ≥ 492× on the least
    flattering statistic), and `--gemm library` is now the default in the binary and in the gate

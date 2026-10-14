@@ -3,16 +3,16 @@
 # the provenance header `tools/gate_locked_run.sh` writes — plus a log name that suits
 # `tools/margin_delta.py` (`<side>_<fixture>.log`).
 #
-#     tmp/gate_ab.sh <side> <fixture> [binary]        # binary defaults to engine/build/decode_run
+#     progress/engine/evidence/gate_ab.sh <side> <fixture> [binary]        # binary defaults to engine/build/decode_run
 #
 # `<side>` is the A/B label the route check is run under (hand|library), it becomes the log prefix, so
-# `tmp/margin/hand_dec300f.log` and `tmp/margin/library_dec300f.log` are directly comparable with
+# `tmp/margin/hand_dec300f.log` and `progress/engine/evidence/margin/library_dec300f.log` are directly comparable with
 # `tools/margin_delta.py tmp/margin/hand tmp/margin/library dec300f`.
 #
 # **`<side>` is the ONLY route control, and it reaches `gate.py`, not the binary.** The first version of
 # this script put `--gemm <side>` in a wrapper binary, which did nothing: `gate.py` appends its own
 # `--gemm <route>` AFTER the wrapper's flag and `decode_run`'s parser is last-wins, so every run of
-# `gate_ab.sh library <fx> tmp/decode_run_library.sh` silently ran the HAND route (the logs proved it:
+# `gate_ab.sh library <fx> progress/engine/evidence/decode_run_library.sh` silently ran the HAND route (the logs proved it:
 # a `library_dec300f.log` whose NUMERICS line said `gemm=hand`). Passing a wrapper still works — the
 # gate's flag is the one that lands, and it is the one the gate judges under — but a wrapper is no
 # longer how the route is chosen. Every verdict line below therefore prints its NUMERICS line: after

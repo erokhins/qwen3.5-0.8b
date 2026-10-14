@@ -62,7 +62,7 @@ Re-take it any time (cheap, and it is the only thing that justifies funding):
 
 ```bash
 tools/gpu_lock.sh acquire ATTR && ./engine/build/decode_run \
-  --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --time-waves --gemm library --gdn-scan seq \
+  --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" --steps 1 --time-waves --gemm library --gdn-scan seq \
   | grep -E "WAVEPASS|WAVE gran=stage family|GROUP"; tools/gpu_lock.sh release ATTR
 ```
 
@@ -100,7 +100,7 @@ decode is bit-identical by the seam rather than by luck. **2.85× on prefill.** 
 it was the numerics admission: a reassociating route cannot be byte-identical, so D-11 replaced cross-wave-
 count byte-identity with the **cascade band**, policed by `tools/band_history.py` (19 keys, `--selftest`
 green) and pinned provenance (`engine/numerics_provenance.json`: wave-row ceiling + hipBLAS version). The
-audit (`bench/route-c-audit-2026-10-14.md`) shows every hand↔library difference is reassociation: ≤ 1 ULP
+audit (`progress/2026-10-14/route-c-audit-2026-10-14.md`) shows every hand↔library difference is reassociation: ≤ 1 ULP
 above the cancellation band, `meanrel ≤ 3.9e-5`, 0 of 1,566 greedy decisions with ≥ 0.10 room flipped, and
 each injected bug clearing the legal delta by ≥ 492×. It also had a false claim to retract first — the
 famous "16/16 both routes" was sixteen hand runs, because a wrapper set `--gemm` and `gate.py` appended it
@@ -126,7 +126,7 @@ Claim: replace §04.4's sequential recurrence with a chunked scan, 1.96–2.99×
 arithmetic at the engine's own worst measured matmul rate, and *closer* to the pinned dumps than the
 sequential form (so no band wider than D-11). Both halves of that survive on paper. The device returned
 **331.2 → 1,953.7 ms wave** (`gdn_rec` 127.0 → ~1,750 ms) — **5.9× slower than priced**. The named cause
-(`bench/p9-phase1c-2026-10-14.md`): matrix-shaped work executed on a vector path — the carry executed
+(`progress/2026-10-14/p9-phase1c-2026-10-14.md`): matrix-shaped work executed on a vector path — the carry executed
 **730.4 GFLOP against 54.03 priced**, and `v_mfma` appears **nowhere** in the binary. Revival condition: not
 another hand-FMA chunk kernel; a chunked form whose matmuls are backed by the matrix unit or by hipBLAS,
 with the same arithmetic re-done at the rate that route actually delivers. Numerics are not the obstacle.
@@ -187,7 +187,7 @@ place in §07.4. (ledger §Q6, `prototype/lm_head_gemv/results.md`.)
 ### 4.9 The fp16 accumulator
 `wmma_gemm<fp16, fp16 acc>` runs (247 vs 219 for f32 acc) but is 3e-4…2.9e-3 relative against its own
 fp16-accumulated reference and catastrophic on cancelled elements (maxrel 4.7e+01 at K=1024). D-3 pins F32
-accumulation; not a candidate. (`bench/prefill-route-spike-2026-10-13.md`.)
+accumulation; not a candidate. (`progress/2026-10-13/prefill-route-spike-2026-10-13.md`.)
 
 ### 4.10 Two instrument-level routes, closed for lack of a handle
 **Stream/graph capture (M4)** needs a stream handle at the launch sites; the engine uses the default stream,
@@ -235,7 +235,7 @@ operand dtypes, and activations in fp16 is a **24→11-bit mantissa cut**, which
 the user has to make (it is a *new* band, not an extension of D-11). Matmul is 29 % of the wave, so the
 ceiling on this lever is roughly −10 % of prefill if the fp16 rate is reachable at real shapes. Needs: a
 band proposal + a flipped-decision audit at the ≥ 0.10-room statistic, on the model of
-`bench/route-c-audit-2026-10-14.md`. **Do not start without the user's approval of the band.**
+`progress/2026-10-14/route-c-audit-2026-10-14.md`. **Do not start without the user's approval of the band.**
 
 ### 6.3 Weight quantization for decode (largest decode lever, explicitly out of scope today)
 Decode is weight-walk-bound: 1.5457 GB of bf16 text weights, and at this box's 237 GB/s read ceiling that is

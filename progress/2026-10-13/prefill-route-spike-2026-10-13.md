@@ -1,6 +1,6 @@
 # Prefill compute route spike — 2026-10-13
 
-**What this is.** The spike `bench/plan-prefill-2026-10-12.md` §"Funded: prefill compute" asked for:
+**What this is.** The spike `progress/2026-10-12/plan-prefill-2026-10-12.md` §"Funded: prefill compute" asked for:
 does the matrix-unit path work on `gfx1151` at all, is the vendor library a usable prefill backend, is
 the bf16→fp16 conversion trustworthy for *this* checkpoint, and therefore which of the two funded routes
 should be built. It answers those four questions and pre-registers the measurement list that decides the
@@ -35,7 +35,7 @@ prerequisite.
 ## 2. Matrix units on `gfx1151`
 
 Probe `tools/mfma_probe.cpp` (runtime) and `tools/mfma_isa.sh` (compile-only ISA evidence). Logs:
-`logs/mfma_isa-2026-10-13.log`, `logs/mfma_probe-2026-10-13.log`.
+`progress/bench/evidence/mfma_isa-2026-10-13.log`, `progress/bench/evidence/mfma_probe-2026-10-13.log`.
 
 ### 2.1 What the compiler emitted
 
@@ -109,7 +109,7 @@ scratch dir.
 
 All of §3 is `tools/gemm_peak.cpp` — the file `devices/strix-halo-compute.md` was measured with, now with
 two correctness modes (`--check`, `--determinism`) that print no timing at all. Logs:
-`logs/gemm_peak_check-2026-10-13.log`, `logs/gemm_peak_det-2026-10-13.log`.
+`progress/bench/evidence/gemm_peak_check-2026-10-13.log`, `progress/bench/evidence/gemm_peak_det-2026-10-13.log`.
 
 ### 3.1 (i) Determinism: clean at every shape this model issues
 
@@ -145,7 +145,7 @@ asked again.
 
 `tools/prefill_gemm_shapes.py` reads the shapes from the shard header via `engine/weights_contract.py`,
 the layer split from `config.json`, and the constants from `engine/state.h`. Full output:
-`logs/prefill_gemm_shapes-2026-10-13.log`. Two corrections come out of it, and both matter.
+`progress/bench/evidence/prefill_gemm_shapes-2026-10-13.log`. Two corrections come out of it, and both matter.
 
 **Correction 1 — the brief's "skinny `k/v_proj`, N=256" is wrong, and the real skinny pair is worse.**
 `k_proj` and `v_proj` are `[512,1024]`: `kKvProjRows = kNumKvHeads × kHeadDim = 2 × 256`
@@ -205,7 +205,7 @@ for a 512-row wave, 148 ms for a 1024-row wave.
 
 ### 3.3 (iii) Epilogues: where rope, `silu`×`up`, gating and the residual add would live
 
-Today, and what a library call changes (`logs/prefill_gemm_shapes-2026-10-13.log` has the table):
+Today, and what a library call changes (`progress/bench/evidence/prefill_gemm_shapes-2026-10-13.log` has the table):
 
 | epilogue | lives today | extra bytes per wave if the matmul is a call |
 |---|---|---|
@@ -242,7 +242,7 @@ both double the activation traffic above and move a rounding, and a moved roundi
 
 `tools/fp16_range_audit.py`, over every tensor in the checkpoint (488) plus the pinned activation fixture
 `data/refs/p300` (484 arrays after carrying two non-activation families). Full output:
-`logs/fp16_range_audit-2026-10-13.log`. `--selftest` passes, and it is the part that makes the rest
+`progress/bench/evidence/fp16_range_audit-2026-10-13.log`. `--selftest` passes, and it is the part that makes the rest
 trustworthy: it proves the cast under audit rounds half-to-even and does not flush subnormals, because a
 converter that did either would make the subnormal and inexact counts read low and the verdict would pass
 vacuously. (`logs/*.log` is gitignored, so the named logs are local run artifacts; §8 regenerates any of
@@ -308,7 +308,7 @@ What has to be handled, precisely:
 
 ### 4.3 The rounding-point fact that changes the sequencing
 
-`tools/build/gemm_peak --check`, `logs/gemm_peak_check-2026-10-13.log`:
+`tools/build/gemm_peak --check`, `progress/bench/evidence/gemm_peak_check-2026-10-13.log`:
 
 ```
 CDTYPE MATRIX (C[m,n] = A[m,k] W[n,k]^T, W as [n,k], OP_T; 64x96x128)
@@ -423,16 +423,16 @@ price is then the non-matmul half of the wave.
 # CPU / compile only — no device, no lock
 .venv/bin/python tools/fp16_range_audit.py --selftest
 .venv/bin/python tools/fp16_range_audit.py --refs data/refs/p300 \
-    > logs/fp16_range_audit-2026-10-13.log
-.venv/bin/python tools/prefill_gemm_shapes.py > logs/prefill_gemm_shapes-2026-10-13.log
-tools/mfma_isa.sh tools/mfma_probe.cpp > logs/mfma_isa-2026-10-13.log   # compile only
+    > progress/bench/evidence/fp16_range_audit-2026-10-13.log
+.venv/bin/python tools/prefill_gemm_shapes.py > progress/bench/evidence/prefill_gemm_shapes-2026-10-13.log
+tools/mfma_isa.sh tools/mfma_probe.cpp > progress/bench/evidence/mfma_isa-2026-10-13.log   # compile only
 
 # device — correctness only, each under a second; one at a time, lock held, util recorded
 tools/gpu_lock.sh acquire prefill-spike && tools/gpu_lock.sh util
 tools/build.sh gemm_peak mfma_probe
-tools/build/gemm_peak  --check                       > logs/gemm_peak_check-2026-10-13.log
-tools/build/gemm_peak  --determinism --dtypes bf16,fp16 > logs/gemm_peak_det-2026-10-13.log
-tools/build/mfma_probe                               > logs/mfma_probe-2026-10-13.log
+tools/build/gemm_peak  --check                       > progress/bench/evidence/gemm_peak_check-2026-10-13.log
+tools/build/gemm_peak  --determinism --dtypes bf16,fp16 > progress/bench/evidence/gemm_peak_det-2026-10-13.log
+tools/build/mfma_probe                               > progress/bench/evidence/mfma_probe-2026-10-13.log
 tools/gpu_lock.sh release prefill-spike
 ```
 

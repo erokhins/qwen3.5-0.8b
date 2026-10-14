@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """P9 Phase 1 — the chunked GDN delta-rule scan priced against `data/refs/`, CPU only.
 
-Phase 0 (`bench/p9-chunked-scan-2026-10-14.md`) funded this work and set the ceiling the forms here
+Phase 0 (`progress/2026-10-14/p9-chunked-scan-2026-10-14.md`) funded this work and set the ceiling the forms here
 are judged against; Phase 0's own numbers came from `spike.py`, which this file imports rather than
 re-derives (`prototype/gdn_chunk/chunk_scan.py` is the specification of the form — nothing here
 re-derives its algebra). What is NEW here, and the reason this file exists next to `spike.py`:
@@ -67,7 +67,7 @@ def _load_module(name: str, path: Path):
 GATE = _load_module("_p1_gate", ROOT / "engine" / "gate.py")
 
 # ---- THE BUDGET — Phase 0's ceilings, quoted, and the D-11 band they sit inside --------------------
-# Phase 0 §5 proposed these from measurements already on disk (`bench/p9-chunked-scan-2026-10-14.md`
+# Phase 0 §5 proposed these from measurements already on disk (`progress/2026-10-14/p9-chunked-scan-2026-10-14.md`
 # §2.1-§2.3). They are a CEILING, not a target: a form that lands under them is inside its budget, a
 # form that lands over them stops and reports the number. No band is adopted here and nothing in this
 # file is a band — `engine/gate.py` and `tools/band_history.py` are untouched and stay green.

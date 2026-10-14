@@ -237,11 +237,11 @@ The `attn` line before/after any change, on the library route (`tools/gpu_lock.s
 
     tools/gpu_lock.sh acquire "attn wave before"
     tools/gpu_lock.sh util
-    ./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --time-waves --gemm library \
+    ./engine/build/decode_run --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" --steps 1 --time-waves --gemm library \
         | grep -E "WAVE gran=stage"           # before; repeat best-of-3 with zero subagents
     tools/gpu_lock.sh release
     # ... kernel change lands ...
-    tools/gpu_lock.sh acquire "attn wave after"; ./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" \
+    tools/gpu_lock.sh acquire "attn wave after"; ./engine/build/decode_run --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" \
         --steps 1 --time-waves --gemm library | grep -E "WAVE gran=stage"; tools/gpu_lock.sh release
 
 The two §3 residency questions, one short program (correctness-only, well under a minute):
@@ -293,7 +293,7 @@ Stated before any measurement, against the numbers in §0:
 
 ## 8. Relation to what is already written
 
-* `bench/p9-chunked-scan-2026-10-14.md` §4 already derived the same **25.79 GFLOP/wave** and the same
+* `progress/2026-10-14/p9-chunked-scan-2026-10-14.md` §4 already derived the same **25.79 GFLOP/wave** and the same
   0.236 TFLOP/s by the same triangle arithmetic, and already named the lever as "tiling/MFMA
   (flash-style blocking over the KV)" rather than a numerics item. This file agrees with that
   conclusion and supplies what §4 did not have: **why** the rate is 80× under the matrix rate

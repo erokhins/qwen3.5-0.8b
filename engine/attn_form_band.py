@@ -4,7 +4,7 @@
     .venv/bin/python engine/attn_form_band.py --ship tmp/ab/ship --tile tmp/ab/tile --prompt-len 1024
     .venv/bin/python engine/attn_form_band.py --selftest
 
-WHY THIS EXISTS. Phase 2 (`prototype/attn_decode/attn_tile_wave`, `bench/attn-wave-diagnosis-2026-10-14.md`
+WHY THIS EXISTS. Phase 2 (`prototype/attn_decode/attn_tile_wave`, `progress/2026-10-14/attn-wave-diagnosis-2026-10-14.md`
 §9) replaces the wave's attention core with a tiled one. Below MAXSC lanes the two forms promise
 BIT-IDENTICAL output, and above it the tiled form owns fixed MAXSC-wide windows where the shipped form
 cuts the row into equal slices — two legal groupings of §07.3's streaming route, so a difference there

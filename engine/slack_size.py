@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The sizing table for the gate's quantization-slack rule: every fixture, every step, one line each.
 
-`bench/plan-2026-10-12.md` D-9 refused to admit a token the pin never decided until the admitting rule
+`progress/2026-10-12/plan-2026-10-12.md` D-9 refused to admit a token the pin never decided until the admitting rule
 was SIZED, and the brief for sizing it asked for a table, not an argument: for each judged step, the pin's
 own top-1/top-2 margin (in value and in BF16 ULP at that magnitude), the step's licensed element error, and
 whether the pin can decide the token under `margin < bound`. This prints that, and nothing else, so the

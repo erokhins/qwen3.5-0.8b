@@ -33,7 +33,7 @@ A KEY is the pair (file, key). For `engine/gate.py` the keys are a policed block
 with that block (`BAND.cos_hard`, `CASCADE_BAND.stage_cos_min` — two dicts in one file, so the block has
 to be part of the name or a ledger line could not say which number it describes); for an allowance file
 they are `margin` and `margin_rel`, and the fixture is in the file name — so each
-fixture's margin is its own key, which is the whole point of D-2 (`bench/plan-2026-10-12.md` §3): one
+fixture's margin is its own key, which is the whole point of D-2 (`progress/2026-10-12/plan-2026-10-12.md` §3): one
 global margin key would let one fixture's measurement excuse every other fixture's.
 
 `record` REFUSES a reason that is empty or boilerplate, because "we needed it to pass" is a motive and
@@ -56,7 +56,7 @@ file's own margin, its own recorded engine deficits and the prompt/feed/specimpl
 for this tool's own source is the git walk below and ordinary review, not itself.
 
 The git-walk mode is unchanged from 2026-10-11 and is still the default with no subcommand, so
-`bench/commit-review-2026-10-11.md` §2 keeps working verbatim. It walks every commit after `--since`
+`progress/2026-10-11/commit-review-2026-10-11.md` §2 keeps working verbatim. It walks every commit after `--since`
 that touched a gate file (prototype/*/run.py, */check.py,
 */floor_probe.py, */reference.py and speccheck/gates/*.py), reads that revision's tolerance
 constants straight out of the file, and reports only the places where a threshold's VALUE moved —
@@ -71,7 +71,7 @@ A threshold that appears for the first time in a file created after `--since` is
 so it is counted and not reported as a move — that distinction is the whole point: a gate written
 today says nothing about whether a gate was widened today. Read-only; touches no device.
 
-The answer this tool was written for is in `bench/commit-review-2026-10-11.md` §2.
+The answer this tool was written for is in `progress/2026-10-11/commit-review-2026-10-11.md` §2.
 """
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ ROOT = Path(__file__).resolve().parent.parent
 HISTORY_REL = "bench/band-history.jsonl"
 GATE_FILE_REL = "engine/gate.py"
 ALLOWANCE_GLOB = "data/refs/*/route_allowance.json"
-PLAN_REL = "bench/plan-2026-10-12.md"
+PLAN_REL = "progress/2026-10-12/plan-2026-10-12.md"
 
 # Keys where a LOWER number is the looser band. `BAND.cos_hard`/`BAND.cos_report` and
 # `CASCADE_BAND.stage_cos_min` are cos FLOORS (a deficit ceiling like `CASCADE_BAND.row_1cos_max` goes
@@ -974,7 +974,7 @@ def main(argv=None) -> int:
         ap.add_argument("--new", required=True, help="the value the tree now holds, or 'absent'")
         ap.add_argument("--reason", required=True)
         ap.add_argument("--decision", required=True,
-                        help="a D-x from bench/plan-2026-10-12.md §3, or a commit subject")
+                        help="a D-x from progress/2026-10-12/plan-2026-10-12.md §3, or a commit subject")
         ap.add_argument("--by", default=None, help="who is responsible (default: git user)")
         ap.add_argument("--event", default="applied", choices=["applied", "refused", "removed"])
         ap.add_argument("--root", default=str(ROOT))

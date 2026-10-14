@@ -1,6 +1,6 @@
 """The state-fingerprint definition — the one place §08's state summary is computed.
 
-Extracted out of `tools/reference_dump.py` (P1 of `bench/plan-prefill-2026-10-12.md` §2.6) because
+Extracted out of `tools/reference_dump.py` (P1 of `progress/2026-10-12/plan-prefill-2026-10-12.md` §2.6) because
 two more readers appeared at once: `engine/gate.py` section (g) has to recompute a pinned
 fingerprint to prove it still matches the dumper, and `engine/decode_run.cpp --state-fp` has to
 emit engine-side rows in the same columns. A formula that lives in three files is a formula that

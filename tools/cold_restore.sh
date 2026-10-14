@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tools/cold_restore.sh — cold weight-restore: how long to make the text weights resident again
-# on a device pool that holds none? Owned by `bench/plan-2026-10-12.md` Q4 ("cold weight-restore
+# on a device pool that holds none? Owned by `progress/2026-10-12/plan-2026-10-12.md` Q4 ("cold weight-restore
 # row (~1 s load) into the perf ledger"); the row itself belongs to `bench/performance-status.md`
 # §6, which only the main agent writes, so this script produces the line and the operator decides.
 #

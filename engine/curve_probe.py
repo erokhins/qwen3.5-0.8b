@@ -7,8 +7,8 @@ the pinned `S n2` (sum of squares of the recurrent state, summed over the 6 GDN 
 halves, so the question this answers is whether the engine got worse there, or whether the thing it is
 being compared against got smaller.
 
-    .venv/bin/python engine/gate.py --fixture dec64f > tmp/gate_dec64f.log   # device: correctness only
-    .venv/bin/python engine/curve_probe.py tmp/gate_dec64f.log               # CPU, reads that log
+    .venv/bin/python engine/gate.py --fixture dec64f > progress/engine/evidence/gate_dec64f.log   # device: correctness only
+    .venv/bin/python engine/curve_probe.py progress/engine/evidence/gate_dec64f.log               # CPU, reads that log
 
 Reading: if the engine's ABSOLUTE error were roughly constant and only the reference's state energy
 moved, then (1-cos) should track 1/(S n2) — and `err x (S n2)` should sit at one level across the whole
@@ -46,7 +46,7 @@ def parse(log: Path):
 
 
 def main() -> int:
-    log = Path(sys.argv[1] if len(sys.argv) > 1 else "tmp/gate_dec64f.log")
+    log = Path(sys.argv[1] if len(sys.argv) > 1 else "progress/engine/evidence/gate_dec64f.log")
     rows = parse(log)
     step = np.array([r[0] for r in rows])
     cos = np.array([r[1] for r in rows])

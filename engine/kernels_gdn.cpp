@@ -68,9 +68,9 @@ GdnScan parse_gdn_scan(const std::string& name) {
     if (name == "collapse") return GdnScan::kCollapse;
     if (name == "chunk") {
         // FAILED CLOSED, deliberately, and this is the note rather than a comment on a throw: the
-        // chunked scan is a killed route, not an experimental one. `bench/p9-phase1-2026-10-14.md`
+        // chunked scan is a killed route, not an experimental one. `progress/2026-10-14/p9-phase1-2026-10-14.md`
         // D-12 dropped it for launch-bound arithmetic (54.03 GFLOP per wave against route A's 33.94),
-        // and `bench/p9-phase1c-2026-10-14.md` §1c.1 D6 found the reason it could not simply be
+        // and `progress/2026-10-14/p9-phase1c-2026-10-14.md` §1c.1 D6 found the reason it could not simply be
         // repaired: `gdn_chunk_carry` formed the chunk-boundary decay as a quotient of two exps, which
         // is not the contract's one exp of a difference, and it returned NaN where the incoming state
         // was zero. A form that fails its own §04.4 budget because of an expression bug cannot carry an
@@ -78,8 +78,8 @@ GdnScan parse_gdn_scan(const std::string& name) {
         // `kernel_price.py` stay in the tree as the record; the one-line repair D6 names is written
         // there for whoever re-funds the route.
         throw std::runtime_error(
-            "--gdn-scan chunk is refused: the chunked scan was killed by bench/p9-phase1-2026-10-14.md "
-            "D-12 and its carry form is known-wrong (bench/p9-phase1c-2026-10-14.md §1c.1 D6: boundary "
+            "--gdn-scan chunk is refused: the chunked scan was killed by progress/2026-10-14/p9-phase1-2026-10-14.md "
+            "D-12 and its carry form is known-wrong (progress/2026-10-14/p9-phase1c-2026-10-14.md §1c.1 D6: boundary "
             "decay as gamC/gam[i] underflows to NaN at S=0). Use `seq` (the shipped form) or `collapse` "
             "(route A, bit-identical to seq). The prototype still runs it: prototype/gdn_chunk/run.py.");
     }
@@ -111,7 +111,7 @@ const char* gdn_chunk_refusal(int tokens) {
         // The number, not a bare "unsupported": C=16 was measured, on the pinned dumps, and lost.
         return "chunk sizes below 64 are measured and rejected, not unsupported: "
                "C=16 is outside §2.3's per-row budget (1-cos 3.388e-4 against the 3.2e-4 ceiling, "
-               "bench/p9-phase1-2026-10-14.md parent verification and prototype/gdn_chunk/phase1.py "
+               "progress/2026-10-14/p9-phase1-2026-10-14.md parent verification and prototype/gdn_chunk/phase1.py "
                "rows). C=32 IS inside that budget (best row number of the three) but the kernel is "
                "instantiated at C=64 only, and a second instantiation of a form already 0.3 % inside "
                "a stage line on p64 is not added unasked.";

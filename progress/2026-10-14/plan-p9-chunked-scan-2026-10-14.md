@@ -43,7 +43,7 @@ All CPU-only, all in `.venv` torch (CPU-only build, which is fine here), against
   by the parent. `tools/band_history.py --check` must stay green.
 - **The dumps are the reference.** Never validate the chunked form against the sequential engine alone — that
   proves self-consistency, not correctness. Against `data/refs/`, with the existing gates' comparison code.
-- Commit per piece; the write-up is `bench/p9-chunked-scan-2026-10-14.md` with the verdict on line 1: **fund**,
+- Commit per piece; the write-up is `progress/2026-10-14/p9-chunked-scan-2026-10-14.md` with the verdict on line 1: **fund**,
   **kill**, or **fund-with-a-wider-band-than-D-11** (the last one is the parent's and the user's call).
 
 ## Out of scope until Phase 0 reports

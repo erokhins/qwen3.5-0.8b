@@ -12,7 +12,7 @@ taken, and no number printed here may be quoted as a measurement — the measure
 The anchors are imported, not retyped: `prototype/gdn_chunk/kernel_price.py` carries the device numbers
 (CUs, clock, LDS per CU, issue width, the two rate rows, the memory rates, the launch floor) each with
 the file that measured it, and the sequential baseline (127.0 ms for `gdn_rec` at 1024 lanes) and the
-win line (≤ 63 ms) come from `bench/p9-phase1-2026-10-14.md` D-12, where the line was written BEFORE
+win line (≤ 63 ms) come from `progress/2026-10-14/p9-phase1-2026-10-14.md` D-12, where the line was written BEFORE
 the route was funded. The whole point of re-deriving this on the CPU is D-12's rule that a route whose
 honest projection cannot clear the line does not get a kernel.
 """
@@ -34,7 +34,7 @@ KERNEL = "rec_collapse_kernel"
 # What the geometry is, in one place, so `--geometry` and `--isa` cannot drift from the code.
 STRIPS, COLS, BLOCK_DIM, HEADS = 4, 32, 128, 16
 D, LAYERS, BODY_ROWS, WAVE_LANES = 128, 18, 512, 1024
-SEQ_MS = 127.0                 # bench/p9-phase1-2026-10-14.md §5: gdn_rec, 1024 lanes, re-taken
+SEQ_MS = 127.0                 # progress/2026-10-14/p9-phase1-2026-10-14.md §5: gdn_rec, 1024 lanes, re-taken
 SEQ_LAUNCHES = LAYERS * WAVE_LANES   # 18,432: one launch per layer per token
 WORK_GFLOP = 33.94             # D-12: the sequential work per 1024-lane wave, re-read as a rate
 WIN_LINE_MS = kp.WIN_LINE_MS   # 63.0 ms, pre-registered in D-12

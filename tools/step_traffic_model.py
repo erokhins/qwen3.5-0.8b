@@ -29,7 +29,7 @@ file decides whether that story can even be true by arithmetic, before any measu
 Usage:
     tools/step_traffic_model.py                       # budget + parametric ceilings
     tools/step_traffic_model.py --lanes 4032          # long-context row
-    tools/step_traffic_model.py --probe-file tmp/q8/mixed_bw.log   # price it with measured rows
+    tools/step_traffic_model.py --probe-file progress/devices/evidence/q8/mixed_bw.log   # price it with measured rows
 """
 from __future__ import annotations
 

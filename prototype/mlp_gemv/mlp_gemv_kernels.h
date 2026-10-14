@@ -206,7 +206,7 @@ __global__ void mlp_down(const hip_bfloat16* __restrict__ W, const float* __rest
 }
 
 /*
- * ── the token-batched pair (P4, bench/plan-prefill-2026-10-12.md) ─────────────────────────
+ * ── the token-batched pair (P4, progress/2026-10-12/plan-prefill-2026-10-12.md) ─────────────────────────
  *
  * One block owns `rpb` output rows AND a tile of `TPB` tokens. The weight row is loaded ONCE for
  * the whole tile instead of once per token, which is the entire point: the MLP is 22 MiB of weights

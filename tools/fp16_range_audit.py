@@ -5,7 +5,7 @@
                                               [--refs data/refs/p300]
                                               [--selftest] [--all-tensors]
 
-Why this exists. Route (a) of the prefill plan (`bench/plan-prefill-2026-10-12.md`, "Funded: prefill
+Why this exists. Route (a) of the prefill plan (`progress/2026-10-12/plan-prefill-2026-10-12.md`, "Funded: prefill
 compute") is fp16 arithmetic on the prefill path, and it rests on one claim about data: that the bf16
 the checkpoint ships in converts to fp16 without loss. That claim is nearly the whole story and is
 not the whole story. bf16 and fp16 are both 16 bits wide, but bf16 has 8 exponent bits and fp16 has 5,

@@ -208,7 +208,7 @@ asserts the ladder stays ordered. Run it CPU-only with
 
 G2's gap was "no bit-level assertion anywhere on §04.5". The CPU mirror closed the assertion half; the
 device half stayed listed as owed (`prototype/gdn_gated_norm` was "written, gated on CPU, never run on a
-device" — `bench/review-2026-10-11.md` §5). It has now run, and it passes at the floor the CPU probe
+device" — `progress/2026-10-11/review-2026-10-11.md` §5). It has now run, and it passes at the floor the CPU probe
 predicted: over 18 GDN layers × 8 `dec8` steps, `gated_out` worst case **ndiff 1/2048** with **max ULP
 1**, zeros 0 / NaN 0, and all six located negatives localising (the four epilogue ones leaving
 `norm_pre_gate` at 0/294912). "Max ULP 1 with ndiff ≈0" is the signature of a 128-term warp tree

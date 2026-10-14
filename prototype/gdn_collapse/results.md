@@ -5,7 +5,7 @@ The op is `engine/gdn_collapse_kernels.h` (kernel) + `engine/kernels_gdn.cpp::gd
 geometry (`collapse_price.py`), the CPU mirror (`collapse_mirror.py`), and — added with the device
 pass — the fast device gate (`gdn_collapse_check.hip.cpp`, `build.sh`, `run.py`).
 
-Route A was funded by `bench/p9-phase1-2026-10-14.md` D-12 with the lines written down first:
+Route A was funded by `progress/2026-10-14/p9-phase1-2026-10-14.md` D-12 with the lines written down first:
 **`gdn_rec` ≤ 63 ms at 1024 lanes lives, > 84 ms dies.** This file is the device verdict on those
 lines, and the answer is: **112.04 ms best-of-3 — dead**, by the route's own pre-registered rule and
 not by anyone's taste. What it did buy is a measured reason why the whole "collapse the launches"
@@ -14,7 +14,7 @@ idea does not work on this recurrence, which is §5.
 ## 0. What happened, in order
 
 1. The kernel as committed (`3d838ea`) **faulted**: `HSA_STATUS_ERROR_MEMORY_FAULT`, illegal access, in
-   the first body, and no timing at all (`bench/p9-route-a-2026-10-14.md` §5's hand-off was never
+   the first body, and no timing at all (`progress/2026-10-14/p9-route-a-2026-10-14.md` §5's hand-off was never
    runnable). Each attempt cost a 5-minute HSA hang-analysis through the engine.
 2. A standalone one-layer device gate was written (`run.py`, seconds per case) so the repair could be
    iterated; it found **two** defects, both of which had to be fixed before the route could be judged
@@ -86,7 +86,7 @@ of a 32-column strip. Two independent consequences:
   appeared in the last head's blocks, which is why it looked like a first-body mystery.
 * LDS: `slot(127,127) = 4160` in a 4,096-cell array — 65 cells past the end of `Sst`, into whatever
   the allocator laid out after it. On this device that does not fault, it corrupts neighbours
-  silently (trap 5 in `bench/HANDOFF-2026-10-14.md`).
+  silently (trap 5 in `progress/2026-10-14/HANDOFF-2026-10-14.md`).
 
 Both loops now walk the 4,096 cells striped over the threads, which also happens to make the global
 access one contiguous 128 B row per warp and the swizzled LDS write 32 distinct banks.
@@ -132,7 +132,7 @@ argument survived contact with the device completely.
 ## 4. The timing, and the verdict against the lines written before it
 
 Main agent, foreground, zero subagents, `tools/gpu_lock.sh` held, `--time-waves` at 1024 lanes
-(`tmp/q10/ids1024.txt`), `--gemm library`:
+(`progress/bench/evidence/q10/ids1024.txt`), `--gemm library`:
 
 | form | `gdn_rec` best-of-3 | runs (ms) | launches | ms/launch |
 |---|---|---|---|---|

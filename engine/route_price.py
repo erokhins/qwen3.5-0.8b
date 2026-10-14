@@ -5,9 +5,9 @@ Two modes, because the question grew a second half:
 
     .venv/bin/python engine/route_price.py                              # dec8, the 8-step table
     .venv/bin/python engine/route_price.py --fixture dec64f \
-          --engine-log tmp/gate_dec64f.log                              # the whole forced chain, 64 steps
+          --engine-log progress/engine/evidence/gate_dec64f.log                              # the whole forced chain, 64 steps
     .venv/bin/python engine/route_price.py --fixture dec64f --engine-log ... \
-          --out tmp/route_dec64f.json                                   # same table as JSON
+          --out progress/engine/evidence/route_dec64f.json                                   # same table as JSON
 
 Why this exists. `engine/logits_floor.py` prices one op (final norm + tied `lm_head`) with the reference's
 own `L23.s_out` held fixed, so its 0.99999862 is the floor for *reassociation-only change on the

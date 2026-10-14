@@ -1,5 +1,5 @@
 // tools/route_c_stages.cpp — the route (c) audit's device data collector
-// (bench/plan-route-c-audit-2026-001.md, comparisons A1 / A3 / A4).
+// (progress/2026-10-13/plan-route-c-audit-2026-10-13.md, comparisons A1 / A3 / A4).
 //
 // Three independently selectable modes, all correctness-only:
 //   stages  — feed a real prompt through the engine's OWN `submit_wave_body`, once per route, and

@@ -282,7 +282,7 @@ eight pinned ids are still neither matched nor contradicted.
 
 One diagnostic the runs did give for free: the prompt path runs end to end and its samples are ordinary
 token ids, not zeros or NaN — `[846, 198, 3710, 2614, 314, 279, 248046]` at top logits 14.70–23.07
-(`tmp/engine_gate/sampled.txt`). They are *not* the template's own next tokens (steps 2, 3, 5, 6 are
+(`progress/engine/evidence/engine_gate/sampled.txt`). They are *not* the template's own next tokens (steps 2, 3, 5, 6 are
 not), which is expected twice over: the reference prefills the prompt as one chunked forward while the
 engine feeds it token-at-a-time through the recurrence (§04.7 vs §04.4, and the README's "What this is
 NOT yet"), and a model is free to want something else mid-template. A gate-side note while reading the
@@ -327,7 +327,7 @@ of expected size, are both launch-side:
    115 casts), which shrink that same bill rather than its overhead.
 
 The honest caveat on the comparison: 8.03 ms is a **sum of per-op cold bursts measured separately**, and
-`bench/commit-review-2026-10-11.md` already graded that sum "overstated as a description of the engine",
+`progress/2026-10-11/commit-review-2026-10-11.md` already graded that sum "overstated as a description of the engine",
 so 14.631 − 8.03 is not a measured gap and nobody should defend or attack it as one. The first real
 engine timing is a warm burst in a zero-subagent, `gpu_lock.sh`-recorded window, with the same best-of-N
 discipline as every other §6 row, and it owes both the ms/token and the tok/s rows the ledger has never
@@ -601,7 +601,7 @@ IDS=248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198,248068,271,
 
 ### Q6 (2026-10-13): the 424-launch bill, priced at the widths each site actually uses
 
-The question this section owes `bench/plan-2026-10-12.md` Q6 is whether the step is launch-bound:
+The question this section owes `progress/2026-10-12/plan-2026-10-12.md` Q6 is whether the step is launch-bound:
 **12.949 ms/token at 128 lanes against a 6.52 ms floor for 1.5457 GB of weights at the 237 GB/s probe**
 (all three figures are §6's, and the effective rate is 124 GB/s — half the probe). Everything below is
 either a §6 figure or arithmetic on one, and each row says which. Nothing here is a new device timing:
@@ -721,10 +721,10 @@ hold it across them (AGENTS.md trap row).
 #     (`git diff --stat` must be empty afterwards). Both sweeps take --binary, and the WAVE path
 #     changed width too, so prefill has to be re-taken in the same window as decode.
 mkdir -p tmp/q6
-git show bc61dce~1:engine/kernels_proj.cpp > tmp/q6/proj_rpb8.cpp
-cp engine/kernels_proj.cpp tmp/q6/proj_rpb32.cpp
-cp tmp/q6/proj_rpb8.cpp  engine/kernels_proj.cpp && engine/build.sh && cp engine/build/decode_run tmp/q6/decode_run_rpb8
-cp tmp/q6/proj_rpb32.cpp engine/kernels_proj.cpp && engine/build.sh
+git show bc61dce~1:engine/kernels_proj.cpp > progress/engine/evidence/q6/proj_rpb8.cpp
+cp engine/kernels_proj.cpp progress/engine/evidence/q6/proj_rpb32.cpp
+cp progress/engine/evidence/q6/proj_rpb8.cpp  engine/kernels_proj.cpp && engine/build.sh && cp engine/build/decode_run tmp/q6/decode_run_rpb8
+cp progress/engine/evidence/q6/proj_rpb32.cpp engine/kernels_proj.cpp && engine/build.sh
 tools/gpu_lock.sh acquire q6-rpb-ab && tools/gpu_lock.sh util
 .venv/bin/python tools/context_sweep.py  --binary tmp/q6/decode_run_rpb8  --lanes 128,512,1024,2048,4032 --steps 32 --runs 3
 .venv/bin/python tools/context_sweep.py  --binary engine/build/decode_run --lanes 128,512,1024,2048,4032 --steps 32 --runs 3
@@ -847,7 +847,7 @@ That gives two independent readings, which should agree:
    called a finding.
 
    The polarity in (1) and (2) is worth stating plainly because the first sketch of this experiment, in
-   `bench/plan-2026-10-12.md` Q6 item 1, had it **inverted** ("burst ≈ sum of stages ⇒ the residue is inside
+   `progress/2026-10-12/plan-2026-10-12.md` Q6 item 1, had it **inverted** ("burst ≈ sum of stages ⇒ the residue is inside
    the kernels; burst ≪ sum ⇒ the stall is exposed, fix submission-side"). Caught before the run, agreed,
    and corrected in place there and in `stage_clock.h`'s header; §07.4 is the precedent for correcting a wrong
    claim where it stood rather than leaving it and dissenting downstream. The instrument is neutral between the
@@ -1055,7 +1055,7 @@ decode-step gap, and prefill does not touch it.
 
 
 
-# P1 of `bench/plan-2026-10-12`: the same gate 64 steps deep — teacher-forced — and what depth said
+# P1 of `progress/2026-10-12/plan-2026-10-12`: the same gate 64 steps deep — teacher-forced — and what depth said
 
 2026-10-11, a worker's shift. Every device command here is a correctness-only gate under the `<60 s`
 allowance in `AGENTS.md`: PASS/FAIL, one run each, blocking, `tools/gpu_lock.sh` held. **No engine timing
@@ -1154,8 +1154,8 @@ excursions, and neither is "state carry-over decaying with position":
 
 ```bash
 # the arithmetic behind the second reading, over the gate's own (e) table
-.venv/bin/python engine/gate.py --fixture dec64f > tmp/gate_dec64f.log    # the device run, correctness
-.venv/bin/python engine/curve_probe.py tmp/gate_dec64f.log                 # CPU: parses that table
+.venv/bin/python engine/gate.py --fixture dec64f > progress/engine/evidence/gate_dec64f.log    # the device run, correctness
+.venv/bin/python engine/curve_probe.py progress/engine/evidence/gate_dec64f.log                 # CPU: parses that table
 ```
 
 - `corr(1−cos, 1/(S n2)) = 0.769`, and `err × (S n2)` has median **0.1994** over the 25 steps up to the
@@ -1291,9 +1291,9 @@ them needs no engine and no device — price the two **legal** GDN prompt forms 
 against itself in that window, an absolute floor there is not measuring what it is supposed to measure.
 
 ```bash
-.venv/bin/python engine/gate.py --fixture dec64f > tmp/gate_dec64f.log   # device: correctness only, already run
+.venv/bin/python engine/gate.py --fixture dec64f > progress/engine/evidence/gate_dec64f.log   # device: correctness only, already run
 .venv/bin/python engine/route_price.py --fixture dec64f \
-        --engine-log tmp/gate_dec64f.log --out tmp/route_dec64f.json     # CPU: 5.3 s wall (1 m 15 s of
+        --engine-log progress/engine/evidence/gate_dec64f.log --out progress/engine/evidence/route_dec64f.json     # CPU: 5.3 s wall (1 m 15 s of
                                                                          # CPU across torch threads)
 ```
 
@@ -1571,8 +1571,8 @@ that mis-states the model is worse than no probe; the lesson is in that file's d
 .venv/bin/python tools/reference_dump.py --message "Count from 1 to 80, separating the numbers with commas." \
         --decode 64 --tag dec64t --lean --deep-steps 63 --logits-bits bf16 --verify data/refs/dec64t
 #   REPRODUCE PASS — every pinned byte and every pinned manifest value came back identical   (5.6 s)
-.venv/bin/python engine/gate.py --fixture dec64t > tmp/gate_dec64t.log               # device, correctness only
-.venv/bin/python engine/route_price.py --fixture dec64t --engine-log tmp/gate_dec64t.log
+.venv/bin/python engine/gate.py --fixture dec64t > progress/engine/evidence/gate_dec64t.log               # device, correctness only
+.venv/bin/python engine/route_price.py --fixture dec64t --engine-log progress/engine/evidence/gate_dec64t.log
 ```
 
 826 tensors + manifest, 57.1 MiB of pins (61 MB on disk) — the same budget as `dec64f`, same lean policy,
@@ -1647,7 +1647,7 @@ are: a fixed absolute floor on the logits cos now demonstrably fires on steps wh
 it against itself, and passes cleanly everywhere else.
 
 
-# Q1 of `bench/plan-2026-10-12`: band option 1 is in force — the margin is a measurement, and what that costs
+# Q1 of `progress/2026-10-12/plan-2026-10-12`: band option 1 is in force — the margin is a measurement, and what that costs
 
 > **SUPERSEDED IN PART, same day (D-2).** This section's *rule* stands — judge step *j* against the route
 > spread measured at step *j* — but the margin is no longer one global constant: it is now **per fixture**,
@@ -1794,7 +1794,7 @@ tmp/…/sampled.txt` after 1.55 GB of `hipMalloc` + `hipMemcpy` and a full run �
 milliseconds, and the refusal is printed before any step runs.
 
 
-# Q2 of `bench/plan-2026-10-12`: engine G7 at breadth — 423 lanes, a two-turn transcript, and a free run that would not diverge
+# Q2 of `progress/2026-10-12/plan-2026-10-12`: engine G7 at breadth — 423 lanes, a two-turn transcript, and a free run that would not diverge
 
 Three things were asked for: a long-context forced pin, a multi-turn pin, and a free-run divergence depth
 measured on prose instead of on a counting chain. All three were made, gated, and two of them are green;
@@ -1991,7 +1991,7 @@ engine/gate.py --fixture dec64t     2 s   PASS
 engine/gate.py --fixture dec300f    7 s   PASS
 engine/gate.py --fixture mt32f      4 s   FAIL — 1 line (tie policy); 290 checks green
 decode_run --ids <dec300f prompt> --steps 128      5 s   free run, 423 steps, stopped=0
-tmp/q2_session.py mt32f 32                        7 s   feed+gen parity, 32/32
+progress/engine/evidence/q2_session.py mt32f 32                        7 s   feed+gen parity, 32/32
 ```
 
 **That `mt32f` FAIL and the "nothing was priced" state were both superseded later the same day** — by D-1
@@ -2002,9 +2002,9 @@ still true as history; the section at the end of this file is the current state.
 
 ---
 
-# D-1 and D-2 of `bench/plan-2026-10-12`: the tie policy keeps to the case it exists for, and the route margin became per-fixture
+# D-1 and D-2 of `progress/2026-10-12/plan-2026-10-12`: the tie policy keeps to the case it exists for, and the route margin became per-fixture
 
-Two gate-policy decisions the operator recorded in `bench/plan-2026-10-12.md` §3, implemented and re-gated
+Two gate-policy decisions the operator recorded in `progress/2026-10-12/plan-2026-10-12.md` §3, implemented and re-gated
 the same day they were written. **Neither touched one line of the engine**: both are about what the gate is
 entitled to call a failure, which is why every number below comes from a gate run or a shipped allowance
 file rather than from a kernel change. No timing is quoted anywhere in this section — `decode_run` prints
@@ -2087,7 +2087,7 @@ measurement of the fixture being judged, which is the only thing a margin may be
 
 Now each `data/refs/<fixture>/route_allowance.json` carries its own margins, derived as the max ratio
 **inside that fixture only**, rounded up at 2 dp, and hash-checked as before. Re-derived from the shipped
-files (not from memory — `tmp/d5_allowance_report.py` recomputes every figure in this table from the
+files (not from memory — `progress/engine/evidence/d5_allowance_report.py` recomputes every figure in this table from the
 `route_*`, `engine_*_when_priced` columns of the four files):
 
 | fixture | margin / margin_rel | own derivation from its own rows | steps judged tighter than flat G5 (cos / meanrel) | worst-ratio step | engine 1−cos at that step | its cap | headroom |
@@ -2102,7 +2102,7 @@ Three things that table says, and one thing it does not.
 1. **`dec64f`'s margin is unchanged at 3.50 / 0.42** — measured in its gate log, not asserted: "this
    fixture's margin in force 3.50". Its own derivation would be 3.04 / 0.34, i.e. *tighter*; D-2 recorded
    keeping the carried numbers, and the tool enforces that: `engine/route_allowance.py --table
-   tmp/route_dec64f.ra.json` **refuses** (`exit=2`) with "this measurement derives 3.04/0.34 but the file on
+   progress/engine/evidence/route_dec64f.ra.json` **refuses** (`exit=2`) with "this measurement derives 3.04/0.34 but the file on
    disk carries 3.50/0.40… re-pricing would make the band tighter. This tool does not move a band on its
    own", and names the file to delete deliberately if the new number is the one to believe.
 2. **The wide fixture is now priced and green**: `dec300f` at 7.99 and `mt32f` at 2.93, both from their own
@@ -2120,7 +2120,7 @@ Three things that table says, and one thing it does not.
    it changes how the table above is reproduced: `data/` is gitignored, so **no** `route_allowance.json` is
    tracked — not these two, not `dec64f`'s. They are regenerable artifacts (`engine/route_price.py` then
    `engine/route_allowance.py`, both CPU-only), which is why every figure quoted here is re-derived from the
-   files on disk by `tmp/d5_allowance_report.py` instead of from a commit.
+   files on disk by `progress/engine/evidence/d5_allowance_report.py` instead of from a commit.
 4. What the table does **not** say: that the rule is now honest about the engine. **The self-reference is
    still there, and per-fixture keying makes it more visible, not less.** A margin defined as
    `max(engine deficit / route spread)` puts that fixture's worst observed step exactly on the boundary *by
@@ -2158,7 +2158,7 @@ All correctness-only, each inside the `<60 s` worker allowance, under `tools/gpu
 **60 %** at the last — discounted as usual, the serving engine that renders this text is the load and it
 busy-polls the iGPU. **No timing taken**: the wall figures below are the cost of running a check, printed only
 to show each one fit the worker allowance, and none of it goes near `bench/performance-status.md`. The whole
-pass is one command — `tmp/d6_final_pass.py` — and it left the ten logs in `tmp/d6_*.log`. Both helpers live
+pass is one command — `progress/engine/evidence/d6_final_pass.py` — and it left the ten logs in `tmp/d6_*.log`. Both helpers live
 under `tmp/`, which is gitignored: they are how these figures were made, the tables above are the record.
 
 ```
@@ -2177,9 +2177,9 @@ engine/route_price.py --fixture mt32f --engine-log … --out …  CPU  3.8 s  th
 speccheck/run_all.py                                       CPU  7m50s  26 gates run, 0 failed
 ```
 
-`dec300f` was **not** re-priced on the CPU: `tmp/route_dec300f.json` (from the Q2 pass) was checked step by
+`dec300f` was **not** re-priced on the CPU: `progress/engine/evidence/route_dec300f.json` (from the Q2 pass) was checked step by
 step against a fresh gate log with `route_price.py`'s own parser and the engine column is identical at all
-128 steps (`tmp/d2_dec300f_still_valid.py`), so the shipped table was cited rather than re-made — the same
+128 steps (`progress/engine/evidence/d2_dec300f_still_valid.py`), so the shipped table was cited rather than re-made — the same
 rule `AGENTS.md` gives for any measurement already on disk whose inputs have not moved.
 
 ## What this pass left open, named
@@ -2201,7 +2201,7 @@ rule `AGENTS.md` gives for any measurement already on disk whose inputs have not
 
 ---
 
-# D-4 of `bench/plan-2026-10-12`: the engine free-runs the corpus, and every one of its divergences is a tie
+# D-4 of `progress/2026-10-12/plan-2026-10-12`: the engine free-runs the corpus, and every one of its divergences is a tie
 
 Q2's item 3 closed by saying the repo had no divergence-depth measurement on a prompt whose next token is
 genuinely uncertain, and named the corpus run as the thing that would give one. This is that run: the same
@@ -2356,7 +2356,7 @@ in the gitignored `data/` like every other regenerable fixture.
 
 ## D-3 — the route margin cannot be made engine-independent, and the reason is a reference-side baseline
 
-Task: `bench/plan-2026-10-12.md` Q4b / decision **D-3** — stop fitting the margin to the engine's own errors,
+Task: `progress/2026-10-12/plan-2026-10-12.md` Q4b / decision **D-3** — stop fitting the margin to the engine's own errors,
 calibrate the multiplier from **legal reference-side routes alone**, and if that multiplier turns out smaller
 than what the engine needs, report it as a finding about the engine rather than as a licence to loosen.
 
@@ -2555,8 +2555,8 @@ done and **no timing was taken**; the gates themselves were not re-run, because 
 
 ```bash
 .venv/bin/python engine/route_margin.py --selftest                    # 12 cases, no files touched
-.venv/bin/python engine/route_margin.py --fixture dec64f --engine-log tmp/d6_gate_dec64f.log \
-    --check-patch --out tmp/route_margin_dec64f.json                  # repeat per fixture
+.venv/bin/python engine/route_margin.py --fixture dec64f --engine-log progress/engine/evidence/d6_gate_dec64f.log \
+    --check-patch --out progress/engine/evidence/route_margin_dec64f.json                  # repeat per fixture
 ```
 
 ## The handover: what this pass could not run, and the sequence if a band move is ever decided
@@ -3412,7 +3412,7 @@ claim counted rather than inferred. Nothing was re-pinned, no band moved, no `EX
 
 **The 4096-lane ceiling was left alone, on purpose.** Raising `kAttnMaxSplit` from 8 to 16 is one line and
 costs 32 MiB/request of `part` scratch — trivial against this box, and the arithmetic is written up in
-`bench/plan-prefill-2026-10-12.md` §3.1 together with the two constants that must move together
+`progress/2026-10-12/plan-prefill-2026-10-12.md` §3.1 together with the two constants that must move together
 (`kAttnMaxSplit` and `decode_run`'s `kSessionDefaultCap`, which is what makes the ceiling reachable at
 all). What makes it *not* cheap-and-provable is that nothing in the tree has more than 524 lanes, so a
 >4096-lane check needs a new pin (P3-class work, and D-2 says a new fixture prices its own margin), and
@@ -3728,15 +3728,15 @@ harnesses print were ignored and nothing here entered `bench/performance-status.
    ./engine/build/decode_run --ids "$IDS" --steps 8 --out tmp/q10/A_inter
    ./engine/build/decode_run --ids "$IDS" --steps 8 --mlp-map contig --out tmp/q10/A_contig
    tools/gpu_lock.sh release q10-engab
-   (cd tmp/q10/A_inter && md5sum *) > tmp/q10/md5_A_int.txt
-   (cd tmp/q10/A_contig && md5sum *) > tmp/q10/md5_A_con.txt
-   diff tmp/q10/md5_A_int.txt tmp/q10/md5_A_con.txt   # no output: 10 files identical
+   (cd tmp/q10/A_inter && md5sum *) > progress/engine/evidence/q10/md5_A_int.txt
+   (cd tmp/q10/A_contig && md5sum *) > progress/engine/evidence/q10/md5_A_con.txt
+   diff progress/engine/evidence/q10/md5_A_int.txt progress/engine/evidence/q10/md5_A_con.txt   # no output: 10 files identical
    ```
 
    wall 0.61 s and 0.50 s. `MLPMAP gate=contig` appears in the second run's stdout and not the first.
 4. **Gate counts, all eight fixtures, both mappings.** `engine/gate.py` takes `--binary` but has no
    engine-arg passthrough, so the alternative walk was gated through a two-line wrapper that adds the flag
-   (`tmp/q10/decode_run_contig.sh`, not committed) — the flag path itself is what got gated, which is the
+   (`progress/engine/evidence/q10/decode_run_contig.sh`, not committed) — the flag path itself is what got gated, which is the
    stronger of the two ways to do it:
 
    | fixture | interleave | contig | same? |
@@ -4058,7 +4058,7 @@ package.
 
 ## Q11 (2026-10-13): D-9's near-tie becomes a **sized** rule — `chunk64b` leaves the expected-red list as a green that names its own tie, and the size comes from the band the gate already polices
 
-D-9 (`bench/plan-2026-10-12.md`) kept `chunk64b` step 0 RED for one honest reason: the pin puts **8337 at
+D-9 (`progress/2026-10-12/plan-2026-10-12.md`) kept `chunk64b` step 0 RED for one honest reason: the pin puts **8337 at
 15.625** and **20619 at 15.500** — a unique winner by **0.125**, which is **2 BF16 ULP** at that magnitude —
 while the engine's legal element error at that step is larger (measured maxabs **0.2509**). Demanding the
 pinned id there is asking a bit-tolerant fixture to be bit-exact. D-9's second half said the fix must not be
@@ -4270,7 +4270,7 @@ four below were run as dry-runs — CPU, no device, no lock taken.
 ### Reproduce
 
 ```bash
-tmp/d9_sizing/all.sh                                                  # the eight device runs, locked, one at
+progress/engine/evidence/d9_sizing/all.sh                                                  # the eight device runs, locked, one at
 #   a time — that loop is one line: for fx in <the eight>; do tools/gate_locked_run.sh $fx tmp/gate_logs; done
 tools/gate_log_diff.sh tmp/d9_sizing/base tmp/d9_sizing/new           # the seven-identity table above
 tools/gate_log_diff.sh tmp/d9_sizing/base tmp/d9_sizing/new --diff    # …and the chunk64b residual, line by line
@@ -4336,7 +4336,7 @@ and section (h) and `--time-waves'` counts_match witness stay comparable. The li
 scratch tiles (`mlp_gate_raw`, `mlp_up_raw`, 3.7 MiB each at 512 rows) and no new casts.
 
 **The bug, and why it looked like the library's.** With the route on, dec8 read 37 FAIL, step-0 logits
-cos 0.42. Three facts localised it: (1) `tmp/gemm_probe.cpp`, which links the engine's own
+cos 0.42. Three facts localised it: (1) `progress/engine/evidence/gemm_probe.cpp`, which links the engine's own
 `gemm_bf16`, gives **worst 1.00 ULP and cos 1.000000000 against a double reference** on all six engine
 shapes (8×4096×1024, 8×6144×1024, 295×512×1024, 295×3584×1024, 295×1024×3584, 512×1024×2048) with a
 row-swapped negative control that catches everything — so the call form, the pinned 128 MiB workspace,
@@ -4399,7 +4399,7 @@ section should be read as if it were. What is unchanged is the hand route: `--ge
 bit-identity against a pre-route binary, section (h) still judges it byte-for-byte, and the row-count rule
 still keeps every one-row body — so every decode bit, on both routes — out of the library path.
 
-**What made it admissible.** `bench/route-c-audit-2026-10-14.md`: each of the ten library shapes
+**What made it admissible.** `progress/2026-10-14/route-c-audit-2026-10-14.md`: each of the ten library shapes
 disagrees with the hand GEMV by **at most 1 ULP of any element above the cancellation band**, at every
 width it is used at (M = 1, 88, 512, 1024), while three injected bugs separate from that legal delta by
 ≥ 492× on the least flattering statistic. Accumulated over a 24-layer body it stays at meanrel ≤ 1.7e-2
@@ -4424,7 +4424,7 @@ printed in the harness output because after this week's incident nothing else in
 | wide520f | 331 / 0 | 339 / 0 | ″ |
 | chunk64b | 380 / 0 | 389 / 0 (2 TIE, 1 SLACK) | ″ |
 
-Reproduce: `tmp/gate_ab.sh <hand|library> <fixture>`, which is
+Reproduce: `progress/engine/evidence/gate_ab.sh <hand|library> <fixture>`, which is
 `engine/gate.py --fixture <fixture> --binary engine/build/decode_run --gemm <side>` under
 `tools/gpu_lock.sh`. **The side flag goes to `gate.py` and nowhere else** — see the trap below.
 
@@ -4473,10 +4473,10 @@ fixed in `0fea0db`, and both are the same failure shape — a checker that canno
 
 **And the claim that had to be retracted.** `0b30422` recorded “all eight fixtures PASS on both routes
 (16/16)”. That was **sixteen hand runs**: the A/B harness carried the route in a wrapper binary
-(`tmp/decode_run_library.sh` → `decode_run --gemm library "$@"`), `gate.py` appends its own
+(`progress/engine/evidence/decode_run_library.sh` → `decode_run --gemm library "$@"`), `gate.py` appends its own
 `--gemm <route>` **after** the wrapper's flag, and `decode_run`'s parser is last-wins — so the “library”
-side ran the hand route. The log said so the whole time (`tmp/margin/library_dec300f.log`, header
-`--binary tmp/decode_run_library.sh`, `NUMERICS … gemm=hand`). There had never been a library-route gate
+side ran the hand route. The log said so the whole time (`progress/engine/evidence/margin/library_dec300f.log`, header
+`--binary progress/engine/evidence/decode_run_library.sh`, `NUMERICS … gemm=hand`). There had never been a library-route gate
 run on any fixture before today; only `tools/route_c_audit.py a2-run`, which passes `--gemm` last and so
 was always correct. Two rules fall out of that, and they are the reason this subsection is long: **a
 route claim must be read from the engine's own echo, never inferred from a command line**, and **an A/B

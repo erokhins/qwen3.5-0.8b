@@ -1,4 +1,4 @@
-// tmp/gemm_probe.cpp — does `engine::kernels::gemm_bf16` compute the product the engine means?
+// progress/engine/evidence/gemm_probe.cpp — does `engine::kernels::gemm_bf16` compute the product the engine means?
 //
 // Links the engine's own route TU, so this exercises the real handle setup, the real workspace pin,
 // the real stream choice and the real call — not a re-typed copy of them. Correctness only: one pass
@@ -11,7 +11,7 @@
 // computed nothing, or left the poison in the buffer, would otherwise look "nearly right".
 //
 // build: hipcc -O3 -Wno-unused-command-line-argument -I. -Iengine -Wl,-rpath,/opt/rocm/lib \
-//          tmp/gemm_probe.cpp engine/kernels_gemm.cpp -lhipblas -o tmp/gemm_probe
+//          progress/engine/evidence/gemm_probe.cpp engine/kernels_gemm.cpp -lhipblas -o tmp/gemm_probe
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 

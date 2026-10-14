@@ -387,7 +387,7 @@ __global__ void attn_core(CoreArgs a) {
 }
 
 // ============================================================================================
-// Phase 2 (§9 of bench/attn-wave-diagnosis-2026-10-14.md; results.md §12 → §20): the tiled wave
+// Phase 2 (§9 of progress/2026-10-14/attn-wave-diagnosis-2026-10-14.md; results.md §12 → §20): the tiled wave
 // form, `attn_tile_wave`.
 //
 // WHY THIS EXISTS. The shipped `attn_core` reads exactly 1.0 byte of K/V per flop: one K row and one

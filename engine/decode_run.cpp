@@ -93,7 +93,7 @@ struct Options {
     bool mlp_gate_map_given = false;
     // Which GEMM a WIDE body runs (route (c), `engine/kernels.h:WaveGemm`). The default is LIBRARY:
     // D-11 accepted the route's wave-width dependence and the route-c audit proved the hand<->library
-    // delta to be reassociation (bench/route-c-audit-2026-10-14.md), so the funded route is what ships.
+    // delta to be reassociation (progress/2026-10-14/route-c-audit-2026-10-14.md), so the funded route is what ships.
     // The admitted guarantee is a band, not bit-identity — `engine/gate.py` judges a library run against
     // CASCADE_BAND and a hand run byte-identically, which is why `hand` stays a first-class route rather
     // than a legacy alias: it is the A/B side (§7 W9) and the way to reproduce a pre-route binary's bits
@@ -444,11 +444,11 @@ void print_usage(FILE* out) {
                  " `hand` is still fully supported and runs the pre-route path everywhere; it is the"
                  " A/B side and the route whose bits are byte-identical to a pre-route binary. Not"
                  " byte-identical across wave widths on the library route — that check is inside a band"
-                 " there (engine/gate.py's CASCADE_BAND, bench/route-c-audit-2026-10-14.md). A one-row"
+                 " there (engine/gate.py's CASCADE_BAND, progress/2026-10-14/route-c-audit-2026-10-14.md). A one-row"
                  " body is the hand GEMV under either setting, so no decode step changes shape or bits"
                  " on either side of this flag\n"
-                 "  --attn-tile 0|1  which attention FORM a WAVE body runs (Phase 2, bench/"
-                 "attn-wave-diagnosis-2026-10-14.md §9). `1`, the default since results.md §21, runs"
+                 "  --attn-tile 0|1  which attention FORM a WAVE body runs (Phase 2, "
+                 "progress/2026-10-14/attn-wave-diagnosis-2026-10-14.md §9). `1`, the default since results.md §21, runs"
                  " `attn_tile_wave`, in which one K/V row load feeds the G=4 GQA heads of ONE query row"
                  " (M is fixed at 1: with a per-row lane cut two rows share no window, so row tiling buys"
                  " nothing — `static_assert(ATTN_TILE_M == 1)`), which is where the wave's K/V re-reads"
@@ -460,7 +460,7 @@ void print_usage(FILE* out) {
                  " REFUSES (`score_f32`, a fused plan, a non-32 warp) rather than falling back, because a"
                  " silent fallback would price the shipped form twice and report it as the tiled one\n"
                  "  --gdn-scan seq|chunk  which §04.4 scan a GDN body runs (P9, §04.7,"
-                 " bench/p9-phase1-2026-10-14.md). `seq`, the default, is the shipped recurrence: ONE"
+                 " progress/2026-10-14/p9-phase1-2026-10-14.md). `seq`, the default, is the shipped recurrence: ONE"
                  " launch per token per layer, 18,432 launches per 1024-token wave, and the form the"
                  " decode pins are pinned through. `chunk` runs the chunked scan — intra-chunk work in"
                  " one launch per body, the inter-chunk carry in a second one that parks the state"

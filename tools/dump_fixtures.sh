@@ -80,7 +80,7 @@ want_tokens() {  # <prompt-file> <expected rendered token count>
 # The same guard for the two `--prompt` fixtures, which are RAW prompt text: no chat template is
 # rendered, so counting them means tokenizing the file itself. These two are the only fixtures whose
 # token count is an IDENTITY rather than a topic — their pinned rows are only ground truth for the
-# disputed lanes if the ids are the ones `tmp/q10/ids1024.txt` holds, so a prompt that drifts by one
+# disputed lanes if the ids are the ones `progress/bench/evidence/q10/ids1024.txt` holds, so a prompt that drifts by one
 # token silently stops being an anchor for the argument it was dumped for.
 raw_tokens() {
   "$PY" - "$1" <<'PY'
@@ -120,7 +120,7 @@ if want p300; then
   run p300 --message "$(cat "$FIX/p300.txt")" --decode 0
 fi
 
-# ---- the P3 boundary fixtures (bench/plan-prefill-2026-10-12.md §5.1, finding F3) ---------------
+# ---- the P3 boundary fixtures (progress/2026-10-12/plan-prefill-2026-10-12.md §5.1, finding F3) ---------------
 # What none of the five shipped fixtures can say: no prompt of theirs ends at a multiple of 64
 # (prompt lens are 17/17/27/232/295), and nothing ever crossed the attention stage's 512-lane
 # ceiling. These three are pins for the cases §04.7 and §07.3 keep referring to, written BEFORE any
@@ -187,7 +187,7 @@ fi
 # disputed streaming rows sit inside pinned ground truth rather than inside an A/B between two builds.
 #
 # THE IDS ARE AN IDENTITY, NOT A TOPIC. Both prompts are the raw text whose tokenization is exactly
-# `tmp/q10/ids1024.txt` — wide640f is the first 640 of that same list, wide1024f is all of it — chosen
+# `progress/bench/evidence/q10/ids1024.txt` — wide640f is the first 640 of that same list, wide1024f is all of it — chosen
 # so the rows the dispute names (1023, and 1024 once the decode step is counted) are pinned rows. Proved
 # by `tmp/pinwork/check_ids_match.py`-style comparison and by `tools/check_fixture_prefix.py`, which
 # shows wide640f's whole block is a bit-exact prefix of wide1024f's: one prompt at two lengths, so a

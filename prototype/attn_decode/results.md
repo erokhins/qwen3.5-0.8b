@@ -304,7 +304,7 @@ heads × lanes, plus ~14 KB of stage writes), which at 237 GB/s is **~2.5 µs of
 
 ## 10. P7 (2026-10-13): the online route becomes an engine route, and gets the band §07.3 pre-authorized
 
-Plan `bench/plan-prefill-2026-10-12.md` §3/P7 moves the engine above the score staging: when a row has
+Plan `progress/2026-10-12/plan-prefill-2026-10-12.md` §3/P7 moves the engine above the score staging: when a row has
 more lanes than `MAXSC`, `engine/kernels_attn.cpp` now selects `full=0 --split ceil(lanes/MAXSC)`
 instead of refusing the token. **No kernel changed for it** — `attn_core`'s streaming branch,
 `attn_combine`'s `(max,sum)` merge and the `part` geometry were already gated here in `--mode once`
@@ -383,7 +383,7 @@ five fixtures whose numbers did not move.
 
 ## 11. P8 (2026-10-13): a whole prefill wave through one launch — `blockIdx.z` is the query row
 
-Plan `bench/plan-prefill-2026-10-12.md` §2.1/P8 asks for the attention layers of a prefill **wave**
+Plan `progress/2026-10-12/plan-prefill-2026-10-12.md` §2.1/P8 asks for the attention layers of a prefill **wave**
 (§06.3: up to 512 query rows, each at its own position, each with one more visible lane than the row
 before it) to be priced by ONE launch per attention layer instead of one per row. This section is the
 op-level half: what the kernel had to gain, why the grid is shaped the way it is, and what a wave is
@@ -495,7 +495,7 @@ strides are the strides a one-row launch already used, and `grid.z = 1` costs no
 
 ## 12. P9 Phase 2 (2026-10-14): the tiled wave core — `attn_tile_wave`, gated on CPU, not yet on device
 
-Phase 1 (`bench/attn-wave-diagnosis-2026-10-14.md`) closed with the byte wall binding: 25.79 GB of K/V
+Phase 1 (`progress/2026-10-14/attn-wave-diagnosis-2026-10-14.md`) closed with the byte wall binding: 25.79 GB of K/V
 re-read for 25.79 GFLOP, 1.000 byte/flop, 108.8 ms of traffic against 109.2 ms measured. §9's lever is
 re-use: one K row loaded once and fed to more than one score dot. This section is the tiled form that
 does it, everything that could be proven without a device, and the command list for the device pass.
@@ -636,18 +636,18 @@ Correctness first, then timing, blocking, zero subagents, best-of-3, and §7 ite
 .venv/bin/python prototype/attn_decode/run.py --wave --tile-kernel --wave-rows 300
 # 2. engine A/B, bit-for-bit, one window (default 0 must equal the pre-Phase-2 binary)
 tools/gpu_lock.sh acquire "attn phase2 ab"; tools/gpu_lock.sh util
-./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --attn-tile 0 --out tmp/ab/ship
-./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --attn-tile 1 --out tmp/ab/tile
+./engine/build/decode_run --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" --steps 1 --attn-tile 0 --out tmp/ab/ship
+./engine/build/decode_run --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" --steps 1 --attn-tile 1 --out tmp/ab/tile
 tools/gpu_lock.sh release
 diff <(cd tmp/ab/ship && ls) <(cd tmp/ab/tile && ls) && for f in tmp/ab/ship/*; do cmp -s "$f" "tmp/ab/tile/${f##*/}" || echo "DIFF ${f##*/}"; done
 # 3. §7 attribution, both sides, best-of-3 (the `attn` line is the measure; the four siblings are the
 #    contamination check)
-for i in 1 2 3; do ./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --time-waves \
+for i in 1 2 3; do ./engine/build/decode_run --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" --steps 1 --time-waves \
     --gemm library --attn-tile 0 | grep -E "WAVE gran=stage|WAVEGAP"; done   # then --attn-tile 1
 # 4. §9's counters over both cores, to check the read census instead of assuming it
 rocprofv3 --kernel-include-regex "attn_tile|attn_core" --pmc SQ_INSTS SQ_INSTS_VALU SQ_INSTS_LDS \
     SQ_WAVES GRBM_COUNT GRBM_RUN_BUSY_STATS --output-format csv -d tmp/rocp2 -o tile \
-    -- ./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --attn-tile 1
+    -- ./engine/build/decode_run --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" --steps 1 --attn-tile 1
 ```
 
 Pre-registered before any of it runs, as §7 demands: the measure is `WAVE gran=stage family=attn ms` on
@@ -854,16 +854,16 @@ bash prototype/attn_decode/build.sh && bash engine/build.sh
 # 2. DEFECT 2. The A/B, with EVERY prompt row dumped on both sides -- `--prefill-logits last` (what §12 used)
 #    leaves one row on each side, which is why there was no table to take. ~1 GB per side at 1024 tokens.
 tools/gpu_lock.sh acquire "attn p2b ab"; tools/gpu_lock.sh util
-./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --prefill-logits all \
+./engine/build/decode_run --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" --steps 1 --prefill-logits all \
     --attn-tile 0 --out tmp/ab2/ship
-./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --prefill-logits all \
+./engine/build/decode_run --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" --steps 1 --prefill-logits all \
     --attn-tile 1 --out tmp/ab2/tile
 tools/gpu_lock.sh release
 .venv/bin/python engine/attn_form_band.py --ship tmp/ab2/ship --tile tmp/ab2/tile --prompt-len 1024
 
 # 3. DEFECT 3. The attribution this could not price, both sides, best-of-3. This must now print an `attn`
 #    line for the tiled side too; §13's shipped baseline to beat is 116.29 ms / 33.60 % of 346.05 ms.
-for i in 1 2 3; do ./engine/build/decode_run --ids "$(cat tmp/q10/ids1024.txt)" --steps 1 --time-waves \
+for i in 1 2 3; do ./engine/build/decode_run --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" --steps 1 --time-waves \
     --gemm library --attn-tile 0 | grep -E "WAVE gran=stage|WAVEGAP"; done        # then --attn-tile 1
 ```
 
@@ -911,8 +911,8 @@ token-count guards committed in `tools/dump_fixtures.sh`.
 
 | fixture | prompt | what is pinned | on disk | what it makes adjudicable |
 |---|---|---|---|---|
-| `data/refs/wide640f` | the first 640 tokens of `tmp/q10/ids1024.txt` (640 = 512 + 128 = 5 × §04.7's chunk) | **every prefill row**: `logits_rows.npy` = [640, 248320] BF16-as-uint16, 303.1 MiB — plus 8 replayed steps, `--deep-steps 7`, state fingerprints | 356 MiB | rows 512…639, the first rows the one-pass stage cannot serve |
-| `data/refs/wide1024f` | `tmp/q10/ids1024.txt` verbatim — proved, not asserted: the manifest's `sources[0].ids` **is** that list, 1024 of 1024 | [1024, 248320], 485.0 MiB, same decode side | 551 MiB | rows 512…1023, **including row 1023, the row §15's A/B disagreed on** |
+| `data/refs/wide640f` | the first 640 tokens of `progress/bench/evidence/q10/ids1024.txt` (640 = 512 + 128 = 5 × §04.7's chunk) | **every prefill row**: `logits_rows.npy` = [640, 248320] BF16-as-uint16, 303.1 MiB — plus 8 replayed steps, `--deep-steps 7`, state fingerprints | 356 MiB | rows 512…639, the first rows the one-pass stage cannot serve |
+| `data/refs/wide1024f` | `progress/bench/evidence/q10/ids1024.txt` verbatim — proved, not asserted: the manifest's `sources[0].ids` **is** that list, 1024 of 1024 | [1024, 248320], 485.0 MiB, same decode side | 551 MiB | rows 512…1023, **including row 1023, the row §15's A/B disagreed on** |
 
 Both carry `prefill_logit_rows: all`, `logits_storage: bf16`, the §10.5 stop probe (`none in 300`, probed before
 dumping, legacy stop 248044 also absent), and a `provenance` block: dumper, dump path, **transformers 5.19.0**,
@@ -1102,7 +1102,7 @@ also proves the import path still works).
 | `engine/gate.py --selftest --fixture dec8` | SELFTEST PASS (all sections, incl. the 16 section-(i) negatives) |
 | `engine/attn_form_band.py --selftest` | 15/15 |
 | `--break-ab-logits 3`, scope `full` vs `form` | rc 1 vs rc 0 + deferred-2 + sidecar, as above |
-| `tmp/stub_decode_run.py` coverage harness, three cases | see §18.1 |
+| `progress/prototype/evidence/stub_decode_run.py` coverage harness, three cases | see §18.1 |
 
 Nothing above produced a millisecond figure, and none of it entered a timing document.
 

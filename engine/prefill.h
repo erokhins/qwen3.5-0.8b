@@ -5,7 +5,7 @@
 // What a wave is NOT yet, said here so nobody has to discover it in a diff: no batched kernel and no
 // chunked GDN scan. Every launch a wave makes is a launch `decode_step` already made for that one
 // token, in the same order, so the wave is byte-identical to the per-token prompt loop it replaces —
-// that equivalence IS the package's gate (`bench/plan-prefill-2026-10-12.md` §4, row P2). P4/P5/P6
+// that equivalence IS the package's gate (`progress/2026-10-12/plan-prefill-2026-10-12.md` §4, row P2). P4/P5/P6
 // batch the families *inside* `submit_token_body`; the wave's shape is what lets them do that without
 // also restructuring the driver, and that is why P2 lands before them.
 //

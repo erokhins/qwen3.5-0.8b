@@ -71,7 +71,7 @@ __device__ __forceinline__ float block_reduce(float v, float* red, bool bf16_tre
  * are each read once and the norm reads the values it already has instead of going back to
  * memory.
  *
- * `blockIdx.x` IS the row (P4, bench/plan-prefill-2026-10-12.md). The §03.1 reduction is
+ * `blockIdx.x` IS the row (P4, progress/2026-10-12/plan-prefill-2026-10-12.md). The §03.1 reduction is
  * row-local — one block, one 1024-element row, nothing crosses a row boundary — so a
  * `[rows, H]` tile in one launch has to produce the same bits as `rows` launches of one row.
  * At `gridDim.x == 1` every pointer this kernel forms is the pointer it formed before the row

@@ -1,6 +1,6 @@
 // tools/mfma_probe.cpp — does the matrix unit execute on `gfx1151` at all? Correctness only.
 //
-// Why this exists: route (c) of the funded prefill package (`bench/plan-prefill-2026-10-12.md`,
+// Why this exists: route (c) of the funded prefill package (`progress/2026-10-12/plan-prefill-2026-10-12.md`,
 // "Funded: prefill compute") is hand-tiled matrix-unit work, and there is a public report that the
 // support is not there — rocm-libraries issue 4618, "gfx1151 support is still broken in practice as
 // of February 2026". `rocwmma.hpp` IS installed (2.2.1), so the question is answerable at the cost of

@@ -22,7 +22,7 @@ gate failure rather than as a silent fudge factor.
 
 The fixture this assembles is written to `--work-dir` and left in place, so the raw binary is
 runnable against it afterwards — which is what makes the timing rows in
-`bench/commit-review-2026-10-11.md` §4 reproducible as written:
+`progress/2026-10-11/commit-review-2026-10-11.md` §4 reproducible as written:
 
     prototype/gdn_decode/gdn_decode --mode all --dir <work-dir> --out <out-dir> --layers 18 \
         --iters 200 --trials 5

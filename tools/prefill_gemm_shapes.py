@@ -12,7 +12,7 @@ can disagree silently are two bugs instead of one). The JSON carries the layer s
 indices, the block-matmul total and the flop sum, so the harness can check itself against the census's
 own arithmetic instead of trusting it. One record per line, so a wrong row is a diffable row.
 
-Three questions from `bench/plan-prefill-2026-10-12.md` ("Funded: prefill compute", route (b)/(c)
+Three questions from `progress/2026-10-12/plan-prefill-2026-10-12.md` ("Funded: prefill compute", route (b)/(c)
 spike), all of them arithmetic on shapes and on rates that are already measured elsewhere:
 
 1. SHAPE COVERAGE. The vendor-library question cannot be answered from a square. The model issues 12

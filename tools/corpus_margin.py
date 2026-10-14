@@ -3,7 +3,7 @@
 
 A free-run agreement number means nothing without knowing how close the decisions were. `dec64t` and
 `dec300f` agree 64/64 and 128/128 because their next tokens are near-certain (D-4 of
-`bench/plan-2026-10-12.md`), and the instrument that knows that is `engine/gate.py::metrics()`'s
+`progress/2026-10-12/plan-2026-10-12.md`), and the instrument that knows that is `engine/gate.py::metrics()`'s
 `gap12`: the pinned logits' top1 minus top2. The corpus fixtures (`tools/corpus_dump.py`) pin only
 ids — 49 prompts x 24 steps of full logits would be ~700 MB and was never worth it — so the margin
 has to be re-derived from the reference on CPU, at the same place in the chain.

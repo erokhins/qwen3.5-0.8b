@@ -3,12 +3,12 @@
  * where the shipped sequential form (`prototype/gdn_decode/gdn_decode_kernels.h::rec_kernel`,
  * re-declared in `engine/kernels.h`) issues one launch per GDN layer per TOKEN.
  *
- * WHY THIS ROUTE EXISTS, in one line. `bench/p9-phase1-2026-10-14.md` D-12 rejected the chunked scan
+ * WHY THIS ROUTE EXISTS, in one line. `progress/2026-10-14/p9-phase1-2026-10-14.md` D-12 rejected the chunked scan
  * for launch-bound reasons and funded this one instead: the sequential work is 33.94 GFLOP per
  * 1024-lane wave against the chunked form's 54.03, because collapsing the recurrence does not have to
  * recompute anything — it only has to stop writing the state to memory and reading it back. The win
  * line was pre-registered there (`gdn_rec` ≤ 63 ms at 1024 lanes, honest band 40–80 ms), and
- * `bench/p9-route-a-2026-10-14.md` carries the geometry arithmetic that was priced BEFORE this file
+ * `progress/2026-10-14/p9-route-a-2026-10-14.md` carries the geometry arithmetic that was priced BEFORE this file
  * was written plus the device commands that decide whether the route lives.
  *
  * WHY IT IS BIT-IDENTICAL TO `rec_kernel` INSTEAD OF CLOSE TO IT. Two things could move a bit, and

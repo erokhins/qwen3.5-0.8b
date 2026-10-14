@@ -6,7 +6,7 @@ moved: the ENGINE column, which this script reads out of a gate log. The route c
 reference, and `route_allowance.py` re-derives the provenance hashes at write time from the fixture and
 `speccheck/specimpl.py`, not from this table.
 
-So: compare every step's `engine_one_cos` / `engine_meanrel` in tmp/route_dec300f.json against the same
+So: compare every step's `engine_one_cos` / `engine_meanrel` in progress/engine/evidence/route_dec300f.json against the same
 steps parsed out of the fresh gate log with route_price's own regex.
 """
 import json
