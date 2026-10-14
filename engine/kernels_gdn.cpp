@@ -3,6 +3,7 @@
 #include "kernels.h"
 
 #include "engine/launch_stats.h"
+#include "engine/gdn_collapse_kernels.h"
 #include "prototype/gdn_chunk/gdn_chunk_kernels.h"
 #include "prototype/gdn_decode/gdn_decode_kernels.h"
 #include "prototype/gdn_gated_norm/gdn_gated_norm_kernels.h"
@@ -41,6 +42,21 @@ void gdn_rec(const float* q, const float* k, const float* v, const float* g, con
     // that can only ever report rows=1 would give section (h) a check that cannot fail.
 }
 
+// Route A, D-12: the same recurrence, one launch per BODY. `dim3(kStrips, kNH)` = (4, 16) = 64 blocks
+// of 128 threads where `gdn_rec` issues 16 blocks of 128 per TOKEN, and `u`/`g`/`beta`/`o` are the
+// whole body tiles rather than row t of them — the two forms therefore touch identical addresses, which
+// is what makes `engine/gdn_collapse_kernels.h`'s bit-identity claim checkable at all.
+//
+// Not counted in `launch_stats` for the same reason `gdn_rec` is not: the recurrence's launch count is
+// the thing under test, and the wave report's `gdn_rec` row already carries it as `rows_total`
+// (`engine/stage_clock.h`: "a reader who wants a launcher-side witness for the recurrence has to count
+// launches"). Adding a family here would move the count out of the row the win line is written on.
+void gdn_rec_collapse(const float* u, const float* g, const float* beta, float* S, float* o,
+                      int rows) {
+    gdn_rc::rec_collapse_kernel<<<dim3(gdn_rc::kStrips, gdn_rc::kNH), gdn_rc::kBlockDim>>>(
+        u, g, beta, S, o, rows);
+}
+
 // ---- P9: §04.7's chunked scan ----------------------------------------------------------------
 //
 // Three things this launcher is responsible for, in the order the code does them: refuse a body the
@@ -49,31 +65,34 @@ void gdn_rec(const float* q, const float* k, const float* v, const float* g, con
 // orders them, exactly as `attn_prep`/`attn_core` are ordered in `kernels_attn.cpp`.
 GdnScan parse_gdn_scan(const std::string& name) {
     if (name == "seq") return GdnScan::kSeq;
+    if (name == "collapse") return GdnScan::kCollapse;
     if (name == "chunk") {
         // FAILED CLOSED, deliberately, and this is the note rather than a comment on a throw: the
-        // chunked scan is a killed route, not an experimental one. `bench/p9-phase1-2026-10-14.md` D-12
-        // dropped it for launch-bound arithmetic (54.03 GFLOP per wave against the sequential form's
-        // 33.94), and `bench/p9-phase1c-2026-10-14.md` §1c.1 D6 found the reason it could not simply be
-        // repaired: `gdn_chunk_carry` formed the chunk-boundary decay as a quotient of two exps, which is
-        // not the contract's one exp of a difference, and it returned NaN where the incoming state was
-        // zero. A form that fails its own §04.4 budget because of an expression bug cannot carry an error
-        // budget, so it does not get to look selectable from a flag. The kernel, `phase1.py` and
-        // `kernel_price.py` stay in the tree as the record; the one-line repair D6 names is written there
-        // for whoever re-funds the route.
+        // chunked scan is a killed route, not an experimental one. `bench/p9-phase1-2026-10-14.md`
+        // D-12 dropped it for launch-bound arithmetic (54.03 GFLOP per wave against route A's 33.94),
+        // and `bench/p9-phase1c-2026-10-14.md` §1c.1 D6 found the reason it could not simply be
+        // repaired: `gdn_chunk_carry` formed the chunk-boundary decay as a quotient of two exps, which
+        // is not the contract's one exp of a difference, and it returned NaN where the incoming state
+        // was zero. A form that fails its own §04.4 budget because of an expression bug cannot carry an
+        // error budget, so it does not get to look selectable from a flag. The kernel, `phase1.py` and
+        // `kernel_price.py` stay in the tree as the record; the one-line repair D6 names is written
+        // there for whoever re-funds the route.
         throw std::runtime_error(
             "--gdn-scan chunk is refused: the chunked scan was killed by bench/p9-phase1-2026-10-14.md "
             "D-12 and its carry form is known-wrong (bench/p9-phase1c-2026-10-14.md §1c.1 D6: boundary "
-            "decay as gamC/gam[i] underflows to NaN at S=0). Use `seq`. The prototype still runs it: "
-            "prototype/gdn_chunk/run.py.");
+            "decay as gamC/gam[i] underflows to NaN at S=0). Use `seq` (the shipped form) or `collapse` "
+            "(route A, bit-identical to seq). The prototype still runs it: prototype/gdn_chunk/run.py.");
     }
-    throw std::runtime_error("--gdn-scan takes `seq` (§04.4's recurrence, one launch per token); got '"
-                             + name + "'. Refusing rather than guessing, because this flag names which "
-                             "side of an A/B the run is");
+    throw std::runtime_error("--gdn-scan takes `seq` (§04.4's recurrence, one launch per token) or "
+                             "`collapse` (route A: the same recurrence, resident, one launch per "
+                             "body); got '" + name + "'. Refusing rather than guessing, because this "
+                             "flag names which side of an A/B the run is");
 }
 
 const char* gdn_scan_name(GdnScan s) {
     switch (s) {
         case GdnScan::kSeq: return "seq";
+        case GdnScan::kCollapse: return "collapse";
         case GdnScan::kChunk: return "chunk";
     }
     return "invalid";
@@ -102,9 +121,9 @@ const char* gdn_chunk_refusal(int tokens) {
            "claim, so it needs a new budget line, not a constant edit.";
 }
 
-// NOTE: unreachable from a flag since `parse_gdn_scan` refuses `chunk` (see the D-12 note there). The
-// launcher and its scratch contract stay, because D-12 dropped the route for arithmetic reasons and the
-// next funding round needs the form to be re-runnable, not reconstructed.
+// NOTE: unreachable from a flag since `parse_gdn_scan` refuses `chunk` (see the D-12 note there).
+// The launcher and its scratch contract stay, because D-12 dropped the route for arithmetic reasons
+// and the next funding round needs the form to be re-runnable, not reconstructed.
 void gdn_chunk_prefill(const GdnChunkLayerArgs& a) {
     if (a.n < 2) {
         throw std::runtime_error("gdn_chunk_prefill: n=" + std::to_string(a.n) + "; a one-row body is"

@@ -22,6 +22,15 @@ cd "$(dirname "$0")/.."
 BIN=engine/build
 FLAGS=(-O3 -Wno-unused-command-line-argument -I. -Iengine -Wl,-rpath,/opt/rocm/lib)
 
+# EXTRA_FLAGS is an intentional hole, for the injected-defect builds the negative tests need:
+#   EXTRA_FLAGS=-DNEG_RC_STATE_BF16 ./engine/build.sh
+# Each defect is its own binary on purpose — `engine/gdn_collapse_kernels.h`'s negatives are compile-time
+# `#ifdef`s precisely so a defect cannot be reachable from the shipping binary at runtime, which is the
+# difference between a negative test and a branch the gate hopes nobody takes. Word-splitting is wanted
+# here (several -D flags), hence the unquoted expansion, and the guard keeps an unset variable from
+# putting an empty argument on the command line.
+if [[ -n ${EXTRA_FLAGS:-} ]]; then FLAGS+=($EXTRA_FLAGS); fi
+
 case "${1:-}" in
   --clean) rm -rf "$BIN"; echo "removed $BIN"; exit 0 ;;
   --debug) FLAGS=(-O0 -g -Wno-unused-command-line-argument -I. -Iengine -Wl,-rpath,/opt/rocm/lib) ;;

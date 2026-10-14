@@ -214,28 +214,45 @@ void gdn_gates(const float* a_raw, const float* b_raw, const float* a_log, const
 void gdn_rec(const float* q, const float* k, const float* v, const float* g, const float* beta,
              float* S, float* o);
 
+// One GDN layer, one BODY, route A: `kNumValueHeads * (d_v / 32)` blocks = 64, and the state stays
+// in LDS for the whole body. `u`/`g`/`beta`/`o` are the same tiles `gdn_rec` is fed one row at a
+// time, so the two forms read and write identical addresses; `rows` is the body's row count.
+void gdn_rec_collapse(const float* u, const float* g, const float* beta, float* S, float* o,
+                      int rows);
+
 // ---- P9: which §04.4 scan a body runs ----------------------------------------------------------
 // Two forms of the same recurrence, from one binary, so a before/after attribution is one window.
 //
-//   kSeq    §04.4's recurrence, one `gdn_rec` launch per token per layer. THE DEFAULT and the shipped
-//           form: every decode pin is pinned through it, and `prototype/gdn_decode` gates it.
-//   kChunk  §04.7's chunked scan (`prototype/gdn_chunk/gdn_chunk_kernels.h`). KILLED by D-12
-//           (`bench/p9-phase1-2026-10-14.md`) and now refuses to be selected, so this enumerator is a
-//           record rather than a choice: the chunked form's error budget was admitted on CPU by
-//           `prototype/gdn_chunk/phase1.py`, but `bench/p9-phase1c-2026-10-14.md` §1c.1 D6 found its
-//           carry forming the chunk-boundary decay as a quotient of two exps — not the contract's one
-//           exp of a difference — returning NaN wherever the incoming state was zero. A form that fails
-//           the wave's own §04.4 budget because of an expression bug cannot carry an error budget, so
-//           `parse_gdn_scan` refuses the name instead of routing to it. The kernel, `phase1.py` and
-//           `kernel_price.py` stay in the tree so the route can be re-funded rather than reconstructed.
+//   kSeq       §04.4's recurrence, one `gdn_rec` launch per token per layer. THE DEFAULT and the
+//              shipped form: every decode pin is pinned through it, and `prototype/gdn_decode` gates
+//              it.
+//   kCollapse  Route A (D-12): the SAME recurrence, resident. One launch per layer per BODY, where
+//              kSeq issues one per layer per TOKEN. A block owns 32 of a head's 128 `d_v` columns and
+//              holds them in LDS across the whole body, so the state is read once per body instead of
+//              twice per token. It is bit-identical to kSeq by construction, not by measurement: the
+//              per-step expressions, the ascending `i` order, and the norm reduction (`block_sum` at
+//              the same `blockDim.x`, fed the same element-per-thread mapping) are the shipped
+//              kernel's, verbatim — only the residency and the launch count move. Why the association
+//              cannot move is §04.4's cancellation measurement (one in 286 `o` elements lose 84 % of
+//              their magnitude), and `bench/p9-phase1c-2026-10-14.md` D-12 priced the chunked
+//              alternative at 54.03 GFLOP against this route's 33.94.
+//   kChunk     §04.7's chunked scan (`prototype/gdn_chunk/gdn_chunk_kernels.h`). KILLED by D-12 and
+//              now refuses to be selected: its carry formed the chunk-boundary decay as a quotient of
+//              two exps (§1c.1 D6), which is a different expression from the contract's one exp of a
+//              difference and returned NaN at `S = 0`, and a wave that fails the wave's own §04.4
+//              budget on a bug cannot carry an error budget. The kernel and `phase1.py` stay in the
+//              tree as the record of why; `parse_gdn_scan` refuses the name.
 //
 // `resolve_gdn_scan` is the one place the row-count rule lives, and it is deliberately shaped like
 // `resolve_wave_gemm`: a ONE-ROW body is kSeq whatever was asked for. That is not a performance
 // opinion. Chunking a scan of one token buys nothing (one chunk, no inter-chunk work) and it would
 // move every decode bit through the chunked form's rounding, which is the one thing §04.7's budget
 // was never allowed to do — phase1's `onerow` witness compares the two forms on a single state
-// update precisely so that this rule is checkable rather than assumed.
-enum class GdnScan { kSeq, kChunk };
+// update precisely so that this rule is checkable rather than assumed. For the same reason a
+// one-row body is never routed through kCollapse: it is bit-identical to kSeq, so the rule costs
+// nothing there, and a resident kernel launched for one token would stage 16 KiB of LDS to do one
+// state update.
+enum class GdnScan { kSeq, kCollapse, kChunk };
 
 // The chunk size, in tokens, that the kernel is instantiated at. One value, compile-time:
 // `prototype/gdn_chunk/phase1.py` prices C=64 inside both budget lines and REJECTS C=16 outright
