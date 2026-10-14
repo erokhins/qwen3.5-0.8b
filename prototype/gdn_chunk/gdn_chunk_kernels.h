@@ -253,8 +253,12 @@ __global__ void gdn_chunk_prep(GdnChunkArgs a) {
         kf[i] = kr;
         qf[i] = qr;
         kst[i * GC_D + tid] = hip_bfloat16(kq * kr);        // D2: rounded on the way into LDS
-        if (live) {
-            const size_t off = ((size_t)t * GC_NH + h) * GC_D + tid;
+        // Written for EVERY row of the chunk, padding included, and the padded rows land on zero
+        // because their q, k, beta and g are zero. That is not tidiness: the carry reads these arrays
+        // for all GC_C rows of the tail chunk, and staging it leaves unwritten is uninitialized scratch
+        // feeding the state update.
+        const size_t off = ((size_t)(base + i) * GC_NH + h) * GC_D + tid;
+        if (base + i < a.n) {
             a.qg[off] = hip_bfloat16(qq * qr * GC_QSCALE * gam[i]);
             a.kh[off] = hip_bfloat16(kq * kr * (gamC / gam[i]));
         }
@@ -268,27 +272,40 @@ __global__ void gdn_chunk_prep(GdnChunkArgs a) {
     // slot has exactly one writer.
     for (int p = tid; p < GC_C * GC_C; p += GC_THREADS) {
         const int t = p / GC_C, s = p % GC_C;
-        const bool store_row = (t < nvalid);
         if (s > t) {
             // The zero half of `intra`, which is `dec.tril()`; `ut`'s is never stored, because the
             // solve only ever reads column < row of `m`.
-            if (store_row) a.intra[((size_t)(base + t) * GC_NH + h) * GC_C + s] = hip_bfloat16(0.f);
+            if (base + t < a.n) a.intra[((size_t)(base + t) * GC_NH + h) * GC_C + s] = hip_bfloat16(0.f);
             continue;
         }
         const float bt = bet[t];
         const float dec = (a.neg == GCK_UT_NO_DECAY) ? 1.0f : expf(cum[t] - cum[s]);
         float accu = 0.f, acci = 0.f;
+        // A padded row's q never gets read: there is no token there, so there is no row of `u` to
+        // read, and the row's own products are zero by the padding rule regardless.
+        const bool live_t = (base + t < a.n);
         for (int d = 0; d < GC_D; ++d) {
             const float ksd = float(kst[s * GC_D + d]);
             // ut's first operand is (k~ * beta) rounded, per `_mm(k * be, kt)`.
             accu += gc_bf(float(kst[t * GC_D + d]) * bt) * ksd;
             // `intra`'s is q~ rounded and UNSCALED by Gamma — the Gamma scaling belongs to the
             // carry-side `q~ Gamma` operand (phase1's `q[:, i] * gam_i`), not to this product.
-            acci += gc_bf(a.u[(size_t)(base + t) * GC_QKV + (size_t)h * GC_D + d] * qf[t] * GC_QSCALE) * ksd;
+            const float qv = live_t
+                                 ? a.u[(size_t)(base + t) * GC_QKV + (size_t)h * GC_D + d] * qf[t]
+                                       * GC_QSCALE
+                                 : 0.f;
+            acci += gc_bf(qv) * ksd;
         }
         if (s < t) m[t][s] = accu * dec;
-        if (store_row) a.intra[((size_t)(base + t) * GC_NH + h) * GC_C + s] = hip_bfloat16(acci * dec);
+        if (live_t) a.intra[((size_t)(base + t) * GC_NH + h) * GC_C + s] = hip_bfloat16(acci * dec);
     }
+    __syncthreads();
+
+    // U's row 0 before the substitution starts: `ut_inverse`'s i = 0 case is e_0 with nothing
+    // subtracted, and row 0 of `m` was never written above (the strict lower of row 0 is empty), so
+    // leaving it here is leaving the FIRST row of every subsequent row's sum uninitialized — which is
+    // not a wrong bit, it is the whole solve.
+    if (tid < GC_C) m[0][tid] = (tid == 0) ? 1.0f : 0.0f;
     __syncthreads();
 
     // ---- the unit-triangular solve ----------------------------------------------------------
@@ -313,19 +330,20 @@ __global__ void gdn_chunk_prep(GdnChunkArgs a) {
     // U's element is uniform across the block and comes out of LDS as a broadcast; the two
     // right-hand sides are what differ (`v beta` from global, `k~ beta Gamma` from LDS).
     for (int t = 0; t < GC_C; ++t) {
-        const bool store_row = (t < nvalid);
         float accn = 0.f, acck = 0.f;
         for (int s = 0; s <= t; ++s) {
             const float us = gc_bf(m[t][s]);   // U is F32 in LDS and BF16 as a matmul operand: the
                                                // model rounds it here and only here
             if (us == 0.f) continue;
             const int ts = base + s;
-            const bool live = (s < nvalid);
+            const bool live = (ts < a.n);
             const float vv = live ? a.u[(size_t)ts * GC_QKV + 2 * GC_VD + (size_t)h * GC_D + tid] : 0.f;
             accn += us * gc_bf(vv * bet[s]);
             acck += us * gc_bf(float(kst[s * GC_D + tid]) * bet[s] * gam[s]);
         }
-        if (store_row) {
+        // Every row of the chunk is written, padding included, for the carry's sake (see the normalise
+        // loop). The padded rows are zero: their U row is e_t, and their v, beta and k~ are all zero.
+        if (base + t < a.n) {
             const size_t off = ((size_t)(base + t) * GC_NH + h) * GC_D + tid;
             a.nv[off] = accn;
             a.kcd[off] = hip_bfloat16(acck);
@@ -394,11 +412,17 @@ __global__ void gdn_chunk_carry(GdnChunkArgs a) {
             float acc[GC_STRIP];
 #pragma unroll
             for (int j = 0; j < GC_STRIP; ++j) acc[j] = 0.f;
-            for (int i = 0; i < GC_D; ++i) {
-                const float kc = gc_bf(float(a.kcd[row * GC_D + i]));
-                if (kc != 0.f) {
+            // A padded row has no staging to read: `prep` wrote none, because rows past the body do not
+            // exist and a tail chunk of a short body can be mostly padding (`--wave-rows 5` makes every
+            // body's tail chunk one). Reading the scratch there would be uninitialized values feeding
+            // the state — the same mistake the zeroing of `vn` exists to prevent, one array over.
+            if (t < nvalid) {
+                for (int i = 0; i < GC_D; ++i) {
+                    const float kc = gc_bf(float(a.kcd[row * GC_D + i]));
+                    if (kc != 0.f) {
 #pragma unroll
-                    for (int j = 0; j < GC_STRIP; ++j) acc[j] += kc * gc_bf(S[i][j]);
+                        for (int j = 0; j < GC_STRIP; ++j) acc[j] += kc * gc_bf(S[i][j]);
+                    }
                 }
             }
 #pragma unroll
@@ -412,7 +436,8 @@ __global__ void gdn_chunk_carry(GdnChunkArgs a) {
         // Two accumulators added at the end, because the model adds two separate matmul results;
         // folding the two loops into one would reorder the F32 chain for no benefit (D1).
         for (int t = tg; t < GC_C; t += tstep) {
-            if (t >= nvalid) continue;         // a padded row writes no output row (§04.7)
+            if (t >= nvalid) continue;         // a padded row writes no output row (§04.7), and has no
+                                               // `qg`/`intra` row to read — see the v_new loop
             const size_t row = (size_t)(base + t) * GC_NH + h;
             float acc[GC_STRIP];
 #pragma unroll
@@ -444,6 +469,7 @@ __global__ void gdn_chunk_carry(GdnChunkArgs a) {
 #pragma unroll
             for (int j = 0; j < GC_STRIP; ++j) acc[j] = 0.f;
             for (int t = 0; t < GC_C; ++t) {
+                if (t >= nvalid) continue;   // no staging there, and `vn[t]` is already zero
                 const float kv = gc_bf(float(a.kh[((size_t)(base + t) * GC_NH + hupd) * GC_D + i]));
                 if (kv != 0.f) {
 #pragma unroll
