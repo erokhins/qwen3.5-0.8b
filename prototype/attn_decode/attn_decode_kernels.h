@@ -156,6 +156,11 @@ struct CoreArgs {
     // zero-initialised struct gives, and what every pre-P8 caller passes — is exactly the decode shape,
     // same blocks, same addresses, same bits.
     int nrows;
+    // Phase 2: which wave form a launch is. 0 (what a zero-initialised struct gives, so every
+    // pre-Phase-2 caller and every one-row decode step) is the shipped per-(row,head) `attn_core`;
+    // 1 is `attn_tile_wave`, the G x M tiled form. `attn_combine` reads it too, because the two forms
+    // lay their split partials out differently and a merge that guessed would read garbage.
+    int tile_kernel;
 };
 
 // The op's own row layouts (P8, §06.3). A wave hands these kernels one buffer per stage with one row
@@ -174,7 +179,9 @@ constexpr size_t ROW_H = (size_t)N_Q * DH;
 // authority that can drift.
 __device__ __host__ inline int split_for_lanes(int lanes) { return (lanes + MAXSC - 1) / MAXSC; }
 
-static inline int nrows_of(const CoreArgs& a) { return a.nrows > 0 ? a.nrows : 1; }
+// `__device__ __host__` because the Phase 2 tiled form needs the same default the launchers use:
+// `nrows = 0` is a zero-initialised struct, and both sides must read it as one row.
+__device__ __host__ inline int nrows_of(const CoreArgs& a) { return a.nrows > 0 ? a.nrows : 1; }
 
 // The lanes query row `qrow` may attend to: §06.3's causal mask for THAT row (the wave's rows advance
 // in position order), plus the two ways an engine gets the mask wrong, kept as injections.
@@ -379,9 +386,382 @@ __global__ void attn_core(CoreArgs a) {
     }
 }
 
+// ============================================================================================
+// Phase 2 (bench/attn-wave-diagnosis-2026-10-14.md §4/§5/§9): the G x M tiled wave form.
+//
+// WHY THIS EXISTS. The shipped `attn_core` reads exactly 1.0 byte of K/V per flop: one K row and
+// one V row per (query row, query head, KV lane) touch, so a 1024-token wave reads 25.79 GB of K/V
+// to do 25.79 GFLOP, and at this box's measured 237 GB/s read ceiling that byte count alone prices
+// the wave at 108.8 ms against 109.2 ms measured. §9's counter pass settled which candidate wall
+// was binding (`SQ_INSTS_VALU` = 6.53 G warp-instructions = a ~20 ms issue floor, 19 % of the
+// line), so the fix is traffic, and traffic falls only by RE-USING one K/V row across more than one
+// touch: `G` = the GQA=4 query heads that share a KV head, `M` = query rows. Putting one K row in LDS
+// once and feeding G x M = 16 score dots off it is the whole lever; what THIS version books is M = 4 of
+// the 16, and the bullet below prices why, names the ~15 lines that close the rest, and says whether the
+// win line depends on it.
+//
+// BIT-IDENTITY (§5's contract). This form preserves the five ordered reductions verbatim; it
+// changes WHERE a K row comes from (LDS, instead of one global load per (row, head) pair) and not any
+// summation order:
+//   1. the score dot is 8 serial `dot += bf(k[t]) * q[t]` per thread, then the 5-step
+//      `__shfl_down_sync` butterfly, then ONE BF16 round, then `x SCALE` — same threads-per-dot,
+//      same per-thread chunk, same butterfly, same rounding site as `attn_core`;
+//   2. `m` is `fmaxf` over the row's scores in index order (max is exactly associative, so it could
+//      not move the bits even as a tree; it is still walked in index order here);
+//   3. `l` is `+= expf(sc[t] - m)` accumulated serially in index order by one thread — no tree, no
+//      tile partial sums, no rescaling;
+//   4. `wt = bf(fb(expf(sc[t] - m) / l))` — the BF16 round of the NORMALISED weight, kept because
+//      that round IS §05.5's reference form, and the epilogue still does not divide again;
+//   5. `acc += wt * v` serial in `t`.
+// For a row wider than the staging (§07.3's pre-authorized streaming route) pass 2 reproduces
+// `attn_core`'s tile-of-`a.tile` loop verbatim, including the `expf(m - mn)` rescale algebra, so
+// the streaming route here lands on the bits the shipped form already streams — it does not open a
+// second band. And a row the shipped form serves one-pass is served one-pass here too (the window
+// rule below), so no row changes route between the two forms: the tiled form's claim is bit-for-bit
+// equality with the shipped form on BOTH routes, which is what `--tile-kernel` gates.
+//
+// THE GEOMETRY. block = (one KV group of G=4 query heads) x (M consecutive query rows) x (one lane
+// window of <= MAXSC lanes); grid = dim3(N_KV, split_for_lanes(lanes_last), ceil(nrows/M)).
+//   * The window is MAXSC lanes — the number `attn_core` stages — and that is not a tuning choice,
+//     it is the bit-identity boundary: a row that fits a window is one-pass, a row wider than MAXSC
+//     is the streaming form §07.3 already bands. Shrinking the window below MAXSC would push rows
+//     the shipped form computes exactly INTO that band, which is a band decision for the parent and
+//     not something to slide into a kernel. It is also why `M` cannot be 16: the staging is
+//     G x M x MAXSC scores, so M=4 is 16 KiB, M=8 is 32 KiB and M=16 would be 64 KiB on a CU that
+//     has 64 KiB in total. §5's budget arithmetic, halved by the exact-BF16 staging below.
+//   * The causal mask is a PREFIX in every row (row `qrow` may attend lanes [0, lvalid+qrow)), so a
+//     pair's score list is never hole-punched: the window is used up to a per-pair limit `lim` and
+//     lanes past it are not read, not scored, not loaded. That is what makes tiling rows legal, and
+//     it is why `NEG_READPAST`/`NEG_DROPCUR` still move exactly the rows that gained or lost a lane:
+//     `lim` comes from `lanes_of` and from nowhere else.
+//   * Empty is identity. A pair whose row cannot attend any lane in this window emits NOTHING: no
+//     score, no max, no sum, no partial. The streaming route's neutral state is (m=0, l=0, acc=0)
+//     and `attn_combine`'s merge of one partial is then the identity (`mn = fmaxf(0, m_s)`,
+//     `r0 = expf(0 - mn)`, and `l`/`acc` are 0 so they contribute nothing). A neutral of m=-1e30
+//     would NOT be an identity — `expf(-1e30 - m_s)` is 0 and would erase a row — so emitting
+//     nothing for an empty pair is load-bearing, not cosmetic.
+//   * Pass 1 stages K, pass 2 reads V from global, and BOTH do it per PAIR — so the re-use this kernel
+//     actually books is M = 4x, not G x M = 16x. Precisely: the four heads of a group read the
+//     identical rows and write them into the identical LDS slots with the identical bytes (benign, and
+//     probably cheap after the first, since a pair's rows are staged and consumed adjacently so L1
+//     likely serves three of the four) — but an L1 hit is not something a traffic claim may rest on, so
+//     `attn_tile_model.py` books all four and the pre-registered numbers are the pessimistic ones. The
+//     lever that closes the gap is block-level staging: stage the group's rows once per sub-block and let
+//     a pair substitute only its OWN appended lane (`j == a.pos + row`, the single lane on which pairs
+//     differ, because it is that row's §05.7 append) from `krope`/`vg` at the use site. That is ~15 lines
+//     in pass 1 plus a sub-block loop in pass 2, and it takes the predicted line from ~1 GB to ~0.4 GB.
+//     Run it only if the device says bytes still bind: at M = 4 the traffic term is already ~4x under the
+//     arithmetic term, so §7's 40 ms win line does not depend on it. Staging a whole window of V is not
+//     an option at any M: 512 lanes x 512 B = 256 KiB. `L` sizes only the K stage, so it never changes
+//     the traffic — it is the cheap knob if LDS turns out to bind.
+//   * WHERE BIT-IDENTITY STOPS, at exactly one place: a row WIDER than MAXSC. The shipped form cuts such
+//     a row into `split` EQUAL slices (`span = ceil(n/split)`, per row); this form owns fixed MAXSC-wide
+//     windows, because a window is what a block shares a K load over. Both are §07.3's streaming form and
+//     both sit inside its pre-authorized band, but the two groupings are not bit-identical to EACH OTHER
+//     — different partial boundaries are a different F32 sum. So the bit-for-bit claim is exact for every
+//     row the one-pass route serves (lanes <= MAXSC) and is a band claim above it. No pinned fixture here
+//     reaches 512 lanes — p300 tops out at 277 — so neither the CPU mirror nor `run.py --wave` can
+//     exercise it; the engine's 1024-token body 1 (lanes 513..1024) is the first place it exists. If an
+//     engine gate step moves there, that is THIS, it is inside §07.3's band by construction, and it is a
+//     band question for the parent rather than a bug to chase. `attn_tile_model.py` models the two
+//     groupings separately for exactly this reason, so the mirror cannot quietly agree with itself.
+//   * Work is handed out PAIR-FIRST (warp w takes pairs w, w+nw, ...) and a pair owns its K rows.
+//     The shipped form is lane-first (warp w scores lane base+w), which cannot survive M>1: with
+//     lane-first order a warp can only reach one row's K rows, so the loads would stay G x M-fold.
+//     Two side benefits worth naming: a warp holds exactly ONE pair's query (8 registers) instead
+//     of the G or G x M rows §5 priced at ~+32 VGPRs, and a pair's whole softmax state is private
+//     to one warp, so the passes need one barrier between them instead of `attn_core`'s two per
+//     tile. Every barrier is in a block-uniform loop; there is no barrier inside a pair loop.
+//   * The re-use does not make the bytes vanish, it moves them from the DRAM path (237 GB/s) to the
+//     LDS path: the ~1 GB of K this form asks global for is about 4 ms of DRAM against under 1 ms of
+//     LDS at a conservative 32 B/clk/CU. §7's falsifiers are about that exchange.
+//
+// WHAT IT COSTS, priced not discovered. Compile-only census (`attn_tile_model.py isa`, which is
+// `hipcc -O3 --offload-arch=gfx1151 -Rpass-analysis=kernel-resource-usage -c` on the header):
+//   attn_tile_wave  49 VGPR, 0 spills, 0 scratch, 16 waves/SIMD, LDS 20,480 B/block
+//   attn_core       53 VGPR, 0 spills, 0 scratch, 16 waves/SIMD, LDS 38,944 B/block
+//   * registers came in CHEAPER than §5 priced them: 49, not 53+32. The +32 was for holding G (or
+//     G x M) query rows in registers; pair-first means a warp only ever holds ONE pair's row (8
+//     floats), so register occupancy is unchanged at 16 waves/SIMD and registers are not the limit.
+//   * LDS is 16 KiB of score staging (G x M x MAXSC BF16 scores) + L x DH x 2 = 4 KiB of K at L=8,
+//     and the descriptor reserves exactly that 20,480 B — 3 blocks/CU, against 1 for `attn_core` if
+//     §3's 38,944 B reservation really caps residency. Note the asymmetry, which is new evidence for
+//     §3: this kernel's group segment equals the sum of its `__shared__` arrays exactly, while
+//     `attn_core`'s in the same TU is 6.3x that sum, so the inflation is kernel-specific and not a
+//     code-object or toolchain property. At M=2 the staging halves to 8 KiB (12 KiB total, 4
+//     blocks/CU = thread-capped) for half the re-use; at M=8 it is 36 KiB and one block fits.
+//     `kTileLdsBytes` is the number to look at before turning a knob.
+//   * blocks: 512 rows x 2 KV groups / (4 rows x 4 heads) = 256 core blocks per body per layer at
+//     body 0 against 4096 shipped. Fewer, fatter blocks IS the re-use, but it makes §2's
+//     dispatch-order note live, so `blockIdx.z` is inverted below and the widest row tiles launch
+//     first instead of trailing the queue.
+//   * what it does NOT share: §05.2's norm and §05.3's rope are read per (row, head) pair from the
+//     staged `q_rope` rather than shared across the group, because sharing them would need a barrier
+//     inside the pair loop — the barriers the pair-first order exists to avoid. Being staged-plan
+//     only, this kernel does no norm/rope work at all: `attn_prep` already did it once per row-head,
+//     which is also why the tile form cannot be `fused` (see `attn_tile_ok`).
+//
+// THE EXACT-BF16 SCORE STAGING. §05.5's score is `bf(fb(dot)) * SCALE` and SCALE = 1/16, and
+// multiplying a BF16 value by a power of two is EXACT (mantissa unchanged, exponent -4), so the
+// score is itself a BF16 value: it stages as 2 bytes and reads back as the identical F32. That
+// halves §5's staging budget and is why M=4 fits at all. The limit of the claim is the subnormal
+// boundary — a score below ~1e-37 would lose bits, which no normalised q.k of this model produces —
+// and `--score-f32` (a policy variant, not the gated route) is NOT expressible in this staging, so
+// both launchers refuse that combination rather than silently rounding it.
+// ============================================================================================
+
+#define ATTN_TILE_G GQA                 // 4 query heads of one KV group per block
+#ifndef ATTN_TILE_M
+#define ATTN_TILE_M 4                   // query rows per block; staging = G*M*MAXSC scores
+#endif
+#ifndef ATTN_TILE_L
+#define ATTN_TILE_L 8                   // K lanes resident at once (LDS knob, traffic-neutral)
+#endif
+#ifndef ATTN_TILE_THREADS
+#define ATTN_TILE_THREADS 256
+#endif
+constexpr int kTileThreads = ATTN_TILE_THREADS;
+constexpr int kTilePairs = ATTN_TILE_G * ATTN_TILE_M;    // pairs one block can hold
+constexpr int kTileScoreElems = kTilePairs * MAXSC;      // BF16 scores staged
+constexpr int kTileLdsBytes = (kTileScoreElems + ATTN_TILE_L * DH) * 2;
+static_assert(ATTN_TILE_M >= 1, "M is the row tile");
+static_assert(ATTN_TILE_L >= 1, "L is the K stage depth");
+static_assert(kTileScoreElems <= 32768, "score staging past 64 KiB cannot be resident on this CU");
+
+// One MAXSC-lane window per lane block — the SAME expression `attn_core`'s split uses, so the
+// one-pass/streaming boundary cannot drift between the two forms (the bit-identity argument rests
+// on it). `__device__ __host__` for the house reason: launcher and op price one number once.
+__device__ __host__ inline int tile_split_of(int lanes_last) { return split_for_lanes(lanes_last); }
+__device__ __host__ inline int tile_rtiles_of(int nrows) { return (nrows + ATTN_TILE_M - 1) / ATTN_TILE_M; }
+// This form's `part` is [row][head in group][lane window][2 + DH] F32 — half the shipped form's
+// footprint at the same lane ceiling, because the 4 heads of a group are the block, not the grid.
+__device__ __host__ inline int tile_part_floats(int nrows, int lanes_last) {
+    return nrows * ATTN_TILE_G * tile_split_of(lanes_last) * (DH + 2);
+}
+
+__device__ __forceinline__ int tile_kv_of(int kv, int neg) {
+    // The group whose K/V this block READS. The §05.7 append (in `attn_prep`) keeps using the honest
+    // group, so a wrong kappa moves the attention output only and not the cache too — the same
+    // split `kv_of` draws for the shipped form. Here all four heads of a row tile move together,
+    // because sharing the group is the whole point of the block; that is what makes `NEG_GQA` the
+    // control for "did the shared K/V load get wired to the right group".
+    return (neg == NEG_GQA) ? ((kv + 1) % N_KV) : kv;
+}
+
+// How many lane windows row `qrow` needs here. Same rule as `blocks_for_row` — one window iff the
+// row fits the staging, whatever the grid's depth, which is what lets one launch mix exact rows with
+// streaming ones — clamped by the windows the LAUNCH actually has, so a row can never be told to
+// write partials no block will produce. The clamp is inert unless a negative widens `lanes_of` past
+// the geometry the launcher priced (`NEG_READPAST` does, on purpose).
+__device__ __forceinline__ int tile_blocks_for_row(const CoreArgs& a, int qrow) {
+    const int n = lanes_of(a, qrow);
+    if (a.full && n <= MAXSC) return 1;
+    const int want = (n + MAXSC - 1) / MAXSC;
+    const int have = a.split > 0 ? a.split : 1;
+    return want < have ? want : have;
+}
+
+// How many lanes of THIS window row `row` may attend: the causal prefix, clipped to the window. A
+// limit rather than a mask, which is what §05.5's mask being a prefix buys the tiling.
+__device__ __forceinline__ int tile_lim(const CoreArgs& a, int row, int blo, int span) {
+    return std::min(span, lanes_of(a, row) - blo);
+}
+
+// What this form may not be asked for, in one place so both launchers refuse the same list.
+inline bool attn_tile_ok(int score_f32, int fused, int warp_size, const char** why) {
+    if (warp_size != 32) { *why = "one warp covers a 256-wide head as 32 lanes x 8 dims"; return false; }
+    if (score_f32) { *why = "the score staging is BF16, exact only for the pinned BF16 score"; return false; }
+    if (fused) { *why = "a wave's §05.7 append must finish before any row reads the cache"; return false; }
+    return true;
+}
+
+__device__ __forceinline__ void attn_tile_body(const CoreArgs a) {
+    __shared__ hip_bfloat16 s_sc[kTilePairs][MAXSC];       // exact-BF16 score staging
+    __shared__ hip_bfloat16 s_k[ATTN_TILE_L * DH];         // K rows, L lanes deep
+    const int y = blockIdx.y;
+    const int z = gridDim.z - 1 - blockIdx.z;   // widest row tiles first: §2's dispatch tail, priced
+    const int kv_read = tile_kv_of(blockIdx.x, a.neg);     // group whose K/V this block reads
+    const int kv_write = blockIdx.x;                       // group whose lanes this wave appends
+    const int lane = threadIdx.x % warpSize, w = threadIdx.x / warpSize;
+    const int nw = blockDim.x / warpSize;
+    const int nrows = nrows_of(a);
+    const int r_lo = z * ATTN_TILE_M;
+    const int r_hi = std::min(nrows, r_lo + ATTN_TILE_M);
+    const int pairs = ATTN_TILE_G * (r_hi - r_lo);
+    const int blo = y * MAXSC;
+    const int windows = tile_split_of(a.lvalid + nrows - 1);
+    if (y >= windows || r_lo >= nrows) return;             // before any barrier: uniform exit
+    const int tile = a.tile > 0 ? a.tile : TILE;           // the streaming route's grouping
+
+    // What this window can serve: the widest lane count among this block's rows, capped at the
+    // window. Lanes above it are never loaded, so a masked causal tail costs no bandwidth.
+    int n_max = 0;
+    for (int r = r_lo; r < r_hi; ++r) n_max = std::max(n_max, lanes_of(a, r));
+    const int span = std::max(0, std::min(n_max, blo + MAXSC) - blo);
+
+    // ---- pass 1: stage K a sub-block of L lanes at a time and score every pair's lanes out of it.
+    // Both inner loops are warp-partitioned by pair, so no barrier is inside either of them.
+    for (int s_lo = 0; s_lo < span; s_lo += ATTN_TILE_L) {
+        const int s_hi = std::min(span, s_lo + ATTN_TILE_L);
+        for (int p = w; p < pairs; p += nw) {
+            const int row = r_lo + p / ATTN_TILE_G;
+            const int l_p = tile_lim(a, row, blo, span);
+            for (int rr = s_lo; rr < s_hi && rr < l_p; ++rr) {
+                const int j = blo + rr;
+                // Lane `pos + row` is this wave's own §05.7 append for `row`; like `attn_core` the
+                // self lane comes from the staged buffers, not from the cache slot it may not be in
+                // yet. `NEG_SLOTK` lands on that slot and so shows up in the NEXT row's read side.
+                const hip_bfloat16* ksrc =
+                    (j == a.pos + row)
+                        ? a.krope + (size_t)ROW_KV * row + (size_t)kv_write * DH
+                        : a.kcache + ((size_t)kv_read * a.cap + (size_t)j) * DH;
+                *reinterpret_cast<uint4*>(&s_k[rr * DH + lane * 8]) =
+                    *reinterpret_cast<const uint4*>(ksrc + lane * 8);
+            }
+        }
+        __syncthreads();                                   // K sub-block published
+        for (int p = w; p < pairs; p += nw) {
+            const int row = r_lo + p / ATTN_TILE_G, h = p % ATTN_TILE_G;
+            const int l_p = tile_lim(a, row, blo, span);
+            if (l_p <= s_lo) continue;                     // EMPTY is identity: emit nothing
+            const int nd = (a.neg == NEG_DIMHALF) ? 4 : 8;  // of the 8 BF16 a lane owns
+            float q[8];                                    // one query row, 8 dims per lane
+            {
+                const hip_bfloat16* qs = a.qrope + (size_t)ROW_H * row +
+                                         (size_t)(ATTN_TILE_G * kv_write + h) * DH + lane * 8;
+                uint4 u = *reinterpret_cast<const uint4*>(qs);
+                const hip_bfloat16* qq = reinterpret_cast<const hip_bfloat16*>(&u);
+                for (int t = 0; t < 8; ++t) q[t] = bf(qq[t]);
+            }
+            for (int rr = s_lo; rr < s_hi && rr < l_p; ++rr) {
+                const hip_bfloat16* k = &s_k[rr * DH + lane * 8];
+                float dot = 0.f;
+                for (int t = 0; t < nd; ++t) dot += bf(k[t]) * q[t];   // serial in t, §05.5
+                dot = warp_sum(dot);                                   // 5-step butterfly
+                // One BF16 round, then the scale. Exact in BF16 because SCALE is 2^-4, which is
+                // what lets the staging be 2 bytes and still read back the identical F32.
+                if (lane == 0) s_sc[p][rr] = fb(a.score_f32 ? dot * SCALE : bf(fb(dot)) * SCALE);
+            }
+        }
+        __syncthreads();                                   // s_sc published for pass 2
+    }
+
+    // ---- pass 2: one pair per warp, in the shipped form's order. The state is warp-private, so
+    // there is no cross-warp hand-off and no second barrier.
+    for (int p = w; p < pairs; p += nw) {
+        const int row = r_lo + p / ATTN_TILE_G, h = p % ATTN_TILE_G;
+        const int l_p = tile_lim(a, row, blo, span);
+        if (l_p <= 0) continue;                            // empty pair: emit nothing, see above
+        const int head = ATTN_TILE_G * kv_write + h;
+        const bool one_pass = (tile_blocks_for_row(a, row) == 1);
+        const hip_bfloat16* sc = &s_sc[p][0];
+        float m = 0.f, l = 0.f, acc[8];
+        for (int u = 0; u < 8; ++u) acc[u] = 0.f;
+        if (one_pass) {
+            // The reference form, exactly `attn_core`'s one-pass branch: max, then sum-of-exp, then
+            // the BF16-rounded normalised weight and P·V, each serial in index order.
+            for (int t = 0; t < l_p; ++t) m = fmaxf(m, bf(sc[t]));
+            for (int t = 0; t < l_p; ++t) l += expf(bf(sc[t]) - m);
+            for (int t = 0; t < l_p; ++t) {
+                const int j = blo + t;
+                const hip_bfloat16* v =
+                    (j == a.pos + row)
+                        ? a.vg + (size_t)ROW_KV * row + (size_t)kv_write * DH + lane * 8
+                        : a.vcache + ((size_t)kv_read * a.cap + (size_t)j) * DH + lane * 8;
+                const float wt = bf(fb(expf(bf(sc[t]) - m) / l));
+                for (int u = 0; u < 8; ++u) acc[u] += wt * bf(v[u]);   // serial in t, §05.5
+            }
+            l = 1.0f;   // weights were normalised and rounded above; the epilogue must not divide
+        } else {
+            // The streaming form: `attn_core`'s tile-of-`tile` loop verbatim, so this route lands on
+            // §07.3's already-banded bits instead of opening a third set. Only the window differs.
+            for (int base = 0; base < l_p; base += tile) {
+                const int nt = std::min(tile, l_p - base);
+                float mt = -1e30f;
+                for (int t = 0; t < nt; ++t) mt = fmaxf(mt, bf(sc[base + t]));
+                const float mn = fmaxf(m, mt);
+                const float rescale = expf(m - mn);
+                float e[TILE], ls = 0.f;
+                for (int t = 0; t < nt; ++t) { e[t] = expf(bf(sc[base + t]) - mn); ls += e[t]; }
+                l = l * rescale + ls;
+                for (int u = 0; u < 8; ++u) acc[u] *= rescale;
+                for (int t = 0; t < nt; ++t) {
+                    const int j = blo + base + t;
+                    const hip_bfloat16* v =
+                        (j == a.pos + row)
+                            ? a.vg + (size_t)ROW_KV * row + (size_t)kv_write * DH + lane * 8
+                            : a.vcache + ((size_t)kv_read * a.cap + (size_t)j) * DH + lane * 8;
+                    for (int u = 0; u < 8; ++u) acc[u] += e[t] * bf(v[u]);
+                }
+                m = mn;
+            }
+        }
+
+        // §05.6 epilogue, 8 dims per lane, same per-element arithmetic as `finish_head`.
+        if (one_pass) {
+            hip_bfloat16 o[8], g8[8];
+            uint4 gu = *reinterpret_cast<const uint4*>(
+                a.qg + (size_t)ROW_Q * row + g_off(head, a.neg) + lane * 8);
+            const hip_bfloat16* gg = reinterpret_cast<const hip_bfloat16*>(&gu);
+            for (int u = 0; u < 8; ++u) {
+                const float av = bf(fb(acc[u] / l));
+                o[u] = fb(av);
+                const float g = bf(gg[u]);
+                g8[u] = fb(av * bf(fb(1.0f / (1.0f + expf(-g)))));
+            }
+            *reinterpret_cast<uint4*>(a.aout + (size_t)ROW_H * row + (size_t)head * DH + lane * 8) =
+                *reinterpret_cast<uint4*>(o);
+            *reinterpret_cast<uint4*>(a.gout + (size_t)ROW_H * row + (size_t)head * DH + lane * 8) =
+                *reinterpret_cast<uint4*>(g8);
+        } else {
+            // One partial per (row, head in group, window); `attn_combine`'s tile branch merges the
+            // windows of the row. A row that needed none of a window wrote nothing to it.
+            float* pp = a.part + (((size_t)row * ATTN_TILE_G + h) * windows + y) * (DH + 2);
+            if (lane == 0) { pp[0] = m; pp[1] = l; }
+            for (int u = 0; u < 8; ++u) pp[2 + lane * 8 + u] = acc[u];
+        }
+    }
+}
+
+// The wave entry point's second form. `a.tile_kernel` in the staged launch plan selects it; a
+// zero-initialised CoreArgs keeps the shipped `attn_core`, which is what a one-row decode step is.
+__global__ void attn_tile_wave(CoreArgs a) { attn_tile_body(a); }
+
 // Merge the split partials of each query head with the same (max,sum) algebra, then §05.6.
 __global__ void attn_combine(CoreArgs a) {
-    const int head = blockIdx.x, d = threadIdx.x;
+    const int d = threadIdx.x;
+    if (a.tile_kernel) {
+        // The tiled form's merge. Its partial slab is [row][head in group][window][2 + DH], so the
+        // grid is (KV group, head in group) x row, and the row's own rule decides whether it needs a
+        // merge at all: a row the staging fits was finished inside its core block, which is the same
+        // argument that lets one launch mix exact rows with streaming ones. Every window below
+        // `s_row` was written: a row with n lanes has lanes in window s iff s < ceil(n / MAXSC), and
+        // that is exactly `s_row` — so this loop never reads a slot no core block filled.
+        const int kv = blockIdx.x / ATTN_TILE_G, h = blockIdx.x % ATTN_TILE_G;
+        const int qrow = blockIdx.y;
+        const int s_row = tile_blocks_for_row(a, qrow);
+        if (s_row == 1) return;
+        const int windows = tile_split_of(a.lvalid + nrows_of(a) - 1);
+        const float* p = a.part + (((size_t)qrow * ATTN_TILE_G + h) * windows) * (DH + 2);
+        float m = 0.f, l = 0.f, acc = 0.f;
+        for (int s = 0; s < s_row; ++s) {
+            const float ms = p[(size_t)s * (DH + 2) + 0];
+            const float ls = p[(size_t)s * (DH + 2) + 1];
+            const float av = p[(size_t)s * (DH + 2) + 2 + d];
+            const float mn = fmaxf(m, ms);
+            const float r0 = expf(m - mn), r1 = expf(ms - mn);
+            l = l * r0 + ls * r1;
+            acc = acc * r0 + av * r1;
+            m = mn;
+        }
+        const int head = ATTN_TILE_G * kv + h;
+        const float av = bf(fb(acc / l));
+        a.aout[ROW_H * qrow + (size_t)head * DH + d] = fb(av);
+        const float g = bf(a.qg[ROW_Q * qrow + g_off(head, a.neg) + d]);
+        a.gout[ROW_H * qrow + (size_t)head * DH + d] = fb(av * bf(fb(1.0f / (1.0f + expf(-g)))));
+        return;
+    }
+    const int head = blockIdx.x;
     const int qrow = blockIdx.y;
     const int s_row = blocks_for_row(a, qrow);
     if (s_row == 1) return;      // that row's single block already finished it in `attn_core`

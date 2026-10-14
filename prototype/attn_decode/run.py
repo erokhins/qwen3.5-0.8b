@@ -503,6 +503,11 @@ def wave_stage(args, fails, worst, ncmp, online_route, band):
     # A wave cannot be fused: the §05.7 append would race the next row's read (the host says so too),
     # so this stage always prices the staged plan.
     knobs = ["--launch", "staged", "--split", str(args.split), "--softmax", args.softmax]
+    if args.tile_kernel:
+        # Phase 2's A/B. Every core launch of this run goes through `attn_tile_wave`; the pins are the
+        # same pins, so the comparison is the §5 contract itself: the tiled wave must reproduce, row by
+        # row and bit for bit, what the shipped form writes against the dumps.
+        knobs.append("--tile-kernel")
     print("\nP8 waves of %d rows from %s prefill rows (one launch per layer, positions per row, "
           "staged plan): %s" % (args.wave_rows, args.long_fixture, " ".join(knobs)))
     for layer in layers:
@@ -636,6 +641,11 @@ def main() -> int:
                          "prefill row), or a comma-separated row list")
     ap.add_argument("--wave-rows", type=int, default=64,
                     help="rows per wave for --wave (default 64, plan §2.1's chunk width)")
+    ap.add_argument("--tile-kernel", action="store_true",
+                    help="Phase 2: run the G x M tiled wave core (`attn_tile_wave`) instead of the "
+                         "shipped per-(row,head) `attn_core`. Wave-only — the host refuses it with "
+                         "--launch fused, --score-f32 or --neg carry. `run.py` takes the GPU lock "
+                         "itself, so hold `tools/gpu_lock.sh` before invoking it (see AGENTS.md)")
     ap.add_argument("--negative", action="store_true")
     ap.add_argument("--no-verify", action="store_true",
                     help="skip the operand-rebuild proof (it is the gate's own foundation)")

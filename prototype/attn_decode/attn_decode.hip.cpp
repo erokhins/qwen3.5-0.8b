@@ -57,7 +57,7 @@
  *
  * Build: prototype/attn_decode/build.sh  (-O3, -Wl,-rpath,/opt/rocm/lib)
  * Run:   ./attn_decode --mode once  --plan PLAN [--launch staged|fused] [--split N]
- *                      [--softmax online|full] [--neg NAME] [--score-f32]
+ *                      [--softmax online|full] [--neg NAME] [--score-f32] [--tile-kernel]
  *        ./attn_decode --mode burst --plan PLAN --iters N [--tile N] [--write-out] [same knobs]
  * Validate: prototype/attn_decode/run.py
  *
@@ -164,7 +164,7 @@ struct Case {
 int main(int argc, char** argv) {
     std::string mode = "once", plan_path, negname = "none", launch = "staged", softmax = "online";
     int split = 1, iters = 30, tile = 1, tile_rep = 1;
-    bool score_f32 = false, write_out = false;
+    bool score_f32 = false, write_out = false, tile_kernel = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() { return std::string(argv[++i]); };
@@ -177,6 +177,7 @@ int main(int argc, char** argv) {
         else if (a == "--tile") tile_rep = atoi(next().c_str());
         else if (a == "--neg") negname = next();
         else if (a == "--score-f32") score_f32 = true;
+        else if (a == "--tile-kernel") tile_kernel = true;
         else if (a == "--write-out") write_out = true;
         else {
             fprintf(stderr, "unknown arg %s\n", a.c_str());
@@ -236,6 +237,27 @@ int main(int argc, char** argv) {
         return 1;
     }
     tile = std::min(TILE, nw);
+    if (tile_kernel) {
+        // Phase 2 A/B switch: every core launch of this run goes through `attn_tile_wave` instead of
+        // `attn_core`, so one build measures both forms in one window. The refusals are
+        // `attn_tile_ok`'s — the same list the engine launcher refuses — so a plan this gate can
+        // price is a plan the engine can run, and vice versa.
+        const char* why = nullptr;
+        if (!attn_tile_ok(score_f32 ? 1 : 0, launch == "fused" ? 1 : 0, prop.warpSize, &why)) {
+            fprintf(stderr, "--tile-kernel refused: %s\n", why);
+            return 1;
+        }
+        if (neg == NEG_CARRY) {
+            // `carry` seeds a row's softmax state from the PREVIOUS query's, and in the tiled form
+            // consecutive queries are pairs of ONE block, so the shipped injection's plumbing (one
+            // stale buffer per launch, keyed by head) cannot express it here. Refusing is the honest
+            // answer: the tile form's analogue — a state leaking between two rows of the same row
+            // tile — is injected and gated in the CPU mirror instead (`attn_tile_model.py
+            // --negative tilecarry`), where the same must-catch rule can be checked row by row.
+            fprintf(stderr, "--tile-kernel refuses --neg carry; see attn_tile_model.py tilecarry\n");
+            return 1;
+        }
+    }
 
     CK(hipMalloc(&g_stale, ((size_t)N_Q * 2 + (size_t)N_Q * DH) * 4));
     CK(hipMemset(g_stale, 0, ((size_t)N_Q * 2 + (size_t)N_Q * DH) * 4));
@@ -323,10 +345,20 @@ int main(int argc, char** argv) {
             CK(hipMalloc(&c.gated, (size_t)N_Q * DH * 2 * c.nrows));
             CK(hipMalloc(&c.rcs, (size_t)ROT * 2 * 2));
             c.stale = g_stale;               // ONE buffer for the whole plan: `carry` has to leak
-            if (split > 1)                    // from case i into case i+1, not into itself
-                // Sized for every row of the case, which is exactly the expression the kernel indexes
-                // with: ((qrow*N_Q + head)*split + y) in `attn_core`.
-                CK(hipMalloc(&c.part, (size_t)c.nrows * N_Q * split * (DH + 2) * 4));
+            // From case i into case i+1, not into itself. The tiled form needs the partials whenever
+            // any row exceeds the staging, which is a per-case question the `--split` knob does not
+            // own, so the allocation is the wider of the two forms' promises.
+            const size_t part_elems =
+                std::max(split > 1 ? (size_t)c.nrows * N_Q * split * (DH + 2) : 0,
+                         tile_kernel ? (size_t)tile_part_floats(c.nrows, c.lanes_last()) : 0);
+            if (part_elems) {
+                // Sized for every row of the case, which is exactly the expression the kernels index
+                // with: ((qrow*N_Q + head)*split + y) for the shipped form,
+                // ((qrow*G + head_in_group)*windows + y) for the tiled one. Zero-filled, so a
+                // partial that was never written reads as the neutral (0,0,0) instead of garbage.
+                CK(hipMalloc(&c.part, part_elems * 4));
+                CK(hipMemset(c.part, 0, part_elems * 4));
+            }
             cases.push_back(c);
         }
     }
@@ -339,9 +371,10 @@ int main(int argc, char** argv) {
     size_t plan_rows = 0;
     for (auto& c : cases) plan_rows += c.nrows;
     printf("plan %s | cases=%zu | rows=%zu | launch=%s (split %d) | softmax=%s | warps=%d tile=%d"
-           " | neg=%s | score=%s | replicas=%d\n",
+           " | neg=%s | score=%s | replicas=%d | core=%s\n",
            plan_path.c_str(), cases.size(), plan_rows, launch.c_str(), split, softmax.c_str(), nw,
-           tile, negname.c_str(), score_f32 ? "f32" : "bf16", std::max(1, tile_rep));
+           tile, negname.c_str(), score_f32 ? "f32" : "bf16", std::max(1, tile_rep),
+           tile_kernel ? "attn_tile_wave" : "attn_core");
     if (neg != NEG_NONE) printf("NEGATIVE TEST: injected bug = %s\n", negname.c_str());
 
     auto launch_case = [&](Case& c, int rep, bool stages) {
@@ -357,6 +390,14 @@ int main(int argc, char** argv) {
         a.cap = c.cap; a.pos = c.pos; a.lvalid = c.lvalid; a.split = split; a.nrows = c.nrows;
         a.neg = neg; a.full = full ? 1 : 0; a.score_f32 = score_f32 ? 1 : 0;
         a.fused = launch == "fused" ? 1 : 0; a.tile = tile;
+        a.tile_kernel = tile_kernel ? 1 : 0;
+        if (tile_kernel) {
+            // The tiled form owns its lane geometry: its windows are MAXSC lanes wide by
+            // construction, so `split` means `tile_split_of(lanes_last)` here rather than the
+            // `--split` knob. Leaving the knob in charge would put a second, disagreeing authority
+            // over how many partials a row promises — `tile_blocks_for_row` clamps by this field.
+            a.split = tile_split_of(c.lanes_last());
+        }
         if (stages) rope_table<<<1, ROT>>>(a);   // stage check, not part of the timed path
         if (launch == "staged") {
             CoreArgs p = a;
@@ -371,8 +412,14 @@ int main(int argc, char** argv) {
         }
         a.aout = c.aout; a.gout = c.gated;
         // grid.z is the query row, grid.y the lane block within it (§07.3's split axis, unchanged).
-        attn_core<<<dim3(N_Q, split, c.nrows), THREADS>>>(a);
-        if (split > 1) attn_combine<<<dim3(N_Q, c.nrows), THREADS>>>(a);
+        // The tiled form's grid is (KV group, lane window, row tile), and the widest-row-first
+        // inversion lives inside the kernel, not here.
+        if (tile_kernel) {
+            attn_tile_wave<<<dim3(N_KV, a.split, tile_rtiles_of(c.nrows)), ATTN_TILE_THREADS>>>(a);
+        } else {
+            attn_core<<<dim3(N_Q, split, c.nrows), THREADS>>>(a);
+        }
+        if (a.split > 1) attn_combine<<<dim3(N_Q, c.nrows), THREADS>>>(a);
         CK(hipGetLastError());
     };
 
@@ -398,9 +445,9 @@ int main(int argc, char** argv) {
         CK(hipDeviceSynchronize());
         for (auto& c : cases) write_case(c);
         printf("RESULT mode=once cases=%zu rows=%zu launches=%d neg=%s split=%d launch=%s"
-               " softmax=%s\n",
+               " softmax=%s core=%s\n",
                cases.size(), plan_rows, launches, negname.c_str(), split, launch.c_str(),
-               softmax.c_str());
+               softmax.c_str(), tile_kernel ? "tile" : "attn_core");
         return 0;
     }
 
