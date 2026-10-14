@@ -1,0 +1,61 @@
+device AMD Radeon 8060S Graphics  CUs=20  clock_MHz=2900  mem_clock_MHz=1000  bus_width=256
+
+=== determinism, bf16 in / f32 accumulate, hipBLAS DEFAULT algorithm
+  shape          layout    m*n runhash freshWs ndiff      noWs  identical          beta0-clean
+  (freshWs = second handle given the same 128 MiB workspace — a DIFF here is real
+   nondeterminism; noWs = second handle given none, a DIFF there is a workspace-
+   dependent kernel choice, which is a configuration fact, not a bug)  q_proj         W[k,n] 2097152 c3c64b64    same     0      same  YES                yes
+  q_proj         W[n,k] 2097152 3fe91d97    same     0      same  YES                yes
+  k_proj         W[k,n] 262144 d96fec2d    same     0      same  YES                yes
+  k_proj         W[n,k] 262144 b7748c00    same     0      same  YES                yes
+  in_proj_a      W[k,n]   8192 2f3d833f    same     0      same  YES                yes
+  in_proj_a      W[n,k]   8192 2b6205f0    same     0      same  YES                yes
+  in_proj_qkv    W[k,n] 3145728 7d13f676    same     0      same  YES                yes
+  in_proj_qkv    W[n,k] 3145728 4b61d361    same     0      same  YES                yes
+  o_proj         W[k,n] 524288 233bd2eb    same     0      same  YES                yes
+  o_proj         W[n,k] 524288 603f1dab    same     0      same  YES                yes
+  mlp_gate       W[k,n] 1835008 b9d99e6d    same     0      same  YES                yes
+  mlp_gate       W[n,k] 1835008 f9074716    same     0      same  YES                yes
+  mlp_down       W[k,n] 524288 eb0d8465    same     0      same  YES                yes
+  mlp_down       W[n,k] 524288 fd303892    same     0      same  YES                yes
+  q_proj@1024    W[k,n] 4194304 b070781b    same     0      same  YES                yes
+  q_proj@1024    W[n,k] 4194304 f271162c    same     0      same  YES                yes
+  q_proj@3072    W[k,n] 12582912 31966d40    same     0      same  YES                yes
+  q_proj@3072    W[n,k] 12582912 ce225be5    same     0      same  YES                yes
+  q_proj@64      W[k,n] 262144 9784127    same     0      same  YES                yes
+  q_proj@64      W[n,k] 262144 da2369e4    same     0      same  YES                yes
+  lm_head@1      W[k,n] 248320 74056829    same     0      same  YES                yes
+  lm_head@1      W[n,k] 248320 ec2c8308    same     0      same  YES                yes
+DET-COMBINED bf16 b30c25c0e7fd147a   (identical across three separate PROCESSES means the
+  selection does not depend on address layout or process history either)
+
+=== determinism, fp16 in / f32 accumulate, hipBLAS DEFAULT algorithm
+  shape          layout    m*n runhash freshWs ndiff      noWs  identical          beta0-clean
+  (freshWs = second handle given the same 128 MiB workspace — a DIFF here is real
+   nondeterminism; noWs = second handle given none, a DIFF there is a workspace-
+   dependent kernel choice, which is a configuration fact, not a bug)  q_proj         W[k,n] 2097152 c3c64b64    same     0      same  YES                yes
+  q_proj         W[n,k] 2097152 3fe91d97    same     0      same  YES                yes
+  k_proj         W[k,n] 262144 d96fec2d    same     0      same  YES                yes
+  k_proj         W[n,k] 262144 b7748c00    same     0      same  YES                yes
+  in_proj_a      W[k,n]   8192 2f3d833f    same     0      same  YES                yes
+  in_proj_a      W[n,k]   8192 2b6205f0    same     0      same  YES                yes
+  in_proj_qkv    W[k,n] 3145728 7d13f676    same     0      same  YES                yes
+  in_proj_qkv    W[n,k] 3145728 4b61d361    same     0      same  YES                yes
+  o_proj         W[k,n] 524288 233bd2eb    same     0      same  YES                yes
+  o_proj         W[n,k] 524288 603f1dab    same     0      same  YES                yes
+  mlp_gate       W[k,n] 1835008 b9d99e6d    same     0      same  YES                yes
+  mlp_gate       W[n,k] 1835008 f9074716    same     0      same  YES                yes
+  mlp_down       W[k,n] 524288 eb0d8465    same     0      same  YES                yes
+  mlp_down       W[n,k] 524288 fd303892    same     0      same  YES                yes
+  q_proj@1024    W[k,n] 4194304 b070781b    same     0      same  YES                yes
+  q_proj@1024    W[n,k] 4194304 f271162c    same     0      same  YES                yes
+  q_proj@3072    W[k,n] 12582912 31966d40    same     0      same  YES                yes
+  q_proj@3072    W[n,k] 12582912 ce225be5    same     0      same  YES                yes
+  q_proj@64      W[k,n] 262144 9784127    same     0      same  YES                yes
+  q_proj@64      W[n,k] 262144 da2369e4    same     0      same  YES                yes
+  lm_head@1      W[k,n] 248320 758b04df    same     0      same  YES                yes
+  lm_head@1      W[n,k] 248320 9009741d    same     0      same  YES                yes
+DET-COMBINED fp16 48ad8cbb1e7ae419   (identical across three separate PROCESSES means the
+  selection does not depend on address layout or process history either)
+
+DETERMINISM PASS

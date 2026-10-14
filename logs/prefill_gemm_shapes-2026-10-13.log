@@ -1,0 +1,117 @@
+model Qwen3.5-0.8B; operands fp16 in / f32 accumulate / 16-bit C (see the
+constraint at the bottom). rate = 6.885 TFLOP/s and bandwidth =
+240.0 GB/s, BOTH QUOTED from devices/ — neither is measured by this script.
+ridge = rate / bandwidth = 28.69 flops per byte = 0.03486 bytes per flop.
+A shape below the ridge is bandwidth-bound however good the kernel is; that is a statement
+about the shape, not about the route. Byte columns are the MINIMUM traffic (each operand
+touched once); a badly blocked kernel re-reads A per N-tile and W per M-tile, so real
+numbers can only be worse than what is printed.
+
+flop accounting: 0.9952 GFLOP per token in block matmuls (186 matmuls), + 0.5086 GFLOP per priced logits row.
+The plan divides its ceilings by ~1.6 GFLOP/token; the matmul part alone is 1.5038 GFLOP/token when every token's logits are priced,
+and prefill prices ONE row per request (§06.5), so the prefill figure is the block part.
+
+=== wave of M = 64 rows
+  matmul                            n/layers     M       N     K    GFLOP    weights    act r+w   B/flop    f/B  bound
+  self_attn.q_proj.weight                  6    64    4096  1024    3.221     48 MiB   3.75 MiB   0.0168   59.4  compute
+  self_attn.k_proj.weight                  6    64     512  1024    0.403      6 MiB  1.125 MiB   0.0186   53.9  compute
+  self_attn.v_proj.weight                  6    64     512  1024    0.403      6 MiB  1.125 MiB   0.0186   53.9  compute
+  self_attn.o_proj.weight                  6    64    1024  2048    1.611     24 MiB   2.25 MiB   0.0171   58.5  compute
+  linear_attn.in_proj_qkv.weight          18    64    6144  1024   14.496    216 MiB  15.75 MiB   0.0168   59.7  compute
+  linear_attn.in_proj_z.weight            18    64    2048  1024    4.832     72 MiB   6.75 MiB   0.0171   58.5  compute
+  linear_attn.in_proj_a.weight            18    64      16  1024    0.038    576 KiB  2.285 MiB   0.0791   12.6  BANDWIDTH
+  linear_attn.in_proj_b.weight            18    64      16  1024    0.038    576 KiB  2.285 MiB   0.0791   12.6  BANDWIDTH
+  linear_attn.out_proj.weight             18    64    1024  2048    4.832     72 MiB   6.75 MiB   0.0171   58.5  compute
+  mlp.gate_proj.weight                    24    64    3584  1024   11.274    168 MiB   13.5 MiB   0.0169   59.2  compute
+  mlp.up_proj.weight                      24    64    3584  1024   11.274    168 MiB   13.5 MiB   0.0169   59.2  compute
+  mlp.down_proj.weight                    24    64    1024  3584   11.274    168 MiB   13.5 MiB   0.0169   59.2  compute
+  lm_head (= embed, §01.1)                 1     1  248320  1024    0.509    485 MiB    487 KiB   1.0010    1.0  BANDWIDTH
+  TOTAL                                                            64.203  1.401 GiB  83.05 MiB   0.0248   40.4  compute
+    arithmetic on the quoted rate: 9.33 ms of matmul for the wave (1.0032 GFLOP/token). Weights are 95 % of the 1.482 GiB touched per wave.
+
+=== wave of M = 512 rows
+  matmul                            n/layers     M       N     K    GFLOP    weights    act r+w   B/flop    f/B  bound
+  self_attn.q_proj.weight                  6   512    4096  1024   25.770     48 MiB     30 MiB   0.0032  315.1  compute
+  self_attn.k_proj.weight                  6   512     512  1024    3.221      6 MiB      9 MiB   0.0049  204.8  compute
+  self_attn.v_proj.weight                  6   512     512  1024    3.221      6 MiB      9 MiB   0.0049  204.8  compute
+  self_attn.o_proj.weight                  6   512    1024  2048   12.885     24 MiB     18 MiB   0.0034  292.6  compute
+  linear_attn.in_proj_qkv.weight          18   512    6144  1024  115.964    216 MiB    126 MiB   0.0031  323.4  compute
+  linear_attn.in_proj_z.weight            18   512    2048  1024   38.655     72 MiB     54 MiB   0.0034  292.6  compute
+  linear_attn.in_proj_a.weight            18   512      16  1024    0.302    576 KiB  18.28 MiB   0.0654   15.3  BANDWIDTH
+  linear_attn.in_proj_b.weight            18   512      16  1024    0.302    576 KiB  18.28 MiB   0.0654   15.3  BANDWIDTH
+  linear_attn.out_proj.weight             18   512    1024  2048   38.655     72 MiB     54 MiB   0.0034  292.6  compute
+  mlp.gate_proj.weight                    24   512    3584  1024   90.194    168 MiB    108 MiB   0.0032  311.7  compute
+  mlp.up_proj.weight                      24   512    3584  1024   90.194    168 MiB    108 MiB   0.0032  311.7  compute
+  mlp.down_proj.weight                    24   512    1024  3584   90.194    168 MiB    108 MiB   0.0032  311.7  compute
+  lm_head (= embed, §01.1)                 1     1  248320  1024    0.509    485 MiB    487 KiB   1.0010    1.0  BANDWIDTH
+  TOTAL                                                           510.066  1.401 GiB    661 MiB   0.0043  232.2  compute
+    arithmetic on the quoted rate: 74.08 ms of matmul for the wave (0.9962 GFLOP/token). Weights are 68 % of the 2.046 GiB touched per wave.
+    N/K < 0.05 at this width: linear_attn.in_proj_a.weight(18/layer), linear_attn.in_proj_b.weight(18/layer) — these are the shapes a square probe says
+    nothing about, and they are below the ridge at every wave width.
+
+=== wave of M = 1024 rows
+  matmul                            n/layers     M       N     K    GFLOP    weights    act r+w   B/flop    f/B  bound
+  self_attn.q_proj.weight                  6  1024    4096  1024   51.540     48 MiB     60 MiB   0.0022  455.1  compute
+  self_attn.k_proj.weight                  6  1024     512  1024    6.442      6 MiB     18 MiB   0.0039  256.0  compute
+  self_attn.v_proj.weight                  6  1024     512  1024    6.442      6 MiB     18 MiB   0.0039  256.0  compute
+  self_attn.o_proj.weight                  6  1024    1024  2048   25.770     24 MiB     36 MiB   0.0024  409.6  compute
+  linear_attn.in_proj_qkv.weight          18  1024    6144  1024  231.928    216 MiB    252 MiB   0.0021  472.6  compute
+  linear_attn.in_proj_z.weight            18  1024    2048  1024   77.309     72 MiB    108 MiB   0.0024  409.6  compute
+  linear_attn.in_proj_a.weight            18  1024      16  1024    0.604    576 KiB  36.56 MiB   0.0645   15.5  BANDWIDTH
+  linear_attn.in_proj_b.weight            18  1024      16  1024    0.604    576 KiB  36.56 MiB   0.0645   15.5  BANDWIDTH
+  linear_attn.out_proj.weight             18  1024    1024  2048   77.309     72 MiB    108 MiB   0.0024  409.6  compute
+  mlp.gate_proj.weight                    24  1024    3584  1024  180.389    168 MiB    216 MiB   0.0022  448.0  compute
+  mlp.up_proj.weight                      24  1024    3584  1024  180.389    168 MiB    216 MiB   0.0022  448.0  compute
+  mlp.down_proj.weight                    24  1024    1024  3584  180.389    168 MiB    216 MiB   0.0022  448.0  compute
+  lm_head (= embed, §01.1)                 1     1  248320  1024    0.509    485 MiB    487 KiB   1.0010    1.0  BANDWIDTH
+  TOTAL                                                          1019.624  1.401 GiB  1.291 GiB   0.0028  352.9  compute
+    arithmetic on the quoted rate: 148.09 ms of matmul for the wave (0.9957 GFLOP/token). Weights are 52 % of the 2.691 GiB touched per wave.
+    N/K < 0.05 at this width: linear_attn.in_proj_a.weight(18/layer), linear_attn.in_proj_b.weight(18/layer) — these are the shapes a square probe says
+    nothing about, and they are below the ridge at every wave width.
+
+=== wave of M = 3072 rows
+  matmul                            n/layers     M       N     K    GFLOP    weights    act r+w   B/flop    f/B  bound
+  self_attn.q_proj.weight                  6  3072    4096  1024  154.619     48 MiB    180 MiB   0.0015  646.7  compute
+  self_attn.k_proj.weight                  6  3072     512  1024   19.327      6 MiB     54 MiB   0.0033  307.2  compute
+  self_attn.v_proj.weight                  6  3072     512  1024   19.327      6 MiB     54 MiB   0.0033  307.2  compute
+  self_attn.o_proj.weight                  6  3072    1024  2048   77.309     24 MiB    108 MiB   0.0018  558.5  compute
+  linear_attn.in_proj_qkv.weight          18  3072    6144  1024  695.785    216 MiB    756 MiB   0.0015  682.7  compute
+  linear_attn.in_proj_z.weight            18  3072    2048  1024  231.928     72 MiB    324 MiB   0.0018  558.5  compute
+  linear_attn.in_proj_a.weight            18  3072      16  1024    1.812    576 KiB  109.7 MiB   0.0638   15.7  BANDWIDTH
+  linear_attn.in_proj_b.weight            18  3072      16  1024    1.812    576 KiB  109.7 MiB   0.0638   15.7  BANDWIDTH
+  linear_attn.out_proj.weight             18  3072    1024  2048  231.928     72 MiB    324 MiB   0.0018  558.5  compute
+  mlp.gate_proj.weight                    24  3072    3584  1024  541.166    168 MiB    648 MiB   0.0016  632.5  compute
+  mlp.up_proj.weight                      24  3072    3584  1024  541.166    168 MiB    648 MiB   0.0016  632.5  compute
+  mlp.down_proj.weight                    24  3072    1024  3584  541.166    168 MiB    648 MiB   0.0016  632.5  compute
+  lm_head (= embed, §01.1)                 1     1  248320  1024    0.509    485 MiB    487 KiB   1.0010    1.0  BANDWIDTH
+  TOTAL                                                          3057.854  1.401 GiB  3.871 GiB   0.0019  540.2  compute
+    arithmetic on the quoted rate: 444.13 ms of matmul for the wave (0.9954 GFLOP/token). Weights are 27 % of the 5.271 GiB touched per wave.
+    N/K < 0.05 at this width: linear_attn.in_proj_a.weight(18/layer), linear_attn.in_proj_b.weight(18/layer) — these are the shapes a square probe says
+    nothing about, and they are below the ridge at every wave width.
+
+=== epilogue bill: what a library matmul unfuses, in extra bytes per wave
+  'fused today' is what the engine already does inside the matmul kernel.
+  site                              fused today?                    M=64       M=512      M=1024      M=3072
+  silu(gate)*up (mlp_gateup)        yes — inside the GEMM         42 MiB     336 MiB     672 MiB   1.969 GiB
+  attn gate de-interleave           no — attn_prep is its own         0 B         0 B         0 B         0 B
+  q/k head-norm + rope              no — attn_prep is its own         0 B         0 B         0 B         0 B
+  gdn gated RMSNorm (§04.5)         no — own kernel already          0 B         0 B         0 B         0 B
+  residual add + next RMSNorm       no — glue is its own pass         0 B         0 B         0 B         0 B
+  Only the MLP costs anything. `mlp_gateup` writes `act` once; a library gate+up writes both
+  halves (2 tiles), a silu-mul kernel reads both (2 tiles) and writes act (1 tile) = 5 tiles
+  of M x 3584 x 2 B per layer instead of 1. Concatenating gate|up into one [7168,1024] weight
+  merges the two calls but does NOT change that count — it buys launches, not traffic.
+  The three attention/GDN epilogues are already separate passes reading a matmul output that
+  is already written to memory, so a library matmul changes nothing there.
+
+  What the library route gives BACK: `proj_gemv` runs PACK_X=false and so needs F32
+  activations, which is most of why 115 cast launches per token exist (engine/kernels_proj.cpp,
+  `engine/results.md` E2). A library GEMM taking a 16-bit A operand reads what glue wrote, so
+  those casts disappear for the projections — a launch-and-dispatch saving at the measured
+  dispatch floor, not a traffic one.
+
+  CONSTRAINT no shape table can express — the rounding point. Every shipped pin rounds a
+  projection's product to BF16 where the reference does, so a library call must be given a
+  16-bit C dtype (HIPBLAS_COMPUTE_32F with C bf16/fp16). Asking for F32 C would both double
+  the activation traffic above and move a rounding, and a moved rounding is a route change
+  (D-3/D-5), not a tuning knob.

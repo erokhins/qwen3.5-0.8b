@@ -1,0 +1,20 @@
+device AMD Radeon 8060S Graphics  gcnArchName=gfx1151  CUs(HIP)=20  wavefront=32  sharedMemPerBlock=65536
+rocwmma 2.2.1
+correctness only — no timing taken, no rate printed
+
+=== 16x16x16  (C[m,n] = A[m,k] * W[n,k]^T, W row-major = col-major B)
+  fp16 in / f32 acc         16x16    x16     PASS cos=1.000000000 meanrel=6.157e-08 maxabs=3.576e-07 maxrel=4.265e-06 (at ref=0.0286998)
+  bf16 in / f32 acc         16x16    x16     PASS cos=1.000000000 meanrel=1.404e-08 maxabs=2.384e-07 maxrel=2.352e-06 (at ref=-0.0116701)
+  fp16 in / fp16 acc16      16x16    x16     PASS cos=0.999999884 meanrel=3.540e-04 maxabs=2.930e-03 maxrel=2.430e-02 (at ref=-0.0272522)
+
+=== 64x96x128  (C[m,n] = A[m,k] * W[n,k]^T, W row-major = col-major B)
+  fp16 in / f32 acc         64x96    x128    PASS cos=1.000000000 meanrel=3.799e-07 maxabs=7.153e-06 maxrel=4.964e-04 (at ref=0.00287773)
+  bf16 in / f32 acc         64x96    x128    PASS cos=1.000000000 meanrel=6.294e-08 maxabs=3.815e-06 maxrel=1.598e-04 (at ref=-2.43261e-06)
+  fp16 in / fp16 acc16      64x96    x128    PASS cos=0.999999253 meanrel=1.042e-03 maxabs=5.469e-02 maxrel=7.690e-01 (at ref=-0.00590515)
+
+=== 128x512x1024  (C[m,n] = A[m,k] * W[n,k]^T, W row-major = col-major B)
+  fp16 in / f32 acc        128x512   x1024   PASS cos=1.000000000 meanrel=3.169e-06 maxabs=1.678e-04 maxrel=1.443e-02 (at ref=-0.000295482)
+  bf16 in / f32 acc        128x512   x1024   PASS cos=1.000000000 meanrel=5.469e-07 maxabs=7.629e-05 maxrel=2.179e-03 (at ref=-0.000354238)
+  fp16 in / fp16 acc16     128x512   x1024   PASS cos=0.999994435 meanrel=2.932e-03 maxabs=3.125e-01 maxrel=4.666e+01 (at ref=8.09431e-05)
+
+MFMA PROBE PASS — 0 failing case/dtype line(s)

@@ -1,0 +1,12 @@
+device AMD Radeon 8060S Graphics  CUs=20
+census tools/build/prefill_gemm_shapes.json: Qwen3.5-0.8B, 24 layers (6 attn / 18 gdn), 186 block matmuls per wave
+hipBLAS workspace pinned: 128 MiB (the fresh handle in --mix-determinism gets the same buffer)
+MIXDET — three identical passes of the mix, every C hashed in call order (FNV-1a).
+§3.1 proved determinism per shape; this asks the question of the mix's call order
+and of a handle that has already issued the whole mix. No timing taken.
+  all-24-layers    M=64    calls=150  cbytes=51118080   pass1=871d498f758d9e76 pass2..3 same freshHandle same beta0 clean  ok
+MIXDET-COMBINED bf16 1731f224b4015b07  (identical across three separate PROCESSES says the
+  selection does not depend on address layout or process history either)
+  all-24-layers    M=64    calls=150  cbytes=51118080   pass1=02b622b67f48d109 pass2..3 same freshHandle same beta0 clean  ok
+MIXDET-COMBINED fp16 ede2ef6da48c6e47  (identical across three separate PROCESSES says the
+  selection does not depend on address layout or process history either)

@@ -1,0 +1,25 @@
+device AMD Radeon 8060S Graphics  CUs=20
+census tools/build/prefill_gemm_shapes.json: Qwen3.5-0.8B, 24 layers (6 attn / 18 gdn), 186 block matmuls per wave
+hipBLAS workspace pinned: 128 MiB (the fresh handle in --mix-determinism gets the same buffer)
+MIXCHECK — the mix's own call form (OP_T on W as [n,k] ld=k, 16-bit C with ldc=n) at
+the census's shapes, against a CPU dot of the same 16-bit inputs rounded the same way.
+The question is the ROUNDING POINT, not whether the product is exact: a library dot
+reassociates, and §10.1 sizes what that legally costs. No timing loop exists in this
+mode, so no ms figure can be printed by it and none is.
+  dt    family                   M       N         K       bits differ              worst distance
+  bf16  self_attn.q_proj.weight  M=16  N=4096   K=1024  bits differ 0     / 65536    worst   0.000 ULP  ok
+  bf16  self_attn.k_proj.weight  M=16  N=512    K=1024  bits differ 0     / 8192     worst   0.000 ULP  ok
+  bf16  self_attn.v_proj.weight  M=16  N=512    K=1024  bits differ 0     / 8192     worst   0.000 ULP  ok
+  bf16  self_attn.o_proj.weight  M=16  N=1024   K=2048  bits differ 0     / 16384    worst   0.000 ULP  ok
+  bf16  linear_attn.in_proj_qkv.weight M=16  N=6144   K=1024  bits differ 1842  / 98304    worst   1.000 ULP  ok
+  bf16  linear_attn.in_proj_z.weight M=16  N=2048   K=1024  bits differ 0     / 32768    worst   0.000 ULP  ok
+  bf16  linear_attn.out_proj.weight M=16  N=1024   K=2048  bits differ 0     / 16384    worst   0.000 ULP  ok
+  bf16  mlp.gate_proj.weight     M=16  N=3584   K=1024  bits differ 536   / 57344    worst   1.000 ULP  ok
+  bf16  mlp.up_proj.weight       M=16  N=3584   K=1024  bits differ 536   / 57344    worst   1.000 ULP  ok
+  bf16  mlp.down_proj.weight     M=16  N=1024   K=3584  bits differ 0     / 16384    worst   0.000 ULP  ok
+  bf16  linear_attn.in_proj_a.weight M=16  N=16     K=1024  bits differ 1     / 256      worst   1.000 ULP  ok
+  bf16  linear_attn.in_proj_b.weight M=16  N=16     K=1024  bits differ 1     / 256      worst   1.000 ULP  ok
+  bf16  in_proj_a|b FUSED        M=16  N=32     K=1024  bits differ 7     / 512      worst   1.000 ULP  ok
+MIXCHECK PASS
+  Every row is within one ULP of the host rounding — §4.3's bf16-C claim restated
+  at the mix's own shapes and call form. No timing taken by this mode.

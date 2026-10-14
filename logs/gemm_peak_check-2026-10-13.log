@@ -1,0 +1,11 @@
+device AMD Radeon 8060S Graphics  CUs=20  clock_MHz=2900  mem_clock_MHz=1000  bus_width=256
+SELFCHECK ok maxrel=0.000e+00 (bf16 in, f32 accumulate, CPU reference)
+LAYOUT CROSS-CHECK ok: OP_T(W as [n,k], ld=k) against the same CPU reference at max|delta| 0.000e+00; 0 of 6144 outputs differ in their bits from the OP_N result (a last-bit difference between two kernels is expected, a different product is not)
+CDTYPE MATRIX (C[m,n] = A[m,k] W[n,k]^T, W as [n,k], OP_T; 64x96x128)
+  A/B    C      status     bits differ worst |device - host-rounded| in ULP of the 16-bit format
+  bf16   bf16   accepted   0           0 
+  bf16   f32    accepted   n/a         F32 output has no 16-bit rounding to compare; SELFCHECK is the accuracy evidence
+  fp16   fp16   accepted   12          1 
+  fp16   f32    accepted   n/a         F32 output has no 16-bit rounding to compare; SELFCHECK is the accuracy evidence
+CDTYPE ok
+CHECK PASS

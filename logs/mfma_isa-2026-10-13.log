@@ -1,0 +1,13 @@
+compiling /home/erokhins/erokhins_projects/qwen3.5-0.8b/tools/mfma_probe.cpp --offload-arch=gfx1151 (compile only; no device touched)
+target line: .amdgcn_target "amdgcn-amd-amdhsa--gfx1151"
+notes target: amdhsa.target:   amdgcn-amd-amdhsa--gfx1151
+
+kernel                                    instrs v_wmma v_mfma  v_fma    loads   verdict
+wmma_gemm<fp16, f32 acc>                     219      1      0      0        2   MATRIX UNIT (v_wmma_f32_16x16x16_f16)
+wmma_gemm<bf16, f32 acc>                     219      1      0      0        2   MATRIX UNIT (v_wmma_f32_16x16x16_bf16)
+wmma_gemm<fp16, fp16 acc>                    247      1      0      0        2   MATRIX UNIT (v_wmma_f16_16x16x16_f16)
+fma_gemm<fp16, f32> (the control)            113      0      0      1        2   scalar/vector FMA only
+
+Read: a kernel whose verdict is MATRIX UNIT emitted the instruction named; one that says
+scalar/vector FMA only had its mma_sync lowered to ordinary arithmetic, which would make a
+runtime PASS worthless as matrix-unit evidence.
