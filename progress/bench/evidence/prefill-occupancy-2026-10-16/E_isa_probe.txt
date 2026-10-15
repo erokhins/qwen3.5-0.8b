@@ -1,0 +1,48 @@
+### 1. ISA inventory for gfx1151 (llvm-mc accepts the mnemonic for this CPU or not)
+  v_mfma_f32_16x16x16f16 (CDNA)            instruction not supported on this GPU (gfx1151): v_mfma_f32_16x16x16f16
+  v_mfma_f32_16x16x16bf16_1k               instruction not supported on this GPU (gfx1151): v_mfma_f32_16x16x16bf16_1k
+  v_wmma_f32_16x16x16_f16                  operands are not valid for this GPU or mode
+  v_dot2_f32_f16                     PRESENT
+  v_dot2_f32_bf16                    PRESENT
+  v_dot4_i32_i8 (dp4a)               PRESENT
+  v_dot8_i32_i4                      PRESENT
+  v_dot4_f32_fp8_fp8 (fp8)                 instruction not supported on this GPU (gfx1151): v_dot4_f32_fp8_fp8
+  v_dot4_f32_fp8_bf8                       instruction not supported on this GPU (gfx1151): v_dot4_f32_fp8_bf8
+  v_pk_fma_f16 (packed fp16)         PRESENT
+  v_pk_fma_bf16 (packed bf16)              instruction not supported on this GPU (gfx1151): v_pk_fma_bf16
+  v_fma_mix_f32 (bf16->f32)          PRESENT
+  v_fmac_f32_e32 (scalar f32)        PRESENT
+
+### 2. the matrix instruction is reachable from our compiler (correct RDNA3 spelling)
+  rocwmma-style WMMA kernel COMPILES for gfx1151; device object ./w-hip-amdgcn-amd-amdhsa-gfx1151.o
+  instructions emitted:  1 v_wmma_f32_16x16x16_f16 
+
+### 3. what the SHIPPED rocBLAS kernels for gfx1151 actually execute (per data type)
+  TYPE       library file                                         arithmetic instructions found
+  BB         BB_HPA Ailk_Bjlk                                      3244 v_fmac_f32_e32; 52 v_fma_f32
+  BB         BB_HPA Ailk_Bljk                                      4244 v_fmac_f32_e32; 44 v_fma_f32
+  BB         BB_HPA Alik_Bjlk                                      798 v_fmac_f32_e32; 8 v_fma_f32
+  BB         BB_HPA Alik_Bljk                                      3926 v_fmac_f32_e32; 44 v_fma_f32
+  BS         BS_HPA Ailk_Bjlk                                      4114 v_fmac_f32_e32; 44 v_fma_f32
+  BS         BS_HPA Ailk_Bljk                                      3112 v_fmac_f32_e32; 30 v_fma_f32
+  BS         BS_HPA Alik_Bjlk                                      480 v_fmac_f32_e32; 2 v_fma_f32
+  BS         BS_HPA Alik_Bljk                                      1933 v_fmac_f32_e32; 36 v_fma_f32
+  CC         CC Ailk_BjlkC                                         574 v_fmac_f32_e32; 320 v_fma_f32
+  CC         CC Ailk_Bjlk                                          514 v_fmac_f32_e32; 320 v_fma_f32
+  CC         CC Ailk_Bljk                                          552 v_fmac_f32_e32; 320 v_fma_f32
+  CC         CC Alik_BjlkC                                         528 v_fmac_f32_e32; 320 v_fma_f32
+  CC         CC Alik_Bjlk                                          428 v_fmac_f32_e32; 320 v_fma_f32
+  CC         CC Alik_Bljk                                          572 v_fmac_f32_e32; 320 v_fma_f32
+  CC         CC AlikC_BjlkC                                        864 v_fma_f32; 262 v_fmac_f32_e32
+  CC         CC AlikC_Bjlk                                         450 v_fmac_f32_e32; 320 v_fma_f32
+  CC         CC AlikC_Bljk                                         424 v_fmac_f32_e32; 320 v_fma_f32
+  DD         DD Ailk_Bjlk                                         none matched
+  DD         DD Ailk_Bljk                                         none matched
+  DD         DD Alik_Bjlk                                         none matched
+  (bb = bf16 in/bf16 out, hh = fp16, ss = fp32, 4xi8I = int8; HPA = high-precision accumulate)
+
+  matrix-instruction census across every gfx1151 code object shipped with rocBLAS:
+    0 of 55 code objects contain a matrix instruction.
+
+  NOTE: the per-kernel .co files Tensile writes are CCO containers (magic 'CCO\003'), which
+  llvm-objdump cannot read; scan the .hsaco/.dat libraries above instead, or use roc-obj.
