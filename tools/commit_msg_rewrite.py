@@ -111,7 +111,7 @@ Usage:
   python3 tools/commit_msg_rewrite.py --emit OUTDIR           # candidates + manifest.json
   python3 tools/commit_msg_rewrite.py --verify OUTDIR         # word proof + lint
   python3 tools/commit_msg_rewrite.py --apply OUTDIR          # REWRITES HISTORY, guarded
-  python3 tools/commit_msg_rewrite.py --verify-history OLD NEW
+  python3 tools/commit_msg_rewrite.py --verify-history OLD NEW [CANDIDATES_DIR]
   python3 tools/commit_msg_rewrite.py --selftest              # no repo state needed
 """
 
@@ -859,12 +859,22 @@ def cmd_apply(indir: str) -> int:
     return 0
 
 
-def cmd_verify_history(oldref: str, newref: str) -> int:
-    """The gate: prove nothing but the messages changed."""
+def cmd_verify_history(oldref: str, newref: str, indir: str | None = None) -> int:
+    """The gate: prove nothing but the messages changed.
+
+    Without INDIR every commit is judged by the strict rule (exact word multiset), which
+    is the right default because a false alarm is cheaper than a false pass: it will
+    report every authored-class commit (HARD / THIN / NEEDS-BODY, whose header is free
+    text by contract) as "invented" words. Pass the candidates directory to get the
+    per-commit class from its manifest and a verdict that can actually reach PASS.
+    """
     old, new = rev_list(oldref), rev_list(newref)
     if len(old) != len(new):
         print(f"FAIL commit count {len(old)} ({oldref}) != {len(new)} ({newref})")
         return 1
+    classes: dict[str, str] = {}
+    if indir:
+        classes = {r["sha"]: r["class"] for r in load_manifest(indir)["commits"]}
     oh, nh = read_headers(old), read_headers(new)
     om, nm = read_messages(old), read_messages(new)
     fails = 0
@@ -886,7 +896,7 @@ def cmd_verify_history(oldref: str, newref: str) -> int:
         # The messages are EXPECTED to differ — that is the whole change. What may not
         # differ is their word multiset, so that is the only message comparison here.
         # A `TODO-HEADER` left in the new side shows up as an invented word.
-        diffs = word_diff(om[o], nm[n], "KEEP")
+        diffs = word_diff(om[o], nm[n], classes.get(o, "KEEP"))
         if diffs:
             bad.append("message words changed: " + "; ".join(diffs))
         if bad:
@@ -897,7 +907,9 @@ def cmd_verify_history(oldref: str, newref: str) -> int:
         return 1
     print(f"VERIFY-HISTORY PASS ({len(old)} commits: tree, parent count, author name+email, "
           f"author date and committer date identical in every one; no word lost or invented "
-          f"between {oldref} and {newref})")
+          f"between {oldref} and {newref}"
+          + (f", judged by the classes in {indir}/manifest.json" if indir else ")")
+          )
     return 0
 
 # ------------------------------------------------------------------ selftest
@@ -1400,8 +1412,9 @@ def main(argv: list[str]) -> int:
     group.add_argument("--verify", metavar="INDIR", help="word proof + lint over a written set")
     group.add_argument("--apply", metavar="INDIR",
                        help="REWRITE HISTORY with git filter-branch --msg-filter")
-    group.add_argument("--verify-history", metavar=("OLDREF", "NEWREF"), nargs=2,
-                       help="prove only the messages changed between two refs")
+    group.add_argument("--verify-history", metavar=("OLDREF", "NEWREF", "CANDIDATES"), nargs="+",
+                       help="prove only the messages changed between two refs; pass the "
+                            "candidates dir to judge each commit by its own class")
     group.add_argument("--selftest", action="store_true", help="synthetic rule cases")
     args = ap.parse_args(argv)
     if args.emit:
@@ -1411,7 +1424,10 @@ def main(argv: list[str]) -> int:
     if args.apply:
         return cmd_apply(args.apply)
     if args.verify_history:
-        return cmd_verify_history(*args.verify_history)
+        vh = args.verify_history
+        if len(vh) not in (2, 3):
+            ap.error("--verify-history takes OLDREF NEWREF [CANDIDATES]")
+        return cmd_verify_history(*vh)
     return selftest()
 
 
