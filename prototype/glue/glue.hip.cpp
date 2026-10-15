@@ -9,7 +9,7 @@
  * Both in one launch is the whole reason this file exists as its own op. Per §03.2 a layer runs
  * 2 norms + 2 residual adds, so an unfused path costs 4 launches per layer (97/token including
  * the norm before layer 0, which has no add in front of it); fused it is 2 per layer (49/token).
- * At the measured 1.85 us/launch floor (bench/performance-status.md §1) that is 0.179 ms/token
+ * At the measured 1.85 us/launch floor (bench/performance-status.md §4) that is 0.179 ms/token
  * unfused against 0.091 ms/token fused, and folding the pair into the GEMV that produces `delta`
  * (the `mlp_gateup` pattern) would take it to 0. The BYTES here are irrelevant by comparison —
  * see results.md; this is a launch-count item, and reporting it in GB/s would be reporting the
@@ -358,7 +358,7 @@ int main(int argc, char** argv) {
         bytes_token += split ? (double)j.bytes_split : (double)j.bytes_fused;
         launches_token += j.launches;
     }
-    const double us_per_launch_floor = 1.85;   // bench/performance-status.md §1
+    const double us_per_launch_floor = 1.85;   // bench/performance-status.md §4
 
     for (const auto& ts : ths) {
         const int th = atoi(ts.c_str());

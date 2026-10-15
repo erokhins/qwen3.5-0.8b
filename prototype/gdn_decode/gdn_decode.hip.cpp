@@ -262,7 +262,7 @@ int main(int argc, char** argv) {
         // Printed, not asserted: whether a >237 GB/s row is skipped work (the repo's standing rule)
         // or a state that stayed resident decides how the ledger may use it. The attribute cannot
         // answer it on this box — `hipDeviceGetAttribute(L2CacheSize)` says 2 MiB while tiling shows
-        // ~54 MiB resident (performance-status.md §1) — so this is a hint, and the tile sweep is the
+        // ~54 MiB resident (performance-status.md §4) — so this is a hint, and the tile sweep is the
         // measurement. Deciding the band is the ledger's call, not the kernel's.
         printf("NOTE working set %.0f KiB; L2 attribute says %d KiB (this box under-reports it — "
                "tiling, not the attribute, is the authority on residency)\n", bytes / 1024.0, l2_kb);

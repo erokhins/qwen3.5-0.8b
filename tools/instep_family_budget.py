@@ -47,10 +47,10 @@ REPO = Path(__file__).resolve().parent.parent
 # `bench/performance-status.md` as "the 237 GB/s probe"). Every roofline here is bytes/this.
 PROBE_GBS = 237.0
 
-# Isolated-burst cost per token per family, as committed in `bench/performance-status.md`'s Q6.1
-# table. `None` = never measured as a burst (the cast/copy rows there are dispatch estimates, and
-# proj is derived from per-shape ratios taken under contention, which is why Q7 leans on mlp and
-# lm_head rather than on proj for the same-geometry test).
+# Isolated-burst cost per token per family, as committed in the frozen ledger's Q6.1 table
+# (progress/2026-10-16/performance-status-2026-10-16.md:683-693). `None` = never measured as a burst (the cast/copy
+# rows there are dispatch estimates, and proj is derived from per-shape ratios taken under contention,
+# which is why Q7 leans on mlp and lm_head rather than on proj for the same-geometry test).
 BURST_MS = {
     "mlp": 2.594,        # prototype/mlp_gemv: cold, 6 replicas of ONE layer, rows/block 8
     "proj": None,        # 3.54-3.60 in the ledger, but derived — kept out of the deciding test
@@ -63,8 +63,8 @@ BURST_MS = {
     "host_tail": None,
 }
 
-# Rough per-launch dispatch price by family, in microseconds, from `bench/performance-status.md`
-# Q6's measured dispatch curve (1.85 us floor, 2.6-3.8 us at the widths these families use). Used
+# Rough per-launch dispatch price by family, in microseconds, from the frozen ledger's measured dispatch
+# curve (progress/2026-10-16/performance-status-2026-10-16.md:135, the 1.85 us floor at :39; 2.6-3.8 us at the widths these families use). Used
 # only to say how much of a family's in-situ row is the instrument's own exposed submission cost.
 DISPATCH_US = {"mlp": 3.75, "proj": 2.80, "lm_head": 3.75, "glue": 3.06, "gdn": 3.06,
                "attn": 3.06, "cast": 3.06, "copy": 3.06, "host_tail": 0.0}

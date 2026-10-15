@@ -37,9 +37,9 @@ rows/block and x-packing sweeps. Both write outputs and correctness-check the ti
     .venv/bin/python prototype/proj_gemv/run.py --time --only gdn  # one ledger row at a time
 
 `--only gdn|attn` is a TIMING selector and needs `--time`: it narrows the cold timing path to the
-layers of one family, which is how `bench/performance-status.md` §2's two "not measured on its own"
-rows (GDN projections 0.3796 GB, attention projections 0.0881 GB) get measured instead of
-arithmetically apportioned — `progress/2026-10-12/plan-2026-10-12.md` Q6 item 5. The P1/P2 correctness gate never
+layers of one family, which is how `bench/performance-status.md` §4's two projection rows — once "not
+measured on its own" (progress/2026-10-16/performance-status-2026-10-16.md:81-82, GDN projections 0.3796 GB and attention
+projections 0.0881 GB) and measured at last on 2026-10-16 — got their numbers instead of apportioned ones, the ask of `progress/2026-10-12/plan-2026-10-12.md` Q6 item 5. The P1/P2 correctness gate never
 narrows: it runs every projection of every layer whatever this flag says, because a gate that can be
 told to look at half the projections is not the gate the numbers above were taken with. Refusing the
 flag without `--time` is the same point: an inert `--only` would read like a subset gate.

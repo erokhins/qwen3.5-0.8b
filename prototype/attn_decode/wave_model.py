@@ -41,13 +41,13 @@ ROOT = Path(__file__).resolve().parents[2]
 KERNEL_H = ROOT / "prototype/attn_decode/attn_decode_kernels.h"
 
 # ---- measured inputs. Every one is a citation, not an assumption. --------------------
-MEASURED_ATTN_MS = 109.2       # bench/performance-status.md, route-(c) attribution table
+MEASURED_ATTN_MS = 109.2       # frozen ledger progress/2026-10-16/performance-status-2026-10-16.md:951, route-(c) attribution table
 MEASURED_ATTN_LAUNCHES = 12    # 6 layers x 2 bodies; `engine/launch_stats.h` counts sites
 MEASURED_WAVE_MS = 328.5       # same table
 DRAM_READ_GBS = 237.0          # devices/strix-halo-memory-bandwidth.md (pure read stream)
 L2_SIZED_GBS = 918.0           # same file: 18 MiB working set — a CEILING, not a rate used below
 VECTOR_FP32_TF = 2.93          # devices/strix-halo-compute.md: hipBLAS fp32 = the vector path
-HAND_GEMM_TF = 0.85            # bench/performance-status.md: the engine's own hand GEMMs
+HAND_GEMM_TF = 0.85            # frozen ledger progress/2026-10-16/performance-status-2026-10-16.md:923: the engine's own hand GEMMs
 LIB_MIX_M512_TF = 18.84        # devices/strix-halo-compute.md: 24-layer mix, 16-bit C, M=512
 CU_COUNT = 40                  # devices/strix-halo-compute.md correction (rocminfo; HIP says 20)
 WAVES_PER_CU = 32              # rocminfo: "Max Waves Per CU"

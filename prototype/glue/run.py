@@ -62,7 +62,7 @@ from speccheck.specimpl import rmsnorm_zc  # noqa: E402
 BIN = Path(__file__).resolve().parent / "glue"
 WORK = Path("/tmp/glue_gate")
 GPU_LOCK = ROOT / "tools" / "gpu_lock.sh"
-LAUNCH_FLOOR_US = 1.85          # bench/performance-status.md §1, measured
+LAUNCH_FLOOR_US = 1.85          # bench/performance-status.md §4, measured
 PROBE_GBS = 237.0
 
 # What "reproduce" means for a NORM. Sized by floor_probe.py over 192 norms x 1024 elements — the

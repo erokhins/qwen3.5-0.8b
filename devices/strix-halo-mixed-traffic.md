@@ -55,7 +55,7 @@ opinion:
 
 * at the byte-weighted (no-cliff) model — `1/BW = f_read/237 + f_write/BW_write` — even charging
   writes a stingy 105 GB/s gives a ceiling of **6.70 ms/token**, against reads-only at 6.47 ms;
-* the engine costs **12.399 ms/token** (`bench/performance-status.md`, Q6.1 stage medians at 128
+* the engine costs **12.399 ms/token** (frozen ledger progress/2026-10-16/performance-status-2026-10-16.md:666, Q6.1 stage medians at 128
   lanes), so it sits at **~53 % of the ceiling** no matter which of those two denominators is used;
 * for write traffic to eat the residue on its own, those 24.85 MB would have to cost **5.9 ms**,
   i.e. **4.2 GB/s** — a write would have to be **~57× more expensive than a read**. No memory system

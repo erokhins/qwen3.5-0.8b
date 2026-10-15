@@ -10,7 +10,7 @@
  *   self_attn.k_proj        [  512,1024] x6   self_attn.v_proj      [  512,1024] x6
  *   self_attn.o_proj        [ 1024,2048] x6
  *
- * Together 0.4677 GB/token = 29 % of the token's bytes (bench/performance-status.md §2), the
+ * Together 0.4677 GB/token = 29 % of the token's bytes (bench/performance-status.md §4), the
  * largest slice left after the MLP. Only two input widths appear — 1024 and 2048 — so the whole
  * family is `proj_gemv<1024>` and `proj_gemv<2048>`: the same skeleton as `mlp_gemv`'s
  * `mlp_down<IN>` (one wavefront per output row, x staged in shared, F32 accumulator, one BF16
@@ -507,7 +507,7 @@ int main(int argc, char** argv) {
                rpb, ms_plan, gbs, 100.0 * gbs / PROBE_GBS, PROBE_GBS, ev_plan, evnote,
                plan_bytes / 1048576.0, occ_x, occ);
         // One line per distinct (rows, in) in the plan: blocks and waves are the block-count
-        // argument the ledger's §5 item 5 asks about (20 CUs, not the 40 rocminfo prints).
+        // argument the frozen ledger's §5 item 5 asks about (progress/2026-10-16/performance-status-2026-10-16.md:240: 20 CUs, not the 40 rocminfo prints).
         for (size_t i = 0; i < plan.jobs.size(); ++i) {
             bool seen = false;
             for (size_t k = 0; k < i; ++k)

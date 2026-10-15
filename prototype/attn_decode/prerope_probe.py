@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Why is the device's `q_rope` one element off at position 64? Attribution, CPU-only, no device.
 
-THE OPEN ITEM (now closed; `prototype/attn_decode/results.md` §4, `bench/performance-status.md`
-§5(g)): the device kernel reproduces the pinned `attn.q_rope` bit-for-bit at every long-cache position
+THE OPEN ITEM (now closed; `prototype/attn_decode/results.md` §4, the frozen ledger's §5(g) at
+progress/2026-10-16/performance-status-2026-10-16.md:203): the device kernel reproduces the pinned `attn.q_rope` bit-for-bit at every long-cache position
 except `p = 64`, where it is a handful of elements off, every delta exactly 1 BF16 ULP, and the cause
 was unattributed. Two candidates were left standing, and the ledger's plan was to dump `z` from the
 kernel and diff it:

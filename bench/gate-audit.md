@@ -6,7 +6,7 @@ finding below is a hole someone could fall into while the engine is being built 
 Merge verdict was **OK with notes**, with one item to close before the engine's token loop ships on
 `lm_head_gemv`'s gate.
 
-Dispositions are mine (supervisor). "Quiescent pass" = §5 item 0 of `performance-status.md`; those
+Dispositions are mine (supervisor). "Quiescent pass" = §5 item 0 of progress/2026-10-16/performance-status-2026-10-16.md:191; those
 items need device runs and cannot be closed by a worker under the serialization rule.
 
 ## Open — would let a wrong kernel pass
@@ -223,7 +223,7 @@ verdict has a history worth knowing before trusting it: the first two attempts f
 gate's own fixture writer numeric-cast `z` instead of bitcasting it — which is why the writer now
 self-verifies, and why this PASS is quoted with its provenance. Write-up:
 `prototype/gdn_gated_norm/results.md` §9 (the pass), §7–§8 (the failures). Timing
-(`2.936 µs/launch`, spread 1.4 %, ≈0.053 ms/token) is `bench/performance-status.md` §6.
+(`2.936 µs/launch`, spread 1.4 %, ≈0.053 ms/token) is the frozen ledger's, progress/2026-10-16/performance-status-2026-10-16.md:267; `bench/performance-status.md` §4 carries the 2026-10-16 re-take at 2.967 µs/launch, spread 0.8 %.
 
 ## `engine/weights_contract.py` — the engine's shape claims, audited against the shard (CPU)
 

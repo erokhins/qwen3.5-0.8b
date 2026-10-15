@@ -66,7 +66,7 @@ shape.
 
 Gate: F1-style per output family (reference operands in, compare against the new pins), the
 floor probe re-derived for these K values (1024 and 2048, not 3584), negative tests located,
-cold timing under the lock. Expect the **block-count question from the ledger (§5 item 5) to
+cold timing under the lock. Expect the **block-count question from the frozen ledger (§5 item 5, progress/2026-10-16/performance-status-2026-10-16.md:240) to
 land here**: `out_proj`/`o_proj` are 1024-row outputs, the same under-fill as `down_proj`. If
 it does not close, write that down as a measured property of this box rather than tuning around
 it.

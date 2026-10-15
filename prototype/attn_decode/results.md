@@ -112,8 +112,8 @@ matters. Each **row `p` of a prefill dump is a decode-shaped query at position `
   either, so the residual is not a 1-ULP transcendental disagreement: the surviving candidate is
   the kernel's own pre-rope reduction — the F32 mean in §05.2's RMSNorm, summed warp-tree here and
   by torch's reduction in the pins. Naming it properly needs `z` (post-norm, pre-rope) dumped from
-  the kernel and diffed against torch at that position; that is written up as item **(g)** of
-  `bench/performance-status.md` §5, the quiescent device pass, because it needs a device run and
+  the kernel and diffed against torch at that position; that is written up as item **(g)** of the frozen
+  ledger's §5, the quiescent device pass (progress/2026-10-16/performance-status-2026-10-16.md:203), because it needs a device run and
   neither this gate nor the probe can produce it. Until then `q_rope` at `p=64` is **1 element off for
   an unattributed reason**, not an accepted floor.
 * **Closed 2026-10-12: the `p=64` residual is the rope table's `cos[3]`, not the norm's reduction.**

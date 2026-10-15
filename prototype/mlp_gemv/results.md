@@ -328,7 +328,7 @@ consistent with `down_proj` issuing only 128 blocks (1024 rows / 8) across 40 CU
 `lm_head_gemv`'s 31040 blocks. Candidate follow-ups, in the order I would try them: keep `x`
 packed in shared as BF16 instead of unpacked F32 (halves the LDS read to global ratio, which is
 2:1 for `down`), split long rows across two wavefronts, or fold the residual add in. Not
-measured, recorded as candidates; `bench/performance-status.md` §5 item 5 owns the follow-up.
+measured, recorded as candidates. The frozen ledger's §5 item 5 (progress/2026-10-16/performance-status-2026-10-16.md:240) owned the follow-up; the live `bench/performance-status.md` §4 now carries its answer — at the 528 MB window and the `contig` walk the same kernels reach 98 % of probe, so 84 % was never this box's ceiling for the shape.
 
 Launch cost, for the ledger: 2 launches per layer × 24 = 48/token ≈ 0.089 ms at the 1.85 µs
 floor, 3.4 % of this op's time. A split gate/up/down version would pay 72.

@@ -59,7 +59,7 @@ import bf16_ulp                                                  # noqa: E402
 
 KERNEL_H = ROOT / "prototype" / "attn_decode" / "attn_decode_kernels.h"
 DRAM_READ_GBS = 237.0        # devices/strix-halo-memory-bandwidth.md, pure read stream
-MEASURED_ATTN_MS = 109.2     # bench/performance-status.md, route-(c) attribution (the baseline)
+MEASURED_ATTN_MS = 109.2     # frozen ledger progress/2026-10-16/performance-status-2026-10-16.md:951, route-(c) attribution (the baseline)
 VECTOR_FP32_TF = 2.93        # devices/strix-halo-compute.md: what the vector path sustains
 HAND_GEMM_TF = 0.85          # the engine's own hand GEMMs (the rate a vector kernel really hits)
 LINES = {"full": 0.0, "stream": 0.0}   # traffic lines read off the mirror, by route
