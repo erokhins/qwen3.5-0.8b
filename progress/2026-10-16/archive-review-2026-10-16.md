@@ -125,14 +125,14 @@ consumes. **NARRATIVE**: chronicle / decision-log prose / "what this pass ran" /
 
 ¹ line-form citations pointing at a line inside that section (comma lists counted per number).
 
-**Totals: 59 LIVE-DATA (3,745 lines), 13 NARRATIVE (265), 14 SUPERSEDED (483).** 69 of the 86
+**Totals: 59 LIVE-DATA (3,716 lines), 13 NARRATIVE (265), 14 SUPERSEDED (513).** 69 of the 86
 sections carry **no** line-form citation at all; 65 line-number references land on 17 sections —
 and **14 of those 65 land on sections classed NARRATIVE or SUPERSEDED** (`:101` ×1, `:250` ×2,
 `:1963` ×2, `:2154` ×5, `:2549` ×4), i.e. the material a tidy split would move is exactly the
 material the frozen archive points into. Three H3 blocks add to the movable set — `565-601` "Levers,
 ranked by expected ms/token" (NARRATIVE), `712-769` "Commands for the main agent, in the order that
 changes strategy" and `1048-1057` "Context, not action: there is no prefill" (both SUPERSEDED:
-`engine/prefill.cpp` and `engine/prefill.h` exist) — **+105 lines, so 853 of 4,493 = 19 % is
+`engine/prefill.cpp` and `engine/prefill.h` exist) — **+105 lines, so 883 of 4,493 = 20 % is
 chronicle or superseded.** (The 86-row table above and the totals are a mechanical join: the fence-
 aware dump below for the ranges, the §2.3 anchor list for the cites.)
 
@@ -386,9 +386,9 @@ document that is not mine to make.**
 | option | exact work | citation rewrites required (from §2) | what can still rot |
 |---|---|---|---|
 | **(a) leave it whole** | nothing | **0** | The 4,493-line file keeps growing (~90 lines/phase ⇒ ~5.4 k by November). A reader cannot tell live contracts from retired prose without reading the banners. Discoverability does not improve at all |
-| **(a′) leave it whole, extract by quotation — RECOMMENDED** | (i) write **new** `progress/2026-10-16/journal-chronology-2026-10-16.md` collecting the 853 chronicle/superseded lines **by quotation with their `N:NNN` anchors**, grouped by the §1 class table; (ii) append a **5-line pointer at the very end of N** (append-only moves no line) saying which new file holds the chronology and that line numbers below it are frozen; (iii) add the §1 class table to it. Total: 2 new files + 1 append | **0 rewrites.** 0 path cites touched, 0 of the 65 line numbers moved, 0 §-labels moved. N grows by 5 lines at the tail, which is the only direction that is safe | The extraction is a *copy*: it can drift from the journal it quotes. Mitigation: every row carries its `N:NNN` anchor, so drift is checkable by `sed -n 'Np'`. The journal itself is still 4.5 k lines — this option buys legibility, not brevity |
+| **(a′) leave it whole, extract by quotation — RECOMMENDED** | (i) write **new** `progress/2026-10-16/journal-chronology-2026-10-16.md` collecting the 883 chronicle/superseded lines **by quotation with their `N:NNN` anchors**, grouped by the §1 class table; (ii) append a **5-line pointer at the very end of N** (append-only moves no line) saying which new file holds the chronology and that line numbers below it are frozen; (iii) add the §1 class table to it. Total: 2 new files + 1 append | **0 rewrites.** 0 path cites touched, 0 of the 65 line numbers moved, 0 §-labels moved. N grows by 5 lines at the tail, which is the only direction that is safe | The extraction is a *copy*: it can drift from the journal it quotes. Mitigation: every row carries its `N:NNN` anchor, so drift is checkable by `sed -n 'Np'`. The journal itself is still 4.5 k lines — this option buys legibility, not brevity |
 | **(b) split by phase into `engine/results/` files + a pointer at the old path** | fence-aware splitter (86 raw `# ` lines vs 14 real H1s; `###` needed for Q6/Q6.1/Q7 inside `501-1057`); ~20 usable blocks of 13-257 lines; the natural directory name is a trap: **`git check-ignore -v engine/results/vol1.md` → ignored by `.gitignore:69` (`results/`)**, so a non-trapped name is mandatory (`engine/journal-2026-11.md` is clean, measured) | **64 of 65 line numbers break** and 50 of them are in `progress/` (rule-forbidden to fix). 6 §-label cites from live code + ledger need path edits (labels survive, paths do not). 10 in-file `§Qn` self-references and 4 "section above/below" pointers break *silently* — they name no file, so nothing reports them. break *silently* — they name no file, so nothing reports them. 2 F5 title-cites (`AGENTS.md:64,67`) must be re-pointed. A pointer file at the old path makes the 180 bare F3 cites resolve to a file that no longer contains the cited text — **existence-checked tools still pass** | Everything. A split makes the label-addressing (F2/F6) and the bare-filename form (F3) worse than they already are, and does not fix the 64 line refs it created |
-| **(c) move the SUPERSEDED §s to `progress/`, leave live data** | 483 lines (14 H2/H1 blocks) + 105 lines (3 H3 blocks) = **588 lines, 19 % of N**, moved to `progress/…`; requires a **new** `progress/` naming rule, since rule 3 says a filename is *kept unchanged* and journal sections are not files — i.e. rule-making the parent has not approved | **64 of 65 line numbers break** (first deletion at `:81`); the 5 blocks carrying cites (`:101`,`:250`,`:1963`,`:2154`,`:2549` = 14 references) break *inside the frozen tree*. Also removes the audit trail for shipped numbers: `:1650-1766` is the only record of **why** the bands are 3.50/7.99, and `:250-298` is the only record of the §07.5 prompt-phase fix | The live file becomes self-consistent and the archive becomes the truth — the exact failure AGENTS.md records twice ("a check whose reference side is derived from the thing under test cannot adjudicate it"). And it still leaves 3,745 lines |
+| **(c) move the SUPERSEDED §s to `progress/`, leave live data** | 513 lines (14 H2/H1 blocks) + 105 lines (3 H3 blocks) = **618 lines, 14 % of N**, moved to `progress/…`; requires a **new** `progress/` naming rule, since rule 3 says a filename is *kept unchanged* and journal sections are not files — i.e. rule-making the parent has not approved | **64 of 65 line numbers break** (first deletion at `:81`); the 5 blocks carrying cites (`:101`,`:250`,`:1963`,`:2154`,`:2549` = 14 references) break *inside the frozen tree*. Also removes the audit trail for shipped numbers: `:1650-1766` is the only record of **why** the bands are 3.50/7.99, and `:250-298` is the only record of the §07.5 prompt-phase fix | The live file becomes self-consistent and the archive becomes the truth — the exact failure AGENTS.md records twice ("a check whose reference side is derived from the thing under test cannot adjudicate it"). And it still leaves 3,716 lines |
 
 **Recommendation: (a′).** It is the only option with a zero-rewrite price, the only one that needs no
 rule change, and the only one whose own damage is checkable. Pair it with the ledger/README prunes
@@ -500,3 +500,14 @@ content and nothing reports it. So `:412` above cites `ROOTS` **by name**
 rather than by number: where a citation must outlive edits to the file it
 points at, a label is the only form that does, which is the general lesson
 §2.1's F2/F5/F5b-versus-F1 asymmetry was already teaching.
+
+**Third correction, found by the extraction S5 produced.** The §1 class table
+and its own totals sentence disagreed: the rows sum to **59 LIVE-DATA = 3,716
+lines and 14 SUPERSEDED = 513**, where the sentence said 3,745 and 483 — `+30`
+and `−29`, netting to −1, which is exactly why the total looked plausible enough
+to publish. NARRATIVE (265) and the row counts (59 / 13 / 14) were right, and
+the ±1 between the table's 4,494 and the prose's 4,493 is the missing final
+newline. Consequences fixed in place: the movable set is **883 lines, 20 %**,
+not 853/19 %, and option (c) moves **618 lines, 14 %**, not 588/19 %. The
+percentages were carried over from the wrong numerator twice, which a totals
+sentence that nobody re-adds is especially good at hiding.
