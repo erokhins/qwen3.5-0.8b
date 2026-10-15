@@ -241,7 +241,7 @@ still resolving as a line. That is the trap this section describes.
   must go, re-point the archive's cites first, and for `bench/performance-status.md` that needs
   the user's explicit words: the ledger's §1–§5 are banner-marked instead of deleted for exactly
   this reason. Check with `tools/doc_ref_check.py` (paths + anchors + `§labels`) and
-  `tools/citation_census.py --anchors`.
+  `tools/citation_census.py --anchors` and `tools/citation_rot_check.py` (the text at a `path:NNN` coordinate must match `HEAD` — the one drift the other two are blind to).
 - **A `§label` citation that names no file resolves only in a reader's memory.** `engine/gate.py`
   carried 17 `§A1…§A4` cites into an audit document without ever naming it — the band they
   justify is enforced from those rows. Write `§N of <path>`, never a bare `§N`, when the target is
