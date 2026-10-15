@@ -22,7 +22,7 @@ dispatch-bound rather than bandwidth-bound and extrapolates to **+9.4 ms**; and 
 being the interesting number" (§2) stopped being true the moment attention's context dependence
 appeared. Read §6 for current numbers and §1–§3 for how each op behaves in isolation.
 
-## 1. Measured on the GPU (real kernels, real reference data)
+## 1. Measured on the GPU (real kernels, real reference data) — **SUPERSEDED BY §6 (banner added 2026-10-16): §6 is the live ledger; this section is kept verbatim because the frozen archive (`progress/`) cites these line numbers and rule 2 of `progress/README.md` does not license moving them**
 
 | what | traffic | time | bandwidth | vs 237 GB/s probe |
 |---|---|---|---|---|
@@ -69,7 +69,7 @@ Three things in that table were surprises and all are now load-bearing:
   2.61–3.59 ms and ranked the configs differently. Rule that follows: a number goes in this file
   only if it was taken under `tools/gpu_lock.sh` **and** its repeat spread is stated with it.
 
-## 2. Per-component budget: every op now has a real kernel (title was written when it was 65 %)
+## 2. Per-component budget: every op now has a real kernel (title was written when it was 65 %) — **SUPERSEDED BY §6 (banner added 2026-10-16): §6 is the live ledger; this section is kept verbatim because the frozen archive (`progress/`) cites these line numbers and rule 2 of `progress/README.md` does not license moving them**
 
 Weights re-derived from the safetensors headers, grouped as §01.7 (decimal GB, so
 `1.5457 GB` text-path total checks out). Roofline column = bytes ÷ 237 GB/s.
@@ -136,7 +136,7 @@ rather than quietly dropped. One real knob came out of the contended data anyway
 threads, which means the 1.85 µs launch floor from the probe is a floor for a narrow block only, and
 per-launch cost at a useful block width is ~50 % above it.
 
-## 3. Projection, with the assumptions named
+## 3. Projection, with the assumptions named — **SUPERSEDED BY §6 (banner added 2026-10-16): §6 is the live ledger; this section is kept verbatim because the frozen archive (`progress/`) cites these line numbers and rule 2 of `progress/README.md` does not license moving them**
 
 | assumption | value | risk |
 |---|---|---|
@@ -170,7 +170,7 @@ confirmed choice, and the rows/block 32 gain is **not** ~0.2 ms/token — it is 
 63–64 % ceiling. The narrow-shape deficit (39–49 % for `k_proj`/`v_proj`/`o_proj`/`out_proj`, 5 % for the
 16-row `in_proj_a`/`in_proj_b`) is what caps the family, and it is a shape problem, not a tile problem.
 
-## 4. What *is* measured end-to-end today (and is not the engine)
+## 4. What *is* measured end-to-end today (and is not the engine) — **SUPERSEDED BY §6 (banner added 2026-10-16): §6 is the live ledger; this section is kept verbatim because the frozen archive (`progress/`) cites these line numbers and rule 2 of `progress/README.md` does not license moving them**
 
 > **Superseded in part, 2026-10-12.** The engine now exists and is measured — see §6's engine rows
 > (11.919 ms/token at 25 lanes, 83.9 tok/s). What follows is kept because the CPU oracle's numbers are
@@ -182,7 +182,7 @@ It is 6× below the GPU projection because the CPU path reads at 75–117 GB/s a
 torch adds per-op overhead on ~200 ops/token. It is quoted here so the number is on the
 record as *not* the engine's performance.
 
-## 5. What has to happen before this file can say "measured"
+## 5. What has to happen before this file can say "measured" — **SUPERSEDED BY §6 (banner added 2026-10-16): §6 is the live ledger; this section is kept verbatim because the frozen archive (`progress/`) cites these line numbers and rule 2 of `progress/README.md` does not license moving them**
 
 > **Done, 2026-10-12.** Item 0 below was executed as §6 ("Clean-window re-take"), with the engine rows
 > added afterwards in the same regime. The numbers in §1 marked † are floors, not measurements, and stay
