@@ -909,6 +909,14 @@ def cmd_verify_history(oldref: str, newref: str, indir: str | None = None) -> in
     per-commit class from its manifest and a verdict that can actually reach PASS.
     """
     old, new = rev_list(oldref), rev_list(newref)
+    if len(new) > len(old):
+        # rev_list is root-first, so work committed after the rewrite sits at the end of
+        # `new`. It is not part of the rewritten set and has no counterpart to compare; say
+        # so out loud rather than letting the counts mismatch look like corruption.
+        extra = len(new) - len(old)
+        print(f"NOTE {extra} commit(s) in {newref} were made after the rewrite; comparing "
+              f"the {len(old)} shared ones")
+        new = new[:-extra]
     if len(old) != len(new):
         print(f"FAIL commit count {len(old)} ({oldref}) != {len(new)} ({newref})")
         return 1
