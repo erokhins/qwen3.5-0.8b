@@ -1401,7 +1401,7 @@ def room_verdict(step_label: str, pin: np.ndarray, eng: np.ndarray | None,
     `room` is the PIN's top-1/top-2 gap, and the pin is the hand route's own answer sheet: the hand
     route reproduces this fixture's pinned ids (that is what its green gate means), so the room the pin
     had IS the room the hand route had, and the audit's flip table (`progress/2026-10-14/route-c-audit-2026-10-14.md`
-    §A2: 24 flips, every one of them below 0.10 of hand-side room, 0 of 1566 rows at or above it)
+    §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md: 24 flips, every one of them below 0.10 of hand-side room, 0 of 1566 rows at or above it)
     transfers to this comparison unchanged. The ENGINE's own gap is printed next to it and not gated —
     which way a legal route's coin landed is not a band, exactly as D-9 prints the engine's gap at a
     slack step without judging it — and when the two readings would disagree (pin room at or over the
@@ -1431,14 +1431,14 @@ def room_verdict(step_label: str, pin: np.ndarray, eng: np.ndarray | None,
     if not flip_admissible(p_gap, e_gap):
         return False, (line + f" | RED: neither side had under {CASCADE_BAND['flip_room_max']:.2f} of"
                        f" room (pin {p_gap:.6g}, engine {e_gap:.6g}), so this flip is not the thin-room"
-                       " class §A2 measured")
+                       " class §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured")
     if p_gap >= CASCADE_BAND["flip_room_max"]:
         # Admitted on the smaller gap while the PIN itself had plenty of room — the two-rows case.
         room_notes.append(f"{step_label}: admitted on room {min(p_gap, e_gap):.6g} (engine's own gap)"
                           f" while the pin had {p_gap:.6g}")
     return True, (line + f" | ADMITTED as a thin-room flip: the smaller of the two sides' gaps is"
                   f" {min(p_gap, e_gap):.6g}, under {CASCADE_BAND['flip_room_max']:.2f}, which is"
-                  " where A-18's chaos floor and §A2's 24/24 thin-room flips live (printed, not gated:"
+                  " where A-18's chaos floor and the 24/24 thin-room flips of §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md live (printed, not gated:"
                   " which way this route's coin landed is not a band)")
 
 
@@ -1447,7 +1447,7 @@ def cascade_floor(cos_cap: float, rel_cap: float) -> tuple[float, float, str]:
 
     A FLOOR ON HOW TIGHTLY A STEP MAY BE JUDGED, never a ceiling: on the library route a step's cap is
     `max(that step's own cap, the measured cascade figure)`, because demanding a deficit smaller than
-    the legal hand<->library delta (max 1.889e-3 per row over 1694 rows, §A2) from a route whose dots
+    the legal hand<->library delta (max 1.889e-3 per row over 1694 rows, §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md) from a route whose dots
     reassociate is asking it not to be that route. On the hand route this returns its arguments
     untouched, so every cap in this file means exactly what it meant before route (c).
     """
@@ -1626,7 +1626,7 @@ def rule_for_step(allowance, j: int) -> tuple:
     steps.
 
     On the `library` route both caps then pass through `cascade_floor`, which can only ever widen them
-    (to the measured hand<->library cascade, §A2) and never narrow them — see CASCADE_BAND.
+    (to the measured hand<->library cascade, §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md) and never narrow them — see CASCADE_BAND.
     """
     if allowance is None:
         cap, rel, floor_clause = cascade_floor(1.0 - BAND["cos_hard"], BAND["meanrel_hard"])
@@ -2639,7 +2639,7 @@ def pairing_checks(man: dict) -> tuple[list, list, np.ndarray]:
 #     reassociated sum, and demanding a tighter deficit than a legal reassociation produces is demanding
 #     the route not be itself.
 #   * A moved argmax is judged by `flip_admissible`, the same room rule section (a)/(b) use, on the same
-#     grounds (§A2's 1694 rows are prefill rows too).
+#     grounds (§A2 of progress/2026-10-14/route-c-audit-2026-10-14.md: its 1694 rows are prefill rows too).
 #
 # What a ROW cannot consult, and what happens instead — said here because a silent hole in an argmax rule
 # is how a gate goes quietly wrong: the D-8 tie policy is keyed to a per-step pin FILE
@@ -2880,7 +2880,7 @@ def prefill_row_checks(work: Path, vocab: int, rows_pin, asked: str,
                 line = (f"row {i} ({region}): pin top1 {pin_id} (room {pin_room:.6g}) vs engine"
                         f" {eng_id} (room {eng_room:.6g})"
                         + (f" — ADMITTED as a thin-room flip: the smaller gap is under"
-                           f" {CASCADE_BAND['flip_room_max']:.2f}, which is §A2's class"
+                           f" {CASCADE_BAND['flip_room_max']:.2f}, which is the class §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured"
                            if ok else
                            f" — RED: neither side had under {CASCADE_BAND['flip_room_max']:.2f} of"
                            " room, so no band in force covers this flip. Stop and report; this"
@@ -3348,7 +3348,7 @@ def numerics_provenance_checks(run: dict, *, stand_in: bool, write: bool = False
         check(str(rec.get("hipblas_version")) == str(ver),
               "the run's hipBLAS is the version recorded for these pins",
               f"hipblasGetVersion says {ver}, the record says {rec.get('hipblas_version')} —"
-              " hipBLAS picks a different solution per (m,n,k) (A-32/§A1), so a silent bump is a"
+              " hipBLAS picks a different solution per (m,n,k) (A-32/§A1 of progress/2026-10-14/route-c-audit-2026-10-14.md), so a silent bump is a"
               " numerics change: re-take the pins, then re-record")
     else:
         print(f"  [info] hipBLAS {ver} printed, not gated on the hand route: nothing in this run"
@@ -3627,8 +3627,8 @@ def wave_band_checks(a_dir: Path, b_dir: Path, a_label: str, b_label: str, what:
     """The library route's replacement for bit-identity between two widths (D-11).
 
     Two GEMMs of the same weights do not produce the same bits at different widths, and demanding they
-    did was demanding the impossible: §A1 found hipBLAS' own solution differs at every N, so `M=1`, `M=5`
-    and `M=512` are three different summation orders and §A2 measured what that costs (worst per-row
+    did was demanding the impossible: §A1 of progress/2026-10-14/route-c-audit-2026-10-14.md found hipBLAS' own solution differs at every N, so `M=1`, `M=5`
+    and `M=512` are three different summation orders and §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured what that costs (worst per-row
     `1-cos` 1.9e-03, worst per-row `meanrel` 6.1e-02, pooled `meanrel` <= 1.56e-02 over 1694 rows).
     The band is that measurement, adopted as policy: per-row `1-cos <= 2e-03`, pooled `meanrel <= 3e-02`,
     pooled `cos >= 0.9998`.
@@ -3676,7 +3676,7 @@ def wave_band_checks(a_dir: Path, b_dir: Path, a_label: str, b_label: str, what:
 def cross_width_ids(sides: list[tuple[str, dict]], band_ref: str) -> None:
     """Cross-width token-id agreement on the library route, where bit-identity is gone (D-11).
 
-    Two widths of a library route can sample different tokens at a row, and §A2 says exactly where: at
+    Two widths of a library route can sample different tokens at a row, and §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md says exactly where: at
     rows whose top-1/top-2 gap was thin. So a differing id is admissible when the row's room is under
     the flip line and red otherwise — the same rule section (a) applies to a pin, with `room` read as
     the smaller of the two sides' own gaps because in this comparison neither side is a reference (the
@@ -3895,7 +3895,7 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
     # has to be said out loud because the stronger claim is the one a reader assumes. On `--gemm hand`
     # the width cannot move a bit (measured, and the reason route (c) is landable at all), so the rule is
     # byte-identity and every id must agree. On `--gemm library` the widths are three different
-    # summation orders (§A1: hipBLAS picks a different solution at every N), so the rule is the measured
+    # summation orders (§A1 of progress/2026-10-14/route-c-audit-2026-10-14.md: hipBLAS picks a different solution at every N), so the rule is the measured
     # cascade band plus the flip rule, and the lines say so.
     #
     # WHY THIS BLOCK IS THE DEFERRED HALF OF SECTION (h), AND THE LAUNCH COUNTERS ABOVE IT ARE NOT. These
@@ -3913,7 +3913,7 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
         if route_is_library():
             cross_width_ids([("batched", batched), ("one-row", perrow)]
                             + ([("carry", sides["carry"])] if "carry" in sides else []),
-                            "D-11, from §A2's 24 flips in 1694 rows, all of them thin-room")
+                            "D-11, from the 24 flips in 1694 rows, all thin-room, that §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md counted")
             wave_band_checks(batched["dir"], perrow["dir"], "batched", "one-row",
                              "the route (c) wave-width band (D-11)")
         else:
@@ -5119,7 +5119,7 @@ def main() -> int:
                          " is floored at the measured hand<->library cascade, a flipped token is"
                          " admissible where that row's top-1/top-2 room was under"
                          f" {CASCADE_BAND['flip_room_max']:.2f} (the smaller of the two sides' gaps,"
-                         " §A2's definition), and section (h) judges wave-width drift against that"
+                         " the definition §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md gives), and section (h) judges wave-width drift against that"
                          " band instead of bit-identity. `hand` is still fully supported and leaves"
                          " every band in this file exactly where it was before route (c) — it is the"
                          " A/B side, and the route whose bits are byte-identical to a pre-route"
@@ -5691,7 +5691,7 @@ def main() -> int:
     # The cascade room rule, armed on the library route alone. A flipped token there is admissible
     # exactly where the hand route's own decision was a thin one: `room` is the PIN's top-1/top-2 gap —
     # the hand route reproduces the pin's ids, which is what that route's green gate means, so the pin's
-    # room IS the hand route's room — and §A2 measured 24 flips in 1694 hand<->library rows with every
+    # room IS the hand route's room — and §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured 24 flips in 1694 hand<->library rows with every
     # one of them under 0.10 of it and none of the 1566 rows at or above it flipping. At or over the line
     # a flip is RED, which is the half that stops this being a shrug. `--gemm hand` never comes here: its
     # wave width cannot move a bit, so a flipped id on that route is a bug and the exact-id rule is the
@@ -5766,7 +5766,7 @@ def main() -> int:
              f" hand<->library cascade (cos deficit {CASCADE_BAND['row_1cos_max']:.0e}, meanrel"
              f" {CASCADE_BAND['stage_meanrel_max']:.0%}), because a route whose dots reassociate cannot"
              " be held to a smaller deficit than its own reassociation (progress/2026-10-14/route-c-audit-2026-10-14.md"
-             " §A2), and the per-matmul floor behind it is 1 ULP at every width (A1). Each step line"
+             " §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md), and the per-matmul floor behind it is 1 ULP at every width (A1). Each step line"
              " names the floor when it is what made the cap wider." if route_is_library() else
              " The hand route is judged by exactly the caps it has always been judged by; the cascade"
              " floor is not in force."))
@@ -6061,7 +6061,7 @@ def report() -> int:
               " consulted (D-1's scope rule): " + "; ".join(slack_notes))
     if rooms:
         print(f"  [ROOM] {len(rooms)} flipped token(s) admitted because that row's top-1/top-2 room was"
-              f" under {CASCADE_BAND['flip_room_max']:.2f} — §A2's thin-room class, where a legal bf16"
+              f" under {CASCADE_BAND['flip_room_max']:.2f} — the thin-room class §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured, where a legal bf16"
               " route may land either way (every figure is on the ROOM line, and only a `--gemm library`"
               " run can consult this rule): " + "; ".join(rooms))
     if room_notes:
