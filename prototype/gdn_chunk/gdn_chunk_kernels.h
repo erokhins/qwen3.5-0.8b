@@ -130,7 +130,7 @@
 #define GC_QKV 6144      // in_proj_qkv's row width: q|k|v, §04.1
 #define GC_VD 2048       // one of those three slices, and o's row width
 #define GC_QSCALE 0.08838834764831845f   // 128^{-1/2}, §04.4
-#define GC_EPS 1e-6f     // §00.2 rms_norm_eps, and inside the root (A-19)
+#define GC_EPS 1e-6f     // §00.2 rms_norm_eps, and inside the root (A-05)
 #define GC_FULL_MASK 0xffffffffffffffffull   // HIP takes the shuffle mask as 64-bit
 
 enum GdnChunkNeg {
