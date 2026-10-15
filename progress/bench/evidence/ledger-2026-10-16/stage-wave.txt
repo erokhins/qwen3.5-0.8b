@@ -1,0 +1,336 @@
+stage128_1 LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
+stage128_1 NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+stage128_1 LAUNCHSTAT family=glue calls=833 calls_batched=49 rows_total=6272 rows_max=112
+stage128_1 LAUNCHSTAT family=proj calls=1938 calls_batched=114 rows_total=14592 rows_max=112
+stage128_1 LAUNCHSTAT family=mlp_gateup calls=408 calls_batched=24 rows_total=3072 rows_max=112
+stage128_1 LAUNCHSTAT family=mlp_down calls=408 calls_batched=24 rows_total=3072 rows_max=112
+stage128_1 LAUNCHSTAT family=gdn_conv calls=306 calls_batched=18 rows_total=2304 rows_max=112
+stage128_1 LAUNCHSTAT family=gdn_gates calls=306 calls_batched=18 rows_total=2304 rows_max=112
+stage128_1 LAUNCHSTAT family=gdn_gated_norm calls=306 calls_batched=18 rows_total=2304 rows_max=112
+stage128_1 LAUNCHSTAT family=attn calls=102 calls_batched=6 rows_total=768 rows_max=112
+stage128_1 STAGE gran=calib idle_sync_us=0.099 iters=200 note=one_of_these_sits_inside_every_serialized_segment
+stage128_1 STAGEPASS gran=burst steps=16 ms_mean=11.3573 ms_min=11.2501 ms_max=11.6039 spread_pct=3.15
+stage128_1 STAGEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage128_1 STAGEPASS gran=stage steps=16 ms_mean=13.2461 ms_min=13.0643 ms_max=13.6006 spread_pct=4.11
+stage128_1 STAGEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage128_1 STAGE gran=stage family=glue      ms_per_step=0.6125 ms_total=9.801 launches_per_step=49 segments_per_step=49 us_per_launch=12.50
+stage128_1 STAGE gran=stage family=proj      ms_per_step=4.1128 ms_total=65.804 launches_per_step=114 segments_per_step=48 us_per_launch=36.08
+stage128_1 STAGE gran=stage family=gdn       ms_per_step=0.6340 ms_total=10.143 launches_per_step=72 segments_per_step=36 us_per_launch=8.80
+stage128_1 STAGE gran=stage family=attn      ms_per_step=0.4829 ms_total=7.726 launches_per_step=6 segments_per_step=6 us_per_launch=80.48
+stage128_1 STAGE gran=stage family=mlp       ms_per_step=3.3830 ms_total=54.128 launches_per_step=48 segments_per_step=48 us_per_launch=70.48
+stage128_1 STAGE gran=stage family=cast      ms_per_step=0.8987 ms_total=14.379 launches_per_step=115 segments_per_step=115 us_per_launch=7.81
+stage128_1 STAGE gran=stage family=copy      ms_per_step=0.2186 ms_total=3.498 launches_per_step=19 segments_per_step=19 us_per_launch=11.51
+stage128_1 STAGE gran=stage family=lm_head   ms_per_step=2.1838 ms_total=34.940 launches_per_step=1 segments_per_step=1 us_per_launch=2183.78
+stage128_1 STAGE gran=stage family=host_tail ms_per_step=0.7123 ms_total=11.398 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage128_1 STAGE gran=stage TOTAL steps=16 ms_per_step=13.2385 ms_total=211.816 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=323
+stage128_1 STAGEPASS gran=kernel steps=16 ms_mean=13.7260 ms_min=13.6403 ms_max=13.8209 spread_pct=1.32
+stage128_1 STAGEPARITY gran=kernel tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage128_1 STAGE gran=kernel family=glue      ms_per_step=0.5948 ms_total=9.517 launches_per_step=49 segments_per_step=49 us_per_launch=12.14
+stage128_1 STAGE gran=kernel family=proj      ms_per_step=4.4782 ms_total=71.651 launches_per_step=114 segments_per_step=114 us_per_launch=39.28
+stage128_1 STAGE gran=kernel family=gdn       ms_per_step=0.8399 ms_total=13.439 launches_per_step=72 segments_per_step=72 us_per_launch=11.67
+stage128_1 STAGE gran=kernel family=attn      ms_per_step=0.4855 ms_total=7.767 launches_per_step=6 segments_per_step=6 us_per_launch=80.91
+stage128_1 STAGE gran=kernel family=mlp       ms_per_step=3.3518 ms_total=53.628 launches_per_step=48 segments_per_step=48 us_per_launch=69.83
+stage128_1 STAGE gran=kernel family=cast      ms_per_step=0.8990 ms_total=14.384 launches_per_step=115 segments_per_step=115 us_per_launch=7.82
+stage128_1 STAGE gran=kernel family=copy      ms_per_step=0.1965 ms_total=3.144 launches_per_step=19 segments_per_step=19 us_per_launch=10.34
+stage128_1 STAGE gran=kernel family=lm_head   ms_per_step=2.1587 ms_total=34.540 launches_per_step=1 segments_per_step=1 us_per_launch=2158.74
+stage128_1 STAGE gran=kernel family=host_tail ms_per_step=0.7118 ms_total=11.389 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage128_1 STAGE gran=kernel TOTAL steps=16 ms_per_step=13.7162 ms_total=219.459 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=425
+stage128_1 STAGEGAP gran=stage burst_ms_mean=11.3573 serialized_ms_mean=13.2461 exposed_ms=1.8888 ratio=1.166
+stage128_1 STAGEGAP gran=kernel burst_ms_mean=11.3573 serialized_ms_mean=13.7260 exposed_ms=2.3687 ratio=1.209
+stage128_1 RESULT mode=run steps=128 ms_total=278.375 ms_per_step=2.175 last_sampled=680 prefix_len=128 stopped=0
+stage128_2 LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
+stage128_2 NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+stage128_2 LAUNCHSTAT family=glue calls=833 calls_batched=49 rows_total=6272 rows_max=112
+stage128_2 LAUNCHSTAT family=proj calls=1938 calls_batched=114 rows_total=14592 rows_max=112
+stage128_2 LAUNCHSTAT family=mlp_gateup calls=408 calls_batched=24 rows_total=3072 rows_max=112
+stage128_2 LAUNCHSTAT family=mlp_down calls=408 calls_batched=24 rows_total=3072 rows_max=112
+stage128_2 LAUNCHSTAT family=gdn_conv calls=306 calls_batched=18 rows_total=2304 rows_max=112
+stage128_2 LAUNCHSTAT family=gdn_gates calls=306 calls_batched=18 rows_total=2304 rows_max=112
+stage128_2 LAUNCHSTAT family=gdn_gated_norm calls=306 calls_batched=18 rows_total=2304 rows_max=112
+stage128_2 LAUNCHSTAT family=attn calls=102 calls_batched=6 rows_total=768 rows_max=112
+stage128_2 STAGE gran=calib idle_sync_us=0.099 iters=200 note=one_of_these_sits_inside_every_serialized_segment
+stage128_2 STAGEPASS gran=burst steps=16 ms_mean=11.2735 ms_min=11.1970 ms_max=11.3584 spread_pct=1.44
+stage128_2 STAGEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage128_2 STAGEPASS gran=stage steps=16 ms_mean=13.2546 ms_min=13.0998 ms_max=13.6202 spread_pct=3.97
+stage128_2 STAGEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage128_2 STAGE gran=stage family=glue      ms_per_step=0.6082 ms_total=9.731 launches_per_step=49 segments_per_step=49 us_per_launch=12.41
+stage128_2 STAGE gran=stage family=proj      ms_per_step=4.1110 ms_total=65.776 launches_per_step=114 segments_per_step=48 us_per_launch=36.06
+stage128_2 STAGE gran=stage family=gdn       ms_per_step=0.6375 ms_total=10.199 launches_per_step=72 segments_per_step=36 us_per_launch=8.85
+stage128_2 STAGE gran=stage family=attn      ms_per_step=0.4847 ms_total=7.755 launches_per_step=6 segments_per_step=6 us_per_launch=80.78
+stage128_2 STAGE gran=stage family=mlp       ms_per_step=3.3880 ms_total=54.209 launches_per_step=48 segments_per_step=48 us_per_launch=70.58
+stage128_2 STAGE gran=stage family=cast      ms_per_step=0.9028 ms_total=14.444 launches_per_step=115 segments_per_step=115 us_per_launch=7.85
+stage128_2 STAGE gran=stage family=copy      ms_per_step=0.2023 ms_total=3.236 launches_per_step=19 segments_per_step=19 us_per_launch=10.64
+stage128_2 STAGE gran=stage family=lm_head   ms_per_step=2.1765 ms_total=34.824 launches_per_step=1 segments_per_step=1 us_per_launch=2176.53
+stage128_2 STAGE gran=stage family=host_tail ms_per_step=0.7360 ms_total=11.776 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage128_2 STAGE gran=stage TOTAL steps=16 ms_per_step=13.2469 ms_total=211.950 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=323
+stage128_2 STAGEPASS gran=kernel steps=16 ms_mean=14.3230 ms_min=14.1464 ms_max=14.5087 spread_pct=2.56
+stage128_2 STAGEPARITY gran=kernel tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage128_2 STAGE gran=kernel family=glue      ms_per_step=0.6352 ms_total=10.164 launches_per_step=49 segments_per_step=49 us_per_launch=12.96
+stage128_2 STAGE gran=kernel family=proj      ms_per_step=4.5469 ms_total=72.750 launches_per_step=114 segments_per_step=114 us_per_launch=39.88
+stage128_2 STAGE gran=kernel family=gdn       ms_per_step=0.8883 ms_total=14.214 launches_per_step=72 segments_per_step=72 us_per_launch=12.34
+stage128_2 STAGE gran=kernel family=attn      ms_per_step=0.4871 ms_total=7.794 launches_per_step=6 segments_per_step=6 us_per_launch=81.19
+stage128_2 STAGE gran=kernel family=mlp       ms_per_step=3.3974 ms_total=54.358 launches_per_step=48 segments_per_step=48 us_per_launch=70.78
+stage128_2 STAGE gran=kernel family=cast      ms_per_step=0.9622 ms_total=15.394 launches_per_step=115 segments_per_step=115 us_per_launch=8.37
+stage128_2 STAGE gran=kernel family=copy      ms_per_step=0.2160 ms_total=3.456 launches_per_step=19 segments_per_step=19 us_per_launch=11.37
+stage128_2 STAGE gran=kernel family=lm_head   ms_per_step=2.1734 ms_total=34.774 launches_per_step=1 segments_per_step=1 us_per_launch=2173.37
+stage128_2 STAGE gran=kernel family=host_tail ms_per_step=1.0027 ms_total=16.044 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage128_2 STAGE gran=kernel TOTAL steps=16 ms_per_step=14.3092 ms_total=228.947 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=425
+stage128_2 STAGEGAP gran=stage burst_ms_mean=11.2735 serialized_ms_mean=13.2546 exposed_ms=1.9810 ratio=1.176
+stage128_2 STAGEGAP gran=kernel burst_ms_mean=11.2735 serialized_ms_mean=14.3230 exposed_ms=3.0495 ratio=1.270
+stage128_2 RESULT mode=run steps=128 ms_total=272.762 ms_per_step=2.131 last_sampled=680 prefix_len=128 stopped=0
+stage128_3 LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
+stage128_3 NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+stage128_3 LAUNCHSTAT family=glue calls=833 calls_batched=49 rows_total=6272 rows_max=112
+stage128_3 LAUNCHSTAT family=proj calls=1938 calls_batched=114 rows_total=14592 rows_max=112
+stage128_3 LAUNCHSTAT family=mlp_gateup calls=408 calls_batched=24 rows_total=3072 rows_max=112
+stage128_3 LAUNCHSTAT family=mlp_down calls=408 calls_batched=24 rows_total=3072 rows_max=112
+stage128_3 LAUNCHSTAT family=gdn_conv calls=306 calls_batched=18 rows_total=2304 rows_max=112
+stage128_3 LAUNCHSTAT family=gdn_gates calls=306 calls_batched=18 rows_total=2304 rows_max=112
+stage128_3 LAUNCHSTAT family=gdn_gated_norm calls=306 calls_batched=18 rows_total=2304 rows_max=112
+stage128_3 LAUNCHSTAT family=attn calls=102 calls_batched=6 rows_total=768 rows_max=112
+stage128_3 STAGE gran=calib idle_sync_us=0.119 iters=200 note=one_of_these_sits_inside_every_serialized_segment
+stage128_3 STAGEPASS gran=burst steps=16 ms_mean=11.5772 ms_min=11.4936 ms_max=11.6820 spread_pct=1.64
+stage128_3 STAGEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage128_3 STAGEPASS gran=stage steps=16 ms_mean=13.7852 ms_min=13.6316 ms_max=14.1299 spread_pct=3.66
+stage128_3 STAGEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage128_3 STAGE gran=stage family=glue      ms_per_step=0.6319 ms_total=10.110 launches_per_step=49 segments_per_step=49 us_per_launch=12.90
+stage128_3 STAGE gran=stage family=proj      ms_per_step=4.1451 ms_total=66.322 launches_per_step=114 segments_per_step=48 us_per_launch=36.36
+stage128_3 STAGE gran=stage family=gdn       ms_per_step=0.6666 ms_total=10.665 launches_per_step=72 segments_per_step=36 us_per_launch=9.26
+stage128_3 STAGE gran=stage family=attn      ms_per_step=0.4863 ms_total=7.781 launches_per_step=6 segments_per_step=6 us_per_launch=81.05
+stage128_3 STAGE gran=stage family=mlp       ms_per_step=3.4247 ms_total=54.795 launches_per_step=48 segments_per_step=48 us_per_launch=71.35
+stage128_3 STAGE gran=stage family=cast      ms_per_step=0.9995 ms_total=15.992 launches_per_step=115 segments_per_step=115 us_per_launch=8.69
+stage128_3 STAGE gran=stage family=copy      ms_per_step=0.2197 ms_total=3.516 launches_per_step=19 segments_per_step=19 us_per_launch=11.56
+stage128_3 STAGE gran=stage family=lm_head   ms_per_step=2.1799 ms_total=34.878 launches_per_step=1 segments_per_step=1 us_per_launch=2179.85
+stage128_3 STAGE gran=stage family=host_tail ms_per_step=1.0207 ms_total=16.330 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage128_3 STAGE gran=stage TOTAL steps=16 ms_per_step=13.7743 ms_total=220.389 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=323
+stage128_3 STAGEPASS gran=kernel steps=16 ms_mean=14.3281 ms_min=14.2529 ms_max=14.4122 spread_pct=1.12
+stage128_3 STAGEPARITY gran=kernel tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage128_3 STAGE gran=kernel family=glue      ms_per_step=0.6422 ms_total=10.275 launches_per_step=49 segments_per_step=49 us_per_launch=13.11
+stage128_3 STAGE gran=kernel family=proj      ms_per_step=4.5326 ms_total=72.521 launches_per_step=114 segments_per_step=114 us_per_launch=39.76
+stage128_3 STAGE gran=kernel family=gdn       ms_per_step=0.8919 ms_total=14.270 launches_per_step=72 segments_per_step=72 us_per_launch=12.39
+stage128_3 STAGE gran=kernel family=attn      ms_per_step=0.4874 ms_total=7.799 launches_per_step=6 segments_per_step=6 us_per_launch=81.24
+stage128_3 STAGE gran=kernel family=mlp       ms_per_step=3.3776 ms_total=54.041 launches_per_step=48 segments_per_step=48 us_per_launch=70.37
+stage128_3 STAGE gran=kernel family=cast      ms_per_step=0.9793 ms_total=15.668 launches_per_step=115 segments_per_step=115 us_per_launch=8.52
+stage128_3 STAGE gran=kernel family=copy      ms_per_step=0.2191 ms_total=3.505 launches_per_step=19 segments_per_step=19 us_per_launch=11.53
+stage128_3 STAGE gran=kernel family=lm_head   ms_per_step=2.1673 ms_total=34.677 launches_per_step=1 segments_per_step=1 us_per_launch=2167.34
+stage128_3 STAGE gran=kernel family=host_tail ms_per_step=1.0167 ms_total=16.268 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage128_3 STAGE gran=kernel TOTAL steps=16 ms_per_step=14.3141 ms_total=229.025 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=425
+stage128_3 STAGEGAP gran=stage burst_ms_mean=11.5772 serialized_ms_mean=13.7852 exposed_ms=2.2080 ratio=1.191
+stage128_3 STAGEGAP gran=kernel burst_ms_mean=11.5772 serialized_ms_mean=14.3281 exposed_ms=2.7510 ratio=1.238
+stage128_3 RESULT mode=run steps=128 ms_total=279.174 ms_per_step=2.181 last_sampled=680 prefix_len=128 stopped=0
+stage4032_1 LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
+stage4032_1 NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+stage4032_1 LAUNCHSTAT family=glue calls=1960 calls_batched=392 rows_total=197568 rows_max=512
+stage4032_1 LAUNCHSTAT family=proj calls=4560 calls_batched=912 rows_total=459648 rows_max=512
+stage4032_1 LAUNCHSTAT family=mlp_gateup calls=960 calls_batched=192 rows_total=96768 rows_max=512
+stage4032_1 LAUNCHSTAT family=mlp_down calls=960 calls_batched=192 rows_total=96768 rows_max=512
+stage4032_1 LAUNCHSTAT family=gdn_conv calls=720 calls_batched=144 rows_total=72576 rows_max=512
+stage4032_1 LAUNCHSTAT family=gdn_gates calls=720 calls_batched=144 rows_total=72576 rows_max=512
+stage4032_1 LAUNCHSTAT family=gdn_gated_norm calls=720 calls_batched=144 rows_total=72576 rows_max=512
+stage4032_1 LAUNCHSTAT family=attn calls=240 calls_batched=48 rows_total=24192 rows_max=512
+stage4032_1 STAGE gran=calib idle_sync_us=0.143 iters=200 note=one_of_these_sits_inside_every_serialized_segment
+stage4032_1 STAGEPASS gran=burst steps=32 ms_mean=14.0280 ms_min=13.9534 ms_max=14.1291 spread_pct=1.26
+stage4032_1 STAGEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage4032_1 STAGEPASS gran=stage steps=32 ms_mean=16.2866 ms_min=16.0851 ms_max=16.8247 spread_pct=4.60
+stage4032_1 STAGEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage4032_1 STAGE gran=stage family=glue      ms_per_step=0.6302 ms_total=20.167 launches_per_step=49 segments_per_step=49 us_per_launch=12.86
+stage4032_1 STAGE gran=stage family=proj      ms_per_step=4.1506 ms_total=132.820 launches_per_step=114 segments_per_step=48 us_per_launch=36.41
+stage4032_1 STAGE gran=stage family=gdn       ms_per_step=0.6568 ms_total=21.018 launches_per_step=72 segments_per_step=36 us_per_launch=9.12
+stage4032_1 STAGE gran=stage family=attn      ms_per_step=2.9926 ms_total=95.763 launches_per_step=6 segments_per_step=6 us_per_launch=498.76
+stage4032_1 STAGE gran=stage family=mlp       ms_per_step=3.4085 ms_total=109.071 launches_per_step=48 segments_per_step=48 us_per_launch=71.01
+stage4032_1 STAGE gran=stage family=cast      ms_per_step=0.9862 ms_total=31.559 launches_per_step=115 segments_per_step=115 us_per_launch=8.58
+stage4032_1 STAGE gran=stage family=copy      ms_per_step=0.2170 ms_total=6.943 launches_per_step=19 segments_per_step=19 us_per_launch=11.42
+stage4032_1 STAGE gran=stage family=lm_head   ms_per_step=2.2127 ms_total=70.807 launches_per_step=1 segments_per_step=1 us_per_launch=2212.73
+stage4032_1 STAGE gran=stage family=host_tail ms_per_step=1.0211 ms_total=32.675 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage4032_1 STAGE gran=stage TOTAL steps=32 ms_per_step=16.2757 ms_total=520.823 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=323
+stage4032_1 STAGEPASS gran=kernel steps=32 ms_mean=17.0401 ms_min=16.8137 ms_max=17.8127 spread_pct=5.94
+stage4032_1 STAGEPARITY gran=kernel tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage4032_1 STAGE gran=kernel family=glue      ms_per_step=0.7205 ms_total=23.056 launches_per_step=49 segments_per_step=49 us_per_launch=14.70
+stage4032_1 STAGE gran=kernel family=proj      ms_per_step=4.5496 ms_total=145.586 launches_per_step=114 segments_per_step=114 us_per_launch=39.91
+stage4032_1 STAGE gran=kernel family=gdn       ms_per_step=0.9051 ms_total=28.964 launches_per_step=72 segments_per_step=72 us_per_launch=12.57
+stage4032_1 STAGE gran=kernel family=attn      ms_per_step=3.0457 ms_total=97.463 launches_per_step=6 segments_per_step=6 us_per_launch=507.62
+stage4032_1 STAGE gran=kernel family=mlp       ms_per_step=3.3752 ms_total=108.006 launches_per_step=48 segments_per_step=48 us_per_launch=70.32
+stage4032_1 STAGE gran=kernel family=cast      ms_per_step=1.0032 ms_total=32.101 launches_per_step=115 segments_per_step=115 us_per_launch=8.72
+stage4032_1 STAGE gran=kernel family=copy      ms_per_step=0.2457 ms_total=7.863 launches_per_step=19 segments_per_step=19 us_per_launch=12.93
+stage4032_1 STAGE gran=kernel family=lm_head   ms_per_step=2.1619 ms_total=69.181 launches_per_step=1 segments_per_step=1 us_per_launch=2161.90
+stage4032_1 STAGE gran=kernel family=host_tail ms_per_step=1.0190 ms_total=32.607 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage4032_1 STAGE gran=kernel TOTAL steps=32 ms_per_step=17.0259 ms_total=544.827 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=425
+stage4032_1 STAGEGAP gran=stage burst_ms_mean=14.0280 serialized_ms_mean=16.2866 exposed_ms=2.2586 ratio=1.161
+stage4032_1 STAGEGAP gran=kernel burst_ms_mean=14.0280 serialized_ms_mean=17.0401 exposed_ms=3.0121 ratio=1.215
+stage4032_1 RESULT mode=run steps=4032 ms_total=1683.804 ms_per_step=0.418 last_sampled=3069 prefix_len=4032 stopped=0
+stage4032_2 LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
+stage4032_2 NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+stage4032_2 LAUNCHSTAT family=glue calls=1960 calls_batched=392 rows_total=197568 rows_max=512
+stage4032_2 LAUNCHSTAT family=proj calls=4560 calls_batched=912 rows_total=459648 rows_max=512
+stage4032_2 LAUNCHSTAT family=mlp_gateup calls=960 calls_batched=192 rows_total=96768 rows_max=512
+stage4032_2 LAUNCHSTAT family=mlp_down calls=960 calls_batched=192 rows_total=96768 rows_max=512
+stage4032_2 LAUNCHSTAT family=gdn_conv calls=720 calls_batched=144 rows_total=72576 rows_max=512
+stage4032_2 LAUNCHSTAT family=gdn_gates calls=720 calls_batched=144 rows_total=72576 rows_max=512
+stage4032_2 LAUNCHSTAT family=gdn_gated_norm calls=720 calls_batched=144 rows_total=72576 rows_max=512
+stage4032_2 LAUNCHSTAT family=attn calls=240 calls_batched=48 rows_total=24192 rows_max=512
+stage4032_2 STAGE gran=calib idle_sync_us=0.143 iters=200 note=one_of_these_sits_inside_every_serialized_segment
+stage4032_2 STAGEPASS gran=burst steps=32 ms_mean=13.8788 ms_min=13.8033 ms_max=14.1174 spread_pct=2.28
+stage4032_2 STAGEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage4032_2 STAGEPASS gran=stage steps=32 ms_mean=16.2475 ms_min=16.1556 ms_max=16.3673 spread_pct=1.31
+stage4032_2 STAGEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage4032_2 STAGE gran=stage family=glue      ms_per_step=0.7064 ms_total=22.604 launches_per_step=49 segments_per_step=49 us_per_launch=14.42
+stage4032_2 STAGE gran=stage family=proj      ms_per_step=4.1371 ms_total=132.386 launches_per_step=114 segments_per_step=48 us_per_launch=36.29
+stage4032_2 STAGE gran=stage family=gdn       ms_per_step=0.6555 ms_total=20.976 launches_per_step=72 segments_per_step=36 us_per_launch=9.10
+stage4032_2 STAGE gran=stage family=attn      ms_per_step=2.9955 ms_total=95.857 launches_per_step=6 segments_per_step=6 us_per_launch=499.26
+stage4032_2 STAGE gran=stage family=mlp       ms_per_step=3.3530 ms_total=107.296 launches_per_step=48 segments_per_step=48 us_per_launch=69.85
+stage4032_2 STAGE gran=stage family=cast      ms_per_step=0.9879 ms_total=31.611 launches_per_step=115 segments_per_step=115 us_per_launch=8.59
+stage4032_2 STAGE gran=stage family=copy      ms_per_step=0.2286 ms_total=7.314 launches_per_step=19 segments_per_step=19 us_per_launch=12.03
+stage4032_2 STAGE gran=stage family=lm_head   ms_per_step=2.1563 ms_total=69.001 launches_per_step=1 segments_per_step=1 us_per_launch=2156.27
+stage4032_2 STAGE gran=stage family=host_tail ms_per_step=1.0165 ms_total=32.529 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage4032_2 STAGE gran=stage TOTAL steps=32 ms_per_step=16.2367 ms_total=519.575 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=323
+stage4032_2 STAGEPASS gran=kernel steps=32 ms_mean=17.2182 ms_min=16.8636 ms_max=17.5374 spread_pct=4.00
+stage4032_2 STAGEPARITY gran=kernel tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage4032_2 STAGE gran=kernel family=glue      ms_per_step=0.7256 ms_total=23.219 launches_per_step=49 segments_per_step=49 us_per_launch=14.81
+stage4032_2 STAGE gran=kernel family=proj      ms_per_step=4.6008 ms_total=147.225 launches_per_step=114 segments_per_step=114 us_per_launch=40.36
+stage4032_2 STAGE gran=kernel family=gdn       ms_per_step=0.9251 ms_total=29.604 launches_per_step=72 segments_per_step=72 us_per_launch=12.85
+stage4032_2 STAGE gran=kernel family=attn      ms_per_step=3.1291 ms_total=100.131 launches_per_step=6 segments_per_step=6 us_per_launch=521.52
+stage4032_2 STAGE gran=kernel family=mlp       ms_per_step=3.3849 ms_total=108.316 launches_per_step=48 segments_per_step=48 us_per_launch=70.52
+stage4032_2 STAGE gran=kernel family=cast      ms_per_step=1.0198 ms_total=32.633 launches_per_step=115 segments_per_step=115 us_per_launch=8.87
+stage4032_2 STAGE gran=kernel family=copy      ms_per_step=0.2391 ms_total=7.652 launches_per_step=19 segments_per_step=19 us_per_launch=12.59
+stage4032_2 STAGE gran=kernel family=lm_head   ms_per_step=2.1613 ms_total=69.163 launches_per_step=1 segments_per_step=1 us_per_launch=2161.34
+stage4032_2 STAGE gran=kernel family=host_tail ms_per_step=1.0181 ms_total=32.581 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage4032_2 STAGE gran=kernel TOTAL steps=32 ms_per_step=17.2039 ms_total=550.525 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=425
+stage4032_2 STAGEGAP gran=stage burst_ms_mean=13.8788 serialized_ms_mean=16.2475 exposed_ms=2.3687 ratio=1.171
+stage4032_2 STAGEGAP gran=kernel burst_ms_mean=13.8788 serialized_ms_mean=17.2182 exposed_ms=3.3394 ratio=1.241
+stage4032_2 RESULT mode=run steps=4032 ms_total=1719.663 ms_per_step=0.427 last_sampled=3069 prefix_len=4032 stopped=0
+stage4032_3 LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
+stage4032_3 NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+stage4032_3 LAUNCHSTAT family=glue calls=1960 calls_batched=392 rows_total=197568 rows_max=512
+stage4032_3 LAUNCHSTAT family=proj calls=4560 calls_batched=912 rows_total=459648 rows_max=512
+stage4032_3 LAUNCHSTAT family=mlp_gateup calls=960 calls_batched=192 rows_total=96768 rows_max=512
+stage4032_3 LAUNCHSTAT family=mlp_down calls=960 calls_batched=192 rows_total=96768 rows_max=512
+stage4032_3 LAUNCHSTAT family=gdn_conv calls=720 calls_batched=144 rows_total=72576 rows_max=512
+stage4032_3 LAUNCHSTAT family=gdn_gates calls=720 calls_batched=144 rows_total=72576 rows_max=512
+stage4032_3 LAUNCHSTAT family=gdn_gated_norm calls=720 calls_batched=144 rows_total=72576 rows_max=512
+stage4032_3 LAUNCHSTAT family=attn calls=240 calls_batched=48 rows_total=24192 rows_max=512
+stage4032_3 STAGE gran=calib idle_sync_us=0.142 iters=200 note=one_of_these_sits_inside_every_serialized_segment
+stage4032_3 STAGEPASS gran=burst steps=32 ms_mean=14.0995 ms_min=13.8462 ms_max=14.4187 spread_pct=4.13
+stage4032_3 STAGEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage4032_3 STAGEPASS gran=stage steps=32 ms_mean=16.3112 ms_min=16.1903 ms_max=16.5344 spread_pct=2.12
+stage4032_3 STAGEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage4032_3 STAGE gran=stage family=glue      ms_per_step=0.7207 ms_total=23.064 launches_per_step=49 segments_per_step=49 us_per_launch=14.71
+stage4032_3 STAGE gran=stage family=proj      ms_per_step=4.1343 ms_total=132.297 launches_per_step=114 segments_per_step=48 us_per_launch=36.27
+stage4032_3 STAGE gran=stage family=gdn       ms_per_step=0.6574 ms_total=21.037 launches_per_step=72 segments_per_step=36 us_per_launch=9.13
+stage4032_3 STAGE gran=stage family=attn      ms_per_step=2.9955 ms_total=95.855 launches_per_step=6 segments_per_step=6 us_per_launch=499.24
+stage4032_3 STAGE gran=stage family=mlp       ms_per_step=3.3806 ms_total=108.180 launches_per_step=48 segments_per_step=48 us_per_launch=70.43
+stage4032_3 STAGE gran=stage family=cast      ms_per_step=1.0012 ms_total=32.037 launches_per_step=115 segments_per_step=115 us_per_launch=8.71
+stage4032_3 STAGE gran=stage family=copy      ms_per_step=0.2391 ms_total=7.650 launches_per_step=19 segments_per_step=19 us_per_launch=12.58
+stage4032_3 STAGE gran=stage family=lm_head   ms_per_step=2.1537 ms_total=68.917 launches_per_step=1 segments_per_step=1 us_per_launch=2153.67
+stage4032_3 STAGE gran=stage family=host_tail ms_per_step=1.0179 ms_total=32.573 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage4032_3 STAGE gran=stage TOTAL steps=32 ms_per_step=16.3003 ms_total=521.611 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=323
+stage4032_3 STAGEPASS gran=kernel steps=32 ms_mean=17.2736 ms_min=16.9336 ms_max=17.8166 spread_pct=5.21
+stage4032_3 STAGEPARITY gran=kernel tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+stage4032_3 STAGE gran=kernel family=glue      ms_per_step=0.7273 ms_total=23.274 launches_per_step=49 segments_per_step=49 us_per_launch=14.84
+stage4032_3 STAGE gran=kernel family=proj      ms_per_step=4.6038 ms_total=147.321 launches_per_step=114 segments_per_step=114 us_per_launch=40.38
+stage4032_3 STAGE gran=kernel family=gdn       ms_per_step=0.9347 ms_total=29.910 launches_per_step=72 segments_per_step=72 us_per_launch=12.98
+stage4032_3 STAGE gran=kernel family=attn      ms_per_step=3.1471 ms_total=100.706 launches_per_step=6 segments_per_step=6 us_per_launch=524.51
+stage4032_3 STAGE gran=kernel family=mlp       ms_per_step=3.4085 ms_total=109.070 launches_per_step=48 segments_per_step=48 us_per_launch=71.01
+stage4032_3 STAGE gran=kernel family=cast      ms_per_step=1.0179 ms_total=32.573 launches_per_step=115 segments_per_step=115 us_per_launch=8.85
+stage4032_3 STAGE gran=kernel family=copy      ms_per_step=0.2407 ms_total=7.703 launches_per_step=19 segments_per_step=19 us_per_launch=12.67
+stage4032_3 STAGE gran=kernel family=lm_head   ms_per_step=2.1581 ms_total=69.060 launches_per_step=1 segments_per_step=1 us_per_launch=2158.12
+stage4032_3 STAGE gran=kernel family=host_tail ms_per_step=1.0207 ms_total=32.663 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+stage4032_3 STAGE gran=kernel TOTAL steps=32 ms_per_step=17.2587 ms_total=552.280 launches_per_step=424 plan_per_step=424 plan_match=1 syncs_per_step=425
+stage4032_3 STAGEGAP gran=stage burst_ms_mean=14.0995 serialized_ms_mean=16.3112 exposed_ms=2.2117 ratio=1.157
+stage4032_3 STAGEGAP gran=kernel burst_ms_mean=14.0995 serialized_ms_mean=17.2736 exposed_ms=3.1741 ratio=1.225
+stage4032_3 RESULT mode=run steps=4032 ms_total=1701.106 ms_per_step=0.422 last_sampled=3069 prefix_len=4032 stopped=0
+wave1024_1 LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
+wave1024_1 NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+wave1024_1 LAUNCHSTAT family=glue calls=147 calls_batched=98 rows_total=50225 rows_max=512
+wave1024_1 LAUNCHSTAT family=proj calls=342 calls_batched=228 rows_total=116850 rows_max=512
+wave1024_1 LAUNCHSTAT family=mlp_gateup calls=72 calls_batched=48 rows_total=24600 rows_max=512
+wave1024_1 LAUNCHSTAT family=mlp_down calls=72 calls_batched=48 rows_total=24600 rows_max=512
+wave1024_1 LAUNCHSTAT family=gdn_conv calls=54 calls_batched=36 rows_total=18450 rows_max=512
+wave1024_1 LAUNCHSTAT family=gdn_gates calls=54 calls_batched=36 rows_total=18450 rows_max=512
+wave1024_1 LAUNCHSTAT family=gdn_gated_norm calls=54 calls_batched=36 rows_total=18450 rows_max=512
+wave1024_1 LAUNCHSTAT family=attn calls=18 calls_batched=12 rows_total=6150 rows_max=512
+wave1024_1 WAVE gran=calib idle_sync_us=0.098 iters=200 note=one_of_these_sits_inside_every_serialized_segment
+wave1024_1 WAVEPASS gran=burst wall_ms=236.0302 tokens=1024 bodies=2 wave_rows=512 priced_rows=1
+wave1024_1 WAVEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 rows_compared=1 first_mismatch=none
+wave1024_1 WAVEPASS gran=stage wall_ms=243.1739 tokens=1024 bodies=2 wave_rows=512 priced_rows=1
+wave1024_1 WAVEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 rows_compared=1 first_mismatch=none
+wave1024_1 WAVE gran=stage family=glue            ms=3.2531 share_pct=1.34 launches=98 segments=98 ms_per_launch=0.03320 rows_total=50176 launchstats_calls=98 plan_launches=98 counts_match=1
+wave1024_1 WAVE gran=stage family=proj            ms=38.8087 share_pct=15.96 launches=228 segments=96 ms_per_launch=0.17021 rows_total=116736 launchstats_calls=228 plan_launches=228 counts_match=1
+wave1024_1 WAVE gran=stage family=gdn_conv        ms=4.5294 share_pct=1.86 launches=36 segments=36 ms_per_launch=0.12582 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+wave1024_1 WAVE gran=stage family=gdn_gates       ms=0.4109 share_pct=0.17 launches=36 segments=36 ms_per_launch=0.01141 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+wave1024_1 WAVE gran=stage family=gdn_rec         ms=123.0848 share_pct=50.62 launches=18432 segments=36 ms_per_launch=0.00668 rows_total=18432 launchstats_calls=-1 plan_launches=18432 counts_match=1 rows_note=one_row_per_launch_by_construction
+wave1024_1 WAVE gran=stage family=gdn_gated_norm  ms=2.1678 share_pct=0.89 launches=36 segments=36 ms_per_launch=0.06022 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+wave1024_1 WAVE gran=stage family=attn            ms=26.7394 share_pct=11.00 launches=12 segments=12 ms_per_launch=2.22828 rows_total=6144 launchstats_calls=12 plan_launches=12 counts_match=1
+wave1024_1 WAVE gran=stage family=mlp_gateup      ms=24.6721 share_pct=10.15 launches=48 segments=48 ms_per_launch=0.51400 rows_total=24576 launchstats_calls=48 plan_launches=48 counts_match=1
+wave1024_1 WAVE gran=stage family=mlp_down        ms=6.8205 share_pct=2.80 launches=48 segments=48 ms_per_launch=0.14209 rows_total=24576 launchstats_calls=48 plan_launches=48 counts_match=1
+wave1024_1 WAVE gran=stage family=cast            ms=6.8252 share_pct=2.81 launches=229 segments=229 ms_per_launch=0.02980 rows_total=0 launchstats_calls=-1 plan_launches=229 counts_match=1 rows_note=no_launcher_row_width
+wave1024_1 WAVE gran=stage family=copy            ms=2.7644 share_pct=1.14 launches=1060 segments=38 ms_per_launch=0.00261 rows_total=0 launchstats_calls=-1 plan_launches=1060 counts_match=1 rows_note=no_launcher_row_width
+wave1024_1 WAVE gran=stage family=lm_head         ms=2.3293 share_pct=0.96 launches=1 segments=1 ms_per_launch=2.32934 rows_total=0 launchstats_calls=-1 plan_launches=1 counts_match=1 rows_note=no_launcher_row_width
+wave1024_1 WAVE gran=stage family=host_tail       ms=0.7455 share_pct=0.31 launches=0 segments=1 ms_per_launch=0.00000 rows_total=0 launchstats_calls=-1 plan_launches=0 counts_match=1 rows_note=no_launcher_row_width
+wave1024_1 WAVE gran=stage TOTAL tokens=1024 bodies=2 wave_rows=512 priced_rows=1 wall_ms=243.1739 sum_ms=243.1511 ungaged_ms=0.0228 ungaged_pct=0.009 tol_ms=2.4317 within_tol=1 launches=20264 plan_launches=20264 plan_match=1 launchstats_families=8 launchstats_match=1 syncs=715 body1_plan_matches_token_plan=1
+wave1024_1 WAVE gran=stage GROUP matmul_ms=70.3013 matmul_pct=28.91 nonmatmul_pct=71.09 gdn_all_pct=53.54 gdn_rec_pct=50.62 gdn_batched_pct=2.92 attn_pct=11.00 glue_pct=1.34 cast_pct=2.81 copy_pct=1.14 lm_head_pct=0.96 host_tail_pct=0.31
+wave1024_1 WAVEGAP gran=stage burst_wall_ms=236.0302 serialized_wall_ms=243.1739 exposed_ms=7.1437 ratio=1.030
+wave1024_1 RESULT mode=run steps=1025 ms_total=308.499 ms_per_step=0.301 last_sampled=3000 prefix_len=1025 stopped=0
+wave1024_2 LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
+wave1024_2 NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+wave1024_2 LAUNCHSTAT family=glue calls=147 calls_batched=98 rows_total=50225 rows_max=512
+wave1024_2 LAUNCHSTAT family=proj calls=342 calls_batched=228 rows_total=116850 rows_max=512
+wave1024_2 LAUNCHSTAT family=mlp_gateup calls=72 calls_batched=48 rows_total=24600 rows_max=512
+wave1024_2 LAUNCHSTAT family=mlp_down calls=72 calls_batched=48 rows_total=24600 rows_max=512
+wave1024_2 LAUNCHSTAT family=gdn_conv calls=54 calls_batched=36 rows_total=18450 rows_max=512
+wave1024_2 LAUNCHSTAT family=gdn_gates calls=54 calls_batched=36 rows_total=18450 rows_max=512
+wave1024_2 LAUNCHSTAT family=gdn_gated_norm calls=54 calls_batched=36 rows_total=18450 rows_max=512
+wave1024_2 LAUNCHSTAT family=attn calls=18 calls_batched=12 rows_total=6150 rows_max=512
+wave1024_2 WAVE gran=calib idle_sync_us=0.099 iters=200 note=one_of_these_sits_inside_every_serialized_segment
+wave1024_2 WAVEPASS gran=burst wall_ms=234.8929 tokens=1024 bodies=2 wave_rows=512 priced_rows=1
+wave1024_2 WAVEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 rows_compared=1 first_mismatch=none
+wave1024_2 WAVEPASS gran=stage wall_ms=247.6045 tokens=1024 bodies=2 wave_rows=512 priced_rows=1
+wave1024_2 WAVEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 rows_compared=1 first_mismatch=none
+wave1024_2 WAVE gran=stage family=glue            ms=3.3164 share_pct=1.34 launches=98 segments=98 ms_per_launch=0.03384 rows_total=50176 launchstats_calls=98 plan_launches=98 counts_match=1
+wave1024_2 WAVE gran=stage family=proj            ms=39.2131 share_pct=15.84 launches=228 segments=96 ms_per_launch=0.17199 rows_total=116736 launchstats_calls=228 plan_launches=228 counts_match=1
+wave1024_2 WAVE gran=stage family=gdn_conv        ms=4.5194 share_pct=1.83 launches=36 segments=36 ms_per_launch=0.12554 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+wave1024_2 WAVE gran=stage family=gdn_gates       ms=0.4049 share_pct=0.16 launches=36 segments=36 ms_per_launch=0.01125 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+wave1024_2 WAVE gran=stage family=gdn_rec         ms=126.8356 share_pct=51.23 launches=18432 segments=36 ms_per_launch=0.00688 rows_total=18432 launchstats_calls=-1 plan_launches=18432 counts_match=1 rows_note=one_row_per_launch_by_construction
+wave1024_2 WAVE gran=stage family=gdn_gated_norm  ms=2.3090 share_pct=0.93 launches=36 segments=36 ms_per_launch=0.06414 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+wave1024_2 WAVE gran=stage family=attn            ms=26.9991 share_pct=10.90 launches=12 segments=12 ms_per_launch=2.24993 rows_total=6144 launchstats_calls=12 plan_launches=12 counts_match=1
+wave1024_2 WAVE gran=stage family=mlp_gateup      ms=25.4156 share_pct=10.26 launches=48 segments=48 ms_per_launch=0.52949 rows_total=24576 launchstats_calls=48 plan_launches=48 counts_match=1
+wave1024_2 WAVE gran=stage family=mlp_down        ms=6.0660 share_pct=2.45 launches=48 segments=48 ms_per_launch=0.12637 rows_total=24576 launchstats_calls=48 plan_launches=48 counts_match=1
+wave1024_2 WAVE gran=stage family=cast            ms=6.8376 share_pct=2.76 launches=229 segments=229 ms_per_launch=0.02986 rows_total=0 launchstats_calls=-1 plan_launches=229 counts_match=1 rows_note=no_launcher_row_width
+wave1024_2 WAVE gran=stage family=copy            ms=2.6285 share_pct=1.06 launches=1060 segments=38 ms_per_launch=0.00248 rows_total=0 launchstats_calls=-1 plan_launches=1060 counts_match=1 rows_note=no_launcher_row_width
+wave1024_2 WAVE gran=stage family=lm_head         ms=2.2940 share_pct=0.93 launches=1 segments=1 ms_per_launch=2.29401 rows_total=0 launchstats_calls=-1 plan_launches=1 counts_match=1 rows_note=no_launcher_row_width
+wave1024_2 WAVE gran=stage family=host_tail       ms=0.7455 share_pct=0.30 launches=0 segments=1 ms_per_launch=0.00000 rows_total=0 launchstats_calls=-1 plan_launches=0 counts_match=1 rows_note=no_launcher_row_width
+wave1024_2 WAVE gran=stage TOTAL tokens=1024 bodies=2 wave_rows=512 priced_rows=1 wall_ms=247.6045 sum_ms=247.5847 ungaged_ms=0.0198 ungaged_pct=0.008 tol_ms=2.4760 within_tol=1 launches=20264 plan_launches=20264 plan_match=1 launchstats_families=8 launchstats_match=1 syncs=715 body1_plan_matches_token_plan=1
+wave1024_2 WAVE gran=stage GROUP matmul_ms=70.6947 matmul_pct=28.55 nonmatmul_pct=71.45 gdn_all_pct=54.15 gdn_rec_pct=51.23 gdn_batched_pct=2.92 attn_pct=10.90 glue_pct=1.34 cast_pct=2.76 copy_pct=1.06 lm_head_pct=0.93 host_tail_pct=0.30
+wave1024_2 WAVEGAP gran=stage burst_wall_ms=234.8929 serialized_wall_ms=247.6045 exposed_ms=12.7116 ratio=1.054
+wave1024_2 RESULT mode=run steps=1025 ms_total=301.808 ms_per_step=0.294 last_sampled=3000 prefix_len=1025 stopped=0
+wave1024_3 LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=115 other=20 total=424
+wave1024_3 NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+wave1024_3 LAUNCHSTAT family=glue calls=147 calls_batched=98 rows_total=50225 rows_max=512
+wave1024_3 LAUNCHSTAT family=proj calls=342 calls_batched=228 rows_total=116850 rows_max=512
+wave1024_3 LAUNCHSTAT family=mlp_gateup calls=72 calls_batched=48 rows_total=24600 rows_max=512
+wave1024_3 LAUNCHSTAT family=mlp_down calls=72 calls_batched=48 rows_total=24600 rows_max=512
+wave1024_3 LAUNCHSTAT family=gdn_conv calls=54 calls_batched=36 rows_total=18450 rows_max=512
+wave1024_3 LAUNCHSTAT family=gdn_gates calls=54 calls_batched=36 rows_total=18450 rows_max=512
+wave1024_3 LAUNCHSTAT family=gdn_gated_norm calls=54 calls_batched=36 rows_total=18450 rows_max=512
+wave1024_3 LAUNCHSTAT family=attn calls=18 calls_batched=12 rows_total=6150 rows_max=512
+wave1024_3 WAVE gran=calib idle_sync_us=0.142 iters=200 note=one_of_these_sits_inside_every_serialized_segment
+wave1024_3 WAVEPASS gran=burst wall_ms=235.4828 tokens=1024 bodies=2 wave_rows=512 priced_rows=1
+wave1024_3 WAVEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 rows_compared=1 first_mismatch=none
+wave1024_3 WAVEPASS gran=stage wall_ms=245.7273 tokens=1024 bodies=2 wave_rows=512 priced_rows=1
+wave1024_3 WAVEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 rows_compared=1 first_mismatch=none
+wave1024_3 WAVE gran=stage family=glue            ms=3.4338 share_pct=1.40 launches=98 segments=98 ms_per_launch=0.03504 rows_total=50176 launchstats_calls=98 plan_launches=98 counts_match=1
+wave1024_3 WAVE gran=stage family=proj            ms=38.1045 share_pct=15.51 launches=228 segments=96 ms_per_launch=0.16712 rows_total=116736 launchstats_calls=228 plan_launches=228 counts_match=1
+wave1024_3 WAVE gran=stage family=gdn_conv        ms=4.3781 share_pct=1.78 launches=36 segments=36 ms_per_launch=0.12161 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+wave1024_3 WAVE gran=stage family=gdn_gates       ms=0.4144 share_pct=0.17 launches=36 segments=36 ms_per_launch=0.01151 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+wave1024_3 WAVE gran=stage family=gdn_rec         ms=126.8327 share_pct=51.62 launches=18432 segments=36 ms_per_launch=0.00688 rows_total=18432 launchstats_calls=-1 plan_launches=18432 counts_match=1 rows_note=one_row_per_launch_by_construction
+wave1024_3 WAVE gran=stage family=gdn_gated_norm  ms=2.1945 share_pct=0.89 launches=36 segments=36 ms_per_launch=0.06096 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+wave1024_3 WAVE gran=stage family=attn            ms=26.5546 share_pct=10.81 launches=12 segments=12 ms_per_launch=2.21289 rows_total=6144 launchstats_calls=12 plan_launches=12 counts_match=1
+wave1024_3 WAVE gran=stage family=mlp_gateup      ms=24.9930 share_pct=10.17 launches=48 segments=48 ms_per_launch=0.52069 rows_total=24576 launchstats_calls=48 plan_launches=48 counts_match=1
+wave1024_3 WAVE gran=stage family=mlp_down        ms=6.4198 share_pct=2.61 launches=48 segments=48 ms_per_launch=0.13375 rows_total=24576 launchstats_calls=48 plan_launches=48 counts_match=1
+wave1024_3 WAVE gran=stage family=cast            ms=6.6611 share_pct=2.71 launches=229 segments=229 ms_per_launch=0.02909 rows_total=0 launchstats_calls=-1 plan_launches=229 counts_match=1 rows_note=no_launcher_row_width
+wave1024_3 WAVE gran=stage family=copy            ms=2.6335 share_pct=1.07 launches=1060 segments=38 ms_per_launch=0.00248 rows_total=0 launchstats_calls=-1 plan_launches=1060 counts_match=1 rows_note=no_launcher_row_width
+wave1024_3 WAVE gran=stage family=lm_head         ms=2.2863 share_pct=0.93 launches=1 segments=1 ms_per_launch=2.28632 rows_total=0 launchstats_calls=-1 plan_launches=1 counts_match=1 rows_note=no_launcher_row_width
+wave1024_3 WAVE gran=stage family=host_tail       ms=0.7915 share_pct=0.32 launches=0 segments=1 ms_per_launch=0.00000 rows_total=0 launchstats_calls=-1 plan_launches=0 counts_match=1 rows_note=no_launcher_row_width
+wave1024_3 WAVE gran=stage TOTAL tokens=1024 bodies=2 wave_rows=512 priced_rows=1 wall_ms=245.7273 sum_ms=245.6978 ungaged_ms=0.0295 ungaged_pct=0.012 tol_ms=2.4573 within_tol=1 launches=20264 plan_launches=20264 plan_match=1 launchstats_families=8 launchstats_match=1 syncs=715 body1_plan_matches_token_plan=1
+wave1024_3 WAVE gran=stage GROUP matmul_ms=69.5173 matmul_pct=28.29 nonmatmul_pct=71.71 gdn_all_pct=54.46 gdn_rec_pct=51.62 gdn_batched_pct=2.84 attn_pct=10.81 glue_pct=1.40 cast_pct=2.71 copy_pct=1.07 lm_head_pct=0.93 host_tail_pct=0.32
+wave1024_3 WAVEGAP gran=stage burst_wall_ms=235.4828 serialized_wall_ms=245.7273 exposed_ms=10.2445 ratio=1.044
+wave1024_3 RESULT mode=run steps=1025 ms_total=296.627 ms_per_step=0.289 last_sampled=3000 prefix_len=1025 stopped=0
