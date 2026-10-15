@@ -789,11 +789,19 @@ def cmd_verify(indir: str) -> int:
 
     The class comes from the manifest, because the word contract is per class: an authored
     header may reword, a mechanically derived one may not.
+
+    A manifest record may name a `ref`: the commit whose message is the reference for the
+    word proof. Without it the file's own sha is used, which is right the first time and
+    wrong for every rewrite after one — after a history rewrite the file is named for the
+    REWRITTEN commit, and grading a rewrite against a rewrite asks whether the second
+    rewrite preserved the first, which is not the contract. The contract is always against
+    the author's original text, so a re-apply carries the original sha forward in `ref`.
     """
     shas = rev_list("HEAD")
-    msgs = read_messages(shas)
     manifest = load_manifest(indir)
     classes = {c["sha"]: c["class"] for c in manifest.get("commits", [])}
+    refs = {c["sha"]: c.get("ref") or c["sha"] for c in manifest.get("commits", [])}
+    msgs = read_messages(sorted(set(shas) | {r for r in refs.values() if r}))
     if manifest and len(classes) != len(shas):
         print(f"LINT manifest lists {len(classes)} commits, HEAD reaches {len(shas)}")
     word_fails = lint_fails = 0
@@ -813,7 +821,11 @@ def cmd_verify(indir: str) -> int:
         elif cls not in CLASSES:
             problems.append(f"manifest class {cls!r} is not one of {'/'.join(CLASSES)}")
         else:
-            problems += word_diff(msgs[sha], text, cls)
+            ref = refs.get(sha, sha)
+            if ref not in msgs:
+                problems.append(f"word-proof reference {ref[:12]} is not reachable")
+            else:
+                problems += word_diff(msgs[ref], text, cls)
             if cls in AUTHORED:
                 # A queue file that no longer carries a sentinel has been authored, so the
                 # class contract above is what decided it. Counted either way: a
