@@ -226,3 +226,30 @@ no child deadline fixes.
   spare — **it outranks all pending speed work** (P9, attention tiling, the 5k target) until fixed or explicitly
   waived by the user in those words. Do not queue it, do not "bank the win first", and do not soften a gate to
   route around it. Report which rows fail, how many, and their decision room before choosing the remedy.
+
+## Citation hygiene (added 2026-10-16; census in `progress/2026-10-16/archive-review-2026-10-16.md`)
+
+Appended at the end of this file deliberately: `progress/2026-10-16/cleanup-audit-2026-10-16.md:179`
+cites `AGENTS.md:172`, and anything inserted above it would silently re-point that cite while
+still resolving as a line. That is the trap this section describes.
+
+- **A line-form citation (`path:138,314`) is a claim about a file's line count, not just its
+  identity.** 96 of the 101 such citations in this tree live in `progress/`, which rule 2 freezes,
+  so any edit that adds or removes a line in a cited file silently rots them — the cite still
+  resolves to *a* line, which is why no checker calls it broken. The guard for touching a cited
+  file is `wc -l` before and after, and journals take same-line substitutions only. If a section
+  must go, re-point the archive's cites first, and for `bench/performance-status.md` that needs
+  the user's explicit words: the ledger's §1–§5 are banner-marked instead of deleted for exactly
+  this reason. Check with `tools/doc_ref_check.py` (paths + anchors + `§labels`) and
+  `tools/citation_census.py --anchors`.
+- **A `§label` citation that names no file resolves only in a reader's memory.** `engine/gate.py`
+  carried 17 `§A1…§A4` cites into an audit document without ever naming it — the band they
+  justify is enforced from those rows. Write `§N of <path>`, never a bare `§N`, when the target is
+  in another file. Witness: `LABEL-UNNAMED` in `tools/doc_ref_check.py` (91 → 74 when the
+  seventeen were fixed).
+- **A checker's clean bill measures the population it scanned.** `tools/doc_ref_check.py` read
+  only `*.md` when it was written, so every citation inside `engine/gate.py`, a kernel header or a
+  writer script was invisible to it; and of the 96 paths it first called missing, 75 are scratch
+  directories recorded as history in `progress/` and are not defects at all. Before trusting any
+  count, ask what was walked and what was filtered — and when you extend a checker, expect a
+  *larger* number, not a smaller one.
