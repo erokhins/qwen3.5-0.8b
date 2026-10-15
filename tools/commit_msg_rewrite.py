@@ -291,8 +291,14 @@ def content_words(text: str) -> Counter:
     split stopped at, not author content, so it cannot make a rewrite fail on its own. No
     proof grades, not the punctuation the splitter had to leave behind. `§` counts as
     content, because a section marker is exactly what a reader looks for.
+
+    R1b: case is not a word either. The splitter capitalizes the clause it promotes to the
+    head of a body (`— the wave-width checks …` becomes `The wave-width checks …`), and
+    `The` vs `the` is one word wearing a different hat; the letters are still graded, so a
+    real substitution still fails. Relaxing this only ever turns a FAIL into a PASS, which
+    is why it can be introduced after a set was already proved case-sensitively.
     """
-    return Counter(w for w in text.split() if not PUNCT_ONLY_RE.match(w))
+    return Counter(w.lower() for w in text.split() if not PUNCT_ONLY_RE.match(w))
 
 
 def protected_line(line: str, in_fence: bool) -> bool:
@@ -501,6 +507,28 @@ def header_shape_reject(head: str) -> str | None:
     return None
 
 
+def tidy_rest(rest: str, delim: str) -> str:
+    """Start the remainder like a sentence, without touching a single word.
+
+    A non-glued split hands its delimiter back to the body, so 78 SPLIT bodies opened
+    `— the wave-width checks hold the scan identical …` — a fragment that reads like a
+    truncation of the header sitting above it. Two edits are allowed and nothing else: drop
+    the delimiter the splitter actually consumed (a standalone punctuation token is not a
+    word, by R1, so the proof cannot notice), and capitalize the first bare lowercase word
+    (case is not a word, by R1b). Scoping the strip to the consumed delimiter is what keeps
+    a markdown bullet at the top of a body from being eaten, and the identifier guard — the
+    capitalize fires only on a plain word followed by whitespace or `,`/`;`, never on
+    `engine::kStopToken` or `gate.py` — keeps code spelled as the author spelled it.
+    """
+    d = delim.strip()
+    while rest.startswith(d) and rest[len(d):len(d) + 1].isspace():
+        rest = rest[len(d):].strip()
+    m = re.match(r"([a-z][a-z]+)(?=[\s,;]|$)", rest)
+    if m and "_" not in m.group(1):
+        rest = m.group(1)[:1].upper() + m.group(1)[1:] + rest[len(m.group(1)):]
+    return rest
+
+
 def split_claims(subject: str) -> dict:
     """First delimiter (by priority) whose left clause is a usable header.
 
@@ -530,7 +558,7 @@ def split_claims(subject: str) -> dict:
             if d in GLUED_DELIMS:
                 head, rest = subject[:i + 1].rstrip(), subject[i + 1:].strip()
             else:
-                head, rest = subject[:i].rstrip(), subject[i:].strip()
+                head, rest = subject[:i].rstrip(), tidy_rest(subject[i:].strip(), d)
             if not head or not rest or len(head) > HEADER_MAX:
                 continue
             # The header must still name the area: the split has to land past the prefix.
@@ -954,6 +982,19 @@ def selftest() -> int:
     check("consecutive prose lines are one paragraph",
           rewrite(d2_in)["text"].split("\n")[2:-1], ["alpha beta gamma delta echo foxtrot"])
     check("re-fill neither invents nor loses a word", word_diff(d2_in, rewrite(d2_in)["text"], "KEEP"), [])
+
+    # ---- D2b: a non-glued split must not leave the delimiter as the body's first token.
+    d2b = ("engine: the wave-width checks hold the scan identical on both sides — both "
+           "were uninitialized LDS on any body whose tail is short")
+    r_d2b = rewrite(d2b)
+    check("split body opens on a sentence, not a dash",
+          r_d2b["text"].split("\n")[2].startswith("Both were uninitialized"), True)
+    check("split body still loses no word", word_diff(d2b, r_d2b["text"], r_d2b["class"]), [])
+    check("tidy leaves an identifier alone", tidy_rest("— engine::kStopToken ends the row", "—"),
+          "engine::kStopToken ends the row")
+    check("tidy does not eat a markdown bullet", tidy_rest("-- item one", "—"), "-- item one")
+    check("tidy strips only the delimiter it consumed", tidy_rest("— `gate.py` is the check", "—"),
+          "`gate.py` is the check")
 
     # ---- paragraph separators are honoured: blank line, list item, fence, spaceless line.
     check("a blank line separates paragraphs",
