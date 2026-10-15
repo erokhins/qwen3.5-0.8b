@@ -63,21 +63,21 @@ files=()
 for e in $( [[ "$ENGINE" == "both" ]] && echo "speccheck hf" || echo "$ENGINE" ); do
   f="$RUNDIR/bench-$stamp-$e.jsonl"
   echo "=== engine=$e threads=$THREADS ==="
-  "$py" "$here/bench/run.py" --engine "$e" --jsonl "$f" "${args[@]}"
+  "$py" "$here/testdata/run.py" --engine "$e" --jsonl "$f" "${args[@]}"
   files+=("$f")
   # MTP is a speccheck-only path (transformers has no MTP class for qwen3_5), so the
   # baseline row above is exactly the number it has to beat.
   if [[ -n "$MTP" && "$e" == "speccheck" ]]; then
     fm="$RUNDIR/bench-$stamp-$e-mtp$MTP.jsonl"
     echo "=== engine=$e+mtp$MTP threads=$THREADS ==="
-    "$py" "$here/bench/run.py" --engine "$e" --mtp "$MTP" --jsonl "$fm" "${args[@]}"
+    "$py" "$here/testdata/run.py" --engine "$e" --mtp "$MTP" --jsonl "$fm" "${args[@]}"
     files+=("$fm")
   fi
 done
 
 echo
 echo "=== summary (threads=$THREADS, reps=$REPS) ==="
-"$py" "$here/bench/run.py" --table "${files[@]}"
+"$py" "$here/testdata/run.py" --table "${files[@]}"
 
 merged="$RUNDIR/bench-$stamp.jsonl"
 : > "$merged"

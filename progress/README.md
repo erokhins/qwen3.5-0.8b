@@ -40,7 +40,7 @@ evidence **do** move here. This file is the index, the naming rule, and the cros
 |---|---|
 | `bench/performance-status.md` | the ledger: appended to, 82 doc lines cite it |
 | `bench/build-queue.md`, `bench/gate-audit.md` | undated, still open |
-| `bench/run.py`, `bench.sh`, `testdata/` | the CPU speed harness, untouched by this pass |
+| `testdata/run.py`, `bench.sh`, `testdata/` | the CPU speed harness, untouched by this pass (the runner moved out of `bench/` on 2026-10-16) |
 | `bench/band-history.jsonl` | data file, default of `tools/band_history.py --check` |
 | `bench/corpus-freerun-2026-10-12.json` | data file, 4 doc lines read it |
 | `engine/results.md`, `prototype/*/results.md` | the journals: live append-only record; this pass made same-line path fixes only, no line moved |

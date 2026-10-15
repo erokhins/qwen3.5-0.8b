@@ -32,7 +32,7 @@ reports `SHAPE` instead of a silently meaningless number.
 
 ## Conventions (the part that makes results comparable)
 
-From `index.json`, and enforced by `bench/run.py` for every engine:
+From `index.json`, and enforced by `testdata/run.py` for every engine:
 
 - **greedy only** - argmax, no sampling, no seeds;
 - **rendered as chat** with thinking off, one user turn, generation prompt appended
@@ -64,7 +64,7 @@ HIP engine is measured here:
 
 - **the same amount of `lm_head` work.** speccheck applies the head to the final
   position only; HF would run it over all 2177 prompt positions, which is a different
-  quantity, so `bench/run.py` passes `logits_to_keep=1` to HF. `--hf-full-logits`
+  quantity, so `testdata/run.py` passes `logits_to_keep=1` to HF. `--hf-full-logits`
   turns that off if you want to see the difference.
 - **the same tokens.** HF's Qwen template applies `|trim` to message content, so
   trailing whitespace in a test is not part of the prompt there. The runner trims
