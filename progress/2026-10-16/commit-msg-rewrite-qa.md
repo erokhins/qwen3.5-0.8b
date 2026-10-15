@@ -543,3 +543,61 @@ only, since the body is untouched and the word proof cannot break on a header ch
   backup ref. That is inherent to history rewrite, not to this message set; the apply run should
   record the backup ref sha next to the ledger entry that says the rewrite happened.
 - Nothing here is a timing measurement, and no number in this file came from a device run.
+
+---
+
+# Second pass, after the first apply (same day)
+
+The first apply landed and then the log was **read**, which found what no gate in the
+tool was asking about: 78 of the 171 SPLIT commits got a body whose first paragraph
+began with the delimiter it was cut at —
+
+    engine/results.md: P2's byte-identity proof
+
+    — pre- and post-seam logits dumps cmp-identical, five fixtures unchanged,
+
+— a fragment that reads like a truncation of the header above it. `split_claims()` was
+handing its delimiter back to the body. Fixed in the splitter (`tidy_rest()`, scoped to
+the delimiter actually consumed so a markdown bullet cannot be eaten) plus the first-word
+capitalize that needs it, which in turn needed **R1b** in the word proof: case is not a
+word, so `The` vs `the` is graded as one word. R1b is one-directional — it can only turn
+a FAIL into a PASS — which is why it is safe to introduce after a set was already proved
+case-sensitively. Three selftest fixtures were witnesses for the old behaviour and were
+updated, not the rules.
+
+Re-applying a rewrite exposed two more contract gaps, both fixed in the tool:
+
+* **`--verify` was grading a rewrite against a rewrite.** A candidate directory is named
+  for commit shas, and after a rewrite the file `X.msg` names the REWRITTEN commit, so
+  the second pass asked "does the second rewrite preserve the first" and reported
+  `word_failures=205` — exactly the authored classes, whose contract is that the *body*
+  carries the original words while the header is free text. A manifest record may now
+  carry `ref`, the sha whose message is the reference; the proof is always against author
+  text. A rewrite that cannot name its reference now fails loudly.
+* **`--verify-history` refused to answer** with `FAIL commit count 407 != 412`, because
+  work had been committed after the first rewrite. Late commits are now set aside and
+  named instead of failing the whole comparison.
+
+Final state after the second apply, checked independently of the tool (its own pairing,
+its own metadata diff):
+
+| check | result |
+|---|---|
+| commits original / HEAD | 407 / 413 (6 made after the rewrite) |
+| tree, parent count, author name+email, author date, committer date | 0 mismatches |
+| word contract, per class against the original text | 0 failures |
+| messages byte-identical to the original | 0 (every message changed) |
+| headers over 72 chars | 0 (max is exactly 72) |
+| bodies opening on a delimiter | 0 (was 78) |
+| missing blank line after the header | 0 |
+| lines over 78 chars | 41, all protected (numbered list items, aligned column blocks) |
+| `--selftest` | 157 checks, 0 failed |
+| `backup-pre-msgrewrite` | 721ba22, the pre-rewrite tip, untouched |
+
+The trap worth keeping: **a candidate directory is keyed to the history it was emitted
+against.** Emit → apply → commit more work → re-emit is fine; emit → apply → edit the
+candidates → apply is not, because the filenames now name commits that no longer exist.
+The remap has to pair by topological position from the root (`filter-branch` preserves
+order and parent structure) and must know which commits were made after the rewrite —
+`git rev-list HEAD ^backup` is *not* that set, because the rewrite replaced the chain, so
+the backup is not an ancestor and the answer is the whole history.
