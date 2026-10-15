@@ -45,7 +45,7 @@ void glue_add_norm_rows(const uint16_t* s, const uint16_t* delta, const uint16_t
 // WHAT THIS IS. `progress/2026-10-13/prefill-route-spike-2026-10-13.md` §6 item 1 funds hipBLAS for ten shapes
 // (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `in_proj_qkv`, `in_proj_z`, `out_proj`, `gate_proj`,
 // `up_proj`, `down_proj` — 150 of a wave's 186 matmul calls) and §"Wave-path attribution" of
-// `bench/performance-status.md` says why: matmul is 74.4 % of a 1024-token prefill and the hand
+// progress/2026-10-16/performance-status-2026-10-16.md:912 says why: matmul is 74.4 % of a 1024-token prefill and the hand
 // GEMMs run at ~0.85 TFLOP/s against hipBLAS's ~33 at the same shape. The call form is the probe's:
 // `OP_T` on the weight as the shard stores it (no transpose copy), bf16 in, f32 accumulate, **bf16
 // `C`** — 16-bit `C` because every shipped pin rounds a projection's product to a 16-bit width, and
@@ -168,7 +168,7 @@ const char* mlp_gate_map_name(MlpGateMap map);
 //
 // WHY THE TWO PATHS WANT OPPOSITE WALKS IS NOT ESTABLISHED, and the next reader should not invent a
 // reason. Both halves are measured, on an exclusive window, against the same bytes
-// (`bench/performance-status.md` §6 "Q10", `engine/results.md` §Q10b): `contig` recovers 0.945 ms of
+// (progress/2026-10-16/performance-status-2026-10-16.md:811 — the frozen ledger's "Q10" — and `engine/results.md` §Q10b): `contig` recovers 0.945 ms of
 // the MLP's 2.034 ms in-step gap at 128 lanes of decode, and `interleave` is 5.1 % better on TTFT at
 // a 1024-token prompt. A per-path setting that is measured, bit-neutral and documented is what ships
 // here — the same shape of decision P7 made for attention's plan and P4 for glue's row batching, both

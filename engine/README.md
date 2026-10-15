@@ -310,7 +310,7 @@ tools/gpu_lock.sh acquire "engine W5b GPU pass" && tools/gpu_lock.sh util
 # negatives localising (w_f32/affine_uncast/single_cast/silu_rounded at norm_pre_gate 0/294912), burst
 # 0.4227 ms per 144-job plan = 2.936 us/launch at spread 1.4 %. A LARGE ndiff here (not 1/2048) means the
 # kernel's per-head reduction or its cast order is wrong on device, NOT that the pins moved. History:
-# the first two runs failed on the gate's own fixture writer, not the kernel —
+# the first two runs failed on the gate's own fixture writer, not the kernel — (the §6 cite on the next line names the frozen era's row, progress/2026-10-16/performance-status-2026-10-16.md:267; live §4 carries today's 2.967 µs/launch re-take)
 # prototype/gdn_gated_norm/results.md §7-§9, and the timing is bench/performance-status.md §6.
 
 tools/gpu_lock.sh release "engine W5b GPU pass"
@@ -320,7 +320,7 @@ tools/gpu_lock.sh release "engine W5b GPU pass"
 # E1 — CLOSED 2026-10-11, in a clean window. glue's gate at 1024 threads, the width the engine does
 # NOT launch: PASS with a legal error profile identical to 256 (g1_n gated 0 / raw 1, adds bit-exact,
 # 784/0, every negative caught at its own stage). So <256 in `kernels_glue.cpp` is a measured
-# preference, not a numerical requirement. The numbers are `bench/performance-status.md` §6; to
+# preference, not a numerical requirement. The numbers are progress/2026-10-16/performance-status-2026-10-16.md:263; to
 # reproduce:
 tools/gpu_lock.sh acquire "glue gate at 1024 (E1)" && tools/gpu_lock.sh util
 .venv/bin/python prototype/glue/run.py --threads 1024

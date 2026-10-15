@@ -124,7 +124,7 @@ no number here is a measurement of anything except the compiler's willingness.
   localising, 2.936 µs/launch at spread 1.4 % → ≈0.053 ms/token for the 18 launches. That is
   `prototype/gdn_gated_norm/run.py --gate`, whose first two attempts failed on the gate's own fixture
   writer rather than on the kernel — see `prototype/gdn_gated_norm/results.md` §7–§9 and
-  `bench/performance-status.md` §6. **None of `engine/`'s own code has run on a device**: no buffer in
+  `bench/performance-status.md` §4 (re-taken 2026-10-16; the 2.936 row is progress/2026-10-16/performance-status-2026-10-16.md:267). **None of `engine/`'s own code has run on a device**: no buffer in
   `state.cpp` has been allocated and no launcher in `kernels_*.cpp` has been launched from the engine.
 
 ## Deferred, with the price named
@@ -299,7 +299,7 @@ bite at that step. `SELFTEST PASS` (clean dry run + four injections), CPU-only.
 ## The first ms/step figure, recorded as *not* a measurement
 
 **Superseded the same day, twice over.** The `14.631 ms/step` below stayed a non-measurement — it did,
-and `bench/performance-status.md` §6 now carries the real row at **11.978 / 12.053 / 12.232**.
+and progress/2026-10-16/performance-status-2026-10-16.md:269 carried the real row at **11.978 / 12.053 / 12.232** (§1 of the live ledger carries today's headline).
 And item 1 below named HIP graphs as the first perf item, which the measured dispatch curve refutes:
 §1's probe replayed 64 captured launches at 1.78 µs against 1.85 µs eager, so a one-token graph buys
 ≈4 % of the dispatch bill (≈0.06 ms) and not the gap. Both corrections live in
@@ -391,7 +391,7 @@ and (a) will be the first token-level correctness result this repo has had.
 # First end-to-end pass: `ENGINE GATE PASS` at 93 checks — and the first engine token costs 11.978 ms
 
 2026-10-11, third device attempt, operator-run in the foreground zero-subagent window that also produced
-`bench/performance-status.md` §6. The two failures before it were the gate's and the runner's, not the
+progress/2026-10-16/performance-status-2026-10-16.md:244 (the frozen ledger's §6). The two failures before it were the gate's and the runner's, not the
 engine's: the weight-rank contract (`92d8e5f` + `engine/weights_contract.py`) and §07.5 armed during the
 prompt phase (`5e7114b`). Nothing in this section was measured by a worker — `AGENTS.md` forbids it — and
 the device figures are quoted, not re-made.
@@ -500,7 +500,7 @@ to an end-to-end quantity produced a non-failing flag that measurement then put 
 
 ## (2) The first throughput row, and the ~4 ms between it and the op-sum
 
-Cited from `bench/performance-status.md` §6, which carries its provenance (three runs, blocking calls,
+Cited from progress/2026-10-16/performance-status-2026-10-16.md:269 (the frozen ledger's §6), which carries its provenance (three runs, blocking calls,
 zero subagents, spread **2.1 %**, `util` 76/71/69 % recorded and discounted per §6): **11.978 / 12.053 /
 12.232 ms/step = 83.5 / 82.9 / 81.7 tok/s**, over 81 steps each — `RESULT steps=81`, the 17-token prompt
 fed one token per step plus 64 requested generation steps, generation ending when the engine emitted id
@@ -517,7 +517,7 @@ probe**; the sum of its parts implies **200 GB/s = 84 %**. The gap is worth 0.94
 The ledger's 8.03 ms is a sum of per-family cold bursts, each measured on **its own** launch plan. Pricing
 the plan `decode_step` actually runs (424 launches, cited per row) accounts for **1.27 ms** of the gap:
 
-| item | ledger §6 bills | the engine pays | Δ | basis |
+| item | ledger §6 bills (frozen: progress/2026-10-16/performance-status-2026-10-16.md:271) | the engine pays | Δ | basis |
 |---|---|---|---|---|
 | projections | 3.039 ms — the **packed 48-launch** plan at rows/block 8 | **3.600 ms** — 114 launches, unpacked (`PACK_X=false`), rows/block 8 | **+0.56** | `prototype/proj_gemv/results.md` per-shape cold table summed over the engine's plan (3.541 ms), scaled by the 1.0166 clean/contended ratio §6 measures on the same plan |
 | cast launches | **not billed at all** | **0.431 ms** — 115 launches × 3.75 µs | **+0.43** | 3.75 µs/launch is glue's measured cost for one 256-thread block (glue §4; §6's re-take reads 2.545 µs at the same width, which would price it at 0.293 ms — this is the least certain row in the table, and §6 already says dispatch-bound numbers here are bimodal). Their traffic is 1.74 MB = 0.007 ms, so this row is dispatch and nothing else |
@@ -737,7 +737,7 @@ tools/gpu_lock.sh release q6-rpb-ab
 #     suspect, not the memory system.
 tools/gpu_lock.sh acquire q6-4032 && .venv/bin/python tools/context_sweep.py --lanes 4032 --steps 32 --runs 5 && tools/gpu_lock.sh release q6-4032
 
-# 2 · ledger §2's two "not measured on their own" rows, now selectable (this commit's --only).
+# 2 · ledger §4's two projection rows (once "not measured on their own"), now selectable (this commit's --only).
 #     GDN layers are 81 % of the projection bytes and own the 5 %-efficient shapes; if the GDN row
 #     comes back at the family's 63 % and attention at 85 %, the narrow-shape work has a target.
 #     run.py takes the lock itself.
@@ -1017,7 +1017,7 @@ IDS4032=$(ids_for 4000)     # redefine if this is a fresh shell; `ids_for` costs
 for i in 4 5 6 7 8; do ./engine/build/decode_run --ids "$IDS4032" --steps 32 --time-stages > tmp/q61/stage4032_$i.log; done
 tools/gpu_lock.sh release q61-4032
 
-# 4 · hand-off item 2: ledger §2's two "not measured on their own" rows. `--only` needs `--time`, and
+# 4 · hand-off item 2: ledger §4's two projection rows (once "not measured on their own"). `--only` needs `--time`, and
 #     run.py takes the lock itself — do NOT hold it across these two.
 .venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time --only gdn
 .venv/bin/python prototype/proj_gemv/run.py --layers all --steps all --time --only attn

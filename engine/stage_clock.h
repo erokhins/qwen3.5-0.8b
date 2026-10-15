@@ -1,7 +1,7 @@
 #pragma once
 // engine/stage_clock.h — the instrument that can tell which of two stories a decode step is.
 //
-// WHY THIS EXISTS. `bench/performance-status.md` §6 and `engine/results.md`'s Q6 section leave a
+// WHY THIS EXISTS. progress/2026-10-16/performance-status-2026-10-16.md:629 (the frozen ledger's Q6) and `engine/results.md`'s Q6 section leave a
 // ~3.4-3.6 ms residue inside a ~12.9 ms token: the named families account for ~9.4 ms, and all 424
 // launches priced at the block width each site actually uses are only ~1.6 ms of dispatch. Two
 // stories fit that residue and they need OPPOSITE fixes:
