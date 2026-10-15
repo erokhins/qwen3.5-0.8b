@@ -200,6 +200,16 @@ no child deadline fixes.
   lump, `git reset --soft` and re-commit it in topical pieces; nothing here is pushed, so
   splitting is free. A backup ref (`git branch backup-<something>`) before rewriting history is
   cheap and worth it.
+- **Commit messages: a short header, then a body that explains.** Header ≤ 72 chars, in the form
+  `area: what the commit does` (`engine:`, `prototype/gdn_decode:`, `tools:`, `docs:`, `bench:`,
+  `specification:`), one clause, no trailing punctuation — `git log --oneline` is the only view most
+  readers get. Then `\n\n` and a body in short paragraphs saying **what** changed and **why** it was
+  needed, including the number or the failure that forced it and a pointer to the file that holds the
+  evidence (`prototype/<op>/results.md` §n, a `bench/` doc). A one-line message is only correct for a
+  commit whose whole content is obvious from its diff — a typo, a renamed file. The 405 history
+  commits were rewritten to this shape on 2026-10-16 by `tools/commit_msg_rewrite.py`, which refuses
+  a set that loses a word or leaves a `TODO-HEADER` sentinel; do not hand-edit a `results.md` line
+  number into a message that a later rewrap would move.
 
 ## Execution policy: keep moving, report at milestones (user, 2026-10-14)
 
