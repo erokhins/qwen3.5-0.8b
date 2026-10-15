@@ -63,6 +63,25 @@ at — the census §2.4(a) shows the same filename means three different files i
 fenced block is a shell comment, not a heading: `grep -c '^# ' engine/results.md` reads 86 and
 72 of those are inside fences. Fence-aware, `engine/results.md` is 14 H1 / 72 H2 / 33 H3.
 
+## What `--verify-quotes` adjudicates
+
+Option (a′) of `progress/2026-10-16/archive-review-2026-10-16.md` §4 extracts by quotation precisely
+because a copy can drift and a move cannot be undone, and it named the mitigation: "every row carries
+its `N:NNN` anchor, so drift is checkable by `sed -n 'Np'`". That is a promise a reader has to keep by
+hand, so this is the promise as a check. It reads a document for markers of the form
+
+    quoted from `path:START-END`
+
+and for each one asserts that the fenced block below it equals `sed -n 'START,ENDp'` of that path —
+line for line, modulo the fence itself and whatever uniform indent the quote uses (a quote inside a
+list item is the same text). Comparison is exact otherwise: one changed word, a dropped line, an
+endpoint one past the end, a marker with no block under it, and a document with no markers at all all
+fail it. A marker line inside a quoted block is content, never a marker, because the fence is
+consumed as a unit. Two normalizations are refused on purpose: trailing blank lines are NOT stripped,
+so a marker whose END lands on a separator blank must quote it (and `--anchors` will reject that same
+cite as landing on a blank — write the marker to the last line that carries text), and interior
+blanks are part of the text.
+
 ## The AGENTS.md rule this obeys
 
 A driver whose parsed list can be empty cannot fail. So every counter here reports the number of
@@ -80,16 +99,20 @@ Usage:
   python3 tools/citation_census.py --check --list F1
   python3 tools/citation_census.py --anchors                 # whole tree
   python3 tools/citation_census.py --anchors engine/gate.py # one citing file
+  python3 tools/citation_census.py --verify-quotes progress/2026-10-16/journal-chronology-2026-10-16.md
   python3 tools/citation_census.py --selftest
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import os
 import re
 import subprocess
 import sys
+import tempfile
 
 # The census's $T alternation, verbatim (§2.1). Order matters only for readability: a regex
 # alternation is first-match-wins, and every alternative here is a distinct path shape.
@@ -580,6 +603,167 @@ def cmd_anchors(paths: list[str], show_notes: bool = False) -> int:
     return 1 if bad else 0
 
 
+# ---------------------------------------------------------------- quotation verification
+# The marker form is fixed by `progress/2026-10-16/archive-review-2026-10-16.md` §4 option (a′):
+# a quoted block says where it came from in this one shape, so a checker can hold the copy to the
+# journal. Deliberately narrow — a marker that could be written four ways could be checked zero ways.
+QUOTE_MARKER_RE = re.compile(r"quoted from `(?P<path>[^`]+):(?P<start>\d+)-(?P<end>\d+)`")
+# An opening fence: optional indent, then 3+ identical fence chars, then an optional info string. The
+# info string is why ```bash works as an outer fence; a closing fence must be bare and at least as
+# long as the opener, which is what lets a quote whose source contains ``` be wrapped in ````.
+QUOTE_FENCE_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})(?P<info>[^`\r\n]*)$")
+
+
+class QuoteBlock:
+    """One `quoted from `path:START-END`` marker and the fenced block under it."""
+
+    __slots__ = ("path", "start", "end", "marker_line", "quoted", "status", "detail")
+
+    def __init__(self, path: str, start: int, end: int, marker_line: int) -> None:
+        self.path, self.start, self.end, self.marker_line = path, start, end, marker_line
+        self.quoted: list[str] = []
+        self.status = "unparsed"
+        self.detail = ""
+
+    @property
+    def anchor(self) -> str:
+        return "%s:%d-%d" % (self.path, self.start, self.end)
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+    @property
+    def n_lines(self) -> int:
+        return max(0, self.end - self.start + 1)
+
+
+def unindent(lines: list[str], indent: int) -> list[str]:
+    """Remove the uniform indent a quote uses. Blank lines stay blank; a shallower line is a bug and
+    is left alone rather than silently grown."""
+    out = []
+    for line in lines:
+        if not line.strip():
+            out.append("")
+        else:
+            lead = len(line) - len(line.lstrip())
+            out.append(line[min(indent, lead):])
+    return out
+
+
+def parse_quote_blocks(doc_lines: list[str]) -> list[QuoteBlock]:
+    """Every marker in `doc_lines`, with its fenced block. A marker inside a quoted block is part of
+    that block's text — fences are consumed as units, so a quote can quote this document."""
+    blocks: list[QuoteBlock] = []
+    i = 0
+    while i < len(doc_lines):
+        m = QUOTE_MARKER_RE.search(doc_lines[i])
+        if not m:
+            i += 1
+            continue
+        block = QuoteBlock(m.group("path"), int(m.group("start")), int(m.group("end")), i + 1)
+        i += 1
+        while i < len(doc_lines) and not doc_lines[i].strip():
+            i += 1
+        opener = QUOTE_FENCE_RE.match(doc_lines[i]) if i < len(doc_lines) else None
+        if opener is None:
+            block.status = "no-block"
+            block.detail = "the line below the marker is not a fenced block"
+            blocks.append(block)
+            continue
+        fence, indent = opener.group("fence"), len(opener.group("indent"))
+        body: list[str] = []
+        closed = None
+        i += 1
+        while i < len(doc_lines):
+            line = doc_lines[i]
+            line_indent = len(line) - len(line.lstrip())
+            if (line.strip() and set(line.strip()) == {fence[0]}
+                    and len(line.strip()) >= len(fence) and line_indent <= indent):
+                closed = i
+                break
+            body.append(line)
+            i += 1
+        if closed is None:
+            block.status = "no-block"
+            block.detail = "the fence opened at line %d is never closed" % (i - len(body))
+            blocks.append(block)
+            continue
+        block.quoted = unindent(body, indent)
+        block.status = "quoted"
+        blocks.append(block)
+        i = closed + 1
+    return blocks
+
+
+def verify_block(block: QuoteBlock, lines_for=target_lines) -> QuoteBlock:
+    """Fill in the verdict: the quote must equal `sed -n 'START,ENDp'` of its path, line for line."""
+    if block.status != "quoted":
+        return block
+    source = lines_for(block.path)
+    if source is None:
+        block.status = "missing-target"
+        block.detail = "%s is not on disk, so nothing can be quoted from it" % block.path
+        return block
+    if block.end > len(source):
+        block.status = "past-end"
+        block.detail = ("line %d is past the end (%s has %d lines)"
+                        % (block.end, block.path, len(source)))
+        return block
+    want = source[block.start - 1:block.end]
+    if len(block.quoted) != len(want):
+        block.status = "drift"
+        block.detail = ("the block holds %d lines, the anchor claims %d"
+                        % (len(block.quoted), len(want)))
+        return block
+    for k, (got, expected) in enumerate(zip(block.quoted, want)):
+        if got != expected:
+            block.status = "drift"
+            block.detail = ("line %d of the block differs\n            quoted: %r\n            "
+                            "source: %r" % (k + 1, got[:100], expected[:100]))
+            return block
+    block.status = "ok"
+    block.detail = "%d lines" % len(want)
+    return block
+
+
+def cmd_verify_quotes(path: str) -> int:
+    """Per-block PASS/FAIL for one document of quotations. Zero blocks is a failure, never a pass."""
+    try:
+        doc = read_lines(path)
+    except OSError as exc:
+        print("citation_census --verify-quotes: cannot read %s: %s" % (path, exc), file=sys.stderr)
+        return 2
+    blocks = [verify_block(b) for b in parse_quote_blocks(doc)]
+    print("citation_census --verify-quotes %s" % path)
+    if not blocks:
+        print("  ZERO quoted blocks parsed — no `quoted from `path:START-END`` marker in this\n"
+              "  document, so it adjudicates nothing. This is a failure, not a pass.")
+        return 1
+    read_targets: set[str] = set()
+    failed = 0
+    quoted_lines = 0
+    for block in blocks:
+        if block.path:
+            read_targets.add(block.path)
+        if block.ok:
+            quoted_lines += len(block.quoted)
+        else:
+            failed += 1
+        print("  %-5s %s  (marker at line %d) %s"
+              % ("PASS" if block.ok else "FAIL", block.anchor, block.marker_line, block.detail))
+    print("  %d blocks parsed, %d passed, %d failed; %d quoted lines verified; %d source file(s) "
+          "read (%s)" % (len(blocks), len(blocks) - failed, failed, quoted_lines, len(read_targets),
+                         ", ".join(sorted(read_targets))))
+    if failed:
+        print("VERIFY FAIL — %d of %d quoted blocks do not match the lines they cite"
+              % (failed, len(blocks)))
+        return 1
+    print("VERIFY PASS — all %d quoted blocks equal `sed -n 'START,ENDp'` of their source (%d "
+          "lines)" % (len(blocks), quoted_lines))
+    return 0
+
+
 # ---------------------------------------------------------------- selftest
 FIXTURE = {
     "doc.md": [
@@ -595,6 +779,26 @@ FIXTURE = {
     ],
     "short.md": ["one", "two", "", "four"],
     "prototype/glue/results.md": ["glue line 1", "glue line 2"],
+}
+
+# The quoted source for the --verify-quotes cases: a virtual journal, 7 lines, with a fenced block in
+# the middle so a quote of it has to survive an inner ``` fence. The name carries an extension neither
+# checker recognises on purpose: this file is tracked, so a fixture string in the line-form shape (a
+# `.md` path plus `:3-4`) is a citation as far as `--anchors` and `tools/doc_ref_check.py` are
+# concerned, and a
+# fixture whose anchors only make sense against the fixture would print as a broken cite in the
+# shipping tool's own report. The real-on-disk path is exercised by `--verify-quotes` over
+# `progress/2026-10-16/journal-chronology-2026-10-16.md`, which is what the mode exists for.
+QUOTE_SOURCE = {
+    "journal.qd": [
+        "# journal",
+        "",
+        "body one",
+        "body two",
+        "```bash",
+        "# cmd: a fence line inside the quoted source",
+        "```",
+    ],
 }
 
 
@@ -704,6 +908,62 @@ def selftest() -> int:
     report("mut: a counter reports an empty record list as admissible",
            not count_pattern(re.compile(r"§ZZZ"), ["doc.md", "short.md"]).integrity(),
            must_fail=True)
+
+    # --- quotation verification: `--verify-quotes` ---------------------------------
+    # The quote cases quote a virtual source whose line numbers are also valid in the real
+    # `engine/results.md`, so this file's own fixture strings stay resolvable citations.
+    def qverify(doc_lines: list[str]) -> list[QuoteBlock]:
+        return [verify_block(b, lines_for=QUOTE_SOURCE.get) for b in parse_quote_blocks(doc_lines)]
+
+    q_ok = qverify(["quoted from `journal.qd:3-4`", "", "````", "body one", "body two",
+                    "````"])
+    report("--verify-quotes: a verbatim block matches its anchor",
+           [b.status for b in q_ok] == ["ok"] and q_ok[0].n_lines == 2)
+    q_indent = qverify(["- a list item quotes it", "", "    quoted from `journal.qd:3-4`",
+                        "", "    ````", "    body one", "    body two", "    ````"])
+    report("--verify-quotes: a uniform indent is the quote's, not the source's",
+           [b.status for b in q_indent] == ["ok"])
+    q_fence = qverify(["quoted from `journal.qd:5-7`", "", "````", "```bash",
+                       "# cmd: a fence line inside the quoted source", "```", "````"])
+    report("--verify-quotes: a longer outer fence survives a source that contains ```",
+           [b.status for b in q_fence] == ["ok"])
+    q_nested = qverify(["quoted from `journal.qd:3-4`", "", "````",
+                        "body one", "quoted from `journal.qd:3-4`", "````"])
+    report("--verify-quotes: a marker inside a quoted block is content, not a second marker",
+           len(q_nested) == 1 and q_nested[0].status == "drift")
+
+    q_word = qverify(["quoted from `journal.qd:3-4`", "", "````", "body one",
+                      "body three", "````"])
+    report("mut: --verify-quotes accepts a quote that drifted by one word",
+           q_word[0].status == "ok", must_fail=True)
+    report("--verify-quotes names the differing line, not just the count",
+           "line 2 of the block differs" in q_word[0].detail)
+    q_short = qverify(["quoted from `journal.qd:3-4`", "", "````", "body one", "````"])
+    report("mut: --verify-quotes accepts a block that dropped the anchor's last line",
+           q_short[0].status == "ok", must_fail=True)
+    q_past = qverify(["quoted from `journal.qd:1-9`", "", "````", "# journal", "", "body one",
+                      "body two", "```bash", "# cmd: a fence line inside the quoted source", "```",
+                      "````"])
+    report("mut: --verify-quotes accepts an anchor past the end of its source",
+           q_past[0].status == "ok", must_fail=True)
+    q_nofence = qverify(["quoted from `journal.qd:3-4`", "", "nothing fenced here"])
+    report("mut: --verify-quotes accepts a marker with no block under it",
+           q_nofence[0].status == "ok", must_fail=True)
+
+    # The AGENTS.md rule, tested end to end: a document that quotes nothing must not print a verdict
+    # that reads like a pass. This one case runs the command itself, over a throwaway file.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        empty_doc = os.path.join(tmpdir, "no-quotes.md")
+        with open(empty_doc, "w", encoding="utf-8") as fh:
+            fh.write("# a document\n\nIt quotes nothing, so it adjudicates nothing.\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc_empty = cmd_verify_quotes(empty_doc)
+    report("mut: --verify-quotes PASSes on a document with zero blocks",
+           rc_empty == 0, must_fail=True)
+    report("--verify-quotes says ZERO blocks out loud, in the verdict line itself",
+           "ZERO quoted blocks" in buf.getvalue())
+
     report("mut: a selftest case that is simply wrong", 1 == 2, must_fail=True)
 
     print()
@@ -724,6 +984,9 @@ def main(argv: list[str]) -> int:
     mode.add_argument("--anchors", nargs="*", metavar="PATH",
                       help="resolve every path:NNN citation in PATH(s), or in every tracked "
                            "md/code file")
+    mode.add_argument("--verify-quotes", metavar="PATH",
+                      help="assert every `quoted from `path:START-END`` block in PATH is exactly the "
+                           "lines it cites; zero blocks is a failure")
     mode.add_argument("--selftest", action="store_true",
                       help="run the synthetic fixtures and the mutation harness")
     ap.add_argument("--list", metavar="FORM", default=None,
@@ -740,6 +1003,8 @@ def main(argv: list[str]) -> int:
         return cmd_check(args.list)
     if args.anchors is not None:
         return cmd_anchors(args.anchors, show_notes=args.all)
+    if args.verify_quotes:
+        return cmd_verify_quotes(args.verify_quotes)
     return 2
 
 
