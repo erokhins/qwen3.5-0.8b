@@ -4491,3 +4491,8 @@ injection is diluted out of the pooled statistic. It fails identically at the co
 it is not a consequence of this change; it is reported rather than re-needled, because a negative that
 only bites at one corpus size is a question about the needle's sizing and not a band to move.
 
+**Pointer, 2026-10-16.** The chronicle and superseded sections of this file are quoted, block by block
+and with the range each came from, in `progress/2026-10-16/journal-chronology-2026-10-16.md`; the census
+that classes them is `progress/2026-10-16/archive-review-2026-10-16.md` §1. **The line numbers here are
+load-bearing: 96 of the 101 line-form citations that census counted live in `progress/`, which rule 2
+freezes, and 51 point into this file — so nothing is deleted, moved or re-wrapped, only appended.**
