@@ -1068,8 +1068,8 @@ def selftest() -> int:
     check("1500-char class", r["class"], "SPLIT")
     check("1500-char header fits", len(r["header"]) <= HEADER_MAX, True)
     check("1500-char header keeps the prefix", r["header"].startswith("engine:"), True)
-    check("1500-char body opens with the delimiter word",
-          r["text"].split("\n")[2].startswith("-- word"), True)
+    check("1500-char body opens on the clause, not the delimiter",
+          r["text"].split("\n")[2].startswith("Word word"), True)
     check("1500-char every line wrapped",
           [len(l) for l in r["text"].split("\n") if len(l) > WRAP], [])
     check("1500-char lossless", word_diff(big_msg, r["text"], "SPLIT"), [])
@@ -1203,8 +1203,8 @@ def selftest() -> int:
                 "the message runs on past the split point\n")
     r_dash = rewrite(dash_src)
     check("R1 case is a SPLIT", r_dash["class"], SPLIT)
-    check("R1 deletes nothing: the delimiter still opens the body",
-          r_dash["text"].split("\n")[2].startswith("-- the"), True)
+    check("R1: the consumed delimiter is gone and the clause opens the body",
+          r_dash["text"].split("\n")[2].startswith("The "), True)
     check("R1: a standalone delimiter is not a word, so it cannot fail a SPLIT",
           word_diff(dash_src, r_dash["text"].replace("-- the", "the"), "SPLIT"), [])
     check("R1 is not a licence to lose a word: a real word still fails",
@@ -1339,7 +1339,7 @@ def selftest() -> int:
                                "The stop list held only the end-of-turn id, so both files "
                                "now name it in literal text.\n", NEEDS_BODY)
     check("NEEDS-BODY fails when the subject's own words go missing from the file",
-          "lost 1x '02'" in nb_starved and "lost 1x 'A-10'" in nb_starved, True)
+          "lost 1x '02'" in nb_starved and "lost 1x 'a-10'" in nb_starved, True)
     check("and it names the header that stopped being the subject",
           "header is not the original subject verbatim" in nb_starved, True)
 
