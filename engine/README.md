@@ -8,7 +8,7 @@ token loop**: per-request state, one launcher per graduated kernel, and `decode_
 token through all of it. `engine/decode_run.cpp` drives it and `engine/gate.py` gates it against the
 pinned `dec8` fixture. **Two device passes have run** (`engine/results.md`, last section): the loader
 loads, `check_weights` passes, the state sizes and the 424-launch plan verify against §07, and the loop
-executes — but **no generation token has come out of this engine yet.** The first two runs ended inside
+executes — but **no generation token has come out of this engine yet.** **Retired 2026-10-16: the engine free-runs the corpus — `engine/results.md` §"the engine free-runs the corpus" is the live statement, and what follows this sentence is the record of those first two device passes.** The first two runs ended inside
 the prompt because §07.5's stop check was armed during it; that is fixed in `5e7114b`, and the token
 result is what the next device pass is for.
 
@@ -39,12 +39,12 @@ and leaves the text path resident on the device.
 
 ## What this is NOT yet
 
-* No `prefill.{h,cpp}`. A prompt is fed to `decode_step` one token at a time — which is what
+* No `prefill.{h,cpp}`. **Retired 2026-10-16: `engine/prefill.{h,cpp}` exists — `engine/results.md` §P2 is the live statement; this bullet is the pre-prefill record.** A prompt is fed to `decode_step` one token at a time — which is what
   `gate.py` does and what a chunked prefill would have to agree with, but it is 17 separate calls
   where the reference does one chunked forward, so prefill is slow and its GDN layers run the
   recurrence where the reference ran the chunked form (§10.5). The token gate does not care; a
   prefill-throughput gate will.
-* No MTP drafting, no batching, no sampler other than greedy, no KV eviction (§08.7).
+* No MTP drafting, no batching, no sampler other than greedy, no KV eviction (§08.7). **Retired in part 2026-10-16: the prompt is now a wave and the kernels batch over it — `engine/results.md` §Q5 (P4/P4b: batching cost exactly nothing numerically); MTP drafting, a non-greedy sampler and KV eviction are still absent.**
 * Slab allocation, multi-shard streaming, and loading are unchanged from the per-tensor
   pattern described above (fine at 4 % of the pool; see `results.md` for what it costs).
 
@@ -464,9 +464,9 @@ the two named deferrals:
 
 1. **Run the device pass above**, in a quiescent window, and land the result in `results.md` and
    `bench/performance-status.md` §6 (including the first ms/token figure, which the ledger has never
-   had for the engine).
+   had for the engine). **Retired 2026-10-16: device passes have run many times since, and the ledger carries the engine's ms/token rows — `bench/performance-status.md` §6 is the live statement.**
 2. `prefill.{h,cpp}` — token-at-a-time through `decode_step` is already what `gate.py` does, so this
-   is a chunked/parallel prefill and nothing else. It is a throughput item, not a correctness one.
+   is a chunked/parallel prefill and nothing else. It is a throughput item, not a correctness one. **Retired 2026-10-16: `engine/prefill.{h,cpp}` exists — `engine/results.md` §P2 is the live statement.**
 3. The two levers `results.md` defers: packed projections (merges the 16-row `in_proj_a`/`in_proj_b`
    launches and several other small dots) and BF16-staged `mlp_gateup`/`mlp_down` (would remove 48 of
    the 115 casts/token). Both are launch-count and traffic wins; neither is a correctness item, and
