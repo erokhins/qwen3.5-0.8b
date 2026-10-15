@@ -423,7 +423,7 @@ the `:3739` suffix (its own selftest asserts `"line cite engine/results.md:3739 
 S2 is the minimal complete fix: keep `ROOTS`, widen the file set, add the anchor and label resolvers,
 and add two selftest cases (`anchor past end of file → broken`, `label not in headings → broken`).
 
-## 6. The second deferred item: `bench/run.py`
+## 6. The second deferred item: `bench/run.py` — EXECUTED 2026-10-16, now `testdata/run.py`
 
 **Ruling: move it to `testdata/run.py`. The census makes it safe.** It is the only non-doc file in
 `bench/`, its corpus is `testdata/`, and its blast radius is measured, not guessed:
@@ -511,3 +511,18 @@ newline. Consequences fixed in place: the movable set is **883 lines, 20 %**,
 not 853/19 %, and option (c) moves **618 lines, 14 %**, not 588/19 %. The
 percentages were carried over from the wrong numerator twice, which a totals
 sentence that nobody re-adds is especially good at hiding.
+
+**S6 landed, and §6 is now a plan that was carried out.** `bench/run.py` is
+`testdata/run.py`; `bench.sh`, `testdata/README.md` and the eight archive path
+cites were updated same-line, so no archive line number moved. §6's own five
+remaining mentions of the old path are deliberate history — they describe the
+tree before the move, and `tools/doc_ref_check.py` will keep reporting them as
+missing paths, which is what an executed plan should look like to a checker.
+Where the census miscounted here: its §6 table lists 8 archive cites and misses
+the 6 sitting in this document's own §6 prose — the second time in one day that
+this file undercounted itself.
+
+Corrected on the same pass, in the root `README.md`, which this review never
+enumerated: `:47` still read "**No end-to-end engine number exists yet**" and
+`:125` still placed the speed runner in `bench/`. Both fixed same-line, because
+`progress/2026-10-16/cleanup-audit-2026-10-16.md:179` cites `README.md:186`.

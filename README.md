@@ -44,10 +44,10 @@ measured 237 GB/s → **~151 tok/s** theoretical (§07.4, confirmed by
 correctness oracle rather than a prototype engine) is 6× below it — which is exactly the
 gap the engine exists to close.
 
-**No end-to-end engine number exists yet.** `bench/performance-status.md` is the honest
-ledger: what has been measured on the GPU (three numbers), what fraction of a token that
-covers (**32 % of the bytes, at 102 % of roofline**), and what is projected from there
-(145–153 tok/s, with the assumptions listed). Read it before quoting a tokens/s figure.
+**The engine runs end to end.** `bench/performance-status.md` is the honest ledger:
+decode **87.1 tok/s at 128 lanes** and prefill **3,331 tok/s at 1024 lanes** are
+measured device numbers; §6 is the live table and §1–§5 above it are the superseded
+pre-clean window. Carry the lane count and the ledger row with any tokens/s figure.
 
 ## Target model — verified facts
 
@@ -122,7 +122,7 @@ specification/               # math-only, library-agnostic forward-pass spec (�
 speccheck/                   # independent Python implementation of that spec + all gates (NOT the engine)
 speccheck/chat.sh            # interactive chat on that path, with prefill/decode stats
 testdata/                    # engine-agnostic speed tests (long summarise, long poem) + schema
-bench/                       # engine-agnostic runner; bench.sh at the root drives it
+bench/                       # the ledger and audits; the runner moved to testdata/
 progress/                    # archive: dated one-shot docs in <YYYY-MM-DD>/ dirs, plus
                              # progress/<owner>/evidence/ for the committed evidence files
 engine/                      # the engine: kernels, residency, scheduler, state pools, drivers
