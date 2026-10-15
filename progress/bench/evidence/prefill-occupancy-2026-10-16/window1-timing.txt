@@ -1,0 +1,64 @@
+=== plain T=1024 run=1 21:19:52
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+RESULT mode=run steps=1025 ms_total=374.014 ms_per_step=0.365 last_sampled=3000 prefix_len=1025 stopped=0
+=== plain T=1024 run=2 21:19:54
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+RESULT mode=run steps=1025 ms_total=321.695 ms_per_step=0.314 last_sampled=3000 prefix_len=1025 stopped=0
+=== plain T=1024 run=3 21:19:55
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+RESULT mode=run steps=1025 ms_total=335.832 ms_per_step=0.328 last_sampled=3000 prefix_len=1025 stopped=0
+=== plain T=2048 run=1 21:19:56
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+RESULT mode=run steps=2049 ms_total=640.612 ms_per_step=0.313 last_sampled=264 prefix_len=2049 stopped=0
+=== plain T=2048 run=2 21:19:57
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+RESULT mode=run steps=2049 ms_total=633.741 ms_per_step=0.309 last_sampled=264 prefix_len=2049 stopped=0
+=== plain T=2048 run=3 21:19:58
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+RESULT mode=run steps=2049 ms_total=629.788 ms_per_step=0.307 last_sampled=264 prefix_len=2049 stopped=0
+=== plain T=4096 run=1 21:19:59
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+=== plain T=4096 run=2 21:20:01
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+=== plain T=4096 run=3 21:20:04
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=library hipblas=3.6.0 attn_tile=1 gdn_scan=seq gdn_chunk=64
+=== time-waves T=1024 21:20:06
+WAVEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 rows_compared=1 first_mismatch=none
+WAVEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 rows_compared=1 first_mismatch=none
+WAVE gran=stage family=glue            ms=3.7965 share_pct=1.50 launches=98 segments=98 ms_per_launch=0.03874 rows_total=50176 launchstats_calls=98 plan_launches=98 counts_match=1
+WAVE gran=stage family=proj            ms=39.7239 share_pct=15.74 launches=228 segments=96 ms_per_launch=0.17423 rows_total=116736 launchstats_calls=228 plan_launches=228 counts_match=1
+WAVE gran=stage family=gdn_conv        ms=4.4376 share_pct=1.76 launches=36 segments=36 ms_per_launch=0.12327 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+WAVE gran=stage family=gdn_gates       ms=0.4102 share_pct=0.16 launches=36 segments=36 ms_per_launch=0.01140 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+WAVE gran=stage family=gdn_rec         ms=128.3055 share_pct=50.85 launches=18432 segments=36 ms_per_launch=0.00696 rows_total=18432 launchstats_calls=-1 plan_launches=18432 counts_match=1 rows_note=one_row_per_launch_by_construction
+WAVE gran=stage family=gdn_gated_norm  ms=2.3724 share_pct=0.94 launches=36 segments=36 ms_per_launch=0.06590 rows_total=18432 launchstats_calls=36 plan_launches=36 counts_match=1
+WAVE gran=stage family=attn            ms=27.2278 share_pct=10.79 launches=12 segments=12 ms_per_launch=2.26898 rows_total=6144 launchstats_calls=12 plan_launches=12 counts_match=1
+WAVE gran=stage family=mlp_gateup      ms=26.5184 share_pct=10.51 launches=48 segments=48 ms_per_launch=0.55247 rows_total=24576 launchstats_calls=48 plan_launches=48 counts_match=1
+WAVE gran=stage family=mlp_down        ms=6.3106 share_pct=2.50 launches=48 segments=48 ms_per_launch=0.13147 rows_total=24576 launchstats_calls=48 plan_launches=48 counts_match=1
+WAVE gran=stage family=cast            ms=7.3208 share_pct=2.90 launches=229 segments=229 ms_per_launch=0.03197 rows_total=0 launchstats_calls=-1 plan_launches=229 counts_match=1 rows_note=no_launcher_row_width
+WAVE gran=stage family=copy            ms=2.6731 share_pct=1.06 launches=1060 segments=38 ms_per_launch=0.00252 rows_total=0 launchstats_calls=-1 plan_launches=1060 counts_match=1 rows_note=no_launcher_row_width
+WAVE gran=stage family=lm_head         ms=2.2580 share_pct=0.89 launches=1 segments=1 ms_per_launch=2.25796 rows_total=0 launchstats_calls=-1 plan_launches=1 counts_match=1 rows_note=no_launcher_row_width
+WAVE gran=stage family=host_tail       ms=0.9545 share_pct=0.38 launches=0 segments=1 ms_per_launch=0.00000 rows_total=0 launchstats_calls=-1 plan_launches=0 counts_match=1 rows_note=no_launcher_row_width
+WAVE gran=stage TOTAL tokens=1024 bodies=2 wave_rows=512 priced_rows=1 wall_ms=252.3298 sum_ms=252.3093 ungaged_ms=0.0206 ungaged_pct=0.008 tol_ms=2.5233 within_tol=1 launches=20264 plan_launches=20264 plan_match=1 launchstats_families=8 launchstats_match=1 syncs=715 body1_plan_matches_token_plan=1
+WAVE gran=stage GROUP matmul_ms=72.5528 matmul_pct=28.75 nonmatmul_pct=71.25 gdn_all_pct=53.71 gdn_rec_pct=50.85 gdn_batched_pct=2.86 attn_pct=10.79 glue_pct=1.50 cast_pct=2.90 copy_pct=1.06 lm_head_pct=0.89 host_tail_pct=0.38
+WAVEGAP gran=stage burst_wall_ms=248.0442 serialized_wall_ms=252.3298 exposed_ms=4.2856 ratio=1.017
+=== time-waves T=2048 21:20:07
+WAVEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 rows_compared=1 first_mismatch=none
+WAVEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 rows_compared=1 first_mismatch=none
+WAVE gran=stage family=glue            ms=7.3093 share_pct=1.32 launches=196 segments=196 ms_per_launch=0.03729 rows_total=100352 launchstats_calls=196 plan_launches=196 counts_match=1
+WAVE gran=stage family=proj            ms=76.6620 share_pct=13.83 launches=456 segments=192 ms_per_launch=0.16812 rows_total=233472 launchstats_calls=456 plan_launches=456 counts_match=1
+WAVE gran=stage family=gdn_conv        ms=9.3370 share_pct=1.68 launches=72 segments=72 ms_per_launch=0.12968 rows_total=36864 launchstats_calls=72 plan_launches=72 counts_match=1
+WAVE gran=stage family=gdn_gates       ms=0.8515 share_pct=0.15 launches=72 segments=72 ms_per_launch=0.01183 rows_total=36864 launchstats_calls=72 plan_launches=72 counts_match=1
+WAVE gran=stage family=gdn_rec         ms=259.7403 share_pct=46.87 launches=36864 segments=72 ms_per_launch=0.00705 rows_total=36864 launchstats_calls=-1 plan_launches=36864 counts_match=1 rows_note=one_row_per_launch_by_construction
+WAVE gran=stage family=gdn_gated_norm  ms=4.6550 share_pct=0.84 launches=72 segments=72 ms_per_launch=0.06465 rows_total=36864 launchstats_calls=72 plan_launches=72 counts_match=1
+WAVE gran=stage family=attn            ms=104.3226 share_pct=18.83 launches=24 segments=24 ms_per_launch=4.34678 rows_total=12288 launchstats_calls=24 plan_launches=24 counts_match=1
+WAVE gran=stage family=mlp_gateup      ms=53.6815 share_pct=9.69 launches=96 segments=96 ms_per_launch=0.55918 rows_total=49152 launchstats_calls=96 plan_launches=96 counts_match=1
+WAVE gran=stage family=mlp_down        ms=13.7346 share_pct=2.48 launches=96 segments=96 ms_per_launch=0.14307 rows_total=49152 launchstats_calls=96 plan_launches=96 counts_match=1
+WAVE gran=stage family=cast            ms=15.0870 share_pct=2.72 launches=457 segments=457 ms_per_launch=0.03301 rows_total=0 launchstats_calls=-1 plan_launches=457 counts_match=1 rows_note=no_launcher_row_width
+WAVE gran=stage family=copy            ms=5.3221 share_pct=0.96 launches=2120 segments=76 ms_per_launch=0.00251 rows_total=0 launchstats_calls=-1 plan_launches=2120 counts_match=1 rows_note=no_launcher_row_width
+WAVE gran=stage family=lm_head         ms=2.2520 share_pct=0.41 launches=1 segments=1 ms_per_launch=2.25197 rows_total=0 launchstats_calls=-1 plan_launches=1 counts_match=1 rows_note=no_launcher_row_width
+WAVE gran=stage family=host_tail       ms=1.1288 share_pct=0.20 launches=0 segments=1 ms_per_launch=0.00000 rows_total=0 launchstats_calls=-1 plan_launches=0 counts_match=1 rows_note=no_launcher_row_width
+WAVE gran=stage TOTAL tokens=2048 bodies=4 wave_rows=512 priced_rows=1 wall_ms=554.1336 sum_ms=554.0836 ungaged_ms=0.0500 ungaged_pct=0.009 tol_ms=5.5413 within_tol=1 launches=40526 plan_launches=40526 plan_match=1 launchstats_families=8 launchstats_match=1 syncs=1427 body1_plan_matches_token_plan=1
+WAVE gran=stage GROUP matmul_ms=144.0781 matmul_pct=26.00 nonmatmul_pct=74.00 gdn_all_pct=49.55 gdn_rec_pct=46.87 gdn_batched_pct=2.68 attn_pct=18.83 glue_pct=1.32 cast_pct=2.72 copy_pct=0.96 lm_head_pct=0.41 host_tail_pct=0.20
+WAVEGAP gran=stage burst_wall_ms=548.5646 serialized_wall_ms=554.1336 exposed_ms=5.5689 ratio=1.010
+=== time-waves T=4096 21:20:10
+=== window1 done 21:20:12

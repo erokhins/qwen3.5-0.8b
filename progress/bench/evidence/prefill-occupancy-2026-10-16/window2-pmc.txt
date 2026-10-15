@@ -1,0 +1,14 @@
+=== T=1024 pass=A counters: SQ_INSTS SQ_INSTS_VALU SQ_INSTS_LDS SQ_INSTS_VMEM SQ_WAVES  21:23:54
+rc=0 (profiler runs are not timed)
+=== T=1024 pass=B counters: GL2C_HIT GL2C_MISS GL2C_EA_RDREQ_64B  21:24:11
+rc=0 (profiler runs are not timed)
+=== T=2048 pass=A counters: SQ_INSTS SQ_INSTS_VALU SQ_INSTS_LDS SQ_INSTS_VMEM SQ_WAVES  21:24:28
+rc=0 (profiler runs are not timed)
+=== T=2048 pass=B counters: GL2C_HIT GL2C_MISS GL2C_EA_RDREQ_64B  21:24:46
+rc=0 (profiler runs are not timed)
+=== window2 done 21:25:04
+tmp/pmc-occ/T1024_A/c_counter_collection.csv
+tmp/pmc-occ/T1024_B/c_counter_collection.csv
+tmp/pmc-occ/T2048_A/c_counter_collection.csv
+tmp/pmc-occ/T2048_B/c_counter_collection.csv
+gpu use: 10%

@@ -1,0 +1,8 @@
+=== C_attn  regex=attn  counters: SQ_WAVE_CYCLES SQ_BUSY_CYCLES SQ_LEVEL_WAVES SQ_WAVES_DELAYED  21:29:26
+rc=0 (profiled run: counts only, never timings)
+=== D_attn  regex=attn  counters: SQ_INSTS SQ_INSTS_SALU SQ_INSTS_VALU SQ_INSTS_LDS SQ_INSTS_VMEM_RD SQ_INSTS_VMEM_WR SQ_INSTS_SMEM SQ_INSTS_MISC SQ_INSTS_WAIT SQ_INSTS_NO_INSTRUCTION_ISSUED  21:29:43
+rc=0 (profiled run: counts only, never timings)
+=== E_all  regex=*  counters: GL2C_EA_RDREQ_64B GL2C_HIT GL2C_MISS  21:30:00
+rc=0 (profiled run: counts only, never timings)
+=== window3 done 21:30:19
+gpu use: 11%
