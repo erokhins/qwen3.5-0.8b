@@ -1,4 +1,4 @@
-# `gdn_gated_norm` — §04.5's gated RMSNorm, k = 1 (kernel + gate **compiled; the first device run failed and the cause is not established**)
+# `gdn_gated_norm` — §04.5's gated RMSNorm, k = 1 (kernel + gate **compiled; the first device run failed and its cause was not established at the time — §8 established it as the gate's own fixture writer, and §9 is the device PASS that followed**)
 
 Why this op exists as its own directory: the audit found that A-01's cast order for this norm is
 asserted at **no bit level anywhere** — the only comparison in the repo was `run_isolated.py`'s
