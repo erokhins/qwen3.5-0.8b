@@ -148,7 +148,8 @@ gap (progress/2026-10-16/performance-status-2026-10-16.md:811). Plan against the
 **4032 lanes, same instrument**: burst **14.028**, stage 16.276, kernel 17.204, exposed **2.26**
 (`STAGEGAP`: 2.212 / 2.259 / 2.369), `idle_sync_us` 0.143, `STAGEPARITY` clean. Family medians: glue 0.706 · proj 4.137 · gdn 0.657 ·
 **attn 2.996** · mlp 3.381 · cast 0.988 · copy 0.229 · lm_head 2.156 · host_tail 1.018. Attention is
-the only family that moves materially with context — **0.4847 → 2.996 ms/step** from 128 to 4032
+the only family that moves materially with context — **0.4847 → 2.996 ms/step** (that median is
+exactly 2.9955, printed half-up; a naive `round(…, 3)` says 2.995) from 128 to 4032
 lanes — while mlp, proj and lm_head are flat to under 1 %. That is the whole context term, in one row.
 
 ## 3. Where a 1024-token prefill wave goes

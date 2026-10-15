@@ -89,7 +89,9 @@ burst-to-step: each named family costs 0.46–1.01 ms more inside the step than 
 | `idle_sync_us` | 0.143 / 0.143 / 0.142 | 0.143 |
 
 In-situ family rows at 4032 lanes (median of 3): glue 0.706 · proj 4.137 · gdn 0.657 · **attn 2.996** ·
-mlp 3.381 · cast 0.988 · copy 0.229 · lm_head 2.156 · host_tail 1.018.
+mlp 3.381 · cast 0.988 · copy 0.229 · lm_head 2.156 · host_tail 1.018. The `attn` median is exactly
+2.9955 — a rounding midpoint, printed half-up as 2.996; a naive float `round(median, 3)` prints 2.995
+and looks like a contradiction of the ledger when it is only a tie-break.
 `STAGEPARITY` clean, `plan_match=1`, same sync counts as the 128-lane rows.
 
 ## 4. Wave attribution, 1024-token prompt — `decode_run --steps 1 --time-waves`, medians of 3
