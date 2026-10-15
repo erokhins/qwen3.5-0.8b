@@ -120,8 +120,8 @@ Every cite changed by this pass, what it asserted, and where it now points. **L*
 | L `devices/strix-halo-mixed-traffic.md:58` | "the ledger, Q6.1 stage medians at 128 lanes" | frozen `:666` | **12.399 ms/token** era row |
 | L `tools/instep_family_budget.py:50-54` | "the ledger's Q6.1 table" | frozen `:683-693` | the isolated-burst cost per family per token |
 | L `tools/instep_family_budget.py:67-69` | "the ledger Q6's dispatch curve" | frozen `:135` + `:39` | 1.85 µs floor, 2.6–3.8 µs at the widths these families use |
-| P `progress/README.md:123`, `:149` | `bench/performance-status.md:988`, `:1094` | snapshot `:988`, `:1094` | the margin log's identity; how the 3072-lane prompt was built |
-| P `progress/2026-10-16/cleanup-audit-2026-10-16.md:96`, `:102`, `:123` | `bench/performance-status.md:989`, `:1094`, `:988` | snapshot, same lines | same three facts |
+| P `progress/README.md:123`, `:149` | the pre-prune ledger, lines 988 and 1094 | snapshot `:988`, `:1094` | the margin log's identity; how the 3072-lane prompt was built |
+| P `progress/2026-10-16/cleanup-audit-2026-10-16.md:96`, `:102`, `:123` | the pre-prune ledger, lines 989, 1094 and 988 | snapshot, same lines | same three facts |
 | P `progress/2026-10-11/commit-review-2026-10-11.md:99` | `performance-status.md:65` | snapshot `:65` | the §1 row that read 387 % of probe |
 | P `progress/2026-10-11/commit-review-2026-10-11.md:109` | `performance-status.md:19-20` | snapshot `:19-20` | the `0.062 ms / 918 GB/s / 387 %` and `1.344 ms / 255 GB/s` rows |
 | P `progress/2026-10-11/commit-review-2026-10-11.md:131` | "ledger §6" | ledger §6 + snapshot `:271` | the 7.975 ms token sum / ~125 tok/s row |
