@@ -2,7 +2,7 @@
 
 **Funded by measurement, not narrative.** With route (c) landed, matmul is 21.2 % of a 1024-token prefill wave
 and `gdn_rec` is **38.2 %** (125.4 ms, 18,432 launches, 6.8 µs each) — past the 40 %-non-matmul threshold this
-repo pre-registered for funding P9. See `bench/performance-status.md` §"Wave-path attribution" and §"Headline
+repo pre-registered for funding P9. See `progress/2026-10-16/performance-status-2026-10-16.md` §"Wave-path attribution" and §"Headline
 tables after the route (c) flip".
 
 **What P9 is.** The gated delta-rule recurrence is serial along the sequence: state `S_t` depends on `S_{t-1}`

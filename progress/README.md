@@ -120,7 +120,7 @@ cited provenance. Owner ladder (the ruling of 2026-10-16):
 | `tmp/gate_dec64f.log` | `progress/engine/evidence/gate_dec64f.log` | engine | 1 | 6 | 5 | 4 | engine 5 cites; engine/curve_probe.py + engine/route_price.py parse it |
 | `tmp/gate_dec64t.log` | `progress/engine/evidence/gate_dec64t.log` | engine | 1 | 3 | 2 | 0 | engine/results.md:1574,1575 read it as probe input |
 | `tmp/gemm_probe.cpp` | `progress/engine/evidence/gemm_probe.cpp` | engine | 1 | 2 | 1 | 0 | engine/results.md:4339 probe source |
-| `tmp/margin/library_dec300f.log` | `progress/engine/evidence/margin/library_dec300f.log` | engine | 2 | 4 | 2 | 1 | supervisor ruling: engine/route_price.py and engine/route_margin.py parse margin logs; bench/performance-status.md:988 only quotes its conclusion |
+| `tmp/margin/library_dec300f.log` | `progress/engine/evidence/margin/library_dec300f.log` | engine | 2 | 4 | 2 | 1 | supervisor ruling: engine/route_price.py and engine/route_margin.py parse margin logs; progress/2026-10-16/performance-status-2026-10-16.md:988 only quotes its conclusion |
 | `tmp/p9/probe_pinwidth.py` | `progress/bench/evidence/p9/probe_pinwidth.py` | bench | 1 | 2 | 1 | 0 | progress/2026-10-14/p9-chunked-scan-2026-10-14.md:52 |
 | `tmp/p9/stage.out` | `progress/bench/evidence/p9/stage.out` | bench | 1 | 9 | 1 | 4 | progress/2026-10-14/p9-chunked-scan-2026-10-14.md:114 full stage table |
 | `tmp/probe_bf16_logits.py` | `progress/engine/evidence/probe_bf16_logits.py` | engine | 2 | 1 | 0 | 0 | supervisor ruling: logits fp/bf16 probe, cited only by an engine commit message |
@@ -146,7 +146,7 @@ cited provenance. Owner ladder (the ruling of 2026-10-16):
 | `tmp/route_dec64f.ra.json` | `progress/engine/evidence/route_dec64f.ra.json` | engine | 2 | 2 | 1 | 1 | tie 1/1 broken by consumption: engine/route_allowance.py refuses it; engine/results.md:2105 is the claim |
 | `tmp/route_margin_dec64f.json` | `progress/engine/evidence/route_margin_dec64f.json` | engine | 1 | 2 | 1 | 1 | engine/results.md:2559 D-6 margin pass; engine/route_margin.py writes/reads it |
 | `tmp/stub_decode_run.py` | `progress/prototype/evidence/stub_decode_run.py` | prototype | 1 | 2 | 1 | 0 | prototype/attn_decode/results.md:1105 the 18.1 coverage harness |
-| `tmp/tilefix/repeat_ids.py` | `progress/bench/evidence/tilefix/repeat_ids.py` | bench | 1 | 2 | 1 | 0 | bench/performance-status.md:1094 how the 3072-lane prompt was built |
+| `tmp/tilefix/repeat_ids.py` | `progress/bench/evidence/tilefix/repeat_ids.py` | bench | 1 | 2 | 1 | 0 | progress/2026-10-16/performance-status-2026-10-16.md:1094 how the 3072-lane prompt was built |
 | `tmp/w9.sh` | `progress/bench/evidence/w9.sh` | bench | 1 | 2 | 1 | 0 | progress/2026-10-14/p9-chunked-scan-2026-10-14.md:435 baseline invocation |
 
 Owner totals: **engine 25**, **bench 17**, **devices 4**, **prototype 1** — 47 files.

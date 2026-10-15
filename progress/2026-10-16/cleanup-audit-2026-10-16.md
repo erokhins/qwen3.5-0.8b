@@ -93,13 +93,13 @@ tracked content: they read the untracked `data/refs/` pins, the untracked gate l
 | `progress/engine/evidence/d2_dec300f_still_valid.py` | 2,159 | 1 | 0 | `engine/results.md:2182` — the 128-step dec300f re-check behind "the shipped table was cited rather than re-made" |
 | `progress/engine/evidence/d6_final_pass.py` | 2,887 | 1 | 0 | `engine/results.md:2161` — "the final pass is one command" |
 | `progress/engine/evidence/d9_sizing/all.sh` | 321 | 1 | 0 | `engine/results.md:4273` — the eight locked device runs, in order |
-| `progress/engine/evidence/decode_run_library.sh` | 71 | 3 | 0 | `bench/performance-status.md:989`, `engine/results.md:4476,4479` — the only bridge from `gate.py --binary` to the library route; the file that proves the library gate was ever runnable |
+| `progress/engine/evidence/decode_run_library.sh` | 71 | 3 | 0 | `progress/2026-10-16/performance-status-2026-10-16.md:989`, `engine/results.md:4476,4479` — the only bridge from `gate.py --binary` to the library route; the file that proves the library gate was ever runnable |
 | `progress/engine/evidence/gate_ab.sh` | 3,132 | 1 | 1 | `engine/results.md:4427` — "Reproduce: `progress/engine/evidence/gate_ab.sh <hand\|library> <fixture>`" |
 | `progress/engine/evidence/gemm_probe.cpp` | 5,238 | 1 | 1 | `engine/results.md:4339` — the probe that localised the wrong-tile defect (cos 0.42) |
 | `progress/engine/evidence/q10/decode_run_contig.sh` | 274 | 1 | 0 | `engine/results.md:3739`; see §5 — the same line says "not committed", which this commit makes stale |
 | `progress/engine/evidence/q6/proj_rpb32.cpp` | 7,167 | 2 | 0 | `engine/results.md:725,727` — one half of the rpb8↔rpb32 A/B, i.e. the source of the historical ledger row |
 | `progress/engine/evidence/q6/proj_rpb8.cpp` | 6,152 | 2 | 0 | `engine/results.md:724,726` — the other half, recovered from `git show bc61dce~1` |
-| `progress/bench/evidence/tilefix/repeat_ids.py` | 785 | 1 | 0 | `bench/performance-status.md:1094` — how the 3072-lane prompt was built ("repeats a real 1024-token prompt three times") |
+| `progress/bench/evidence/tilefix/repeat_ids.py` | 785 | 1 | 0 | `progress/2026-10-16/performance-status-2026-10-16.md:1094` — how the 3072-lane prompt was built ("repeats a real 1024-token prompt three times") |
 | `progress/bench/evidence/w9.sh` | 1,289 | 1 | 0 | `progress/2026-10-14/p9-chunked-scan-2026-10-14.md:435` — the baseline invocation a priced model is judged against |
 | `progress/engine/evidence/q2_session.py` | 2,733 | 1 | 0 | `engine/results.md:1994` — the feed+gen parity run (32/32) |
 | `progress/prototype/evidence/stub_decode_run.py` | 2,105 | 1 | 0 | `prototype/attn_decode/results.md:1105` — the §18.1 coverage harness; the only thing that made the prefill-row gate testable |
@@ -120,7 +120,7 @@ tracked content: they read the untracked `data/refs/` pins, the untracked gate l
 | `progress/engine/evidence/route_dec64f.json` | 24,321 | 1 | 0 | `engine/results.md:1296` |
 | `progress/engine/evidence/route_dec64f.ra.json` | 31,200 | 1 | 0 | `engine/results.md:2105` — the file whose `exit=2` refusal is the evidence that the allowance check bites |
 | `progress/engine/evidence/route_margin_dec64f.json` | 92,489 | 1 | 0 | `engine/results.md:2559` (the D-6 margin pass) |
-| `progress/engine/evidence/margin/library_dec300f.log` | 316,659 | 2 | 1 | `bench/performance-status.md:988`, `engine/results.md:4478` — the log whose header proved the "library" gate had actually run the hand route. **3.2× the cap**; the misattribution finding is unrecoverable without it |
+| `progress/engine/evidence/margin/library_dec300f.log` | 316,659 | 2 | 1 | `progress/2026-10-16/performance-status-2026-10-16.md:988`, `engine/results.md:4478` — the log whose header proved the "library" gate had actually run the hand route. **3.2× the cap**; the misattribution finding is unrecoverable without it |
 | `progress/engine/evidence/gate_dec64f.log` | 72,790 | 5 | 0 | the gate run itself: `engine/README.md:246`, `engine/results.md:1157,1158,1294,1296` all read it as *input* to a CPU probe |
 | `progress/engine/evidence/gate_dec64t.log` | 72,130 | 2 | 0 | same, `engine/results.md:1574,1575` |
 | `progress/engine/evidence/d6_gate_dec64f.log` | 91,465 | 1 | 0 | same, `engine/results.md:2558` |

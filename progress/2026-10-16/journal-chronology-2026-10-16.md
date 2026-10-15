@@ -269,14 +269,14 @@ quoted from `engine/results.md:299-334`
 ## The first ms/step figure, recorded as *not* a measurement
 
 **Superseded the same day, twice over.** The `14.631 ms/step` below stayed a non-measurement — it did,
-and `bench/performance-status.md` §6 now carries the real row at **11.978 / 12.053 / 12.232**.
+and `progress/2026-10-16/performance-status-2026-10-16.md`:269 (frozen ledger §6) carried the real row at **11.978 / 12.053 / 12.232**.
 And item 1 below named HIP graphs as the first perf item, which the measured dispatch curve refutes:
 §1's probe replayed 64 captured launches at 1.78 µs against 1.85 µs eager, so a one-token graph buys
 ≈4 % of the dispatch bill (≈0.06 ms) and not the gap. Both corrections live in
 "the first engine throughput row", at the end of this file.
 
 The second run printed `RESULT … ms_per_step=14.631`. **This is an observation, not a number.** It is a
-gate run's by-product, which `bench/performance-status.md` §6 refuses as a measurement; it is one
+gate run's by-product, which `progress/2026-10-16/performance-status-2026-10-16.md`:244 (frozen ledger §6) refuses as a measurement; it is one
 unwarmed first pass over freshly allocated state and scratch, i.e. the first-GPU-touch regime
 `devices/strix-halo-unified-memory.md` measures at ~35 GB/s instead of ~240; there is no burst and no
 best-of-N; and no `util` was recorded for the window. Do not quote it and do not diff it against
