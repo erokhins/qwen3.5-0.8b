@@ -205,7 +205,7 @@ grep -n '^## What\|^## The pass\|^## The handover\|^## Deferred\|^## Open questi
 | F2 | `` `path` §label `` / `path §N` | `` `bench/performance-status.md` §6 ``, `` `engine/results.md` §Q6.1 `` | **171** |
 | F3 | bare path or bare filename, no anchor | `` `engine/results.md` ``, `` `results.md` `` | §2.4 |
 | F4 | nickname + section | `ledger §6`, `ledger §5(g)` | 16 (5 live, 11 in `progress/`) |
-| F5 | path + parenthetical qualifier, usually a section **title** | `` `engine/results.md` (“Q5 / P8”) ``, `` `bench/performance-status.md` ("Headline tables after the tiled attention wave ships") ``, `` `engine/results.md` ("Decision 2 of the deep gate") `` | 23 |
+| F5 | path + parenthetical qualifier, usually a section **title** | `` `engine/results.md` (“Q5 / P8”) ``, `` `bench/performance-status.md` ("Headline tables after the tiled attention wave ships") ``, `` `engine/results.md` ("Decision 2 of the deep gate") `` | 24 |
 | F5b | letter-labelled section sign, no digits | `§Q6.1`, `§A2`, `§Q9 Results`, `§"the two real limits"`, `§expectation 6` | 95 (42 `§Q`, 33 `§A`) |
 | F6 | label with **no file named on the line** | `engine/gate.py`'s 17 `§A1…§A4`, which live in `progress/2026-10-14/route-c-audit-2026-10-14.md:79,144,204,265` | 66 label-only |
 | F7 | bare `§NN.N` into `specification/` | `§04.4`, `§10.5` — thousands; not adjudicable, unaffected by any move here | — |
@@ -409,7 +409,7 @@ line numbers`) — which is ugly and correct.
 | S7 | `AGENTS.md: two trap rows` — (i) a line-number citation is destroyed by any deletion above it, and 96 of 101 such cites are in the frozen archive; (ii) label-only citations (`§A2`, `results.md §20`) resolve by neighbourhood and are invisible to `git ls`/`doc_ref_check` | `AGENTS.md` | `python3 tools/doc_ref_check.py && python3 tools/citation_census.py --check` |
 | S8 | `tools: journal_sections.py — the fence-aware section census` (optional; if S1 already carries `--sections`, fold it in and skip this commit) | new tool | `--selftest` asserts 14 H1 / 72 H2 / 33 H3 for `engine/results.md` |
 
-**Does `tools/doc_ref_check.py` cover the new paths?** **Path existence: yes, already.** `ROOTS` (`tools/doc_ref_check.py:73-77`) lists `progress`, added by
+**Does `tools/doc_ref_check.py` cover the new paths?** **Path existence: yes, already.** `ROOTS` (the list by that name near the top of the file) lists `progress`, added by
 pass 2 so archive paths are adjudicated; `git check-ignore` confirms
 `progress/2026-10-16/archive-review-2026-10-16.md`, `progress/engine/journal/v1.md` and
 `testdata/run.py` are all NOT-IGNORED, while `engine/results/vol1.md` **is** ignored by
@@ -455,7 +455,7 @@ structure proposal already raised, and it does not block the move.
 4. **`§A1..§A4` are the shipping gate's evidence for a shipped band** and they live in an archived
    audit. Nothing in the tree proves those labels still match the numbers `CASCADE_BAND` encodes —
    S3 names the file, it does not re-verify the numbers. That needs a device-free re-read of
-   `progress/2026-10-14/route-c-audit-2026-10-14.md:144-203`, not a checker.
+   `progress/2026-10-14/route-c-audit-2026-10-14.md:144-204`, not a checker.
 5. **Classification is content-based, not tool-based.** Every NARRATIVE/SUPERSEDED call in §1 is
    quoted with a verified line number; LIVE-DATA calls rest on "a table/contract sits here" plus the
    cite column, and reasonable disagreement is confined to the zero-cite measurement blocks (e.g.
@@ -463,3 +463,40 @@ structure proposal already raised, and it does not block the move.
 6. **No timing was taken and no device command run.** Every number here is `grep`/`wc`/`git ls-files`
    over the working tree at the current HEAD, and every table above carries its command.
 
+
+## 8. Addendum, same day: what the checkers it asked for came back and said
+
+Appended, not edited in place — an append moves no line, so the 51 line-form
+cites into this file and the `N:NNN` anchors it publishes stay valid. Three
+corrections, each found by a tool this document asked for (S1
+`tools/citation_census.py`, S2 the `tools/doc_ref_check.py` upgrade), and the
+cost of building them:
+
+* **§2.1 F5 is 24, not 23.** The published count was one short; the census's own
+  `grep -ohE` recipe over the census's own tree gives 24, proven two ways —
+  `git grep -ohE '<T>\`?,? ?\(' dece2d9 -- ':(exclude)this-file' | wc -l` → 24,
+  and a clean `git archive dece2d9` extraction with this file removed → 24 by
+  occurrence count and by matched-line count. Row corrected in place above; the
+  same-line edit is the only kind rule 2 allows and the only kind a table cell
+  needs.
+* **§7.4's `route-c-audit-…:144-203` range was one line long**: line 203 is
+  blank and the A3 heading is at `:204`, so the anchor resolver called it
+  broken. Corrected to `:144-204`. Found by the anchor resolver, which is the
+  check that could not have existed before S2 — a dead line cite in a document
+  *about* dead line cites.
+* **§7.4's `§A1…§A4` claim survives contact**; the dead-`§` exemplar in
+  `tools/cold_restore.sh` does not: `:98` is `bench/performance-status.md §6 —
+  fill in the spread and the util pair`, where `§6` resolves fine and "fill" is
+  English, not a label. Recorded because "the check found nothing" is a
+  different result from "the check was not run".
+
+**The cost, and it is this document's own thesis.** Building S2 moved lines
+inside `tools/doc_ref_check.py` — `ROOTS` went `73-77 → 101-105`, the selftest
+fixtures `284,285 → 558,559` — which is exactly §4's failure mode arriving
+through the front door: an upgrade to a checker silently invalidates the line
+cites the archive holds *into that checker*. One of the two moved cites was
+detectably dead (line 77 is now blank); the other two now point at the wrong
+content and nothing reports it. So `:412` above cites `ROOTS` **by name**
+rather than by number: where a citation must outlive edits to the file it
+points at, a label is the only form that does, which is the general lesson
+§2.1's F2/F5/F5b-versus-F1 asymmetry was already teaching.
