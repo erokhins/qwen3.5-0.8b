@@ -659,12 +659,12 @@ CASCADE_RULE = ("a reassociating route is judged by the step's own band floored 
 # judged the old way: with this set to `hand`, every band in this file means exactly what it meant before
 # route (c). This default and `decode_run`'s move together, in one commit, because a gate that judged
 # library output under hand bands would be judging the wrong rule.
-GEMM_ROUTES = ("hand", "library")
+GEMM_ROUTES = ("hand", "library", "lt")
 GEMM_ROUTE = "library"
 
 
 def set_route(name: str) -> None:
-    """Declare which GEMM route the run being judged used. Refuses anything but the two real ones,
+    """Declare which GEMM route the run being judged used. Refuses anything but the real ones,
     because a typo here would silently judge a library run by the hand bands."""
     global GEMM_ROUTE
     if name not in GEMM_ROUTES:
@@ -673,8 +673,14 @@ def set_route(name: str) -> None:
 
 
 def route_is_library() -> bool:
-    """Is the cascade floor in force? True only for the route the audit priced."""
-    return GEMM_ROUTE == "library"
+    """Is the cascade floor in force? True for every library route and for nothing else.
+
+    `lt` joins `library` because the band is sized by the same thing: both routes replace a hand GEMV's
+    fixed reduction order with a library kernel's, so the wave-boundary check is inside a band on either
+    and byte-identical on neither. `lt` is not simply `library` though — it is a DIFFERENT library, so a
+    run under `lt` is a separate judgment with its own log, not a re-read of a `library` one. The hand
+    route keeps every cap in this file exactly where it was before route (c)."""
+    return GEMM_ROUTE in ("library", "lt")
 
 
 fails: list[str] = []
@@ -4105,7 +4111,8 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
     # prints the value a check is hunting for is a check that can never fail — this one printed
     # `route=library` while the engine printed `route=hipblas`, which is how every dry run was green and
     # every real library run was red. `--selftest` asserts this spelling.
-    lines.append("GEMM route=hipblas handle=1 workspace_mib=128 dtype=bf16-in/bf16-C/f32-compute"
+    lines.append("GEMM route=" + ("hipblaslt" if GEMM_ROUTE == "lt" else "hipblas")
+                 + " handle=1 workspace_mib=128 dtype=bf16-in/bf16-C/f32-compute"
                  " stream=default" if route_is_library() else "GEMM route=hand")
     # Same reasoning as the GEMM line above, and the same limit: the stand-in has no hipBLAS to ask, so
     # it echoes `hipblas=dry-run` and `numerics_provenance_checks` refuses to assert anything from it.
@@ -4522,7 +4529,7 @@ def selftest(fixture: str = "dec8") -> int:
         # assertion now reads NUMERICS's `gemm=`, and this case pins both halves of what the check
         # printed, so neither the checker nor its stand-in can drift back into agreeing with each other.
         ([], 0, [f"NUMERICS echoed gemm={GEMM_ROUTE}",
-                 f"(GEMM line says {'hipblas' if route_is_library() else 'hand'})"],
+                 f"(GEMM line says {'hipblaslt' if GEMM_ROUTE == 'lt' else ('hipblas' if route_is_library() else 'hand')})"],
          "the route check reads NUMERICS's `gemm=` and the stand-in's GEMM line carries the spelling the"
          " real engine prints, so the check is exercised against something that could disagree"),
         (["--break-ids", "3"], 1, "[FAIL] generation step 3 samples greedy_continuation[4]",
@@ -5123,7 +5130,13 @@ def main() -> int:
                          " admissible where that row's top-1/top-2 room was under"
                          f" {CASCADE_BAND['flip_room_max']:.2f} (the smaller of the two sides' gaps,"
                          " the definition §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md gives), and section (h) judges wave-width drift against that"
-                         " band instead of bit-identity. `hand` is still fully supported and leaves"
+                         " band instead of bit-identity. `lt` is the hipBLASLt call path"
+                         " (`--gemm lt`, `prototype/gemm_algo_sweep/results.md` §3a): a different"
+                         " library, so a different kernel and a different accumulation order, and it is"
+                         " judged by the SAME cascade floor because the band is sized by "
+                         "\"a library chose the reduction\" rather than by which library did — but it is"
+                         " a separate judgment with its own log, never a re-read of a `library` run."
+                         " `hand` is still fully supported and leaves"
                          " every band in this file exactly where it was before route (c) — it is the"
                          " A/B side, and the route whose bits are byte-identical to a pre-route"
                          " binary. The flag is passed to every `decode_run` this gate starts and the"

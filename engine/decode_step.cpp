@@ -447,8 +447,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     // `lm_head` site is untouched. The F32 widenings stay where they are even when this route makes one
     // of them unread: deleting a launch is a change to the §07 launch bill (`planned_launch_counts()`,
     // `gate.py` section (d), the wave plan in `stage_clock.cpp`), and §7 W5 prices that separately.
-    const bool lib_gemm =
-        kernels::resolve_wave_gemm(sc.wave_gemm, n) == kernels::WaveGemm::kLibrary;
+    const bool lib_gemm = kernels::wave_gemm_is_library(sc.wave_gemm, n);
     const auto project = [&](const void* weight, const uint16_t* x_bf16, const float* x_f32,
                              uint16_t* out, int rows, int in) {
         if (lib_gemm) {

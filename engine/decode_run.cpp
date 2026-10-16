@@ -460,7 +460,7 @@ void print_usage(FILE* out) {
                  "usage: decode_run [--model DIR] [--ids ID,ID,...] [--steps N] [--out DIR]"
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
                  " [--prefill-logits last|all] [--wave-rows N]"
-                 " [--mlp-map auto|interleave|contig] [--gemm library|hand] [--attn-tile 0|1]"
+                 " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
                  " [--attn-touch 0|1]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
@@ -473,7 +473,14 @@ void print_usage(FILE* out) {
                  " byte-identical across wave widths on the library route — that check is inside a band"
                  " there (engine/gate.py's CASCADE_BAND, progress/2026-10-14/route-c-audit-2026-10-14.md). A one-row"
                  " body is the hand GEMV under either setting, so no decode step changes shape or bits"
-                 " on either side of this flag\n"
+                 " on either side of this flag. `lt` sends the same ten fat shapes to hipBLASLt"
+                 " (`hipblasLtMatmul`) instead of hipBLAS, with one algorithm chosen per (shape, M) at"
+                 " plan time and printed as a `GEMM-LT` line before the first body; `legacy` is a"
+                 " synonym for `library`, so a shell loop can spell both sides of the pair it is timing."
+                 " Not the default: same numerics contract as `library` (bf16 in, f32 accumulate, bf16"
+                 " C, 128 MiB workspace, default stream) with a different accumulation ORDER, so it is"
+                 " judged by the same cascade band and not by byte-identity"
+                 " (prototype/gemm_algo_sweep/results.md §3a)\n"
                  "  --attn-tile 0|1  which attention FORM a WAVE body runs (Phase 2, "
                  "progress/2026-10-14/attn-wave-diagnosis-2026-10-14.md §9). `1`, the default since results.md §21, runs"
                  " `attn_tile_wave`, in which one K/V row load feeds the G=4 GQA heads of ONE query row"
@@ -1120,13 +1127,19 @@ int main(int argc, char** argv) {
         sc.attn_touch = o.attn_touch;
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;
-        if (o.wave_gemm == engine::kernels::WaveGemm::kLibrary) {
+        if (engine::kernels::wave_gemm_is_library(o.wave_gemm, engine::kMaxWaveRows)) {
             // Created here, once, before the first body: the handle and the pinned workspace must not
             // be first touched 400 launches into a prefill. Only when the route is actually on, so a
             // `--gemm hand` run allocates nothing the pre-route run did not.
-            const std::string route = engine::kernels::gemm_route_init();
+            const std::string route = engine::kernels::gemm_route_init(o.wave_gemm);
             if (o.wave_gemm_given) {
                 std::printf("GEMM %s\n", route.c_str());
+                // The lt route's algorithm for each (shape, M) is fetched NOW, before the first body,
+                // and printed: 150 library calls a wave cannot each pay for a heuristic query, and a
+                // timing window must not contain library bookkeeping that the other side of the A/B
+                // does not pay. One line per shape, so the algo actually in force is in the log.
+                const std::string plan = engine::kernels::gemm_route_plan(o.wave_rows);
+                if (!plan.empty()) std::printf("%s", plan.c_str());
             }
         } else if (o.wave_gemm_given) {
             // The A/B side names itself too: a log that does not say which GEMM its wide bodies used

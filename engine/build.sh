@@ -57,12 +57,15 @@ echo "built $BIN/loader_test"
 # handle and one pinned workspace for the process, and the one call form every library matmul in the
 # engine shares (`tools/gemm_common.h`, which `tools/gemm_peak --check` and `tools/prefill_mix --check`
 # certify against a CPU reference — one authority for the OP_T/ld pair, not a copy that can drift).
+# It now also holds the hipBLASLt call path (`--gemm lt`, D26), which is why `-lhipblaslt` is here too:
+# the two libraries coexist in one binary on purpose, because the A/B is a runtime flag and both sides
+# must be present to be measured in one window. The engine never has both routes live at once.
 hipcc "${FLAGS[@]}" \
   engine/decode_run.cpp engine/decode_step.cpp engine/prefill.cpp engine/state.cpp engine/loader.cpp \
   engine/launch_stats.cpp engine/stage_clock.cpp \
   engine/kernels_glue.cpp engine/kernels_proj.cpp engine/kernels_mlp.cpp \
   engine/kernels_gdn.cpp engine/kernels_attn.cpp engine/kernels_lmhead.cpp \
   engine/kernels_cast.cpp engine/kernels_gemm.cpp \
-  -lhipblas \
+  -lhipblas -lhipblaslt \
   -o "$BIN/decode_run"
 echo "built $BIN/decode_run"

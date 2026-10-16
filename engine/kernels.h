@@ -66,17 +66,43 @@ enum class WaveGemm {
     // than the hand route's: on this route the wave-boundary check is INSIDE A BAND, not
     // byte-identical — see `progress/2026-10-14/route-c-audit-2026-10-14.md` and `engine/results.md`, route (c).
     kLibrary,
+    // The hipBLASLt call path (D26): `hipblasLtMatmul` with one cached algorithm per (shape, M)
+    // instead of `hipblasGemmEx`, whose kernel choice the caller can neither see nor pin. Measured at
+    // the shipping width M=512, the 150-call mix costs 18.67 ms as `kLibrary`, 17.42 ms through
+    // hipBLASLt's heuristic rank-0 and 15.90 ms with a per-shape algo table — 1.072x from the
+    // call-path change alone, 1.174x with the table (`prototype/gemm_algo_sweep/results.md` §3a).
+    // Three shapes come back `ratio = 1.000` — hipBLASLt's rank-0 is already its own fastest
+    // enumerated kernel — while the engine's `hipblasGemmEx` call is still 1.22-1.63x slower than that
+    // same kernel, so the gap is hipBLAS-vs-hipBLASLt SELECTION, not kernel quality.
+    //
+    // NOT the default, and not by oversight: the operator decides when it flips, and it is a runtime
+    // knob rather than a build define so both paths live in one binary and can be A/Bed in one process
+    // (the `--attn-touch` precedent). The numerics contract is `kLibrary`'s — bf16 in, f32 accumulate,
+    // bf16 `C`, one pinned 128 MiB workspace, the default stream — with a different accumulation
+    // ORDER, which is a band question and not a byte-identity one: `engine/gate.py` judges `lt` by the
+    // same cascade floor it arms for `library`.
+    kLibraryLt,
     // Still first-class, and deleted by nothing: with this set every body takes the hand kernel
     // whatever its width, which is how the old path stays measurable in the same window (§7 W9 is an
     // A/B), how "decode untouched" is checkable end to end, and how a pre-route binary's bits can
     // still be reproduced. `engine/gate.py` judges it by the pre-route bands: its cascade floor is
-    // armed for `library` and for nothing else.
+    // armed for a library route and for nothing else.
     kHand,
 };
 
-// "library" / "hand". Throws on anything else: this flag selects which side of an A/B a run is.
+// "library" / "legacy" / "lt" / "hand". Throws on anything else: this flag selects which side of an
+// A/B a run is. `legacy` is accepted as a synonym for `library` because the pair being A/Bed is
+// legacy-hipBLAS against lt-hipBLASLt and one shell loop should be able to spell both sides;
+// `wave_gemm_name` never prints it — the echoed route stays `library`, which is what `gate.py`'s
+// route check compares against the log.
 WaveGemm parse_wave_gemm(const std::string& name);
 const char* wave_gemm_name(WaveGemm route);
+
+// Does a body of `rows` rows submit to a library GEMM? The single spelling of the question
+// `submit_wave_body` asks, so that a third route cannot be added here and forgotten there: it is
+// `resolve_wave_gemm`'s row-count rule (`rows <= 1` is the hand GEMV whatever the run asked for)
+// tested against "is this a library route", which is now two of the four names, not one.
+bool wave_gemm_is_library(WaveGemm want, int rows);
 
 // hipBLAS's own version as "major.minor.patch", or "unknown" if the query fails. D-11 makes this
 // provenance: the library's solution per (m,n,k) is the numerics, and a bump can change it without
@@ -93,9 +119,28 @@ WaveGemm resolve_wave_gemm(WaveGemm want, int rows);
 // one pinned workspace, default stream, nothing per call — said out loud because it is the constraint
 // a reviewer cannot check from the call sites). Idempotent; throws if the handle or the workspace
 // cannot be created, which is better than a first matmul failing 400 launches into a prefill.
-std::string gemm_route_init();
+//
+// `want` chooses WHICH library is built: `kLibrary` creates the hipBLAS handle, `kLibraryLt` the
+// hipBLASLt one, and `kHand` (or any non-library route) creates neither — a `--gemm hand` run still
+// allocates nothing the pre-route binary did not. The two library paths are never both live: one
+// process runs one route, which is what makes "which GEMM produced these logits" a property of the
+// run and not of the call site. The default argument is `kLibrary` so the pre-lt callers
+// (`tools/route_c_stages.cpp`, and every log taken before this flag had a third value) still build
+// exactly what they built before.
+std::string gemm_route_init(WaveGemm want = WaveGemm::kLibrary);
 // Tears down what `gemm_route_init` created. Safe to call when it never ran.
 void gemm_route_shutdown();
+
+// PLAN-TIME algo selection for the hipBLASLt route, one call per (shape, M) instead of one per matmul.
+// The engine issues 150 library calls per 24-layer wave and a heuristic query costs more than the win
+// it buys, so the algorithm is fetched once per (shape, M) and cached; this is where that fetch runs,
+// before the first body, so a wave's measured milliseconds contain no library bookkeeping. `rows` is
+// the scratch's row width — the M every full body issues — and the seven distinct (shape, M) keys are
+// the same census `prototype/gemm_algo_sweep --list` prints. Returns one line per shape built, empty
+// if the lt route is not the live one (so a `library`/`hand` run prints nothing new). A body of a
+// width nobody prewarmed — a prompt whose last wave is a remainder — still works: `gemm_bf16` builds
+// and caches that key on first use, and says so in the same line format.
+std::string gemm_route_plan(int rows);
 
 // The matmul itself: `out[m,n] = x[m,k] · weight[n,k]ᵀ`, bf16 operands, f32 accumulate, bf16 `out`.
 // `weight` is the shard's [n,k] row-major blob used as stored; `x` is [m,k] row-major and `out` is
