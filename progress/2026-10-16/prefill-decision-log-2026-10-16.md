@@ -157,3 +157,69 @@ user's use case is a big file, and D2 says a big file is where the quadratic liv
   tested — if it fails, D4's verdict must come from the microprototype instead.
 - The engine's own `--time-waves` instrument is the cheapest family attribution and reconciles to
   0.009 % of the wave (ledger §3), so it, not the profiler, is the attribution source of record.
+
+## D13 — numeric format: the user delegated the decision, with a test (2026-10-16, late)
+
+Asked whether the WMMA fast tier's fp16 operands were "a user band decision". The user's answer,
+verbatim in substance: **any 16-bit or even 32-bit arithmetic may be used if the gates still pass,
+or if we cannot significantly widen the checks in the gates** — and the standing rule to apply
+judgement and proceed rather than stop repeats.
+
+So the decision rule for a datatype change in this repo is now:
+
+1. Does the existing gate set stay green? If yes, adopt; no new band is needed, because the bands
+   already bought are wide enough to cover it.
+2. If a gate goes red, ask whether the check could be widened *without materially weakening it* —
+   which for this repo has a concrete meaning: a band widened to admit an fp16 path must still catch
+   the injected bugs that the negative controls derive (AGENTS.md: must-catch sets are derived from
+   geometry, not hand-listed). If it still catches them, adopt and record the new band and what
+   witnesses it.
+3. Only a change that neither passes nor can be widened stays a user decision.
+
+What that costs here is nothing, because of an asymmetry worth writing down: **fp16 has a narrower
+range than bf16 but a wider mantissa** (1+5+10 vs 1+8+7), so inside fp16's range fp16 is strictly
+*more* precise than the format every gate is calibrated to. The only ways the switch can make a
+number worse are overflow above 65504 and flush-to-zero below ~5.96e-08. That makes the feasibility
+question a range census, not a band negotiation.
+
+## D14 — the fp16 range census: it fits, with ~800x margin
+
+`tools/fp16_range_probe.py` over **every** pinned dump in `data/refs` (evidence:
+`progress/bench/evidence/prefill-occupancy-2026-10-16/F_fp16_range_all_dumps.txt`), 22 098 tensors,
+1.11 billion values, comparing on the BF16 bit pattern so no tensor is widened to f32:
+
+| role | tensors | values | max abs | values over 65504 | below fp16 min normal | flushed to zero |
+|---|---|---|---|---|---|---|
+| activations | 18 332 | 597 778 432 | **82.5** | **0** | 4.92 % | 92 793 (0.0085 %) |
+| logits | 406 | 513 525 760 | 35.5 | 0 | 0.0006 % | 0 |
+| weights | 16 | 352 256 | 0.1738 | 0 | 0.23 % | 0 |
+| fingerprint rows | 1 140 | 63 840 | 3.96e6 | 4 413 | — | — |
+| token ids | 404 | 732 | 2.48e5 | 34 | — | — |
+
+The last two rows are excluded by role, and that exclusion is the finding, not a detail: the first
+version of the probe flagged **276 "overflowing" tensors**, and every one of them was either a
+`*_fp.npy` fingerprint quadruple (whose first and fourth columns are magnitude-as-bits and run to
+~1e6 by construction) or `input_ids`, which is an index tensor held as float32. A range census over
+metadata is a census of nothing. The real margin on activations is 65504 / 82.5 = **794x**.
+
+Two bugs found in my own instrument on the way, both recorded in the tool's header because both are
+the repo's usual shape: (a) sign-stripping a bf16 pattern is `AND 0x7FFF`, **not** `abs()` of an
+int16 view — 0xC190 is -12.5 and its int16 absolute value, 0x3E80, is the pattern for +2.5, which
+made 351 tensors look like they overflowed; (b) the role filter had to be written before the verdict
+was trusted, since a check whose population includes metadata cannot adjudicate a value question.
+
+**Consequences, decided under D13 and not queued for approval:**
+
+- The fp16 fast tier is unblocked. Ledger §6.2 and the route index's "needs a user band decision"
+  note are superseded for the fp16 case: the gate set is the decision procedure, and the census says
+  the range cannot be what breaks it.
+- bf16 → fp16 for **weights** is exact in mantissa (7 bits into 10) and their max abs is 0.17, so a
+  weight conversion cannot overflow at all; it is a free upgrade in precision, worth checking
+  because it costs nothing to test.
+- 4.92 % of activation values are below fp16 min normal and stay representable only as subnormals;
+  92 797 values (0.0085 %) flush to zero. If a gate goes red on the switch, that flush is the first
+  suspect and the second is an FMA-contraction/association change (the `q̃` lesson in
+  `prototype/gdn_collapse/results.md` §2), not the mantissa.
+- The census is fixture-bounded: it is a claim about pinned values, and the guard is to re-run
+  `tools/fp16_range_probe.py` whenever a new fixture is pinned. A prompt that produced a hidden state
+  above 65504 would show up there first.

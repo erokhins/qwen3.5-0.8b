@@ -1,0 +1,18 @@
+scanned 20298 pinned tensors, 1,111,721,020 values, dumps: chunk64b, corpus48, corpus48engine, corpus48engine-smoke, corpus48sdpa, dec300f, dec64f, dec64t, dec8, mt32f, p128, p300, p64, p8, prefix24dec8, smoke, wide1024f, wide520f, wide640f, zz
+
+The only thing fp16 has that bf16 lacks is a range: 10 mantissa bits beats bf16's 7, so
+inside its range fp16 is strictly MORE precise than the format the gates are calibrated
+to. What can break is overflow above 65504 and flush-to-zero below ~5.96e-08. Those two
+are what this table counts, per role, because the datatype decision is made per role:
+
+  role                        tensors         values      max|x|      min|x|  over 65504  subnormal %   flushed
+  activations                   18332    597,778,432        82.5   1.221e-38           0      4.9158%    92,793
+  fingerprint rows (metadata)     1140         63,840   3.962e+06   6.913e-09       4,413      4.1071%         4
+  ids (not a value tensor)        404            732   2.481e+05          10          34      0.0000%         0
+  logits                          406    513,525,760        35.5    5.96e-08           0      0.0006%         0
+  weights                          16        352,256      0.1738   2.263e-07           0      0.2319%         0
+
+no value in any scanned value-tensor exceeds fp16 range.
+
+values below fp16 min normal overall: 29,392,121 (2.6438 %); below fp16 min subnormal, i.e. flushed to zero: 92,797
+VERDICT: PASS: fp16 range covers every scanned value-tensor; mantissa is a strict improvement on bf16, so a bf16-calibrated gate cannot be loosened by the switch
