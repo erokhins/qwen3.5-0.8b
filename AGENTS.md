@@ -311,3 +311,11 @@ Appended at the end for the standing line-citation reason; the entry it belongs 
   time, and check whether the implied rate is even achievable. Related and subtler: a model fitted to a
   measurement cannot falsify itself (the byte model fit three widths to within 5 % and still described
   nothing) — see D21.
+- **a sweep timed at a width the shipping path never issues is a fact about the library, not the
+  engine.** `engine/decode_step.h:49` is `kMaxWaveRows = 512`, so a wave is at most 512 rows and a
+  4096-lane prefill is **eight sequential 512-row waves**; the engine never issues an M = 1024 or
+  M = 4096 GEMM. The first read of `prototype/gemm_algo_sweep` priced the win at the M = 4096 rows
+  (`q_proj`: engine 1.7459 ms vs library 1.0534 ms, 1.66×) and the real prize at M = 512 is 1.17×
+  — 2.0 % of the wave, not 5 %. Before aggregating any per-shape sweep, derive the call width the
+  engine can actually emit and aggregate at that width; keep the other widths only as a bound on a
+  future geometry, labelled as such. | `prototype/gemm_algo_sweep/results.md` §3a |

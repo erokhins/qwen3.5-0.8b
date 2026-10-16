@@ -589,3 +589,50 @@ Two things worth more than the verdict:
    that MODE is the broken one. **Repairing hand spellings to collect a predicted ~3 % of the wave is not
    funded.** Recorded as a correction, not deleted, because a roof argument and a measured elasticity
    disagreeing is exactly the kind of thing that produced this session's three reversals.
+
+## D26 — the GEMM gap is the engine's own call, not the library's kernels: 1.17× available at the shipping width, no hand WMMA needed
+
+`prototype/gemm_algo_sweep/results.md` §3a, §4. The cheap question before building a hand WMMA GEMM — is
+hipBLASLt's default heuristic leaving the 1.4–1.6× on the table? — answered something better than expected.
+
+**Measured, all at the shipping width M = 512** (`engine/decode_step.h:49` `kMaxWaveRows = 512`, so a wave is
+at most 512 rows and a 4096-lane prefill is eight such waves; the engine never issues M = 1024 or 4096):
+
+| path | ms / 24-layer wave | vs engine | saved off the 1105.20 ms wave |
+|---|---|---|---|
+| engine today (`hipblasGemmEx`) | 18.67 | — | — |
+| `hipblasLtMatmul`, heuristic rank-0 | 17.42 | 1.072× | 10.0 ms (0.9 %) |
+| `hipblasLtMatmul`, best of 12 enumerated | 15.90 | **1.174×** | **22.2 ms (2.0 %)** |
+
+The decisive rows are the ones where `ratio = 1.000`: on `q_proj`, `k_proj+v_proj` and `in_proj_z` the
+heuristic's rank-0 **is** the fastest enumerated kernel, yet the engine's own call is 1.220×, 1.625× and
+1.359× slower than it. hipBLAS and hipBLASLt choose differently, and that difference is larger than anything
+the enumeration offers. A third of the prize is a call-path change; two thirds needs a per-shape algo table.
+**No hand WMMA GEMM should be started on the strength of the 1.4–1.6× ceiling while this 1.17× sits unbuilt.**
+
+Three things recorded alongside, because each is a trap of its own class:
+
+1. **The band was wrong, not the library** — and the correction came from evidence, not preference. Every
+   candidate initially failed `cos ≥ 0.999999` by 1.8e-06 with `worst_ulp` exactly at the bound. The
+   mechanism turned out stronger than "reference noise": reordering the double reference moves *nothing*
+   (`ndiff=0`), F32 accumulation moves nothing (a dot of bf16 products is bit-identical to the exact sum
+   here), and the whole deficit is **bf16 output quantisation**, `1 − meanrel²/2`. Floors are now measured
+   per `(shape, M, check_rows)` by `--floor-probe` with provenance printed, and there is no built-in
+   default: a missing CAL row exits 2 before any HIP call.
+2. **A must-catch set must be derived from what the object under test can break.** The one-term-short
+   1024-chain injection is *below the resolution of any cos floor at this K* — its worst-seed deficit is
+   0.73×–5.1× the quantisation deficit, i.e. on two shapes the injected bug moved cosine **less than a
+   correct answer does**. It was replaced by nine algo-level injections (wrong `ld`, swapped operand roles,
+   two split-K partial losses, aliased partial slot, half-written tile, `beta` left at 1 against stale and
+   against NaN `C`, doubled `alpha`), which sit 3–5 orders of magnitude below the floor. `one_term_short`
+   is still reported, by `RESOLUTION`, with the reason written down.
+3. **A device leg at 2 ULP was a cancellation, and F1 predicted it before I looked.** `in_proj_qkv` crossed
+   at one element in 49,152 with `|ref|/max|ref| = 1.96e-07`; `gate_proj+up_proj` at one in 28,672 with
+   2.34e-07, on the engine leg as well as the algo leg. The bound stayed at 1 ULP and the exemption became
+   cancellation-aware and symmetric. Had it been a fat cluster at full magnitude it would have been a
+   library defect on the shipping path; it was not, and the check distinguished the two.
+
+**Open, named:** the ledger's `GROUP matmul_ms` = 70.30 ms at a 1024-lane wave versus this mix's predicted
+37.3 ms — so the ledger's `GROUP` carries library time beyond these 150 calls. Until reconciled, the algo
+route is worth **at least 0.9–2.0 % of a 4096-lane wave and possibly near twice that**, and the engine-side
+A/B is what sizes it.
