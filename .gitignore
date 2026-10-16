@@ -117,3 +117,6 @@ engine/loader_test
 # built binary of the issue-rate probe (the source and gate are tracked; this is the product)
 prototype/issue_rate_probe/issue_rate_probe
 prototype/gdn_rec_isa/gdn_rec_isa
+# same trap, one directory over: the binary is named after its directory, so the path is written in
+# full (two components) — `prototype/**/gemm_algo_sweep` would match the directory and hide the sources
+prototype/gemm_algo_sweep/gemm_algo_sweep
