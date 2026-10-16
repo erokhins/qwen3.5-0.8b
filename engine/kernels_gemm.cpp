@@ -186,10 +186,12 @@ struct AlgoPin {
     const char* algo_hex;
 };
 
-// Three shapes are pinned, and all three are here for ONE reason: at the shipping width the heuristic's
-// rank-0 — which is all an unpinned `lt` run gets — is SLOWER than the call this engine already makes
-// through hipBLAS. Taking rank-0 there gives back part of the win `prototype/gemm_algo_sweep/results.md`
-// §3c measured. The test is therefore `default_ms` vs `engine_call_ms`, never `best_ms` vs either, and
+// ONE shape is pinned today, and the reason it is pinned is the reason the table exists at all: at the
+// shipping width the heuristic's rank-0 — which is all an unpinned `lt` run gets — is SLOWER than the
+// call this engine already makes through hipBLAS. Taking rank-0 there gives back part of the win
+// `prototype/gemm_algo_sweep/results.md` §3c measured. This used to be three rows; the two others were
+// warm-burst winners that lost in situ (§3d), and the table shrank to this while this paragraph kept
+// claiming three. The test is therefore `default_ms` vs `engine_call_ms`, never `best_ms` vs either, and
 // that section's lesson 2 is that reading the
 // "best" column as though it were the "default" column is how `mlp_down` was shipped at 0.812x.
 // Numbers are `prototype/gemm_algo_sweep/results.md` §1's `RESULT` lines at M=512 (the sweep's
@@ -209,9 +211,18 @@ struct AlgoPin {
 // and is deliberately NOT taken here: that is new speed, not a recovered regression, and it belongs in
 // its own funded change with its own A/B.
 //
-// `in_proj_qkv` is the marginal one: 0.2000 vs 0.1989 is 0.6%, inside the few-percent spread a burst
-// on this box has, so that pin rests on the winner being 1.075x over its rank-0 (0.50 ms per 24-layer
-// wave at 36 calls), not on the 0.6%. `down_proj` and `o_proj+out_proj` clear the burst's own noise.
+// The table above is the pre-adjudication candidate list, kept because it is the evidence for the
+// decision below and not the decision. `down_proj` is the row that survived in situ; `o_proj+out_proj`
+// and `in_proj_qkv` did not, and cost `proj` 5.5 ms when tried.
+//
+// Two facts about what a pin may name, because both were assumed this session and only one of them is
+// true. TRUE: a pin bypasses the heuristic query entirely — the predicates below are "valid hex, not
+// all zero, `max_workspace_bytes <= kWorkspaceBytes`" and nothing else — so `kHeuristicWidth` does not
+// bound what can be pinned, and a winner the engine's own 8-wide query would never return is still
+// admissible. FALSE: that the 12-candidate sweeps so far priced the whole field. Deepening the sweep to
+// 64 candidates finds kernels at ranks 16-55 a further 1.13-1.39x over rank-0 on four shapes
+// (`progress/2026-10-16/prefill-decision-log-2026-10-16.md` D31), so the candidate list above is
+// measured against a truncated field and every ratio in it is a floor, not an answer.
 //
 // Pins bind on (N, K, M), so they cover the FULL wave width and nothing else: a partial wave (640 lanes
 // = 512 + 128 rows) or a prompt-shaped body (dec8 plans M=17) still takes the heuristic. That is the
