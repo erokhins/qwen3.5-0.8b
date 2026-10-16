@@ -99,7 +99,11 @@ struct Options {
     // than a legacy alias: it is the A/B side (§7 W9) and the way to reproduce a pre-route binary's bits
     // in the same window. A one-row body is the hand GEMV under either setting (`resolve_wave_gemm`),
     // so this flag cannot move a decode bit either way.
-    engine::kernels::WaveGemm wave_gemm = engine::kernels::WaveGemm::kLibrary;
+    // Shipped default since `--gemm lt` was measured in situ and its one red row was attributed to a
+    // one-ULP tie: GROUP matmul 1.503x at 1024 lanes and the whole wave +11.0% / +8.4% (D28), with the
+    // gate green on all nine fixtures at both routes under the ULP flip line (D29). `library` is kept as
+    // a first-class value precisely so that claim stays A/B-able in one binary; `legacy` is its alias.
+    engine::kernels::WaveGemm wave_gemm = engine::kernels::WaveGemm::kLibraryLt;
     bool wave_gemm_given = false;
     // Which algo pins are in force (`all` / `none` / csv of shape names). Only meaningful with
     // `--gemm lt`; see `kernels.h::gemm_pins_select`.
@@ -1148,7 +1152,10 @@ int main(int argc, char** argv) {
             // be first touched 400 launches into a prefill. Only when the route is actually on, so a
             // `--gemm hand` run allocates nothing the pre-route run did not.
             const std::string route = engine::kernels::gemm_route_init(o.wave_gemm);
-            if (o.wave_gemm_given) {
+            if (o.wave_gemm_given || o.wave_gemm == engine::kernels::WaveGemm::kLibraryLt) {
+                // Printed whenever lt is the route in force, not only when the flag named it: lt is now
+                // the shipped default, and a log that does not say which algo each shape ran cannot be
+                // re-read next month.
                 std::printf("GEMM %s\n", route.c_str());
                 // The lt route's algorithm for each (shape, M) is fetched NOW, before the first body,
                 // and printed: 150 library calls a wave cannot each pay for a heuristic query, and a
