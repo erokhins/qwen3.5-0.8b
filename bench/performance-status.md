@@ -379,3 +379,13 @@ for. The prior ledger row for `attn` at 4096 lanes was 412.07 ms (§1 of
 `progress/2026-10-16/prefill-occupancy-results-2026-10-16.md`), consistent with the 403–405 ms taken
 here in a different window — a further reminder that absolute ms moves a few % between windows and only
 a paired run like this one may be read as a ratio.
+
+**Decode side of the same pair (measured after the row above, same day).** `ids2048.txt`, `--steps 64`
+against `--steps 192`, marginal = Δms ÷ 128, three reps, both values in one hold:
+`--attn-touch 0` gives 12.732 / 12.859 / 12.668 ms/token (spread 1.5 %), `--attn-touch 1` gives
+12.308 / 12.458 / 12.840 (spread 4.3 %) — **ratio of bests 1.029, i.e. unchanged within noise**. That is
+the expected result and it should be read as such, not as a small win: this is single-request decode, so
+attention runs the **one-row** path, and the two levers live in the tiled *wave* body. §1's
+14.028 ms = **71.3 tok/s** headline therefore stands as the decode number; the prefill rows above are what
+this port moved. (Widths differ — 2112 lanes here vs 4032 in §1 — so these ms are not comparable to §1's,
+only to each other.)

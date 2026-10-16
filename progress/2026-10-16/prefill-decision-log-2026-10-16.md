@@ -488,3 +488,29 @@ What changes in the plan:
    bandwidth-bound" must show demanded-vs-achievable, not demanded-vs-elapsed, or must show the
    instruction-cut falsification directly. Two of the last three plan reversals in this log came from
    reading a rate as a wall.
+
+## D22 — D21's lever is on the shipping path: attn 403.38 → 275.19 ms, the wave 1243.07 → 1105.20 ms
+
+`engine/attn_slim_kernels.h` + `--attn-touch`, gates green at both values, witness in
+`bench/performance-status.md` (appended section) and `engine/HANDOFF-attn-touch.md`. Numbers taken paired
+inside one lock hold with both spellings in **one binary** — the runtime knob was the right call over the
+build-time define the worker proposed, because a define would have made this a two-window comparison, and
+two windows is how the last three plan reversals in this log were produced.
+
+What happened to the plan, in one line each:
+
+1. **D21 was right and it paid**: −128.2 ms of the `attn` family at 4096 lanes (**1.466×**), −137.9 ms of
+   the whole wave (**1.125×**), 3295 → **3706 prefill tok/s** at 4096 tokens.
+2. **`gdn_rec` did not move** (501.82/507.01 vs 509.27/510.53 ms) — the control behaved as a control
+   should, which is worth recording because it is the first time in this sequence that a lever's
+   non-effect was also gated rather than assumed.
+3. **Decode is unchanged, and that is a fact about the route, not a disappointment**: single-request decode
+   runs the one-row attention path; the levers are in the wave body. Best-of-3 ratio 1.029 with 4.3 %
+   spread. The ledger's 71.3 tok/s stands.
+4. **The traffic routes are now unblocked in the right order.** D19's M = 2 halving was real and bought
+   nothing because it was measured against an instruction wall that was 2.6× taller than it needed to be.
+   With the touch at 45 slots instead of 116, re-testing M = 2 against `--attn-touch 1` is the obvious
+   next measurement, and it is cheap: both forms already exist, and `prototype/attn_m2`'s gates are green.
+5. **What the day's reversals have in common**: every one of them came from reading a *rate* as a *wall* —
+   41 wavefronts/CU, 237 GB/s demanded, 4.696 TFLOP/s. The guard that actually works is not a smarter
+   model but a cheaper experiment: change one thing and see which side moves.
