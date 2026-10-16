@@ -1,0 +1,49 @@
+# isa_census capture, CPU-only (hipcc --save-temps output; no device, no timing). Commands are HANDOFF step 3.
+
+$ isa_census.py isa_tu… gfx1151.s --kernels attn_tile_wave --loop-has ds_bpermute_b32
+
+_Z14attn_tile_wave8CoreArgs
+  whole kernel, static: ops=1454 issue-slots=1416 VALU=908 LDS=17 VMEM=10 SALU=475 other=6 encode-only=337
+  hottest opcodes: s_delay_alu=307, v_and_b32_e32=84, s_mov_b32=66, v_fma_f32=63, v_cndmask_b32_e32=51, v_mul_f32_e32=46, v_fmac_f32_e32=45, s_or_b32=39, v_div_scale_f32=34, s_waitcnt=30, s_xor_b32=29, v_mov_b32_e32=29
+  loops whose body contains 'ds_bpermute_b32': 1
+    loop BB1_27 depth=2 blocks=12: ops/iter=57 slots/iter=55 VALU=24 LDS=6 VMEM=0 SALU=25
+
+$ isa_census.py isa_tu_m2… gfx1151.s --kernels attn_m2_wave --loop-has ds_bpermute_b32
+
+_Z12attn_m2_wave8CoreArgs
+  whole kernel, static: ops=1916 issue-slots=1880 VALU=995 LDS=20 VMEM=15 SALU=844 other=6 encode-only=416
+  hottest opcodes: s_delay_alu=382, s_mov_b32=106, v_and_b32_e32=87, s_or_b32=75, v_fma_f32=63, s_cselect_b32=56, s_add_i32=54, v_cndmask_b32_e32=46, v_mul_f32_e32=45, v_fmac_f32_e32=45, s_xor_b32=44, v_mov_b32_e32=40
+  loops whose body contains 'ds_bpermute_b32': 1
+    loop BB5_88 depth=2 blocks=14: ops/iter=71 slots/iter=70 VALU=23 LDS=6 VMEM=0 SALU=41
+
+$ isa_census.py isa_tu… --kernels attn_tile_wave --ops v_exp_f32|v_ldexp|v_div_|v_rcp_f32|v_rndne
+
+_Z14attn_tile_wave8CoreArgs
+  whole kernel, static: ops=1454 issue-slots=1416 VALU=908 LDS=17 VMEM=10 SALU=475 other=6 encode-only=337
+  hottest opcodes: s_delay_alu=307, v_and_b32_e32=84, s_mov_b32=66, v_fma_f32=63, v_cndmask_b32_e32=51, v_mul_f32_e32=46, v_fmac_f32_e32=45, s_or_b32=39, v_div_scale_f32=34, s_waitcnt=30, s_xor_b32=29, v_mov_b32_e32=29
+  opcodes matching /v_exp_f32|v_ldexp|v_div_|v_rcp_f32|v_rndne/: 122 of 1715 (7.1% of the static instruction stream)
+    v_div_scale_f32=34, v_rcp_f32_e32=18, v_div_fmas_f32=17, v_div_fixup_f32=17, v_rndne_f32_e32=12, v_exp_f32_e32=12, v_ldexp_f32=12
+    loop BB1_18 depth=1 blocks=5: ops/iter=33 slots/iter=33 VALU=11 LDS=0 VMEM=0 SALU=20
+    loop BB1_21 depth=1 blocks=1: ops/iter=6 slots/iter=5 VALU=3 LDS=0 VMEM=0 SALU=2
+    loop BB1_27 depth=2 blocks=12: ops/iter=57 slots/iter=55 VALU=24 LDS=6 VMEM=0 SALU=25
+    loop BB1_28 depth=1 blocks=1: ops/iter=10 slots/iter=9 VALU=4 LDS=1 VMEM=0 SALU=4
+    loop BB1_56 depth=1 blocks=8: ops/iter=76 slots/iter=71 VALU=46 LDS=0 VMEM=0 SALU=23
+    loop BB1_59 depth=1 blocks=1: ops/iter=7 slots/iter=6 VALU=4 LDS=0 VMEM=0 SALU=2
+    loop BB1_63 depth=1 blocks=1: ops/iter=10 slots/iter=10 VALU=6 LDS=1 VMEM=0 SALU=3
+    loop BB1_67 depth=1 blocks=1: ops/iter=24 slots/iter=23 VALU=18 LDS=1 VMEM=0 SALU=4
+    loop BB1_70 depth=1 blocks=1: ops/iter=28 slots/iter=24 VALU=18 LDS=1 VMEM=0 SALU=5
+    loop BB1_74 depth=1 blocks=1: ops/iter=9 slots/iter=9 VALU=5 LDS=1 VMEM=0 SALU=3
+    loop BB1_76 depth=1 blocks=1: ops/iter=21 slots/iter=21 VALU=17 LDS=1 VMEM=0 SALU=3
+    loop BB1_79 depth=1 blocks=3: ops/iter=25 slots/iter=24 VALU=10 LDS=0 VMEM=0 SALU=12
+    loop BB1_82 depth=1 blocks=1: ops/iter=6 slots/iter=5 VALU=3 LDS=0 VMEM=0 SALU=2
+    loop BB1_86 depth=2 blocks=3: ops/iter=62 slots/iter=58 VALU=47 LDS=2 VMEM=0 SALU=9
+
+$ isa_census.py dot2_shape… --kernels score_scalar,score_dot2
+
+score_scalar
+  whole kernel, static: ops=43 issue-slots=41 VALU=34 LDS=0 VMEM=3 SALU=4 other=0 encode-only=8
+  hottest opcodes: v_lshlrev_b32_e32=9, v_mov_b16_e32=8, v_and_b32_e32=7, s_delay_alu=5, v_fmac_f32_e32=5, s_waitcnt=3, global_load_b128=2, v_dual_fmac_f32=2, s_load_b128=1, s_load_b64=1, s_clause=1, v_fma_f32=1
+
+score_dot2
+  whole kernel, static: ops=13 issue-slots=13 VALU=6 LDS=0 VMEM=3 SALU=4 other=0 encode-only=4
+  hottest opcodes: v_dot2_f32_bf16=4, v_lshlrev_b32_e32=2, s_waitcnt=2, global_load_b128=2, s_delay_alu=2, s_load_b128=1, s_load_b64=1, s_clause=1, global_store_b32=1, s_endpgm=1

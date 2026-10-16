@@ -408,3 +408,43 @@ score loop exists to pair with it.
    (`readpast`, `dropcurrent`, `dimhalf`, `gqaoff`) — both forms do the same wrong thing, so they could
    never register at *any* geometry. Negative mode now compares each form against **its own** clean
    output per `(row, head)`.
+
+## D20 — the score dot is priced out: 14 % of the instruction stream, and both dots together cap any arithmetic-class change at 27.9 %
+
+`prototype/attn_score_dot2/` — priced bottom-up from the **disassembly**, and stopped before writing a
+kernel, which is what the brief asked for and what the branch-2 rule makes cheap.
+
+1. **The prize is 3.9–10.5 % of the m2 form's 2.5402 ms residual (0.100–0.236 ms) at 4096 lanes**, against
+   the ~15 % kill line I set. Not marginal-by-a-hair: structurally bounded.
+2. **Why: the QK dot is 16 of the 114.6 VALU warp-instructions one (row, lane, head) touch costs — 14 %.**
+   Eight one-instruction bf16→f32 conversions plus eight FMAs (kernel-relative lines 693–715), and
+   `dot2_shape.cpp` proves a dot2 leg would be 4 × `v_dot2_f32_bf16` with zero conversions. **The PV dot
+   cannot be a dot2 at all** — it has one accumulator, so there is nothing for the second lane of the
+   packed instruction to multiply.
+3. **Both dots together are 27.9 % of the stream, and that is the ceiling on any arithmetic-class change
+   to this kernel — WMMA included.** So D19's hopeful "m2 + arithmetic-class ⇒ 2.42 → ~1.25 ms" is
+   unreachable by instruction *class*. The arithmetic wall is real (D19 proved that) and it is made of
+   something other than matrix-shaped work.
+4. **What it is made of, and therefore what to fund: the causal-mask guards cost 20 VALU instructions per
+   touch — more than the dot they protect — and the bf16→f32 conversions 8 more.** Together 24 % of the
+   stream, in control flow and format handling, neither of which needs a numerics decision to touch:
+   applying the causal bound as a loop limit instead of a per-element guard is bit-identity preserving by
+   construction. That is the next route, and it must be counted in the disassembly before and after, not
+   modelled.
+5. **A retired number of mine:** the "score cost 0.246 ms at 1024 lanes" that I had written into the specs
+   discussion of the fast tier is not in the tree as a score-only figure — it reproduces as the *whole*
+   touch bill at the 2-instruction roof (0.267 ms), so it overstated a score-only prize by ~7×. The
+   nearest real ancestor (190 of ~1,030 warp-inst/touch, 2026-10-14) already said the score loop was
+   under a fifth of the touch, which is the same story the disassembly tells now.
+6. **The decisive argument was not size.** dot2 would spend M = 2's bit-identity admission — the one thing
+   that makes this route need no user decision — to buy ≤ 10.5 %. Trading a free gate for a small number
+   is a bad trade even when the number is real. The gate plan is written anyway (§6) in case a future
+   width changes the arithmetic: association is all a dot2 changes, and the F1 floor may make the band
+   question free.
+
+**Also in this entry:** the `NEGVERDICT` scoping defect is fixed and witnessed without a device —
+`prototype/attn_m2/stub_harness.py` stands in for the binary and `run.py selftest` runs 12/12, including
+the case the device proved impossible before (`must=24 moved_m2=24 moved_ship=0 forms_agree=no
+verdict=PASS`). It also caught a latent `NameError` that killed `--neg slotk` on device, and it added the
+missing control group: a verdict now FAILs if the *clean* run is not bit-identical, because without a
+clean control no injection verdict means anything.

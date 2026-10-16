@@ -1,0 +1,145 @@
+====================================================================================================
+1. PINS AND CEILINGS (all measured elsewhere; nothing here is a guess)
+====================================================================================================
+  touches in the counter census   = 25,190,400  (Sigma_lanes 524,800 x 6 layers x 8 heads)
+  VALU warp-inst per touch        = 114.6   (= 2,888,000,000 / touches; the occupancy doc prints '~115')
+  achieved VALU rate              = 106.1 G warp-inst/s = 45.8% of the 2/CU/clk roof 231.5 G
+  scalar dot ceiling              = 3.65 T-MAC/s (7.30 TFLOP/s)
+  dot2-bf16 dot ceiling           = 11.64 T-MAC/s (23.28 TFLOP/s) = 3.19x the scalar leg
+  score loop, counted from the ISA= 42 VALU/touch (dot 16 + reduction 20 + round/address 6)
+  -> the score loop is 36.6% of a touch's VALU stream, and the dot alone is 14.0%
+  ISA re-check: _Z14attn_tile_wave8CoreArgs static: packed-half bf16->f32 conversions=50, v_fma*/v_fmac_f32=108. This is a PRESENCE check only - the static count also covers rope and the epilogue, so the per-touch figure (8 conversions + 8 FMAs) comes from the window quoted in results.md 2.1.
+  ISA re-check: score_scalar: v_dot2=0 conversions=14 fma=6 - the scalar form must show conversions+fma, the dot2 form 4 dot2 and 0 conv
+  ISA re-check: score_dot2: v_dot2=4 conversions=0 fma=0 - the scalar form must show conversions+fma, the dot2 form 4 dot2 and 0 conv
+
+====================================================================================================
+2. MACs PER WAVE, BY PART, AND THE CEILING EACH PART RUNS AT
+====================================================================================================
+
+  wave64-at-1024: 64 rows, lanes 1021..1084, Sigma_lanes 67,360, touches 538,880
+    score dot (q.k, 256 MAC per touch)                        138.0 M MAC
+    PV dot (weights x v, 256 MAC per touch)                   138.0 M MAC
+    rope + per-head norm (attn_prep)                            0.8 M MAC
+    §05.6 epilogue (div, sigmoid gate, 2 rounds)                1.6 M MAC
+    score dot at the scalar ceiling                          0.0378 ms
+    score dot at the dot2-bf16 ceiling                       0.0119 ms
+    PV dot at the scalar ceiling (NOT dot2-shaped: 8 accumulators)     0.0378 ms
+    whole VALU stream at the 2/CU/clk roof                   0.2668 ms
+    whole VALU stream at the achieved rate                   0.5825 ms  (x97% of ship)
+    MEASURED: ship 0.5991 ms | m2 0.6511 ms
+
+  wave64-at-2048: 64 rows, lanes 2045..2108, Sigma_lanes 132,896, touches 1,063,168
+    score dot (q.k, 256 MAC per touch)                        272.2 M MAC
+    PV dot (weights x v, 256 MAC per touch)                   272.2 M MAC
+    rope + per-head norm (attn_prep)                            0.8 M MAC
+    §05.6 epilogue (div, sigmoid gate, 2 rounds)                1.6 M MAC
+    score dot at the scalar ceiling                          0.0746 ms
+    score dot at the dot2-bf16 ceiling                       0.0234 ms
+    PV dot at the scalar ceiling (NOT dot2-shaped: 8 accumulators)     0.0746 ms
+    whole VALU stream at the 2/CU/clk roof                   0.5265 ms
+    whole VALU stream at the achieved rate                   1.1492 ms  (x90% of ship)
+    MEASURED: ship 1.2753 ms | m2 1.3546 ms
+
+  wave64-at-4096: 64 rows, lanes 4033..4096, Sigma_lanes 260,128, touches 2,081,024
+    score dot (q.k, 256 MAC per touch)                        532.7 M MAC
+    PV dot (weights x v, 256 MAC per touch)                   532.7 M MAC
+    rope + per-head norm (attn_prep)                            0.8 M MAC
+    §05.6 epilogue (div, sigmoid gate, 2 rounds)                1.6 M MAC
+    score dot at the scalar ceiling                          0.1460 ms
+    score dot at the dot2-bf16 ceiling                       0.0458 ms
+    PV dot at the scalar ceiling (NOT dot2-shaped: 8 accumulators)     0.1460 ms
+    whole VALU stream at the 2/CU/clk roof                   1.0305 ms
+    whole VALU stream at the achieved rate                   2.2495 ms  (x93% of ship)
+    MEASURED: ship 2.4163 ms | m2 2.5402 ms
+
+  wave16-at-4096: 16 rows, lanes 4081..4096, Sigma_lanes 65,416, touches 523,328
+    score dot (q.k, 256 MAC per touch)                        134.0 M MAC
+    PV dot (weights x v, 256 MAC per touch)                   134.0 M MAC
+    rope + per-head norm (attn_prep)                            0.2 M MAC
+    §05.6 epilogue (div, sigmoid gate, 2 rounds)                0.4 M MAC
+    score dot at the scalar ceiling                          0.0367 ms
+    score dot at the dot2-bf16 ceiling                       0.0115 ms
+    PV dot at the scalar ceiling (NOT dot2-shaped: 8 accumulators)     0.0367 ms
+    whole VALU stream at the 2/CU/clk roof                   0.2591 ms
+    whole VALU stream at the achieved rate                   0.5657 ms  (x79% of ship)
+    MEASURED: ship 0.7166 ms | m2 0.7667 ms
+
+====================================================================================================
+3. THE PRICE: what a 3-4x faster score dot removes, three ways
+====================================================================================================
+  (A) MAC-roof: only the multiply-adds move, at the two sustained ceilings.
+  (B) Instruction share: the dot2 removes 12 of 114.6 VALU warp-inst per touch = 10.5% of the stream;
+      that fraction is an UPPER bound on the time saving, because a kernel at 46 % of the
+      issue roof does not convert freed slots into freed time 1:1.
+
+  wave64-at-1024:
+    (A) 0.0259 ms = 4.0% of the m2 residual (0.6511 ms) | 4.3% of ship (0.5991 ms)
+    (B) bound = 10.5% of the wave = 0.0279 ms at the roof, 0.0610 ms at the achieved rate
+
+  wave64-at-2048:
+    (A) 0.0512 ms = 3.8% of the m2 residual (1.3546 ms) | 4.0% of ship (1.2753 ms)
+    (B) bound = 10.5% of the wave = 0.0551 ms at the roof, 0.1203 ms at the achieved rate
+
+  wave64-at-4096:
+    (A) 0.1002 ms = 3.9% of the m2 residual (2.5402 ms) | 4.1% of ship (2.4163 ms)
+    (B) bound = 10.5% of the wave = 0.1079 ms at the roof, 0.2355 ms at the achieved rate
+
+  wave16-at-4096:
+    (A) 0.0252 ms = 3.3% of the m2 residual (0.7667 ms) | 3.5% of ship (0.7166 ms)
+    (B) bound = 10.5% of the wave = 0.0271 ms at the roof, 0.0592 ms at the achieved rate
+
+  PRIZE BAND at the funded width (64 rows at 4096 lanes): 3.9% .. 10.5% of the m2 form's 2.5402 ms residual (0.100 .. 0.235 ms).
+  D19's pair target is ~1.25 ms per wave at 4096, i.e. removing ~1.29 ms. A dot2 removes at most 0.235 ms = 0% of what that target needs.
+  ROBUSTNESS: the 114.6 warp-inst/touch census is the SHIPPED form's. The m2 form's per-touch count cannot be materially lower (the arithmetic per touch is identical; what the pair shares is
+    loads, which are not VALU), and any excess bookkeeping makes the share SMALLER: at 20 % more instructions per touch the bound is 8.7%, not 10.5%.
+  FALSIFIER (HANDOFF step 5 measures this): the instruction bound is 12 / census, so the verdict flips only if attn_m2_wave costs fewer than 80 VALU warp-inst per touch.
+  KILL LINE: 15% of the wave.  BELOW -> STOP, do not write the kernel
+
+====================================================================================================
+4. THE 0.246 ms CLAIM, CHECKED AGAINST THE PINS
+====================================================================================================
+  At the 1024-lane wave (wave64-at-1024, ship 0.5991 ms) the score dot's real
+  arithmetic cost is 0.0378 ms at the sustained scalar rate (138.0 M MAC),
+  and its whole score LOOP is 36.6% of its VALU stream = 0.0978 ms at the roof, 0.2134 ms at the achieved rate.
+  What DOES come out near 0.246 ms: the ENTIRE per-touch VALU stream of that wave at the
+  2-warp-inst/CU/clk roof = 0.2668 ms (538,880 touches x 114.6 warp-inst / 2.315e+11).
+  So the figure is the whole instruction bill, not the score dot's: quoting it as the score's
+  cost overstates the prize by ~7x. (The claim named in the brief is not in the
+  tree; this is the only reading of it that reproduces the number, and it is arithmetic, not
+  a citation.) The nearest ancestor that IS in the tree is the 2026-10-14 pre-tile census
+  ('~1,030 warp-inst per touch in the one-pass form, of which the score-tile loop is 190 and
+  the softmax+PV loop ~840', progress/2026-10-14/attn-wave-diagnosis-2026-10-14.md §2). Read
+  that census at the then-assumed 4 inst/CU/clk roof gives 0.221 ms, the same
+  neighbourhood - so the figure is underdetermined, and two ancestries land near it. What is
+  NOT plausible under any reading is that it is the score dot's MAC cost. Note also that 190/1030
+  = 18.4 %: even in the pre-tile form the score loop was under a fifth of the touch, which is
+  the same conclusion this price reaches from the shipped form's census.
+
+====================================================================================================
+5. WHAT THE OTHER 85 % IS (so the next lever is chosen from this table, not from hope)
+====================================================================================================
+  score dot (the only dot2-shaped leg)                                33.3 M warp-inst   14.0%
+  score reduction (5 shuffle steps + guards)                          41.6 M warp-inst   17.4%
+  score round/scale/addressing                                        12.5 M warp-inst    5.2%
+  pass 2 by subtraction: expf, V conversions, 8 FMAs, rescale, address math     151.2 M warp-inst   63.4%
+  TOTAL (matches the counter census)                                 238.6 M warp-inst   100.0%
+
+  The pass-2 pile is where the instructions live. On the streaming route these waves take, its three
+  biggest items are all bigger than the dot, and naming them here is a census, not a funding request:
+    * `expf` is inlined as ~14 VALU ops (v_mul_f32_e32, v_rndne_f32_e32, v_cvt_i32_f32_e32, v_exp_f32_e32,
+      v_ldexp_f32, and the clamp cndmasks) and costs ~15 warp-inst per touch on this route; the one-pass
+      route pays it TWICE per touch (`attn_decode
+      _kernels.h`: the `l += expf(...)` sum loop, then `expf(...) / l` in the weight loop) plus a full
+      IEEE divide (`v_div_scale_f32` / `v_rcp_f32` / `v_div_fixup_f32` / `v_div_fmas_f32`) - 34 per
+      touch there. Reusing the first `expf` instead of recomputing it would need `ns` floats per
+      thread, which is why the reference form pays it twice;
+    * the PV dot is 8 one-instruction BF16 conversions + 8 FMAs = 16 per touch, the same size as the
+      score dot, and it CANNOT be a dot2: `v_dot2_*` folds two products into ONE accumulator (its
+      builtin returns a single f32) and PV needs eight, one per output dim;
+    * the shuffle's per-step mask guard (compare + cndmask + address add + LDS permute, plus a full-exec
+      test per step) is ~4 VALU per step for work that is dead when the mask really is `exec`.
+  The one lever with real headroom against a 15% line is neither dot: it is `v_wmma_f32_16x16x16_f16`
+  at 52.63 TFLOP/s (D19 says the same), which covers BOTH dots - 32 of 114.6 warp-inst per touch, 28 %
+  of the stream, against two MFMA instructions per 16x16x16 tile. Pricing WMMA is a separate brief and
+  is not answered here.
+
