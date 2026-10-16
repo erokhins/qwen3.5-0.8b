@@ -130,6 +130,10 @@ WaveGemm resolve_wave_gemm(WaveGemm want, int rows);
 std::string gemm_route_init(WaveGemm want = WaveGemm::kLibrary);
 // Tears down what `gemm_route_init` created. Safe to call when it never ran.
 void gemm_route_shutdown();
+// Runtime filter over the per-shape algo pin table: "all" (the default), "none", or a comma-separated
+// list of pinned shape names. A pin choice is a measurement variable, so it is a knob and not a
+// rebuild: pin-vs-rank-0 must be one window with one binary. Throws on an unknown name.
+void gemm_pins_select(const std::string& spec);
 
 // PLAN-TIME algo selection for the hipBLASLt route, one call per (shape, M) instead of one per matmul.
 // The engine issues 150 library calls per 24-layer wave and a heuristic query costs more than the win

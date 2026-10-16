@@ -52,6 +52,7 @@
 #include <tuple>
 #include <vector>
 
+#include "engine/decode_step.h"   // kMaxWaveRows: a pin is keyed to the shipping wave width
 #include "engine/state.h"
 #include "tools/gemm_common.h"
 
@@ -185,16 +186,73 @@ struct AlgoPin {
     const char* algo_hex;
 };
 
-// Empty as shipped, which is the honest state: `results.md` §3a names the shapes a pin would pay for at
-// M=512 (`down_proj` 1.231x, `o_proj+out_proj` 1.138x, `in_proj_qkv` 1.075x, `gate_proj+up_proj`
-// 1.067x) but has not published the algo BYTES of those winners, and transcribing a hex string nobody
-// captured is a placeholder, not a pin. Adding a row here is the ONLY edit a measured winner needs: the
-// lookup below runs ahead of the heuristic for every shape, and the `GEMM-LT` line prints
-// `source=pin` when one is in force so the route can never silently drift back to rank-0.
+// Three shapes are pinned, and all three are here for ONE reason: at the shipping width the heuristic's
+// rank-0 — which is all an unpinned `lt` run gets — is SLOWER than the call this engine already makes
+// through hipBLAS. Taking rank-0 there gives back part of the win `prototype/gemm_algo_sweep/results.md`
+// §3c measured. The test is therefore `default_ms` vs `engine_call_ms`, never `best_ms` vs either, and
+// that section's lesson 2 is that reading the
+// "best" column as though it were the "default" column is how `mlp_down` was shipped at 0.812x.
+// Numbers are `prototype/gemm_algo_sweep/results.md` §1's `RESULT` lines at M=512 (the sweep's
+// `--rows 512 --max-algos 12` window); the bytes are that same build's `--verify --algo-dump`
+// `ALGODUMP` lines, matched to each winner by `best_seq`/`best_idx` — not hand-written.
+//
+//   shape              rank-0 ms  engine ms  winner ms   rank-0/engine   winner/engine
+//   o_proj+out_proj      0.0871     0.0801     0.0766      1.087x slow     0.956x
+//   in_proj_qkv          0.2000     0.1989     0.1862      1.006x slow     0.936x
+//   down_proj            0.1439     0.1313     0.1169      1.096x slow     0.890x
+//
+// The other four shapes of `kLtShapes` need nothing and so get nothing, by the same measurement: their
+// rank-0 already beats the engine's own call (q_proj 0.820x, `k_proj+v_proj` 0.616x, in_proj_z 0.736x,
+// gate_proj+up_proj 0.861x of `engine_call_ms`), and a pin is provenance-bound — it freezes one kernel
+// against one hipBLASLt version (these were captured on 10.4.1) — so a shape that owes nothing is not
+// worth a re-capture obligation. `gate_proj+up_proj`'s winner IS a further 1.067x over its own rank-0
+// and is deliberately NOT taken here: that is new speed, not a recovered regression, and it belongs in
+// its own funded change with its own A/B.
+//
+// `in_proj_qkv` is the marginal one: 0.2000 vs 0.1989 is 0.6%, inside the few-percent spread a burst
+// on this box has, so that pin rests on the winner being 1.075x over its rank-0 (0.50 ms per 24-layer
+// wave at 36 calls), not on the 0.6%. `down_proj` and `o_proj+out_proj` clear the burst's own noise.
+//
+// Pins bind on (N, K, M), so they cover the FULL wave width and nothing else: a partial wave (640 lanes
+// = 512 + 128 rows) or a prompt-shaped body (dec8 plans M=17) still takes the heuristic. That is the
+// same state the 1.120x A/B was measured in, and `GEMM-LT` prints `source=` for every plan, so which
+// kernel served which width is readable in any log rather than inferred from a table.
+//
+// One field of that log line to read carefully: on a `source=pin` line `ws=` is the algo record's own
+// stamped `max_workspace_bytes`, and for a record that came back from the heuristic — which all three of
+// these did — hipBLASLt stamps that field with the preference cap the query ran under (128 MiB here,
+// the whole buffer) rather than with what the kernel needs. Re-running `--verify --algo-dump` shows it:
+// every heuristic-ranked record in that capture carries 134217728 there, and the records `getAllAlgos`
+// adds carry SIZE_MAX, while the real per-kernel demand lives in the separate `workspaceSize` the sweep
+// prints as `ws=` and `hipblasLtMatmulAlgoCheck` fills — that is the field `skipped_workspace=15077` in
+// §4 of `prototype/gemm_algo_sweep/results.md` counts. Two consequences, both wanted: `ws=134217728` on a pin line is a ceiling the library wrote and
+// not a demand by the kernel (the launch passes the whole pinned buffer on every path anyway, see
+// `gemm_bf16` below), and the refuse-if-bigger-than-the-buffer predicate above also refuses any
+// enumerated record, so a pin can only ever name an algorithm the heuristic itself would have served.
+// Which pins are in force for this run: "*" means all, an empty list means none. This is a
+// measurement variable, so it is a runtime knob and not a rebuild — pin-vs-rank-0-vs-pin-subset has to
+// be one window with one binary, and the sweep already proved that a burst column and the in-situ
+// family do not move by the same factor, so the subset question can only be answered in situ.
+std::vector<std::string> g_pin_allow{std::string("*")};
+
+bool pin_allowed(const char* name) {
+    for (const std::string& s : g_pin_allow) {
+        if (s == "*" || s == name) return true;
+    }
+    return false;
+}
+
 const std::vector<AlgoPin>& algo_pins() {
     static const std::vector<AlgoPin> kPins = [] {
         std::vector<AlgoPin> v;
-        // v.push_back({"down_proj", kHidden, kIntermediate, kMaxWaveRows, "<48 hex chars>"});
+        // Pinned by measurement, and only this one. The other two candidates (`o_proj+out_proj`,
+        // `in_proj_qkv`) were warm-burst winners — rank-0 slower than the engine's call, this algo
+        // faster — and measured in situ they cost `proj` 5.5 ms of a 24.8 ms family (24.82 -> 30.35 ms,
+        // one window, three reps, `prototype/gemm_algo_sweep/results.md` §3d). A burst winner can be an
+        // in-situ loser, so a pin earns its place in situ or not at all. `down_proj` stayed: 7.81 ->
+        // 6.78 ms against the library's 6.43 ms, the only shape where rank-0 was a regression.
+        v.push_back({"down_proj", kHidden, kIntermediate, kMaxWaveRows,
+                     "890300000000000000000000000000000000000800000000"});
         return v;
     }();
     return kPins;
@@ -313,7 +371,8 @@ std::string build_lt_route() {
     std::ostringstream os;
     os << "route=hipblaslt handle=1 workspace_mib=" << (kWorkspaceBytes >> 20)
        << " version=" << lt_version << " algo_source=heuristic-rank-0-per-shape pins="
-       << algo_pins().size() << " stream=default";
+       << [] { size_t n = 0; for (const AlgoPin& p : algo_pins()) { if (pin_allowed(p.name)) ++n; } return n; }()
+       << " stream=default";
     r.description = os.str();
     return r.description;
 }
@@ -355,6 +414,7 @@ LtPlan& lt_plan(LtRoute& r, const char* name, int n, int k, int m, std::string& 
     int returned = 0, skipped_ws = 0, skipped_state = 0;
     for (const AlgoPin& pin : algo_pins()) {
         if (pin.n != n || pin.k != k || pin.m != m) continue;
+        if (!pin_allowed(pin.name)) continue;  // filtered out by `--gemm-pins`; rank-0 stands
         hipblasLtMatmulAlgo_t pinned{};
         if (!algo_from_hex(pin.algo_hex, pinned) || algo_all_zero(pinned)
             || pinned.max_workspace_bytes > kWorkspaceBytes) {
@@ -438,6 +498,38 @@ LtPlan& lt_plan_for(int m, int n, int k, std::string& built_line) {
 }
 
 }  // namespace
+
+// `--gemm-pins all|none|<csv of shape names>`. Throws on a name that is not in the pin table: a typo
+// that silently meant "no pins" would price rank-0 twice and report the pin as a null.
+void gemm_pins_select(const std::string& spec) {
+    std::vector<std::string> v;
+    if (spec == "all") {
+        v.emplace_back("*");
+    } else if (spec != "none") {
+        size_t p = 0;
+        while (p <= spec.size()) {
+            size_t c = spec.find(',', p);
+            const bool last = (c == std::string::npos);
+            if (last) c = spec.size();
+            if (c > p) v.push_back(spec.substr(p, c - p));
+            if (last) break;
+            p = c + 1;
+        }
+    }
+    for (const std::string& name : v) {
+        if (name == "*") continue;  // the "all" sentinel, not a shape name
+        bool known = false;
+        for (const AlgoPin& pin : algo_pins()) {
+            if (pin.name == name) known = true;
+        }
+        if (!known) {
+            throw std::runtime_error("gemm lt: --gemm-pins names '" + name
+                                     + "', which is not in the pin table (use all, none, or a"
+                                       " comma-separated list of pinned shape names)");
+        }
+    }
+    g_pin_allow = v;
+}
 
 std::string gemm_route_init(WaveGemm want) {
     route().path = want;

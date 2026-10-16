@@ -101,6 +101,9 @@ struct Options {
     // so this flag cannot move a decode bit either way.
     engine::kernels::WaveGemm wave_gemm = engine::kernels::WaveGemm::kLibrary;
     bool wave_gemm_given = false;
+    // Which algo pins are in force (`all` / `none` / csv of shape names). Only meaningful with
+    // `--gemm lt`; see `kernels.h::gemm_pins_select`.
+    std::string gemm_pins = "all";
     // Which attention FORM a wave body runs (Phase 2, `kernels.h:AttnLayerArgs::wave_tile`). 1 is the
     // SHIPPED default since `prototype/attn_decode/results.md` §21: the G x 1 tiled `attn_tile_wave`, which
     // measured 26.70 ms against the shipped form's 107.67 ms at 1024 lanes and is BIT-identical to it on
@@ -212,6 +215,9 @@ Options parse_args(int argc, char** argv) {
             // that became the default would price the default twice and report it as a null.
             o.wave_gemm = engine::kernels::parse_wave_gemm(next());
             o.wave_gemm_given = true;
+        } else if (a == "--gemm-pins") {
+            // Parses or throws, like `--gemm`: an unrecognised name must not silently mean "no pins".
+            o.gemm_pins = next();
         } else if (a == "--attn-tile") {
             const std::string v = next();
             if (v != "0" && v != "1") {
@@ -1128,6 +1134,9 @@ int main(int argc, char** argv) {
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;
         if (engine::kernels::wave_gemm_is_library(o.wave_gemm, engine::kMaxWaveRows)) {
+            // Pin filter first: it decides what `gemm_route_plan` below fetches and what the version
+            // line counts, so setting it after the plan would print one route and run another.
+            engine::kernels::gemm_pins_select(o.gemm_pins);
             // Created here, once, before the first body: the handle and the pinned workspace must not
             // be first touched 400 launches into a prefill. Only when the route is actually on, so a
             // `--gemm hand` run allocates nothing the pre-route run did not.
