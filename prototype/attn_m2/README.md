@@ -3,12 +3,17 @@
 One block walks K and V **once** for **two** adjacent query rows instead of twice, with the causal mask
 applied per row so each row attends exactly its own prefix. Funded by
 `progress/2026-10-16/ceiling-based-route-ranking-2026-10-16.md` §6 and decision D5 item 3
-(bit-identity required), against the diagnosis in §3.4: `attn`'s byte floor is 7.7× *under* its measured
+(bit-identity required), against the diagnosis in §3.4 of that doc: `attn`'s byte floor is 7.7× *under* its
+measured
 time at every width, so the lever is traffic, not arithmetic — and arithmetic routes on this family are
 worth only 1.4–1.6× (D16/D17).
 
-**Status: CPU gates green, device pass not yet run.** Every device cell in `results.md` is `NOT MEASURED`
-and the commands to fill them are `HANDOFF.md`. No timing exists for this form anywhere.
+**Status: bit-identity is green on device (including the MAXSC straddle) and bytes demanded falls to ~0.50
+as modeled; the widths the prize is booked at are still `NOT MEASURED`.** One device window ran
+(`prototype/attn_m2/results.md` §2–§4): four plans were blocked by a launcher bug since fixed and guarded
+(§6), the controls it ran were vacuous for two reasons also fixed (§3), and the timings it took were all on
+waves 2.5–5× **below this box's bandwidth plateau**, where M = 2's halved grid cancels its halved bytes by
+construction (§7). No timing exists for this form at a width that can price it.
 
 ## The one-sentence design
 
@@ -23,7 +28,7 @@ mirror for every legal `(split, n)` — worst observed 519.
 
 From `m2_model.py traffic`, which reproduces the funding doc's own numbers from an independent census:
 
-| width | M=1 byte floor | M=2 byte floor | `attn` measured (quoted §3.4) | prize | doc §6 prize |
+| width | M=1 byte floor | M=2 byte floor | `attn` measured (quoted §3.4 of the funding doc) | prize | doc §6 prize |
 |---|---|---|---|---|---|
 | 1024 lanes | 27.2 ms | 13.7 ms | 27.23 ms | 13.6 ms | 13.6 ms |
 | 2048 lanes | 108.8 ms | 54.5 ms | 104.32 ms | 49.8 ms | 49.9 ms |
@@ -38,10 +43,14 @@ is bytes-demanded arithmetic plus a timing, and `HANDOFF.md` says which of each.
 
 * **Occupancy.** `attn_m2_wave`: VGPR 50, SGPR 64, Scratch 0, **LDS 22,656 B/block** with 256 threads
   (8 warps). 65536/22656 = **2 blocks/CU = 16 wavefronts**, against the shipped `attn_tile_wave`'s
-  12,288 B × 4 warps → 5 blocks = 20 wavefronts. M = 2 buys bytes and spends latency-hiding, and the
-  lesson from `gdn_collapse` §4–5 is that a byte-bound kernel is still a kernel. The named lever if the
-  device says occupancy is the binding term: alias `s_k` and `s_v` into one stage (24 wavefronts) — not
-  implemented, because that trades the sharing for a different conflict.
+  12,288 B × 4 warps → 5 blocks = 20 wavefronts. That was the predicted cost and it was reported before any
+  device number existed — but the first device numbers (0.90× on four short waves) are not evidence for it:
+  all four were 16–32 blocks, below the ~80-block grid size at which this box's read bandwidth reaches its
+  233–240 GB/s plateau, and M = 2 halves the grid as well as the bytes, so below the knee they cancel by
+  arithmetic rather than by occupancy (§7). The plateau sweep reached 233–240 GB/s with 128-thread blocks,
+  i.e. ~8 wavefronts/CU at the knee, which is *below* this kernel's 16 — so aliasing `s_k`/`s_v`
+  (22,656 → 18,560 B → 24 wavefronts) is banked, not scheduled, and a 2-row/4-warp block is worse than the
+  thing it was proposed to fix (LDS is sized by `M × G × STAGE`, not by warps, so wavefronts would fall to 8).
 * **A single-row wave gains nothing and pays ~0.2 %.** The `decode7` case in `compare` shows ratio 1.001:
   a lone row has no partner to share with, and its self lane is staged twice. M = 2 is a **wave/prefill**
   route; decode steps should keep `attn_core`.
@@ -73,12 +82,22 @@ Block shape: `grid (N_KV, split, ceil(nrows/2))`, 256 threads = 8 warps = **one 
 ## CPU gates (all green, all re-runnable, no device)
 
 ```
-.venv/bin/python prototype/attn_m2/m2_model.py selftest                        # 17 checks
+.venv/bin/python prototype/attn_m2/m2_model.py selftest                        # 23 checks
+.venv/bin/python prototype/attn_m2/m2_model.py guard                            # the refusal bound (§6)
+./prototype/attn_m2/attn_m2 --geom-guard                                        # same bound, C++ side
 .venv/bin/python prototype/attn_m2/m2_model.py compare --anchor wide1024f       # 13 cases, 0 diffs
 .venv/bin/python prototype/attn_m2/m2_model.py negative --anchor wide1024f      # 9 injections
 .venv/bin/python prototype/attn_m2/m2_model.py traffic                          # the byte model
-.venv/bin/python prototype/attn_m2/run.py plans                                 # device plans, no device
+.venv/bin/python prototype/attn_m2/m2_model.py regime                           # the crossover (§7)
+.venv/bin/python prototype/attn_m2/run.py negmatrix                             # plan x control matrix
+.venv/bin/python prototype/attn_m2/run.py plans                                 # 12 plans, no device
 ```
+
+`guard` and `--geom-guard` are the same assertion written twice — CPU mirror and C++ closed forms — and they
+print identical numbers (13,744 geometries, worst single-block union 518 of 520, 0 phantom refusals, 0 leaks,
+16 real plan geometries). `attn_m2_ok` refused four funded plans once by comparing a per-block bound against
+a sum over blocks; a comment saying that check was implied is what failed, so the bound now walks the space
+in both spellings and asserts *which* check fired (§6).
 
 `compare` is the admission gate: **0 differing elements out of the whole tensor, per case**, on 5 pinned
 spans, 7 built boundary waves and one real HF-pinned decode row at 1032 lanes. `negative` runs 9

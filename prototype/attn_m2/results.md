@@ -1,8 +1,11 @@
 # `prototype/attn_m2` — results
 
-Status: **CPU gates green; device pass not run.** Every device cell below is `NOT MEASURED` and stays
-that way until someone with an exclusive box fills it (`HANDOFF.md`). A worker may not take timings
-(AGENTS.md), so this file deliberately contains no device number — not an estimate, not a "should be".
+Status: **bit-identity green on device (§2), and every device number here belongs to the main agent** — one
+window was run under lock `attn-m2` on 2026-10-16 and its numbers are in §2/§3/§4. What that window could
+not reach, it could not reach because of a launcher bug (§2) rather than a limit (§6), and the four plans it
+blocked are still `NOT MEASURED`, along with the above-the-knee waves §7 says are the only ones that can
+price the funded claim. A worker may not take timings (AGENTS.md), so nothing new in this file is a device
+number — the corrections are to mechanism and to what the existing numbers mean.
 
 ---
 
@@ -12,11 +15,15 @@ Each line is the command and the outcome it prints. Re-run them; do not take thi
 
 | command | outcome |
 |---|---|
-| `.venv/bin/python prototype/attn_m2/m2_model.py selftest` | 17 checks, 0 failures |
+| `.venv/bin/python prototype/attn_m2/m2_model.py selftest` | 23 checks, 0 failures |
+| `.venv/bin/python prototype/attn_m2/m2_model.py guard` | the refusal guard (§6): 13,744 geometries, 0 failures |
 | `.venv/bin/python prototype/attn_m2/m2_model.py compare --anchor wide1024f` | 13 cases, **0 differing elements in every case**, 0 poison reads, 0 provenance violations, 0 partial-slot aliases |
 | `.venv/bin/python prototype/attn_m2/m2_model.py negative --anchor wide1024f` | 9 injections × 13 cases, 0 failures against derived must-catch/must-not-catch sets |
-| `.venv/bin/python prototype/attn_m2/m2_model.py traffic` | byte model; reproduces §3.4's floors 27.2 / 108.8 / 435.0 and §6's M = 2 prizes 13.6 / 49.9 / 194.6 ms |
-| `.venv/bin/python prototype/attn_m2/run.py plans` | 8 device plans written, no device touched |
+| `.venv/bin/python prototype/attn_m2/m2_model.py traffic` | byte model; reproduces the floors the funding doc quotes (`progress/2026-10-16/ceiling-based-route-ranking-2026-10-16.md` §3.4: 27.2 / 108.8 / 435.0 ms) and its §6 M = 2 prizes 13.6 / 49.9 / 194.6 ms |
+| `.venv/bin/python prototype/attn_m2/m2_model.py regime` | which regime each wave was measured in, and the crossover (§7) |
+| `./prototype/attn_m2/attn_m2 --geom-guard` | the C++ spelling of the guard: same 13,744 geometries, same numbers, host-only |
+| `.venv/bin/python prototype/attn_m2/run.py plans` | 12 device plans written, no device touched |
+| `.venv/bin/python prototype/attn_m2/run.py negmatrix` | which plan proves which injection, derived (§3) |
 
 ### §1.1 Bit-identity per case (the admission gate)
 
@@ -88,7 +95,8 @@ one head (the injection reaches the arithmetic).
 ### §1.4 What the byte model says, and where it stops paying
 
 From `m2_model.py traffic` (arithmetic on the head geometry over the 237 GB/s ceiling; quoted, not
-measured). Per-block census, so these are fetched lane rows with multiplicity — the mistake §20.5 was
+measured). Per-block census, so these are fetched lane rows with multiplicity — the mistake §20.5 of
+`prototype/attn_decode/results.md` was
 about is booking a re-use the loop does not have:
 
 * 1024 lanes → 0.5024 of M = 1's K+V bytes; 2048 → 0.5012; 4096 → 0.5006. The floor halves.
@@ -96,7 +104,8 @@ about is booking a re-use the loop does not have:
   0.512 (1024–1087, split 3). Short pairs and straddling pairs pay the union residue.
 * V is re-used less than K whenever the two spans differ (each row's chunk *k* is anchored at its own
   `blo`, so the staged unions overlap).
-* The arithmetic floor (3.53 / 14.1 / 56.5 ms, §3.4) sits 7.7× *under* the byte floor and M = 2 does not
+* The arithmetic floor (3.53 / 14.1 / 56.5 ms, `ceiling-based-route-ranking-2026-10-16.md` §3.4) sits 7.7×
+  *under* the byte floor and M = 2 does not
   move it at all — two rows still do two rows' worth of dots. That is where the M ≈ 7.7 crossover comes
   from, and why M = 2 is the funded step rather than M = 4 or 8.
 
@@ -141,31 +150,75 @@ names for the m2 kernel itself, and it is why "the CPU mirror is green" bought n
 Bit-identity holds on the four plans that run — including the MAXSC/MAXSC+1 straddle, which is the case
 M = 2 exists to prove. The bytes-demanded ratio reproduces the byte model (~0.50 for a full pair).
 
-**The four refusals are a bug, not a limit, and they are the important finding of this window.**
-`attn_m2_ok` calls `attn_m2_pair_union(lanes_last - 1, split, 0)`, but that function's first argument is
-a **row index** `n_lo` — which is how the harness itself calls it (`n_lo = c.lvalid + ATTN_M2_M * rt`).
-Passing a lane count makes the closed form derive each row's lane span from a row number, so every plan
-above ~520 lanes is refused with *“the union of a pair's slices exceeds ATTN_M2_STAGE”*. At 1032 lanes
-and `split = 3` a slice is ~344 lanes and the union should be ~346, well inside the 520 bound. The
-consequence is that **the widths the route is funded for — 1024 and 4096 — cannot be run at all**, which
-is also why §4 is negative only over the short end.
+**The four refusals are a bug, not a limit, and they are the important finding of this window — with a
+mechanism different from the one first written here.** `attn_m2_ok` tested
+`attn_m2_pair_union(lanes_last - 1, split, 0) > ATTN_M2_STAGE`, and that function returns lane rows
+**summed over the pair's lane blocks** (`total`), whereas `ATTN_M2_STAGE` bounds the **widest single lane
+block** (`max_block`). A 1024-lane wave sums four ~344-lane blocks to ~1032, so every plan above ~520
+*total* lanes was refused — `plan-straddles-block-2`, `plan-straddles-block-3`, `plan-pair-widest-1024`,
+`plan-tail` — while every short plan passed, `pair-just-above` at exactly 520 by luck. The first diagnosis
+in the brief and in this section, that `n_lo` is a row index fed a lane count, is wrong in that detail:
+`n_lo` has always been the lower row's lane count, and the harness's `n_lo = c.lvalid + ATTN_M2_M * rt` is
+the same quantity (`decision log D18` item 3 carries the same wrong detail; it is left as written because
+journals are not rewritten). The window's arithmetic was right — at 1032 lanes with `split = 3` the slice
+is 344 and the union 344 of a 520 bound — and it is now checked instead of asserted (§6). Consequence
+unchanged: **the widths the route is funded for, 1024 and 4096, did not run**, so §4 is negative only over
+the short end and the four REFUSED rows above have to be re-run.
 
-## §3 Device negatives
+## §3 Device negatives — the window's controls were vacuous, for two reasons, and the driver is rebuilt
 
-Run with `run.py negative --neg X`, which iterates every plan; the summary line prints the **last** plan
-only, and with the §2 refusals the only plans that execute are the short ones. That makes eight of the
-nine injections **vacuous on device**: `partrow`, `partalias` and friends can only move a *streaming*
-row, and a plan whose rows are 1–8 lanes has no streaming row, so their must-catch set is empty and
-“nothing moved” proves nothing. This is the AGENTS.md trap (“a negative control with an empty must-catch
-set is not a control”) arriving through plan selection rather than through the injection itself.
+The window ran `run.py negative --neg X`, which iterated every plan and printed **one summary line for the
+last plan only**. With §2's refusals the only plans that executed were the short ones, so eight of the nine
+injections reported "0 moved". Two independent defects made that number meaningless; both are now
+structurally impossible rather than watched for.
 
-| injection | observed (short plans only) | admissible? |
-|---|---|---|
-| `maskwide` | moved 1 case | yes — the one injection whose geometry survives a short plan |
-| `partrow`, `partalias`, `readpast`, `dropcurrent`, `dimhalf`, `gqaoff`, `slotk`, `slotv` | moved 0 cases | **no** — empty derived must-catch set at these widths |
+1. **Empty derived must-catch sets could be run at all.** `partrow` and `partalias` alias a SPLIT partial,
+   which only a *streaming* row writes; a plan whose rows are 1–8 lanes has no streaming row, so the set is
+   empty and "nothing moved" proves nothing. `run.py` now computes `m2_model.neg_expect` per injection per
+   plan and runs an injection **only on plans whose derived set is non-empty**; if no plan qualifies it
+   stops with an assertion before touching the device — an empty list cannot print PASS. `run.py negmatrix`
+   prints the whole matrix, derived: at 1–8 lanes `partrow`/`partalias` score 0 and are excluded; a lone
+   1032-lane row's `maskwide` set is 0, so `plan-tail` is excluded from that injection; all nine have at
+   least one plan.
+2. **The baseline was wrong, and this is the larger defect.** "Moved" was measured as *form vs form* under
+   the injection. For a **form-neutral** injection — `readpast`, `dropcurrent`, `dimhalf`, `gqaoff` — both
+   forms do the same wrong thing, so they agree and the count is **zero however far the bug spread**. Those
+   four could never have registered on device at any geometry. Negative mode now runs each plan **twice**
+   (`--neg none`, then `--neg X`) and compares each form's injected output against **that same form's clean
+   output**, per `(row, head)`, from the dumps the harness already writes. The form-vs-form agreement is
+   asserted separately and must be 0 — the §1.2 claim, now actually checked under injection. For the three
+   `NEG_M2_*` injections the shipped form is a control group: it does not implement those ids, so it must
+   not move at all.
 
-Re-run after the refusal fix, when the > MAXSC plans execute; the CPU mirror's derived sets (§1.2) stand
-until then.
+Per plan the driver prints one line with its own verdict:
+
+```
+NEGVERDICT plan=pair-just-above neg=partrow rows=8 lanes=513-520 split=2 must=64 moved_m2=64 \
+           moved_ship=0 blind_hits=0 forms_agree=yes verdict=PASS
+```
+
+and a plan the launcher refuses prints `verdict=NO-LAUNCH` and counts as a **failure**, never a skip — the
+one check that would have surfaced §2's bug inside the window itself.
+
+**How the driver itself was checked, without a device.** `run.py --bin PATH` runs the driver against any
+binary, so selection and adjudication can be exercised against a stub that writes right-sized dumps and
+prints `RESULT` lines in the real format (the stub used here was scratch, not committed; the `--bin` flag is
+the committed part). Four outcomes, all reproduced: a stub that moves every `(row, head)` → `gqaoff` PASSes
+on 8/8 plans, exit 0; the same stub under `maskwide` is **failed** for moving rows the geometry declares
+blind (`blind_hits>0`, exit 1) while `plan-tail` is excluded as structurally empty; a stub that refuses with
+no `RESULT` line → `NO-LAUNCH` on every plan, exit 1; and handing `partrow` only the 1–8-lane plan →
+`ASSERTION FAIL … EMPTY derived must-catch set`, exit 1, **before any binary is invoked**. In none of these
+can an empty list print PASS.
+
+| injection | window's observation | admissible then? | what the re-run must show |
+|---|---|---|---|
+| `maskwide` | moved 1 case | yes — the one a short plan can reach | m2 moves exactly the widened rows, ship moves 0 heads, forms agree |
+| `partrow`, `partalias` | moved 0 cases | **no** — empty derived set at 1–8 lanes | must move on `straddles-block-2/3`, `pair-widest-1024`, `tail` |
+| `readpast`, `dropcurrent`, `dimhalf`, `gqaoff` | moved 0 cases | **no** — wrong baseline, not wrong geometry | each form moves its own derived set against its own clean output |
+| `slotk`, `slotv` | moved 0 cases | **no** — wrong baseline, and no mirror model | both forms move: the shared stage must not launder a cache perturbation |
+
+Until that re-run, the CPU mirror's derived sets (§1.2) are the only evidence, and §2's re-run is a
+prerequisite for most of them.
 
 ## §4 Timing and traffic — measured, and negative where measurable
 
@@ -183,10 +236,13 @@ same constant to both and dilute the ratio.
 | `pair-shortest` | 1–8 | 0.0085 ms | 0.0094 ms | **0.906** |
 
 **M = 2 is 7–10 % slower than the shipped form at every width this harness can currently run**, with the
-bytes demanded down ~2×. That is the occupancy term from §1.5 (16 wavefronts/CU against 20) arriving as
-predicted and being, at these widths, larger than the traffic saving. It is **not** a verdict on the
-funded claim, because the claim lives at 1024 and 4096 lanes, where the byte model books 13.6 ms and
-194.3 ms and where §2's refusal bug currently blocks the run. Spread across reps was under ~3 %; the
+bytes demanded down ~2×. The first reading here — "the occupancy term from §1.5 arriving as predicted" —
+does not survive §7: all four of these waves are **16–32 blocks**, and this box's read bandwidth only
+reaches its 233–240 GB/s plateau **from ~80 blocks up**, so in every one of them M = 2's halved grid
+cancels its halved bytes by construction. What the numbers say is narrower than they looked: below the
+bandwidth knee this route loses ~9 %, and §7 shows where it should win. It is **not** a verdict on the
+funded claim, which lives at 1024 and 4096 lanes on waves of tens of rows, where the byte model books
+13.6 ms and 194.3 ms and where §2's refusal bug blocked the run. Spread across reps was under ~3 %; the
 pair is quoted, not a single number from each side.
 
 Realized blocks/CU and wavefronts per CU from a profiler: NOT MEASURED (the compile census says
@@ -195,8 +251,113 @@ VGPR 50, SGPR 64, scratch 0, LDS 22,656 B → 2 blocks/CU).
 ## §5 Decision rule for shipping this
 
 1. Any non-zero `ndiff` on §2 → not admissible, fix the kernel (do not touch the gate).
-2. Bit-identity green but the paired timing flat or negative → the occupancy cost is the binding term;
-   the named lever is aliasing `s_k`/`s_v` (24 wavefronts) or a 2-row/4-warp block, and the byte model in
-   §1.4 says the prize is real only at ≥ 2048 lanes.
+2. Bit-identity green but the paired timing flat or negative → **first ask which regime was
+   measured** (§7). At 16–32 blocks the grid is below the bandwidth plateau, where M = 2's halved grid
+   cancels its halved bytes by construction and the result is not evidence about the route. Only a loss
+   measured above the knee is a loss; the named levers (aliasing `s_k`/`s_v`, a 2-row/4-warp block) move
+   occupancy, and §7 argues occupancy is not the binding term.
 3. Timing wins at 4096 but loses at ≤ 1024 → ship it behind the same kind of width gate the engine already
    uses for the tile form, and say so by lane count, not by benchmark-after-the-fact.
+
+---
+
+## §6 The refusal guard — the bound is now something that runs
+
+`attn_m2_ok` refuses on a prediction made from `lanes_last` alone. Before this fix that prediction used the
+wrong aggregate, and the failure was silent: four of eight funded plans simply did not launch. A comment
+saying "the refusal is implied by the split check" is a note, not a forcing, so the bound is now walked.
+Two spellings, same numbers, no device:
+
+```
+.venv/bin/python prototype/attn_m2/m2_model.py guard        # CPU mirror, no build needed
+./prototype/attn_m2/attn_m2 --geom-guard                    # the C++ closed forms, host-only
+```
+
+Both print: **13,744 geometries walked** (split 1..8 × full 0/1 × nrows 1/2/3/4/8/17 over a lane census
+dense below 64, dense over the MAXSC boundary, every multiple of MAXSC ± 2, and a sweep to the engine's
+4096-lane ceiling), and four assertions:
+
+| assertion | result |
+|---|---|
+| **BOUND** — no legal launch stages a union wider than `ATTN_M2_STAGE` or a slice wider than MAXSC | worst single-block union **518 of 520** (at `lanes_last=4094 split=8 full=0`), worst row slice **512 of 512** |
+| **NO PHANTOM** — the launcher refuses no launch the kernel would run happily | **0 phantom refusals** |
+| **NO LEAK** — the launcher accepts no launch the kernel would have to poison | **0 leaks** |
+| **REAL PLANS** — the 12 geometries this op actually runs are accepted | all 12 ok, read out of the header's own table |
+
+Three things worth stating plainly:
+
+* **The bound is not exceeded at any real width.** The headroom is 2 lanes (518 of 520) and the derivation
+  `span_max + (split − 1) = 512 + 7 = 519` is met, so `ATTN_M2_STAGE = 520` is honest, not generous. That
+  answers the question the brief asked: there is **no real width where M = 2's union bound fails**, so M = 2
+  is not limited by staging.
+* Geometries with a grid shallower than `split_for_lanes` do exceed the bound (e.g. `split=7` at 4096 lanes
+  gives a 586-lane slice) and are correctly refused — but by the **split** check. The guard asserts which
+  reason fired, so a union refusal can never again be the accidental answer for a too-shallow grid.
+* The `M2_REAL` table lives in the header and the Python guard **parses it out of the header text**, so
+  there is one table, not two that can drift. A plan that starts being refused fails the guard, in seconds,
+  before it can cost a device window.
+
+`m2_model.py selftest` now carries these as six of its checks, so the guard cannot be skipped by running
+only `compare`.
+
+## §7 Where M = 2 pays: a block-count crossover, not a lane-count one
+
+`.venv/bin/python prototype/attn_m2/m2_model.py regime` prints this section's arithmetic from the census,
+with §4's ms numbers as quoted inputs.
+
+**The measured plateau.** `devices/strix-halo-memory-bandwidth.md`: a grid-stride read sweep over 20–640
+blocks × 128–1024 threads reaches **233–240 GB/s and plateaus from ~80 blocks up**. Below ~80 blocks the
+achieved bandwidth scales with the grid, because the grid is what produces outstanding loads.
+
+**What M = 2 does to the grid.** `blocks_ship = N_KV × split × nrows`, `blocks_m2 = N_KV × split ×
+⌈nrows/2⌉`. M = 2 halves the grid at the same time as it halves the bytes. Below the knee those two halves
+cancel — that is not a defect in the kernel, it is arithmetic on a device fact.
+
+| wave | blocks ship → m2 | above the knee? | achieved GB/s ship → m2 | traffic share of ship's time | bytes ratio β | speedup |
+|---|---|---|---|---|---|---|
+| `pair-at-maxsc` | 16 → 8 | **no** | 14.2 → 8.4 | 6.0 % | 0.635 | 0.932 |
+| `maxsc-minus-1` | 16 → 8 | **no** | 14.2 → 6.5 | 6.0 % | 0.502 | 0.910 |
+| `pair-just-above` | 32 → 16 | **no** | 62.8 → 28.4 | 26.5 % | 0.502 | 0.902 |
+| `pair-shortest` | 16 → 8 | **no** | 8.7 → 6.1 | 3.7 % | 0.778 | 0.904 |
+
+All four are 2.5–5× below the knee and 4–27× above their own DRAM floor, so none of them is a wave whose
+time *is* its traffic — which is the only regime where the funded saving exists. Note also that the loss is
+~0.90 in all four while β ranges 0.50–0.78 and traffic share ranges 3.7–26.5 %: the loss does not track the
+traffic term at all, which is what the plateau explanation predicts.
+
+**Above the knee** (census, floor at 237 GB/s — **NOT MEASURED**):
+
+| wave | blocks ship → m2 | ship MB | floor ship | floor m2 | β | speedup if both sit at the plateau |
+|---|---|---|---|---|---|---|
+| 64 rows at 1021–1084 lanes (split 3) | 384 → 192 | 138.0 | 0.582 ms | 0.298 ms | 0.512 | **1.95** |
+| 64 rows at 2045–2108 lanes (split 5) | 640 → 320 | 272.2 | 1.148 ms | 0.591 ms | 0.515 | **1.94** |
+| 64 rows at 4033–4096 lanes (split 8) | 1024 → 512 | 532.7 | 2.248 ms | 1.125 ms | 0.500 | **2.00** |
+| 16 rows at 4081–4096 lanes (split 8) | 256 → 128 | 134.0 | 0.565 ms | 0.283 ms | 0.500 | **2.00** |
+
+**The crossover, stated as a condition.** M = 2 pays where `blocks_m2 ≥ ~80` *and* the shipped wave is at
+the plateau, i.e. **40 rows at split 2, 20 rows at split 4, 10 rows at split 8**. The engine's own prefill
+waves are 64 rows, so at every funded width the engine is above the knee and the prize arithmetic is intact
+there — **but it is unmeasured**, and §4's numbers neither support nor refute it. Nothing in this section is
+a measurement of `attn_m2_wave`; it is the census plus the box's published plateau, and the way to falsify
+it is the burst at the four waves above.
+
+### §7.1 Do the two named levers change the crossover? No.
+
+* **Aliasing `s_k`/`s_v`.** LDS map: `s_sc` 8,320 B + `s_k` 4,096 + `s_v` 8,192 + `s_kself`/`s_vself`
+  2,048 = **22,656 B**. `s_v` is the larger stage, so an alias costs `s_k`: 22,656 → **18,560 B** →
+  3 blocks/CU → **24 wavefronts/CU** instead of 16. Legal in this two-pass structure (pass 1 stages K, pass
+  2 stages V, barrier between), and it is worth measuring *only if* a burst taken above the knee still
+  shows a loss.
+* **A 2-row/4-warp block.** LDS per block does not depend on warp count — `s_sc` is sized by
+  `M × G × STAGE`, not by warps — so blocks/CU stays 2 and wavefronts/CU **halves to 8**. This lever is
+  strictly worse than what it is meant to fix. Worth recording because it was proposed as a fix.
+* The lever that would actually move occupancy is not `s_k`/`s_v` at all but **`s_sc` (37 % of the block's
+  LDS)**: keeping each warp's 520 union scores in registers instead of shared memory takes LDS to 14,336 B
+  → 4 blocks/CU → 32 wavefronts, the device's `Max Waves Per CU`. Its price is ~9–17 VGPR (50 → ~60), which
+  the register census would have to re-adjudicate:
+  `hipcc -O3 --offload-arch=gfx1151 -Rpass-analysis=kernel-resource-usage -c attn_m2.hip.cpp`. Not
+  implemented — no measurement yet asks for it.
+* Why occupancy is probably not the binding term at all: the plateau sweep hit 233–240 GB/s with
+  **128-thread** blocks, i.e. ~8 wavefronts/CU at ~80 blocks over 40 CUs (`devices/strix-halo-compute.md`:
+  40 CUs, `rocminfo`), which is *below* this kernel's 16. So 16 wavefronts should be enough to reach the
+  plateau, and the loss in §4 is explained by the block count being under the knee without invoking LDS.

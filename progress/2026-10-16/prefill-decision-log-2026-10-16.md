@@ -351,3 +351,60 @@ exist at 1–8 lanes) and proved nothing; only `maskwide` fired and was admissib
 faulted before its first comparison — `diff_rows` called a `__syncthreads()`-containing reduction from
 inside `if (threadIdx.x == 0)`, which aborts the queue on GCN instead of miscounting. A green CPU mirror
 was worth nothing until that was fixed.
+
+## D19 — two measured facts say `attn` sits where two equal walls meet, so no single-lever route can move it
+
+Window `attn-m2-2`. With the refusal fixed (see below) the four above-the-knee waves ran, and the result
+is not "M = 2 is slow" — it is that **dividing bytes by measured ms on both sides reveals a wall the byte
+model cannot see.**
+
+| wave (64 rows unless noted) | lanes | ship ms | m2 ms | speedup | bytes m2/ship | **ship GB/s** | **m2 GB/s** |
+|---|---|---|---|---|---|---|---|
+| `wave64-at-1024` | 1021–1084 | 0.5991 | 0.6511 | 0.920 | 0.512 | **230.3** | 108.5 |
+| `wave64-at-2048` | 2045–2108 | 1.2753 | 1.3546 | 0.941 | 0.515 | **213.4** | 103.5 |
+| `wave64-at-4096` | 4033–4096 | 2.4163 | 2.5402 | 0.951 | 0.500 | **220.5** | 104.9 |
+| `wave16-at-4096` | 4081–4096 | 0.7166 | 0.7667 | 0.935 | 0.500 | **187.0** | 87.4 |
+
+Read the last three columns together. The shipped form runs **at the memory plateau** (187–230 GB/s
+against a 237 GB/s ceiling), so it is traffic-bound, exactly as the byte model said. M = 2 really does
+halve the traffic — the two rows' lane sets are *nested prefixes*, so their union is just the wider one,
+and the census halving is real, not an accounting trick. **And the time did not move.** So the m2 form
+runs at ~105 GB/s not because the fabric is slow but because, with the bytes halved, what is left is the
+*arithmetic and latency* of the same total work — the pair still computes both rows' scores over their
+own prefixes.
+
+Therefore: at 4096 lanes the traffic wall and the arithmetic wall are **roughly the same height** (ship's
+traffic wall ≈ 2.42 ms; m2's residual ≈ 2.54 ms). A route that cuts only bytes hits the arithmetic wall;
+D16's conclusion that "the byte wall is back in front" was right about which wall is *at* the surface and
+wrong that cutting it helps on its own. This is why single-lever routes in this index keep disappointing:
+the cheapest pair is what matters — **M-tiling (built, bit-identical) plus an arithmetic-class change to
+the score loop.** If both land, `attn` at 4096 goes toward ~1.2–1.3 ms per wave instead of 2.42; if only
+one lands, it goes the wrong way, which is now measured four times.
+
+Note for the arithmetic side: fp16 does **not** halve bytes — it is also 16-bit — so WMMA cuts only the
+arithmetic wall. Only 8-bit staging (int8, with scales, still a stop-and-ask) cuts the traffic wall by
+half on its own.
+
+**M = 2 status: parked, not failed.** Bit-identity is green on device at every width including the
+1032-lane pinned HF row and 64-row waves; the traffic halving is real; the form is ~2× off the plateau
+for reasons that are now attributable rather than mysterious. It reopens the moment an arithmetic-class
+score loop exists to pair with it.
+
+### The two defects that blocked the above, and what they cost
+
+1. **`attn_m2_pair_union` returns a sum over lane blocks while `ATTN_M2_STAGE` bounds the widest single
+   block** — a unit mismatch, not the row-index/lane-count confusion I diagnosed from the outside. The
+   fix is an `M2Union {total, max_block, max_slice, over_read}` struct so the two aggregates cannot be
+   conflated, plus `attn_m2_geometry_guard`: 13,744 geometries walked two ways (Python mirror and the C++
+   launcher, identical numbers) asserting bound / no-phantom / no-leak / real-plans. Answer to the
+   question I asked: **the stage bound is not exceeded at any real width** — worst legal single-block
+   union 518 of 520, 0 phantom refusals, all 16 real plan geometries accepted.
+2. **`NEGVERDICT` appends a `forms disagree` problem unconditionally**, including for injections that
+   exist only in the m2 form (`maskwide`, `partrow`, `partalias`), where the shipped form is *required*
+   not to move and disagreement is the definition of success. Those three can therefore never print PASS
+   — the `mixed_bw` failure mode again: a check that fails for every configuration catches nothing. The
+   same run also proved the earlier negative suite was doubly vacuous for a reason neither of us had seen:
+   "moved" was measured form-vs-form, which is structurally blind for the form-neutral injections
+   (`readpast`, `dropcurrent`, `dimhalf`, `gqaoff`) — both forms do the same wrong thing, so they could
+   never register at *any* geometry. Negative mode now compares each form against **its own** clean
+   output per `(row, head)`.

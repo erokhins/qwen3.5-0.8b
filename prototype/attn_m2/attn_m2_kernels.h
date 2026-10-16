@@ -280,54 +280,116 @@ __device__ __host__ inline int attn_m2_part_floats(int nrows, int lanes_last) {
     return nrows * N_Q * split_for_lanes(lanes_last) * (DH + 2);
 }
 
-// Lane rows one pair's shared K walk fetches, summed over its lane blocks. `n_lo` is the LOWER row's
-// lane count; the pair's second row has n_lo + 1, which is what `lanes_of` gives for adjacent query
-// rows (lanes = lvalid + row) — the census is about a wave, so it does not pretend to price a pair of
-// arbitrary lane counts it can never contain. A lone final row (odd `nrows`) walks its own slices, i.e.
-// exactly `n_lo`. Honest-route geometry only: `neg` is left at NEG_NONE, because the traffic claim is a
-// claim about the shipping path.
+// What a pair's shared K walk touches. ONE struct with TWO aggregates, because they are different
+// quantities and conflating them is a bug that already happened: `total` is lane rows SUMMED OVER THE
+// PAIR'S LANE BLOCKS — a traffic census, bounded by nothing except the context length — while
+// `max_block` is the widest SINGLE lane block, which is the quantity `ATTN_M2_STAGE` bounds. The first
+// version of `attn_m2_ok` compared `total` to STAGE and therefore refused every plan above ~520 lanes
+// (a 1024-lane wave sums four ~340-lane blocks to 1032), which is results.md §2's blocked widths.
+// `attn_m2_geometry_guard` below is the guard that makes the confusion fail loudly instead of quietly.
+struct M2Union {
+    int total = 0;        // lane rows over all lane blocks: TRAFFIC
+    int max_block = 0;    // widest single lane block: what STAGE bounds
+    int max_slice = 0;    // widest single row slice: what MAXSC bounds
+    bool over_read = false;   // a block staged past what the row(s) in it have lanes for
+};
+
+// Lane rows one pair's shared K walk fetches. `n_lo` is the LOWER row's LANE COUNT; the pair's second
+// row has n_lo + 1, which is what `lanes_of` gives for adjacent query rows (lanes = lvalid + row) — the
+// census is about a wave, so it does not pretend to price a pair of arbitrary lane counts it can never
+// contain. It is a lane count, not a row index; `m2_launch_scan` is the function that takes a launch and
+// walks its real rows. Honest-route geometry only: `neg` is left at NEG_NONE, because the traffic claim
+// is a claim about the shipping path.
 //
 // This is a CLOSED FORM over the same rules `m2_pair_at` applies (it calls it), and
 // `m2_model.py selftest` requires the C++ and Python spellings of the census to agree on a census of
 // (n, split, full) — a traffic model that retypes the geometry is how §12 booked a 4x that was never
 // there (§20.5).
-inline int attn_m2_pair_union(int n_lo, int split, int full) {
-    if (n_lo <= 0) return 0;
+inline M2Union attn_m2_pair_union(int n_lo, int split, int full) {
+    M2Union u;
+    if (n_lo <= 0) return u;
     CoreArgs a{};
     a.split = split > 0 ? split : 1;
     a.full = full;
     a.lvalid = n_lo;
     a.neg = NEG_NONE;
-    a.nrows = 2;
+    a.nrows = ATTN_M2_M;
+    a.pos = n_lo - 1;                      // row 0's self lane is its last lane, like a real wave
+    a.tile = TILE;
     M2Row p0, p1;
     M2Pair p;
-    int total = 0;
     for (int y = 0; y < a.split + 1; ++y) {
         m2_pair_at(a, 0, y, &p0, &p1, &p);
         if (!p.any) break;
-        total += p.union_n;
+        u.total += p.union_n;
+        if (p.union_n > u.max_block) u.max_block = p.union_n;
+        const int s0 = p0.active ? p0.bhi - p0.blo : 0;
+        const int s1 = p1.active ? p1.bhi - p1.blo : 0;
+        const int s = s0 > s1 ? s0 : s1;
+        if (s > u.max_slice) u.max_slice = s;
+        if (p.u_hi > n_lo + 1) u.over_read = true;   // the pair has n_lo + 1 lanes between its rows
     }
-    return total;
+    return u;
 }
 
 // The same census for one row alone (a wave with an odd row count ends with one).
-inline int attn_m2_row_union(int n, int split, int full) {
-    if (n <= 0) return 0;
+inline M2Union attn_m2_row_union(int n, int split, int full) {
+    M2Union u;
+    if (n <= 0) return u;
     CoreArgs a{};
     a.split = split > 0 ? split : 1;
     a.full = full;
     a.lvalid = n;
+    a.neg = NEG_NONE;
     a.nrows = 1;
+    a.pos = n - 1;
+    a.tile = TILE;
     M2Row p0, p1;
     M2Pair p;
-    int total = 0;
     for (int y = 0; y < a.split + 1; ++y) {
         m2_pair_at(a, 0, y, &p0, &p1, &p);
         if (!p.any) break;
-        if (p.union_n > n) return -1;      // a lone row must never over-read: poison the census
-        total += p.union_n;
+        u.total += p.union_n;
+        if (p.union_n > u.max_block) u.max_block = p.union_n;
+        const int s0 = p0.active ? p0.bhi - p0.blo : 0;
+        if (s0 > u.max_slice) u.max_slice = s0;
+        if (p.union_n > n) u.over_read = true;        // a lone row must never over-read
     }
-    return total;
+    return u;
+}
+
+// What one LAUNCH would actually do, walked over every pair and every lane block it can contain. The
+// launcher refuses on a prediction built from `lanes_last` alone; this is the ground truth that
+// prediction is checked against, and it is why the guard can tell a correct refusal from a phantom one.
+struct M2Launch {
+    int max_block = 0;        // widest single union the kernel will stage
+    int max_slice = 0;        // widest single row slice
+    int total_union = 0;      // traffic census, summed over blocks
+    int blocks = 0;
+    bool too_wide = false;    // a union past STAGE or a slice past MAXSC, as `m2_pair_at` computes it
+};
+
+inline M2Launch m2_launch_scan(int lvalid, int pos, int nrows, int split, int full) {
+    CoreArgs a{};
+    a.lvalid = lvalid; a.pos = pos; a.nrows = nrows;
+    a.split = split > 0 ? split : 1; a.full = full; a.neg = NEG_NONE; a.tile = TILE;
+    M2Launch L;
+    for (int rt = 0; rt < attn_m2_rtiles_of(nrows); ++rt) {
+        for (int y = 0; y < a.split + 1; ++y) {
+            M2Row r0, r1; M2Pair p;
+            m2_pair_at(a, rt, y, &r0, &r1, &p);
+            if (!p.any) break;
+            ++L.blocks;
+            if (p.too_wide) L.too_wide = true;
+            if (p.union_n > L.max_block) L.max_block = p.union_n;
+            L.total_union += p.union_n;
+            const int s0 = r0.active ? r0.bhi - r0.blo : 0;
+            const int s1 = r1.active ? r1.bhi - r1.blo : 0;
+            const int s = s0 > s1 ? s0 : s1;
+            if (s > L.max_slice) L.max_slice = s;
+        }
+    }
+    return L;
 }
 
 // What this form may not be asked for, in one place so the launcher and the gate refuse the same list.
@@ -340,15 +402,202 @@ inline bool attn_m2_ok(int score_f32, int fused, int warp_size, int split, int l
         *why = "a row's slice would exceed the MAXSC staging the score buffer reserves (raise --split)";
         return false;
     }
-    // The pair-union bound at the widest pair the launch can contain. With the split check above this
-    // is implied (span_max <= MAXSC, union <= span_max + split - 1 = ATTN_M2_STAGE); it is spelled out
-    // because an implied bound is an untested one, and this one costs nothing to recompute.
-    if (lanes_last >= 2
-        && attn_m2_pair_union(lanes_last - 1, split, 0) > ATTN_M2_STAGE) {
-        *why = "the union of a pair's slices exceeds ATTN_M2_STAGE";
-        return false;
+    // The pair-union bound at the widest pair the launch can contain: rows (lanes_last - 1, lanes_last).
+    // With the split check above this is implied (span_max <= MAXSC, union <= span_max + split - 1 =
+    // ATTN_M2_STAGE); it is spelled out because an implied bound is an untested one — and because it was
+    // spelled WRONG first (a `total` summed over blocks against a per-block bound), which is what
+    // `attn_m2_geometry_guard` now checks instead of a comment. `max_block`, never `total`. Both `full`
+    // spellings are priced because this predicate does not take `full`, and a refusal must hold for the
+    // launch the caller will actually make whichever one that is.
+    if (lanes_last >= 2) {
+        const M2Union u0 = attn_m2_pair_union(lanes_last - 1, split, 0);
+        const M2Union u1 = attn_m2_pair_union(lanes_last - 1, split, 1);
+        const int worst_block = u0.max_block > u1.max_block ? u0.max_block : u1.max_block;
+        const int worst_slice = u0.max_slice > u1.max_slice ? u0.max_slice : u1.max_slice;
+        if (worst_block > ATTN_M2_STAGE) {
+            *why = "the union of a pair's SLICE PAIR in one lane block exceeds ATTN_M2_STAGE";
+            return false;
+        }
+        if (worst_slice > MAXSC) {   // belt and braces on the split check above
+            *why = "a row's slice in one lane block exceeds MAXSC";
+            return false;
+        }
     }
     return true;
+}
+
+// The guard DEFECT 1 needed, and the reason it is a guard rather than a patch. `attn_m2_ok` refuses on a
+// prediction made from `lanes_last` alone. Its first prediction used the wrong aggregate and refused
+// four of the eight funded plans, including both widths the 13.6/194.3 ms prize is booked at, while
+// every plan under ~520 lanes passed by luck — `pair-just-above` sat at exactly 520. "The refusal is
+// implied by the split check" is a note, not a forcing, so this walks the space and asserts:
+//
+//   1. BOUND     — no geometry the kernel can be launched on stages a union wider than ATTN_M2_STAGE or
+//                  a row slice wider than MAXSC, as the KERNEL computes it (`m2_launch_scan`);
+//   2. NO PHANTOM — the launcher never refuses a launch the kernel would run happily (the §2 bug);
+//   3. NO LEAK    — the launcher never accepts a launch the kernel would have to poison;
+//   4. REAL PLANS — the plan geometries this op actually runs, listed in `M2_REAL`, are accepted.
+//
+// Host-only in use (no HIP call), so it can run in a minute on any box: `./attn_m2 --geom-guard`.
+// Returns the number of failures.
+struct M2RealCase { const char* name; int lanes_last; int split; int nrows; };
+
+// The geometries of `run.py`'s plans and the two widths the route is funded for. Kept here, next to the
+// guard that reads it, so a plan that starts being refused fails the guard rather than the plan run.
+inline const M2RealCase* attn_m2_real_cases(int* n_out) {
+    static const M2RealCase REAL[] = {
+        {"pair-at-maxsc",     515, 2, 4},   // one-pass/streaming straddle: 512 and 513 lanes
+        {"maxsc-minus-1",     514, 2, 4},
+        {"pair-just-above",   520, 2, 8},   // sat at exactly the old bound: passed by luck
+        {"straddles-block-2", 1027, 3, 4},  // refused before the fix
+        {"straddles-block-3", 1539, 4, 4},  // refused before the fix
+        {"pair-widest-1024",  1024, 2, 4},  // refused before the fix
+        {"tail-hf-1032",      1032, 3, 1},  // the real HF row: refused before the fix
+        {"prefill-1024",      1024, 2, 8},  // where the doc books 13.6 ms
+        {"prefill-2048",      2048, 4, 8},
+        {"prefill-4096",      4096, 8, 8},  // where it books 194.6 ms
+        {"decode-640",         640, 2, 1},
+        {"decode-2049",       2049, 5, 1},   // 2049 lanes needs ceil(2049/512) = 5 blocks, not 4
+        // The four waves `run.py`'s TIMING_SPECS writes — the ones above the bandwidth plateau, i.e. the
+        // plans the funded claim will be measured on (results.md §7). Listed here so the guard proves
+        // acceptance for every plan the driver emits, in seconds, instead of a device window finding out.
+        {"wave64-at-1024",    1084, 3, 64},
+        {"wave64-at-2048",    2108, 5, 64},
+        {"wave64-at-4096",    4096, 8, 64},
+        {"wave16-at-4096",    4096, 8, 16},
+    };
+    *n_out = (int)(sizeof(REAL) / sizeof(REAL[0]));
+    return REAL;
+}
+
+inline int attn_m2_geometry_guard(int verbose) {
+    int fails = 0, checked = 0, refused = 0, phantom = 0, leaked = 0;
+    int worst_block = 0, worst_slice = 0;
+    int wb_lanes = 0, wb_split = 0, wb_full = -1;      // the geometry that produced worst_block
+
+    // The lane counts worth walking: every short one, a dense band over the one-pass/streaming boundary,
+    // every multiple of MAXSC +/- 2 (where a row changes lane block), a coarse sweep to the engine's lane
+    // ceiling MAXSC x MAXSPLIT, and the ceiling itself.
+    int lanes[512];
+    int nl = 0;
+    auto push = [&](int n) {              // deduplicated: the Python mirror walks the SAME set, and two
+        for (int i = 0; i < nl; ++i)      // guards that count different populations cannot be compared
+            if (lanes[i] == n) return;
+        if (n >= 1 && nl < 512) lanes[nl++] = n;
+    };
+    for (int n = 1; n <= 64; ++n) push(n);
+    for (int n = MAXSC - 6; n <= MAXSC + 10; ++n) push(n);
+    for (int k = 2; k <= ATTN_M2_MAXSPLIT; ++k)
+        for (int d = -2; d <= 2; ++d) push(MAXSC * k + d);
+    for (int n = 65; n <= MAXSC * ATTN_M2_MAXSPLIT; n += 127) push(n);
+    push(MAXSC * ATTN_M2_MAXSPLIT);
+
+    static const int NROWS[] = {1, 2, 3, 4, 8, 17};
+    for (int li = 0; li < nl; ++li) {
+        const int lanes_last = lanes[li];
+        for (int split = 1; split <= ATTN_M2_MAXSPLIT; ++split) {
+            for (int full = 0; full <= 1; ++full) {
+                for (int ni = 0; ni < (int)(sizeof(NROWS) / sizeof(NROWS[0])); ++ni) {
+                    const int nrows = NROWS[ni];
+                    if (lanes_last < nrows) continue;
+                    const int lvalid = lanes_last - nrows + 1;
+                    const int pos = lvalid - 1;
+                    const M2Launch L = m2_launch_scan(lvalid, pos, nrows, split, full);
+                    ++checked;
+                    if (L.total_union <= 0) continue;
+                    // A grid shallower than `split_for_lanes` is not a geometry this form may be
+                    // launched on — the split check refuses it — so the bound is not claimed for it. What
+                    // IS claimed, and checked below, is that the refusal that fires is the SPLIT one, so a
+                    // union refusal can never again be the accidental answer for a too-shallow grid.
+                    const bool legal_split = split >= attn_m2_split(lanes_last);
+                    if (legal_split) {
+                        // 1. BOUND, as the kernel computes it, not as the launcher predicts.
+                        if (L.max_block > worst_block) {
+                            worst_block = L.max_block;
+                            wb_lanes = lanes_last; wb_split = split; wb_full = full;
+                        }
+                        if (L.max_slice > worst_slice) worst_slice = L.max_slice;
+                        if (L.max_block > ATTN_M2_STAGE) {
+                            if (verbose)
+                                printf("GUARD FAIL bound: lanes_last=%d split=%d full=%d nrows=%d stages "
+                                       "union %d > ATTN_M2_STAGE %d\n", lanes_last, split, full, nrows,
+                                       L.max_block, ATTN_M2_STAGE);
+                            ++fails;
+                        }
+                        if (L.max_slice > MAXSC) {
+                            if (verbose)
+                                printf("GUARD FAIL bound: lanes_last=%d split=%d full=%d nrows=%d slices "
+                                       "%d > MAXSC %d\n", lanes_last, split, full, nrows, L.max_slice, MAXSC);
+                            ++fails;
+                        }
+                    }
+                    // 2 and 3: the launcher's verdict must agree with the kernel's, in both directions.
+                    const char* why = "";
+                    const bool ok = attn_m2_ok(0, 0, 32, split, lanes_last, &why);
+                    if (!legal_split) {
+                        if (ok) {
+                            if (verbose)
+                                printf("GUARD FAIL leak: lanes_last=%d split=%d accepted although "
+                                       "split_for_lanes would need %d\n", lanes_last, split,
+                                       attn_m2_split(lanes_last));
+                            ++fails; ++leaked;
+                        } else if (std::string(why).find("--split") == std::string::npos) {
+                            if (verbose)
+                                printf("GUARD FAIL attribution: lanes_last=%d split=%d refused for "
+                                       "\"%s\", not the shallow-grid reason\n", lanes_last, split, why);
+                            ++fails;
+                        }
+                        continue;
+                    }
+                    if (ok && L.too_wide) {
+                        if (verbose)
+                            printf("GUARD FAIL leak: lanes_last=%d split=%d full=%d nrows=%d accepted "
+                                   "but the kernel would poison (max_block=%d max_slice=%d)\n",
+                                   lanes_last, split, full, nrows, L.max_block, L.max_slice);
+                        ++fails; ++leaked;
+                    }
+                    if (!ok && !L.too_wide) {
+                        if (verbose)
+                            printf("GUARD FAIL phantom refusal: lanes_last=%d split=%d full=%d "
+                                   "nrows=%d refused for \"%s\" but max_block=%d max_slice=%d fit\n",
+                                   lanes_last, split, full, nrows, why, L.max_block, L.max_slice);
+                        ++fails; ++phantom;
+                    }
+                    if (!ok) ++refused;
+                }
+            }
+        }
+    }
+
+    // 4. The plans this op runs must be accepted, and must not be too wide.
+    int nreal = 0;
+    const M2RealCase* real = attn_m2_real_cases(&nreal);
+    for (int i = 0; i < nreal; ++i) {
+        const M2RealCase& c = real[i];
+        const char* why = "";
+        const bool ok = attn_m2_ok(0, 0, 32, c.split, c.lanes_last, &why);
+        const M2Launch L = m2_launch_scan(c.lanes_last - c.nrows + 1, c.lanes_last - c.nrows,
+                                          c.nrows, c.split, 1);
+        if (!ok || L.too_wide) {
+            printf("GUARD FAIL real plan %s (lanes_last=%d split=%d nrows=%d): %s%s max_block=%d\n",
+                   c.name, c.lanes_last, c.split, c.nrows, ok ? "kernel would poison" : why,
+                   ok ? "" : "", L.max_block);
+            ++fails;
+        } else if (verbose) {
+            printf("  [ok  ] %-16s lanes_last=%4d split=%d nrows=%2d | max block union %3d of %d, "
+                   "slice %3d of %d, %d blocks\n", c.name, c.lanes_last, c.split, c.nrows,
+                   L.max_block, ATTN_M2_STAGE, L.max_slice, MAXSC, L.blocks);
+        }
+    }
+
+    printf("geom-guard: %d geometries walked (split 1..%d, full 0/1, nrows 1/2/3/4/8/17) | "
+           "worst single-block union %d of ATTN_M2_STAGE %d over LEGAL grids (at lanes_last=%d split=%d "
+           "full=%d) | worst row slice %d of MAXSC %d | refused %d (phantom %d, leak %d) | "
+           "%d real plan geometries\n",
+           checked, ATTN_M2_MAXSPLIT, worst_block, ATTN_M2_STAGE, wb_lanes, wb_split, wb_full,
+           worst_slice, MAXSC, refused, phantom, leaked, nreal);
+    printf("geom-guard: %s\n", fails ? "FAIL" : "PASS");
+    return fails;
 }
 
 // Loud poison, so a bound a launcher failed to enforce cannot become a silent numerics diff.

@@ -834,6 +834,263 @@ def cmd_census(args) -> None:
           f"{'agree' if closed == m_k else 'DISAGREE'}")
 
 
+# ============================================================================================
+# The refusal guard, spelled in Python as well as in C++.
+#
+# C++ sibling: `attn_m2_geometry_guard` in attn_m2_kernels.h, runnable with `./attn_m2 --geom-guard`
+# (host-only: no HIP call). It exists because `attn_m2_ok`'s first spelling compared a lane-row TOTAL
+# summed over lane blocks against ATTN_M2_STAGE, a PER-BLOCK bound, and so refused every plan above
+# ~520 lanes — four of the eight funded plans, both of the widths the prize is booked at
+# (results.md §2). A comment saying "the refusal is implied by the split check" is a note, not a
+# forcing; these four assertions run instead:
+#   BOUND      no legal launch stages a union wider than STAGE or a slice wider than MAXSC;
+#   NO PHANTOM the launcher never refuses a launch the kernel would run happily;
+#   NO LEAK    the launcher never accepts a launch the kernel would have to poison;
+#   REAL PLANS the plan geometries this op runs are accepted.
+# Python rather than only C++ so the guard runs without a build, and the REAL-PLAN table is READ out of
+# the header rather than duplicated — a second spelling of a table is a second chance to be wrong.
+# ============================================================================================
+
+def py_split_for_lanes(lanes_last: int) -> int:
+    return (lanes_last + MAXSC - 1) // MAXSC      # `split_for_lanes`, same expression, same file
+
+
+def py_launch_scan(lvalid: int, pos: int, nrows: int, split: int, full: bool) -> dict:
+    """What one launch would stage, walked over every pair and lane block it can contain."""
+    L = {"max_block": 0, "max_slice": 0, "total_union": 0, "blocks": 0, "too_wide": False}
+    for rt in range(rtiles(nrows)):
+        for y in range(max(split, 1) + 1):
+            rows, p = pair_at(lvalid, pos, split, full, rt, y, nrows)
+            if not p["any"]:
+                break
+            L["blocks"] += 1
+            L["too_wide"] = L["too_wide"] or bool(p["too_wide"])
+            L["max_block"] = max(L["max_block"], p["union_n"])
+            L["total_union"] += p["union_n"]
+            for g in rows:
+                if g["active"]:
+                    L["max_slice"] = max(L["max_slice"], g["bhi"] - g["blo"])
+    return L
+
+
+def py_m2_ok(split: int, lanes_last: int) -> tuple[bool, str]:
+    """Mirror of `attn_m2_ok`'s geometry half: (accepted, reason). Same order of checks, so a refusal
+    can be attributed to the check that fired rather than to the first one that comes to mind."""
+    if split < py_split_for_lanes(lanes_last):
+        return False, "shallow grid (--split)"
+    if lanes_last >= 2:
+        block = slice_ = 0
+        for full in (0, 1):
+            L = py_launch_scan(lanes_last - 1, lanes_last - 2, 2, split, bool(full))
+            block = max(block, L["max_block"])
+            slice_ = max(slice_, L["max_slice"])
+        if block > STAGE:
+            return False, f"union {block} > STAGE"
+        if slice_ > MAXSC:
+            return False, f"slice {slice_} > MAXSC"
+    return True, ""
+
+
+REAL_CASE_RE = re.compile(r'\{"([a-z0-9\-]+)",\s*(\d+),\s*(\d+),\s*(\d+)\}')
+
+
+def header_real_cases() -> list[tuple]:
+    """The `M2_REAL` table, read out of the header text (name, lanes_last, split, nrows)."""
+    return [(m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+            for m in REAL_CASE_RE.finditer(M2_H.read_text())]
+
+
+def guard_lanes() -> list[int]:
+    lanes = list(range(1, 65)) + list(range(MAXSC - 6, MAXSC + 11))
+    for k in range(2, MAXSPLIT + 1):
+        lanes += [MAXSC * k + d for d in (-2, -1, 0, 1, 2)]
+    lanes += list(range(65, MAXSC * MAXSPLIT + 1, 127))
+    lanes.append(MAXSC * MAXSPLIT)
+    return sorted({n for n in lanes if n >= 1})
+
+
+GUARD_NROWS = (1, 2, 3, 4, 8, 17)
+
+
+def guard_walk(verbose: bool = False) -> tuple[int, dict]:
+    fails = checked = refused = phantom = leaked = 0
+    worst_block = worst_slice = 0
+    at = None
+    for lanes_last in guard_lanes():
+        for split in range(1, MAXSPLIT + 1):
+            for full in (0, 1):
+                for nrows in GUARD_NROWS:
+                    if lanes_last < nrows:
+                        continue
+                    lvalid = lanes_last - nrows + 1
+                    L = py_launch_scan(lvalid, lvalid - 1, nrows, split, bool(full))
+                    checked += 1
+                    if not L["total_union"]:
+                        continue
+                    legal = split >= py_split_for_lanes(lanes_last)
+                    if legal:
+                        if L["max_block"] > worst_block:
+                            worst_block, at = L["max_block"], (lanes_last, split, full)
+                        worst_slice = max(worst_slice, L["max_slice"])
+                        if L["max_block"] > STAGE:
+                            fails += 1
+                            if verbose:
+                                print(f"GUARD FAIL bound: lanes_last={lanes_last} split={split} "
+                                      f"full={full} nrows={nrows} union {L['max_block']} > {STAGE}")
+                        if L["max_slice"] > MAXSC:
+                            fails += 1
+                            if verbose:
+                                print(f"GUARD FAIL bound: lanes_last={lanes_last} split={split} "
+                                      f"full={full} nrows={nrows} slice {L['max_slice']} > {MAXSC}")
+                    ok, why = py_m2_ok(split, lanes_last)
+                    if not legal:
+                        if ok:
+                            leaked += 1
+                            fails += 1
+                        elif "--split" not in why:
+                            fails += 1
+                            if verbose:
+                                print(f"GUARD FAIL attribution: lanes_last={lanes_last} split={split} "
+                                      f"refused for {why!r}, not the shallow-grid reason")
+                        continue
+                    if ok and L["too_wide"]:
+                        leaked += 1
+                        fails += 1
+                    if (not ok) and (not L["too_wide"]):
+                        phantom += 1
+                        fails += 1
+                        if verbose:
+                            print(f"GUARD FAIL phantom: lanes_last={lanes_last} split={split} "
+                                  f"full={full} nrows={nrows} refused for {why!r} but fits "
+                                  f"(block {L['max_block']}/{STAGE}, slice {L['max_slice']}/{MAXSC})")
+                    if not ok:
+                        refused += 1
+    real_bad = []
+    for name, lanes_last, split, nrows in header_real_cases():
+        L = py_launch_scan(lanes_last - nrows + 1, lanes_last - nrows, nrows, split, True)
+        ok, why = py_m2_ok(split, lanes_last)
+        if not ok or L["too_wide"]:
+            real_bad.append(f"{name}: {why or 'kernel would poison'}")
+        elif verbose:
+            print(f"  [ok  ] {name:<17} lanes_last={lanes_last:>4} split={split} nrows={nrows:>2}"
+                  f" | max block union {L['max_block']:>3} of {STAGE}, slice {L['max_slice']:>3} of "
+                  f"{MAXSC}, {L['blocks']} blocks")
+    fails += len(real_bad)
+    for b in real_bad:
+        print(f"GUARD FAIL real plan {b}")
+    return fails, {"checked": checked, "worst_block": worst_block, "worst_slice": worst_slice,
+                   "at": at, "refused": refused, "phantom": phantom, "leaked": leaked,
+                   "real": len(header_real_cases()), "real_bad": real_bad}
+
+
+# ============================================================================================
+# Which regime a wave was measured in, and where M = 2 therefore pays.
+#
+# The funding books a traffic saving (27.2 -> 13.6 ms at 1024 lanes), and a traffic saving only exists in
+# a wave whose time IS its traffic. Two measured device facts decide that, and neither is a timing of
+# this kernel:
+#   * read bandwidth on this part plateaus at 233-240 GB/s FROM ~80 BLOCKS UP
+#     (`devices/strix-halo-memory-bandwidth.md`, a 20-640 block x 128-1024 thread sweep). Below that the
+#     achieved bandwidth scales with the grid, because the grid is what produces the outstanding loads.
+#   * M = 2 halves the grid by construction: `blocks_m2 = N_KV x split x ceil(nrows/2)` against the
+#     shipped `N_KV x split x nrows`. Halving blocks and halving bytes cancel.
+# So the crossover is a BLOCK COUNT, not a lane count. The four waves timed in results.md §4 were 16-32
+# blocks — 2.5-5x below the plateau knee — so they measure the regime where the cancellation is exact.
+# This command prints that arithmetic from the census, using §4's ms numbers as inputs.
+# ============================================================================================
+BW_CEIL_GBPS = 237.0        # measured read ceiling, same file
+KNEE_BLOCKS = 80            # same file: "plateaus from ~80 blocks up"
+
+# results.md §4, measured by the main agent in one lock hold (best of 40x5, spread < 3 %). INPUTS here,
+# not conclusions — quoted so this command's arithmetic is traceable to the window that produced them.
+MEASURED_WAVES = [
+    # tag                first lanes  nrows  split  ship ms  m2 ms
+    ("pair-at-maxsc",      512,        4,     2,    0.2953,  0.3167),
+    ("maxsc-minus-1",      511,        4,     2,    0.2949,  0.3240),
+    ("pair-just-above",    513,        8,     2,    0.1348,  0.1495),
+    ("pair-shortest",        1,        8,     1,    0.0085,  0.0094),
+]
+# The geometries that ARE above the knee, i.e. the ones that can price the funded claim.
+FUNDING_WAVES = [
+    # tag                first lanes  nrows  split
+    ("wave64-at-1024",    1021,      64,     3),
+    ("wave64-at-2048",    2045,      64,     5),
+    ("wave64-at-4096",    4033,      64,     8),
+    ("wave16-at-4096",    4081,      16,     8),
+]
+
+
+def regime_row(tag: str, first: int, nrows: int, split: int,
+               ship_ms: float | None = None, m2_ms: float | None = None) -> dict:
+    lanes = [first + r for r in range(nrows)]
+    k_s, v_s = wave_census(lanes, split, True, form="shipped")
+    k_m, v_m = wave_census(lanes, split, True, form="m2")
+    b_s, b_m = (k_s + v_s) * DH * 2, (k_m + v_m) * DH * 2
+    blk_s = N_KV * split * nrows
+    blk_m = N_KV * split * rtiles(nrows)
+    r = {"tag": tag, "lanes": f"{lanes[0]}-{lanes[-1]}", "nrows": nrows, "split": split,
+         "blk_ship": blk_s, "blk_m2": blk_m, "bytes_ship": b_s, "bytes_m2": b_m,
+         "beta": b_m / b_s,
+         "floor_ship_ms": b_s / (BW_CEIL_GBPS * 1e6),     # bytes / (GB/s) = s; x1e3 for ms
+         "floor_m2_ms": b_m / (BW_CEIL_GBPS * 1e6),
+         "above_knee_m2": blk_m >= KNEE_BLOCKS, "per_block_ratio": (b_m / blk_m) / (b_s / blk_s)}
+    if ship_ms:
+        r.update(ship_ms=ship_ms, m2_ms=m2_ms, speedup=ship_ms / m2_ms,
+                 gbps_ship=b_s / (ship_ms / 1e3) / 1e9, gbps_m2=b_m / (m2_ms / 1e3) / 1e9,
+                 traffic_share=r["floor_ship_ms"] / ship_ms)
+    return r
+
+
+def cmd_regime(args) -> int:
+    print(f"plateau knee: ~{KNEE_BLOCKS} blocks in flight (233-240 GB/s from there up); "
+          f"read ceiling {BW_CEIL_GBPS} GB/s — both from devices/strix-halo-memory-bandwidth.md")
+    print("\nA. the waves already timed (results.md §4: ms are inputs, quoted not remade)")
+    print(f"{'wave':<16}{'lanes':>11}{'blk sh':>7}{'blk m2':>7}{'above':>6}{'GB/s sh':>9}"
+          f"{'GB/s m2':>9}{'traffic%':>9}{'bytes m2/sh':>12}{'speedup':>9}{'1/beta':>8}")
+    for tag, first, nrows, split, sms, mm in MEASURED_WAVES:
+        r = regime_row(tag, first, nrows, split, sms, mm)
+        print(f"{r['tag']:<16}{r['lanes']:>11}{r['blk_ship']:>7}{r['blk_m2']:>7}"
+              f"{('yes' if r['above_knee_m2'] else 'NO'):>6}{r['gbps_ship']:>9.1f}{r['gbps_m2']:>9.1f}"
+              f"{100 * r['traffic_share']:>9.1f}{r['beta']:>12.3f}{r['speedup']:>9.3f}"
+              f"{1 / r['beta']:>8.2f}")
+    print("\nB. waves above the knee — the ones that can price the funded claim (NOT MEASURED)")
+    print(f"{'wave':<16}{'lanes':>11}{'blk sh':>7}{'blk m2':>7}{'above':>6}{'MB sh':>8}"
+          f"{'floor sh ms':>12}{'floor m2 ms':>12}{'bytes m2/sh':>12}{'speedup if at plateau':>22}")
+    for tag, first, nrows, split in FUNDING_WAVES:
+        r = regime_row(tag, first, nrows, split)
+        print(f"{r['tag']:<16}{r['lanes']:>11}{r['blk_ship']:>7}{r['blk_m2']:>7}"
+              f"{('yes' if r['above_knee_m2'] else 'NO'):>6}{r['bytes_ship'] / 1e6:>8.1f}"
+              f"{r['floor_ship_ms']:>12.3f}{r['floor_m2_ms']:>12.3f}{r['beta']:>12.3f}"
+              f"{1 / r['beta']:>22.2f}")
+    min_rows = {s: 2 * -(-KNEE_BLOCKS // (N_KV * s)) for s in (2, 4, 8)}
+    print(f"\ncrossover: `blocks_m2 = N_KV x split x ceil(nrows/2)`, so the m2 grid reaches the "
+          f"{KNEE_BLOCKS}-block knee at "
+          + ", ".join(f"{n} rows at split {s}" for s, n in sorted(min_rows.items()))
+          + ". Below the knee, halving blocks costs what halving bytes buys (measured speedups "
+            "0.90-0.93 on 16-32-block waves); above it both forms read at the plateau and the speedup "
+            "tends to 1/beta ~= 2. The engine's own prefill waves (64 rows) are above the knee at every "
+            "funded width, so the prize is intact there until measured otherwise — but it is UNMEASURED, "
+            "and §4's numbers do not bear on it.")
+    print("occupancy: 16 wavefronts/CU (LDS 22,656 B -> 2 blocks/CU) is NOT the binding term, because the "
+          "plateau sweep reached 233-240 GB/s with 128-thread blocks, i.e. ~8 wavefronts/CU at the knee. "
+          "Aliasing s_k/s_v (22,656 -> 18,560 B -> 3 blocks/CU = 24 wavefronts) or a 2-row/4-warp block "
+          "(LDS unchanged -> 2 blocks/CU x 4 warps = 8 wavefronts, worse) therefore do not move the "
+          "crossover. Bank them, do not schedule them — results.md §6.3.")
+    return 0
+
+
+def cmd_guard(args) -> int:
+    fails, s = guard_walk(verbose=args.verbose)
+    print(f"geom-guard (python mirror): {s['checked']} geometries walked "
+          f"(split 1..{MAXSPLIT}, full 0/1, nrows {GUARD_NROWS}) | worst single-block union "
+          f"{s['worst_block']} of STAGE {STAGE} over LEGAL grids (at lanes_last={s['at'][0]} "
+          f"split={s['at'][1]} full={s['at'][2]}) | worst row slice {s['worst_slice']} of MAXSC "
+          f"{MAXSC} | refused {s['refused']} (phantom {s['phantom']}, leak {s['leaked']}) | "
+          f"{s['real']} real plan geometries read out of {M2_H.name}")
+    print(f"geom-guard: {'FAIL' if fails else 'PASS'}")
+    return 1 if fails else 0
+
+
 def cmd_selftest(args) -> int:
     fails: list[str] = []
 
@@ -861,6 +1118,23 @@ def cmd_selftest(args) -> int:
                     bad += 1
     check(bad == 0, f"pair union: the per-block walk and `row_bounds`' brute union agree ({bad} disagree)")
     check(worst <= STAGE, f"pair union <= ATTN_M2_STAGE for every legal (split, n): worst {worst}/{STAGE}")
+    # 1b. THE REFUSAL GUARD. `attn_m2_ok`'s first spelling compared a lane-row total summed over lane
+    # blocks against ATTN_M2_STAGE, a per-block bound, and refused four of the eight funded plans
+    # (results.md §2). These assertions are what makes that class fail loudly instead of quietly.
+    gfails, gs = guard_walk(verbose=False)
+    check(gs["real"] >= 10, f"the real-plan refusal table is readable out of {M2_H.name} "
+                           f"({gs['real']} rows) — one spelling, not a duplicated list")
+    check(not gs["real_bad"], f"every real plan geometry is accepted: "
+          f"{gs['real_bad'] or 'all ' + str(gs['real']) + ' ok'}")
+    check(gs["phantom"] == 0, f"NO PHANTOM: the launcher refuses no launch the kernel would run "
+                             f"({gs['phantom']} phantom refusals in {gs['checked']} geometries)")
+    check(gs["leaked"] == 0, f"NO LEAK: the launcher accepts no launch the kernel would poison "
+                            f"({gs['leaked']} leaks)")
+    at = gs["at"]
+    check(gs["worst_block"] <= STAGE and gs["worst_slice"] <= MAXSC,
+          f"BOUND over legal grids: worst single-block union {gs['worst_block']}/{STAGE} at "
+          f"lanes_last={at[0]} split={at[1]} full={at[2]}, worst slice {gs['worst_slice']}/{MAXSC}")
+    check(gfails == 0, f"geom-guard: {gs['checked']} geometries, {gfails} failures")
     refused = sum(1 for n in (513, 1025, 4097)
                   if pair_at(n, n - 1, 1, True, 0, 0, 2)[1]["too_wide"])
     check(refused == 3, "a split shallower than split_for_lanes is flagged too_wide (3/3)")
@@ -950,7 +1224,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="CPU mirror and gates for prototype/attn_m2")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, fn in (("geometry", cmd_geometry), ("census", cmd_census), ("compare", cmd_compare),
-                     ("negative", cmd_negative), ("traffic", cmd_traffic), ("selftest", cmd_selftest)):
+                     ("negative", cmd_negative), ("traffic", cmd_traffic), ("regime", cmd_regime),
+                     ("selftest", cmd_selftest)):
         p = sub.add_parser(name)
         p.add_argument("--fixture", default="p300")
         p.add_argument("--anchor", default=None, help="fixture with >MAXSC decode pins, e.g. wide1024f")
@@ -959,6 +1234,9 @@ def main() -> int:
         p.add_argument("--start", type=int, default=0)
         p.add_argument("--only", default=None)
         p.set_defaults(fn=fn)
+    pg = sub.add_parser("guard", help="the refusal guard: host-only, no device, no build needed")
+    pg.add_argument("--verbose", action="store_true", help="print every real plan row and every failure")
+    pg.set_defaults(fn=cmd_guard)
     args = ap.parse_args()
     return args.fn(args)
 

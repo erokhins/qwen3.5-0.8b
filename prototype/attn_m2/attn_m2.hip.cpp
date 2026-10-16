@@ -173,7 +173,7 @@ static int neg_from(const std::string& s) {
 
 int main(int argc, char** argv) {
     std::string plan_path, negname = "none", outdir = ".";
-    int split = 1, tile = TILE, nrows_cap = 0, burst = 0, reps = 5;
+    int split = 1, tile = TILE, nrows_cap = 0, burst = 0, reps = 5, geom_guard = 0;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
@@ -185,8 +185,13 @@ int main(int argc, char** argv) {
         else if (a == "--out") outdir = next();
         else if (a == "--burst") burst = std::atoi(next().c_str());
         else if (a == "--reps") reps = std::atoi(next().c_str());
+        else if (a == "--geom-guard") geom_guard = 1;
         else { fprintf(stderr, "unknown argument %s\n", a.c_str()); return 1; }
     }
+    // Host-only: no HIP call, no device, no lock. Walks the (lanes_last, split, full, nrows) space and
+    // requires `attn_m2_ok`'s verdict to agree with what the kernel geometry would do, in both
+    // directions (see `attn_m2_geometry_guard` in the header for why this exists).
+    if (geom_guard) return attn_m2_geometry_guard(1) ? 1 : 0;
     const int neg = neg_from(negname);
     if (neg < 0) { fprintf(stderr, "unknown --neg %s\n", negname.c_str()); return 1; }
     std::ifstream pf(plan_path);
@@ -331,8 +336,10 @@ int main(int argc, char** argv) {
         for (int r = 0; r < c.nrows; ++r) ship_rows += c.lvalid + r;
         for (int rt = 0; rt < attn_m2_rtiles_of(c.nrows); ++rt) {
             const int n_lo = c.lvalid + ATTN_M2_M * rt;
-            m2_rows += (ATTN_M2_M * rt + 1 < c.nrows) ? attn_m2_pair_union(n_lo, split, 1)
-                                                      : attn_m2_row_union(n_lo, split, 1);
+            // `.total` — lane rows summed over lane blocks. The bound is `max_block`, and the refusal
+            // predicate uses that one; conflating the two is results.md §2's blocked-widths bug.
+            m2_rows += (ATTN_M2_M * rt + 1 < c.nrows) ? attn_m2_pair_union(n_lo, split, 1).total
+                                                      : attn_m2_row_union(n_lo, split, 1).total;
         }
         const double ship_b = (double)ship_rows * N_KV * 2 * DH * 2;
         const double m2_b = (double)m2_rows * N_KV * 2 * DH * 2;
