@@ -20,7 +20,10 @@ WHAT IT DOES NOT MODEL, and that is on purpose. It has no attention, no lanes, n
 moves (row, head) blocks because it was TOLD to. It therefore cannot adjudicate whether a derived
 must-catch set is correct — that is `m2_model.py negative`'s job, against the Python mirror. What it can
 adjudicate is whether the driver accepts a legitimate PASS and rejects each way a PASS could be fake,
-which is a property of the driver rather than of the sets.
+which is a property of the driver rather than of the sets. It writes the TWO forms of record (`ship`,
+`m2`) and ignores `--slim`: the slim body is a device question about a kernel, and a stub that emitted an
+`.m2slim.aout.bin` copy of the m2 buffer would make the driver's "the slim body's wrong must equal the
+plain body's" clause pass by construction, which is the worst kind of green.
 
     ATTN_M2_STUB="<key>=<value>[;<key>=<value>…]"      (all keys optional, defaults in brackets)
       m2=<none|all|comma-separated row indices>   rows whose m2-form output differs from clean   [none]
@@ -101,7 +104,7 @@ def main() -> int:
             split = argv[i + 1]
         elif a == "--neg":
             neg = argv[i + 1]
-        elif a in ("--tile", "--rows", "--burst", "--reps", "--geom-guard"):
+        elif a in ("--tile", "--rows", "--burst", "--reps", "--geom-guard", "--slim"):
             pass                                   # accepted and ignored, like a knob the stub lacks
         elif a.startswith("--"):
             print(f"stub: ignoring unrecognised argument {a}", file=sys.stderr)

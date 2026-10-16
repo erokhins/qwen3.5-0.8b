@@ -1,5 +1,14 @@
 # `prototype/attn_m2` — results
 
+**Verdict on the slim port (§8), stated first because it is the point: predicted NOT TO PAY, and this is a
+prediction, not a measurement.** The two touch levers transfer to the M = 2 body and they are bit-identical
+(the gate is written and green on CPU; the device half is handed over in `HANDOFF-slim.md`), but they cut
+the per-touch bill from 124 to 59 slots while the shipped tile form, wearing the same two levers, sits at
+**45**. M = 2 pays a +31 % instruction premium for the same levers it now shares, and the traffic halving
+that is supposed to pay for it bought about nothing pre-port (§4: m2-plain was 5.1 % *slower* than ship
+while demanding half the bytes). Two independent static estimates put m2-slim at **1.77–1.99 ms** against
+ship-slim's measured **1.5416 ms** at wave64-at-4096, i.e. **15–29 % slower**. Falsifier in §8.4.
+
 Status: **bit-identity green on device (§2), and every device number here belongs to the main agent** — one
 window was run under lock `attn-m2` on 2026-10-16 and its numbers are in §2/§3/§4. What that window could
 not reach, it could not reach because of a launcher bug (§2) rather than a limit (§6), and the four plans it
@@ -15,7 +24,8 @@ Each line is the command and the outcome it prints. Re-run them; do not take thi
 
 | command | outcome |
 |---|---|
-| `.venv/bin/python prototype/attn_m2/m2_model.py selftest` | 23 checks, 0 failures |
+| `.venv/bin/python prototype/attn_m2/m2_model.py selftest` | 33 checks, 0 failures (the last 10 are §8.1's guard that the slim MODE *calls* the tile side's levers and defines none of its own) |
+| `.venv/bin/python prototype/attn_m2/run.py selftest` | the driver's own verdict logic against `stub_harness.py`: 12 cases, 0 failures (§3). It runs at `--slim 0` only: the stub models the two forms of record and could not witness the slim clause — see `stub_harness.py`'s header for why a stub that faked one would be the worst kind of green |
 | `.venv/bin/python prototype/attn_m2/m2_model.py guard` | the refusal guard (§6): 13,744 geometries, 0 failures |
 | `.venv/bin/python prototype/attn_m2/m2_model.py compare --anchor wide1024f` | 13 cases, **0 differing elements in every case**, 0 poison reads, 0 provenance violations, 0 partial-slot aliases |
 | `.venv/bin/python prototype/attn_m2/m2_model.py negative --anchor wide1024f` | 9 injections × 13 cases, 0 failures against derived must-catch/must-not-catch sets |
@@ -24,7 +34,8 @@ Each line is the command and the outcome it prints. Re-run them; do not take thi
 | `./prototype/attn_m2/attn_m2 --geom-guard` | the C++ spelling of the guard: same 13,744 geometries, same numbers, host-only |
 | `.venv/bin/python prototype/attn_m2/run.py plans` | 12 device plans written, no device touched |
 | `.venv/bin/python prototype/attn_m2/run.py negmatrix` | which plan proves which injection, derived (§3) |
-| `.venv/bin/python prototype/attn_m2/run.py selftest` | the driver's own verdict logic against `stub_harness.py`: 12 cases, 0 failures (§3) |
+| `.venv/bin/python prototype/attn_valu_slim/isa_census.py --src "$PWD/prototype/attn_m2/attn_m2.hip.cpp" --kernels attn_tile_wave,attn_slim1_wave,attn_m2_wave,attn_m2_slim_wave --out prototype/attn_m2/isa_census.output.txt` | four-form per-touch census with its controls in the same table (§8.2). CPU-only: `hipcc -O3 -c`, no device, no lock |
+| `./prototype/attn_m2/attn_m2 --slim 2` / `--forms bogus` / `--forms ship` | each refuses on the command line before any HIP call: `--slim` is binary, a form token must match exactly, and a run with no candidate form has nothing to diff |
 
 ### §1.1 Bit-identity per case (the admission gate)
 
@@ -52,6 +63,13 @@ the per-row lane order (D5 item 3), and a row that changed at all would mean the
 The last row is the route's limit stated plainly: **a single-row wave has no partner to share with and
 costs ~0.2 %** (the self lane is staged twice). M = 2 is a wave/prefill route; decode steps keep
 `attn_core`. The two bolded ratios are the two geometries where sharing pays least (§1.4).
+
+Those are the **m2-vs-ship** pair of record. Under `--slim 1` the device harness must print two more pairs
+at zero — `m2slim vs m2` and `m2slim vs ship` — on every row of all 12 plans (§8.3). The CPU mirror cannot
+stand in for either: it models the recurrence, not the spelling, and a mirror that shares the formula with
+the thing under test agrees with it by construction (AGENTS.md, the q̃ row — "what bit-identity is owed is
+the source text's association, not the algebra"). Both pairs are **`NOT MEASURED`**; `HANDOFF-slim.md` §2 is
+the command and §8.4 is what each possible outcome would mean.
 
 ### §1.2 The negatives, and how their sets are derived
 
@@ -396,3 +414,218 @@ it is the burst at the four waves above.
   **128-thread** blocks, i.e. ~8 wavefronts/CU at ~80 blocks over 40 CUs (`devices/strix-halo-compute.md`:
   40 CUs, `rocminfo`), which is *below* this kernel's 16. So 16 wavefronts should be enough to reach the
   plateau, and the loss in §4 is explained by the block count being under the knee without invoking LDS.
+---
+
+## §8 The slim port — the two touch levers onto the M = 2 body (2026-10-16, later the same day as §2–§4; CPU-side only)
+
+No device was touched for this section. Nothing below is a timing; §4 still owns every millisecond in this
+directory. The device gate and the bursts are handed over in `HANDOFF-slim.md`.
+
+### §8.1 What was ported, and how it was kept from drifting
+
+Both levers from `engine/attn_slim_kernels.h` — the unrolled 8-term score dot with the `nd == 4` tail, and
+the hand-folded warp reduce on `ds_bpermute_b32` with precomputed lane-invariant permute addresses — are
+now applied to the M = 2 wave body. The port is one function, not two:
+
+```
+template <int MODE> __device__ __forceinline__ void attn_m2_body(const CoreArgs a)
+attn_m2_wave      = attn_m2_body<0>                      // the two forms of record, unchanged spelling
+attn_m2_slim_wave = attn_m2_body<VSLIM_DOT | VSLIM_FOLD> // both levers on
+```
+
+Templating rather than copying is a numerics decision, not a tidiness one: a copied body drifts, and §20.1
+of `prototype/attn_decode/results.md` is this tree's own record of what two self-consistent spellings joined
+by a branch do (each agrees with itself, every per-form check passes, and the answer is wrong). So
+`attn_m2_body<0>` IS the m2-plain that §2 gated, and the A/B is single-variable by construction.
+
+**The levers are the same spelling, not a transcription of it.** `attn_m2_kernels.h` includes
+`../attn_valu_slim/attn_valu_slim_kernels.h` and calls `vslim_dot<8|4>` / `vslim_fold<MODE>` /
+`vslim_permute_addr` directly. The brief said "transcribe character for character"; sharing the header is
+the stronger form of the same requirement, and it is enforced textually — `m2_model.py selftest` (33 checks
+now) requires the include, requires each of the four call sites, requires each definition to exist in the
+tile header (an include of an empty file is not sharing), and refuses any `*slim*`/`*permute*` helper
+defined in the m2 header. A CPU mirror cannot see association or FMA contraction (AGENTS.md, the q̃ row),
+so a textual guard is the only honest instrument here.
+
+Shape differences from the tile form, stated before adapting rather than after:
+
+| part of a touch | tile form | m2 form | consequence |
+|---|---|---|---|
+| score dot | 8 serial-in-`t` BF16 products off one `uint4` at `s_k + lane * 8` | same 8 products, but the base is **selected** per row of the pair: self lane from `s_kself[m * DH + lane * 8]`, otherwise `s_k[(rr - s_lo) * DH + lane * 8]` | the lever applies verbatim; the wide load sits behind a pointer select, which is the one cost the slim body cannot avoid |
+| warp fold | 5 `bpermute` steps over 32 lanes × 8 dims | identical | verbatim, including the `pa[4]` hoist (uniform between the barriers, so 4 address computations per pair, not 20) |
+| per-element guard | `for (p = w; p < pairs; p += nw)` — no bound test | an explicit `if (j < g.blo \|\| j >= g.bhi) continue;` pair-walk guard | m2's +8 SALU/touch premium over the tile form is this guard plus the select, and it survives the levers (§8.2) |
+| traffic | one K lane row and one V lane row per (row, head) | the pair's **union** walk, so a shared lane is fetched once for both rows | the funded halving, untouched by the port: `bytesdemanded_m2slim == bytesdemanded_m2` is printed, not assumed |
+
+### §8.2 Census, both directions, with the control in the same table
+
+Unit, once: **one (row, lane-block, head) touch** = one pass-1 score-loop iteration for one warp — the same
+unit `prototype/attn_valu_slim/isa_census.py` books the tile form in, so the columns are comparable. A pair
+of rows costs **two** touches and demands roughly **one** lane-row fetch; the two things m2 changes live in
+different units, which is why the traffic column is printed separately and never folded into slots.
+Regenerate with
+
+```
+.venv/bin/python prototype/attn_valu_slim/isa_census.py --src "$PWD/prototype/attn_m2/attn_m2.hip.cpp" \
+    --kernels attn_tile_wave,attn_slim1_wave,attn_m2_wave,attn_m2_slim_wave \
+    --out prototype/attn_m2/isa_census.output.txt
+```
+
+| kernel | slots/touch | VALU | LDS | SALU | VGPR | LDS B | whole-kernel slots |
+|---|---|---|---|---|---|---|---|
+| `attn_tile_wave` (ship) | **116** | 55 | 14 | 47 | 47 | 12,288 | 1416 |
+| `attn_slim1_wave` (ship-slim) | **45** | 28 | 7 | 10 | 47 | 12,288 | 1524 |
+| `attn_m2_wave` (m2-plain) | **124** | 55 | 14 | 55 | 50 | 22,656 | 1880 |
+| `attn_m2_slim_wave` (m2-slim) | **59** | 34 | 7 | 18 | 50 | 22,656 | 2013 |
+
+Control discipline, both directions:
+
+* **m2 non-slim is unchanged by the port.** Its row is bit-for-bit the pre-port row (124 / 55 / 14 / 55,
+  VGPR 50, LDS 22,656 B) — the port added an instantiation, it did not touch the plain body's code. Same
+  for the tile control at 116, and the tile-slim row reproduces the recorded 45 exactly, in a TU that now
+  contains four instantiations. A census taken after a refactor is worth nothing unless the untouched forms
+  read the same before and after; here they do.
+* **The slim forms change no resources**: VGPR and LDS per block are identical to their twins, so no part of
+  §8.4's price can be an occupancy story smuggled in by the back door.
+* Where the +14 slots/touch of m2-slim over ship-slim comes from, out of the category rollup: `+4`
+  `dot.bf16-conv` (the widened convert on the selected pointer), `+1` `score.bf16-round`, `+1`
+  `score.bf16-round-guard`. The remaining ~8 is not covered by any named rule, which is a fact about the m2
+  guard itself rather than about the census: its SALU/touch is 47 → 55 plain and 10 → 18 slim, and the pair-
+  walk guard and the pointer select are precisely the two things the rule table has no bucket for. The
+  levers themselves land identically on both bodies — `fold.exec-guard` 16 → 2 on the tile side and 16 → 0 on
+  the m2 side, `fold.range-select` 7 → 0 and 3 → 0, `dot.lds-load` 8 → 1 on both, `dot.q-indexed` 8 → 0 on
+  both — and the two bodies' fold is the same five permutes on both sides.
+* Whole-kernel slots go **up** for the slim forms (1416 → 1524, 1880 → 2013) while the hot-loop bill goes
+  down by half. That is expected — the nd-split inlines two copies of the dot and the prologue/staging loops
+  are untouched — and it is the reason D21's rule matters here: only the per-touch bill can be compared
+  against a measured time, and only a measurement can say whether even that one is the wall.
+
+### §8.3 The admission gate, and what it refuses
+
+`run.py ab --slim 1` runs `ship`, `m2` and `m2slim` over **one** set of operands in **one** process and
+requires all three pairs at `ndiff 0` on every row of all 12 plans:
+
+* `m2 vs ship` — the pair of record (§2).
+* `m2slim vs m2` — the lever claim, single-variable because both come from one template.
+* `m2slim vs ship` — the claim that matters for shipping.
+* `shipslim vs ship` appears too when `shipslim` is in `--forms`, at `ndiff 0` or the run is invalid (§8.4).
+
+A missing RESULT key is a FAIL (`verdict=NO-KEY`), never a skip — the `prototype/gdn_collapse/run.py`
+lesson, and the reason `AB_PAIRS` is an explicit expected-pair table rather than whatever keys arrived.
+CPU-side validation run for this section: `m2_model.py selftest` 33 checks 0 failures; `attn_m2 --geom-guard`
+13,744 geometries, 0 phantom, 0 leak, 16 real plan geometries, worst single-block union 518 of 520;
+`run.py plans`, `negmatrix` (9 injections, each with a non-empty derived must-catch set), `run.py selftest`
+12/12. `negative --neg <id> --slim 1` additionally requires the slim body's wrong to land on exactly the
+plain body's rows — `dimhalf` is the injection that would show a lever changing semantics rather than
+spelling, because that lever is *about* `nd`. **No device run was taken**, so the gate is written and
+unexecuted; `HANDOFF-slim.md` is the command list.
+
+### §8.4 The price: prediction, assumption, falsifier
+
+Prediction, in the harness's own ruler (wave64-at-4096, one case, one layer, best-of-5 × burst-40):
+
+* **m2-slim lands 1.77–1.99 ms against ship-slim's measured 1.5416 ms, i.e. 15–29 % slower.** Two
+  independent static estimates, deliberately built differently so agreement means something:
+  * *Elasticity transfer.* The tile side measured a pure instruction cut at constant traffic: 116 → 45
+    slots/touch bought 2.3446 → 1.5416 ms, so in this regime time ∝ slots^0.44. Applying the same exponent
+    to m2's 124 → 59 and dividing out the plain-form ratio (2.5402 / 2.4163 = 1.051, measured in one window)
+    gives **m2-slim / ship-slim ≈ 1.15**, i.e. ≈ 1.77 ms.
+  * *Slot premium, traffic free.* 59 / 45 = +31 %. Pre-port, m2 booked a +6.9 % per-touch slot premium
+    (124 vs 116) and measured **+5.1 % slower** while demanding half the bytes (§4, one window), so the
+    halving collected roughly 2 points of that premium — and even that credit is generous, because part of
+    the m2 deficit is its 22,656 B of LDS (2 blocks/CU against the tile form's more) rather than traffic.
+    The confound transfers unchanged, since both m2 forms carry the same LDS, so the band holds: **≈ 1.99 ms**.
+  The spread between them is exactly the uncertainty in how much the halving is worth; the *sign* is not in
+  question, because both are above 1.
+* **m2-slim beats m2-plain by ≈ 1.4×** (124 → 59 slots at the same exponent). If that does not show up, the
+  elasticity assumption is the thing that is wrong, not the traffic arithmetic.
+
+Assumption, named so it can be killed: **at wave64-at-4096 the wall is the touch loop's issue bill, not
+DRAM.** Three things support it and none of them is arithmetic on demanded bytes:
+
+* the tile form's own 1.52×, which is a pure instruction cut at **identical traffic**
+  (`prototype/attn_valu_slim/results.md` §7.1);
+* the harness's own census at this width books 4.26 GB of K+V lane rows (the printed
+  `bytesdemanded_ship`, for the one pinned layer) against a 1.54 ms kernel — **≈ 2.8 TB/s demanded against a
+  237 GB/s measured read ceiling**, i.e. the census is L2-absorbed traffic, not DRAM traffic, and halving it
+  cannot be booked as time. That is D21 of
+  `progress/2026-10-16/prefill-decision-log-2026-10-16.md` applied to this directory's own number: demanded
+  ≠ DRAM;
+* §4's m2 result, where half the bytes bought nothing measurable.
+
+The traffic halving is therefore booked at ≈ 2 points, the same credit it actually collected pre-port.
+
+Falsifier, one paired burst at wave64-at-4096 with both forms inside one rep (the harness alternates every
+active form within a rep, so m2-slim and ship-slim are one ruler, not two windows — the trap the ledger's
+"a ruler re-taken in a different window is not an A/B" row is about). The predicted band is 1.15–1.29×
+slower, so the two decision lines sit at its edges:
+
+* `best_m2slim_ms ≤ 1.05 × best_shipslim_ms` → **the assumption is false.** A halving of bytes demanded
+  would be worth ≥ 25 %, DRAM is closer to binding than the census says, and the m2 route reopens (with the
+  V-split of §7's open levers as the next thing to price, since it would halve the same traffic again).
+* `best_m2slim_ms ≥ 1.15 × best_shipslim_ms` → prediction holds; **m2 is out of the speed plan** and this
+  directory's shipping question is answered without another build.
+* In between, the static model is wrong in an unexplained direction: re-read the census against the burst
+  (which of the +14 slots are actually paid for?) rather than taking a third estimate.
+* Second, cheaper sub-falsifier that costs nothing extra: if `m2-slim / m2-plain` is worse than 0.9× (the
+  levers bought < 11 % on the m2 body), the elasticity does not transfer at all and §8.4's first estimate is
+  void — that says m2 is not slot-bound, which would make the traffic term the only candidate and would
+  change the verdict's direction.
+
+Why the wave16-at-4096 row is in the handoff and is not a repeat: §7's crossover is a block-count story, and
+at 16 rows the m2 grid is 128 blocks against the tile form's 256 on 40 CUs. If m2-slim wins *only* at the
+wide wave and loses at the narrow one, that is the crossover asserting itself and the pair still does not
+ship; a win at both would mean occupancy was hiding behind the instruction bill.
+
+### §8.5 What changed in the harness, in one paragraph
+
+Four named forms — `ship` (`attn_tile_wave`), `m2`, `m2slim`, `shipslim` (`attn_slim1_wave`, the tile form
+with both levers) — with `--slim 0|1` to add the slim m2 form and `--forms a,b,c` to pick a subset for a
+burst. `ship` is always active because it is the reference, and a diff against a form that never ran is
+worse than no diff; tokens are matched exactly, because a substring test would make `--forms m2slim`
+silently add `m2`. One `core_args` / one `launch_wave` feed both the gated path and the timed path, and each
+slim form is launched exactly as its unslimmed twin is — grid, threads, `a.split` and partial footprint
+shared — which is what keeps every comparison single-variable. The burst path now times **every** active
+form inside one rep and prints `best_<form>_ms` plus one `SPEEDUP a=… b=…` line per ordered pair, so a
+four-form question is answered in one window instead of six. Dumps are per form
+(`<case>.<form>.aout.bin`), and `run.py negative --slim 1` uses those files to require the slim body's
+wrong to equal the plain body's, with a missing dump reported as a problem rather than as "nothing moved".
+
+## §6 The pair, measured (main agent, 2026-10-16): the levers transfer, the traffic halving still buys nothing
+
+Window `m2-slim`, blocking, zero subagents, `util` 91 % and discounted. Four forms — `ship`, `m2`,
+`m2slim`, `shipslim` — **alternating inside each rep of one process**, so every ratio below is one ruler.
+Best-of-20×5 at 1024 lanes, best-of-10×5 elsewhere, `steady_clock`, warm pass first.
+
+**Admission first:** `run.py ab --slim 1` is **PASS on all 12 plans × 3 pairs** (`m2 vs ship`,
+`m2slim vs m2`, `m2slim vs ship`), `ndiff = 0` on every row — including the straddles and the 1032-lane
+pinned row. The levers were not transcribed into the m2 header; they are *called* from
+`attn_valu_slim_kernels.h`, and `m2_model.py selftest` (10 guards) enforces that the include and every
+call site exist and that no second spelling of `vslim_*` lives in the m2 header. So there is nothing to
+drift, which is the property §20.1 has been asking for all along.
+
+| wave | ship | m2 | m2-slim | ship-slim | **levers on m2** | levers on ship | **m2-slim ÷ ship-slim** |
+|---|---|---|---|---|---|---|---|
+| 64 rows @ 1024 | 0.5606 | 0.6182 | 0.4183 | 0.3690 | **1.478×** | 1.519× | **1.134** |
+| 64 rows @ 2048 | 1.3471 | 1.4071 | 0.9572 | 0.8728 | **1.470×** | 1.543× | **1.097** |
+| 64 rows @ 4096 | 2.5214 | 2.5982 | 1.7391 | 1.6482 | **1.494×** | 1.530× | **1.055** |
+| 16 rows @ 4096 | 0.7411 | 0.7747 | 0.5272 | 0.4954 | **1.469×** | 1.496× | **1.064** |
+
+Read the last two column groups separately, because they answer different questions.
+
+- **The levers transfer to M = 2 and do exactly what they do on the tile form** — 1.469–1.494× on m2
+  against 1.496–1.543× on ship. Independent confirmation of D21's mechanism: this kernel's wall is the
+  instruction bill, on either row-tiling.
+- **And the traffic halving still buys nothing.** m2-slim is **5.5–13.4 % slower** than ship-slim at every
+  width, with the census ratio still ~0.50. That is the second independent measurement (the first was
+  §4, pre-port) of halving bytes-demanded and collecting nothing, taken this time against a touch bill
+  one third of its former height. **M = 2 stays parked.**
+
+Against the worker's written prediction — `results.md` predicted **not to pay**, at 1.15–1.29× slower:
+direction correct, magnitude about 2× pessimistic (measured 1.055–1.134). The falsifier bands it set
+were `≤ 1.05×` reopens and `≥ 1.15×` closes; the result lands at **1.055 at 4096** — inside the ambiguous
+band, and the narrowest of the four. Stating that precisely matters more than rounding it toward a
+conclusion: at the width that carries the headline M = 2 is now within 5.5 % of parity, and the only
+thing that would make it worth more is traffic that actually reaches DRAM, which this fixture cannot
+produce and which the engine cannot probe above 4096 lanes without raising `kAttnMaxSplit` (blocked,
+D4/D5). The elasticity model behind the 1.15–1.29 estimate should be treated as biased pessimistic if
+anyone reuses it.

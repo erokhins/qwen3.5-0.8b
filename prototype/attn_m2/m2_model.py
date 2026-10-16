@@ -1154,6 +1154,23 @@ def cmd_selftest(args) -> int:
           "a streaming tile fits the K sub-block stage: static_assert present")
     check(re.search(r"static_assert\(ATTN_M2_VSLOT > TILE", src) is not None,
           "the V stage bounds a tile plus the split residue: static_assert present")
+    # 3b. THE TOUCH LEVERS ARE SHARED SPELLINGS, NOT A SECOND COPY. Two self-consistent spellings of the
+    # score dot, joined by a branch, is the failure §20.1 of `prototype/attn_decode/results.md` records —
+    # and unlike a layout, an arithmetic spelling cannot be witnessed by a CPU mirror (AGENTS.md: a CPU
+    # mirror cannot see FMA contraction or association). So the only honest guard is textual: this header
+    # must CALL the tile side's helpers and must not define helpers of its own.
+    vs_h = M2_H.parent.parent / "attn_valu_slim" / "attn_valu_slim_kernels.h"
+    vs = vs_h.read_text()
+    check('#include "../attn_valu_slim/attn_valu_slim_kernels.h"' in src,
+          f"the slim MODE includes {vs_h.name} rather than restating the levers")
+    for call, defn in (("vslim_dot<8>(", "float vslim_dot("), ("vslim_dot<4>(", "float vslim_dot("),
+                       ("vslim_fold<MODE>(", "float vslim_fold("),
+                       ("vslim_permute_addr(", "unsigned vslim_permute_addr(")):
+        check(call in src, f"the slim MODE calls the shared spelling {call}")
+        check(defn in vs, f"{vs_h.name} really defines {defn} (an include of an empty file is not sharing)")
+    check(re.search(r"__device__[^;{]*\b\w*(slim|permute|bpermute)\w*\s*\(", src) is None,
+          "this header defines NO lever helper of its own: one spelling of the dot and the fold, in one "
+          "file")
     sites = part_site_m2(src)
     check(len(sites) == 1, f"this form has ONE partial writer — its reader is the shipped "
                            f"`attn_combine` ({len(sites)} sites found)")

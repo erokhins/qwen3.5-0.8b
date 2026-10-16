@@ -543,3 +543,25 @@ MODE 2 in one burst returning > 1.10× refutes the latency reading, < 1.02× kil
 this family. Given the harness does not exist yet and the family's own numbers cap the prize, the queue
 takes the attention re-test first — `M = 2`'s traffic halving against a touch bill that is now 45 slots
 instead of 116, where the harnesses already exist and the family is still 275 ms.
+
+## D24 — the pair measured: the levers transfer to M = 2 (1.47–1.49×) and the traffic halving still buys nothing
+
+`prototype/attn_m2/results.md` §6. Four forms in one process, alternating inside each rep. Admission green
+first: 12 plans × 3 pairs, `ndiff = 0` everywhere, with the levers *called* from
+`attn_valu_slim_kernels.h` rather than copied, so there is no second spelling to drift and the selftest
+enforces that.
+
+**The levers generalize** — 1.469–1.494× on the m2 body, the same as 1.496–1.543× on the tile body. That
+is a second, independent confirmation of D21: for this kernel the wall is the instruction bill under
+either row-tiling.
+
+**The traffic halving does not pay, now twice measured** — m2-slim is 5.5–13.4 % slower than ship-slim at
+every width with the bytes-demanded ratio still ~0.50. Pre-port it lost to a tall instruction wall; post-
+port, with the bill at 45 slots, it loses by about the same margin. **M = 2 stays parked**, and the
+traffic-reduction family loses its last funded member for attention at these widths.
+
+Honest bookkeeping on the prediction: the worker wrote "not to pay, 1.15–1.29× slower". Right direction,
+~2× pessimistic magnitude (measured 1.055–1.134), and the headline width landed at 1.055 inside the
+ambiguous band of its own falsifier. Recorded rather than rounded: if anyone reuses that elasticity model,
+it is biased pessimistic; and if `kAttnMaxSplit` is ever raised, the only untested regime left for this
+route is traffic that genuinely reaches DRAM above 4096 lanes.

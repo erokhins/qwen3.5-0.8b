@@ -123,10 +123,64 @@
  * staging is BF16 and exact only for the pinned `bf(fb(dot)) * SCALE` with SCALE = 2^-4; no `fused`: a
  * wave's §05.7 append must land before any row reads the cache) plus one refusal of its own: a `split`
  * whose slices would push a pair's union past `ATTN_M2_STAGE`.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * THE MODE PARAMETER: the same body, with and without the two per-touch instruction levers
+ * ---------------------------------------------------------------------------------------------
+ * D22 queued the re-test of M = 2 against a touch bill that is now 45 slots instead of 116, and the
+ * measured tile-form gain from making it so (`prototype/attn_valu_slim/results.md` §4 priced it, §7.1
+ * measured it at 1.52-1.57x). `attn_m2_body` is therefore a template on MODE, whose
+ * bits are `VSLIM_DOT` and `VSLIM_FOLD` — the SAME vocabulary `prototype/attn_valu_slim` uses for the
+ * tile form — and two of them are instantiated:
+ *
+ *   `attn_m2_wave`       MODE 0. The body exactly as it was measured at 2.5402 ms, unchanged.
+ *   `attn_m2_slim_wave`  MODE `VSLIM_DOT|VSLIM_FOLD`. Same body, two spellings replaced.
+ *
+ * WHY THE HELPERS ARE INCLUDED AND NOT TRANSCRIBED. `attn_slim_kernels.h` (the engine's copy) and
+ * `attn_valu_slim_kernels.h` (the prototype's) each already spell the lever helpers, and a third copy
+ * in this file would be the §20.1 failure in a new place (`prototype/attn_decode/results.md`: two
+ * self-consistent spellings of the same dot, joined by a branch, each agreeing only with itself). So this
+ * file includes
+ * `../attn_valu_slim/attn_valu_slim_kernels.h` and calls `vslim_dot<ND>` / `vslim_fold<MODE>` /
+ * `vslim_permute_addr` directly. Those three are the same code as the engine's `attn_slim_dot` /
+ * `attn_slim_fold` / `attn_slim_perm_addr`, verified identical apart from the names and comment tails
+ * (and the fold's parameter name), and `m2_model.py selftest` requires this body to name them — so
+ * "character for character" is not a transcription claim here, there is no transcription.
+ * Association is load-bearing (AGENTS.md, the gdn_collapse row: a hoisted constant moved 93,522 of
+ * 131,072 elements while leaving the state bit-exact, and a CPU mirror cannot see either the
+ * contraction or the association), which is exactly why a shared spelling beats a copied one.
+ *
+ * HOW m2's touch differs from the tile form's, and what that did to the levers — stated because the
+ * two are NOT the same shape, and pretending otherwise is how a port silently adapts a gate:
+ *   - THE DOT is the same eight BF16 products in the same serial-in-`t` order into one F32 accumulator,
+ *     but it is handed a SELECTED pointer: a union lane that is this row's SELF lane comes from
+ *     `s_kself`, everything else from `s_k` (constraint 4 above). `vslim_dot` reads its operand as one
+ *     `uint4`, so the select stays and becomes one `v_cndmask` on the LDS offset in front of the one
+ *     wide load — the tile form has no such select and therefore one fewer addressing op. Both stage
+ *     bases are 16-byte aligned by construction (`(slot or m) * DH + lane * 8` elements = a multiple of
+ *     16 bytes), which is what lets the wide load be legal at all.
+ *   - THE FOLD is the same 5-step `warp_sum` over one warp holding 32 lanes x 8 dims, once per touch.
+ *     Nothing about M = 2 changes its shape, so the lever applies verbatim.
+ *   - WHAT NEITHER LEVER TOUCHES, and is m2-only: the per-element pair-walk guard
+ *     (`if (j < g.blo || j >= g.bhi) continue;`), which is most of the +8 SALU/touch this form pays over the
+ *     tile form, and the union residue. Both stay.
+ *
+ * Control row, same discipline as the tile-side port: MODE 0 IS the shipped `attn_m2_wave` (one body,
+ * so nothing can drift between a copy and the original), and its census row must stay
+ * 124 slots / 55 VALU / 14 LDS / 55 SALU per touch with VGPR 50 / SGPR 64 / LDS 22,656 B — the
+ * recorded pre-port figure. `attn_m2_slim_wave` should land near the tile form's 45/28/7/10 plus the
+ * guard. Reproduce with:
+ *
+ *     .venv/bin/python prototype/attn_valu_slim/isa_census.py \
+ *         --src "$PWD/prototype/attn_m2/attn_m2.hip.cpp" \
+ *         --kernels attn_m2_wave,attn_m2_slim_wave,attn_tile_wave,attn_slim1_wave
+ *
+ * (the `--src` must be absolute: the census compiles inside a scratch directory).
  */
 #pragma once
 
 #include "../attn_decode/attn_decode_kernels.h"
+#include "../attn_valu_slim/attn_valu_slim_kernels.h"   // the lever helpers, shared not copied (see above)
 
 // ---- geometry constants ---------------------------------------------------------------------
 #define ATTN_M2_M 2                  // query rows per K/V walk. 2 is the funded step; M = 4 and M = 8
@@ -607,6 +661,10 @@ __device__ __forceinline__ void m2_panic(const CoreArgs& a, int row) {
     }
 }
 
+// MODE 0 is the body exactly as it was before the touch levers, and MODE `VSLIM_DOT|VSLIM_FOLD` is the
+// same body with the score dot and the warp fold re-spelled by the shared helpers. One body, not a
+// copy: the two cannot then disagree about anything except the two spellings.
+template <int MODE>
 __device__ __forceinline__ void attn_m2_body(const CoreArgs a) {
     __shared__ hip_bfloat16 s_sc[ATTN_M2_M][ATTN_M2_G][ATTN_M2_STAGE];   // exact-BF16 scores
     __shared__ hip_bfloat16 s_k[ATTN_M2_L * DH];                         // shared K rows (pass 1)
@@ -624,6 +682,15 @@ __device__ __forceinline__ void attn_m2_body(const CoreArgs a) {
     const int head = ATTN_M2_G * kv_write + h;      // FULL head index: slots, outputs, gates
     const int tile = (a.tile > 0 && a.tile <= TILE) ? a.tile : TILE;
     const int nd = (a.neg == NEG_DIMHALF) ? 4 : 8;  // of the 8 BF16 a lane owns
+    // LEVER 2, part 1 — the four folded permute addresses (deltas 8, 4, 2, 1). Functions of `lane`
+    // alone, so they are loop-invariant across every touch this block makes; only the slim MODE reads
+    // them. Declared outside the `if constexpr` so the two MODEs differ in exactly the two spellings and
+    // nothing else — and the control row of the census is what shows the unused slots are free here
+    // (VGPR 50 and LDS 22,656 B on both m2 forms), not a sentence saying so.
+    unsigned pa[4] = {0, 0, 0, 0};
+    if constexpr (MODE != 0) {
+        for (int i = 0; i < 4; ++i) pa[i] = vslim_permute_addr(lane, 8 >> i);   // 8, 4, 2, 1
+    }
 
     M2Row p0, p1;
     M2Pair b;
@@ -691,18 +758,59 @@ __device__ __forceinline__ void attn_m2_body(const CoreArgs a) {
         }
         __syncthreads();                                   // K sub-block published
         if (g.active) {
-            for (int rr = s_lo; rr < s_hi; ++rr) {
-                const int j = b.u_lo + rr;
-                if (j < g.blo || j >= g.bhi) continue;     // not this ROW's lane: not this warp's work
-                const hip_bfloat16* k = (j == g.pos)
-                                            ? &s_kself[m * DH + lane * 8]
-                                            : &s_k[(rr - s_lo) * DH + lane * 8];
-                float dot = 0.f;
-                for (int t = 0; t < nd; ++t) dot += bf(k[t]) * q[t];   // serial in t, §05.5
-                dot = warp_sum(dot);                                   // 5-step butterfly
-                // One BF16 round, then the scale; exact in BF16 because SCALE = 2^-4, which is what
-                // lets the staging be 2 bytes and still read back the identical F32.
-                if (lane == 0) s_sc[m][h][rr] = fb(bf(fb(dot)) * SCALE);
+            // One (row, lane, head) touch = one dot + one fold + one BF16 round — THE SAME unit the
+            // tile-side census counts, so the two forms' per-touch rows are comparable. m2's touch
+            // differs from the tile form's in two ways and neither is a lever: the walk is over the
+            // PAIR's union, so each warp skips the lanes that are not its own row's (the +8 SALU/touch
+            // the census shows), and a union lane that is this row's SELF lane is scored from `s_kself`
+            // rather than `s_k` (constraint 4). Both survive both levers unchanged.
+            if constexpr (MODE == 0) {
+                for (int rr = s_lo; rr < s_hi; ++rr) {
+                    const int j = b.u_lo + rr;
+                    if (j < g.blo || j >= g.bhi) continue;  // not this ROW's lane: not this warp's work
+                    const hip_bfloat16* k = (j == g.pos)
+                                                ? &s_kself[m * DH + lane * 8]
+                                                : &s_k[(rr - s_lo) * DH + lane * 8];
+                    float dot = 0.f;
+                    for (int t = 0; t < nd; ++t) dot += bf(k[t]) * q[t];   // serial in t, §05.5
+                    dot = warp_sum(dot);                                  // 5-step butterfly
+                    // One BF16 round, then the scale; exact in BF16 because SCALE = 2^-4, which is what
+                    // lets the staging be 2 bytes and still read back the identical F32.
+                    if (lane == 0) s_sc[m][h][rr] = fb(bf(fb(dot)) * SCALE);
+                }
+            } else {
+                // LEVER 1 (`vslim_dot<ND>`) and LEVER 2 (`vslim_fold<MODE>`), spelled by the shared
+                // helpers in `prototype/attn_valu_slim/attn_valu_slim_kernels.h` — not transcribed, so
+                // there is no second spelling of the dot in this tree to disagree with the first.
+                // The dot's operand is a SELECTED pointer here, which the tile form never pays; that is
+                // one `v_cndmask` in front of its one wide load, and it is not removable by a lever.
+                auto publish = [&](int rr, float dot) {
+                    dot = vslim_fold<MODE>(dot, pa);        // LEVER 2: the guards are hoisted, the
+                                                            // permute is one inline ds_bpermute_b32
+                    // One BF16 round, then the scale; exact in BF16 because SCALE = 2^-4, which is what
+                    // lets the staging be 2 bytes and still read back the identical F32.
+                    if (lane == 0) s_sc[m][h][rr] = fb(bf(fb(dot)) * SCALE);
+                };
+                // LEVER 1: `nd` is warp-uniform (a function of `a.neg`), so the dim-half injection gets
+                // its own copy of the loop behind one uniform compare instead of lending this one a
+                // runtime trip count. Which is how MODE 0 ends up rolling the dot: eight scalar
+                // `ds_load_u16`s, eight `v_movrels_b32_e32`s for the dynamically indexed `q[t]` and
+                // eight back edges per touch.
+                if (nd == 8) {
+                    for (int rr = s_lo; rr < s_hi; ++rr) {
+                        const int j = b.u_lo + rr;
+                        if (j < g.blo || j >= g.bhi) continue;
+                        publish(rr, vslim_dot<8>((j == g.pos) ? &s_kself[m * DH + lane * 8]
+                                                              : &s_k[(rr - s_lo) * DH + lane * 8], q));
+                    }
+                } else {
+                    for (int rr = s_lo; rr < s_hi; ++rr) {
+                        const int j = b.u_lo + rr;
+                        if (j < g.blo || j >= g.bhi) continue;
+                        publish(rr, vslim_dot<4>((j == g.pos) ? &s_kself[m * DH + lane * 8]
+                                                              : &s_k[(rr - s_lo) * DH + lane * 8], q));
+                    }
+                }
             }
         }
         __syncthreads();                                   // s_sc published for pass 2
@@ -825,4 +933,13 @@ __device__ __forceinline__ void attn_m2_body(const CoreArgs a) {
     }
 }
 
-__global__ void attn_m2_wave(CoreArgs a) { attn_m2_body(a); }
+// MODE 0 is the form every number in `results.md` §2–§7 was taken on; the slim MODE is D22's re-test.
+// Both are compiled unconditionally, so `isa_census.py` prints both rows out of one binary and the
+// harness's `--slim` decides only which one the LAUNCHER runs, never which one exists.
+__global__ void attn_m2_wave(CoreArgs a) { attn_m2_body<0>(a); }
+__global__ void attn_m2_slim_wave(CoreArgs a) { attn_m2_body<VSLIM_DOT | VSLIM_FOLD>(a); }
+
+// What `--slim` means here, in one place so the harness and a reader cannot drift: 0 = the two forms of
+// record (ship, m2); 1 = adds `attn_m2_slim_wave`, i.e. both levers. Single-lever attribution lives in
+// `prototype/attn_valu_slim --slim 2|3`, which is where the two levers were separated.
+inline bool attn_m2_slim_ok(int slim) { return slim == 0 || slim == 1; }

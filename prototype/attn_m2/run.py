@@ -46,7 +46,9 @@ and a form-neutral injection still failing when the two forms disagree.
 Run (repo root, inside one gpu_lock hold, blocking):
     .venv/bin/python prototype/attn_m2/run.py plans
     .venv/bin/python prototype/attn_m2/run.py ab
+    .venv/bin/python prototype/attn_m2/run.py ab --slim 1      # + m2-slim vs m2-plain and vs ship
     .venv/bin/python prototype/attn_m2/run.py negative --neg partrow
+    .venv/bin/python prototype/attn_m2/run.py negative --neg dimhalf --slim 1
 CPU-only, no device, no lock:
     .venv/bin/python prototype/attn_m2/run.py negmatrix      # which plan proves which injection
     .venv/bin/python prototype/attn_m2/run.py selftest       # verdict logic, against the stub harness
@@ -209,11 +211,11 @@ def build() -> bool:
     return True
 
 
-def run_bin(plan: Plan, neg: str, dump: Path, echo: bool = True) -> tuple[int, str, str]:
+def run_bin(plan: Plan, neg: str, dump: Path, echo: bool = True, slim: int = 0) -> tuple[int, str, str]:
     """One harness run over one plan. Returns (rc, stdout, stderr); a refusal is a FAILURE, not a skip."""
     dump.mkdir(parents=True, exist_ok=True)
     cmd = [str(BIN), "--plan", str(plan.path), "--neg", neg, "--split", str(plan.split),
-           "--out", str(dump)]
+           "--slim", str(slim), "--out", str(dump)]
     print("$ " + " ".join(cmd))
     r = subprocess.run(cmd, capture_output=True, text=True)
     if echo:
@@ -287,33 +289,65 @@ def negmatrix(plans: list[Plan]) -> int:
     return 0
 
 
-def do_ab(plans: list[Plan]) -> int:
-    """Bit-identity A/B, one verdict line per plan."""
+# The bit-diff pairs `do_ab` requires, by `--slim` level. A missing RESULT key is a FAILURE, never a
+# skip: a verdict computed over a pair list that silently came up empty cannot fail, which is the
+# `prototype/gdn_collapse/run.py`-shaped bug in every driver that parses another program's output.
+AB_PAIRS = {
+    0: (("m2 vs ship", "ndiff_aout", "ndiff_gated"),),
+    1: (("m2 vs ship", "ndiff_aout", "ndiff_gated"),
+        ("m2slim vs ship", "ndiff_aout_m2slim", "ndiff_gated_m2slim"),
+        ("m2slim vs m2", "ndiff_aout_m2slim_vs_m2", "ndiff_gated_m2slim_vs_m2")),
+}
+
+
+def do_ab(plans: list[Plan], slim: int = 0) -> int:
+    """Bit-identity A/B, one verdict line per plan per PAIR.
+
+    Under `--slim 1` the harness runs ship, m2 and m2slim over ONE set of operands in ONE process, so
+    all three pairs below are single-variable: the slim body differs from m2 only in the two spellings,
+    and m2 differs from ship only in the row tiling. Under `--slim 0` only the pair of record is
+    expected, which is the gate every number in results.md was taken on.
+    """
     rc = 0
+    pairs = AB_PAIRS[slim]
     for p in plans:
         dump = WORK / "dump" / "ab" / p.tag
-        code, out, err = run_bin(p, "none", dump)
+        code, out, err = run_bin(p, "none", dump, slim=slim)
         res = results_of(out)
         if not res:
             print(f"VERDICT plan={p.tag} verdict=NO-LAUNCH (exit {code}) "
                   f"{err.strip().splitlines()[0] if err.strip() else 'no RESULT line'}")
             rc = 1
             continue
-        bad = [c for c, f in res.items()
-               if int(f["ndiff_aout"]) or int(f["ndiff_gated"])]
-        for c, f in res.items():
-            print(f"VERDICT plan={p.tag} case={c} rows={f['rows']} lanes={f['lanes']} "
-                  f"split={f['split']} ndiff_aout={f['ndiff_aout']} ndiff_gated={f['ndiff_gated']} "
-                  f"bytes_m2/ship={f['ratio']} verdict="
-                  f"{'PASS' if c not in bad else 'FAIL'}")
-        rc |= 1 if bad else 0
-    print(f"\n{'FAIL' if rc else 'PASS'}: ab over {len(plans)} plan(s) — every row of every plan must "
-          "be ndiff 0; NO-LAUNCH counts as a failure, never a skip.")
+        for cname, f in res.items():
+            for pair_name, ka, kg in pairs:
+                if ka not in f or kg not in f:
+                    print(f"VERDICT plan={p.tag} case={cname} pair={pair_name} verdict=NO-KEY "
+                          f"(the harness printed no {ka}= for this case; a pair that is not measured "
+                          "cannot be a pass)")
+                    rc = 1
+                    continue
+                na, ng = int(f[ka]), int(f[kg])
+                print(f"VERDICT plan={p.tag} case={cname} pair={pair_name} rows={f['rows']} "
+                      f"lanes={f['lanes']} split={f['split']} slim={slim} "
+                      f"{ka}={na} {kg}={ng} verdict={'PASS' if not (na or ng) else 'FAIL'}")
+                rc |= 1 if (na or ng) else 0
+        ratios = {c: f["ratio"] for c, f in res.items()}
+        print(f"VERDICT plan={p.tag} slim={slim} pairs={len(pairs)} "
+              f"bytes_m2/ship={sorted(set(ratios.values()))}")
+    print(f"\n{'FAIL' if rc else 'PASS'}: ab over {len(plans)} plan(s) at slim={slim}, "
+          f"{len(pairs)} pair(s) per case — every row of every plan must be ndiff 0; NO-LAUNCH and "
+          "NO-KEY count as failures, never skips.")
     return rc
 
 
-def do_negative(plans: list[Plan], neg: str) -> int:
-    """Injected-bug controls, per plan, against the derived sets. Two baselines, one verdict per plan."""
+def do_negative(plans: list[Plan], neg: str, slim: int = 0) -> int:
+    """Injected-bug controls, per plan, against the derived sets. Two baselines, one verdict per plan.
+
+    Under `--slim 1` the slim body runs too and its moved-set must equal the plain body's: an injection
+    that fires on one spelling of the score dot and not the other is a lever that changed semantics, and
+    `dimhalf` is exactly the injection that would show it (the dot lever is ABOUT `nd`).
+    """
     if neg in MIRROR_ONLY_NEG:
         print(f"ASSERTION: --neg {neg} is not runnable on a device ({M.NEG_WHY.get(neg, '')[:120]}). "
               "Run it in the mirror: `m2_model.py negative`.")
@@ -337,12 +371,13 @@ def do_negative(plans: list[Plan], neg: str) -> int:
           f"{[p.tag for p in empty] or 'none'}")
 
     rc = 0
+    forms = ["ship", "m2"] + (["m2slim"] if slim else [])
     for p in chosen:
         must, blind = (set(), set()) if neg in DEVICE_ONLY_NEG else p.expect(neg)
         clean = WORK / "dump" / "clean" / p.tag
         inj = WORK / "dump" / f"neg-{neg}" / p.tag
-        code_c, out_c, err_c = run_bin(p, "none", clean, echo=False)
-        code_i, out_i, err_i = run_bin(p, neg, inj)
+        code_c, out_c, err_c = run_bin(p, "none", clean, echo=False, slim=slim)
+        code_i, out_i, err_i = run_bin(p, neg, inj, slim=slim)
         res_c, res_i = results_of(out_c), results_of(out_i)
         if not res_i or not res_c:
             why = (err_i or err_c).strip().splitlines()
@@ -367,16 +402,25 @@ def do_negative(plans: list[Plan], neg: str) -> int:
             # non-zero `disagree`, so nothing is being waved through.
             problems.append(f"the CLEAN run is not bit-identical ({clean_disagree}): there is no control "
                             "group, so this verdict is uninterpretable — `run.py ab` must be green first")
-        moved_m2: set = set()
-        moved_ship: set = set()
+        moved = {form: set() for form in forms}
         for cname in res_i:
-            for form in ("ship", "m2"):
-                diff = moved_heads(clean / f"{cname}.{form}.aout.bin", inj / f"{cname}.{form}.aout.bin",
-                                   p.nrows)
-                if form == "m2":
-                    moved_m2 |= diff
-                else:
-                    moved_ship |= diff
+            for form in forms:
+                a = clean / f"{cname}.{form}.aout.bin"
+                b = inj / f"{cname}.{form}.aout.bin"
+                if not (a.exists() and b.exists()):
+                    # A form the harness did not dump cannot be adjudicated. Say so rather than letting
+                    # a missing file read as "nothing moved".
+                    problems.append(f"no {form} dump for {cname} ({a.name} / {b.name} missing), so its "
+                                    "injected-vs-clean diff was never taken")
+                    continue
+                moved[form] |= moved_heads(a, b, p.nrows)
+        moved_m2, moved_ship, moved_slim = moved["m2"], moved["ship"], moved.get("m2slim", set())
+        if slim and moved_slim != moved_m2:
+            # Both m2 bodies implement the same routing, masks and partial slots; the levers change two
+            # spellings inside the score. A wrong that reaches one and not the other is the levers
+            # changing values, and no bit-identity claim survives that.
+            problems.append(f"the slim body's wrong differs from the plain body's: m2 rows "
+                            f"{sorted(rows_of(moved_m2))} vs m2slim rows {sorted(rows_of(moved_slim))}")
         if neg in M2_ONLY_NEG:
             # The shipped form does not implement this id, so it is a control group and the positive
             # assertion is that it stayed exactly where it was while the form under test moved every
@@ -416,8 +460,9 @@ def do_negative(plans: list[Plan], neg: str) -> int:
         print(f"NEGVERDICT plan={p.tag} neg={neg} class="
               f"{'m2-only' if neg in M2_ONLY_NEG else 'cache' if neg in DEVICE_ONLY_NEG else 'shared'} "
               f"rows={p.nrows} lanes={p.lanes[0]}-{p.lanes[-1]} "
-              f"split={p.split} must={len(must)} moved_m2={len(moved_m2)} "
-              f"moved_ship={len(moved_ship)} blind_hits={len(hit_blind)} "
+              f"split={p.split} slim={slim} must={len(must)} moved_m2={len(moved_m2)} "
+              + (f"moved_m2slim={len(moved_slim)} " if slim else "")
+              + f"moved_ship={len(moved_ship)} blind_hits={len(hit_blind)} "
               f"forms_agree={'no' if disagree else 'yes'} "
               f"forms_check={'agree' if neg in FORMS_AGREE_NEG else 'control-group-must-not-move'} "
               f"verdict={'FAIL' if problems else 'PASS'}"
@@ -477,7 +522,7 @@ SELFTEST_CASES = [
              "dimhalf", "pair-at-maxsc", {"m2": "all", "ship": "all"}, 0, "verdict=PASS"),
     StubCase("stub_cache_injection_moves_both_forms_and_produces_a_verdict",
              "slotk", "pair-at-maxsc", {"m2": "all", "ship": "all"}, 0,
-             "class=cache rows=4 lanes=512-515 split=2 must=0 moved_m2=32 moved_ship=32 "
+             "class=cache rows=4 lanes=512-515 split=2 slim=0 must=0 moved_m2=32 moved_ship=32 "
              "blind_hits=0 forms_agree=yes forms_check=agree verdict=PASS"),
     StubCase("stub_form_neutral_injection_that_makes_the_forms_differ_is_caught",
              "dimhalf", "pair-at-maxsc", {"m2": "all", "ship": "all", "form_delta": "1"}, 1,
@@ -556,6 +601,11 @@ def main() -> int:
                     help="fixture with pinned decode rows above 1024 lanes")
     ap.add_argument("--layer", type=int, default=R.ATTN_LAYERS[0])
     ap.add_argument("--neg", default="maskwide", help="injection for `negative`: " + "|".join(NEG_NAMES))
+    ap.add_argument("--slim", type=int, choices=[0, 1], default=0,
+                    help="0 = the two forms of record (ship, m2). 1 = also run m2-slim, so `ab` prints "
+                         "m2slim-vs-ship and m2slim-vs-m2 as well, and `negative` additionally requires "
+                         "the slim body's wrong to land on exactly the plain body's rows. `selftest` "
+                         "runs at 0: stub_harness.py models the two forms of record only")
     ap.add_argument("--bin", default=None,
                     help="the harness binary to run. Pointing it at a stub is how the driver's own "
                          "selection/verdict logic gets checked without a device window")
@@ -583,8 +633,8 @@ def main() -> int:
     if not build():
         return 1
     if args.what == "ab":
-        return do_ab(plans)
-    return do_negative(plans, args.neg)
+        return do_ab(plans, args.slim)
+    return do_negative(plans, args.neg, args.slim)
 
 
 if __name__ == "__main__":
