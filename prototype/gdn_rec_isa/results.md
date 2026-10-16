@@ -15,10 +15,14 @@ No device was touched. Every number here is either from a listing or already on 
 ## 1. The unit — a "token-step", and why attention's amortisation analogy breaks
 
 One **token-step** = one `rec_kernel` launch = one (token, GDN layer):
-`rec_kernel<<<NH=16, D=128>>>` (`engine/kernels_gdn.cpp:295`), wave32 (`.amdhsa_wavefront_size32 1`),
+`rec_kernel<<<NH=16, D=128>>>` (`engine/kernels_gdn.cpp:40`), wave32 (`.amdhsa_wavefront_size32 1`),
 so 16 blocks × 4 wavefronts = **64 wavefronts**, and the family is 18 launches per token (18 GDN
 layers). The grid is not "16 wavefronts over 40 CUs" as the earlier read put it — it is 16 *blocks*,
-but the conclusion survives: 64 wavefronts is ≤1 per SIMD on this part either way (§3).
+but the conclusion survives: 64 wavefronts is ≤1 per SIMD on this part either way (§3). (Corrected
+while the harness was written: this paragraph carried a line cite into `engine/kernels_gdn.cpp` past
+the end of that file, and the `rec_kernel<<<NH, D>>>` launch is at
+`engine/kernels_gdn.cpp:40`. A stale coordinate still resolves to *some* line, which is why
+`tools/doc_ref_check.py` is what caught it and not a reader.)
 
 The launch is **one token deep**. The per-`j` state walk is a real loop with a runtime trip count;
 the per-token loop is not a loop at all — the next token is the next launch. So:
@@ -186,7 +190,124 @@ its roofline section; the conclusion is the same under both readings and both ar
 `isa_census.py` (76 self-tested rules; imports `attn_valu_slim`'s wrapper over
 `attn_score_dot2`'s classifier — nothing copied), `gdn_rec_isa_kernels.h` (MODE 0 control + MODEs
 1/2/2c; MODE 3 specified but unwritten), `isa_tu.cpp`, `isa_census.output.txt`/`.s`,
-`rec_kernel.ship.s`. Commands, device steps and what is *not* built (no `.hip.cpp` harness yet):
-`HANDOFF.md`. Limits of this write-up: it is a static census — `expf`'s real length, LDS bank
-behaviour of the 512 B-stride `ds_read_b128`, and whether any wait is actually exposed are all
-device questions, listed in `HANDOFF.md` §4.
+`rec_kernel.ship.s` — and, since §6, `gdn_rec_isa.hip.cpp` + `build.sh` (the device A/B harness) with
+`isa_census.harness.output.txt` (the census re-taken on the harness TU). Commands, device steps and what
+is *not* built (MODE 3, and the `rocprofv3` counter pass): `HANDOFF.md`. Limits of this write-up: it is
+a static census — `expf`'s real length, LDS bank behaviour of the 512 B-stride `ds_read_b128`, and
+whether any wait is actually exposed are all device questions, listed in `HANDOFF.md` §4.
+
+## 6. The harness that makes the falsifier runnable (added after the verdict, not before it)
+
+`results.md` §4 ended with a falsifier no one could run, because `HANDOFF.md` named the commands and
+`prototype/gdn_rec_isa/` had no `.hip.cpp`. `gdn_rec_isa.hip.cpp` is that harness, built on
+`prototype/gdn_collapse/gdn_collapse_check.hip.cpp`'s shape (one process, one set of operands, one state
+buffer and one `o` buffer per MODE, guard bands and an unwritten-element sentinel on everything) with
+`prototype/attn_m2/attn_m2.hip.cpp`'s burst shape (every active MODE timed *inside* each rep, so the
+falsifier is one measurement window rather than four). Commands and expected output shape:
+`HANDOFF.md` §3. No timing was taken by whoever wrote it — the `--burst` path is present and unused.
+
+**What it judges, and how little room it leaves.** MODE 0 (`rec0_kernel`) is the reference; MODEs 1, 2
+and 2c must reproduce it **bit for bit on `o` and on the final state over T = 128 tokens**, four cases
+(two state memories × zeros/carried state, four seeds). Zero is the only acceptable `ndiff_*_vs0`. No
+band, no cos, no max-ULP: a band here would be a way of not checking the claim, and the claim (§4's
+"bit-identity vs band" bullet) is that these MODEs re-spell a reduction rather than re-associate one.
+Two extras the census did not ask for but the tree's own traps insist on:
+
+* **every case runs twice** (`--repeat 2`). MODEs 1 and 2 cross lanes with inline
+  `ds_bpermute_b32`/`ds_swizzle_b32` whose `s_waitcnt lgkmcnt(0)` is written by hand, and per
+  `prototype/attn_valu_slim` a *racy* permute does not produce a stable wrong answer — it produces
+  run-to-run disagreement. `rerun_ndiff_*` is that check; a non-zero value indicts the wait, not the
+  arithmetic.
+* **a CPU reference is printed but is not the gate.** The host mirror transcribes the shipped tree,
+  including the FMA sites the listing proves the device fuses (`v_fmac_f32_e32` in loop A at
+  `rec_kernel.ship.s:243-282` and loop B at `:346-383`, `v_fma_f32 v1, -v6, v1, v5` at `:315`), and keeps
+  `qn = (qq*rsqrt)*Q_SCALE`'s association — the bug class `prototype/gdn_collapse/results.md` §2
+  documents. It cannot be bit-identical to the device, because the device computes `rsqrtf` as
+  `v_rsq_f32_e32` (`rec_kernel.ship.s:177`) and `expf` as `v_exp_f32_e32` + `v_ldexp_f32` (`:304-307`),
+  approximations of a different kind from glibc's. So `ndiff_*_vs_cpu` is non-zero for MODE 0 too, MODE
+  0's line is echoed as `CPU-FLOOR`, and a MODE passes by matching MODE 0. The mirror's real job is the
+  one thing MODE-vs-MODE structurally cannot do: a fixture bug shared by *all* the MODEs — a q|k|v row
+  stride off, heads indexed the other way, the state transposed — leaves every MODE agreeing with every
+  other, and shows instead as `maxrel_*_vs_cpu` of order 1 instead of order 1e-6.
+
+**Two CPU-only selftests, because a gate nobody can run should still be half-checkable on a CPU.**
+`--selftest-lane` (80,660 checks, `bad=0`) re-derives the hand fold's source-lane rule and the
+compiler's on the host and requires them equal for all 32 lanes × 5 deltas and for both stages of the
+shipped `block_sum`, with a must-catch control: the xor-butterfly rule and the "a lane that falls off the
+wave contributes nothing" rule each have to *move* lanes, and they do (62,000 each), so the agreement is
+not vacuous. `--selftest-mirror` (524,304 checks, `bad=0`) witnesses the mirror's addresses with three
+exact identities at `g = 0` exactly — `beta = 0` leaves the state bit-identical, `beta = 1` from a zero
+state yields the outer product `ks ⊗ v`, and `o` is `qs · state` — which is what says the CPU column is
+measuring the recurrence and not a private invention of it.
+
+**The census row: the harness work did not move MODE 0.** `isa_census.harness.output.txt` is
+`isa_census.py` run over the *harness* TU (`SAVE_TEMPS=1 ./build.sh` leaves `tmp/gdn_isa/gdn_rec_isa.s`),
+so the listing is the code the binary will actually execute, built with the `-Xcompiler -mfma` the host
+mirror needs:
+
+| listing | `rec_kernel` | `rec0_kernel` | `rec1_kernel` | `rec2_kernel` | `rec2c_kernel` |
+|---|---|---|---|---|---|
+| engine TU (`isa_census.output.txt`) | 1,523 | 1,523 | 1,488 | 1,391 | 1,492 |
+| harness TU (`isa_census.harness.output.txt`) | 1,523 | 1,523 | 1,488 | 1,391 | 1,492 |
+
+Both control rows read IDENTICAL (shipped vs the MODE-0 copy, engine TU vs harness TU) and the category
+tallies agree slot for slot with §2, so the −2.3 %/−8.7 %/−2.0 % deltas §4 priced are the deltas the
+binary will run, and nothing in the harness work reached device codegen.
+
+**What the thresholds decide.** The burst prints, per case, `best_<mode>_ms` (ms per *token-step* launch,
+best-of-`reps`, state restored before each timed loop so every MODE walks the trajectory that was gated)
+and a `FALSIFIER` line per lever with `rec0_over_mode` and its band:
+
+| `rec0_over_rec2` | what it means, in §4's words |
+|---|---|
+| **> 1.10** | the latency reading is refuted: the prologue chain *is* on the critical path and the barrier/guard cut is a lever, not a formatting change. MODE 3 (the norms out of the launch, one pre-pass per token for all 18 layers) becomes the funded next step, and it is still unwritten. |
+| **< 1.02** | the instruction route is dead for this family, as §4 predicted: `gdn_rec` moves by raising work per launch (the scan route), not by slimming the instruction stream. Nothing else in this directory needs re-opening. |
+| **between** | inconclusive. Re-take on the long-memory cases (the ones whose state resembles a real wave), and if it persists the `rocprofv3` counter pass in `HANDOFF.md` §4 is the tie-breaker. |
+
+And what a bit-identity failure would mean per MODE, since that is the question this harness answers
+first: `rec1` differs → the hand fold is not the tree the compiler emits (the lane selftest says it is at
+the rule level, so look at the asm and the wait); `rec2c` differs while `rec2` does not → the *fusion* is
+wrong (shared barrier structure, the two `red[]` arrays, the dropped "protect `red[0]`" barriers), since
+2c differs from MODE 0 only by fusion with compiler shuffles; both differ → the spelling is common to
+both; `rec2c` clean and `rec2` dirty → the hand spelling alone. `rerun_ndiff_*` non-zero on any of them →
+the hand-written `s_waitcnt` is racy, which is a defect in the MODE, not a band to negotiate. A MODE that
+moves a bit is not a slower lever, it is a numerics change, and this harness exists to say so before
+anyone times it.
+
+## §7 Device falsifier (main agent, 2026-10-16): D23's verdict stands, and one of its premises needed replacing
+
+Window `gdn_rec_isa_ab`, blocking, zero subagents, util 92 % (discounted). CPU selftests first:
+`--selftest-lane` 80,660 cases bad=0 with its must-catch control firing (62,000 lanes moved), and
+`--selftest-mirror` 524,304 cases bad=0. Then admission on device, 4 cases × 4 MODEs, T=128:
+
+| MODE | vs MODE 0 | rerun (same process, twice) | verdict |
+|---|---|---|---|
+| `rec0` (shipped copy) | 0 / 0 | 0 / 0 | BIT_IDENTICAL |
+| `rec1` (hand-spelled fold) | **262,144 / 262,144 — every element** | **1,408 and 80,512 o elements differ between runs** | DIFFERS, **non-deterministic** |
+| `rec2` (fused pair, hand-spelled) | **262,144 / 262,144** | **14,080 in the carried case** | DIFFERS, **non-deterministic** |
+| `rec2c` (fused pair, compiler-lowered) | **0 / 0** | 0 / 0 | BIT_IDENTICAL |
+
+Two things follow, and only one of them is about `gdn_rec`.
+
+**1. The hand-spelled cross-lane spellings in MODEs 1 and 2 are broken, not merely re-associated.**
+Every element of `o` differs (262,144 of 262,144), `maxrel_o_vs_cpu` reaches 5.4e+05 to 1.2e+06 against a
+MODE-0 floor of 1.9e-01, and the same MODE disagrees with itself across two runs — which is the signature
+this repo uses for a racy hand `ds_bpermute_b32`, not for a different addition tree. `rec2c`, the *same*
+fused-pair idea lowered by the compiler instead of by hand, is bit-identical. So the technique is not the
+problem — `attn_valu_slim`'s hand-fold survives bit-identity and a three-run race check on the shipping
+path — these two spellings are wrong, and the harness caught them before any number was taken from them
+because the gate was bit-identity and "no timing if admission failed" was enforced in the binary.
+
+**2. The falsifier ran on the one valid lever, and it landed in the kill band: 1.0159×.**
+`rec0` 0.8088 ms vs `rec2c` 0.7962 ms, burst 40 × 5 reps, same buffers, one window, per-launch 6.319 µs
+(the census modelled 6.8–6.9 µs, so the model was not wrong about the launch cost either). `rec2c` removes
+2.0 % of slots, so measured elasticity is ≈ **0.8** — slots cut → time cut, nearly proportionally.
+
+That elasticity is *much* more issue-sensitive than D23's roof argument implied, and it is the honest
+correction to make here: "runs at 10 % of its issue roof" predicted instruction cuts would be near-worthless,
+and the direct measurement says a slot cut does translate at roughly 0.8×. It does not change the verdict,
+because the arithmetic lands in the same place from the other direction: the best available lever in this
+family is MODE 2 at −8.7 % of slots, which at elasticity 0.8 is ≈ 7 % of the family ≈ 36 ms of a
+1105 ms wave, and that MODE is the one that is broken. **Repairing two hand spellings to collect a
+predicted ~3 % of the wave is not funded**, and the falsifier's own threshold agrees: to refute the
+latency reading you needed > 1.10×, and the only working spelling returned 1.016×.

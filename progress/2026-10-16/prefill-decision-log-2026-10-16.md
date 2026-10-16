@@ -565,3 +565,27 @@ Honest bookkeeping on the prediction: the worker wrote "not to pay, 1.15–1.29�
 ambiguous band of its own falsifier. Recorded rather than rounded: if anyone reuses that elasticity model,
 it is biased pessimistic; and if `kAttnMaxSplit` is ever raised, the only untested regime left for this
 route is traffic that genuinely reaches DRAM above 4096 lanes.
+
+## D25 — `gdn_rec`'s falsifier ran: 1.016× on the one valid lever, and the two hand-spelled levers are broken rather than slow
+
+`prototype/gdn_rec_isa/results.md` §7. D23 left a falsifier nobody could run; the harness now exists and
+the answer is in the kill band: `rec0` 0.8088 ms vs `rec2c` 0.7962 ms = **1.0159×** (refute needed > 1.10×,
+kill threshold < 1.02×), burst 40 × 5 reps in one window, per-launch 6.319 µs against the census's modelled
+6.8–6.9 µs.
+
+Two things worth more than the verdict:
+
+1. **MODEs 1 and 2 do not compute the right answer, and the gate is what caught it.** Every element of `o`
+   differs (262,144/262,144), `maxrel` vs the CPU reference reaches 1.2e+06 against MODE 0's 1.9e-01 floor,
+   and each disagrees **with itself** across two runs (1,408 / 80,512 / 14,080 elements) — the repo's own
+   signature for a racy hand-written cross-lane permute, not for a re-associated reduction. `rec2c`, the
+   same fused-pair idea lowered by the compiler rather than by hand, is bit-identical, so the technique is
+   fine (`attn_valu_slim`'s hand-fold ships) and these spellings are wrong. Admission was bit-identity and
+   the binary refuses to time when admission fails, so no number was ever taken from a broken MODE.
+2. **D23's premise was wrong even though its verdict survives.** Measured elasticity from −2.0 % slots to
+   −1.6 % time is **≈ 0.8**: slot cuts *do* translate in this family, which "10 % of the issue roof ⇒ worth
+   ~1 %" did not predict. The verdict survives because the arithmetic closes from the other side: the
+   biggest lever available is MODE 2 at −8.7 % slots ≈ 7 % of the family ≈ 36 ms of a 1105 ms wave, and
+   that MODE is the broken one. **Repairing hand spellings to collect a predicted ~3 % of the wave is not
+   funded.** Recorded as a correction, not deleted, because a roof argument and a measured elasticity
+   disagreeing is exactly the kind of thing that produced this session's three reversals.
