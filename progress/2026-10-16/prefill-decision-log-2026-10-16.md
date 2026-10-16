@@ -837,6 +837,10 @@ prefill wave at 4096 lanes has no remaining route above the noise except raising
 quantisation (5.1)** — which is the honest statement of where this ends, and the reason 1.3 matters more than
 anything else on the list.
 
+**Queue status, updated as items close.** Item 1 (3.2, workspace budget) **closed negative — see D31**, and its
+replacement is **3.7, select beyond the shallow heuristic answer** (≈ 2.2 % ceiling, burst-priced, in-situ
+adjudication required), inserted at position 7b below 3.4/3.5. Everything else in the list stands as written.
+
 # D31 — D30 item 3.2 comes back **negative**, and the thing it found instead is candidate depth (2026-10-16)
 
 **Question asked:** 15,077 of 15,750 enumerated algos exceed the engine's 128 MiB workspace budget
