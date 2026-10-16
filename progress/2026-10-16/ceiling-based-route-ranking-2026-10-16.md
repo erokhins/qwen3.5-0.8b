@@ -499,3 +499,38 @@ comes from `hipblas`/`rocblas_gemm_ex`); a per-family split of the `gdn` batched
    traffic lever itself is worth **194.6 ms (M=2) to 355.6 ms (M=8)** on a 1307.75 ms wave. The
    crossover M is 7.7 at *every* width, because both bills are quadratic in T — which is the D4b
    "scaling cannot separate the walls" observation, finally priced with a measured ceiling beside it.
+
+---
+
+## 9. Status of this ranking after the work that followed it (2026-10-16, main agent)
+
+Appended deliberately, so §5 and §6 stay exactly as written and every `§3.4`/`§6` cite from
+`prototype/attn_m2/` still resolves. The wave has moved since §5 was booked — `--gemm lt` shipped and the attn
+instruction surgery shipped — and two of this file's ranks turned out to be wrong in ways worth recording
+next to the originals rather than over them.
+
+Current measured state at 4096 lanes: `wall_ms = 1111.95`, `gdn_rec` **48.07 %**, `attn` **25.70 %**, matmul
+group **17.92 %**, small-kernel tail ≈ 8 %. Full family table and disposition of every lever:
+`prefill-decision-log-2026-10-16.md` **D30**, updated by **D31**.
+
+| §5 rank | route | what actually happened |
+|---|---|---|
+| 1 | **R1 attention row-tiling (M = 2)** | **RANK WAS WRONG, but the next thing was not.** M = 2 is bit-identical and **slower** — 7–10 % before the levers (D18), **5.5–13.4 % slower after them** (D24), so traffic halving collected nothing twice over. The prize booked here (194.6 ms at 4096) never existed: it came from a byte model that §D21 later falsified. What *did* ship out of the same family is instruction surgery on the tile touch — 116 → 45 issue slots, **attn 1.466×, whole wave 1.125×** — which this file priced at zero because it was not a traffic route. |
+| 2 | **R2 close the matmul gap to the library's own rate, no hand kernel** | **SHIPPED, and it was the best of the file.** `--gemm lt` is the default (`aaefe01`, D26–D29): GROUP matmul **276.90 → 195.11 ms (1.419×)** and the wave **1.049×** at 4096, 1.110× at 1024. §6's cheap falsifier — burst the shipped plan at rows = 512 in walk order — is what found it, and §6's own conditional ("R2's rank moves to 1 for short prompts") came true: at 1024 lanes it *was* rank 1. The booked prize of 117.2 ms at 4096 was ~82 ms of real GROUP delta plus a remainder that was the ledger's burst-vs-step effect, which §2 already warned about. |
+| 3 | **R3 hand-written WMMA GEMM** | **DEPRIORITISED, and by arithmetic rather than by its own unmet preconditions.** Those are still unmet (fragment layout undecidable, all 7 negative controls of the probe harness failing), and on top of that R2 ate most of its prize: the library now runs **33.8–35.9 TFLOP/s** at the shipping width against a measured WMMA roof of 52.63, so the remaining increment is ≈ 1.47× of a much smaller number, not +88.5 ms. Do not fund before D31's 3.7 and the `gdn_rec` items. |
+| 4 | R4 `v_dot2_f32_bf16` | unchanged; still sequenced behind M-tiling, which is now parked, so effectively dormant. |
+| 5 | R5 raise the lane ceiling | unchanged, still blocked on the numerics admission. It is also the only route that could re-open R1, since traffic that never reaches DRAM is what killed M = 2. |
+| 6 | R6 fusion/launch leftovers | unchanged, and the ceiling is `exposed_ms` as written; `WAVEGAP ratio=1.030` says there is almost nothing exposed to overlap. |
+| 7 | **R7 `gdn_rec` by arithmetic class or state width** | **RANK WAS TOO LOW, and it is now the head of the queue.** The instruction half is closed (D23/D25: 1.0159× on the fused-reduction MODE, kill band 1.0159 — funded no), but this file's own note — "a 16-bit state variant could in principle be worth ~260 ms at 4096" — is the largest live number on the board, and the reason it is not being dismissed is D25's real finding: the family is **latency-bound at ~1.6 working wavefronts per CU**, which no route in §5 addressed. Open now: the state-dtype/traffic census and the dependency-break falsifier (D30 §1 items 1.6 and 1.3). |
+| 8 | R8 integer paths | unchanged, out of authority (int8/int4 is a user decision). |
+| 9 | R9 `lm_head` | unchanged, dead, M = 1. |
+
+**One new route this file does not contain, and where it ranks:**
+
+| new | **D31 3.7 — select beyond the shallow heuristic answer** | **mid-table.** `ratio` to rank-0 at 64 candidates is 1.39 `down_proj` / 1.34 `o_proj+out_proj` / 1.21 `gate_proj+up_proj` / 1.13 `in_proj_qkv`, with the winners sitting at ranks 16–55 where the engine's 8-wide query cannot see them, and a pin is not bound by that width. Priced at **≈ 24 ms of a 4096-lane prefill (2.2 %) as a burst ceiling**, below `gdn_rec` because D28 proved a burst winner can be an in-situ loser (two of three were), and the same window showed 7.5 % window noise on a 0.12 ms call. Its sibling, raising the workspace budget, is **closed negative** (D31): the apparent +8.8 % at 12 candidates was the truncation, not the workspace.
+
+The honest summary of §5 from here: **the file was right that the matmul gap was cheap and wrong that
+attention's gap was traffic**, and the two errors are the same error — pricing a family from a byte model
+instead of asking which wall is lower with the instructions counted. That is why D30 asks nine questions per
+family now, and why the biggest thing left is the one question §5 never asked of `gdn_rec`: not "how many
+instructions" but "what is it waiting on".
