@@ -4021,6 +4021,9 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
                # pass is exactly the pass that was read while one side had silently thrown inside
                # `prefill_wave`, so the form is named on the command line here too.
                "--attn-tile", args.attn_tile,
+               # The touch SPELLING, for the identical reason: a width A/B whose two sides ran different
+               # inner spellings of the same form measures two things at once.
+               "--attn-touch", args.attn_touch,
                # The GDN scan too, for the identical reason: the two sides of a width A/B must differ
                # in width and nothing else.
                "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk)]
@@ -5165,6 +5168,24 @@ def main() -> int:
                          " say which form it ran is evidence about neither. This default and"
                          " `decode_run.cpp`'s own are moved in one commit, or a gate would silently judge"
                          " a different binary than the one the engine ships.")
+    ap.add_argument("--attn-touch", choices=("0", "1"), default="1",
+                    help="which SPELLING of the tiled wave's per-touch inner work runs, passed"
+                         " straight to `decode_run --attn-touch`: `1`, the default, is `attn_slim_wave`"
+                         " (`engine/attn_slim_kernels.h`) — the score dot's trip count made"
+                         " compile-time (it was runtime only because the `NEG_DIMHALF` injection asks for"
+                         " 4 of 8 dims and LLVM rolled the hot dot to match) and the warp reduce folded"
+                         " by hand with its own `s_waitcnt`, 45 issue slots per (row,lane,head) touch"
+                         " instead of 116, measured 1.52-1.57x on the wave and owed BIT identity, not a"
+                         " band (`prototype/attn_valu_slim/results.md` §2, §7). `0` selects the"
+                         " prototype's `attn_tile_wave` unchanged — the frozen side the census and the"
+                         " timing baseline are taken on, and the reason both spellings stay compiled"
+                         " into one engine binary. Like `--attn-tile` it is wave-only, so a decode step"
+                         " is the same bits under either value, and it is asserted against the run's own"
+                         " NUMERICS echo rather than inferred: a judged run that cannot say which"
+                         " spelling produced its bits is evidence about neither. This default and"
+                         " `decode_run.cpp`'s own move in one commit, for the same reason"
+                         " `--attn-tile`'s defaults do (`engine/gate.py`'s echo check fails a binary"
+                         " that does not carry the field).")
     ap.add_argument("--gdn-scan", choices=("seq", "collapse"), default="seq",
                     help="which §04.4 scan a GDN body runs, passed straight to `decode_run"
                          " --gdn-scan` (P9, §04.7, route A is progress/2026-10-14/p9-phase1-2026-10-14.md D-12):"
@@ -5375,6 +5396,10 @@ def main() -> int:
            # section (i) exists to decide §15's question, and a log that cannot say which form produced
            # its rows is not evidence about either of them.
            "--attn-tile", args.attn_tile,
+           # The touch SPELLING, named and asserted for the identical reason: the two spellings are
+           # claimed bit-identical, so a log that cannot say which one ran cannot witness that claim
+           # either way.
+           "--attn-touch", args.attn_touch,
            # The GDN scan, named on every run and asserted below: P9's matrix is this flag twice over
            # the ten fixtures, and a judged run that cannot say which scan produced its rows is
            # evidence about neither.
@@ -5506,6 +5531,18 @@ def main() -> int:
                " claim about either form can be made from this log" if echoed_tile is None else
                f"NUMERICS echoed attn_tile={echoed_tile}, this gate was run with --attn-tile"
                f" {args.attn_tile}"))
+        # The touch SPELLING, read off the same line for the same reason (engine/attn_slim_kernels.h).
+        # MANDATORY, not optional: a binary that predates `--attn-touch` cannot be judged as though it
+        # carried the flag, and the two spellings are claimed bit-identical, so silence here would let a
+        # pre-port binary pass as a post-port one. Same shape as the row-coverage rule: a check that
+        # cannot fail is decoration.
+        echoed_touch = run.get("numerics", {}).get("attn_touch")
+        check(str(echoed_touch) == str(args.attn_touch),
+              "the run ran the attention touch spelling this gate is judging it under",
+              ("its NUMERICS line carried no `attn_touch=` — the binary predates --attn-touch, so no"
+               " claim about either spelling can be made from this log" if echoed_touch is None else
+               f"NUMERICS echoed attn_touch={echoed_touch}, this gate was run with --attn-touch"
+               f" {args.attn_touch}"))
         # The GDN scan, read off the same line for the same reason (P9). This is also the check that
         # catches a silent fall back: a `--gdn-scan chunk` run whose launcher decided to run `seq`
         # after all would echo `seq` here and fail, rather than pricing the shipped form twice.

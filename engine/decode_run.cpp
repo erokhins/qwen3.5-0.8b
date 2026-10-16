@@ -112,6 +112,21 @@ struct Options {
     // default twice and call it the tiled form.
     int attn_tile = 1;
     bool attn_tile_given = false;
+    // Which SPELLING of the tiled wave's per-touch inner work runs (`--attn-touch`, the follow-up to
+    // `--attn-tile` rather than a third value of it: `--attn-tile 0` has to keep pricing the per-(row,head)
+    // `attn_core` exactly as it did before this flag existed, so the two A/Bs stay independent).
+    // `1`, the default, runs `engine/attn_slim_kernels.h`'s `attn_slim_wave`: the score dot's trip count
+    // made compile-time (it was runtime only because of the `NEG_DIMHALF` injection, and LLVM rolled the
+    // hot dot to match) and the warp reduce folded by hand with an explicit `s_waitcnt`, which together
+    // take one (row, lane, head) touch from 116 issue slots to 45 and measured 1.52-1.57x on the wave
+    // (`prototype/attn_valu_slim/results.md` §7). `0` runs the prototype's `attn_tile_wave`, the frozen
+    // side the census and the timing baseline are taken on. Both kernels are in this binary whatever this
+    // says, so the paired timing happens in one window — the difference between a number and a claim
+    // (`AGENTS.md`: a ruler re-taken in a different window is not an A/B). Same contract as `--attn-tile`:
+    // bit-identity, wave-only (a one-row body is the fused single-row form either way, so no decode bit
+    // moves), echoed on the NUMERICS line because a log that cannot say which spelling produced its bits
+    // adjudicates neither side. Parse-or-throw like every other A/B flag here.
+    int attn_touch = 1;
     // Which §04.4 scan a GDN body runs (P9, §04.7; route A is D-12). `seq` is the shipped recurrence —
     // one launch per token per layer, the form every decode pin is pinned through — and `collapse` is
     // the same recurrence held resident, one launch per layer per BODY. `chunk` is refused at
@@ -206,6 +221,17 @@ Options parse_args(int argc, char** argv) {
             }
             o.attn_tile = v == "1";
             o.attn_tile_given = true;
+        } else if (a == "--attn-touch") {
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--attn-touch takes 0 (the shipped tile spelling, "
+                                         "`attn_tile_wave`) or 1 (the slim spelling, "
+                                         "`attn_slim_wave`); got '" + v + "'. Refusing rather than"
+                                         " guessing, because this names which side of an A/B the run"
+                                         " is, and a typo that became the default would price the"
+                                         " default twice and report it as the slim form");
+            }
+            o.attn_touch = v == "1";
         } else if (a == "--gdn-scan") {
             o.gdn_scan = engine::kernels::parse_gdn_scan(next());
             o.gdn_scan_given = true;
@@ -435,6 +461,7 @@ void print_usage(FILE* out) {
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
                  " [--prefill-logits last|all] [--wave-rows N]"
                  " [--mlp-map auto|interleave|contig] [--gemm library|hand] [--attn-tile 0|1]"
+                 " [--attn-touch 0|1]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -459,6 +486,19 @@ void print_usage(FILE* out) {
                  " single-row form under either setting, so no decode bit moves, and the tiled form"
                  " REFUSES (`score_f32`, a fused plan, a non-32 warp) rather than falling back, because a"
                  " silent fallback would price the shipped form twice and report it as the tiled one\n"
+                 "  --attn-touch 0|1  which SPELLING of the tiled wave's touch loop runs "
+                 "(prototype/attn_valu_slim/). `1`, the default, runs `attn_slim_wave`: the score dot's"
+                 " trip count is made compile-time — it was runtime only because the NEG_DIMHALF injection"
+                 " asks for 4 of 8 dims, and LLVM rolled the hot dot to match, at 8 scalar `ds_load_u16`,"
+                 " 8 `v_movrels_b32` and 8 `s_waitcnt` per touch — and the warp reduce is folded by hand"
+                 " with its own `s_waitcnt lgkmcnt(0)`, because `SIInsertWaitcnts` does not insert waits"
+                 " for inline-asm DS ops. 116 issue slots per (row, lane, head) touch become 45"
+                 " (prototype/attn_valu_slim/results.md §2) for 1.52-1.57x on the wave (§7). `0` runs the"
+                 " prototype's `attn_tile_wave` unchanged. The contract with `1` is bit-identity, not a"
+                 " band: same eight products in the same serial order, same five-step butterfly, same"
+                 " clamp. Wave-only, like --attn-tile: a one-row body is the fused single-row form under"
+                 " either setting, so no decode bit moves, and BOTH spellings are compiled into the binary"
+                 " whatever this says, so a paired timing is one window rather than two builds\n"
                  "  --gdn-scan seq|chunk  which §04.4 scan a GDN body runs (P9, §04.7,"
                  " progress/2026-10-14/p9-phase1-2026-10-14.md). `seq`, the default, is the shipped recurrence: ONE"
                  " launch per token per layer, 18,432 launches per 1024-token wave, and the form the"
@@ -1060,10 +1100,11 @@ int main(int argc, char** argv) {
         // the library it is linked against, not about the run — and read by `gate.py`'s
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
         std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d"
-                    " gdn_scan=%s gdn_chunk=%d\n",
+                    " attn_touch=%d gdn_scan=%s gdn_chunk=%d\n",
                     engine::kMaxWaveRows, o.wave_rows,
                     engine::kernels::wave_gemm_name(o.wave_gemm),
                     engine::kernels::gemm_route_version().c_str(), o.attn_tile,
+                    o.attn_touch,
                     engine::kernels::gdn_scan_name(o.gdn_scan), o.gdn_chunk);
         if (o.sizes_only) {
             std::printf("RESULT mode=sizes-only tensors=%zu check_weights=PASS\n", stats.n_loaded);
@@ -1076,6 +1117,7 @@ int main(int argc, char** argv) {
         sc.mlp_gate_map = o.mlp_gate_map;
         sc.wave_gemm = o.wave_gemm;
         sc.attn_tile = o.attn_tile;
+        sc.attn_touch = o.attn_touch;
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;
         if (o.wave_gemm == engine::kernels::WaveGemm::kLibrary) {

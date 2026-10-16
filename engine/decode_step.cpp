@@ -622,6 +622,12 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // a decode step is the shipped bits whatever this flag says — which is what lets the A/B
             // be taken inside one binary without a decode rung moving.
             a.wave_tile = sc.attn_tile;
+            // And which SPELLING of that core's touch loop, from `DecodeScratch::attn_touch`. Same
+            // one-row immunity for the same reason: `attn_decode_layer` only consults it on the tiled
+            // branch it never takes for `rows == 1`. Carried as a separate flag rather than folded into
+            // `--attn-tile` because the A/Bs are independent — `--attn-tile 0` must keep pricing the
+            // per-(row,head) `attn_core` exactly as it did before this flag existed.
+            a.wave_touch = sc.attn_touch;
             stageclock::note(stageclock::kAttn);
             kernels::attn_decode_layer(a);
             // One widening over the whole [n][2048] tile, for the same reason P5 packed the casts

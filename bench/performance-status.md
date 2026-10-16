@@ -336,3 +336,46 @@ number, the second says which numbers cannot be trusted even when taken that way
    has been runnable since `decode_step` grew that launcher and has not been run.
 7. The 4032-lane row is quoted from one instrument; `attn`'s in-situ 2.996 ms/step at 4032 lanes has
    no isolated burst beside it, so its share of the step is a stage-clock figure, not a floor.
+
+## The `--attn-touch` pair: the attention family at 1.466× and the wave at 1.125× (2026-10-16)
+
+Appended at the end deliberately — §§1–§5 are banner-marked and cited by line from `progress/`, so
+nothing above this line may shift.
+
+This is the first entry in this ledger taken as a **paired A/B inside one lock hold**: both spellings in
+**one binary**, alternating, so the pair is one ruler and not two windows. Window `attn-touch`,
+`attn-touch-timing`; zero subagents; blocking; util read 92 % and discounted (it has never been a usable
+gate on this box). Instrument: `decode_run --time-waves --attn-tile 1 --attn-touch 0|1`, `--steps 0`,
+`ids4096.txt` / `ids1024.txt` from `progress/bench/evidence/prefill-occupancy-2026-10-16/`.
+
+| 4096 lanes, `--steps 0` | `--attn-touch 0` (shipped spelling) | `--attn-touch 1` (slim) | pair |
+|---|---|---|---|
+| `attn` family | **403.38 / 404.92 ms** | **275.35 / 275.19 ms** | **1.466×** (−128.2 ms, −31.8 %) |
+| `gdn_rec` (control, untouched by the lever) | 501.82 / 507.01 ms | 509.27 / 510.53 ms | 1.00 — as it must be |
+| `TOTAL wall_ms` | **1243.07 / 1245.43 / 1271.12 ms** | **1105.20 / 1110.82 / 1112.11 ms** | **1.125×** (−137.9 ms) |
+| prefill throughput at 4096 tokens | 3295 tok/s | **3706 tok/s** | +12.5 % |
+
+1024 lanes: 240.39 → 230.81 ms = **1.041×**. That row is dispatch-bound and bimodal on this box
+(§6), so quote it with the 4096 row, not instead of it.
+
+What makes this admissible as a change to the shipping path rather than a prototype number:
+
+- **Bit-identity on the engine path, not just the copy.** A 4096-lane prefill at `--attn-touch 0` and at
+  `1` produced **byte-identical dumps across every written file**. `engine/gate.py` passes at both
+  values on `dec8` and `wide520f` with numerically identical aggregates (pooled meanrel 9.447e-03,
+  pooled 1-cos 5.499e-05, same worst row), and the gate now *fails* if the engine's NUMERICS line omits
+  `attn_touch=` — an inert extra field would have been the silent-pass failure mode.
+- **The hand-written `s_waitcnt` is not racy**: three 1024-lane runs at `--attn-touch 1`, byte-identical
+  dumps (a missing wait would show as run-to-run disagreement, not a stable wrong answer).
+- **The frozen reference still agrees**: `prototype/attn_decode/run.py --wave --tile-kernel` prints
+  4112 stage comparisons, 0 failures, unchanged from before the port.
+- **Census on the engine TU**: `attn_tile_wave` 116 slots/touch (55 VALU / 14 LDS / 47 SALU) vs
+  `attn_slim_wave` 45 (28 / 7 / 10), both bodies compiled into the same TU so the control pair is
+  permanent and drift is visible.
+
+Attribution note for anyone re-taking this: the `attn` family row fell by 128 ms while the wave fell by
+138 ms, so ~10 ms is outside the attributed families; `gdn_rec` did not move, which is what a control is
+for. The prior ledger row for `attn` at 4096 lanes was 412.07 ms (§1 of
+`progress/2026-10-16/prefill-occupancy-results-2026-10-16.md`), consistent with the 403–405 ms taken
+here in a different window — a further reminder that absolute ms moves a few % between windows and only
+a paired run like this one may be read as a ratio.

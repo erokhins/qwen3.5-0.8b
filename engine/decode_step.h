@@ -75,6 +75,14 @@ struct DecodeScratch {
     // only), and a form that has not met the device does not become the engine's default by having been
     // written. `--attn-tile 1` is the A/B side.
     int attn_tile = 0;
+    // Which SPELLING of the tiled wave's touch loop runs (Phase 2 follow-up, `--attn-touch`,
+    // `kernels.h:AttnLayerArgs::wave_touch`). Same riding reason as the four above and the same override
+    // for a one-row body — the fused single-row form is what decode runs whatever this says, so no decode
+    // bit moves under it either. The default is 1, the slim spelling, because the two spellings were
+    // proved bit-identical on the prototype harness's 12 plans before being ported; `engine/gate.py`
+    // re-proves it on the engine path against the pinned dumps at BOTH values, which is the device pass
+    // `engine/HANDOFF-attn-touch.md` hands over. `--attn-touch 0` is the frozen side of that A/B.
+    int attn_touch = 1;
     // Which §04.4 scan a GDN body runs (P9, `kernels.h:GdnScan`). Same riding reason as the three
     // above, and it too is overridden per body — a ONE-ROW body is `gdn_rec` whatever this says,
     // because decode's bits are pinned through the sequential recurrence and a chunked scan of one

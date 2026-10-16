@@ -35,6 +35,11 @@
 #include <stdexcept>
 
 #include "prototype/attn_decode/attn_decode_kernels.h"
+// The engine's copy of the tiled wave body with the two per-touch instruction levers applied
+// (`--attn-touch 1`, the shipping default). Included AFTER the op header because it is a copy of that
+// header's `attn_tile_body` and uses its vocabulary; both kernels are compiled either way, so the switch
+// below selects a LAUNCH and never a build.
+#include "engine/attn_slim_kernels.h"
 
 namespace engine::kernels {
 namespace {
@@ -280,7 +285,24 @@ void attn_decode_layer(const AttnLayerArgs& a) {
             // launcher. One row per block since §20, so the row extent is `rows`, and the widest-row-
             // first inversion lives inside the kernel.
             core.tile_kernel = 1;
-            attn_tile_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
+            // WHICH SPELLING SCORES THE TOUCH (`--attn-touch`, `AttnLayerArgs::wave_touch`). Same grid,
+            // same block extent, same `CoreArgs`, same `part` slot expression — `attn_slim_wave` is
+            // `attn_tile_wave`'s body with the score dot's trip count made compile-time and the warp
+            // reduce folded by hand, so 116 issue slots per (row, lane, head) touch become 45 and nothing
+            // else moves (`engine/attn_slim_kernels.h`, `prototype/attn_valu_slim/results.md` §7).
+            // Both kernels are in this binary whatever this says, which is what makes the paired timing
+            // one window instead of two builds (`AGENTS.md`: a ruler re-taken in a different window is not
+            // an A/B), and it is why `attn_combine` still needs no branch on the form: one address
+            // expression is shared by writer and reader (§20.1).
+            //
+            // A WAVE-ONLY SWITCH, like `wave_tile` itself: a one-row body is `attn_core`, so no decode bit
+            // can move under it. It cannot degrade into the other side either — the two kernels are both
+            // the tiled form, so there is nothing here for a fallback to fall back to.
+            if (a.wave_touch) {
+                attn_slim_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
+            } else {
+                attn_tile_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
+            }
         } else {
             attn_core<<<dim3(N_Q, split, rows), THREADS>>>(core);
         }

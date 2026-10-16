@@ -353,6 +353,18 @@ struct AttnLayerArgs {
     // each a refusal in `attn_tile_ok`, and the launcher turns a refusal into an error, not a fallback —
     // a fallback would price the shipped form twice and report it as the tiled one.
     int wave_tile = 0;
+    // Which SPELLING of the tiled wave's per-touch inner work runs (`--attn-touch`). Only consulted when
+    // `wave_tile` picked the tiled form, and only for a wave: a one-row body is `attn_core` whatever this
+    // says, so it carries `--attn-tile`'s property — a decode bit cannot move under it — for the same
+    // reason and enforced in the same place, the launcher. 1 is `engine/attn_slim_kernels.h`'s
+    // `attn_slim_wave`: the score dot's trip count made compile-time and the warp reduce folded by hand,
+    // 45 issue slots per (row, lane, head) touch instead of 116, measured 1.52-1.57x on the wave and
+    // bit-identical on the prototype harness (`prototype/attn_valu_slim/results.md` §7). 0 is the
+    // prototype's `attn_tile_wave`, kept as the frozen side the A/B and the census are made against.
+    // The DEFAULT IS 1 because the levers were gated before they were ported, unlike the tiled form
+    // itself when `wave_tile`'s default was set; `engine/gate.py` asserts the run's own NUMERICS echo
+    // equals the flag it was given, so a binary cannot quietly be judged by the other side.
+    int wave_touch = 1;
 };
 void attn_decode_layer(const AttnLayerArgs& a);
 
