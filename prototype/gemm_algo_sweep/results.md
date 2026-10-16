@@ -214,6 +214,100 @@ draft-layer projections, or a family attribution difference — and until that i
 statement is that the algo route is **worth at least 0.9–2.0 % of a 4096-lane wave and possibly closer to
 twice that**. The engine-side A/B is what sizes it; this file does not claim a number it cannot attribute.
 
+## 3b. Reconciling that gap: what `matmul_ms = 70.30 ms` is actually made of (2026-10-17)
+
+§3a left the gap open on purpose. This closes the part that enumeration and the ledger's own
+evidence can close, and names the rest precisely.
+
+**The group is three families, not one kind of call.** `stage_clock.cpp:454` defines
+`matmul_ms = share({kProj, kMlpGateup, kMlpDown})`, and §3's three family medians — 38.81, 24.99,
+6.42 — sum to 70.22 against the printed 70.30 (the group is the median of per-run sums, so the
+0.08 ms is rounding across runs, not a missing family). Nothing else is in the group. So the gap is
+not a fourth family hiding inside `matmul`; it is that a family's segment measures **everything**
+launched under that family's note, and the sweep prices only library calls.
+
+**Sites are not calls.** `--time-waves` counts launches per note, and `stage-wave.txt` records
+`family=proj launches=228`, `family=mlp_gateup launches=48`, `family=mlp_down launches=48` — 324
+sites for the 1024-lane wave (`--wave-rows 512`, two bodies). The same file's
+`TOTAL … launches=20264 plan_launches=20264 plan_match=1 launchstats_match=1` means the engine's
+independent structural bill agreed with every family count, and that bill
+(`decode_step.h:300`, `stage_clock.cpp:86,117,118`) has no draft or MTP entry at all. Decomposing
+the 324 sites against the source:
+
+| family | sites/wave | **library calls/wave** | non-library launches inside the same segment |
+|---|---|---|---|
+| `proj` | 228 | **156** | 72 — `in_proj_a`/`in_proj_b` at `N=16`. `proj_gemm` refuses `N < 512` (`kernels_proj.cpp:135-142`, `kSmallestLibraryRows`) and the two sites call the hand `proj_gemv` directly at any width (`decode_step.cpp:532,535`) |
+| `mlp_gateup` | 48 | **96** | 48 — the `silu(gate)*up` epilogue kernel: `mlp_gateup_gemm` is three GPU submissions counted as **one** site (`kernels_mlp.cpp:253-268`), so its third launch carries no family note of its own |
+| `mlp_down` | 48 | **48** | 0 |
+| **total** | **324** | **300 = 2 × 150** | **120** |
+
+So the census was complete and there is nothing to add to it: no draft-layer projections (no MTP site
+exists in `engine/*.cpp` outside `loader.cpp:366-376`, which only maps draft weight *names*), no
+`lm_head` GEMM (that is a hand `gemv_bf16` on its own family, `kernels_lmhead.cpp:25`), no second
+library path. The 1024-lane wave issues exactly 300 library GEMMs and 120 non-library launches
+inside `matmul_ms`.
+
+**The enumeration the gap needed** — shape | N | K | M | calls/wave | family | file:line. Every row is
+`M = 512` because `kMaxWaveRows = 512` (`decode_step.h:49`): a 1024-lane wave is two 512-row bodies.
+`engine-call ms` is §3's `engine_call_ms` for that shape at that `M`; `family ms/wave` is that number
+× calls/wave.
+
+| shape | N | K | M | calls/wave | family | call site | engine-call ms | family ms/wave |
+|---|---|---|---|---|---|---|---|---|
+| `q_proj` | 4096 | 1024 | 512 | 12 | `proj` | `decode_step.cpp:513` | 0.1551 | 1.861 |
+| `k_proj`, `v_proj` (two weights, one shape) | 512 | 1024 | 512 | 24 | `proj` | `decode_step.cpp:516,519` | 0.0328 | 0.787 |
+| `o_proj` (attn) / `out_proj` (GDN) — same shape, one site | 1024 | 2048 | 512 | 48 | `proj` | `decode_step.cpp:721` | 0.0801 | 3.845 |
+| `in_proj_qkv` | 6144 | 1024 | 512 | 36 | `proj` | `decode_step.cpp:526` | 0.1989 | 7.160 |
+| `in_proj_z` | 2048 | 1024 | 512 | 36 | `proj` | `decode_step.cpp:529` | 0.0930 | 3.348 |
+| `in_proj_b` | 16 | 1024 | 512 | 36 | `proj` **(hand)** | `decode_step.cpp:532` | — | below |
+| `in_proj_a` | 16 | 1024 | 512 | 36 | `proj` **(hand)** | `decode_step.cpp:535` | — | below |
+| `gate_proj`, `up_proj` (two weights, one shape) | 3584 | 1024 | 512 | 96 | `mlp_gateup` | `kernels_mlp.cpp:262-263` | 0.1462 | 14.035 |
+| `down_proj` | 1024 | 3584 | 512 | 48 | `mlp_down` | `kernels_mlp.cpp:276` | 0.1313 | 6.302 |
+| **library total** | | | | **300** | | | | **37.338** |
+
+Against the ledger: `proj` 38.81 vs 17.002 predicted, `mlp_gateup` 24.99 vs 14.035, `mlp_down`
+6.42 vs 6.302 — residuals **21.81 / 10.96 / 0.12 over the published medians**, total **+32.88 ms**, which is the ~33 §3a
+asked about. Per call that is `proj` **2.28×**, `mlp_gateup` **1.78×**, `mlp_down` **1.02×**.
+
+| part of the 32.88 ms | ms | basis |
+|---|---|---|
+| 48 `silu·mul` epilogues, swept into `mlp_gateup` | **≥ 2.2** | traffic floor: 11.0 MB moved per call (3 × `512×3584×2` read + 3.67 MB write) × 48 = 529 MB at the 237 GB/s read plateau |
+| 72 hand `in_proj_a`/`in_proj_b` launches, swept into `proj` | **≥ 0.7**, plausibly 1–4 | each re-reads the 512×1024 F32 activation tile (2.10 MB) that `qkv`/`z` already touched: 151 MB at the plateau. The hand kernel runs 16 rows on 32-wide blocks, so it is occupancy-poor at wave width and the floor understates it |
+| the same 300 library calls, in situ vs warm burst | **≈ 26–30** | the residual once those two are subtracted: 1.55× on `mlp_gateup`, 1.02× on `mlp_down`, ~2.2× on `proj` |
+
+Two candidate explanations are **excluded by the evidence**, which is worth recording because both
+looked likely:
+
+- **not measurement serialization.** `stage-wave.txt`'s own `WAVEGAP` line reports
+  `exposed_ms = 7.1437` of 243.17 ms — `ratio=1.030` — so the per-family numbers are within 3 % of
+  the pipelined wall and the stage clock is not draining between notes.
+- **not cold weight traffic, even though the burst is cache-hot.** The wave reads each weight once
+  (1.94 GiB of weight per wave); a burst re-reads one weight 40 times. That floor is
+  `weight bytes ÷ 237 GB/s` per call: ≤ 4.1 ms/wave for `proj`, ≤ 3.1 for `mlp_gateup`, 1.6 for
+  `mlp_down`. It cannot be the mechanism for `mlp_down`, which has the largest cold-read floor
+  relative to its residual and a residual of 0.12 ms.
+
+**What remains unaccounted, and what would account for it.** About 26–30 ms is the same 300 calls
+costing 1.5–2.2× their `engine_call_ms` in the wave, and the split of that between activation traffic
+the burst never pays and plain interleaving/dispatch effects **cannot be derived from anything on
+disk**: the wave clock attributes at family granularity, the sweep measures at shape granularity, and
+the two do not meet. Ledger §2 prices the same in-situ effect on the hand path at 1.25× (`proj`
+4.1128 in situ vs 3.2843 isolated) and 1.42× (`mlp` 3.388 vs 2.378) — right direction, right order,
+not enough to cover 2.28×.
+
+Two measurements close it, and neither needs a new tool:
+
+1. **`decode_run --time-waves` at `--gemm library` and `--gemm lt` inside one lock hold** (§7). Both
+   numbers come from the same instrument as the 70.30, so their difference is in situ and needs no
+   ruler translation. This is the number the question was asked for: the algo lever is 1.072× of
+   *something*, and the two candidate denominators price it at 4.8 ms (of 70.30) or 2.5 ms (of 37.34)
+   out of a 245.73 ms wave — 2.0 % vs 1.0 %.
+2. If the attribution itself is wanted: split the `proj` note at the `proj_gemm`/`proj_gemv` seam —
+   one extra note in `kernels_proj.cpp:128-143` and one line in `stage_clock.cpp`'s plan — retake §3
+   in one window, and the hand share of `proj` stops being a bound and becomes a number. Same
+   instrument, no new tool, and it retires §4's hand-projection question at the same time.
+
+
 ## 4. What this says about the 1.4–1.6× headroom
 
 Fill in only from measured rows:
@@ -233,3 +327,49 @@ Fill in only from measured rows:
   survived, `skipped_unsupported=368` and `skipped_cap=370`. So the 12 candidates timed per shape are not
   a sample of the catalogue, they are almost the whole of what this workspace budget admits. Raising the
   128 MiB cap is a separate, unpriced question that would have to be re-gated the same way.
+
+## 3c. The engine A/B, measured (`--gemm lt` vs `--gemm library`, main agent, 2026-10-16)
+
+**The prize is bigger than §3a priced, and the projection was the thing that was wrong.** §3a said
+1.174× on the 150-call mix and hedged that the ledger's `matmul` group carries more than that mix. It does,
+and the lt path captures all of it. Both routes measured in **one** lock hold (`gemm-lt-ab`, `util` 92 %,
+zero subagents, blocking), alternating `library`/`lt` inside each rep, medians of 3, `--steps 1
+--time-waves` so the family rows are the same instrument as ledger §3.
+
+| width | family | `library` median ms | `lt` median ms | **ratio** | the three runs on each side |
+|---|---|---|---|---|---|
+| **1024 lanes** | `GROUP matmul` | 71.28 | **49.58** | **1.437×** | 72.20/71.28/70.67 · 49.01/49.86/49.58 |
+| | `proj` | 38.99 | 25.63 | **1.521×** | 39.98/38.75/38.99 · 25.62/25.87/25.63 |
+| | `mlp_gateup` | 25.71 | 16.10 | **1.597×** | 25.87/25.71/25.34 · 15.62/16.10/16.13 |
+| | `mlp_down` | 6.35 | 7.82 | **0.812×** ⚠ | 6.35/6.81/6.34 · 7.77/7.89/7.82 |
+| | **whole wave** | 240.96 | **215.14** | **1.120×** | 241.82/240.96/238.93 · 215.21/215.14/219.73 |
+| **3072 lanes** | `GROUP matmul` | 211.72 | **149.98** | **1.412×** | 210.52/211.72/213.10 · 149.98/151.21/149.19 |
+| | `proj` | 116.98 | 76.65 | **1.526×** | |
+| | `mlp_gateup` | 75.18 | 48.50 | **1.550×** | |
+| | `mlp_down` | 19.16 | 24.56 | **0.780×** ⚠ | |
+| | **whole wave** | 804.85 | **743.35** | **1.083×** | 797.77/804.85/812.51 · 737.12/743.35/749.44 |
+
+Throughput at those widths: **4250 → 4760 prefill tok/s at 1024 tokens (+12.0 %)** and **3817 → 4133 tok/s
+at 3072 tokens (+8.3 %)**. `WAVEPARITY tokens_identical=1 logits_bitidentical=1` on both routes in all six
+runs (it compares burst against stage within a route; cross-route bit-identity is not owed — §7c of
+`HANDOFF.md`).
+
+Three things this says that the burst sweep could not:
+
+1. **§3a's mix under-priced the win by ~4×** because the mix timed 150 calls at M = 512 in a tight loop,
+   while the engine's `proj` family is 228 launches including the hand `in_proj_a/b` GEMVs and the epilogues
+   that ledger §3 sweeps into these groups. The `proj` and `mlp_gateup` ratios (1.52×, 1.60×) are not the
+   burst ratios of any single shape — they include launches that are not GEMMs at all. **A per-call burst
+   table cannot project a family-level wave number**; this one was off by 4×, in the flattering direction.
+2. **`mlp_down` regresses, 0.78–0.81×, and the sweep predicted it and I ignored the sign.** For
+   `down_proj` at M = 512, lt rank-0 is `default_ms=0.1439` versus the engine call's `0.1313` — the ratio
+   1.231 that made `down_proj` the headline "algo swap pays" row belongs to **best-of-12**, not to the
+   default heuristic. Shipping rank-0 therefore loses here, and the fix is exactly what `algo_pins()` exists
+   for: pin `down_proj`'s `best_seq=1` algo (0.1169 ms, 35.53 TFLOP/s) instead of taking the heuristic. A
+   sweep column that says "best" must be read against the default column before any of it is called a win.
+3. **The band question is the only thing between this and the default.** The gate's section (h) — batched
+   vs one-row, which under `lt` is hand-GEMV vs hipBLASLt — reads worst per-row `1-cos 2.204e-03` on
+   `dec64f` against a 2e-03 band calibrated for **hipBLAS-vs-hand**, a different pairing, while every
+   pin-facing section passes and `lt`'s pooled numbers are *better* than `library`'s. That is a
+   band-re derivation, not a bug, and it must be derived from a measured spread rather than by editing a
+   constant. Until it is, the default stays `library` and a red gate stays red.

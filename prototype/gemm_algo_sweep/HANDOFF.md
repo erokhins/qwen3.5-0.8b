@@ -338,3 +338,140 @@ as the route-width sensitivity — see README §2 before quoting either.
    behaviour and not a fault; (c) the real `--verify --algo-dump` capture fed to `--selftest-sys`, so
    the algo-bytes audit is done on library output rather than on hand-authored fixtures; (d) `results.md`
    §1/§3 once (a) exists.
+
+## 7. The `--gemm lt` path exists in the engine — what to time, what to gate, what a pass looks like
+
+Implementation landed 2026-10-17 in `engine/kernels_gemm.cpp` (+ `kernels.h`, `decode_step.cpp`,
+`decode_run.cpp`, `build.sh`, `gate.py`). `--gemm lt` sends the same ten fat shapes to
+`hipblasLtMatmul` instead of `hipblasGemmEx`, with **one algorithm per `(shape, M)` chosen at plan
+time** (`gemm_route_plan(rows)`, called once from `decode_run` when `--gemm` was named explicitly,
+and lazily on first use otherwise) and printed as one `GEMM-LT` line each. Default remains `library`;
+`legacy` is an accepted synonym so a shell loop can spell both sides of the pair it is timing.
+Workspace budget unchanged (128 MiB, the same buffer size, and `HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES`
+is set to it so an algo needing more is never returned). `algo_pins()` is the static per-shape override
+table — empty as shipped, keyed by `(shape, M)`, one 48-hex-char `hipblasLtMatmulAlgo_t` per entry — so a
+pinned algo from §1's `RESULT` lines drops in without touching a call site. A shape with no usable algo
+**throws**; nothing falls back silently.
+
+`gate.py` knows the route: `GEMM_ROUTES = ("hand", "library", "lt")`, and `lt` is judged by the library
+cascade floor (`route_is_library()` is true for both) but logged and cross-checked as its own route —
+`--gemm lt` requires `NUMERICS … gemm=lt` *and* a `GEMM route=hipblaslt` line, so a gate cannot quietly
+judge the binary the other route ships.
+
+### 7a. Correctness already taken (worker, device, **no timing taken**)
+
+Every line below is a correctness verdict. None of these may be quoted as a duration; the wall figures
+are a by-product of a worker holding the lock for seconds at a time, and the AGENTS rule stands: no
+worker number enters a timing doc.
+
+| command | result |
+|---|---|
+| `.venv/bin/python engine/gate.py --gemm lt` (dec8) | **PASS**, 0 fails, util 91 % at acquire |
+| `.venv/bin/python engine/gate.py --gemm lt --fixture wide1024f` | **PASS**, 0 fails, util 93 % — this is the 1024-lane prompt, so two 512-row bodies and the seven planned keys are the ones actually used |
+| `.venv/bin/python engine/gate.py --gemm lt --fixture dec64f` | **FAIL — 1 check, §7c below**, util 93 % |
+| `.venv/bin/python engine/gate.py --gemm library --fixture dec64f` (same window, for the pair) | PASS |
+| `.venv/bin/python engine/gate.py --gemm hand` (dec8) | PASS — the `--gemm hand` branch of `decode_run`'s init still works |
+| `.venv/bin/python engine/gate.py` (default library, dec8) | PASS — shipped route unaffected |
+| `.venv/bin/python engine/gate.py --selftest --gemm lt` | SELFTEST PASS (CPU only, no device) |
+
+One-shape bit-parity was **not** the acceptance test and was not achieved: `lt` is a different
+accumulation order, so its output is inside the cascade band, not bit-identical. A same-prompt
+`lt` vs `legacy` logits diff (21 rows, dec8) reads worst per-row `1-cos 6.920e-04`, worst per-row
+`meanrel 3.699e-02`, pooled within band, and **both routes sit the same distance from the pin**
+(`cos` to `dec8/logits_last`: lt 0.999858737, legacy 0.999819815; `meanrel` 1.827e-02 vs 2.006e-02)
+with the same argmax at every step. `lt` is marginally closer to HF here, which is what §3a's
+1.072× in accuracy-neutral terms looks like from the inside.
+
+### 7b. The timing pass (main agent only)
+
+Both sides in **one** lock hold, alternating, medians of 3 — the §1 row of
+`bench/performance-status.md` §6 and the "a ruler re-taken in a different window is not an A/B" rule
+make an unpaired pair of runs worthless here.
+
+```bash
+mkdir -p tmp/gemmlt && tools/gpu_lock.sh acquire gemm-lt-ab && tools/gpu_lock.sh util
+for run in 1 2 3; do
+  for route in library lt; do
+    ./engine/build/decode_run --model models/Qwen3.5-0.8B \
+        --ids "$(cat progress/bench/evidence/q10/ids1024.txt)" \
+        --steps 1 --time-waves --gemm "$route" > "tmp/gemmlt/${route}_${run}.log" 2>&1
+  done
+done
+grep -hE "WAVE gran=stage (GROUP|family=(proj|mlp_gateup|mlp_down) )|WAVEPARITY|TOTAL" tmp/gemmlt/*.log
+tools/gpu_lock.sh util && tools/gpu_lock.sh release gemm-lt-ab
+```
+
+`--time-waves` replays the prompt wave from a fresh state at both submission granularities, so the
+family rows it prints are the same instrument as ledger §3 — that is what makes `library` vs `lt`
+inside one hold an A/B rather than two rulers. Quote three things: the `GROUP matmul_ms` pair, the
+three family `ms=` pairs, and `WAVEPARITY tokens_identical logits_bitidentical` (expect
+`tokens_identical=1 logits_bitidentical=1` **within the pass**, which compares burst against stage on
+the same route, not `lt` against `library` — cross-route bit-identity is not owed and §7c explains
+why the band, not equality, is the witness).
+
+Then a prefill TTFT row from the existing ruler, both routes, same window:
+
+```bash
+tools/prefill_sweep.py            # library
+tools/prefill_sweep.py --gemm lt  # if it forwards the flag; otherwise call decode_run directly
+```
+
+If `tools/prefill_sweep.py` has no `--gemm` passthrough, do not add one for this: the §7b `decode_run`
+pair above is the A/B, and the sweep exists to price widths, not routes.
+
+### 7c. What a passing gate looks like, per family
+
+The gate judges **end-to-end logits**, not families, so "per family" below means "which shape carries
+the risk, and what green looks like there". Bands are `CASCADE_BAND` (`engine/gate.py`): per-row
+`1-cos ≤ 2e-03`, pooled `meanrel ≤ 3e-02`, pooled `1-cos` deficit `≤ 2e-04`.
+
+| family | shapes at risk | green looks like | measured now |
+|---|---|---|---|
+| `mlp_down` | `down_proj` N=1024 K=3584 | dec8 + wide1024f inside the band; §3 says the engine call is 1.231× off the best algo here, so this is where an algo pin should move time most | PASS on both fixtures |
+| `mlp_gateup` | `gate_proj`/`up_proj` N=3584 K=1024, 96 calls/wave — the largest share of `matmul` | same, and this family's `ms` also carries the `silu·mul` epilogue (§3b), so do not read its `lt` delta as pure GEMM | PASS on both fixtures |
+| `proj` | `in_proj_qkv` (1.075× off best), `in_proj_z` (engine call 1.359× off), `q_proj` (1.220×), `o_proj`/`out_proj` (1.138×) | same bands; `in_proj_a`/`in_proj_b` are untouched by this route (hand GEMV at any width), so a `proj` delta is entirely the five fat shapes | PASS on dec8 and wide1024f; **the one red is here**, below |
+
+**The red, and what it actually is.** On `dec64f`, section (h)'s per-row check
+(`batched` at `--wave-rows 512` vs `one-row` at `--wave-rows 1`, which on the lt route is
+hand-GEMV-vs-hipBLASLt) reports worst per-row `1-cos = 2.204e-03` at `logits45.bin` against the
+2e-03 band. On the *same row in the same fixture* the library route reads `1.889e-03` — lt is 17 %
+further from the one-row side, not diverging (its **pooled** numbers are better than library's:
+meanrel 1.429e-02 vs 1.433e-02, pooled `1-cos` deficit 1.459e-04 vs 1.488e-04). Every pin-facing
+section passes: 64/64 steps paired, worst step at 2.604× its own measured route spread against a
+3.50 allowance, and the sampled ids match the pins at all 64 steps.
+
+So this is the band question, not a bug finding, and it is an operator call, not a worker call: the
+band was **measured for hipBLAS-vs-hand** (§A2 of `progress/2026-10-14/route-c-audit-2026-10-14.md`),
+and hipBLASLt's heuristic rank-0 reassociates slightly differently. The two ways forward are (a) widen
+`CASCADE_BAND` per-row `1-cos` to ~2.5e-03 — which AGENTS' numeric-format rule allows only if the
+widened band still catches every injection in the derived must-catch set, i.e. re-run
+`gate.py --selftest --gemm lt` plus the two negative controls below with the new number and show it
+still bites — or (b) pin, per shape, the algo whose accumulation order matches what the gate was
+calibrated against, using `algo_pins()`. Do not do (a) by editing the constant alone.
+
+The must-catch witnesses for that decision, and they already bite under `--gemm lt` **today** (CPU-only,
+`--dry-run`, so they cost no device window and can be re-run after any band edit):
+
+```bash
+.venv/bin/python engine/gate.py --dry-run --gemm lt --break-band 3       # rc=1 — noise 4x outside the cap in force
+.venv/bin/python engine/gate.py --dry-run --gemm lt --break-ab-logits 2  # rc=1 — a differ in section (h)'s one-row side
+.venv/bin/python engine/gate.py --selftest --gemm lt                     # SELFTEST PASS
+```
+
+If a widened band still fails all three, it is still discriminating and can be adopted with its new
+number recorded beside this measurement; if any of them goes green, the widening weakened the check and
+the answer is (b).
+
+### 7d. Still owed, in order
+
+1. §7b's timing A/B (main agent, one hold). Until it exists the honest headline is §3a's, unchanged.
+2. The §7c band decision.
+3. The algo pin table, if 2 lands: the §1 `RESULT` lines' winning `algo` hex for `down_proj` (1.231×),
+   `k_proj`/`v_proj` (engine call 1.625× off), `in_proj_z` (1.359×), `q_proj` (1.220×), written as
+   `algo_pins()` entries at `M = 512`. A pin is also a different accumulation order, so it is re-gated,
+   not trusted — the same three fixtures, same sections.
+4. `NUMERICS` still prints `hipblas=<version>` from hipBLAS even on the lt route, and
+   `numerics_provenance.json` records hipBLAS only; the hipBLASLt version is on the `GEMM` line
+   (`version=10.4.1`, `hipblaslt`). Harmless today because the provenance check compares hipBLAS's
+   version against itself, but if `lt` ever ships as the default that file needs the other library's
+   version beside it, or the provenance witness is describing a library the run did not use.

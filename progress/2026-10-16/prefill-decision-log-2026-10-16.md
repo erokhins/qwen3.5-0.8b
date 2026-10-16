@@ -636,3 +636,36 @@ Three things recorded alongside, because each is a trap of its own class:
 37.3 ms — so the ledger's `GROUP` carries library time beyond these 150 calls. Until reconciled, the algo
 route is worth **at least 0.9–2.0 % of a 4096-lane wave and possibly near twice that**, and the engine-side
 A/B is what sizes it.
+
+## D27 — `--gemm lt` measured on the engine: whole-wave 1.120× at 1024 lanes, and my mix projection was 4× low
+
+`prototype/gemm_algo_sweep/results.md` §3c. Both routes in one lock hold, alternating per rep, medians of 3:
+
+| width | `GROUP matmul` | whole wave | prefill tok/s |
+|---|---|---|---|
+| 1024 lanes | 71.28 → **49.58 ms (1.437×)** | 240.96 → **215.14 ms (1.120×)** | 4250 → **4760 (+12.0 %)** |
+| 3072 lanes | 211.72 → **149.98 ms (1.412×)** | 804.85 → **743.35 ms (1.083×)** | 3817 → **4133 (+8.3 %)** |
+
+This is the largest prefill win since the engine exists — larger than the attention slim (1.125× of the wave)
+— and it cost no new kernel: `hipblasLtMatmul` with the heuristic rank-0 cached per `(shape, M)`, default
+still `library`, `legacy` accepted as a synonym so a shell loop can spell both sides of the pair.
+
+Two lessons, both mine:
+
+1. **A per-call burst table cannot project a family-level wave number; mine was 4× low.** §3a priced 1.174×
+   from 150 calls timed at M = 512 in a tight loop; the engine's `proj` family is 228 launches including the
+   hand `in_proj_a/b` GEMVs and epilogues that §3 sweeps into these groups, and the measured family ratios
+   (proj 1.521×, gateup 1.597×) belong to no single shape in the table. The error was in the flattering
+   direction, which is why it survived review.
+2. **`mlp_down` regresses (0.78–0.81×) and the sweep had already told me so.** For `down_proj` at M=512, lt
+   rank-0 is 0.1439 ms against the engine's 0.1313 ms; the 1.231× I called a win belongs to **best-of-12**,
+   not the default. Reading a "best" column as though it were the default column is the mistake, and the fix
+   is `algo_pins()` — pin `down_proj`'s `best_seq=1` (0.1169 ms) rather than take the heuristic. **Rule:
+   a sweep column labelled "best" must be read against the "default" column before anything is called a win.**
+
+**Default stays `library` until one band question is answered.** Gate section (h) (batched vs one-row, which
+under `lt` is hand-GEMV vs hipBLASLt) reads worst per-row `1-cos 2.204e-03` on `dec64f` against a 2e-03 band
+that was measured for the **hipBLAS-vs-hand** pairing — a different independent variable — while every
+pin-facing section passes and lt's pooled numbers are better than library's (meanrel 1.429e-02 vs
+1.433e-02). The remedy is to re-derive that band from a measured spread for the new pairing and re-run the
+must-catch witnesses, not to edit the constant. A red gate does not get flipped by a big number next to it.

@@ -104,7 +104,7 @@ not a library call:
 |---|---|
 | `in_proj_a` / `in_proj_b`, N=16 | `proj_gemm` **refuses** them (`engine/kernels_proj.cpp:134-141`); the engine guard itself records why (12–22× the dispatch floor at that N), so they stay in the hand GEMV at every width |
 | `lm_head`, 248320×1024 | `lm_head_full` (`engine/kernels_lmhead.cpp:25`) is a hand GEMV over an **F32** activation, run once per request, not per wave row. `bench/performance-status.md` §3 lists it as a wave *family*, which is true of the hand kernel; no route hands it to hipBLAS, so sweeping it would price a call the engine does not make |
-| a body of one row (M=1) | `resolve_wave_gemm` sends M≤1 to the hand GEMV whatever the run asked for (`engine/kernels_gemm.cpp:147-153`); `--rows` refuses 1 rather than timing a shape the library never sees |
+| a body of one row (M=1) | `resolve_wave_gemm` sends M≤1 to the hand GEMV whatever the run asked for (`engine/kernels_gemm.cpp:540-546`); `--rows` refuses 1 rather than timing a shape the library never sees |
 
 ### Wave widths (the M axis), and an honest correction
 
