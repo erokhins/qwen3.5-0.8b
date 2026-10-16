@@ -153,5 +153,7 @@ scanned. A counter that cannot reproduce a 485 MiB known workload cannot adjudic
   M-tiling cannot help (M = 1 by definition in decode), so the candidate causes are the issue/latency
   side and per-block staging waste. It has no isolated burst row beside it (ledger debt 7), so the first
   action there is an instrument, not a kernel. Worth more than anything in §5 if it survives a probe.
-- Already parked, unchanged: §6.2 fp16 on the matrix path (needs a user band decision), §6.3 weight
+- Already parked: §6.2 fp16 on the matrix path — **unblocked 2026-10-16** (no band needed: fp16 is a
+  mantissa gain on bf16 inside its range, and nothing pinned exceeds that range, decision log D13/D14);
+  its cost is now gated on the WMMA measurement below, not on approval. §6.3 weight
   quantisation (out of scope unless asked), §6.4 MTP on GPU (never priced on device).
