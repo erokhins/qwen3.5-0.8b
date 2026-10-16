@@ -592,3 +592,140 @@ and two extra repeats of `dec64f`/`chunk64b` came back bit-identical, so it is n
 **What this section does not decide**: whether `--gemm lt` becomes the default. The `library` control is
 green and the red row is attributed to the route's own spread at a one-ULP tie, so the blocker is now the
 `flip_room_max` question above plus the main agent's timing window, not an unexplained divergence.
+
+## 3f. The line re-derived in BF16 ULP: **1.50**, and the two room readings it turned out to need (2026-10-16, worker)
+
+§3e left `flip_room_max = 0.10` in place and named the two things a re-derivation needed: a census on
+**both** cross-width pairings over all nine fixtures, and proof that a wider line still catches every
+injection in the must-catch set. Both are below. The constant that replaced it is
+**`CASCADE_BAND["flip_room_max_ulp"] = 1.50`**, in BF16 ULP of the row's own top-1, and the retired
+absolute line is gone from `engine/gate.py` rather than kept alongside it.
+
+### The census, both pairings, nine fixtures, one command
+
+The carry pairing needs the gate's own `run_batched_ab`, which §3e's probe could not produce; the gate now
+writes all three widths into its work dir, so the census runs over what a normal gate run leaves behind.
+One directory of `<fixture>_<route>` legs (`tmp/flipc`, produced by
+`.venv/bin/python engine/gate.py --fixture <fx> --gemm <route> --work tmp/flipc/<fx>_<route>` for the nine
+fixtures `dec8 dec64f dec64t chunk64b p128 mt32f wide520f wide640f wide1024f` × `library` × `lt`), then:
+
+```
+.venv/bin/python engine/wave_flip_census.py --work-root tmp/flipc --retired-line 0.10 \
+    --fixtures dec8,dec64f,dec64t,chunk64b,p128,mt32f,wide520f,wide640f,wide1024f --routes library,lt
+```
+
+| route | pairing | rows | flips | worst room (logits) | worst room (ULP) | worst row |
+|---|---|---|---|---|---|---|
+| `library` | batched-vs-carry | 2951 | 21 | 0.0905876 | **0.7247** | `p128` 35 |
+| `library` | batched-vs-one-row | 2951 | 18 | 0.0544815 | **0.6224** | `chunk64b` 55 |
+| `lt` | batched-vs-carry | 2951 | 21 | 0.124807 | **0.9985** | `wide520f` 180 |
+| `lt` | batched-vs-one-row | 2951 | 14 | 0.0504608 | **0.4353** | `wide520f` 87 |
+
+Totals: **74 flips in 11 804 row comparisons**, and **0 flips at or over 1.50 ULP anywhere in them**. The
+bucket table says the same thing from the other side — in the logits unit, every flip lives below 0.50;
+in the ULP unit, every one lives below 1. So §3e's suspicion is measured rather than argued: the corpus
+contains no flip that is a full representable step wide except `wide520f` row 180, and that one is
+*exactly* one step (0.124807 of a logit at top-1 20.04, where one BF16 step is 0.125 — `--show-rows 180`
+prints both sides' top-3 and their own gaps).
+
+### Why 1.50, and the margin each pairing actually has
+
+The constant is the census' worst figure rounded up with a half-step of slack, and the ratio is printed with
+the number on every run (`flip_room_line()`, in the (h) verdict line and in the run header):
+
+* `lt` batched-vs-carry: line ÷ worst observed = **1.50×** — the tightest of the four, and the pairing that
+  produced the worst row;
+* `library` batched-vs-carry: **2.07×**;
+* either route against the one-row side: **2.41×** (`library`) and **3.45×** (`lt`).
+
+A margin has to be named per pairing, because the four are not one number wearing four coats, and the
+reference pairing has no margin at all to borrow — see the last section. The band history carries the whole
+census as its reason (`tools/band_history.py`, two lines: the retirement of `flip_room_max` and the
+application of `flip_room_max_ulp`; `tools/band_history.py check` passes, and an unrecorded edit to the
+constant stops the gate before it reads a fixture).
+
+### Does it still bite, and in which direction
+
+Two edges, both required, both asserted as `--selftest` cases and reproducible standalone (**CPU only, with
+`--dry-run`** — the `--break-ab-*` injections live in the CPU stand-in for section (h); a guard now refuses
+them on a device run instead of silently discarding them, which is what nine vacuous `rc=0` lines in an
+earlier sweep were):
+
+| injection | room, in the line's own unit | ULP line | retired `0.10` | what it is |
+|---|---|---|---|---|
+| `--break-ab-room 3:2.0` | 2.00 ULP at top-1 63 = 0.50 logits | **RED** | RED | both sides' own gaps 0.5/0.5 |
+| `--break-ab-room 3:2.0:1.0` | 2.00 ULP at top-1 1.0 = 0.015625 logits | **RED** | admitted | the tightening half |
+| `--break-ab-room 3:1.0:63` | 1.00 ULP at top-1 63 = 0.25 logits | admitted | **RED** | `wide520f` row 180's shape, on CPU |
+| `--break-ab-ids 3` | 1.00 logits at top-1 1.0 = 4.00 ULP | **RED** | RED | the pre-existing must-catch |
+
+So the answer to “does it still bite” is *yes, and in both directions*: the second row is a flip the old
+magnitude-blind line waved through (0.0156 logits at a top-1 of 1.0) and the new one refuses, which is what
+keeps this from being a pure relaxation; the third is the row that blocked `--gemm lt` and is now admitted
+as the coin toss the census measured it to be. In the **real** corpus the colour change is exactly one row,
+named by the census itself (`wide520f` row 180 on `lt`, RED → admitted), and **no real row became newly
+RED** — the tightening is witnessed only by injection, because the corpus contains no thin-in-logits /
+wide-in-ULP flip to tighten on. That asymmetry is a fact about the corpus, not a wish: at these magnitudes
+0.10 of a logit is already under a ULP, so an absolute line and a ULP line agree everywhere the corpus
+actually goes.
+
+### The blocker that made this a semantics correction, not a constant
+
+A single constant does not work, and the reason is a must-catch case, not a preference. `--break-runnerup 7`
+lifts the pin's runner-up one BF16 step over the pinned maximum at a step the pin decided by **1.375 logits =
+11.00 ULP**; after `lift_over_pin` the *engine's* own top-1/top-2 gap is exactly **1.00 ULP**. Judged
+symmetrically — `min(pin, engine)`, which is how §A2 defined room — that reads as 1.00 ULP, sits under any
+line that also admits `wide520f` row 180 at 0.9985, and the injection is admitted. No constant can both
+admit the real row and refuse that injection under one symmetric reading; the two rows are one ULP apart in
+opposite directions. The readings therefore split by **pairing**, and the split is written where it is used:
+
+* **cross-width, engine-vs-engine** (section (h), `cross_width_ids`): `flip_room_ulp` — the min over the two
+  sides' own gaps, each divided by that side's own BF16 step. Neither side is an answer sheet, so the
+  closer side's uncertainty is the honest quantity, and that is exactly the population §A2 measured.
+* **pin-vs-engine** (`room_verdict`, and section (i)'s pinned prefill rows): `reference_room_ulp` — the
+  PIN's own top-1/top-2 gap in ULP. One side *is* an answer sheet; the engine's near-tie says nothing about
+  whether the reference decided, and the injected one-step lift is precisely the bug that reading hides.
+
+`--selftest` section (h2) runs one injected row through both readings and **requires them to disagree** (RED
+at 11.00 ULP on the reference reading, admitted at 1.00 ULP on the min reading), so the split cannot be
+“simplified” back into one path unnoticed. The honest cost, printed rather than hidden: on the reference
+pairing the line has **no measured margin** — across the nine fixtures × both routes of the device set below,
+**zero flips were admitted against a pin at all**, so that reading is held up by injection evidence alone,
+and `flip_room_line("reference")` says so in the run header instead of quoting the cross-width ratio.
+
+### Device set under the new line, and the state of the blocker
+
+Full set, one held lock (`tools/gpu_lock.sh`, `util` 93 % at acquire, **correctness only, no timing taken** —
+the walls below are the price of a correctness gate, not measurements):
+
+```
+engine/gate.py --fixture <fx> --gemm <lt|library> --work tmp/flipc3/<fx>_<route>
+```
+
+`rc=0 fail=0` on all 18 (dec8 4/4 s · dec64f 7/8 · dec64t 8/8 · chunk64b 8/9 · p128 6/7 · mt32f 12/11 ·
+wide520f 17/17 · wide640f 30/29 · wide1024f 43/107 s, `lt`/`library`), `ENGINE GATE PASS` in every log. The
+only movement against the pre-change ledger is the one the census predicted: **`wide520f --gemm lt` is
+green**, its (h) line now listing row 180 among eight thin-room flips at 0.9985 ULP, and the
+`--retired-line` colour check above names that row as the only one the change moved — every other fixture
+and route reads as it did before, which is what “the corpus never goes where the two lines disagree” looks
+like in a device run rather than a bucket table.
+`--selftest` is green on all three routes, `engine/attn_form_band.py --selftest` 15/15, and
+`tools/band_history.py check` passes. **`--gemm` still defaults to `library`; nothing in this section flips
+it** — that call is the timing window plus the user, and the numerics blocker is now the admitted tie, not an
+unexplained divergence.
+
+### Instruments changed on the way (all of them needed for the above)
+
+`engine/wave_flip_census.py` gained `--work-root`/`--routes`/`--pairings` so the table above is one tracked
+command rather than a scratch script, and `--retired-line` so the colour changes are printed rather than
+claimed; its ULP conversion is now `gate.flip_room_ulp` instead of a second local copy.
+`engine/attn_form_band.py` carries each side's top-1 value in its row record, because a ULP needs a
+magnitude and it was passing bare logit gaps. `tools/prefill_row_rooms.py` and `prototype/gdn_chunk/phase1.py`
+read the new key and the reference reading. `engine/gate.py` gained the `(h0)` selftest section and the
+refusal of `--break-ab-*` without `--dry-run`: an injection that a real run silently discards is a control
+that cannot fire, which is the same class of defect as the empty must-catch set §20.6 of
+`prototype/attn_decode/results.md` records. And the edit that added the ULP helpers left a second copy of
+`census_pair`'s body below its own `return` — dead, still reading the retired key, and invisible to every
+run because unreachable code cannot raise. `tools/dead_after_return.py` (new, stdlib AST, no dependencies)
+prints statements that sit after a `return`/`raise`/`break`/`continue` in the same block; it reports 0 over
+the five files this change touched, which is the only sense in which “checked for that mistake” is now more
+than a sentence.

@@ -4676,3 +4676,15 @@ reader can check without rerunning anything.
 two bit-identical repeats of `dec64f`+`chunk64b` on the `lt` leg to separate run noise from a real move. The
 red row itself, the ULP census over the corpus, and what a re-derivation of `flip_room_max` would need are in
 `prototype/gemm_algo_sweep/results.md` §3e. **`--gemm` still defaults to `library`; nothing here flips it.**
+
+**Follow-up, same day: the flip line is now a ULP line.** `CASCADE_BAND.flip_room_max` (0.10 of a logit) is
+retired and `CASCADE_BAND["flip_room_max_ulp"] = 1.50` replaces it, measured on both cross-width pairings of
+all nine fixtures (74 flips in 11 804 row comparisons, worst 0.9985 ULP at `wide520f` row 180), with the
+retired absolute line printed beside it so the single colour change is named rather than argued. The change
+also split the room rule into the two readings it had always been conflating — a cross-width pair is judged
+on the min of the two sides' own gaps, a pin-vs-engine pair on the **reference's** own gap, because the
+engine's near-tie is not evidence about whether the reference decided. `wide520f --gemm lt` is green on that
+line and the other 17 runs of the set are unchanged. The census, the injections at both edges of the new
+line, the blocker that forced the split (`--break-runnerup`, admitted under a single symmetric reading and
+refused under the reference one) and the commands are in `prototype/gemm_algo_sweep/results.md` §3f.
+**`--gemm` still defaults to `library`; nothing here flips it.**

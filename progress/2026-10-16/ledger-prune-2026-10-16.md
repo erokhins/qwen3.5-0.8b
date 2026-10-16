@@ -139,7 +139,7 @@ Every cite changed by this pass, what it asserted, and where it now points. **L*
 
 Deliberately **not** re-pointed, because live §6 still carries the fact they cite (the clean-window
 protocol, the bimodality warning, the `util` rule, "timings are the main agent's"):
-`engine/gate.py:4192`, `engine/chat.py:19,200`, `engine/kernels_glue.cpp:44`,
+`engine/gate.py:4454`, `engine/chat.py:19,200`, `engine/kernels_glue.cpp:44`,
 `engine/README.md:455,466`, `engine/results.md:5,20,309,1242,2798,2817,3296,3452,3804,4035`,
 `AGENTS.md:122`, `prototype/{proj_gemv,glue,mlp_gemv,attn_decode}/*` protocol cites, and
 `bench/build-queue.md:114` ("§1 gets a measured tok/s row" — live §1 is that row).

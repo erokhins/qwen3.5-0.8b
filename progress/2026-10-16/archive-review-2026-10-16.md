@@ -293,7 +293,7 @@ git ls-files -z | grep -zv '^progress/' | xargs -0 grep -nHE "$T:[0-9]" 2>/dev/n
 | `devices/strix-halo-memory-bandwidth.md` | 1 | 18 | — |
 
 Two rot hazards visible only here. **(a) Bare `results.md` is 41+12 anchors with no directory:**
-`engine/gate.py:5419` "the default since results.md §21" and `engine/kernels_attn.cpp:294`
+`engine/gate.py:5748` "the default since results.md §21" and `engine/kernels_attn.cpp:294`
 "(results.md §20 …)" both mean `prototype/attn_decode/results.md`; `engine/kernels_glue.cpp:35`
 means `prototype/glue/results.md`. Nothing resolves this form mechanically today. **(b) Live code
 cites archive labels with the file unnamed:** `engine/gate.py` uses `§A1`/`§A2`/`§A3`/`§A4` **17
@@ -318,7 +318,7 @@ Its "36 `results.md §N`" is 41 here, for the same reason (it scanned `*.md` at 
 
 `specification/ASSUMPTIONS.md` carries **A-01…A-18** and no more. Live code cites two ids that are
 not defined there: `A-19` (`prototype/gdn_chunk/gdn_chunk_kernels.h:133`) and `A-32`
-(`engine/gate.py:3494`, and reproduced verbatim in the committed transcript
+(`engine/gate.py:3678`, and reproduced verbatim in the committed transcript
 `progress/engine/evidence/margin/library_dec300f.log:1362`). Both are `doc_ref_check`-invisible —
 ids, not paths — so they belong with F6 in the new check (§5 S7). `A-25` in raw greps is a
 `SHA-256` substring, not an assumption id; do not "fix" it.
