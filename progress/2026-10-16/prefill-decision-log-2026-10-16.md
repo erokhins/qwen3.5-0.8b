@@ -223,3 +223,32 @@ was trusted, since a check whose population includes metadata cannot adjudicate 
 - The census is fixture-bounded: it is a claim about pinned values, and the guard is to re-run
   `tools/fp16_range_probe.py` whenever a new fixture is pinned. A prompt that produced a hidden state
   above 65504 would show up there first.
+
+## D15 — the probe's priority order flipped: the matrix ceiling is now the top number, not the issue floor
+
+Written when the `issue_rate_probe` worker checkpointed mid-task (first pass died at its 2 h
+deadline; resumed as run 56987460), because the reason it exists changed underneath it.
+
+Order in the original brief (D8): (a) sustained VALU warp-inst/CU/clk on the attn dot shape, (b) KV
+read GB/s against resident working-set size, (c) arithmetic-path rates as an afterthought. Order
+after `tools/isa_probe.sh` and D13/D14:
+
+1. **What a hand-written WMMA leg sustains, as percent of the 59.36 TFLOP/s roof.** This is now the
+   single number the fast tier is gated on. Reason: the 4× is an instruction-level certainty
+   (`v_wmma_f32_16x16x16_f16` exists, compiles, and 0 of 55 shipped `gfx1151` code objects use any
+   matrix instruction), so the question is no longer "is there headroom" but "does a kernel we can
+   write reach it at our occupancy". A kernel that sustains 2× the scalar rate makes the fast tier
+   the biggest prefill lever since the tiled wave; one that sustains 1.1× means the 41 % lane
+   coverage from §03 is the binding constraint and instruction choice is not.
+2. **Where dot2 / dot4-i8 / dot8-i4 / `v_pk_fma_f16` sit between the 1-MAC floor and the 4× roof** —
+   same run, and it prices the int8 future (which stays a stop-and-ask for bands: D13 exclusion) and
+   the no-WMMA fallback for shapes too thin for a 16×16 tile.
+3. The original two questions, demoted. They still decide the M-tiling route (D8 stands), but they no
+   longer gate the biggest candidate win.
+
+Two things the worker is told explicitly, because both are repo lessons rather than local ones: an
+arithmetic leg whose measured op is not the op in the billed span is worse than a missing leg (so
+`irp_lds_tile`, whose LDS reads LLVM peels out of the loop, is left **loudly unbilled** rather than
+billed at the staging loop), and the WMMA lane layout gets a witness before any WMMA timing is
+trusted — `--wmma-check` must print the ones / cadd / feederA / feederB results, since a wrong lane
+map reproduces plausible numbers on a symmetric fixture.
