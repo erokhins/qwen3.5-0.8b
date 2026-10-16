@@ -836,3 +836,62 @@ admission, and 5.1–5.3 are out of authority or out of scope. **If items 1–7 
 prefill wave at 4096 lanes has no remaining route above the noise except raising the lane ceiling (2.5) and
 quantisation (5.1)** — which is the honest statement of where this ends, and the reason 1.3 matters more than
 anything else on the list.
+
+# D31 — D30 item 3.2 comes back **negative**, and the thing it found instead is candidate depth (2026-10-16)
+
+**Question asked:** 15,077 of 15,750 enumerated algos exceed the engine's 128 MiB workspace budget
+(`prototype/gemm_algo_sweep/results.md` §4), and memory is not a constraint for this model — does raising the
+budget admit better kernels? **Answer: no, and the apparent yes was an artifact.**
+
+Two budgets, one lock hold each, `--rows 512 --check-rows 8 --inner 8`, `util` 63 % then 92 %, best_tflops per
+shape:
+
+| shape | 12 candidates |  | 64 candidates |  |
+|---|---|---|---|---|
+| | 128 MiB | 512 MiB | 128 MiB | 512 MiB |
+| `q_proj` | 35.44 | 34.73 | 32.96 | 33.29 |
+| `k_proj+v_proj` | 26.64 | 27.11 | 26.93 | 27.14 |
+| `o_proj+out_proj` | 28.26 | 28.38 | **33.62** | **34.83** |
+| `in_proj_qkv` | 35.61 | 35.94 | 35.37 | 35.02 |
+| `in_proj_z` | 32.48 | 30.22 | 30.01 | 31.64 |
+| `gate_proj+up_proj` | 32.04 | **34.86** | **35.07** | **35.39** |
+| `down_proj` | 34.58 | 31.21 | **35.79** | **36.14** |
+
+At 12 candidates the 512 MiB column looked like a **+8.8 % win on `gate_proj+up_proj`** (0.1173 → 0.1078 ms).
+At 64 candidates the same shape reaches 35.07 **at the original 128 MiB**, so the gain was the candidate list
+being too short, not the workspace being too small. Same for `down_proj` and `o_proj+out_proj`. Four shapes move
+by less than the window noise in either direction. **`kWorkspaceBytes` stays at 128 MiB** — the budget is not the
+lever, and the free memory stays unspent.
+
+**The trap, spelled, because it is the same one as D27's "best column vs default column": a `best` read off a
+truncated candidate list measures the truncation, not the field.** `--max-algos 12` was the setting the earlier
+§1 sweep used, so every ratio in §1 — and the pin table built from it — is a floor on the available headroom and
+not a measurement of it.
+
+That gives a new queue item, and it is bigger than the one that closed:
+
+**3.7 (new): select beyond the shallow heuristic answer.** At 128 MiB with 64 candidates, `ratio` (rank-0 vs
+best) is **1.387 `down_proj`, 1.407/1.336 `o_proj+out_proj`, 1.207 `gate_proj+up_proj`, 1.133 `in_proj_qkv`**
+— winners sitting at ranks 16–55, which is where the engine's `kHeuristicWidth = 8` cannot see them. Worth
+noting against the code: a **pin is not bound by that width** (it is validated only as "valid hex, non-zero,
+workspace fits", `engine/kernels_gemm.cpp:427-447`), so adopting a deep winner needs no new selection path —
+only an algo capture at a deep query and an in-situ adjudication. The prize, priced on the per-wave call counts
+`--list` books (24/48/24/18 calls) and the 64-candidate `default_ms` vs `best_ms`: ≈ **3.0 ms per 150-call wave,
+≈ 24 ms of a 4096-lane prefill ≈ 2.2 %** — a ceiling, taken at burst rates, and D28's precedent is that
+two of three burst winners were in-situ *losers*. Ranked below the `gdn_rec` items for exactly that reason.
+
+Two instrument defects fell out of the same window, both recorded rather than patched around silently:
+
+- **`--calibration-out` replaces `floor_calibration.tsv` instead of merging by key.** A later
+  `--floor-probe --rows 1024,4096` therefore deleted the M=512 CAL rows, and this session's first two sweep
+  attempts exited 2 with `CALIBRATION-NEEDED … missing=7 of 7` for want of them. Recovered by probing M=512
+  into its own file and concatenating (21 rows now, backup in `tmp/wsjob/floor_calibration.before.tsv`); the
+  writer should merge, and a sweep that cannot find its keys should say which prior probe deleted them.
+- **A stale comment claimed three pins above a table holding one.** The prose was written before the in-situ
+  adjudication shrank the table and survived it. Fixed in the same commit as this entry, with the two
+  true/false claims about pin admissibility written down where the next reader will trip on them.
+
+**Window noise witness, kept because it sizes every claim above:** `q_proj` best_ms was 0.1212 ms in the
+12-candidate window and 0.1303 ms in the 64-candidate window, same budget, same shape, minutes apart — **7.5 %
+on a 0.12 ms call**. Any single-shape burst claim below that is not a finding; it is why 3.7 must be adjudicated
+in situ and not adopted from this table.
