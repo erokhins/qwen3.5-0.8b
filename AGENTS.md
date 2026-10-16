@@ -253,3 +253,33 @@ still resolving as a line. That is the trap this section describes.
   directories recorded as history in `progress/` and are not defects at all. Before trusting any
   count, ask what was walked and what was filtered — and when you extend a checker, expect a
   *larger* number, not a smaller one.
+
+## Numeric format: delegated, with a gate-shaped test (user, 2026-10-16)
+
+Appended at the end deliberately, for the reason stated in the section above it: `progress/2026-10-16/cleanup-audit-2026-10-16.md:179` cites `AGENTS.md:172`, so inserting anywhere earlier would silently re-point it.
+
+The question on the table was whether switching a hot path to fp16 needed a new numerics band, i.e.
+a user decision. It does not, and the standing rule now is:
+
+- **Any 16-bit or 32-bit arithmetic may be adopted if the existing gates stay green.** No new band,
+  no new approval round: bands already bought are wide enough, and a green gate set *is* the decision
+  procedure.
+- **If a gate goes red, ask whether the check can be widened without materially weakening it.** Here
+  that has a concrete test, not a mood: a widened band must still catch every injection in the
+  must-catch set that the negative controls derive from geometry (see the traps table — hand-listed
+  must-catch sets rot into "everything" and prove nothing). If it still catches them, adopt it and
+  record the new band beside what witnesses it.
+- **Only a change that neither passes nor can be widened is a user decision.** Do not pre-emptively
+  park work behind a band question that the gates would have answered.
+
+Why the gates are the right instrument for fp16 specifically: fp16 is 1+5+10 against bf16's 1+8+7,
+so inside fp16's range it is *more* precise than the format every band is calibrated to. The only
+new failure modes are overflow above 65504 and flush-to-zero below ~5.96e-08, and those are a range
+census, not a band negotiation — `tools/fp16_range_probe.py` over every pinned dump answers it in one
+pass (activations peak 82.5, logits 35.5, weights 0.17, nothing over 65504; decision log D14).
+
+Two things this rule does **not** cover, both still stop-and-ask: **int8/int4 quantisation** (its error
+is orders of magnitude larger than a format change and would need bands materially wider than today),
+and **widening a band that a pinned gate depends on for its discriminating power** — if the only way
+to make a switch pass is to loosen a check that currently catches a real bug, that is the second
+bullet's failure case, and it is reported, not routed around.

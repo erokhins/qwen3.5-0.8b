@@ -228,14 +228,14 @@ GEMM rate the Phase 1 spike used. Proposed line, to fix before writing code: the
 
 ### 6.2 fp16 activations on the matrix path (+21.5 % on the GEMM legs)
 `devices/strix-halo-compute.md` measures fp16 **6.885** vs bf16 **5.667** TFLOP/s at the engine's own
-`1024×4096×1024`, and `v_wmma_f32_16x16x16_f16` exists (bf16 has its own matrix instruction too, so this is
-not an emulation story). Weight conversion alone is safe and cheap — the whole bf16→fp16 weight delta is
-**3.0e-08**, ~1e-5 of a bf16 quantum — but it buys nothing on its own, because `GemmEx` wants matching
-operand dtypes, and activations in fp16 is a **24→11-bit mantissa cut**, which is a numerics-band decision
-the user has to make (it is a *new* band, not an extension of D-11). Matmul is 29 % of the wave, so the
-ceiling on this lever is roughly −10 % of prefill if the fp16 rate is reachable at real shapes. Needs: a
-band proposal + a flipped-decision audit at the ≥ 0.10-room statistic, on the model of
-`progress/2026-10-14/route-c-audit-2026-10-14.md`. **Do not start without the user's approval of the band.**
+`1024×4096×1024`, and `v_wmma_f32_16x16x16_f16` exists. Corrected 2026-10-16 by `tools/isa_probe.sh`:
+on `gfx1151` that is the ONLY matrix instruction — bf16 has no WMMA and no `v_pk_fma_bf16` — so the
+matrix path is fp16 or nothing, and its roof is 4× the vector rate, not 1.2× (specs §7). Weight
+conversion alone is safe and cheap (whole bf16→fp16 weight delta **3.0e-08**), and fp16 beats our
+bf16 activations on mantissa (10 bits vs 7) wherever the value fits; every pinned value fits, since
+`tools/fp16_range_probe.py` finds activations peaking at 82.5 against a 65504 ceiling, so a switch
+cannot lose precision inside range. Matmul is 29 % of the wave: at least −10 % of prefill, more via
+WMMA. Admitted under the user's 2026-10-16 rule — decision log D13/D14 — with the gate set as the check.
 
 ### 6.3 Weight quantization for decode (largest decode lever, explicitly out of scope today)
 Decode is weight-walk-bound: 1.5457 GB of bf16 text weights, and at this box's 237 GB/s read ceiling that is
