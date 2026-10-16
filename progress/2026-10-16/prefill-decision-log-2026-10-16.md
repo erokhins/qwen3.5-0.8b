@@ -725,3 +725,114 @@ pairing owns it); **an unmeasured threshold must say it is unmeasured** — the 
 admissions in 18 runs and states that instead of borrowing the cross-width margin; and **an injection that
 does nothing must refuse rather than pass** (`--break-ab-*` without `--dry-run` now exits 1; nine earlier
 device runs had been silently vacuous).
+
+
+---
+
+# D30 — the explicit prefill inventory: every lever considered, with its disposition (2026-10-16)
+
+Written because the session kept discovering routes in the order it stumbled into them, which is not the same
+as having processed them. This is the closed list, and the method used to make it closed: **for each family of
+the wave, ask nine questions** — is it bytes-bound, instruction-bound, latency-bound, launch/dispatch-bound,
+fusible with a neighbour, improvable in precision-choice (16/32-bit), improvable in geometry (tile/width/split),
+improvable in library selection, or blocked behind a numerics admission? Every answer below carries its
+disposition and, for the ones not yet measured, the cheapest falsifier that would decide it.
+
+**Basis, measured after the `--gemm lt` flip** (`--time-waves --steps 0`, `ids4096`, one rep of the median
+window, `wall_ms=1111.95`, `plan_match=1 launchstats_match=1`):
+
+| family | ms | % of wave |
+|---|---|---|
+| `gdn_rec` | 534.54 | **48.07** |
+| `attn` | 285.80 | **25.70** |
+| `proj` | 105.37 | 9.48 |
+| `mlp_gateup` | 66.74 | 6.00 |
+| `cast` | 29.59 | 2.66 |
+| `mlp_down` | 27.15 | 2.44 |
+| `gdn_conv` | 20.71 | 1.86 |
+| `glue` | 14.48 | 1.30 |
+| `copy` | 12.35 | 1.11 |
+| `gdn_gated_norm` | 9.88 | 0.89 |
+| `lm_head` | 2.52 | 0.23 |
+| `gdn_gates` | 1.85 | 0.17 |
+| `host_tail` | 0.87 | 0.08 |
+
+So two families are 73.8 % of the wave, and anything that does not touch `gdn_rec`, `attn`, the matmul group
+(17.9 %), or the small-kernel tail (8.0 %) cannot move the headline at all.
+
+## 1. `gdn_rec` — 534.54 ms, 48.07 %
+
+| # | lever | disposition | evidence / first falsifier |
+|---|---|---|---|
+| 1.1 | instruction surgery (unroll, hand-folded reductions, spill removal) | **CLOSED, funded no** | D23 census: 1523 slots/token-step at ~10 % of its own issue roof; D25 falsifier `rec0`/`rec2c` = **1.0159×**, elasticity ≈ 0.8, largest lever (−8.7 % slots) worth ~7 % of the family and that MODE is broken. Refuting needed > 1.10× |
+| 1.2 | chunked scan (P9, §04.7) | **CLOSED for now, measured loss** | priced ≥ 1.5×, measured 5.9× worse. It chunks intra-chunk work, not the dependency. Only re-opens if 1.4 or 1.5 lands first |
+| 1.3 | **latency of the per-token dependency chain** (the reading D25 leaves standing) | **UNTESTED — biggest open item on the box** | ~1.6 *working* wavefronts per CU (one warp per block drives the recurrence, three park at the norm barrier). Falsifier: a harness variant that breaks the cross-token dependency (each token reads an independent starting state — numerically meaningless, timing-only) and compares against MODE 0. If time collapses, latency binds and 1.4/1.5 are worth funding; if it does not, the family is bound by something the census has not named and the whole family needs a different model |
+| 1.4 | raise working wavefronts per CU (more warps cooperating per token, or split the state across blocks and combine) | **UNTESTED, blocked behind 1.3** | only funded if 1.3 says latency binds. Cost is real: cross-block combine adds a barrier and a partial buffer |
+| 1.5 | shorten the chain itself (re-associate the recurrence so two dependent steps overlap) | **UNTESTED, numerics-gated** | any re-association must pass the existing bands; the state is F32 with bf16 casts and A-18 says depth decays token match anyway, so the band question is answerable with the existing floors |
+| 1.6 | **state dtype / traffic**: is the GDN state F32 in memory? If so, a 16-bit state halves the largest per-token traffic figure in the engine | **UNTESTED, cheap census first** | per-request state is 18.0 MiB + 0.63 MiB conv (`§00.5`), i.e. the recurrence moves a large buffer per token. Census: dtype as laid out in `engine/` + bytes moved per launch ÷ measured time. Then D13/D14 authority applies unchanged (16/32-bit is adoptable if gates stay green; fp16 is *more* precise than bf16 in mantissa and the range census peaked at 82.5) |
+| 1.7 | fuse `gdn_conv` + `gdn_gates` + `gdn_gated_norm` (20.71 + 1.85 + 9.88 = 32.4 ms) into the rec launch, or into each other | **UNTESTED** | 32 ms of separate kernels plus their state round-trips; the ceiling is small (~3 %) but the traffic saved may exceed the kernel time, which is exactly the mistake D21 warns about — census the round-trips before funding |
+| 1.8 | better algo/library route | **N/A** | hand kernel, no library call |
+
+## 2. `attn` — 285.80 ms, 25.70 %
+
+| # | lever | disposition | evidence / first falsifier |
+|---|---|---|---|
+| 2.1 | instruction surgery on the tile touch | **SHIPPED** | D21/D22: 116 → 45 slots per touch, family 1.466×, whole wave 1.125× |
+| 2.2 | M=2 row tiling (traffic halving) | **PARKED, measured twice** | D18/D24: bit-identical, bytes halved, **5.5–13.4 % slower** both before and after the slim levers. Re-opens only above 4096 lanes, which needs 2.5 |
+| 2.3 | further scalar instruction cuts on the 45-slot touch | **CLOSED by the same census** | 45 slots is the post-slim number; the remaining content is 8 WMMAs-worth of arithmetic plus the softmax; D20 priced arithmetic-class changes at ≤ 10.5 %, below the 15 % kill line |
+| 2.4 | **`v_wmma_f32_16x16x16_f16_w32` for the score and PV dots** | **UNTESTED, and it is *not* 2.2** | the matrix-unit form replaces the score dot's whole 16-slot loop with one instruction per 16×16×16 tile across 16 rows at once — it is an instruction lever wearing a traffic costume, which is precisely the direction D21 said wins. Needs fp16 operands (D13/D14 authority covers the format). First falsifier: price one tiled WMMA touch on CPU, then one device A/B against the 45-slot body; the ceiling is the remaining arithmetic share, ~28 % of the touch |
+| 2.5 | raise `kAttnMaxSplit` / lane ceiling above 4096 | **BLOCKED, needs numerics admission** | D4/D5. It is also the only route that could re-open 2.2 (traffic that actually reaches DRAM). Unblocking needs an admitted band for > MAXSC straddles, not a constant |
+| 2.6 | occupancy / wave shape of the tiled kernel | **UNTESTED cheaply** | the tile form's realised occupancy is not recorded; one `--time-waves` run with a couple of block-size variants costs minutes and would say whether 2.4 has a scheduling headroom to spend |
+
+## 3. matmul group — `proj` + `mlp_gateup` + `mlp_down` = 199.26 ms, 17.92 %
+
+| # | lever | disposition | evidence / first falsifier |
+|---|---|---|---|
+| 3.1 | library algorithm selection (`hipblasLtMatmul`, per-`(shape,M)` algo, one pin) | **SHIPPED** | D26–D29: group 1.419× at 4096 lanes, whole wave 1.049× |
+| 3.2 | **raise the 128 MiB workspace budget** | **UNTESTED — cheapest open matmul item** | **15,077 of 15,750 enumerated algos need more than 128 MiB** (`algo_max_workspace_fits`). Memory is not a constraint for this model (whole checkpoint is 4 % of the pool), so a 512 MiB budget may admit strictly better algos. `gemm_algo_sweep --workspace-mib 512` answers it in one window; the engine change is one constant |
+| 3.3 | hand WMMA GEMM to beat the library | **DEPRIORITISED, not closed** | after 3.1 the library runs at 33–38 TFLOP/s against a 52.63 measured WMMA roof → ~1.2–1.4× left, and it must be earned with a real kernel. Re-rank only if 3.2 says the library is out of algos to give |
+| 3.4 | move the 72 hand `in_proj_a`/`in_proj_b` GEMVs into the library route | **UNTESTED** | they are `proj_gemm`-refused today and sit inside the 105.37 ms `proj` family; first measure is the burst `M=512` rate of those two shapes against what the hand GEMV achieves in situ (the lesson of §3d applies: adjudicate in situ) |
+| 3.5 | pin more shapes, chosen **in situ** | **OPEN, small** | only `down_proj` is pinned and `mlp_down` still costs 0.945×; the burst-priced pins lost in situ, so the candidates must be ranked in situ before pinning. Worth ~1 ms |
+| 3.6 | `silu·mul` epilogue fused into the gate/up GEMM | **UNTESTED, small** | ≥ 2.2 ms of `mlp_gateup` is the separate epilogue (Job-1 reconciliation); hipBLASLt has no two-matrix `silu(a)·b` epilogue, so this is a custom kernel — 6.00 % family, ~2 % ceiling |
+
+## 4. the small-kernel tail — `cast` 29.59 + `copy` 12.35 + `glue` 14.48 + `gdn_gated_norm` 9.88 + `gdn_conv` (in 1.7) ≈ 66 ms, 6.0 %
+
+| # | lever | disposition | evidence / first falsifier |
+|---|---|---|---|
+| 4.1 | fuse `cast` work into the producing kernels | **UNTESTED** | 29.59 ms of pure conversion. Census first: which casts, whose output, and whether the producer can write the target dtype without an extra pass. Ceiling ~2.7 % if all of it vanished |
+| 4.2 | eliminate `copy` (12.35 ms) by in-place staging where legal | **UNTESTED** | needs the same census discipline: what is copied, why, and what aliasing rule forbids in-place |
+| 4.3 | reduce `glue` launch count (49 launches/body) | **CLOSED for value** | dispatch-bound and bimodal on this box (`bench/performance-status.md` §6); 14.48 ms of 1112 with a ceiling well under the noise floor of every measurement in this log |
+| 4.4 | overlap independent bodies on separate streams | **CLOSED, measured small** | `WAVEGAP exposed_ms=7.14, ratio=1.030` — there is almost nothing exposed to overlap |
+
+## 5. out of my authority, listed so it is not mistaken for an oversight
+
+| # | lever | status |
+|---|---|---|
+| 5.1 | **int8/int4 quantisation** of weights or activations | **STOP-AND-ASK** — error is orders of magnitude above any adopted band; the standing rule requires the user's words (`AGENTS.md`, numeric-format section) |
+| 5.2 | MTP drafting as a prefill/decode accelerator | in scope for decode only, measured slower on CPU (spec §09.5), and no engine path exists; not a prefill lever |
+| 5.3 | anything for models larger than this checkpoint | tagged **[FUTURE]**, not scheduled (M4 explicitly not scheduled) |
+
+## 6. the queue this implies, in order, with the first measurement for each
+
+1. **3.2 workspace budget** — `gemm_algo_sweep --workspace-mib 512` at M=512, paired against the 128 MiB
+   result already in §1. Minutes, no new code. *Main agent.*
+2. **1.6 `gdn_rec` state dtype + traffic census** — CPU census of the layout and bytes-per-launch, to say what
+   fraction of 534 ms is state movement. *Worker.*
+3. **1.3 dependency-break falsifier** — decides whether `gdn_rec` is latency-bound and therefore whether 1.4
+   and 1.5 get funded. This is the single highest-value open measurement on the box: the family is 48 % of the
+   wave and every existing model of it is an inference rather than a measurement. *Worker builds, main agent
+   measures.*
+4. **2.4 WMMA attention touch** — priced on CPU against the 45-slot body before any device time, then one
+   A/B. *Worker.*
+5. **2.6 attn tile occupancy** — one `--time-waves` window with block-size variants; tells 2.4 whether it has
+   scheduling headroom. *Main agent.*
+6. **1.7 / 4.1 / 4.2 fusion censuses** — census only; no fusion gets funded without a bytes figure first, per
+   D21. *Worker.*
+7. **3.4 / 3.5** — the two small matmul items, ranked in situ. *Worker builds, main agent measures.*
+8. **3.3 hand WMMA GEMM** — deliberately last, and only if 3.2 comes back empty.
+
+Items 1.2, 2.1, 2.2, 2.3, 3.1, 4.3, 4.4 are closed with evidence on the record. 2.5 is blocked on a numerics
+admission, and 5.1–5.3 are out of authority or out of scope. **If items 1–7 all come back negative, then the
+prefill wave at 4096 lanes has no remaining route above the noise except raising the lane ceiling (2.5) and
+quantisation (5.1)** — which is the honest statement of where this ends, and the reason 1.3 matters more than
+anything else on the list.
