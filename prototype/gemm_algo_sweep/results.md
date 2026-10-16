@@ -322,7 +322,7 @@ Fill in only from measured rows:
   `in_proj_qkv` (34.61 TFLOP/s best) at M = 512 are within 1.06–1.09× of the best any enumerated kernel
   found, so no algo work is owed there — the engine's own call is what lags them (1.220× and 1.068×).
 * **what enumeration reveals that timing cannot:** of 15,750 enumerated (algo, shape) entries,
-  **15,077 request more workspace than the engine's 128 MiB** (`engine/kernels_gemm.cpp:59`) and are
+  **15,077 request more workspace than the engine's 128 MiB** (`engine/kernels_gemm.cpp:60`) and are
   therefore unreachable at the engine's budget — `skipped_workspace=0` per shape among the twelve that
   survived, `skipped_unsupported=368` and `skipped_cap=370`. So the 12 candidates timed per shape are not
   a sample of the catalogue, they are almost the whole of what this workspace budget admits. Raising the
@@ -373,3 +373,121 @@ Three things this says that the burst sweep could not:
    pin-facing section passes and `lt`'s pooled numbers are *better* than `library`'s. That is a
    band-re derivation, not a bug, and it must be derived from a measured spread rather than by editing a
    constant. Until it is, the default stays `library` and a red gate stays red.
+
+## 3d. The pin set that regression needs, read off §1's own columns (2026-10-16)
+
+§3c's lesson 2 named the remedy but did not write it down, so this is the table that `algo_pins()`
+(`engine/kernels_gemm.cpp`) now carries. The test is **`default_ms` against `engine_call_ms`**, not
+`best_ms` against anything: a shape only needs a pin if the heuristic's rank-0 — all an unpinned `lt`
+run gets — is slower than the `hipblasGemmEx` call this engine makes today. Every column below is §1's
+`RESULT` line for that shape at `M=512`; no new timing was taken to build this table, and `lt0/engine`
+< 1 means `lt` already wins without help.
+
+| shape | rank-0 ms | engine ms | winner ms | **lt0/engine** | winner/engine | pinned? |
+|---|---|---|---|---|---|---|
+| `q_proj` | 0.1271 | 0.1551 | 0.1271 | **0.820** | 0.820 | no — rank-0 already wins |
+| `k_proj+v_proj` | 0.0202 | 0.0328 | 0.0202 | **0.616** | 0.616 | no |
+| `o_proj+out_proj` | 0.0871 | 0.0801 | 0.0766 | **1.087** ⚠ | 0.956 | **yes** — `best_seq=5`, `idx=905` |
+| `in_proj_qkv` | 0.2000 | 0.1989 | 0.1862 | **1.006** ⚠ | 0.936 | **yes** — `best_seq=1`, `idx=1210` |
+| `in_proj_z` | 0.0684 | 0.0930 | 0.0684 | **0.736** | 0.736 | no |
+| `gate_proj+up_proj` | 0.1259 | 0.1462 | 0.1180 | **0.861** | 0.807 | no — but see below |
+| `down_proj` | 0.1439 | 0.1313 | 0.1169 | **1.096** ⚠ | 0.890 | **yes** — `best_seq=1`, `idx=905` |
+
+Three pins, then: `down_proj` (the one §3c measured as a 0.78–0.81× family regression), `o_proj+out_proj`
+(1.087× slower than the engine's call, and 48 calls per wave) and `in_proj_qkv` (1.006×, which is inside
+the burst's own few-percent spread — that pin rests on its winner being 1.075× over its own rank-0,
+0.50 ms per 24-layer wave at 36 calls, not on the 0.6 %).
+
+**The bytes were captured, not transcribed.** `gemm_algo_sweep --verify --rows 512 --algo-dump <f>`
+writes one `ALGODUMP` line per enumerated algorithm, and a pin is the `data=` field of the line whose
+`seq`/`idx` match the `RESULT` line's `best_seq`/`best_idx`. That the capture is the same population the
+engine's heuristic sees is checkable, not assumed: the dump's `heur_rank=0` line for
+`down_proj M=512` carries `data=37040000…`, and `37040000…` is the identical 24 bytes every pre-pin
+`--gemm lt` log prints as that shape's rank-0 pick (`GEMM-LT shape=down_proj … source=heuristic-rank-0
+algo=37040000…`). The equality re-derives from one command on each side — `--verify --rows 512` for the
+engine's pick, `--verify --algo-dump` for the capture — so it does not depend on any log surviving.
+
+| pin (N, K, M) | `seq`/`idx` | `data` (the whole `hipblasLtMatmulAlgo_t`) | kernel |
+|---|---|---|---|
+| `o_proj+out_proj` 1024, 2048, 512 | 5 / 905 | `890300000000000000000000000000000000000800000000` | `MT64x128x64_MI16x16x1 … WG16_8_1_WGM8` |
+| `in_proj_qkv` 6144, 1024, 512 | 1 / 1210 | `ba0400000000000000000000000000000000000800000000` | `MT128x64x64_MI16x16x1 … WG32_4_1_WGM8` |
+| `down_proj` 1024, 3584, 512 | 1 / 905 | `890300000000000000000000000000000000000800000000` | `MT64x128x64_MI16x16x1 … WG16_8_1_WGM8` |
+
+`o_proj+out_proj` and `down_proj` land on the same algorithm record — same kernel, two shapes — which is
+why their hexes are identical. Captured on hipBLASLt **10.4.1**; a pin is provenance-bound to that
+version (the engine prints it on the `GEMM` line) and must be re-captured, not inherited, after a bump.
+All three bind at `M = kMaxWaveRows` only: a partial wave (640 lanes = 512 + 128) or a prompt-shaped
+body (dec8 plans `M=17`) still takes the heuristic, which is the state §3c's 1.120× was measured in.
+
+Three things this deliberately does **not** take.
+
+* **`gate_proj+up_proj`'s winner is a further 1.067× over its own rank-0 and is left on the table.** Its
+  rank-0 already beats the engine's call by 1.16×, so nothing is regressing; taking the winner would be
+  new speed rather than a recovered regression, at 96 calls per wave, and it belongs in its own funded
+  change with its own paired A/B. Same for the three shapes whose `ratio` is 1.000 — there is nothing to
+  pin there, rank-0 is the best of the twelve.
+* **No pin at `M=1024/4096`.** §3a retired those widths: the engine never issues a wave wider than
+  `kMaxWaveRows`.
+* **No raising of the 128 MiB workspace cap**, which is what makes 15 077 of 15 750 enumerated records
+  unreachable (§4). That is a separate, unpriced question and the pins inherit the cap.
+
+What a pin cannot do is being said plainly, because §3c's own numbers say it: at `down_proj` the pinned
+kernel is 0.890× of the engine's `hipblasGemmEx` call in a warm burst, while the in-situ `mlp_down`
+family measured 0.812× of it under rank-0 where the burst priced only a 1.096× deficit. Burst and
+in-situ do not move by the same factor (§3b is the whole argument for that), so a pin that recovers the
+burst deficit is not a promise about the wave row. Confirming that `mlp_down` lands at or above the
+`library` figure **inside one paired window** is the main agent's measurement, not anything here.
+
+The other half of §3c's blocker — section (h)'s band — is a numerics question, not an algo question, and
+is written up where the band lives: `engine/results.md` (“Route (c) follow-up”) and
+`CASCADE_BAND`/`wave_row_1cos_band()` in `engine/gate.py`, measured by
+`engine/wave_band_floor_probe.py`.
+
+## 3d. The pins, measured in situ: a burst winner can be an in-situ loser, and one of the three was harmful
+
+`--gemm-pins all|none|<csv>` is a runtime knob (`engine/kernels_gemm.cpp::gemm_pins_select`), added by the
+main agent precisely because a pin subset can only be adjudicated in situ and a rebuild-per-subset would put
+each side in a different window. Four configs, 1024 lanes, medians of 3, all twelve runs in one lock hold:
+
+| config | `GROUP` | `proj` | `mlp_gateup` | `mlp_down` | **whole wave** | tok/s |
+|---|---|---|---|---|---|---|
+| `library` / no pins | 70.84 | 38.79 | 25.29 | 6.43 | 239.43 | 4277 |
+| `lt` / no pins (rank-0) | 48.79 | 25.22 | 15.66 | **7.81** ⚠ | 218.85 | 4679 |
+| **`lt` / `down_proj` only** | **47.68** | **24.82** | 15.96 | 6.78 | **215.32** | **4756** |
+| `lt` / all three pins | 52.85 | 30.35 | 15.71 | 6.54 | 218.69 | 4682 |
+
+**The two pins the burst priced as wins cost 5.5 ms of a 24.8 ms `proj` family.** `o_proj+out_proj` and
+`in_proj_qkv` were selected on the rule "rank-0 is slower than the engine's call at M=512, this algo is
+faster" — true in the warm burst (0.956× and 0.936× of the engine call), false in situ, where they landed at
+30.35 ms against rank-0's 25.22 ms. `down_proj` is the one shape where the burst and the wave agree, and it
+is kept: rank-0 7.81 ms → 6.78 ms against the library's 6.43 ms. The pin table is now one entry.
+
+That is the same lesson as §3c point 1 one layer down: **a warm-burst per-call ranking does not transfer to
+in-situ family time**, first in the flattering direction (my mix was 4× low), now in the painful one (a pin
+that measured 4 % better in a burst was 22 % worse in the wave). A pin earns its place in situ or not at all,
+and `algo_pins()` without an in-situ A/B would have shipped a regression dressed as an optimization.
+
+### Final measured configuration, both widths, one window each, medians of 3
+
+| width | `GROUP` | `proj` | `mlp_gateup` | `mlp_down` | whole wave | prefill tok/s |
+|---|---|---|---|---|---|---|
+| 1024 lanes | 71.11 → **47.32 (1.503×)** | 38.64 → 24.75 (1.561×) | 26.23 → 15.92 (1.647×) | 6.24 → 6.60 (0.945×) | 238.02 → **214.40 (1.110×)** | 4302 → **4776 (+11.0 %)** |
+| 3072 lanes | 210.10 → **145.26 (1.446×)** | 115.25 → 75.31 (1.530×) | 75.53 → 49.56 (1.524×) | 19.15 → 20.44 (0.937×) | 794.96 → **733.24 (1.084×)** | 3864 → **4190 (+8.4 %)** |
+
+`WAVEPARITY tokens_identical=1 logits_bitidentical=1` on every run, both routes, both widths.
+
+### Gate state before any default flip, and one red that stops it
+
+Full set (`dec8 dec64f dec64t chunk64b p128 mt32f wide520f wide640f wide1024f`) × both routes: **every
+fixture `rc=0 fail=0` except `wide520f --gemm lt`, which reads `rc=1 fail=1`.** The red is not a band
+overrun — the per-row `1-cos` check passes at 1.077e-03 against a 2.75e-03 band — it is a **token flip above
+the coin-toss threshold**: section (h) batched-vs-carry reports `1 RED: prefill row 180: 13 vs 248046 with
+room 0.124807 (both sides' own gaps 0.182308 / 0.124807)`, where the rule treats room < 0.10 as a coin
+toss. `library` does not produce that flip; six other thin-room flips on the same fixture are all inside the
+rule. So **the default stays `library`** and `lt` remains opt-in until the row is understood.
+
+And a provenance mistake I made, recorded rather than hidden: the worker derived that 2.75e-03 band **on the
+three-pin algo set** — the band text names `engine/kernels_gemm.cpp algo_pins()` as the set it was measured
+on — and then I trimmed the pin table to one entry. The band is therefore stated against a pin set the
+binary no longer uses. It still passed on the final set, but it must be re-derived on the shipping set before
+it is cited again, and `engine/wave_band_floor_probe.py` is the thing that does it.

@@ -669,3 +669,29 @@ that was measured for the **hipBLAS-vs-hand** pairing — a different independen
 pin-facing section passes and lt's pooled numbers are better than library's (meanrel 1.429e-02 vs
 1.433e-02). The remedy is to re-derive that band from a measured spread for the new pairing and re-run the
 must-catch witnesses, not to edit the constant. A red gate does not get flipped by a big number next to it.
+
+## D28 — pins adjudicated in situ: keep only `down_proj`; final `--gemm lt` is +11.0 % prefill at 1024 and +8.4 % at 3072, and one red row holds the default
+
+`prototype/gemm_algo_sweep/results.md` §3d. Added `--gemm-pins all|none|<csv>` as a runtime knob (main-agent
+edit, because a pin subset is only adjudicable in situ and a rebuild per subset would put each side in a
+different window). Four configs in one hold: rank-0 218.85 ms, down_proj-only **215.32 ms**, all-three-pins
+218.69 ms against library 239.43 ms.
+
+**The two extra pins cost 5.5 ms of a 24.8 ms `proj` family** (25.22 → 30.35 ms) while having measured
+4–6 % better in a warm burst. Same lesson as D27 one layer down, now in the painful direction: a warm-burst
+per-call ranking does not transfer to in-situ family time. Pin table is one entry; `algo_pins()` without an
+in-situ A/B would have shipped a regression dressed as an optimization.
+
+Final: 1024 lanes GROUP 1.503×, whole wave 238.02 → 214.40 ms (**+11.0 %**, 4302 → 4776 tok/s); 3072 lanes
+GROUP 1.446×, wave 794.96 → 733.24 ms (**+8.4 %**, 3864 → 4190 tok/s); parity 1/1 everywhere.
+
+**Gate state: 9 fixtures × both routes — all green except `wide520f --gemm lt`.** Not a band overrun
+(per-row 1-cos 1.077e-03 vs a 2.75e-03 band) but a token flip above the coin-toss rule: batched-vs-carry
+`1 RED: prefill row 180: 13 vs 248046 with room 0.124807 (own gaps 0.182308 / 0.124807)` where room < 0.10 is
+a coin toss and this row sits just above it; `library` does not flip it. **Default stays `library`** — a
+borderline row that only the candidate route flips is exactly the thing not to ship past on the strength of
+the headline next to it.
+
+Provenance error of mine, recorded: the 2.75e-03 band was derived by the worker **on the three-pin algo set**
+(the band text names `algo_pins()`), and I then trimmed the table to one. It still passes on the final set,
+but the band must be re-derived on the set the binary actually ships before it is cited again.
