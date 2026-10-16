@@ -252,3 +252,39 @@ arithmetic leg whose measured op is not the op in the billed span is worse than 
 billed at the staging loop), and the WMMA lane layout gets a witness before any WMMA timing is
 trusted — `--wmma-check` must print the ones / cadd / feederA / feederB results, since a wrong lane
 map reproduces plausible numbers on a symmetric fixture.
+
+## D16 — the matrix ceiling measured: 52.6 TFLOP/s, and `attn` was never at an issue floor
+
+Device window 2026-10-16 ~02:20–02:50, `tools/gpu_lock.sh` held, zero subagents, blocking, best-of
+20 launches × 5 reps. Table and caveats: `prototype/issue_rate_probe/results.md`; raw rows:
+`progress/bench/evidence/issue-rate-probe-2026-10-16/G_raw_rows.txt`.
+
+1. **`v_wmma_f32_16x16x16_f16` sustains 52.63 TFLOP/s = 88.8 % of the 59.36 roof**, against the
+   engine's 4.696 TFLOP/s through hipBLASLt: **11.2×**. The 60 TFLOPS is therefore settled on
+   device, not just on paper — the instruction reaches its roof in a loop and nothing in the shipped
+   stack issues one (0 of 55 `gfx1151` code objects, `tools/isa_probe.sh`).
+2. **`v_dot2_f32_bf16` sustains 23.28 TFLOP/s = 4.1× our current library path**, and it is a *bf16*
+   instruction: no format change, no range question, only a reduction-association change (which still
+   has to survive the §05.5 ordered-reduction logic, so it is a numerics change of a smaller kind).
+   Cheapest big lever found so far, and it does not need the fp16 discussion at all.
+3. **The 1-wide issue floor was wrong.** `rocminfo` says 2 SIMDs per CU, and the probe sustains
+   0.493 (scalar) to 3.552 (WMMA) MAC/lane/clk against roofs of 1 to 4. Re-read against a 2-wide
+   issue, `attn_tile_wave` is at **~47 %**, not the 92–95 % of §03 — so D8's discriminator resolved
+   in favour of **bytes**, and M-tiling goes back above instruction-count surgery. §03's sentence
+   stands as written history; this is the correction, and the reason it survived is recorded in the
+   results doc §3: the earlier pass had no measured arithmetic ceiling beside its instruction count.
+4. **One number that must not be quoted.** The probe's own `pct_of_ceiling` claimed 172 % and 248 %
+   because its `mac_per_lane_clk` column was warp-instructions-per-CU-per-clock wearing a MAC label.
+   Caught because a value above a roof is impossible by construction, which is the same tripwire that
+   caught `41 wavefronts per CU` (D10). The corrected arithmetic lives in
+   `prototype/issue_rate_probe/tabulate.py`; the binary's columns are flagged dead in results.md §0.
+5. **Not yet licensed by this measurement**: any int8 route (integer legs are raw-dot ceilings at
+   47–48 % of roof, no dequant cost modelled, and bands are a D13 exclusion), and any WMMA kernel
+   that hand-rolls a fragment layout — the on-device `--wmma-check` proved the accumulating dot and
+   the D==16+C wiring but its feeder probe was too degenerate to recover the k-slot pairing
+   (`tile SKIPPED … NOT DECIDABLE`), so a real kernel uses the builtin's fragment abstraction.
+
+Next, in order: (i) route the dot2-bf16 finding into the attention score loop, where the ordered
+reduction already exists and the format is unchanged; (ii) prototype a WMMA score path through the
+fragment abstraction with the layout question closed properly; (iii) re-take the byte-vs-issue call
+for M-tiling now that the issue wall is half as tall as claimed.

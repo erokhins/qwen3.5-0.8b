@@ -157,3 +157,13 @@ scanned. A counter that cannot reproduce a 485 MiB known workload cannot adjudic
   mantissa gain on bf16 inside its range, and nothing pinned exceeds that range, decision log D13/D14);
   its cost is now gated on the WMMA measurement below, not on approval. §6.3 weight
   quantisation (out of scope unless asked), §6.4 MTP on GPU (never priced on device).
+
+## Correction, taken the same day: the 1-wide issue floor this document assumes does not exist
+
+§3's "92–95 % of a 1-warp-inst/CU/clk issue floor" was measured correctly and bounded wrongly: the
+part has **two** issue slots per CU (`rocminfo`: SIMDs per CU = 2), and a later device window
+measured the arithmetic directly — scalar `v_fma_f32` at 0.493 of a 1-MAC/lane/clk roof, `dot2` at
+1.57 of 2, `v_wmma_f32_16x16x16_f16` at 3.55 of 4 (52.63 TFLOP/s, 88.8 % of the matrix roof).
+Re-read against 2 slots, `attn_tile_wave` is near 47 %, not 95 %, so the byte wall is back in front
+and M-tiling outranks instruction-count surgery. Detail and the numbers that came with it:
+decision log **D16**, `prototype/issue_rate_probe/results.md` §1 and §3.

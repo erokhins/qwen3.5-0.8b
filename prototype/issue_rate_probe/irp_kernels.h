@@ -50,6 +50,7 @@
 #define IRP_KERNELS_H
 
 #include <hip/hip_bfloat16.h>
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -127,6 +128,8 @@ struct Args {
     float* __restrict__ each;     // per-thread partials, selftest only (see `each` below)
     int verify;                   // uniform across the block, so the barriers inside are safe
     int inject;                   // Inject, see below
+    const __half* __restrict__ frag;  // 32 fp16: the WMMA legs' A and B fragments (16 each), read
+                                      // from memory so the compiler cannot fold the operands away
 };
 
 enum Inject {
@@ -317,10 +320,46 @@ constexpr int kLdsRows = kAttnTileLdsBytes / kRowBytes;          // 24 rows of 2
 constexpr int kLdsWords = kAttnTileLdsBytes / 16;                // 768 uint4 stage words
 constexpr int kLdsWordsPerThread = kLdsWords / kAttnTileThreads; // 6 per thread
 constexpr int kLdsElemsPerThread = kLdsWordsPerThread * 8;       // 48 BF16 read back per thread
+constexpr int kLdsPhaseCount = 4;     // how many opaque read-address rotations one burst cycles
+constexpr int kLdsRotSlot = 20;       // Args::p slots holding them; 8..15 are the KV dot's query
+constexpr int kLdsSrcTileElems = kLdsRows * kHeadDim;   // one 12,288 B source tile of BF16
 
 __device__ __forceinline__ float irp_tag(int e) { return (float)(1 + (e % 7)); }
 
-__global__ void irp_lds_tile(const Args a, const int reuse) {
+// THE TILE IS STAGED FROM A REAL DEVICE BUFFER AND READ BACK THROUGH AN OPAQUE ADDRESS, and both
+// halves of that sentence are load-bearing. There are three separate ways this measurement can be a
+// lie without any of them looking like a bug:
+//
+//  1. LOOP-INVARIANT VALUES. If the staged value depends only on the tile address the reads can be
+//     hoisted out of the loop. The previous run's disassembly showed exactly that: the billed span
+//     held 6 `ds_store_b128` and not one `ds_read`, so the row measured a hoist and called it LDS.
+//  2. KNOWABLE VALUES. Even with a trip-varying staged value, if the compiler can compute what was
+//     stored it forwards store to load across the barrier and the 48 reads become 48 `v_bfe`+`v_cvt`
+//     pairs materialising constants - measured in this session at 1,220 instructions per iteration
+//     with no LDS traffic whatsoever. So the tile is filled from a real device buffer, the way attn
+//     stages a real K row, and nothing about its contents is knowable at compile time.
+//  3. PROVABLY-ALIASED ADDRESSES. With opaque contents but a read address the compiler can prove
+//     equal to a write address it can still forward. So the read side adds a rotation `r` taken from
+//     device memory: `off = row*DH + ((lane + r) & 31)*8`. At run time r is 0 and each thread reads
+//     its own lane's words, which keeps both accounts simple; the compiler cannot know that, so it
+//     must emit real LDS loads instead of forwarded registers.
+//  4. IDENTICAL CONTENT EVERY TRIP. With (1)-(3) in place the compiler still peeled the read block
+//     out of the loop, because the tile held the same bytes on every trip: it precomputed the reads
+//     once and left a loop adding constants (measured: a 13-instruction loop of 6 `v_add_f32` and no
+//     LDS access). So trip i stages source tile `i % kLdsPhaseCount`, four tiles with DIFFERENT
+//     contents. That is what attn does anyway - it stages a new K slab per iteration rather than the
+//     same one - and it is what makes the reads load-bearing on each trip.
+//
+// `isa_census.py` requires 48 `ds_read_b16`, at least one staged LDS write and at least one global
+// load inside the billed span, so each of those three failure modes stops the build instead of
+// becoming a plausible-looking row. And every read result feeds `acc`, the value the block publishes:
+// a read whose result is discarded is not a read the machine had to perform.
+//
+// The tag carries the LANE index (it varies per element within a row), which is what makes per-thread
+// sums distinct and therefore makes the per-thread witness able to see a permutation of reads. The KV
+// kernel's tag is warp-uniform on purpose instead: its witness is the block sum, and warp-uniform
+// values are what make a stolen row invisible per-warp but plain per-row. See BLOCKER 4.
+__global__ void irp_lds_tile(const Args a, const hip_bfloat16* __restrict__ src, const int reuse) {
     extern __shared__ __align__(16) unsigned char raw[];
     hip_bfloat16* tile = reinterpret_cast<hip_bfloat16*>(raw);
     double* const sh = reinterpret_cast<double*>(raw);   // valid only after the read-side barrier
@@ -330,20 +369,26 @@ __global__ void irp_lds_tile(const Args a, const int reuse) {
     float acc = 0.0f;
     _Pragma("unroll 1")
     for (unsigned long long i = 0; i < a.iters; ++i) {
-        // ---- stage: 6 uint4 per thread, one per row this warp owns (rows w, w+nw, w+2nw, ...).
-        // The uint4 is assembled in registers and stored as ONE ds_store_b128, which is the width
-        // attn's staging uses (`*reinterpret_cast<uint4*>(&s_k[slot*DH + lane*8]) = ...`).
+        // The rotation, from memory: uniform across the block (so the read map stays a bijection) and
+        // unknown to the compiler (so the reads can be neither forwarded nor hoisted). It is 0 at run
+        // time; see `mirror_lds_thread`, which models the run-time value, not the unknown one.
+        const unsigned long long ph = i % (unsigned long long)kLdsPhaseCount;
+        const int r = (int)a.p[kLdsRotSlot + ph];
+        // The phase's source tile: different bytes per trip, so the reads below cannot be computed
+        // once outside the loop. `kLdsSrcTileElems` is one tile, so this walks four 12 KiB tiles.
+        const hip_bfloat16* srcp = src + ph * (unsigned long long)kLdsSrcTileElems;
+        // ---- stage: 6 uint4 per thread, one per row this warp owns (rows w, w+nw, w+2nw, ...), one
+        // ds_store_b128 each, which is the width attn's staging uses
+        // (`*reinterpret_cast<uint4*>(&s_k[slot*DH + lane*8]) = ...`).
         _Pragma("unroll")
         for (int k = 0; k < kLdsWordsPerThread; ++k) {
             const int row = w + k * nw;
-            union { uint4 u; hip_bfloat16 e[8]; } v;
             const int base = row * kHeadDim + lane * 8;
-            _Pragma("unroll")
-            for (int t = 0; t < 8; ++t) v.e[t] = hip_bfloat16(irp_tag(base + t));
-            *reinterpret_cast<uint4*>(&tile[base]) = v.u;
+            *reinterpret_cast<uint4*>(&tile[base]) = *reinterpret_cast<const uint4*>(&srcp[base]);
         }
         __syncthreads();                              // tile published
-        // ---- read back: 48 ds_read_u16 per thread, one FMA each, in attn's dot shape
+        // ---- read back: 48 ds_read_b16 per thread, one FMA each, in attn's dot shape - the same
+        // "a lane owns 8 contiguous elements and dots them against q" pattern `attn_tile_wave` uses.
         const float q = a.p[0];
         for (int rep = 0; rep < reuse; ++rep) {
             _Pragma("unroll")
@@ -359,7 +404,12 @@ __global__ void irp_lds_tile(const Args a, const int reuse) {
                 // only the per-thread mirror can see it. A row-level rotation would NOT do: with
                 // nw = threads/32 = 4 the warp row-cosets carry equal tag sums, so a row rotation is
                 // invisible to BOTH witnesses and the control would be vacuous (measured: differ=0).
-                int off = row * kHeadDim + lane * 8;
+                // The trip index is IN THE ADDRESS on purpose. Contents that vary per trip are not
+                // enough on their own: measured on this compiler, a read block whose address is a
+                // function of the trip number alone gets peeled out and multiplied by the trip count.
+                // With `i` in the address and `r` knowable only at run time, the 48 element loads must
+                // be issued inside the loop, which is the whole point of the row.
+                int off = row * kHeadDim + ((lane + (int)i + r) & (warpSize - 1)) * 8;
                 if (IRP_NEG == kInjLdsSwap) off ^= 8;      // lane ^= 1 in element units
                 if (IRP_NEG == kInjLdsShort && row == kLdsRows - 1) continue;
                 float dot = 0.0f;
@@ -453,6 +503,14 @@ __global__ void fill_rows_k(hip_bfloat16* p, unsigned long long n, unsigned long
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += s)
         p[i] = hip_bfloat16((float)(1.0 + (double)((i / kHeadDim) % mod)));
 }
+// The LDS tile's source: a tag that varies PER ELEMENT (1 + e%7), so the threads reading different
+// lanes' words hold genuinely different values and the per-thread witness can see a permuted read.
+// `fill_rows_k` is row-constant on purpose for the KV shape; this one is the opposite case.
+__global__ void fill_tag_k(hip_bfloat16* p, size_t n) {
+    const size_t s = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += s)
+        p[i] = hip_bfloat16((float)(1 + (int)(i % 7)));
+}
 __global__ void fill_const_k(hip_bfloat16* p, size_t n, float v) {
     const size_t s = (size_t)gridDim.x * blockDim.x;
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += s)
@@ -460,5 +518,7 @@ __global__ void fill_const_k(hip_bfloat16* p, size_t n, float v) {
 }
 
 }  // namespace irp
+
+#include "irp_arith_kernels.h"   // the arithmetic-path legs; needs `namespace irp` to be complete
 
 #endif  // IRP_KERNELS_H

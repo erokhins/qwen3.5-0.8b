@@ -46,10 +46,12 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -96,33 +98,96 @@ struct Cfg {
     bool selftest_geom = false;
     bool guards = false;                    // selftest only: poison bands around every region
     bool want_each = false;                 // selftest only: per-thread account
+    bool wmma_check = false;                // the WMMA correctness probe: device, no timing
+    bool wmma_dump = false;                 // ... and print the derived feeder map
     int child_case = -1;
 };
 
 struct Kernel {
     const char* name;
-    const char* family;     // valu | serial | cvt | lds | kv
+    const char* family;      // valu | serial | cvt | lds | kv | mac | wmma
     int chains;
     const void* fn;
-    unsigned long long wi;  // warp-inst per iteration, read out of the disassembly
+    unsigned long long wi;   // warp-inst per iteration, from the disassembly (IRP_WI_)
+    unsigned long long ops;  // measured ops per iteration, from the disassembly (IRP_OPS_)
+    double mac_per_op;       // MACs per LANE per op of the billed instruction
+    double ceil_mac;         // ceiling in MAC/lane/clk, `devices/strix-halo-official-specs.md` §7
+    // The arithmetic legs (`mac`, `wmma`) are closed-form predictable, so their witness is an
+    // equality and needs no tolerance. The published per-thread value is
+    //     seed0 + seed_lane * lane + delta * ops * iters
+    // with `ops` taken from the DISASSEMBLY, not from the source: if the compiler duplicated or
+    // dropped an op the witness disagrees instead of agreeing with a wrong kernel.
+    double delta;            // one op's contribution to that sum
+    double seed0, seed_lane; // the accumulator seeds, as the same closed form
+    // The exactness bound applies to ONE accumulator (one fp16 HALF on the packed leg), not to the
+    // per-thread tally, which is why these are separate from `seed0`/`seed_lane`: on irp_pkf16_8 the
+    // tally is the sum of 8 accumulators x 2 halves, so booking the tally against 2^11 rejected every
+    // plan at 128 threads (cap came out negative) while one half never exceeds 8 + lane.
+    double acc_seed0, acc_seed_lane;
+    double acc_grow, acc_bound;  // per-iteration growth of ONE accumulator, and the largest value
+                                 // that accumulator's own type carries exactly (see plan_build)
+    unsigned word_m, word_b; // operand bit patterns handed to the kernel in p[16], p[17]
     const char* note;
 };
 
-#define IRP_K(NAME, FAMILY, CHAINS, NOTE) \
-    Kernel { #NAME, FAMILY, CHAINS, (const void*)(NAME), IRP_WI_##NAME, NOTE }
+#define IRP_K(NM, FAM, CH, MAC_, CEIL_, NOTE)                                   \
+    Kernel { #NM, FAM, CH, (const void*)(NM), IRP_WI_##NM, IRP_OPS_##NM, MAC_, CEIL_,            \
+             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0u, 0u, NOTE }
+#define IRP_AK(NM, FAM, CH, MAC_, CEIL_, DELTA_, S0, SL, AS0, ASL, GROW, BOUND, WM, WB, NOTE)           \
+    Kernel { #NM, FAM, CH, (const void*)(NM), IRP_WI_##NM, IRP_OPS_##NM, MAC_, CEIL_,            \
+             DELTA_, S0, SL, AS0, ASL, GROW, BOUND, WM, WB, NOTE }
+
+using irp_arith::kBf0;   using irp_arith::kBf1;   using irp_arith::kI4_1;  using irp_arith::kI8_1;
+using irp_arith::kPk1;   using irp_arith::kF16ExactInt;  using irp_arith::kI32ExactInt;
+// The arithmetic legs live in `namespace irp_arith` so the census can slice them apart from the
+// traffic kernels by mangled name; the table below refers to them by their plain names.
+using namespace irp_arith;
+
+// The operand column and the delta column are a PAIR: every field of every operand is 1, which is what
+// makes one op contribute exactly its MAC count to the accumulator (2 for a packed fp16 FMA because
+// each half adds 1; 16 per D element for a WMMA because K = 16). `irp_mix_8` is the one exception and
+// carries a zero in b's high bf16 half, so its increment is 1 under either reading of the mixed FMA.
+// clang-format off
 const Kernel kKernels[] = {
-    IRP_K(irp_fma_1, "valu", 1, "one FMA per thread per iteration"),
-    IRP_K(irp_fma_4, "valu", 4, ""),
-    IRP_K(irp_fma_8, "valu", 8, ""),
-    IRP_K(irp_fma_16, "valu", 16, ""),
-    IRP_K(irp_fma_32, "valu", 32, ""),
-    IRP_K(irp_serial_8, "serial", 8, "8 FMAs in ONE dependency chain: latency, not issue"),
-    IRP_K(irp_serial_32, "serial", 32, ""),
-    IRP_K(irp_cvt_8, "cvt", 8, "a bf16->f32 conversion feeding every FMA (attn score shape)"),
-    IRP_K(irp_cvt_16, "cvt", 16, ""),
-    IRP_K(irp_lds_tile, "lds", 0, "write+read 12,288 B of LDS per iteration (attn LDS block size)"),
-    IRP_K(irp_kv_read, "kv", 0, "one warp per 512 B KV row, both KV heads, dot at the use site"),
+    IRP_K(irp_fma_1,   "valu",  1, 1.0, 1.0, "one FMA per thread per iteration"),
+    IRP_K(irp_fma_4,   "valu",  4, 1.0, 1.0, ""),
+    IRP_K(irp_fma_8,   "valu",  8, 1.0, 1.0, ""),
+    IRP_K(irp_fma_16,  "valu", 16, 1.0, 1.0, ""),
+    IRP_K(irp_fma_32,  "valu", 32, 1.0, 1.0, ""),
+    IRP_K(irp_serial_8,  "serial",  8, 1.0, 1.0, "8 FMAs in ONE dependency chain: latency, not issue"),
+    IRP_K(irp_serial_32, "serial", 32, 1.0, 1.0, ""),
+    IRP_K(irp_cvt_8,   "cvt",  8, 1.0, 1.0, "a bf16->f32 conversion feeding every FMA (attn score shape)"),
+    IRP_K(irp_cvt_16,  "cvt", 16, 1.0, 1.0, ""),
+    // The two TRAFFIC rows carry `mac_per_op = 0`: their loop shape mixes loads, unpacking and the
+    // dot, so "MACs per warp-instruction" has no honest value, and they are judged by their GB/s
+    // column instead. The arithmetic rows below are the ones with ceilings to be measured against.
+    IRP_K(irp_lds_tile,   "lds", 0, 0.0, 0.0, "stage 12,288 B global->LDS and read it back (attn's tile)"),
+    IRP_K(irp_kv_read,    "kv",  0, 0.0, 0.0, "one warp per 512 B KV row, both KV heads, dot at the use site"),
+    // ---- one row per arithmetic path. ceilings: 1 / 2 / 4 / 8 MAC per lane per clock, and 4 for
+    // WMMA (§7 rows). `acc_bound` is the accumulator's OWN exactness limit: fp16 2^11, f32 2^24,
+    // i32 2^31, which is why --iters cannot be raised freely on the packed-fp16 leg.
+    IRP_AK(irp_f32_8,    "mac",  8,   1.0, 1.0,   1.0, 36.0,  8.0,  8.0,  1.0,  1.0, kF32ExactInt, 0u, 0u,
+           "v_fma_f32 baseline through the same shape as every other leg"),
+    IRP_AK(irp_mix_8,    "mac",  8,   1.0, 1.0,   1.0, 36.0,  8.0,  8.0,  1.0,  1.0, kF32ExactInt, kBf1, kBf0,
+           "v_fma_mix_f32: the bf16-in/f32-out path rocBLAS's HS_HPA runs"),
+    IRP_AK(irp_pkf16_8,  "mac",  8,   2.0, 2.0,   2.0, 72.0, 16.0,  8.0,  1.0,  1.0, kF16ExactInt, kPk1, kPk1,
+           "v_pk_fma_f16: 2 MACs per lane per clock, fp16 accumulator (exact to 2^11)"),
+    IRP_AK(irp_d2f16_8,  "mac",  8,   2.0, 2.0,   2.0, 36.0,  8.0,  8.0,  1.0,  2.0, kF32ExactInt, kPk1, kPk1,
+           "v_dot2_f32_f16 plain form, f32 accumulator"),
+    IRP_AK(irp_d2bf16_8, "mac",  8,   2.0, 2.0,   2.0, 36.0,  8.0,  8.0,  1.0,  2.0, kF32ExactInt, kBf1, kBf1,
+           "v_dot2_f32_bf16: the only bf16 2-MAC path on this part"),
+    IRP_AK(irp_d4i8_8,   "mac",  8,   4.0, 4.0,   4.0, 36.0,  8.0,  8.0,  1.0,  4.0, kI32ExactInt, kI8_1, kI8_1,
+           "v_dot4_i32_i8 RAW dot rate; a real int8 GEMM adds dequant/zero-point on top"),
+    IRP_AK(irp_d8i4_8,   "mac",  8,   8.0, 8.0,   8.0, 36.0,  8.0,  8.0,  1.0,  8.0, kI32ExactInt, kI4_1, kI4_1,
+           "v_dot8_i32_i4 RAW dot rate (int4, not fp4: there is no fp4 or fp8 here)"),
+    IRP_AK(irp_u4u8_8,   "mac",  8,   4.0, 4.0,   4.0, 36.0,  8.0,  8.0,  1.0,  4.0, kI32ExactInt, kI8_1, kI8_1,
+           "v_dot4_u32_u8: the int8 spelling a frontend can actually reach"),
+    IRP_AK(irp_u8u4_8,   "mac",  8,   8.0, 8.0,   8.0, 36.0,  8.0,  8.0,  1.0,  8.0, kI32ExactInt, kI4_1, kI4_1,
+           "v_dot8_u32_u4: the int4 spelling a frontend can actually reach"),
+    IRP_AK(irp_wmma_4,   "wmma",  4, 128.0, 4.0, 128.0, 528.0, 32.0, 8.0, 1.0, 16.0, kF32ExactInt, 0u, 0u,
+           "v_wmma_f32_16x16x16_f16 accumulated over K; 4096 MAC per warp-inst"),
 };
+// clang-format on
 const Kernel* find_kernel(const std::string& n) {
     for (const Kernel& k : kKernels)
         if (n == k.name) return &k;
@@ -172,17 +237,35 @@ double mirror_per_thread(const Cfg& c, const Kernel& k, unsigned tid) {
     return s;
 }
 
-// lds: thread (w, lane) stages and re-reads rows w, w+nw, ... and the tile's value at element e is
-// 1 + (e % 7). Per-thread sums therefore differ by lane, which is exactly why the per-thread account
-// can see a slot alias and the block-sum account cannot.
+// lds: thread (w, lane) stages rows w, w+nw, ... of source tile `i % kLdsPhaseCount` and reads back
+// rows w, w+nw, ... at `((lane + i + r) & 31)`, where r is 0 at run time. The tile's value at flat
+// element e is 1 + (e % 7) - what `fill_tag_k` writes - so the per-iteration sum differs by phase
+// (each source tile starts at a different residue mod 7), by lane, and by trip index. The mirror
+// models the RUN-TIME r, because the account is about what the machine added, not about what the
+// compiler was allowed to assume. Per-thread sums differ by lane, which is exactly why the
+// per-thread account can see a slot alias and the block-sum account cannot.
 double mirror_lds_thread(int lane, int w, int nw, const Cfg& c) {
-    double per_iter = 0.0;
-    for (int k = 0; k < irp::kLdsWordsPerThread; ++k) {
-        const int row = w + k * nw;
-        const int base = row * kHeadDim + lane * 8;
-        for (int t = 0; t < 8; ++t) per_iter += valu_tag(base + t);
+    constexpr int kPeriod = 32 * irp::kLdsPhaseCount;   // (lane+i)&31 has period 32; tile has period 4
+    double per_residue[kPeriod];
+    for (int s = 0; s < kPeriod; ++s) {
+        const int ph = s % irp::kLdsPhaseCount;
+        const size_t tile_base = (size_t)ph * irp::kLdsSrcTileElems;
+        const int laneR = (lane + s) & (irp::kWarpWidth - 1);     // r == 0 at run time
+        double sum = 0.0;
+        for (int k = 0; k < irp::kLdsWordsPerThread; ++k) {
+            const int row = w + k * nw;
+            const size_t base = tile_base + (size_t)row * kHeadDim + (size_t)laneR * 8;
+            for (int t = 0; t < 8; ++t) sum += valu_tag((double)(base + t));
+        }
+        per_residue[s] = sum;
     }
-    return per_iter * (double)c.reuse * (double)c.iters;
+    double total = 0.0;
+    for (int s = 0; s < kPeriod; ++s) {
+        const unsigned long long n =
+            (c.iters + (unsigned long long)(kPeriod - 1 - s)) / (unsigned long long)kPeriod;
+        total += (double)n * per_residue[s];
+    }
+    return total * (double)c.reuse;
 }
 
 // kv: global warp gw reads rows gw, gw+nwarps, ... of every KV head, once per pass. Each of its 32
@@ -192,6 +275,13 @@ double mirror_kv_warp(unsigned long long gw, unsigned long long nwarps, unsigned
     double s = 0.0;
     for (unsigned long long r = gw; r < rows; r += nwarps) s += 8.0 * valu_tag((double)r);
     return s * (double)passes;
+}
+
+// The arithmetic legs: seed + delta per op, all integers, exact in the accumulator's own type.
+// `k.ops` is the disassembled op count, so the mirror and the kernel share a source of truth only for
+// the SEED and the OPERANDS; the op count itself is measured, which is the point of the census.
+double mirror_arith_thread(const Cfg& c, const Kernel& k, unsigned tid) {
+    return k.seed0 + k.seed_lane * (double)tid + k.delta * (double)k.ops * (double)c.iters;
 }
 
 // ---- device memory -------------------------------------------------------------------------
@@ -280,6 +370,7 @@ struct Plan {
     std::vector<double> exp_block;       // per-block expected block-reduced sum
     double expected_total = 0.0;
     double max_thread_sum = 0.0;         // for the F32-exactness bound
+    unsigned long long iters_cap = 0;    // set when the accumulator bound rejected `iters`: the largest that stays exact
     bool ok = false;
     std::string why;
 };
@@ -359,6 +450,19 @@ bool plan_build(const Cfg& c, Plan& p) {
                 per_thread * (double)irp::kWarpWidth;   // 32 lanes, equal shares
         }
         for (double v : p.exp_block) p.expected_total += v;
+    } else if (fam == "mac" || fam == "wmma") {
+        // One closed form per thread, and the only per-thread variation is the lane in the seed (the
+        // operands are warp-uniform on purpose: they come from one memory word, which is the attn
+        // score shape and also what keeps the accumulators in VGPRs).
+        double blk = 0.0, maxt = 0.0;
+        for (unsigned t = 0; t < (unsigned)c.threads; ++t) {
+            const double v = mirror_arith_thread(c, *p.k, t);
+            blk += v;
+            if (v > maxt) maxt = v;
+        }
+        p.max_thread_sum = maxt;
+        p.exp_block.assign(p.blocks, blk);
+        for (double x : p.exp_block) p.expected_total += x;
     } else {
         // The A family's per-thread values differ by thread index (the per-lane seed that keeps the
         // accumulators in VGPRs), so the block account is the closed form summed over threads rather
@@ -382,6 +486,27 @@ bool plan_build(const Cfg& c, Plan& p) {
                 std::to_string((long long)p.max_thread_sum) +
                 " would cross 2^24, where the equality stops being exact. Lower --iters (or --passes).";
         return false;
+    }
+    // THE ACCUMULATOR'S OWN EXACTNESS LIMIT, which is stricter than the tally's on the packed-fp16
+    // leg and looser on the integer ones. An fp16 accumulator carries exact integers only to 2^11, so
+    // `--iters 20000` on irp_pkf16_8 would silently wrap the witness: the run would still be a valid
+    // instruction-rate measurement but the equality gate would be lying, so the plan refuses and names
+    // the largest iters that keeps it exact. Lengthen the burst with --blocks or --launches instead; do
+    // not raise --iters past an accumulator's bit width.
+    if (p.k->acc_grow > 0.0) {
+        const double acc_max = p.k->acc_seed0 + p.k->acc_seed_lane * (double)(p.threads - 1)
+                             + p.k->acc_grow * (double)p.iters;
+        if (acc_max >= p.k->acc_bound) {
+            const double cap = (p.k->acc_bound - p.k->acc_seed0
+                                - p.k->acc_seed_lane * (double)(p.threads - 1)) / p.k->acc_grow;
+            p.iters_cap = (unsigned long long)cap;
+            p.why = std::string("one accumulator would reach ") + std::to_string((long long)acc_max) +
+                    " and this kernel's accumulator carries exact integers only to " +
+                    std::to_string((long long)p.k->acc_bound) +
+                    "; max --iters here is " + std::to_string((long long)cap) +
+                    ". Lengthen the burst with --blocks/--launches instead.";
+            return false;
+        }
     }
     p.ok = true;
     return true;
@@ -415,9 +540,29 @@ RunResult run_one(const Cfg& c, const Plan& p, double* icpcb_out, double* gbs_ou
         std::vector<float> h(operand_n, 0.0f);
         h[0] = 1.0f;                       // FMA multiplier: runtime 1.0, invisible to the compiler
         h[1] = 1.0f;                       // FMA addend
+        // lds: the four read-address rotations live at p[20..23] and are 0 at run time, so each
+        // thread reads the words it staged and `mirror_lds_thread` stays a closed form. They are
+        // unreadable to the compiler, which is what forces real `ds_read_b16` instead of forwarded
+        // registers. p[8..15] is the KV dot's query vector and must not overlap them.
+        for (int t = 0; t < irp::kLdsPhaseCount; ++t) h[20 + t] = 0.0f;
         for (int t = 0; t < 8; ++t) h[8 + t] = 1.0f;      // the kv dot's query vector
         for (int j = 0; j < 32; ++j) h[64 + j] = (float)(j + 1);   // chain seeds, all distinct
+        // The packed operands, as bit patterns: fp16 pairs, bf16 pairs, int8 bytes or int4 nibbles
+        // depending on the leg. They live in device memory so the compiler cannot see their values and
+        // cannot fold an op into an add; the driver's `delta` column declares what each op contributes
+        // and the witness is what checks that declaration.
+        unsigned wm = p.k->word_m, wb = p.k->word_b;
+        memcpy(&h[irp_arith::kWordM], &wm, sizeof(wm));
+        memcpy(&h[irp_arith::kWordB], &wb, sizeof(wb));
         IRP_CK(hipMemcpy(ops.base, h.data(), operand_n * sizeof(float), hipMemcpyHostToDevice));
+    }
+    // The WMMA legs' A and B fragments: 16 fp16 per operand, all 1.0, so every D element grows by
+    // exactly 16 per op. From memory rather than literals, for the same reason as the packed operands.
+    Buf frag;
+    if (std::strcmp(p.k->family, "wmma") == 0) {
+        frag = alloc_dev(2 * irp_arith::kWmmaAFrag * sizeof(__half));
+        std::vector<__half> hf(2 * irp_arith::kWmmaAFrag, __float2half(1.0f));
+        IRP_CK(hipMemcpy(frag.base, hf.data(), hf.size() * sizeof(__half), hipMemcpyHostToDevice));
     }
     Buf sink = alloc_dev(sizeof(float));
     const size_t sum_slots = (size_t)c.launches * p.blocks;
@@ -432,12 +577,24 @@ RunResult run_one(const Cfg& c, const Plan& p, double* icpcb_out, double* gbs_ou
     if (fam == "kv") {
         kv = alloc_kv(p.rows * kHeadDim, c.guards, true, p.rows);
     }
+    // The LDS kernel stages from a real device tile. It is poison-banded like the KV set because a
+    // staging loop that wandered off its 12,288 B is exactly the bug the guard bands exist for.
+    KvBuf lds_src;
+    if (fam == "lds") {
+        // Four source tiles, staged in rotation. `fill_tag_k` writes 1 + (e % 7) over the WHOLE
+        // region, so consecutive tiles carry different residues and each trip's tile really differs.
+        const size_t n = (size_t)irp::kLdsPhaseCount * irp::kLdsSrcTileElems;
+        lds_src = alloc_kv(n, c.guards, false, 0);
+        irp::fill_tag_k<<<512, 256>>>(lds_src.p, n);
+        IRP_CK(hipDeviceSynchronize());
+    }
 
     Args a{};
     a.p = (const float*)ops.base;
     a.sink = (float*)sink.base;
     a.sums = (double*)sums.base;
     a.each = c.want_each ? (float*)each.base : nullptr;
+    a.frag = (const __half*)(frag.base ? frag.base : nullptr);
     a.iters = c.iters;
     a.verify = c.verify;
     a.inject = inject_code(c.inject);
@@ -450,7 +607,7 @@ RunResult run_one(const Cfg& c, const Plan& p, double* icpcb_out, double* gbs_ou
             irp::irp_kv_read<<<p.blocks, p.threads, dyn_shares>>>(
                 a, kv.p, p.rows, (unsigned int)p.passes);
         } else if (fam == "lds") {
-            irp::irp_lds_tile<<<p.blocks, p.threads, dyn_shares>>>(a, c.reuse);
+            irp::irp_lds_tile<<<p.blocks, p.threads, dyn_shares>>>(a, lds_src.p, c.reuse);
         } else {
             void (*fn)(Args) = (void (*)(Args))p.k->fn;
             fn<<<p.blocks, p.threads, dyn_shares>>>(a);
@@ -501,6 +658,8 @@ RunResult run_one(const Cfg& c, const Plan& p, double* icpcb_out, double* gbs_ou
                                          p.warps_per_block, c);
             } else if (fam2 == "kv") {
                 want = mirror_kv_warp(t / (unsigned long long)irp::kWarpWidth, p.warps, p.rows, p.passes);
+            } else if (fam2 == "mac" || fam2 == "wmma") {
+                want = mirror_arith_thread(c, *p.k, (unsigned)(t % (unsigned long long)p.threads));
             } else {
                 want = mirror_per_thread(c, *p.k, (unsigned)(t % (unsigned long long)p.threads));
             }
@@ -508,6 +667,7 @@ RunResult run_one(const Cfg& c, const Plan& p, double* icpcb_out, double* gbs_ou
         }
     }
     if (fam == "kv" && c.guards) R.guards_ok = guards_intact(kv);
+    if (fam == "lds" && c.guards) R.guards_ok = guards_intact(lds_src);
 
     if (icpcb_out) {
         const double secs = best / 1000.0;
@@ -521,8 +681,10 @@ RunResult run_one(const Cfg& c, const Plan& p, double* icpcb_out, double* gbs_ou
         *lds_gbs_out = best > 0 ? p.lds_mib_total * MiB / (best / 1000.0) / 1e9 : 0.0;
     }
     (void)hipFree(ops.base); (void)hipFree(sink.base); (void)hipFree(sums.base);
+    if (frag.base) (void)hipFree(frag.base);
     if (c.want_each && each.base) (void)hipFree(each.base);
     if (fam == "kv" && kv.base) (void)hipFree(kv.base);
+    if (fam == "lds" && lds_src.base) (void)hipFree(lds_src.base);
     return R;
 }
 
@@ -582,6 +744,187 @@ bool lds_swap_is_permutation(int threads, int reuse, unsigned long long iters, i
     return clean_total == swap_total && differ > 0;
 }
 
+// Waves per CU as the driver will actually realise them, against the part's maximum.
+// `Max Waves Per CU = 32` is what `rocminfo` reports for gfx1151 and what
+// progress/2026-10-16/prefill-occupancy-results-2026-10-16.md §4 measures the engine sitting under, so
+// a rate row taken at more than 32 waves/CU would be a row about a queue, not about the ALU. The
+// occupancy API is asked with the SAME dynamic shared memory size the launch uses, because that is the
+// thing that limits residency for the LDS kernel (12 KiB/block) and the A kernels (threads*8 B).
+int resident_blocks_per_cu(const Cfg& c, const Plan& p) {
+    int bpc = 0;
+    const int dyn = (std::string(p.k->family) == "lds") ? kAttnTileLdsBytes
+                                                        : p.threads * (int)sizeof(double);
+    if (hipOccupancyMaxActiveBlocksPerMultiprocessor(&bpc, p.k->fn, p.threads, dyn) != hipSuccess)
+        return -1;
+    return bpc;
+}
+
+// ============================================================================================
+// The WMMA correctness probe: `--wmma-check`. Correctness only — one wavefront, no timing, no burst.
+//
+// WHY IT DERIVES RATHER THAN ASSERTS. The lane layout is the part of a WMMA kernel that goes silently
+// wrong, and this worker takes no device measurements, so the last thing this file should do is
+// transcribe a fragment layout from a blog post and call it verified. Instead `irp_wmma_frag` takes
+// RAW per-lane fragments (16 fp16 A, 16 fp16 B, 8 f32 C in; 8 f32 D out) and writes raw D back, so
+// no tile layout is claimed anywhere in the kernel, and the host derives the structure from the part:
+//
+//   ones     A and B fragments all 1.0, C = 0. Every D element must be EXACTLY 16.0: the instruction
+//            really is a 16-deep accumulating dot, and D really is 8 f32 per lane with no garbage.
+//            Layout-free, so this is the check that catches "the builtin is not what we think".
+//   cadd     same operands, C nonzero. D must equal 16 + C, which is the accumulate wiring.
+//   feederA  one lane's A fragment at a time set to 1.0 (others 0), B all 1.0. D[slot] then counts how
+//            many of that output's 16 products came from that lane. 32 launches, values 0..16, exact.
+//   feederB  the same on the B side.
+//
+// From the two feeder maps the probe asserts the structural statement "this is a 16x16 grid of 16-deep
+// dots": every D slot is fed by exactly 16 A-products and 16 B-products, and the distinct feeder
+// patterns number exactly 16 on each side with 16 D slots each (the rows and the columns). If that
+// fails, the instruction is not shaped the way a tile GEMM needs and the row is a finding.
+//
+//   tile     only run when the derived maps are single-feeder per D slot (one A lane and one B lane
+//            supply each output). In that case the fragments define a rank-1 tile unambiguously, and D
+//            is compared against a naive triple-loop fp16 matmul of that tile, in fp32, exactly.
+//            When the maps are not single-feeder the probe says SO AND WHY: the k-slot pairing between
+//            an A fragment slot and a B fragment slot is not derivable from the marginals, and a
+//            general tile would need a per-(lane,slot) probe (32x16 launches per side, same shape as
+//            feederA) to get it. That probe is the next step before any shipping WMMA kernel, and
+//            HANDOFF.md carries it as an open blocker rather than as a silent gap.
+// ============================================================================================
+int wmma_check(bool dump_text) {
+    using namespace irp_arith;
+    const int NL = kWmmaLanes, NA = kWmmaAFrag, ND = kWmmaDFrag;
+    const size_t NF = (size_t)NL * NA, NDIM = (size_t)NL * ND;
+    __half *dA = nullptr, *dB = nullptr; float *dC = nullptr, *dD = nullptr;
+    IRP_CK(hipMalloc((void**)&dA, NF * sizeof(__half)));
+    IRP_CK(hipMalloc((void**)&dB, NF * sizeof(__half)));
+    IRP_CK(hipMalloc((void**)&dC, NDIM * sizeof(float)));
+    IRP_CK(hipMalloc((void**)&dD, NDIM * sizeof(float)));
+    int fails = 0;
+
+    std::vector<__half> hA(NF), hB(NF);
+    std::vector<float> hC(NDIM), hD(NDIM);
+    auto one = __float2half(1.0f);
+
+    auto run = [&](bool use_c) {
+        IRP_CK(hipMemcpy(dA, hA.data(), NF * sizeof(__half), hipMemcpyHostToDevice));
+        IRP_CK(hipMemcpy(dB, hB.data(), NF * sizeof(__half), hipMemcpyHostToDevice));
+        if (use_c) IRP_CK(hipMemcpy(dC, hC.data(), NDIM * sizeof(float), hipMemcpyHostToDevice));
+        // D is pre-filled with a value the kernel cannot produce, so "the kernel wrote nothing" is
+        // distinguishable from "the kernel wrote a wrong number".
+        for (size_t i = 0; i < NDIM; ++i) hD[i] = -12345.5f;
+        IRP_CK(hipMemcpy(dD, hD.data(), NDIM * sizeof(float), hipMemcpyHostToDevice));
+        irp_arith::irp_wmma_frag<<<1, NL>>>(dA, dB, use_c ? dC : nullptr, dD);
+        IRP_CK(hipDeviceSynchronize());
+        IRP_CK(hipMemcpy(hD.data(), dD, NDIM * sizeof(float), hipMemcpyDeviceToHost));
+    };
+    auto setf = [&](std::vector<__half>& f, int lane, double v) {
+        const __half h = __float2half((float)v);
+        for (int s = 0; s < NA; ++s) f[(size_t)lane * NA + s] = h;
+    };
+
+    // ---- ones ----
+    for (size_t i = 0; i < NF; ++i) { hA[i] = one; hB[i] = one; }
+    run(false);
+    int bad = 0;
+    for (size_t i = 0; i < NDIM; ++i) if (hD[i] != 16.0f) ++bad;
+    printf("WMMA onesh      ok=%d bad=%d/%zu first=%.6g   (every D element must be exactly 16)\n",
+           bad == 0 ? 1 : 0, bad, NDIM, hD[0]);
+    if (bad) ++fails;
+
+    // ---- cadd ----
+    for (size_t i = 0; i < NDIM; ++i) hC[i] = (float)(i % 7);
+    run(true);
+    bad = 0;
+    for (size_t i = 0; i < NDIM; ++i) if (hD[i] != 16.0f + hC[i]) ++bad;
+    printf("WMMA cadd       ok=%d bad=%d/%zu   (D must equal 16 + C, the accumulate wiring)\n",
+           bad == 0 ? 1 : 0, bad, NDIM);
+    if (bad) ++fails;
+
+    // ---- feederA / feederB: one lane at a time, so each D slot reports a count, 0..16, exactly.
+    std::vector<int> nA((size_t)NDIM * NL), nB((size_t)NDIM * NL);
+    auto feed = [&](bool side_b, std::vector<int>& out) {
+        for (int p = 0; p < NL; ++p) {
+            for (int lane = 0; lane < NL; ++lane) {
+                setf(hA, lane, 0.0); setf(hB, lane, 1.0);
+            }
+            if (side_b) setf(hB, p, 1.0); else setf(hA, p, 1.0);
+            run(false);
+            for (size_t d = 0; d < NDIM; ++d) out[d * NL + p] = (int)lround(hD[d]);
+        }
+    };
+    feed(false, nA);
+    feed(true, nB);
+
+    int deep_bad = 0, patA = 0, patB = 0;
+    {
+        std::set<std::string> sa, sb;
+        for (size_t d = 0; d < NDIM; ++d) {
+            int sumA = 0, sumB = 0; std::string ka, kb;
+            for (int p = 0; p < NL; ++p) {
+                sumA += nA[d * NL + p]; sumB += nB[d * NL + p];
+                if (nA[d * NL + p]) ka += (char)('A' + p / 8), ka += (char)('0' + p % 8);
+                if (nB[d * NL + p]) kb += (char)('A' + p / 8), kb += (char)('0' + p % 8);
+            }
+            if (sumA != NA || sumB != NA) ++deep_bad;      // not a 16-deep dot on both sides
+            sa.insert(ka); sb.insert(kb);
+        }
+        patA = (int)sa.size(); patB = (int)sb.size();
+    }
+    printf("WMMA feeder     ok=%d slots=%zu slots_not_16_deep=%d distinct_A_patterns=%d"
+           " distinct_B_patterns=%d  (want 16 and 16: the rows and the columns)\n",
+           (deep_bad == 0 && patA == 16 && patB == 16) ? 1 : 0, NDIM, deep_bad, patA, patB);
+    if (deep_bad || patA != 16 || patB != 16) ++fails;
+
+    // ---- tile, when the marginals are enough to define the tile at all ----
+    int single_a = 1, single_b = 1;
+    for (size_t d = 0; d < NDIM; ++d) {
+        int ca = 0, cb = 0;
+        for (int p = 0; p < NL; ++p) { if (nA[d * NL + p]) ++ca; if (nB[d * NL + p]) ++cb; }
+        if (ca != 1) single_a = 0;
+        if (cb != 1) single_b = 0;
+    }
+    if (single_a && single_b) {
+        // Rank-1 tiles: A's row for lane p is u_p everywhere along k, B's column for lane q is v_q.
+        // The naive matmul is a literal triple loop in fp32 over fp16-rounded operands, not a formula,
+        // so it is a reference and not a restatement of the kernel.
+        int u[32], v[32];
+        for (int p = 0; p < NL; ++p) { u[p] = 1 + (p * 5) % 9; v[p] = 1 + (p * 3) % 7; }
+        for (int lane = 0; lane < NL; ++lane) { setf(hA, lane, u[lane]); setf(hB, lane, v[lane]); }
+        run(false);
+        int tb = 0; double worst = 0.0;
+        for (size_t d = 0; d < NDIM; ++d) {
+            int pa = -1, pb = -1;
+            for (int p = 0; p < NL; ++p) { if (nA[d * NL + p]) pa = p; if (nB[d * NL + p]) pb = p; }
+            double acc = 0.0;    // naive fp16 matmul of the rank-1 tile: 16 products of u_pa * v_pb
+            for (int k = 0; k < NA; ++k) acc += (double)(__half)u[pa] * (double)(__half)v[pb];
+            const double got = (double)hD[d];
+            if (got != acc) { ++tb; if (fabs(got - acc) > worst) worst = fabs(got - acc); }
+        }
+        printf("WMMA tile       ok=%d bad=%d/%zu worst=%.3g   (naive fp16 matmul, rank-1 tile)\n",
+               tb == 0 ? 1 : 0, tb, NDIM, worst);
+        if (tb) ++fails;
+    } else {
+        printf("WMMA tile       SKIPPED single_feeder_A=%d single_feeder_B=%d  NOT DECIDABLE from the"
+               " marginals: the k-slot pairing between an A fragment slot and a B fragment slot is not"
+               " recoverable from per-lane counts, so a general tile would need a per-(lane,slot) probe"
+               " (32x16 launches per side). Until that is done no shipping WMMA kernel may assume a"
+               " fragment layout; see HANDOFF.md.\n", single_a, single_b);
+    }
+    if (dump_text) {
+        printf("WMMA-DUMP feederA: one line per D slot (lane,slot) then the A lanes feeding it\n");
+        for (size_t d = 0; d < NDIM; ++d) {
+            printf("  d=%3zu A:", d);
+            for (int p = 0; p < NL; ++p) if (nA[d * NL + p]) printf(" %d*%d", p, nA[d * NL + p]);
+            printf("  B:");
+            for (int p = 0; p < NL; ++p) if (nB[d * NL + p]) printf(" %d*%d", p, nB[d * NL + p]);
+            printf("\n");
+        }
+    }
+    (void)hipFree(dA); (void)hipFree(dB); (void)hipFree(dC); (void)hipFree(dD);
+    printf("WMMA-CHECK %s\n", fails ? "FAILED" : "ok");
+    return fails ? 5 : 0;
+}
+
 // ---- selftest: geometry and mirrors, no device, no timing ------------------------------------
 struct GeomCase {
     const char* name;
@@ -607,9 +950,30 @@ int run_geom(int only) {
         Plan p;
         const bool ok = plan_build(c, p);
         char buf[160];
+        if (k.wi == 0) {
+            // The census refused to bill this kernel (its required mnemonic is not inside any loop),
+            // so there is no honest rate to plan. A SKIP with a reason, never a plan built on a zero.
+            report((std::string("plan_skip_") + k.name).c_str(), true,
+                   "UNBILLED by isa_census.py (required op not inside a loop); run.py skips this leg");
+            continue;
+        }
+        bool pass = ok && p.k != nullptr;
+        if (!ok && p.iters_cap > 0) {
+            // The accumulator bound fired at the default iters. That is the check working, so assert
+            // both halves: it rejects above the bound and it plans at exactly the bound.
+            const unsigned long long cap = p.iters_cap;
+            Cfg c2 = c; c2.iters = cap;
+            Plan p2;
+            const bool ok2 = plan_build(c2, p2);
+            char buf2[160];
+            snprintf(buf2, sizeof buf2, "rejects iters=%llu (cap=%llu), plans iters=%llu wi=%llu",
+                     c.iters, cap, cap, p2.k ? p2.k->wi : 0ULL);
+            report((std::string("plan_bound_") + k.name).c_str(), ok2 && p.k->wi > 0, buf2);
+            continue;
+        }
         snprintf(buf, sizeof buf, "wi=%llu warps=%llu expected_total=%.0f",
                  p.k ? p.k->wi : 0ULL, p.warps, p.expected_total);
-        report((std::string("plan_ok_") + k.name).c_str(), ok && p.k && p.k->wi > 0, buf);
+        report((std::string("plan_ok_") + k.name).c_str(), pass, buf);
     }
     // 2. The tag closed form and its loop must agree — the account is an equality, so a mirror bug is
     //    a false PASS waiting to happen.
@@ -807,6 +1171,9 @@ void usage() {
         "  --dry-run          print the plan and its bill; touches no device, takes no timing\n"
         "  --selftest-geom    host mirrors, witness properties, rejections. No device, no timing\n"
         "  --selftest         device byte witnesses, one child process per case. No timing printed\n"
+        "  --wmma-check       WMMA correctness: does the part do a 16-deep accumulating dot, and\n"
+        "                     which lanes feed which output. Device, correctness only, no timing\n"
+        "  --wmma-dump        ... and print the derived lane->output feeder map\n"
         "\n"
         "Timing rows belong to the main agent under tools/gpu_lock.sh. This binary does not acquire\n"
         "it and never will: a caller that holds the lock and then runs a self-locking driver deadlocks.\n");
@@ -839,11 +1206,14 @@ int main(int argc, char** argv) {
         else if (a == "--only-case") only = atoi(next("--only-case").c_str());
         else if (a == "--dry-run") c.dry_run = true;
         else if (a == "--selftest") c.selftest = true;
+        else if (a == "--wmma-check") c.wmma_check = true;
+        else if (a == "--wmma-dump") c.wmma_dump = true;
         else if (a == "--selftest-geom") c.selftest_geom = true;
         else if (a == "--help" || a == "-h") { usage(); return 0; }
         else { fprintf(stderr, "unknown argument %s\n", a.c_str()); usage(); return 2; }
     }
     if (c.selftest_geom) return run_geom(only);
+    if (c.wmma_check || c.wmma_dump) return wmma_check(c.wmma_dump);
     if (c.selftest) return run_selftest(only);
 
     Plan p;
@@ -858,7 +1228,8 @@ int main(int argc, char** argv) {
                p.k->name, p.k->family, p.blocks, p.threads, p.warps, p.iters);
         if (is_kv) printf(" footprint_mib=%.3f rows=%llu passes=%llu rd_mib_per_launch=%.3f",
                           p.footprint_mib, p.rows, p.passes, p.launch_bytes_mib);
-        if (is_lds) printf(" reuse=%d lds_mib_per_launch=%.3f", p.reuse, p.lds_mib_total);
+        if (is_lds) printf(" reuse=%d lds_mib_total=%.4f src_tiles=%d", p.reuse,
+                          p.lds_mib_total, irp::kLdsPhaseCount);
         printf(" warp_inst_per_iter=%llu(isa) warp_inst_total=%.0f"
                " expected_block_sum=%.0f expected_total=%.0f max_thread_sum=%.0f\n",
                p.k->wi, p.warp_inst_total,
@@ -869,11 +1240,42 @@ int main(int argc, char** argv) {
     double icpcb = 0, gbs = 0, lds_gbs = 0;
     const RunResult R = run_one(c, p, &icpcb, &gbs, &lds_gbs);
     const int suspect = (is_kv && gbs > 240.0) ? 1 : 0;
+    const int bpc = resident_blocks_per_cu(c, p);
     printf("IRP tag=%s kernel=%s family=%s blocks=%d threads=%d warps=%llu iters=%llu"
-           " warp_inst_per_iter=%llu warp_inst_total=%.0f"
+           " warp_inst_per_iter=%llu ops_per_iter=%llu(isa) macs_per_lane_per_op=%g"
+           " warp_inst_total=%.0f"
            " best_ms_per_launch=%.6f icpcb=%.4f cu_count=%d clock_mhz=%.0f",
            c.tag.c_str(), p.k->name, p.k->family, p.blocks, p.threads, p.warps, p.iters,
-           p.k->wi, p.warp_inst_total, R.best_ms, icpcb, c.cu_count, c.clock_mhz);
+           p.k->wi, p.k->ops, p.k->mac_per_op, p.warp_inst_total, R.best_ms, icpcb,
+           c.cu_count, c.clock_mhz);
+    // THE CONVERSION, printed with its inputs so the row is auditable without a spreadsheet:
+    //   mac_per_lane_clk = flop_per_s / (2 * cu_count * 64 * clock_hz)   [MACs are 2 FLOPs, 64 lane
+    //                                                                      slots per CU]
+    //   pct_of_ceiling   = 100 * mac_per_lane_clk / ceiling_mac_per_lane_clk
+    // and mac_per_lane_clk also equals icpcb * macs_per_lane_per_op, which is the cross-check a reader
+    // can do in their head: the scalar FMA roof is icpcb 1.0000 = 1.0 MAC/lane/clk, the WMMA roof is
+    // icpcb 0.03125 = 4.0 MAC/lane/clk.
+    {
+        const double secs = R.best_ms / 1000.0;
+        // One warp-instruction is 64 lane-slots of work, each doing `macs_per_lane_per_op` MACs, each
+        // MAC worth 2 FLOPs. That is the whole conversion; nothing else is folded in here.
+        const double flop_per_s = secs > 0
+            ? p.warp_inst_total * 64.0 * p.k->mac_per_op * 2.0 / secs
+            : 0.0;
+        const double mac_lane_clk = flop_per_s / (2.0 * (double)c.cu_count * 64.0
+                                                  * c.clock_mhz * 1e6);
+        if (p.k->ceil_mac > 0.0) {
+            printf(" Tflops_or_Tops=%.3f mac_per_lane_clk=%.4f ceiling_mac_per_lane_clk=%g"
+                   " pct_of_ceiling=%.1f crosscheck_icpcb_x_mac=%.4f",
+                   flop_per_s / 1e12, mac_lane_clk, p.k->ceil_mac,
+                   100.0 * mac_lane_clk / p.k->ceil_mac, icpcb * p.k->mac_per_op);
+        } else {
+            printf(" Tflops_or_Tops=n/a traffic_row: judged by GB/s, not by MACs per lane per clock");
+        }
+        printf(" waves_requested_per_cu=%.2f resident_waves_per_cu=%d max_waves_per_cu=32",
+               (double)p.warps / (double)c.cu_count,
+               bpc > 0 ? bpc * p.warps_per_block : -1);
+    }
     if (is_kv)
         printf(" footprint_mib=%.3f rows=%llu passes=%llu rd_mib_per_launch=%.3f"
                " gbs=%.2f pct_of_read_probe=%.1f pct_of_resident_tier=%.1f",

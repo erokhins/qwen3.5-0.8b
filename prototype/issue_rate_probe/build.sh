@@ -19,8 +19,11 @@ HFLAGS="-O3 -Wl,-rpath,/opt/rocm/lib --offload-arch=${ARCH}"
 test -x /opt/rocm/bin/rocm-core/rocm_agent_enumerator || echo "note: rocm agent enumerator missing" >&2
 
 # 1. The census: compile-only, no device, and it refuses to emit if a hot loop cannot be found.
-python3 isa_census.py --emit irp_isa.gen.h --quiet
-python3 isa_census.py --check
+#    `irp_lds_tile` is named in --allow-unbilled because the compiler peels its LDS reads out of the
+#    billed loop (see run.py UNBILLED_REASON): the census emits a 0 bill for it and run.py refuses to
+#    run that leg. Any OTHER kernel that cannot be billed still fails the build.
+python3 isa_census.py --allow-unbilled irp_lds_tile --emit irp_isa.gen.h --quiet
+python3 isa_census.py --allow-unbilled irp_lds_tile --check
 
 # 2. The shipping binary.
 ${HIPCC} ${HFLAGS} -o issue_rate_probe issue_rate_probe.cpp
