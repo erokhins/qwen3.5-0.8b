@@ -8,8 +8,10 @@ route are new (`wave64-at-*`, §7).
 
 **Lock protocol.** Neither `run.py` nor `attn_m2` self-locks `tools/gpu_lock.sh` — deliberately: three gate
 drivers in this repo self-lock and a caller that already holds the lock deadlocks on them (AGENTS.md). **You**
-hold the lock around all of it, and release before invoking anything that self-locks. Check:
-`grep -c gpu_lock prototype/attn_m2/*.py` → 0.
+hold the lock around all of it, and release before invoking anything that self-locks. Check (the AGENTS.md
+pattern `grep -c gpu_lock` over-counts, because this file *discusses* the lock): what must be zero is a call
+site — `grep -n "gpu_lock.sh\s*\(acquire\|status\)\|subprocess.*gpu_lock" prototype/attn_m2/*.py` prints
+nothing, and the two `grep -c gpu_lock prototype/attn_m2/run.py` hits are the prose at lines 12 and 46.
 
 Steps 1–4 are correctness and take well under a minute each on device. Step 5 is the timing and is
 main-agent work by rule.
@@ -42,11 +44,18 @@ green selftest already implies a green guard.)
 ```bash
 .venv/bin/python prototype/attn_m2/run.py plans        # 12 plans into /tmp/attn_m2/
 .venv/bin/python prototype/attn_m2/run.py negmatrix    # which plan proves which injection
+.venv/bin/python prototype/attn_m2/run.py selftest     # the driver's verdict logic, against the stub
 ```
 
 `negmatrix` is derived, not typed: at 1–8 lanes `partrow`/`partalias` score an empty must-catch set and are
 excluded from those plans, and a lone 1032-lane row's `maskwide` set is empty. `run.py negative` refuses to
 run an injection with no plan that can catch it — an empty list cannot print PASS.
+
+`selftest` is new and it is the reason steps 3–4 can be trusted to mean what they print: it drives the real
+driver against `stub_harness.py` (same CLI, same `RESULT` lines, same dump layout, no attention) through
+`--bin`, so the adjudication rules are witnessed on CPU before a device window spends itself on them.
+Eleven cases; the two that matter here are an m2-only injection printing **PASS** — which was impossible
+before the class scoping was fixed — and a form-neutral injection still failing when the two forms disagree.
 
 ## 3. THE BIT-IDENTITY RUN — the gate, now over every funded width
 
@@ -60,13 +69,21 @@ is the shipped merge on both sides. It prints one `VERDICT` line per plan and ex
 differs **or fails to launch** — `verdict=NO-LAUNCH` is a failure, which is the check that would have caught
 §2's bug inside the window.
 
-Admissible answer: `ndiff_aout=0 ndiff_gated=0` on every row of all 12 plans. New since last window:
+Admissible answer: `ndiff_aout=0 ndiff_gated=0` on every row of all 12 plans. **Check whether this window has
+already run before spending a lock hold on it**: decision log D19 (window `attn-m2-2`) records "bit-identity is
+green on device at every width including the 1032-lane pinned HF row and 64-row waves", which is this step's
+answer — but `results.md` §2 still carries the first window's four `REFUSED` rows and no §2b table, so what
+may be missing is the write-up, not the run. Re-run only if the table cannot be filled from that window's log.
+New since the first window:
 
-* **`plan-straddles-block-2` (1024–1027, split 3), `plan-straddles-block-3` (1536–1539, split 4),
-  `plan-pair-widest-1024` (1021–1024, split 2), `plan-tail` (the real HF row at 1032 lanes, split 3)** —
+* **`straddles-block-2` (1024–1027, split 3), `straddles-block-3` (1536–1539, split 4),
+  `pair-widest-1024` (1021–1024, split 2), `tail` (the real HF row at 1032 lanes, split 3)** —
   refused last time, and the first four rows of `results.md` §2's table are still `NOT MEASURED`.
-* **`plan-wave64-at-{1024,2048,4096}` and `plan-wave16-at-4096`** — waves of tens of streaming rows, which
+* **`wave64-at-{1024,2048,4096}` and `wave16-at-4096`** — waves of tens of streaming rows, which
   is the shape the route is funded for and the shape §4 never touched.
+
+Those are the **tags** `--only` takes; the file on disk is `/tmp/attn_m2/plan-<tag>.txt`, so the `plan-`
+prefix belongs to the path and not to the filter.
 
 If a row differs here and the CPU mirror says it should not, suspect in this order: barrier uniformity (the
 pair's union bounds are block-uniform; a lane-dependent `return` or a barrier in a divergent branch is the
@@ -85,8 +102,9 @@ done
 Per plan it prints one line:
 
 ```
-NEGVERDICT plan=straddles-block-3 neg=partrow rows=4 lanes=1536-1539 split=4 must=32 moved_m2=32 \
-           moved_ship=0 blind_hits=0 forms_agree=yes verdict=PASS
+NEGVERDICT plan=straddles-block-3 neg=partrow class=m2-only rows=4 lanes=1536-1539 split=4 must=32 \
+           moved_m2=32 moved_ship=0 blind_hits=0 forms_agree=no \
+           forms_check=control-group-must-not-move verdict=PASS
 ```
 
 and what each field means is not obvious, so:
@@ -101,11 +119,14 @@ and what each field means is not obvious, so:
 * **`blind_hits=0`**: no row the geometry says cannot be reached may move. This is the half of the control
   that catches an over-wide mask or a leaked shared stage, and it is why a must-catch set alone is not a
   control.
-* **`forms_agree=yes`**: the two forms stay bit-identical to each other even while both are wrong — the §1.2
-  claim, re-asserted under injection.
-* `slotk`/`slotv` are injected inside `attn_prep`, so the mirror has no derived set for them; the assertion
-  is that **both** forms move, because a shared stage that swallowed a cache perturbation would show up
-  here and nowhere else.
+* **`forms_agree` means something only for `class=shared` and `class=cache`** — there the two forms do the
+  same wrong thing and must stay bit-identical to each other even while both are wrong (the §1.2 claim).
+  For `class=m2-only` the shipped form is the control group, so `forms_agree=no` is the **expected** answer
+  and `verdict=PASS` next to it is correct; before this scoping was fixed those three injections could not
+  print PASS at all (results.md §3, defect 3). `forms_check` names which rule the verdict applied.
+* **`class=cache` (`slotk`/`slotv`)**: injected inside `attn_prep`, so the mirror has no derived set for
+  them; the assertion is that **both** forms move, because a shared stage that swallowed a cache
+  perturbation would show up here and nowhere else.
 
 `headcarry` and `gqa_head0` are mirror-only (a device version would race an aliased shared slot, and the
 winner is whichever warp landed last) — they are covered by `m2_model.py negative`.

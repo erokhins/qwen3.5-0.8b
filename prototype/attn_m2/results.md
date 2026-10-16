@@ -24,6 +24,7 @@ Each line is the command and the outcome it prints. Re-run them; do not take thi
 | `./prototype/attn_m2/attn_m2 --geom-guard` | the C++ spelling of the guard: same 13,744 geometries, same numbers, host-only |
 | `.venv/bin/python prototype/attn_m2/run.py plans` | 12 device plans written, no device touched |
 | `.venv/bin/python prototype/attn_m2/run.py negmatrix` | which plan proves which injection, derived (§3) |
+| `.venv/bin/python prototype/attn_m2/run.py selftest` | the driver's own verdict logic against `stub_harness.py`: 12 cases, 0 failures (§3) |
 
 ### §1.1 Bit-identity per case (the admission gate)
 
@@ -180,39 +181,73 @@ structurally impossible rather than watched for.
    prints the whole matrix, derived: at 1–8 lanes `partrow`/`partalias` score 0 and are excluded; a lone
    1032-lane row's `maskwide` set is 0, so `plan-tail` is excluded from that injection; all nine have at
    least one plan.
-2. **The baseline was wrong, and this is the larger defect.** "Moved" was measured as *form vs form* under
+2. **The baseline was wrong.** "Moved" was measured as *form vs form* under
    the injection. For a **form-neutral** injection — `readpast`, `dropcurrent`, `dimhalf`, `gqaoff` — both
    forms do the same wrong thing, so they agree and the count is **zero however far the bug spread**. Those
    four could never have registered on device at any geometry. Negative mode now runs each plan **twice**
    (`--neg none`, then `--neg X`) and compares each form's injected output against **that same form's clean
-   output**, per `(row, head)`, from the dumps the harness already writes. The form-vs-form agreement is
-   asserted separately and must be 0 — the §1.2 claim, now actually checked under injection. For the three
-   `NEG_M2_*` injections the shipped form is a control group: it does not implement those ids, so it must
-   not move at all.
+   output**, per `(row, head)`, from the dumps the harness already writes.
+3. **…and the fix for defect 2 brought in a third: the forms-agree assertion was applied to every class.**
+   Found on device in the next window. `if disagree: problems.append("forms disagree")` fired for the three
+   `NEG_M2_*` ids as well — and there the shipped form is the **control group**: it does not implement
+   `maskwide`/`partrow`/`partalias`, it is *required* not to move (which the driver already asserted as
+   `moved_ship == 0`), so the two forms disagreeing is the definition of the injection reaching the
+   arithmetic. Those three could therefore never print PASS; the device read
+   `must=24 moved_m2=24 moved_ship=0 blind_hits=0 verdict=FAIL` over a control that had worked. The
+   `mixed_bw` trap one level over — a check that fails for every configuration catches nothing — and the
+   same shape as §20.6's `partalias` lesson: an assertion must be scoped to the geometry it can adjudicate.
 
-Per plan the driver prints one line with its own verdict:
+   The assertion now runs only for the classes named in `run.py:FORMS_AGREE_NEG` (the four shared ones plus
+   the `attn_prep` cache pair, where both forms really do the same wrong thing and §1.2's claim is what is
+   being re-asserted). For the m2-only class the positive assertions are `moved_ship == 0` and — because a
+   control group that is not clean proves nothing — that the **clean** run of the same plan is
+   bit-identical, which negative mode had never checked and now requires.
+
+Per plan the driver prints one line with its own verdict, and the two new fields say which rule was applied:
 
 ```
-NEGVERDICT plan=pair-just-above neg=partrow rows=8 lanes=513-520 split=2 must=64 moved_m2=64 \
-           moved_ship=0 blind_hits=0 forms_agree=yes verdict=PASS
+NEGVERDICT plan=pair-just-above neg=partrow class=m2-only rows=8 lanes=513-520 split=2 must=64 \
+           moved_m2=64 moved_ship=0 blind_hits=0 forms_agree=no \
+           forms_check=control-group-must-not-move verdict=PASS
 ```
 
-and a plan the launcher refuses prints `verdict=NO-LAUNCH` and counts as a **failure**, never a skip — the
+`forms_agree=no` beside `verdict=PASS` is the correct answer for `class=m2-only` and was impossible before
+this fix; for `class=shared` a PASS still requires `forms_agree=yes`. A plan the launcher refuses prints
+`verdict=NO-LAUNCH` and counts as a **failure**, never a skip — the
 one check that would have surfaced §2's bug inside the window itself.
 
-**How the driver itself was checked, without a device.** `run.py --bin PATH` runs the driver against any
-binary, so selection and adjudication can be exercised against a stub that writes right-sized dumps and
-prints `RESULT` lines in the real format (the stub used here was scratch, not committed; the `--bin` flag is
-the committed part). Four outcomes, all reproduced: a stub that moves every `(row, head)` → `gqaoff` PASSes
-on 8/8 plans, exit 0; the same stub under `maskwide` is **failed** for moving rows the geometry declares
-blind (`blind_hits>0`, exit 1) while `plan-tail` is excluded as structurally empty; a stub that refuses with
-no `RESULT` line → `NO-LAUNCH` on every plan, exit 1; and handing `partrow` only the 1–8-lane plan →
-`ASSERTION FAIL … EMPTY derived must-catch set`, exit 1, **before any binary is invoked**. In none of these
-can an empty list print PASS.
+**How the driver itself is checked, without a device — now committed.** `run.py selftest` drives the real
+driver end-to-end against `stub_harness.py` through `--bin`: a stub with the same CLI, the same `RESULT case=`
+line and the same dump layout, which moves `(row, head)` blocks exactly as its `ATTN_M2_STUB` instruction
+says and has no attention, no lanes and no geometry of its own. Twelve cases, 0 failures:
+
+| case | instruction | the verdict the driver must produce |
+|---|---|---|
+| `maskwide` moves exactly the derived rows, ship does not move | `m2=1,2,3` | **PASS** — the case that could not exist before the fix |
+| `partrow` moves an all-rows derived set | `m2=all` | **PASS** |
+| the clean run is already not bit-identical | `m2=all;clean_diff=1` | FAIL — "CLEAN run is not bit-identical", no control group |
+| the m2 form moves nothing | `m2=none;clean_diff=1` | FAIL — must-catch rows did not move |
+| `maskwide` moves a derived-blind row | `m2=all` on `pair-at-maxsc` | FAIL — `blind_hits=8` |
+| the shipped form moves under an m2-only id | `m2=all;ship=all` | FAIL — "shipped form moved" |
+| form-neutral injection, both forms move alike | `m2=all;ship=all` | PASS |
+| cache injection (`slotk`), both forms move | `m2=all;ship=all` | PASS — and it witnesses a third latent bug in the same dispatch: the `DEVICE_ONLY` branch never bound `missing`, so `--neg slotk` died with a `NameError` instead of printing a verdict |
+| form-neutral injection, the two forms' wrongs differ | `m2=all;ship=all;form_delta=1` | FAIL — "forms disagree under a shared injection" |
+| `readpast` moves nothing | (no movement) | FAIL — must-catch rows did not move |
+| the launcher refuses, no `RESULT` line | `no_result=1` | FAIL — `verdict=NO-LAUNCH` |
+| `partrow` on the 1–8-lane plan | `m2=all` | ASSERTION FAIL before any binary runs — EMPTY derived set |
+
+The middle rows are what stop the fix being "delete the agreement assertion": the form-neutral case with
+`form_delta=1` fails **only** on that assertion, and the m2-only case with `clean_diff=1` fails **only** on
+the control-run identity that replaced it. The expectation lives in the selftest, not in the stub — where a
+spec says `must`, the selftest expands it into that plan's derived rows and tells the stub to move exactly
+those — so the stub stays a bit-mover with no opinion and what the table adjudicates is the driver's rule.
+Whether the derived sets are *right* is a different question, witnessed by `m2_model.py negative` against
+the Python mirror; the stub cannot see geometry and does not try to answer it. In none of these can an empty
+list print PASS.
 
 | injection | window's observation | admissible then? | what the re-run must show |
 |---|---|---|---|
-| `maskwide` | moved 1 case | yes — the one a short plan can reach | m2 moves exactly the widened rows, ship moves 0 heads, forms agree |
+| `maskwide` | moved 1 case | yes — the one a short plan can reach | m2 moves exactly the widened rows, ship moves 0 heads, and the two forms disagree **by design** |
 | `partrow`, `partalias` | moved 0 cases | **no** — empty derived set at 1–8 lanes | must move on `straddles-block-2/3`, `pair-widest-1024`, `tail` |
 | `readpast`, `dropcurrent`, `dimhalf`, `gqaoff` | moved 0 cases | **no** — wrong baseline, not wrong geometry | each form moves its own derived set against its own clean output |
 | `slotk`, `slotv` | moved 0 cases | **no** — wrong baseline, and no mirror model | both forms move: the shared stage must not launder a cache perturbation |
