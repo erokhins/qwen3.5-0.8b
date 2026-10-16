@@ -325,3 +325,29 @@ ban on hand-rolling WMMA fragment layouts before the layout is proven. Funded ne
 the per-row lane order as the admission gate — the largest prize that needs no user decision
 (194.6 ms of a 1307.75 ms wave at `M = 2`, 355.6 ms at `M = 8`), chosen over the fact-B routes precisely
 because fact B turned out to be 1.4–1.6× and not 11×.
+
+## D18 — D17's funded route ran: M = 2 is bit-identical and 7–10 % slower at every width measurable today
+
+Window `attn-m2`, `prototype/attn_m2/results.md` §2–§4. Three findings, one of them a defect in my own
+brief's assumption that the prototype could price itself at the funded widths.
+
+1. **Bit-identity holds on device** — `ndiff = 0` for both outputs on every row of every plan that runs,
+   including the MAXSC/MAXSC+1 straddle that M = 2 exists to prove, and bytes-demanded falls to ~0.50 as
+   the traffic model predicted. The route is *correct*.
+2. **It is slower where it can run**: ship 0.2953 / 0.2949 / 0.1348 / 0.0085 ms against m2 0.3167 /
+   0.3240 / 0.1495 / 0.0094 ms — speedups **0.933, 0.910, 0.902, 0.906**, paired in one lock hold,
+   best-of-40×5. The occupancy cost the worker named up front (16 wavefronts/CU vs the shipped form's 20)
+   is bigger than the traffic saving at ≤ 520 lanes.
+3. **The funded widths could not be measured at all.** `attn_m2_ok` feeds a *lane count* to
+   `attn_m2_pair_union`, whose first parameter is a *row index*, so every plan above ~520 lanes is
+   refused as exceeding the stage bound — including `plan-tail` at 1032 lanes and both straddling plans.
+   At 1032 lanes with `split = 3` the true union is ~346 of a 520 bound, so the refusals are wrong. Until
+   that is fixed the 13.6 ms / 194.3 ms prize booked at 1024 and 4096 lanes is unmeasured, and finding 2
+   must not be read as the route's verdict.
+
+Also recorded rather than smoothed over: with those refusals the only plans that execute are short ones,
+so **eight of nine device negative controls had an empty derived must-catch set** (a streaming row cannot
+exist at 1–8 lanes) and proved nothing; only `maskwide` fired and was admissible. And the harness itself
+faulted before its first comparison — `diff_rows` called a `__syncthreads()`-containing reduction from
+inside `if (threadIdx.x == 0)`, which aborts the queue on GCN instead of miscounting. A green CPU mirror
+was worth nothing until that was fixed.
