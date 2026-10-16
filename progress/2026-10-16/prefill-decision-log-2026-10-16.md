@@ -695,3 +695,33 @@ the headline next to it.
 Provenance error of mine, recorded: the 2.75e-03 band was derived by the worker **on the three-pin algo set**
 (the band text names `algo_pins()`), and I then trimmed the table to one. It still passes on the final set,
 but the band must be re-derived on the set the binary actually ships before it is cited again.
+
+## D29 — `--gemm lt` becomes the shipped default: 1.049× on the 4096-lane headline, and the flip-room line retires an absolute threshold for a unit
+
+Headline pair, one window, `--time-waves --steps 0`, `ids4096`, medians of 3: **1122.50 → 1069.89 ms,
+3649 → 3828 prefill tok/s (1.049×)**, `GROUP matmul` 276.90 → 195.11 ms (1.419×). Whole-wave ratios elsewhere:
+**1.110× at 1024 lanes** (4302→4776 tok/s) and **1.084× at 3072** (3864→4190). The `lt` side is the noisier of
+the two at 4096 (±2.6 % against ±0.1 %), so the ratio is quoted from medians. Decode unchanged at 71.3 tok/s
+**by construction** — a one-row body is the hand GEMV on either route — and was deliberately not re-taken; if
+M=1 ever goes to the library, that claim dies and decode must be re-measured.
+
+Gate: 18/18 green on both fixtures×routes before the move (`wide520f --gemm lt` included, row 180 admitted at
+0.9985 ULP), four fixtures re-taken at the new default green with `gemm=lt` echoed. `bench/performance-status.md`
+§7 is the ledger row.
+
+The thing worth keeping from the last mile is that **the blocker was a unit error in the gate, not a numerics
+problem in the route.** `flip_room_max = 0.10` in logits is 0.80 ULP at logit 20 and 6.4 ULP at logit 1: it
+excused thin ties at small magnitudes and condemned a one-step tie at a large one. Retired for
+`flip_room_max_ulp = 1.5` (census: worst flip in 11,804 comparisons is 0.9985 ULP), and the attempt to serve
+both pairings with it exposed a second confusion — a pin-vs-engine comparison must read the **reference's**
+room, because the engine's own near-tie is not evidence about whether the reference decided; `--break-runnerup`
+places its candidate exactly one ULP above the pin's max, so a symmetric min-over-sides reading admitted a
+licensed negative control at any line ≥ 1.0 while the row needing admission sat at 0.9985. A 0.0015 ULP
+squeeze, which is what a forced-to-be-shared threshold looks like from the inside.
+
+Three rules out of it, all in the code and the ledger rather than only here: **a threshold must be printed
+with the margin that justified it** (`flip_room_line(pairing)` prints value, observed max, ratio and which
+pairing owns it); **an unmeasured threshold must say it is unmeasured** — the pin-vs-engine line has zero real
+admissions in 18 runs and states that instead of borrowing the cross-width margin; and **an injection that
+does nothing must refuse rather than pass** (`--break-ab-*` without `--dry-run` now exits 1; nine earlier
+device runs had been silently vacuous).

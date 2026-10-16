@@ -389,3 +389,51 @@ attention runs the **one-row** path, and the two levers live in the tiled *wave*
 14.028 ms = **71.3 tok/s** headline therefore stands as the decode number; the prefill rows above are what
 this port moved. (Widths differ — 2112 lanes here vs 4032 in §1 — so these ms are not comparable to §1's,
 only to each other.)
+
+---
+
+## 7. The GEMM route flip: `--gemm lt` is the shipped default (2026-10-16)
+
+Route: the engine's wide-body library matmuls moved from `hipblasGemmEx` to `hipblasLtMatmul` with one
+algorithm resolved per `(shape, M)` at plan time (`engine/kernels_gemm.cpp`, decision log D26–D29). The
+`--gemm` flag keeps `library` as a first-class value and `legacy` as its alias, so every row below stays
+A/B-able in one binary; `--gemm-pins all|none|<csv>` does the same for the pin table.
+
+**Instrument:** `decode_run --time-waves --steps 0`, `ids4096.txt` from
+`progress/bench/evidence/prefill-occupancy-2026-10-16/` for the headline, `ids1024.txt` / `ids3072.txt` from
+`progress/bench/evidence/q10/` for the rest. Both routes inside one `gpu_lock` hold, alternating per rep,
+medians of 3, zero subagents, blocking. `util` at acquire: 92 % (the 1024/3072 windows), 90 % (3072 re-take),
+92 % (the 4096 headline window) — discounted per §6, and the same-window pairing is what makes the ratio,
+not the absolute ms.
+
+| width | `GROUP matmul_ms` | whole wave `wall_ms` | prefill tok/s | ratio |
+|---|---|---|---|---|
+| **4096 lanes (headline)** | 276.90 → **195.11** | 1122.50 → **1069.89** | 3649 → **3828** | **1.049×** |
+| 3072 lanes | 210.10 → **145.26** | 794.96 → **733.24** | 3864 → **4190** | **1.084×** |
+| 1024 lanes | 71.11 → **47.32** | 238.02 → **214.40** | 4302 → **4776** | **1.110×** |
+
+The 4096 spread is 1069.89 / 1111.95 / 1055.11 ms on the `lt` side against 1122.50 / 1123.88 / 1121.58 on
+`library` — ±2.6 % against ±0.1 %, i.e. the `lt` side is the noisier of the two at this width and the
+headline ratio is quoted from the medians, not the best. The §1 prefill row before this change was 3706
+tok/s, taken in a different window; **the paired pair is 3649 → 3828**, and the honest statement of the win
+is the ratio.
+
+Family rows, same pairs (`library` → `lt`): `proj` 38.64 → 24.75 ms (**1.561×**) at 1024 lanes and 115.25 →
+75.31 (**1.530×**) at 3072; `mlp_gateup` 26.23 → 15.92 (**1.647×**) and 75.53 → 49.56 (**1.524×**);
+`mlp_down` 6.24 → 6.60 (**0.945×**) and 19.15 → 20.44 (**0.937×**) — `down_proj` is the one pinned shape and
+still costs a little; an in-situ A/B of three pinned shapes left only that one, because the other two
+burst-winners cost 5.5 ms of a 24.8 ms `proj` family in situ (§3d of
+`prototype/gemm_algo_sweep/results.md`). `WAVEPARITY tokens_identical=1 logits_bitidentical=1` on both routes
+in every run.
+
+**Decode is untouched, by construction rather than by measurement:** a one-row body is the hand GEMV on
+either route (`resolve_wave_gemm`), so the **71.3 tok/s** row above stands unchanged and was not re-taken
+here. If a future change ever sends M=1 to the library, that claim dies with it and decode must be re-taken.
+
+**Gate state at the flip:** `engine/gate.py` over all nine fixtures × both routes was 18/18 green *before*
+the default moved (worker window, util 93 %), and four fixtures re-taken here at the new default — `dec8`,
+`dec64f`, `wide520f`, `wide1024f` — are green with the log echoing `gemm=lt`. The per-row band is
+**2.75e-03** and the flip-room line is now **1.50 BF16 ULP** with the pin-vs-engine pairing read on the
+reference's own room; both carry their provenance in the gate's own output
+(`prototype/gemm_algo_sweep/results.md` §3f holds the census: 74 flips over 11,804 comparisons, worst
+0.9985 ULP, 0 at or over the line).
