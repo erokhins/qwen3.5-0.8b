@@ -491,3 +491,104 @@ three-pin algo set** — the band text names `engine/kernels_gemm.cpp algo_pins(
 on — and then I trimmed the pin table to one entry. The band is therefore stated against a pin set the
 binary no longer uses. It still passed on the final set, but it must be re-derived on the shipping set before
 it is cited again, and `engine/wave_band_floor_probe.py` is the thing that does it.
+
+## 3e. The red row, attributed with `--gemm-pins`: it is the route, not the pin — and the room line is magnitude-blind (2026-10-16, worker)
+
+§3d left `--gemm lt` opt-in on one row: `wide520f` section (h), batched-vs-carry, prefill row 180, `13 vs
+248046 with room 0.124807`. This section says which aspect of `lt` produces it, hands over the measurement
+that §3d's last paragraph asked for, and decides nothing about the default.
+
+### The instrument first: a run had to say which pins it ran
+
+A pin-subset argument cannot be made from a log that prints `pins=1`, because `pins=1` is consistent with
+"asked for `all` and got one" and with "asked for `down_proj`". So the `GEMM` route echo now reads
+**`pins=<in force>/<in the table>`** — `pins=1/1` for the shipping table, `pins=0/1` with `--gemm-pins
+none` — and `engine/gate.py` grew `--gemm-pins`, passed to every side of every A/B, with a **forcing** check
+in `gemm_pin_checks`: a run whose echo does not match what was asked is a FAIL before any comparison runs,
+and a missing `pins=` on an `lt` run is a FAIL rather than a silent judgment of a different binary. That is
+the same rule the gate already applies to `--attn-touch`, and `--selftest` now carries the mismatch case
+(`engine/results.md`, Route (c) follow-up 2).
+
+### The three configs, one lock hold, correctness only
+
+`util` 92 % at acquire. Wall times below are the cost of a correctness gate, **not measurements** — no
+timing was taken and none of these lines belongs in a ledger row.
+
+| side asked for | engine echo | `rc` | wall |
+|---|---|---|---|
+| `--gemm library` (control) | `route=hipblas …` (no pin field) | **0** | 17 s |
+| `--gemm lt --gemm-pins none` | `pins=0/1` | 1 | 16 s |
+| `--gemm lt --gemm-pins down_proj` (ships) | `pins=1/1` | 1 | 18 s |
+
+**The pin is not the cause.** The two `lt` dumps are byte-identical on all 524 rows × 3 sides (batched,
+per-row, carry), 0 differing, and both print the same red row. The reason is geometric: a pin binds on
+(N, K, M) with `M = kMaxWaveRows`, and `wide520f`'s wide body is **`M=500`** — its own log line is
+`GEMM-LT shape=down_proj N=1024 K=3584 M=500 source=heuristic-rank-0` — so no pin can serve this fixture
+whether the table has one entry or three. `lt` in general is what moves row 180, not the pinned algo. The
+`library` control is green, which is the same fact from the other side.
+
+### (d) Row 180 as it actually stands, on both routes
+
+| pairing | side | top-1 | top-2 | own gap | room | room in BF16 ULP of that side's top-1 |
+|---|---|---|---|---|---|---|
+| `lt` batched-vs-carry | batched | `13` (19.956587) | `248046` (19.774279) | 0.182308 | 0.124807 | 1.46 (batched) |
+| | carry | `248046` (20.039961) | `13` (19.915154) | 0.124807 | | **1.00** (carry) |
+| `library` batched-vs-carry | batched | `13` (gap 0.0332603) | — | 0.0332603 | 0.0332603 | 0.27 |
+| | carry | `248046` (gap 0.042799) | — | 0.042799 | | 0.34 |
+
+One BF16 step at 20 is 0.125, so the `lt` pair sits **one representable step apart at logit ≈ 20** and the
+`library` pair is a third of that. Both routes flip this row against the carry side; what differs is which
+side's gap is the smaller one, because `room` is the min of the two. `wide520f` pins no HF row 180 (it
+carries `logits_last.npy` only, no `prefill_logit_rows`), so there is no oracle at this row to appeal to —
+the argument has to be about the two sides, not about a third.
+
+### The census, and what the 0.10 line cannot see
+
+`engine/wave_flip_census.py` (new, CPU-only: it reads dumps a device run already made) re-runs the
+room-bucket census of §A2 of `progress/2026-10-14/route-c-audit-2026-10-14.md` on these pairings, importing the room definition, the bucket edges and the threshold
+rather than restating them.
+
+* `wide520f`, batched-vs-carry: `lt` 8 flips, 1 at or over the line (row 180); `library` 8 flips, 0 at or
+  over. Same eight rows on both routes apart from two swaps (129/196 in, 157/179 out).
+* Bucketed by **ULPs instead of logits**, every one of the eight `lt` flips and all eight `library` flips
+  land in `[0, 1)` ULP; the `[1, 2)` bucket and everything above it are **0 flipped out of 47/42 rows**.
+* Corpus-wide (`engine/wave_band_floor_probe.py` dumps, 9 fixtures / 2951 rows, batched-vs-one-row):
+  `lt` 14 flips with a worst room of **0.44 ULP**, `library` 18 flips with a worst of **0.62 ULP** —
+  **0 at or over 0.10 on either route, and 0 at or over 1 ULP on either.** The one carry-pair flip above
+  the line is the only flip in the whole set that is even a full step wide, and it is the row in question.
+
+So the three candidate readings, stated plainly:
+
+1. **The route is not wrong at row 180.** Nothing in it disagrees with a reference; the two sides are one
+   BF16 step apart and both routes flip the row.
+2. **It is a coin toss, but the line cannot see that.** `flip_room_max = 0.10` is an absolute logit gap,
+   and a logit gap means something only at the magnitude it sits at — `engine/gate.py`'s own `bf16_ulp`
+   says as much ("0.125 is nothing at 40 and two whole ULP at 15.6"). 0.10 is 0.8 ULP at 20 and 40 ULP at
+   0.5; row 180 crossed the line because it happened to sit at logit 20, not because the decision was
+   40× safer than the flips at logit 0.5 that the rule admits.
+3. **The line needs re-derivation in a magnitude-aware unit — and that is not this section's to make.** A
+   ULP-normalized line would admit row 180 at 0.998 ULP, i.e. by two tenths of a percent, which is far too
+   thin a margin to adopt from one fixture. Before any number replaces 0.10: run the census on **both**
+   pairings (batched-vs-one-row *and* batched-vs-carry) over all nine fixtures — the carry side needs the
+   gate's `run_batched_ab`, which `wave_band_floor_probe.py` does not produce today — and check that a
+   widened line still catches every injection in the must-catch set, per the numeric-format rule in
+   `AGENTS.md`. **Nothing in `CASCADE_BAND` was touched here.**
+
+### The band re-take §3d asked for
+
+Re-measured on the one-entry table the binary ships with (`engine/wave_band_floor_probe.py --gemm-pins all`,
+9 fixtures / 2951 rows, `util` 93 %, wall 137 s, correctness only): **`lt` max 2.204122e-03** at
+`dec64f/logits45.bin`, `library` max **1.888942e-03** at the same row. The max did not move, so the band
+stays **2.75e-03** and needs no `band_history` line; the provenance text now names the one-entry table and
+says so. Why it did not move, and what did: the row that carries the ceiling lives in a fixture whose
+widest body is 17 rows, which no pin can reach, while the two fixtures that *do* run 512-row bodies —
+`wide640f`, `wide1024f` — went from 2.0330e-04 to **1.4517e-04, −29 %**. A trimmed table made the corpus
+cheaper to satisfy and left the ceiling where it was. Four fixtures below the pin width moved by ≤ 0.08 %
+for a reason this section cannot attribute (the removed pins are gone from the binary, so their side of the
+comparison is no longer a runnable config; the `library` leg reproduced all nine fixtures to five digits
+and two extra repeats of `dec64f`/`chunk64b` came back bit-identical, so it is not run noise either). It is
+≤ 0.08 %, it is nowhere near the row that sets the band, and it is recorded rather than smoothed over.
+
+**What this section does not decide**: whether `--gemm lt` becomes the default. The `library` control is
+green and the red row is attributed to the route's own spread at a one-ULP tie, so the blocker is now the
+`flip_room_max` question above plus the main agent's timing window, not an unexplained divergence.

@@ -31,7 +31,7 @@ rate*:
    `tools/gemm_peak.cpp` hard-coding `HIPBLAS_R_32F` for `C`. With a 16-bit `C` — which is what the
    engine actually asks for — the same calls sustain **33.1–33.7 TFLOP/s** at the engine's own shapes,
    and the 24-layer wave mix sustains **18.84 / 22.31 / 23.26 TFLOP/s at M = 512 / 1024 / 3072**.
-2. **The engine is verifiably on the 16-bit-`C` path.** `engine/kernels_gemm.cpp:170-171` calls
+2. **The engine is verifiably on the 16-bit-`C` path.** `engine/kernels_gemm.cpp:171-172` calls
    `gemm_stored_weight(..., HIP_R_16BF, ..., HIP_R_16BF)` and `kernels_gemm.cpp:101` describes the
    route as `dtype=bf16-in/bf16-C/f32-compute`. All of `proj`, `mlp_gateup`, `mlp_down` go through that
    one function (`kernels_mlp.cpp:262-263,276`, `kernels_proj.cpp:146`).
@@ -483,7 +483,7 @@ comes from `hipblas`/`rocblas_gemm_ex`); a per-family split of the `gdn` batched
    alone is **28.59 TFLOP/s** (180.4 GFLOP / 6.3106 ms) — 1.93× the 1-MAC vector roof of 14.82 and
    *above* dot2-bf16's best sustained 23.28. The probe's baseline of 4.696 TFLOP/s is the number
    `devices/strix-halo-compute.md` retired as an F32-`C` artifact, and the engine is verifiably on the
-   16-bit-`C` path (`engine/kernels_gemm.cpp:170`). Consequence for the plan: **dot2-bf16 would make
+   16-bit-`C` path (`engine/kernels_gemm.cpp:171`). Consequence for the plan: **dot2-bf16 would make
    `mlp_down` 23 % slower** (its dot2 floor is 7.75 ms against 6.31 ms measured), and a WMMA kernel
    has to beat hipBLAS's 18.84–33.7, not 4.696.
 2. **42 % of the wave is reachable by neither fact.** `gdn_rec` is 50.85 % of a 1024 wave and 39.78 % of

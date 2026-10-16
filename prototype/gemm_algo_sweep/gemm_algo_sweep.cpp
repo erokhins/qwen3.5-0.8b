@@ -15,7 +15,7 @@
 //               does NOT take tools/gpu_lock.sh itself — HANDOFF.md §2 says who holds it.
 //
 // WHY hipBLASLt AND NOT hipBLAS. The engine's own call is `hipblasGemmEx` through
-// `gemm_common::gemm_stored_weight` (engine/kernels_gemm.cpp:170, tools/gemm_common.h:119), which
+// `gemm_common::gemm_stored_weight` (engine/kernels_gemm.cpp:171, tools/gemm_common.h:119), which
 // takes the kernel choice away from the caller: `HIPBLAS_GEMM_DEFAULT`, and that is all. hipBLASLt
 // is the same vendor library with the choice exposed, so it is the instrument for asking "is the
 // default leaving anything on the table". The engine's own call is timed too, as the per-shape
@@ -111,7 +111,7 @@ const EngineShape kShapes[] = {
 //       bench/performance-status.md §3 lists `lm_head` as a wave FAMILY, which is true of the hand
 //       kernel; nothing routes it to hipBLAS, so sweeping it here would price a call not made.
 //   a body of one row — `resolve_wave_gemm` sends M=1 to the hand GEMV whatever the run asked for
-//       (engine/kernels_gemm.cpp:540-546), so M>=2 is the library's domain and --rows refuses 1.
+//       (engine/kernels_gemm.cpp:641-647), so M>=2 is the library's domain and --rows refuses 1.
 
 struct Options {
     enum Mode { kList, kVerify, kTime, kSelftestLayout, kSelftestSys, kFloorProbe };
@@ -147,7 +147,7 @@ struct Options {
     std::string calibration;        // floor_calibration.tsv; empty until resolve_band sets the path
     std::string calibration_out;    // --floor-probe writes the measured floors here
     std::string program = "gemm_algo_sweep";
-    size_t ws_bytes = 128ull << 20;  // engine/kernels_gemm.cpp:59 pins 128 MiB; same here
+    size_t ws_bytes = 128ull << 20;  // engine/kernels_gemm.cpp:60 pins 128 MiB; same here
     bool check_only = false;      // correctness pass, then stop: no timing at all (worker-safe)
     int algo_seq = -1;            // run exactly one candidate (implies --check-only): fault isolation
     bool trace_launch = false;    // print the full argument list of every launch, not just the warm one
@@ -296,7 +296,7 @@ bool parse_args(int argc, char **argv, Options &o) {
     for (int r : o.rows) {
         if (r < 2) {
             std::printf("ARG_ERROR --rows takes 2..N: M=1 is the hand GEMV whatever the run asked "
-                        "for (engine/kernels_gemm.cpp:540-546), so the library has no one-row shape\n");
+                        "for (engine/kernels_gemm.cpp:641-647), so the library has no one-row shape\n");
             return false;
         }
     }
@@ -1422,7 +1422,7 @@ bool time_problem(hipblasLtHandle_t lt, hipblasHandle_t hb, const EngineShape &s
     // ---- the engine's own call, judged exactly like a candidate.
     //
     // This is the line that makes the band falsifiable instead of negotiable. hipBLAS'
-    // HIPBLAS_GEMM_DEFAULT path is what engine/kernels_gemm.cpp:170 ships today, so:
+    // HIPBLAS_GEMM_DEFAULT path is what engine/kernels_gemm.cpp:171 ships today, so:
     //   engine ok, algo WRONG   -> the algorithm is the suspect.
     //   engine WRONG too        -> no algorithm in the library could pass this gate, because the
     //                              reference and the floor are what are failing. That is exactly what
@@ -1447,7 +1447,7 @@ bool time_problem(hipblasLtHandle_t lt, hipblasHandle_t hb, const EngineShape &s
             std::printf("CHECK-ENGINE shape=%s M=%d call=hipblasGemmEx HIPBLAS_GEMM_DEFAULT "
                         "ndiff=%zu/%zu worst_ulp=%.4f %s cos=%.9f meanrel=%.3e survivors=%zu "
                         "fnv=%016llx "
-                        "verdict=%s%s witness=\"the shipping path (engine/kernels_gemm.cpp:170); if "
+                        "verdict=%s%s witness=\"the shipping path (engine/kernels_gemm.cpp:171); if "
                         "this is WRONG too, the band or the reference is the defect, not the "
                         "algorithm\"\n",
                         sh.name, m, eng.ndiff, eng.n, eng.worst_ulp, band_str(eng).c_str(), eng.cos,
@@ -1627,7 +1627,7 @@ bool time_problem(hipblasLtHandle_t lt, hipblasHandle_t hb, const EngineShape &s
                     "inner=%d solution=%s\n",
                     eng ? "ENGINE-CALL" : "TIME", sh.name, m, eng ? -1 : e.seq, e.idx,
                     eng ? (size_t)0 : e.ws, best[(size_t)i], tf, o.reps, o.inner,
-                    eng ? "hipblasGemmEx HIPBLAS_GEMM_DEFAULT (engine/kernels_gemm.cpp:170)"
+                    eng ? "hipblasGemmEx HIPBLAS_GEMM_DEFAULT (engine/kernels_gemm.cpp:171)"
                         : e.solution.c_str());
         if (eng) { engine_ms = best[(size_t)i]; continue; }
         // `timed[i]` is the index into cand; `default_pos` is also an index into cand, NOT into
@@ -2775,7 +2775,7 @@ int print_list() {
     int total = 0;
     std::printf("# The matmuls the library route issues. Read out of engine/, not remembered.\n");
     std::printf("# form: C_rm[M,N] = X_rm[M,K] * W_rm[N,K]^T, bf16 in / f32 accumulate / bf16 C\n");
-    std::printf("#       (engine/kernels_gemm.cpp:170 -> tools/gemm_common.h:119)\n");
+    std::printf("#       (engine/kernels_gemm.cpp:171 -> tools/gemm_common.h:119)\n");
     std::printf("%-18s %-11s %-6s %-6s %-9s %s\n", "shape", "family", "N", "K", "per_wave", "site");
     for (const auto &s : kShapes) {
         std::printf("%-18s %-11s %-6d %-6d %-9d %s\n", s.name, s.family, s.n, s.k, s.per_wave,
@@ -2789,7 +2789,7 @@ int print_list() {
                 "to the hand GEMV\n");
     std::printf("EXCLUDED lm_head (248320x1024): hand GEMV at engine/kernels_lmhead.cpp:25, once "
                 "per request; no route reaches hipBLAS with it\n");
-    std::printf("EXCLUDED M=1: engine/kernels_gemm.cpp:540-546 sends a one-row body to the hand "
+    std::printf("EXCLUDED M=1: engine/kernels_gemm.cpp:641-647 sends a one-row body to the hand "
                 "GEMV whatever the run asked for\n");
     std::printf("\nWave width: the shipped per-call cap is 512 rows (engine/decode_step.h:49 "
                 "kMaxWaveRows; engine/decode_run.cpp:264 refuses more), so M=1024 and M=4096 are "
@@ -2908,7 +2908,7 @@ int main(int argc, char **argv) {
         CK(hipMalloc(&ws, o.ws_bytes));
         if (o.engine_ref) {
             // The engine's own route rebuilt here rather than linked out of the engine: one handle,
-            // one pinned workspace, default stream (engine/kernels_gemm.cpp:114-144). The same 128 MiB
+            // one pinned workspace, default stream (engine/kernels_gemm.cpp:115-145). The same 128 MiB
             // goes to hipBLASLt, which is sound because exactly one library is ever in flight.
             BK(hipblasCreate(&hb));
             BK(hipblasSetWorkspace(hb, ws, o.ws_bytes));

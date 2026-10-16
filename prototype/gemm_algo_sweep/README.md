@@ -19,7 +19,7 @@ Built by `bash prototype/gemm_algo_sweep/build.sh` → `gemm_algo_sweep` (gitign
 
 ## 1. The call form being swept
 
-One form, one place: `engine/kernels_gemm.cpp:155 gemm_bf16()` →
+One form, one place: `engine/kernels_gemm.cpp:156 gemm_bf16()` →
 `gemm_common::gemm_stored_weight()` (`tools/gemm_common.h:119`) → `hipblasGemmEx(..., HIP_R_16BF,
 ..., HIP_R_16BF out, HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT)`.
 
@@ -27,7 +27,7 @@ So: **bf16 operands, f32 accumulate, bf16 `C`** — the 16-bit `C` being the who
 reaches 33–38 TFLOP/s instead of the 4.7–6.0 that `devices/strix-halo-compute.md` first printed
 (that file's second correction). The tool books the identical form: `OP_T` on the weight as the
 shard stores it with `lda = k`, `OP_N` on the activation with `ldb = k`, `ldc = n`, `alpha = 1`,
-`beta = 0`, one 128 MiB workspace on the default stream — the same size `engine/kernels_gemm.cpp:59`
+`beta = 0`, one 128 MiB workspace on the default stream — the same size `engine/kernels_gemm.cpp:60`
 pins, because workspace size feeds split-K eligibility and a route that left it to the library's
 default would be making kernel choice a function of what the allocator last freed.
 
@@ -104,7 +104,7 @@ not a library call:
 |---|---|
 | `in_proj_a` / `in_proj_b`, N=16 | `proj_gemm` **refuses** them (`engine/kernels_proj.cpp:134-141`); the engine guard itself records why (12–22× the dispatch floor at that N), so they stay in the hand GEMV at every width |
 | `lm_head`, 248320×1024 | `lm_head_full` (`engine/kernels_lmhead.cpp:25`) is a hand GEMV over an **F32** activation, run once per request, not per wave row. `bench/performance-status.md` §3 lists it as a wave *family*, which is true of the hand kernel; no route hands it to hipBLAS, so sweeping it would price a call the engine does not make |
-| a body of one row (M=1) | `resolve_wave_gemm` sends M≤1 to the hand GEMV whatever the run asked for (`engine/kernels_gemm.cpp:540-546`); `--rows` refuses 1 rather than timing a shape the library never sees |
+| a body of one row (M=1) | `resolve_wave_gemm` sends M≤1 to the hand GEMV whatever the run asked for (`engine/kernels_gemm.cpp:641-647`); `--rows` refuses 1 rather than timing a shape the library never sees |
 
 ### Wave widths (the M axis), and an honest correction
 
@@ -282,7 +282,7 @@ it sweeps `--seeds` operand fills and prices four legs, then writes one `CAL` ro
 
 | leg | what it is | what it licenses |
 |---|---|---|
-| **device** | the default-ranked hipBLASLt algorithm **and `hipblasGemmEx` — the engine's own shipping call** (`engine/kernels_gemm.cpp:170`) | what a correct kernel on this box actually does. If the *engine* leg is outside the floor too, no algorithm in the library could ever pass: the band or the reference is the defect |
+| **device** | the default-ranked hipBLASLt algorithm **and `hipblasGemmEx` — the engine's own shipping call** (`engine/kernels_gemm.cpp:171`) | what a correct kernel on this box actually does. If the *engine* leg is outside the floor too, no algorithm in the library could ever pass: the band or the reference is the defect |
 | **reference** | three legal summation orders of the same dot (serial, reversed, strided-4-then-fold) against the mode-0 reference the gate uses | whether the reference moves by itself. Measured: **it does not** — `ndiff=0`, `worst_ulp=0.0000` on every shape and seed |
 | **license** | the same products accumulated in **F32**, serial and in four strided partials — what `HIPBLAS_COMPUTE_32F` entitles a kernel to do | the cancellation band's first candidate size. Measured here: also bit-identical (`ndiff=0`), because a dot of bf16 products accumulates exactly in F32 at these K — so on this box the device legs, not the license legs, are what needed exempting |
 | **must-catch** | defects an *algorithm swap can actually produce*, encoded to bf16 and judged by the same `compare_16bit_output` a kernel's output goes through | if `cos_floor ≤ mustcatch_max_cos` the probe **refuses to write the row** (`PROBE-REFUSE reason=band_would_not_discriminate`): a floor that cannot catch its own negative controls is not a floor |
