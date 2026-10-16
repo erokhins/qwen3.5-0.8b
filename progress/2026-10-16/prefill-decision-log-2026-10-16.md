@@ -448,3 +448,43 @@ the case the device proved impossible before (`must=24 moved_m2=24 moved_ship=0 
 verdict=PASS`). It also caught a latent `NameError` that killed `--neg slotk` on device, and it added the
 missing control group: a verdict now FAILs if the *clean* run is not bit-identical, because without a
 clean control no injection verdict means anything.
+
+## D21 — D19 is falsified by a bit-identical change: `attn` was never bandwidth-bound, and the byte wall was a units coincidence
+
+`prototype/attn_valu_slim/results.md` §7. A source-only change — unroll the score dot whose trip count is
+runtime, hand-fold the warp reduce — cuts a touch from 116 issue slots to 45 and moves the **shipped**
+attention form from 2.3446 ms to 1.5416 ms at 4096 lanes (**1.521×**, and 1.52–1.57× at every width
+measured), with `ndiff = 0` on all 12 plans, run-to-run-identical logs, and 36 injection runs showing no
+disagreement. No numerics decision, no occupancy cost.
+
+The falsifying arithmetic is one division. These levers remove **no traffic**, so the bytes-demanded
+census is unchanged; at 1.5416 ms the same 532.7 MB becomes **345 GB/s demanded**, and at 1024 lanes
+**381 GB/s**. Both are above this part's measured 237 GB/s DRAM read ceiling, which a kernel cannot
+exceed. Therefore the census never described DRAM traffic — L1/L2 absorb most of the reuse — and
+`bytes-demanded ÷ time` sitting at 225–248 GB/s was coincidence, not measurement.
+
+That retires the load-bearing claim of D8/D9/D16/D19:
+
+- **D16 item 3** ("the byte wall is back in front, so traffic reduction outranks instruction surgery") —
+  wrong: instruction surgery outranked everything and was worth 1.52×.
+- **D19** ("two walls of equal height, so no single lever moves attn") — wrong in its premise. m2 halved
+  traffic and gained nothing because the traffic was not the wall; m2's residual was instruction and
+  latency bound, as was the shipped form. The "equal height" was two measurements of the same wall from
+  two directions.
+- **The byte model's 5 % fit across three widths** in `prefill-occupancy-results-2026-10-16.md` stands as
+  arithmetic — it fits — and is still not evidence, because the quantity it fits is demanded bytes over
+  time, which is a restatement of the time, not an independent constraint. That is the trap in general
+  form: *a model that reproduces the measurement it was fitted to cannot falsify anything.*
+
+What changes in the plan:
+
+1. **The levers port to `engine/kernels_attn.cpp` now**, ahead of every route in the index: attn is
+   412.07 ms of a 1307.75 ms wave at 4096 lanes, and 1.52× there is roughly 140 ms of the wave. Gate
+   path: `prototype/attn_decode`'s existing pinned gates first, then the engine, then a full-wave
+   re-measure for the ledger.
+2. **Traffic routes go back in the queue behind instruction routes**, with M = 2 re-tested *after* the
+   levers land — its halving is real and may pay against a lower instruction wall.
+3. **`tools/` needs a cheap guard for this class of error**: any claim of the form "family X is
+   bandwidth-bound" must show demanded-vs-achievable, not demanded-vs-elapsed, or must show the
+   instruction-cut falsification directly. Two of the last three plan reversals in this log came from
+   reading a rate as a wall.

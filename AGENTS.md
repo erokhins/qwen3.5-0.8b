@@ -301,3 +301,13 @@ Appended at the end for the standing line-citation reason; the entry it belongs 
   *above* the 2-MAC vector roof of 29.63, which proves the tuned path is a matrix path with no
   disassembly at all. "0 of 55" and "0 of the readable 55" read the same and mean different things;
   write the second form until the first is actually true.
+- **A bytes-demanded ÷ time figure near the DRAM plateau is not evidence of a bandwidth wall.** Three
+  days of prefill planning (D8, D9, D16, D19) read `attn` as bandwidth-bound because its demanded census
+  divided by its measured time landed at 225–248 GB/s against a 237 GB/s ceiling. A bit-identical
+  instruction cut (116 issue slots per touch → 45) then made it **1.521× faster with the census
+  unchanged** — which puts the demanded rate at 345–381 GB/s, *above* the ceiling the part cannot
+  exceed. Demanded bytes are not DRAM bytes: L1/L2 absorb the reuse. The falsification is cheap and
+  should be run before a traffic route is funded — cut instructions or traffic and see which one moves
+  time, and check whether the implied rate is even achievable. Related and subtler: a model fitted to a
+  measurement cannot falsify itself (the byte model fit three widths to within 5 % and still described
+  nothing) — see D21.
