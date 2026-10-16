@@ -629,11 +629,35 @@ SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller 
 #   stage_cos      0.9998  the same stage ladder's cos floor: A3's worst stage is 0.999848723 (`norm`),
 #                         0.999833378 (`block_out`), so the floor is 1.7e-4 below the worst legal
 #                         stage and the whole ladder is monotone to within the ×8.8 spread above.
-#   flip_room      0.10   how much top-1/top-2 room the HAND route had to have before a flipped token
-#                         is a bug rather than a coin toss. A2: 1670 of 1694 rows agree on argmax, and
-#                         **all 24 flips have < 0.10 of room on the hand side** (16 of them < 0.02);
-#                         0 of the 1566 rows with >= 0.10 flipped. That is A-18's chaos floor showing
-#                         up on the route axis instead of the attention axis.
+#   flip_room_ulp  1.50   how much top-1/top-2 room a side had to have before a flipped token is a bug
+#                         rather than a coin toss — measured IN BF16 STEPS AT THAT ROW'S OWN MAGNITUDE
+#                         (`room_in_ulp`), not in logits. The unit is the whole point: the 0.10 this
+#                         key used to carry was 0.8 of a step at logit 20 and 40 steps at 0.5, so it
+#                         was a magnitude proxy masquerading as a decision rule, and `wide520f` row 180
+#                         went RED at logit 20 for a pair one representable step apart (§3e of
+#                         prototype/gemm_algo_sweep/results.md).
+#                         WHERE 1.50 COMES FROM. The census that sizes it is
+#                         `prototype/gemm_algo_sweep/results.md` §3f: both cross-width pairings
+#                         (batched-vs-carry and batched-vs-one-row) over 9 fixtures x 2 routes x 2951
+#                         rows, all 74 flips named with their room in logits AND in ULP. Worst flip
+#                         anywhere in it: **0.9985 ULP** (`lt`, wide520f row 180, the red row), then
+#                         0.7247 (`library`, p128 row 35), 0.6224 (`library`, batched-vs-one-row),
+#                         0.4353 (`lt`, same). So 1.50 is 1.50x the worst legal flip in the corpus on
+#                         the route that produced it, and 2.07x/2.41x/3.45x over the other three —
+#                         printed on every run by `flip_room_line()`, because a threshold whose margin
+#                         is not in the log is a threshold nobody can audit a year later.
+#                         WHAT THE OLD LINE DID WHEN REWRITTEN IN THIS UNIT, both directions. 1.50 ULP
+#                         is a SMALLER absolute gap than 0.10 for |top-1| < 16 (0.09375 at [8,16),
+#                         0.0469 at [4,8), 0.0117 at [1,2)) and a LARGER one at or above 16 (0.1875 at
+#                         [16,32), 0.375 at [32,64)), because `bf16_ulp` is a step function. So this
+#                         is a trade, not a relaxation: it tightens everywhere the corpus's flips
+#                         were NOT sitting and relaxes at the magnitudes they were. Honest half of that
+#                         sentence: over the 5902 rows of the census exactly ONE row changes colour,
+#                         wide520f row 180 on `lt` (RED -> admitted), and zero rows change colour the
+#                         other way, because no flip in the corpus sits below |top-1| = 8. The
+#                         tightening is therefore licensed by the unit, not demonstrated by this
+#                         corpus, and it is witnessed by an injection instead —
+#                         `--break-ab-room 3:2.0:1.0` (§3f, "Does it still bite").
 #
 # HOW THEY BIND, which is the whole of the design. Three rules, and the first is the reason none of
 # these numbers is a loosening of anything that is already green:
@@ -652,15 +676,17 @@ SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller 
 #      in a few hundred large elements while the rest of a 248 320-wide vocabulary cancels. Gating a
 #      row at 3e-2 would fail legal data, exactly as a 1-ULP gate on the MLP act would (A1: that stage
 #      floors at 5-8 ULP because three chained BF16 roundings are not 1-Lipschitz in ULP units).
-#   3. A flipped token is admissible only where the hand route's own room was < `flip_room`; a flip at
-#      >= 0.10 of room is RED, and the line prints both sides' gaps so a reader can see the difference
-#      between "this decision was a coin toss" and "this decision was decided and the engine disagrees".
-#      `room` here is the PIN's top-1/top-2 gap — the hand route reproduces the pin's decision, so the
-#      pin's room IS the hand route's room. `tools/route_c_audit.py a2` buckets by the SMALLER of the
-#      two sides' gaps, which is a slightly more permissive reading: two of the 24 A2 flips
-#      (p128 row 27, chunk64b row 97) have >= 0.10 of room on the hand side and < 0.10 on the library
-#      side. This gate takes the literal reading, prints the other side's gap beside it, and names the
-#      disagreement in a note rather than resolving it silently in either direction.
+#   3. A flipped token is admissible only where a side's own room was < `flip_room_max_ulp` BF16 ULP at
+#      that row's magnitude; a flip with >= 1.50 ULP of room on BOTH sides is RED, and the line prints
+#      both sides' gaps so a reader can see the difference between "this decision was a coin toss" and
+#      "this decision was decided and the engine disagrees". `room` here is the PIN's top-1/top-2 gap —
+#      the hand route reproduces the pin's decision, so the pin's room IS the hand route's room.
+#      `tools/route_c_audit.py a2` buckets by the SMALLER of the two sides' gaps, which is a slightly
+#      more permissive reading: two of the 24 A2 flips (p128 row 27, chunk64b row 97) have >= 0.10 of
+#      room on the hand side and < 0.10 on the library side. This gate takes the literal reading, prints
+#      the other side's gap beside it, and names the disagreement in a note rather than resolving it
+#      silently in either direction. Nothing about that min() reading changed with the unit; the census
+#      that sized 1.50 uses the same quantity (`engine/wave_flip_census.py` imports it from there).
 #
 #
 # THEY ARE POLICED, IN PLACE. `tools/band_history.py` reads every block in its `POLICED_BLOCKS` list, so
@@ -688,11 +714,61 @@ CASCADE_BAND = {
     "row_1cos_max_lt": 2.75e-3,   # per logits row, hand<->hipBLASLt — section (h) under `--gemm lt`
     "stage_meanrel_max": 3.0e-2,   # per stage tile (a3), NOT per logits row
     "stage_cos_min": 0.9998,       # ditto
-    "flip_room_max": 0.10,         # top-1/top-2 room the pin (= the hand route) had
+    "flip_room_max_ulp": 1.5,    # top-1/top-2 room, IN BF16 STEPS AT THE ROW'S OWN top-1, a flip may have
 }
 CASCADE_RULE = ("a reassociating route is judged by the step's own band floored at the measured cascade"
                 " (cos deficit >= 2e-3, meanrel >= 3e-2), and a flipped token is admissible only where"
-                " the pin (= the hand route) had < 0.10 of top-1/top-2 room")
+                " the side that owns the decision — the reference in a pin-vs-engine pairing, the closer"
+                " of the two engines in a cross-width one — had under 1.5 BF16 ULP of top-1/top-2 room")
+
+# Where the flip line came from, in the gate's own output, in the same shape as `WAVE_ROW_BAND_SOURCE`
+# below: a band that does not name its denominator is a band nobody can re-check. The three figures the
+# audit needs are HERE, not in a reader's memory: the line, the worst legal flip the census measured on
+# the route in force, and the ratio between them.
+FLIP_ROOM_SOURCE = {
+    "library": ("worst legal flip measured on this route 0.7247 ULP (p128 row 35, batched-vs-carry)"
+                " over 2951 rows, so the line is 2.07x the worst flip in the corpus; the same pairing"
+                " against the one-row side puts its worst at 0.6224 ULP (chunk64b/wide520f row 55),"
+                " 2.41x"),
+    "lt": ("worst legal flip measured on this route 0.9985 ULP (wide520f row 180, batched-vs-carry,"
+           " logit 20.04 — one BF16 step of 0.125 apart, which is the row that was RED under the old"
+           " magnitude-blind 0.10) over 2951 rows, so the line is 1.50x the worst flip in the corpus;"
+           " the same pairing against the one-row side puts its worst at 0.4353 ULP (wide520f row 87),"
+           " 3.45x"),
+}
+FLIP_ROOM_CENSUS = ("census: engine/wave_flip_census.py over data dumped by"
+                    " engine/gate.py --gemm <route> for all nine fixtures, both cross-width pairings,"
+                    " 74 flips in 11 804 row comparisons; numbers and commands in"
+                    " prototype/gemm_algo_sweep/results.md §3f")
+FLIP_ROOM_REFERENCE_SOURCE = (
+    "this pairing has NO measured margin of its own: 0 flips were admitted against a pin across the"
+    " nine fixtures x both routes of the 2026-10-16 device set (18 gate runs, all ENGINE GATE PASS),"
+    " so on this path the line is held by injection evidence alone -- `--break-runnerup` (the pin"
+    " decided by 11.00 ULP while the engine lifted its runner-up one BF16 step over the pin's max) is"
+    " RED here, and `--selftest`'s reading-split case requires the two readings to disagree on that"
+    " same row. A threshold that cannot name a measured margin has to say so; borrowing the"
+    " cross-width margin below would be the same unaccountable number wearing a better coat")
+
+
+def flip_room_line(pairing: str = "cross-width") -> str:
+    """The flip line, its margin, and WHICH pairing the margin belongs to, as one sentence.
+
+    Same purpose as `wave_row_1cos_band()`'s provenance clause — a band that does not name its
+    denominator cannot be re-checked — with one addition the per-row band does not need: the two room
+    readings are calibrated differently, so a flip line without its pairing would let the reference
+    path borrow a margin it never earned. `pairing` is "cross-width" (two engine sides, no reference,
+    margin measured by the census) or "reference" (pin vs engine, no real-corpus margin to quote).
+    """
+    val = f"{CASCADE_BAND['flip_room_max_ulp']:.2f} BF16 ULP"
+    if pairing == "reference":
+        return (f"{val}, measured on the REFERENCE's own top-1/top-2 gap (the min-over-sides reading"
+                " belongs to pairings with no reference, and using it here would let an injected"
+                " one-step lift read as a coin toss). " + FLIP_ROOM_REFERENCE_SOURCE)
+    src = FLIP_ROOM_SOURCE.get(GEMM_ROUTE)
+    return (f"{val} at the row's own top-1"
+            + (f" — {src}" if src else
+               " (not in force on the hand route; no route delta to size it on)")
+            + ". " + FLIP_ROOM_CENSUS)
 
 # Where each wave-width row band came from, in the gate's own output rather than in a reader's memory.
 # A band that does not name its denominator is a band nobody can re-check — see `prototype/attn_tile_model.py`'s
@@ -834,7 +910,6 @@ tie_notes: list[str] = []   # tied steps the engine matched outright: printed, N
 slack: list[str] = []       # steps admitted by the quantization-slack rule; counted in report()
 slack_notes: list[str] = [] # steps inside the slack region the engine matched outright: notes, not uses
 rooms: list[str] = []       # flips admitted by the cascade room rule (library route only); counted
-room_notes: list[str] = []  # flips whose two readings of `room` disagree: printed, not decided twice
 
 # ---- the judging scope ------------------------------------------------------------------------
 # What a run is being asked to adjudicate. `full` (the default) is the ordinary gate: a check that
@@ -1523,51 +1598,110 @@ def top2(v: np.ndarray) -> tuple[int, float, float]:
     return i, top, top - float(np.max(rest))
 
 
-def flip_admissible(room_pin: float, room_engine: float) -> bool:
-    """The one line the flip rule turns on, in ONE place: is this flip admissible?
+def room_in_ulp(top_val: float, gap: float) -> float:
+    """One side's top-1/top-2 gap in BF16 steps at that side's own top-1 — the unit the flip line is in.
 
-    `room` is read as the SMALLER of the two sides' top-1/top-2 gaps, which is exactly how
-    `tools/route_c_audit.py a2` bucketed the 1694 rows the 0.10 line is derived from (its own words:
-    "`room` is the SMALLER of the two sides' top1-minus-top2 gap, so a row in the first bucket was a
-    coin toss for one of the two routes and cannot be blamed on the other"). The audit's headline —
-    0 of 1566 rows with >= 0.10 of room flipped — is a claim about THAT quantity, so that is the
-    quantity the band is allowed to rest on.
-
-    The reading is recorded here rather than inlined because the two readings of the adopted wording
-    differ on two rows of the corpus (p128 row 27: hand 0.101 / library 0.019; chunk64b row 97: hand
-    0.201 / library 0.054), and switching to "the pin's own gap only" has to be a one-line change that
-    someone decides, not a rewrite. `room_notes` prints every flip where the two readings disagree, so
-    the disagreement stays visible in the log rather than being resolved silently toward the more
-    permissive side.
+    A logit gap means something only at the magnitude it sits at (`bf16_ulp`'s own note: 0.125 is nothing
+    at 40 and two whole ULP at 15.6), which is why the line moved into this unit out of absolute logits.
+    Same step function section (b) states a near-tie in, so there is ONE definition of ULP in this tree.
     """
-    return min(room_pin, room_engine) < CASCADE_BAND["flip_room_max"]
+    step = bf16_ulp(top_val)
+    return float("inf") if not step or step != step else float(gap) / step
+
+
+def flip_room_ulp(*sides: tuple[float, float]) -> float:
+    """The room of a comparison with NO reference in it, in ULP: the SMALLER of the sides' own gaps,
+    each divided by that side's own step size. A side is `(top-1 value, top-1 minus top-2)` as `top2`
+    returns it.
+
+    The min() is §A2's reading, unchanged, and it is right for exactly the pairings §A2 measured: two
+    legal widths of one route (batched vs one-row vs carried), where neither side is an answer sheet and
+    "a row in the first bucket was a coin toss for one of the two routes and cannot be blamed on the
+    other". For a comparison against the PIN there is an answer sheet, and this is the wrong quantity —
+    see `reference_room_ulp`.
+    """
+    return min(room_in_ulp(v, g) for v, g in sides)
+
+
+def reference_room_ulp(pin: np.ndarray) -> tuple[float, float, float, float]:
+    """`(id, room_in_ulp, gap_logits, top1_value)` of the REFERENCE's own decision at one row.
+
+    In a pin-vs-engine comparison the question the flip rule answers is "was the reference decided, and
+    did the engine go elsewhere?". The room that bears on that is the reference's own: the engine's
+    runner-up gap is not evidence about the reference, and it is actively misleading here — an injected
+    wrong id lifted one BF16 step over the pin's maximum has an engine-side room of exactly 1.00 ULP at
+    any magnitude, which is the narrowest illegal lift this tree knows how to build (`lift_over_pin`) and
+    would read as a coin toss under a min() reading.
+    """
+    i, val, gap = top2(pin)
+    return i, room_in_ulp(val, gap), gap, val
+
+
+def room_is_thin(room_ulp: float) -> bool:
+    """The line itself, in ONE place: is this much room (BF16 ULP) a coin toss? Both readings route
+    through here, so the number appears once and only the CHOICE of quantity differs between them."""
+    return room_ulp < CASCADE_BAND["flip_room_max_ulp"]
+
+
+def flip_admissible(*sides: tuple[float, float]) -> bool:
+    """Is this flip admissible? — the SYMMETRIC reading, for a comparison with no reference (section (h)'s
+    cross-width pairings). Judged on `flip_room_ulp`: the smaller of the sides' gaps in BF16 ULP.
+
+    One line, two READINGS, because the two pairings ask different questions (§3f of
+    prototype/gemm_algo_sweep/results.md). Before 2026-10-16 this was the only reading and it was applied
+    to the pin-vs-engine pairing too, which is how `wide520f` row 180 and `--break-runnerup` came to need
+    opposite answers from one constant: the real cross-width row needs the line above 0.9985 ULP and the
+    injected pin-vs-engine wrong-id sits at exactly 1.00 ULP of engine-side room, a 0.0015 ULP squeeze
+    that no value of the constant can serve. Splitting the READING — not the constant — is the fix:
+    reference comparisons ask about the reference (`reference_flip_admissible`), engine-vs-engine asks
+    about the closer of the two engines. Merging them back together is the mistake that starts the same
+    argument over again, and `--selftest`'s reading-split case fails if anyone does it.
+    """
+    return flip_room_ulp(*sides) < CASCADE_BAND["flip_room_max_ulp"]
+
+
+def reference_flip_admissible(pin: np.ndarray) -> bool:
+    """Is a flip against the PIN admissible? Only if the REFERENCE itself had under the line of room.
+
+    Same number as `flip_admissible`, different side measured, for the reason in `reference_room_ulp`.
+    §A2's min() rationale does not reach here: §A2 bucketed hand-vs-library rows, two engines and no
+    reference, and the two corpus rows its min() reading turned on (p128 row 27, chunk64b row 97) are
+    engine-vs-engine rows. The device set of 2026-10-16 reports zero real admissions on this pairing
+    (9 fixtures × both routes), so what holds this reading up is injections, and `flip_room_line`
+    says so instead of borrowing the cross-width margin.
+    """
+    return room_is_thin(reference_room_ulp(pin)[1])
 
 
 def room_verdict(step_label: str, pin: np.ndarray, eng: np.ndarray | None,
                  sampled: int) -> tuple[bool, str]:
     """`(admissible, the line to print)` for one flipped token under the cascade room rule.
 
-    `room` is the PIN's top-1/top-2 gap, and the pin is the hand route's own answer sheet: the hand
-    route reproduces this fixture's pinned ids (that is what its green gate means), so the room the pin
-    had IS the room the hand route had, and the audit's flip table (`progress/2026-10-14/route-c-audit-2026-10-14.md`
-    §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md: 24 flips, every one of them below 0.10 of hand-side room, 0 of 1566 rows at or above it)
-    transfers to this comparison unchanged. The ENGINE's own gap is printed next to it and not gated —
-    which way a legal route's coin landed is not a band, exactly as D-9 prints the engine's gap at a
-    slack step without judging it — and when the two readings would disagree (pin room at or over the
-    line while the engine's own gap is under it) that is said out loud rather than buried.
+    This is the REFERENCE pairing, so the room judged is the PIN's own top-1/top-2 gap in BF16 ULP
+    (`reference_room_ulp`, and the reason it is not `flip_room_ulp` is written there). The pin is the
+    hand route's answer sheet as well: the hand route reproduces this fixture's pinned ids, so the room
+    the pin had IS the room the hand route had.
+
+    The ENGINE's own gap is printed beside it and NOT judged. That is the distinction a single symmetric
+    line erased: for two legal widths of one route the closer side's uncertainty is the honest quantity,
+    because neither side is an answer sheet; here one side is, and the other side's near-tie says nothing
+    about whether the reference decided. `--selftest` runs one row under both readings and requires them
+    to disagree, so this cannot be "simplified" back into one path unnoticed.
 
     Fails closed on a missing engine row: a flip that cannot be attributed to a row cannot be admitted.
     """
     p_id, p_val, p_gap = top2(pin)
-    line = (f"ROOM {step_label}: pin top1 {p_id} over its runner-up by {p_gap:.6g}"
-            f" = {p_gap / bf16_ulp(p_val if p_val else 1.0):.1f} BF16 ULP at that magnitude,"
-            f" against the audit's flip line {CASCADE_BAND['flip_room_max']:.2f}"
-            f" ({CASCADE_RULE})")
+    _pid, p_ulp, _pg, _pv = reference_room_ulp(pin)
+    line = (f"ROOM {step_label}: pin top1 {p_id} ({p_val:.6g}) over its runner-up by {p_gap:.6g}"
+            f" = {p_ulp:.2f} BF16 ULP at that magnitude,"
+            f" against the flip line {flip_room_line('reference')} ({CASCADE_RULE})")
     if eng is None:
         return False, line + " | NOT ADMISSIBLE: no engine logits row, so the flip cannot be attributed"
-    e_id, _e_val, e_gap = top2(eng)
-    line += (f"; engine top1 {e_id} over ITS runner-up by {e_gap:.6g}"
-             f"; room = min(the two) = {min(p_gap, e_gap):.6g}")
+    e_id, e_val, e_gap = top2(eng)
+    e_ulp = room_in_ulp(e_val, e_gap)
+    line += (f"; engine top1 {e_id} ({e_val:.6g}) over ITS runner-up by {e_gap:.6g}"
+             f" = {e_ulp:.2f} ULP — printed, not judged: this pairing has a reference, and the"
+             " engine's own uncertainty is not the reference's")
     if p_gap <= 0.0:
         # A zero gap in the pin is not a thin decision, it is no decision: that row is an exact tie, and
         # D-8's tie policy already owns it (it admits only an id the pin actually tied at its maximum,
@@ -1577,16 +1711,14 @@ def room_verdict(step_label: str, pin: np.ndarray, eng: np.ndarray | None,
         return False, (line + " | NOT ADMISSIBLE under the flip rule: the pin's gap here is 0, i.e. the"
                        " pin TIED at its maximum, and that question belongs to the tie policy above"
                        " (which admits only an id the pin tied), not to the thin-room rule")
-    if not flip_admissible(p_gap, e_gap):
-        return False, (line + f" | RED: neither side had under {CASCADE_BAND['flip_room_max']:.2f} of"
-                       f" room (pin {p_gap:.6g}, engine {e_gap:.6g}), so this flip is not the thin-room"
-                       " class §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured")
-    if p_gap >= CASCADE_BAND["flip_room_max"]:
-        # Admitted on the smaller gap while the PIN itself had plenty of room — the two-rows case.
-        room_notes.append(f"{step_label}: admitted on room {min(p_gap, e_gap):.6g} (engine's own gap)"
-                          f" while the pin had {p_gap:.6g}")
-    return True, (line + f" | ADMITTED as a thin-room flip: the smaller of the two sides' gaps is"
-                  f" {min(p_gap, e_gap):.6g}, under {CASCADE_BAND['flip_room_max']:.2f}, which is"
+    if not reference_flip_admissible(pin):
+        return False, (line + f" | RED: the REFERENCE had {p_ulp:.3g} BF16 ULP of room here"
+                       f" ({p_gap:.6g} at top-1 {p_val:.6g}), at or over"
+                       f" {CASCADE_BAND['flip_room_max_ulp']:.2f}, so the pin decided this token and"
+                       " the engine went elsewhere. That is a divergence, not the thin-room class §A2"
+                       " of progress/2026-10-14/route-c-audit-2026-10-14.md measured (which had no reference on either side)")
+    return True, (line + f" | ADMITTED as a thin-room flip: the reference's own room is"
+                  f" {p_ulp:.4g} BF16 ULP, under {CASCADE_BAND['flip_room_max_ulp']:.2f}, which is"
                   " where A-18's chaos floor and the 24/24 thin-room flips of §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md live (printed, not gated:"
                   " which way this route's coin landed is not a band)")
 
@@ -3001,13 +3133,14 @@ def prefill_row_checks(work: Path, vocab: int, rows_pin, asked: str,
             worst_cos = (deficit, i)
         if m["meanrel"] > worst_rel[0]:
             worst_rel = (m["meanrel"], i)
-        pin_id, _, pin_room = top2(ref)
-        eng_id, _, eng_room = top2(eng)
+        pin_id, pin_val, pin_room = top2(ref)
+        eng_id, eng_val, eng_room = top2(eng)
+        pin_ulp = room_in_ulp(pin_val, pin_room)
         # A census of the PIN alone, taken before anything is compared: how many of these rows is the
         # reference itself ill-equipped to decide. It is printed with the verdict because the flip rule
         # forgives a move on exactly this class of row, and a reader who cannot see how large that class
         # is cannot tell a green run from a green run that had a lot of room to be green.
-        if pin_room < CASCADE_BAND["flip_room_max"]:
+        if pin_ulp < CASCADE_BAND["flip_room_max_ulp"]:
             pin_thin.append(i)
         if int(np.count_nonzero(ref == ref.max())) > 1:
             pin_tied.append(i)
@@ -3025,18 +3158,22 @@ def prefill_row_checks(work: Path, vocab: int, rows_pin, asked: str,
                     tied_rows.append(line)
                 check(ok, f"row {i}: the engine's argmax moved against a TIED pinned row", line)
             else:
-                ok = flip_admissible(pin_room, eng_room)
-                line = (f"row {i} ({region}): pin top1 {pin_id} (room {pin_room:.6g}) vs engine"
-                        f" {eng_id} (room {eng_room:.6g})"
-                        + (f" — ADMITTED as a thin-room flip: the smaller gap is under"
-                           f" {CASCADE_BAND['flip_room_max']:.2f}, which is the class §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured"
+                ok = room_is_thin(pin_ulp)      # the REFERENCE reading; `flip_admissible` is for pairings with no reference
+                row_ulp = pin_ulp
+                line = (f"row {i} ({region}): pin top1 {pin_id} ({pin_val:.6g}) over its runner-up by"
+                        f" {pin_room:.6g} = {pin_ulp:.3g} ULP vs engine {eng_id} ({eng_val:.6g})"
+                        f" over its own runner-up by {eng_room:.6g}"
+                        + (f" — ADMITTED as a thin-room flip: the reference's own room is"
+                           f" {row_ulp:.4g} BF16 ULP, under"
+                           f" {CASCADE_BAND['flip_room_max_ulp']:.2f}, which is the class §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured"
                            if ok else
-                           f" — RED: neither side had under {CASCADE_BAND['flip_room_max']:.2f} of"
+                           f" — RED: neither side had under"
+                           f" {CASCADE_BAND['flip_room_max_ulp']:.2f} BF16 ULP of"
                            " room, so no band in force covers this flip. Stop and report; this"
                            " section does not widen one"))
                 if ok:
                     rooms.append(f"prefill row {i}: {pin_id} -> {eng_id}"
-                                 f" (room {min(pin_room, eng_room):.6g})")
+                                 f" (room {row_ulp:.4g} BF16 ULP)")
                 flips.append(line)
                 check(ok, f"row {i}: the engine's argmax moved against the pinned row", line)
         e = eng.astype(np.float64)
@@ -3070,7 +3207,7 @@ def prefill_row_checks(work: Path, vocab: int, rows_pin, asked: str,
         print(f"  boundary row {i} ({which}): cos deficit {at_row[i]:.4e}")
     print(f"  the pin's own fragile rows, counted on the reference alone: {len(pin_tied)} tie at their"
           f" maximum {intlist(pin_tied)}, {len(pin_thin)} have top-1/top-2 room under"
-          f" {CASCADE_BAND['flip_room_max']:.2f} {intlist(pin_thin)} — on the other"
+          f" {CASCADE_BAND['flip_room_max_ulp']:.2f} BF16 ULP {intlist(pin_thin)} — on the other"
           f" {n_rows - len(set(pin_tied) | set(pin_thin))} of the {n_rows} pinned rows an argmax move is"
           " a defect by the rule already in force, which is what makes a green run here a claim about the"
           " engine rather than a tautology about the fixture (census: tools/prefill_row_rooms.py)")
@@ -3104,6 +3241,53 @@ def intlist(a) -> str:
     """An id list, capped: a tied row in a 248 320-wide vocabulary could print a thousand numbers."""
     ids = [int(x) for x in a]
     return str(ids[:8]) + (f" … {len(ids)} in all" if len(ids) > 8 else "")
+
+
+def selftest_room_readings(fixture: str, step: int | None) -> list[str]:
+    """One injected row, judged by BOTH room readings, and they must DISAGREE.
+
+    This is the witness that the flip rule has two readings on purpose. The row is
+    `--break-runnerup`'s: the pin decided step `step` by a wide margin, and the engine lifted the pin's
+    runner-up exactly one BF16 step over the pin's maximum — the narrowest illegal choice this tree
+    builds. Judged as a reference comparison the reference's own room says RED; judged with the
+    symmetric min() the engine's own one-step gap says ADMITTED. Both are printed, with the ULP figures,
+    and the case fails if either verdict moves:
+
+      * merge the two pairings back into one path and one of the two flips colour — which is exactly how
+        `wide520f` row 180 (cross-width, must-admit at 0.9985 ULP) and this row (reference, must-refuse
+        at 1.00 ULP engine-side) came to need opposite answers from one constant;
+      * loosen the slack bound, and the row stops being decidable for a different reason.
+
+    Nothing here is a device result and nothing is timed: it is arithmetic on pinned rows.
+    """
+    if not route_is_library():
+        print("  [SKIP] the two room readings: the flip rule is consulted on library routes only;"
+              " `--gemm hand` never reaches it (its own ids check is the whole rule there).")
+        return []
+    if step is None:
+        print(f"  [SKIP] the two room readings: {fixture} has no step whose margin clears its licensed"
+              " element error, so there is no decidable row to aim the injection at.")
+        return []
+    pin = pin_row(step)
+    eng = lift_over_pin(step, pin, pin_runnerup(step, "--break-runnerup"))
+    _p_id, p_ulp, p_gap, p_val = reference_room_ulp(pin)
+    e_id, e_val, e_gap = top2(eng)
+    e_ulp = room_in_ulp(e_val, e_gap)
+    ref_thin = room_is_thin(p_ulp)
+    min_thin = room_is_thin(min(p_ulp, e_ulp))
+    detail = (f"step {step}: pin top1 over its runner-up by {p_gap:.6g} = {p_ulp:.2f} ULP;"
+              f" engine top1 {e_id} ({e_val:.6g}) over ITS runner-up by {e_gap:.6g} = {e_ulp:.2f} ULP"
+              f" → reference reading {'ADMITTED' if ref_thin else 'RED'}"
+              f" at {p_ulp:.2f} ULP, min()-over-sides reading"
+              f" {'ADMITTED' if min_thin else 'RED'} at {min(p_ulp, e_ulp):.2f} ULP"
+              f" (line {CASCADE_BAND['flip_room_max_ulp']:.2f})")
+    ok = (not ref_thin) and min_thin
+    print(f"  [{'PASS' if ok else 'FAIL'}] the same injected wrong-id, judged by both room readings,"
+          f" must split: {detail}" + ("" if ok else
+      " — the two readings must disagree in THIS direction: the reference decided (RED) while the"
+        " engine's own near-tie would admit. If they agree, one pairing has been folded into the other"
+        " and the distinction §3f of prototype/gemm_algo_sweep/results.md exists for is gone"))
+    return [] if ok else [f"the two room readings must split at step {step}: {detail}"]
 
 
 def selftest_prefill_rows() -> list[str]:
@@ -3630,11 +3814,61 @@ def wave_launchstat_lines(counts: dict, prompt_len: int, decode_steps: int, wave
     return out
 
 
+def ab_room_spec(spec: str) -> tuple[int, float, float] | None:
+    """Parse `--break-ab-room POS[:ULP[:MAG]]` → `(position, room in BF16 ULP, top-1 magnitude)`.
+
+    Empty means no injection. `MAG` defaults to 63.0 because that is the stand-in corpus's own row
+    magnitude, and `ULP` to 2.0 — just above the line, which is the only margin at which a must-catch
+    is a measurement of the line rather than of the bug's size. The two knobs together are the point:
+    the same room in ULP is a different absolute gap at every magnitude, and that is exactly the axis
+    the line was moved onto (§3f of prototype/gemm_algo_sweep/results.md).
+    """
+    if not spec.strip():
+        return None
+    parts = spec.split(":")
+    if not 1 <= len(parts) <= 3:
+        raise SystemExit(f"--break-ab-room takes POS[:ULP[:MAG]], got {spec!r}")
+    try:
+        pos = int(parts[0])
+        ulp = float(parts[1]) if len(parts) > 1 else 2.0
+        mag = float(parts[2]) if len(parts) > 2 else 63.0
+    except ValueError:
+        raise SystemExit(f"--break-ab-room takes POS[:ULP[:MAG]], got {spec!r}")
+    if pos < 0 or ulp <= 0.0 or mag <= 0.0:
+        raise SystemExit(f"--break-ab-room needs a position at or after 0 and positive ULP/MAG,"
+                         f" got {spec!r}")
+    return pos, ulp, mag
+
+
+def ab_room_row(wide_side: bool, ulp: float, mag: float) -> tuple[np.ndarray, int]:
+    """Row `pos` for ONE side of the stand-in, built so the two sides disagree at an EXACT room.
+
+    Same shape on both sides — a floor at `-mag` across all 64 lanes with the top two ids at `mag` and
+    `mag - gap`, the winner swapped — so each side's own top-1 is `mag` and its own gap is exactly
+    `gap = ulp x bf16_ulp(mag)`. `bf16_ulp` returns powers of two and `ulp` is a small binary fraction
+    in every case the selftest runs, so `mag - gap` is exact in F32 and the room the flip rule prices
+    is the requested number of ULP, not an approximation of it.
+
+    Two details that are not arbitrary. The flat floor matters: leaving the arange's other 62 lanes in
+    place would bury a one-ULP tie at the top of a row whose energy sits far above it, so the
+    injection would be judged on arithmetic it never intended. And only the two top lanes differ
+    between the sides, so the row band and the pooled stage figures cannot see this injection at all —
+    the flip half is the only half that can go red, which is what makes it aimed rather than
+    indiscriminate (`prototype/mlp_gemv/results.md`'s locality rule).
+    """
+    win, lose = (63, 62) if wide_side else (62, 63)
+    gap = ulp * bf16_ulp(mag)
+    row = np.full(64, -mag, dtype=np.float32)
+    row[win], row[lose] = mag, np.float32(mag - gap)
+    return row, win
+
+
 def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: dict,
                         work: Path, wave_rows: int, break_wave: bool = False,
                         break_ab_logits: int = -1, break_ab_ids: int = -1, carry_rows: int = 0,
                         break_gdn_one_row: bool = False,
-                        break_attn_one_row: bool = False) -> dict:
+                        break_attn_one_row: bool = False,
+                        break_ab_room: str = "") -> dict:
     """The sides of section (h), on the CPU, for `--dry-run` / `--selftest`.
 
     Like section (d) in dry-run mode this is Python comparing with itself — said out loud in the note
@@ -3652,8 +3886,15 @@ def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: d
     `break_attn_one_row` aims the same bug at P8's site alone: the attention layer of a wide wave
     submitting one query row per launch. Same reasoning as the GDN injection — a wave that quietly ran
     one row at a time produces identical bits, so only the counters can see it.
+
+    `break_ab_room` is the flip line's own negative: POS's row becomes a controlled near-tie on which
+    the two sides pick different ids, at `ULP` BF16 ULP of room and a top-1 of `MAG` (see
+    `ab_room_spec`/`ab_room_row`). Unlike the two injections above it, this one changes BOTH sides —
+    the bug it models is two legal widths disagreeing, and a perturbation on one side alone could not
+    state a room for the pair.
     """
     greedy = man["greedy_continuation"]
+    room_spec = ab_room_spec(break_ab_room)
 
     def side(name: str, requested_rows: int, observed_rows: int, perturbs: bool,
              only_one_row: dict | None = None) -> dict:
@@ -3697,6 +3938,16 @@ def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: d
                 return -1
             return 999900001 + pos      # an id no row of this corpus argmaxes to; unique per position
 
+        def room_case(pos: int):
+            """`(row, sampled_id)` when POS's row is the controlled near-tie, else None.
+
+            Each side writes its own winner into `sampled`, which is what makes the two sides disagree
+            the way two legal widths disagree — an id choice that follows from that side's own bits.
+            """
+            if room_spec is None or pos != room_spec[0]:
+                return None
+            return ab_room_row(not perturbs, room_spec[1], room_spec[2])
+
         lines = [f"PREFILL tokens={len(prompt_ids)} logits={PREFILL_LOGITS_ALL}"
                  f" prefix_len={len(prompt_ids)} wave_rows={requested_rows}",
                  # Every row priced: the A/B compares every row of the wave, and under `last` there
@@ -3705,19 +3956,26 @@ def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: d
         for i, tok in enumerate(prompt_ids):
             sampled = greedy[0] if i == len(prompt_ids) - 1 else prompt_ids[i + 1]
             sampled = perturb_id(i) if perturb_id(i) >= 0 else sampled
+            rc = room_case(i)
+            if rc is not None:
+                sampled = rc[1]
             lines.append(f"STEP kind={PREFILL_KIND} index={i} input={tok} sampled={sampled}"
                          f" top_logit=1 pos_before={i} pos_after={i + 1} stop=0")
             (out_dir / f"logits{i}.bin").write_bytes(
-                np.arange(64, dtype=np.float32).tobytes())
+                (rc[0] if rc is not None else np.arange(64, dtype=np.float32)).tobytes())
             perturb(i)
         for j in range(len(dec_logits)):
             pos = len(prompt_ids) + j
             alt = perturb_id(pos)
+            sampled = alt if alt >= 0 else greedy[j + 1]
+            rc = room_case(pos)
+            if rc is not None:
+                sampled = rc[1]
             lines.append(f"STEP kind={DECODE_KIND} index={pos} input={greedy[j]}"
-                         f" sampled={alt if alt >= 0 else greedy[j + 1]} top_logit=1 pos_before={pos}"
+                         f" sampled={sampled} top_logit=1 pos_before={pos}"
                          f" pos_after={pos + 1} stop=0")
             (out_dir / f"logits{pos}.bin").write_bytes(
-                np.arange(64, dtype=np.float32).tobytes())
+                (rc[0] if rc is not None else np.arange(64, dtype=np.float32)).tobytes())
             perturb(pos)
         lines += wave_launchstat_lines(counts, len(prompt_ids), len(dec_logits), observed_rows,
                                        only_one_row)
@@ -3928,18 +4186,22 @@ def cross_width_ids(sides: list[tuple[str, dict]], band_ref: str) -> None:
                 check(False, f"{label_a} and {label_b} row {i} is comparable",
                       f"logits{fidx}.bin is {ra.shape} floats on {label_a}, {rb.shape} on {label_b}")
                 continue
-            a_id, _av, a_gap = top2(ra)
-            b_id, _bv, b_gap = top2(rb)
+            a_id, a_val, a_gap = top2(ra)
+            b_id, b_val, b_gap = top2(rb)
             where = f"{x.get('kind')} row {x.get('index')}"
-            if flip_admissible(a_gap, b_gap):
+            pair_ulp = flip_room_ulp((a_val, a_gap), (b_val, b_gap))
+            if flip_admissible((a_val, a_gap), (b_val, b_gap)):
                 flips.append(f"{where}: {label_a} {xa} / {label_b} {xb}, room"
-                             f" {min(a_gap, b_gap):.6g} (< {CASCADE_BAND['flip_room_max']:.2f})")
+                             f" {pair_ulp:.4g} BF16 ULP"
+                             f" (< {CASCADE_BAND['flip_room_max_ulp']:.2f};"
+                             f" own gaps {a_gap:.6g} / {b_gap:.6g})")
             else:
-                reds.append(f"{where}: {xa} vs {xb} with room {min(a_gap, b_gap):.6g}"
+                reds.append(f"{where}: {xa} vs {xb} with room {pair_ulp:.4g} BF16 ULP"
                             f" (both sides' own gaps {a_gap:.6g} / {b_gap:.6g})")
         check(not reds,
               f"{label_a} and {label_b} sample the same tokens at every row that was not a coin toss"
               f" — the cascade flip rule, {band_ref}",
+              f"flip line: {flip_room_line()}. "
               f"{len(sa)} rows compared; {len(flips)} thin-room flip(s)"
               + (f": {'; '.join(flips)}" if flips else "")
               + (f" | {len(reds)} RED: {'; '.join(reds)}" if reds else ""))
@@ -5111,6 +5373,56 @@ def selftest(fixture: str = "dec8") -> int:
          " the ordinary different-ids failure; on the library route it is the flip rule being asked"
          " whether an id difference at a row with real room is admissible, and the stand-in's rows are"
          " aranges whose every gap is 1.0 — no row of this corpus is a coin toss, so it must refuse"),
+        # The flip line's own edges, MEASURED rather than asserted. `--break-ab-room POS:ULP[:MAG]`
+        # builds a row whose room is exactly the ULP figure it is handed (§3f of
+        # prototype/gemm_algo_sweep/results.md), so these three cases say where the 1.50 ULP line sits
+        # in its own unit, on both sides of it, and the room is printed inside the FAIL line so a reader
+        # can check the injection is above the line instead of trusting that it is:
+        #   3:2.0      2.00 ULP at this corpus's own magnitude = 0.50 logits -> RED (both readings)
+        #   3:2.0:1.0  2.00 ULP at top-1 1.0 = 0.0156 logits -> RED on the ULP line, and it is the row
+        #              the retired magnitude-blind 0.10 ADMITTED. The tightening half, and the only
+        #              witness that the new line is not purely a relaxation.
+        #   3:1.0:63   1.00 ULP at top-1 63 = 0.25 logits -> ADMITTED now, RED under the retired line:
+        #              wide520f row 180's shape, reproduced on the CPU rather than waited for on device.
+        (["--break-ab-room", f"{ab_pos}:2.0"], 1,
+         ([f"[FAIL] batched and one-row sample the same tokens at every row that was not a coin toss",
+           f"prefill row {ab_pos}: 63 vs 62 with room 2 BF16 ULP"
+           f" (both sides' own gaps 0.5 / 0.5)",
+           "![FAIL] batched and one-row keep every logits row inside the cascade band",
+           "![FAIL] batched and one-row pool to a stage meanrel inside the cascade band",
+           "![FAIL] the batched side issues ROW-BATCHED glue launches"]
+          if route_is_library() else
+          ["[FAIL] both sides sample the same token ids",
+           "[FAIL] both sides write bit-identical logits",
+           "![FAIL] the batched side issues ROW-BATCHED glue launches"]),
+         f"position {ab_pos} is a near-tie 2.00 BF16 ULP wide at top-1 63 (0.50 logits) on which the two"
+         " sides pick different ids: above the 1.50 ULP line, so the flip rule must refuse it and name"
+         " the room in ULP. Only two lanes differ between the sides, so the row band, the pooled stage"
+         " figures and every launch count stay green — the flip rule is the only thing that may notice"),
+        (["--break-ab-room", f"{ab_pos}:2.0:1.0"], 1,
+         ([f"[FAIL] batched and one-row sample the same tokens at every row that was not a coin toss",
+           f"prefill row {ab_pos}: 63 vs 62 with room 2 BF16 ULP"
+           f" (both sides' own gaps 0.015625 / 0.015625)",
+           "![FAIL] batched and one-row keep every logits row inside the cascade band"]
+          if route_is_library() else
+          ["[FAIL] both sides sample the same token ids",
+           "[FAIL] both sides write bit-identical logits"]),
+         f"position {ab_pos} is the SAME 2.00 ULP room at top-1 1.0, i.e. 0.015625 logits — a gap the"
+         f" retired 0.10 line admitted (0.015625 < 0.10) and the ULP line refuses. This is the case"
+         " that shows the change is a trade and not a relaxation: had it stayed green, the new line"
+         " would have been a pure loosening and would have needed a different justification"),
+        (["--break-ab-room", f"{ab_pos}:1.0:63"],
+         0 if route_is_library() else 1,
+         ([f"[PASS] batched and one-row sample the same tokens at every row that was not a coin toss",
+           f"prefill row {ab_pos}: batched 63 / one-row 62, room 1 BF16 ULP (< 1.50;"
+           f" own gaps 0.25 / 0.25)",
+           "![FAIL] batched and one-row keep every logits row inside the cascade band"]
+          if route_is_library() else
+          ["[FAIL] both sides sample the same token ids",
+           "[FAIL] both sides write bit-identical logits"]),
+         f"position {ab_pos} at 1.00 BF16 ULP of room at top-1 63 = 0.25 logits: the wide520f row-180"
+         " shape (one representable step apart at a large logit), which the retired 0.10 called RED and"
+         " this line admits as the coin toss the census measured it to be"),
     ]
     bad = []
     for extra, want_rc, want_in, what in cases:
@@ -5133,6 +5445,20 @@ def selftest(fixture: str = "dec8") -> int:
         if not ok:
             print("      " + "\n      ".join(l for l in p.stdout.splitlines() if "FAIL" in l)[:400])
             bad.append(what)
+    # The refusal of a stand-in injection on a real run, asserted here rather than left to the reader.
+    # This one runs WITHOUT `--dry-run`, which is the point; `--no-engine` is there so that a broken guard
+    # fails this case on CPU instead of silently starting a device run inside `--selftest`. With the guard
+    # intact nothing after argument parsing is reached at all. Without it, the same argv runs the engine,
+    # discards the flag, and prints PASS over a bug that was never injected.
+    section("(h0) a stand-in injection asked of a real run is refused, not ignored")
+    for extra in (["--break-ab-room", f"{ab_pos}:2.0"], ["--break-ab-logits", "2"],
+                  ["--break-ab-ids", "2"]):
+        p = subprocess.run(base + ["--no-engine"] + extra, capture_output=True, text=True)
+        ok = p.returncode != 0 and "only the CPU stand-in" in (p.stdout + p.stderr)
+        print(f"  [{'PASS' if ok else 'FAIL'}] {extra[0]} without --dry-run refuses to run the engine"
+              f" and names the flag — rc={p.returncode}")
+        if not ok:
+            bad.append(f"stand-in injection {extra[0]} not refused on a real run")
     # The fingerprint-identity case is a property of the pins and the shared helper rather than of an
     # injection, and it is the only thing in this file that imports torch — so it runs once here, in
     # this process, instead of once per dry-run subprocess. A fixture with no fingerprint pins has
@@ -5144,6 +5470,8 @@ def selftest(fixture: str = "dec8") -> int:
         if len(fails) > before:
             bad.append("fp-of-pins identity (section (g)'s mechanical case): " + fails[-1][:160])
     bad += selftest_declared_gaps(fixture)
+    section("(h2) the flip rule's TWO room readings, on one injected row — in process")
+    bad += selftest_room_readings(fixture, slack_out)
     section("(i) the prefill-row section's own negatives — synthetic rows, in process")
     row_bad = selftest_prefill_rows()
     bad += row_bad
@@ -5375,7 +5703,8 @@ def main() -> int:
                          " carries — arms the cascade floor (CASCADE_BAND): each step's cos/meanrel cap"
                          " is floored at the measured hand<->library cascade, a flipped token is"
                          " admissible where that row's top-1/top-2 room was under"
-                         f" {CASCADE_BAND['flip_room_max']:.2f} (the smaller of the two sides' gaps,"
+                         f" {CASCADE_BAND['flip_room_max_ulp']:.2f} BF16 ULP at the row's own"
+                         " magnitude (the smaller of the two sides' gaps,"
                          " the definition §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md gives), and section (h) judges wave-width drift against that"
                          " band instead of bit-identity. `lt` is the hipBLASLt call path"
                          " (`--gemm lt`, `prototype/gemm_algo_sweep/results.md` §3a): a different"
@@ -5520,6 +5849,16 @@ def main() -> int:
                          " with --break-ab-logits. On `--gemm hand` that is the ordinary "
                          "different-ids failure; on `--gemm library` it is the flip rule being asked"
                          " whether an id difference at a row with real room is admissible (it is not)")
+    ap.add_argument("--break-ab-room", dest="break_ab_room", default="", metavar="POS[:ULP[:MAG]]",
+                    help="with --dry-run: make section (h) position POS a controlled near-tie on which"
+                         " the two sides pick different ids, with a room of exactly ULP BF16 ULP (default"
+                         " 2.0, just above the 1.50 line) at a top-1 of MAG (default 63, this corpus's"
+                         " own magnitude). Only the two top lanes differ between the sides, so the row"
+                         " band and the pooled stage figures cannot see it and the flip rule is the only"
+                         " thing that can go red. ULP and MAG together are the point: 2.0 ULP at top-1 1"
+                         " is 0.0156 of a logit, a gap the retired magnitude-blind 0.10 could never have"
+                         " seen, and 1.0 ULP at top-1 63 is 0.25 logits, which the old line called RED"
+                         " and this one admits (the wide520f row-180 shape, on the CPU)")
     ap.add_argument("--break-y0", dest="break_y0", action="store_true",
                     help="with --dry-run: the wave's LAST prefill row samples an id the pinned"
                          " prefill row does not put at its maximum, so §06.5's first answer token is"
@@ -5566,6 +5905,30 @@ def main() -> int:
                          " perturbation test")
     ap.add_argument("--build", action="store_true", help="run engine/build.sh first")
     args = ap.parse_args()
+
+    # (pre) INJECTION HYGIENE. Several `--break-*` flags are read ONLY by `batched_ab_stand_in`, the CPU
+    # sides section (h) compares under `--dry-run`; on a real run `run_batched_ab` supplies the sides and
+    # never looks at them. Passing one to a device run would therefore buy a green verdict for a bug that
+    # was never injected — the empty-must-catch-set trap, and it happened: a `--break-ab-room` sweep run
+    # without `--dry-run` printed nine quiet rc=0 lines that read as "the injection did not bite". Refuse
+    # the combination and say which flag carries the injection instead of ignoring it.
+    stand_in_only = {"--break-ab-logits": args.break_ab_logits,
+                     "--break-ab-ids": args.break_ab_ids,
+                     "--break-ab-room": args.break_ab_room,
+                     "--break-wave": args.break_wave,
+                     "--break-gdn-one-row": args.break_gdn_one_row,
+                     "--break-attn-one-row": args.break_attn_one_row}
+    asked = [flag for flag, val in stand_in_only.items() if val not in ("", -1, False)]
+    if asked and not args.dry_run:
+        raise SystemExit(
+            f"gate: {', '.join(asked)} "
+            + ("is" if len(asked) == 1 else "are") + " section (h) "
+            + ("injection" if len(asked) == 1 else "injections") + " that only the CPU stand-in "
+            "implements (`batched_ab_stand_in`); without --dry-run this gate would run the engine, "
+            "silently discard "
+            + ("it" if len(asked) == 1 else "them") + ", and report PASS. Add --dry-run "
+            "(`--selftest` does so itself) to judge the checker, or drop "
+            + ("the flag" if len(asked) == 1 else "the flags") + " to judge the engine.")
 
     # (pre) BAND HISTORY — checked before a fixture is read, before a binary is started, before a
     # device is touched. `tools/band_history.py` compares every number in `BAND` and in `CASCADE_BAND`,
@@ -5959,9 +6322,10 @@ def main() -> int:
                           " one — tested against the cascade room rule", y0_room_line)
         y0_room_ok = y0_ok_room
         if y0_ok_room:
-            p_id, _, p_gap = top2(y0_pin)
-            rooms.append(f"prefill row {p_id} -> {y0} (pin room {p_gap:.6g} <"
-                         f" {CASCADE_BAND['flip_room_max']:.2f})")
+            p_id, p_val, p_gap = top2(y0_pin)
+            rooms.append(f"prefill row {p_id} -> {y0} (pin room {p_gap:.6g} ="
+                         f" {room_in_ulp(p_val, p_gap):.4g} BF16 ULP <"
+                         f" {CASCADE_BAND['flip_room_max_ulp']:.2f})")
     check(y0_matches or y0_ok or y0_room_ok,
           "the prompt's last token samples greedy_continuation[0]",
           (f"{y0 if y0 is not None else 'no prompt step ran'} vs {greedy[0]}"
@@ -6040,9 +6404,10 @@ def main() -> int:
                   " tie policy nor the slack rule covers — tested against the cascade room rule", line)
             if ok:
                 room_ok[j] = True
-                p_id, _, p_gap = top2(dec_logits[j])
-                rooms.append(f"step {j} {p_id} -> {got_ids[j]} (pin room {p_gap:.6g} <"
-                             f" {CASCADE_BAND['flip_room_max']:.2f})")
+                p_id, p_val, p_gap = top2(dec_logits[j])
+                rooms.append(f"step {j} {p_id} -> {got_ids[j]} (pin room {p_gap:.6g} ="
+                             f" {room_in_ulp(p_val, p_gap):.4g} BF16 ULP <"
+                             f" {CASCADE_BAND['flip_room_max_ulp']:.2f})")
     for j, (g, w) in enumerate(zip(got_ids, greedy[1:])):
         by_tie = g != w and tie_ok.get(j, False)
         by_slack = g != w and slack_ok.get(j, False)
@@ -6095,6 +6460,10 @@ def main() -> int:
     # ---- (b) logits ------------------------------------------------------------------------------
     section("(b) logits vs the pinned dumps — the rule in force is named on every step")
     print(f"  route in force: --gemm {GEMM_ROUTE}."
+          + ("" if not route_is_library() else
+             f" Flip line in force, per pairing — cross-width (two engine sides, no reference):"
+             f" {flip_room_line('cross-width')} | reference (pin vs engine):"
+             f" {flip_room_line('reference')}.")
           + (f" Algo pins in force: --gemm-pins {GEMM_PINS} (asserted against the run's own `pins=`"
              " echo above) — the pinned algo and the heuristic's rank-0 are different kernels, so a"
              " wave-width verdict on this route is a verdict about THIS pin set and no other."
@@ -6270,7 +6639,8 @@ def main() -> int:
         sides = batched_ab_stand_in(man, prompt_ids, dec_logits, counts, work, wave_rows,
                                     args.break_wave, args.break_ab_logits, args.break_ab_ids,
                                     carry_rows,
-                                    args.break_gdn_one_row, args.break_attn_one_row)
+                                    args.break_gdn_one_row, args.break_attn_one_row,
+                                    args.break_ab_room)
     else:
         sides = run_batched_ab(args, prompt_ids, n_decode, greedy, replay, work, wave_rows,
                                carry_rows)
@@ -6402,15 +6772,10 @@ def report() -> int:
               " consulted (D-1's scope rule): " + "; ".join(slack_notes))
     if rooms:
         print(f"  [ROOM] {len(rooms)} flipped token(s) admitted because that row's top-1/top-2 room was"
-              f" under {CASCADE_BAND['flip_room_max']:.2f} — the thin-room class §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured, where a legal bf16"
+              f" under {CASCADE_BAND['flip_room_max_ulp']:.2f} BF16 ULP at its own magnitude — the"
+              " thin-room class §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured, where a legal bf16"
               " route may land either way (every figure is on the ROOM line, and only a `--gemm library`"
               " run can consult this rule): " + "; ".join(rooms))
-    if room_notes:
-        print(f"  [ROOM-NOTE] {len(room_notes)} of those flips were admitted on the SMALLER of the two"
-              " sides' gaps while the PIN's own gap was at or over the line. The audit's flip line is"
-              " derived from that smaller-gap quantity (`tools/route_c_audit.py a2` buckets by it), and"
-              " this gate uses the same quantity rather than deciding the stricter reading of"
-              " \"the hand route's own room\" silently: " + "; ".join(room_notes))
     rec = EXPECTED_RED.get(REFS.name)
     if not fails and rec is not None:
         # The heal case D-9's reporting needs as much as the red case: a line goes on this list because it
