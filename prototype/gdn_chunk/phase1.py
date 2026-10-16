@@ -74,11 +74,15 @@ GATE = _load_module("_p1_gate", ROOT / "engine" / "gate.py")
 STAGE_MEANREL_MAX = 9.9e-3      # Phase 0 §2.1 worst BF16-operand stage meanrel (vs pins)
 STAGE_COS_MIN = 0.9999          # §2.1 worst BF16-operand stage cos, rounded up to a line
 ROW_1COS_MAX = 3.2e-4           # Phase 0 §2.3 worst per-logits-row 1-cos
-FLIP_ROOM_MIN = GATE.CASCADE_BAND["flip_room_max"]   # 0.10, imported from the file that owns it
+FLIP_ROOM_MAX_ULP = GATE.CASCADE_BAND["flip_room_max_ulp"]   # imported from the file that owns it;
+# every room below is measured IN BF16 ULP at the row's own top-1 (gate.room_in_ulp), and against the
+# PIN this is the REFERENCE reading — the question is whether HF decided the row, not whether the
+# chunked form found it close (engine/gate.py `reference_room_ulp`, §3f of
+# prototype/gemm_algo_sweep/results.md).
 D11 = dict(stage_meanrel=GATE.CASCADE_BAND["stage_meanrel_max"],
            row_1cos=GATE.CASCADE_BAND["row_1cos_max"],
            stage_cos=GATE.CASCADE_BAND["stage_cos_min"],
-           room=FLIP_ROOM_MIN)
+           room=FLIP_ROOM_MAX_ULP)
 BODY_ROWS = 512                 # engine wave_rows body the device shape is priced at
 CS_LIST = spike.CS_LIST         # (16, 32, 64)
 # The forms a Phase-1 device kernel could be. `mma` (BF16 operands, F32 accumulator) is the shape the
@@ -287,7 +291,8 @@ def cmd_rows(args) -> int:
     print(f"\n=== rows: {args.fixture} — {n_rows} pinned prefill rows x {vocab} vocab"
           f" (storage {man.get('logits_storage')}, MAXSC {GATE.lane_geometry()[0]})")
     print(f"    budget: per-row 1-cos(chunk,seq) <= {ROW_1COS_MAX:.1e};"
-          f" zero moves at room >= {FLIP_ROOM_MIN:.2f} (room rule: gate.flip_admissible)")
+          f" zero moves at room >= {FLIP_ROOM_MAX_ULP:.2f} BF16 ULP of the PIN's own room"
+          " (room rule: gate.reference_room_ulp)")
     print("    a row's lanes are row+1, so rows above MAXSC are the streaming form §07.3 bands —"
           " the rows that killed the attention tile form at room 13.25")
     for form in chunk_forms:
@@ -318,24 +323,30 @@ def cmd_rows(args) -> int:
                 region_worst[region] = (one, i)
             if one > ROW_1COS_MAX:
                 n_over += 1
-            pin_id, _, pin_room = GATE.top2(pin)
-            seq_id, _, seq_room = GATE.top2(srow)
-            ch_id, _, ch_room = GATE.top2(crow)
+            pin_id, pin_val, pin_room = GATE.top2(pin)
+            seq_id, seq_val, seq_room = GATE.top2(srow)
+            ch_id, ch_val, ch_room = GATE.top2(crow)
+            # Room in the line's own unit, on the side that owns the decision. Against the pin that is
+            # the pin; the `seq`/`ch` pair further down is engine-vs-engine and keeps the min() reading.
+            pin_ulp = GATE.room_in_ulp(pin_val, pin_room)
             if seq_id != pin_id:
                 seq_moves_pin += 1
             if ch_id != pin_id:
-                room = min(pin_room, ch_room)
-                adm = GATE.flip_admissible(pin_room, ch_room)
+                room = pin_ulp
+                adm = GATE.room_is_thin(pin_ulp)
                 moves_pin.append((i, region, pin_id, ch_id, room, adm, seq_id == pin_id))
-                if room >= FLIP_ROOM_MIN:
+                if room >= FLIP_ROOM_MAX_ULP:
                     big_room_moves.append((i, region, pin_id, ch_id, room))
                 if not adm:
-                    fails.append(f"{form} row {i}: argmax moved against the pin at room {room:.4g}")
+                    fails.append(f"{form} row {i}: argmax moved against the pin at room"
+                                 f" {room:.4g} BF16 ULP of the pin's own")
             if ch_id != seq_id:
-                moves_seq.append((i, region, seq_id, ch_id, min(seq_room, ch_room)))
+                moves_seq.append((i, region, seq_id, ch_id,
+                                  min(GATE.room_in_ulp(seq_val, seq_room),
+                                      GATE.room_in_ulp(ch_val, ch_room))))
             if ch_id != pin_id and seq_id == pin_id:
-                adjudicated.append((i, region, pin_id, ch_id, min(pin_room, ch_room)))
-            if pin_room < FLIP_ROOM_MIN:
+                adjudicated.append((i, region, pin_id, ch_id, pin_ulp))
+            if pin_ulp < FLIP_ROOM_MAX_ULP:
                 thin += 1
         c_mean /= n_rows
         print(f"\n  --- {form} vs {FLOOR_FORM} (the route delta) and vs the pin (HF decides)")
@@ -364,9 +375,10 @@ def cmd_rows(args) -> int:
                       f"  {FLOOR_FORM} side {'agrees' if seq_ok else 'also disagrees'} with HF")
         ok_room = not big_room_moves
         if not ok_room:
-            fails.append(f"{form}: {len(big_room_moves)} argmax moves at room >= {FLIP_ROOM_MIN}")
+            fails.append(f"{form}: {len(big_room_moves)} argmax moves at room >="
+                         f" {FLIP_ROOM_MAX_ULP} BF16 ULP of the pin's own")
         print(f"    [{'PASS' if ok_room else 'FAIL'}] zero argmax moves at room >="
-              f" {FLIP_ROOM_MIN:.2f}: {len(big_room_moves)} such moves"
+              f" {FLIP_ROOM_MAX_ULP:.2f} BF16 ULP: {len(big_room_moves)} such moves"
               + (" — " + "; ".join(f"row {i} ({r}) room {rm:.4g}"
                                    for i, r, _, _, rm in big_room_moves) if big_room_moves else ""))
         print(f"        adjudicated moves (chunked disagrees with HF where {FLOOR_FORM} agrees):"
@@ -375,7 +387,7 @@ def cmd_rows(args) -> int:
         if adjudicated and args.adjudicated_counts:
             fails.append(f"{form}: {len(adjudicated)} adjudicated moves")
         print(f"        the pin's own fragile rows: {thin} of {n_rows} have room under"
-              f" {FLIP_ROOM_MIN:.2f} (census: tools/prefill_row_rooms.py)")
+              f" {FLIP_ROOM_MAX_ULP:.2f} BF16 ULP (census: tools/prefill_row_rooms.py)")
     print(f"\nrows: {'PASS' if not fails else 'FAIL'}"
           + ("".join("\n  " + f for f in fails) if fails else
              f" — {chunk_forms} inside the Phase-0 row budget on all {n_rows} pinned rows"))

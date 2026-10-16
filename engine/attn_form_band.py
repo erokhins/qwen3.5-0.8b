@@ -21,8 +21,10 @@ built around the two ways this A/B went wrong once:
      numerics question.
   2. A FLIP IS NOT A BAND EVENT UNTIL ITS ROOM IS MEASURED. A row whose argmax moves prints the
      top-1/top-2 room on BOTH sides and is judged by the room rule already in force
-     (`engine/gate.py`'s `CASCADE_BAND["flip_room_max"]`, applied by `gate.flip_admissible`, which
-     reads room as the smaller of the two sides' gaps). A flip at or above that room prints
+     (`engine/gate.py`'s `CASCADE_BAND["flip_room_max_ulp"]`, applied by `gate.flip_admissible`, which
+     reads room as the smaller of the two sides' gaps IN BF16 ULP at each side's own top-1 — the
+     symmetric reading, which is the right one here because both sides are the engine: a shipped form
+     against a tiled one, no reference between them). A flip at or above that room prints
      `BLOCKER` and exits non-zero: it is not something the band covers, and it is a stop-and-report
      for the operator rather than a line to file under "band".
 
@@ -145,7 +147,8 @@ def row_verdict(ship: np.ndarray, tile: np.ndarray, *, lanes: int, cancel_rel: f
         "worst_idx": worst, "worst_abs": float(d[worst]),
         "worst_ship": float(ship[worst]), "worst_tile": float(tile[worst]),
         "worst_rel": float(abs(float(ship[worst])) / scale) if scale else 0.0,
-        "ship_id": s_id, "ship_room": s_room, "tile_id": t_id, "tile_room": t_room,
+        "ship_id": s_id, "ship_room": s_room, "ship_val": s_val,
+        "tile_id": t_id, "tile_room": t_room, "tile_val": t_val,
         "flipped": s_id != t_id,
     }
 
@@ -182,9 +185,12 @@ def verdict_lines(rows: list[dict], band: dict, cancel_rel: float) -> tuple[list
                 flags.append(f"OUTSIDE band: 1-cos {deficit:.3e} > row_1cos_max"
                              f" {band['row_1cos_max']:.0e}")
         if r["flipped"]:
-            admit = GATE.flip_admissible(r["ship_room"], r["tile_room"])
-            flags.append("ARGMAX MOVES %d->%d, room %.4f/%.4f -> %s"
+            admit = GATE.flip_admissible((r["ship_val"], r["ship_room"]),
+                                         (r["tile_val"], r["tile_room"]))
+            flags.append("ARGMAX MOVES %d->%d, room %.4g/%.4g logits = %.3g ULP -> %s"
                          % (r["ship_id"], r["tile_id"], r["ship_room"], r["tile_room"],
+                            GATE.flip_room_ulp((r["ship_val"], r["ship_room"]),
+                                               (r["tile_val"], r["tile_room"])),
                             "admitted (room under the line)" if admit
                             else "BLOCKER: room at or above the flip line, §07.3 does not cover it"))
             red = red or not admit
@@ -312,14 +318,17 @@ def cmd_ab(args) -> int:
         for r in flips:
             print(f"  flip at row {r['row']}: shipped {r['ship_id']} (room {r['ship_room']:.4f}) vs"
                   f" tiled {r['tile_id']} (room {r['tile_room']:.4f}); room read as the smaller of"
-                  f" the two, against the line {band['flip_room_max']} (engine/gate.py flip rule)")
+                  f" the two, in BF16 ULP at each side's own top-1, against the line"
+                  f" {band['flip_room_max_ulp']} (engine/gate.py flip rule; both sides are the engine"
+                  " here, so this is the symmetric reading, not the reference one)")
     # The engine's own sampled column, cross-checked against the per-row argmax above. A differing step
     # is only accounted for if a JUDGED row flipped there and the flip rule admits it; anything else is
     # an unexplained divergence in the stream, and the honest verdict for that is red, not "band".
     both = sorted(set(ship_sampled) & set(tile_sampled))
     diff_steps = [s for s in both if ship_sampled[s] != tile_sampled[s]]
     explained = {r["row"] for r in rows if r["flipped"]
-                 and GATE.flip_admissible(r["ship_room"], r["tile_room"])}
+                 and GATE.flip_admissible((r["ship_val"], r["ship_room"]),
+                                          (r["tile_val"], r["tile_room"]))}
     # Which row explains which step is exactly the index-alignment trap AGENTS.md records (§10.5's pins
     # pair with greedy[s+1], the REPL's first sample pairs with greedy[s]), so a step counts as explained
     # under EITHER reading and only a step neither explains is called unexplained. The reading is stated
@@ -393,14 +402,16 @@ def cmd_selftest(_args) -> int:
     wide[9] = np.float32(31.0)                        # flips the top-1 with 30 of room on one side
     wideflip = v(wide)
     checks.append(("a flip at wide room is a BLOCKER, not a band event",
-                   wideflip["flipped"] and not GATE.flip_admissible(wideflip["ship_room"],
-                                                                    wideflip["tile_room"])))
+                   wideflip["flipped"] and not GATE.flip_admissible(
+                       (wideflip["ship_val"], wideflip["ship_room"]),
+                       (wideflip["tile_val"], wideflip["tile_room"]))))
     thin = base.copy()
     thin[9] = np.float32(30.0 + 1e-4)                 # coin-toss room on the tiled side
     thinflip = v(thin)
     checks.append(("the same flip at thin room is admitted by the rule already in force",
-                   thinflip["flipped"] and GATE.flip_admissible(thinflip["ship_room"],
-                                                                thinflip["tile_room"])))
+                   thinflip["flipped"] and GATE.flip_admissible(
+                       (thinflip["ship_val"], thinflip["ship_room"]),
+                       (thinflip["tile_val"], thinflip["tile_room"]))))
     _, red = verdict_lines([wideflip], band, CANCEL_REL)
     _, red_ok = verdict_lines([same], band, CANCEL_REL)
     checks.append(("verdict_lines goes red for the wide-room flip and green for a clean row",
