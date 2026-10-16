@@ -4496,3 +4496,183 @@ and with the range each came from, in `progress/2026-10-16/journal-chronology-20
 that classes them is `progress/2026-10-16/archive-review-2026-10-16.md` §1. **The line numbers here are
 load-bearing: 96 of the 101 line-form citations that census counted live in `progress/`, which rule 2
 freezes, and 51 point into this file — so nothing is deleted, moved or re-wrapped, only appended.**
+
+## Route (c) follow-up (2026-10-16): `lt` gets its three algo pins, and section (h) gets a band measured
+## on the pairing `lt` actually forms
+
+§3c of `prototype/gemm_algo_sweep/results.md` left `--gemm lt` one step from becoming the default and named
+two blockers: `mlp_down` at **0.780–0.812×** of the library family, and a red section (h). They are different
+kinds of thing — one is an algorithm-selection problem, the other is a band that was calibrated for a pairing
+this route no longer runs — and both are closed here, but neither is closed by a timing this pass took:
+everything device-side below is a correctness measurement, because a worker does not own a timing window
+(`AGENTS.md`, “GPU execution is serialized and belongs to the main agent”).
+
+**Blocker 1, the pins.** Three shapes get one, on the rule that a shape needs a pin exactly when the
+heuristic’s rank-0 is slower than the `hipblasGemmEx` call this engine makes today — `default_ms` vs
+`engine_call_ms`, not `best_ms`. The table, the hexes and the capture command are
+`prototype/gemm_algo_sweep/results.md` §3d; the numbers are §1’s, read off the main agent’s own sweep log,
+and the bytes came out of `--verify --algo-dump`, not out of a transcription (`seq`/`idx` select, `data=`
+carries). The identity check that the capture is the same population the engine’s heuristic sees is an
+equality, not a hope: the dump’s `heur_rank=0` record for `down_proj M=512` is
+`data=37040000…`, which is the `algo=` the engine printed for its own rank-0 before any pin existed.
+
+| pinned shape | rank-0 vs engine call | winner vs engine call | `GEMM-LT` line now printed |
+|---|---|---|---|
+| `o_proj+out_proj` (1024, 2048, 512) | 1.087× slower | 0.956× | `source=pin algo=8903…0000` |
+| `in_proj_qkv` (6144, 1024, 512) | 1.006× slower | 0.936× | `source=pin algo=ba04…0000` |
+| `down_proj` (1024, 3584, 512) | 1.096× slower | 0.890× | `source=pin algo=8903…0000` |
+
+Three things follow from the way that was built rather than being asserted. A pin is honoured or the run
+**refuses to start** — a log saying `source=pin` over a rank-0 launch would be worse than no pin, so
+`lt_plan` throws if a pinned record does not parse, is all-zero, or wants more than the buffer. Pins bind on
+`(N, K, M)` and therefore cover the **full wave width only**; a partial wave (640 lanes = 512 + 128) or a
+prompt-shaped body (dec8 plans `M=17`) still takes the heuristic, which is exactly the state that file’s
+1.120× was measured in. And the workspace predicate has a consequence nobody planned: a heuristic-returned record
+carries the *preference cap* in `max_workspace_bytes` (128 MiB, the whole buffer) while an enumerated one
+carries `SIZE_MAX`, so the refuse-if-bigger check also means **only an algorithm the heuristic itself would
+have served can ever be pinned**. That is why the `ws=134217728` on a pin line is a ceiling the library wrote
+and not a demand by the kernel, and reading it as one would put the whole pin set in doubt.
+
+**What the pins do not do.** At `down_proj` the pinned kernel is 0.890× of the engine’s own call in a warm
+burst, while the in-situ `mlp_down` family measured 0.812× of it under rank-0 where that burst priced only a
+1.096× deficit. Burst and in-situ do not move by the same factor — `prototype/gemm_algo_sweep/results.md`
+§3b is the whole argument for that — so “the pin”
+recovers `mlp_down`” is a claim awaiting one paired window, and it is the main agent’s measurement. This pass
+can say the pins are *chosen from the shape’s measured best* and that every gate below passes with them
+active; it cannot and does not say the 0.78× row is gone.
+
+**Blocker 2, the band.** Section (h) compares `--wave-rows 512` against `--wave-rows 1`, and
+`resolve_wave_gemm` forces the hand GEMV at one row whatever the run asked for — so on an `lt` run that pair
+is hand-GEMV against **hipBLASLt**, while `row_1cos_max = 2e-3` was priced on hand against **hipBLAS**
+(D-11’s A2, 1694 rows). A band that measures a pair the gate no longer runs cannot adjudicate it, and the red
+line was the symptom, not the disease: every pin-facing section passed, and `lt`’s *pooled* numbers were
+better than `library`’s.
+
+`engine/wave_band_floor_probe.py` re-derives it. The probe exists instead of a spreadsheet because it calls
+`gate.run_batched_ab` and `gate.corpus_drift` rather than reimplementing them — a probe that computes its own
+statistic can disagree with the gate about a detail and be green while doing so, which is the same failure
+`prototype/attn_decode/results.md` §20.9 records for the attention mirror. Both legs, both routes, nine
+fixtures, one shared
+`--gate-id`, one lock hold (137 s wall, util 92 % at acquire, **no timing taken**; the wall is a by-product
+of not knowing the answer in advance, which is what makes the margin believable):
+
+| fixture | `library` worst per-row 1-cos | `lt` worst per-row 1-cos |
+|---|---|---|
+| dec8 | 7.3019e-04 | 5.3169e-04 |
+| dec64f | **1.8889e-03** | **2.2041e-03** |
+| dec64t | 7.2791e-04 | 7.4389e-04 |
+| chunk64b | 1.0873e-03 | 5.4356e-04 |
+| p128 | 1.0873e-03 | 9.2416e-04 |
+| mt32f | 1.2528e-03 | 1.4645e-03 |
+| wide520f | 9.9054e-04 | 1.0765e-03 |
+| wide640f | 2.5511e-04 | 2.0330e-04 |
+| wide1024f | 2.5511e-04 | 2.0330e-04 |
+| **max, 2951 rows** | **1.8889e-03** | **2.2041e-03** |
+
+Two facts in that table and not one. The `library` leg reproduced D-11’s number exactly, 1.8889e-03 at the
+same row of the same fixture (`dec64f/logits45.bin`) across 2951 rows instead of 1694 — so the old band was
+not wrong, it was complete for its own pairing and nothing else. And the two legs do not order the same way
+per fixture: `lt` is the *lower* spread on dec8, chunk64b, p128 and both wide fixtures and the higher one on
+dec64f, dec64t, mt32f and wide520f. A single number cannot fit both orderings, which is why this became a
+second key rather than a bump of the first: **`CASCADE_BAND["row_1cos_max_lt"] = 2.75e-3`**, the measured max
+× the probe’s stated 1.25 margin, on the same convention `row_1cos_max` was set on (max + 6 %) and on the
+numerics rule of 2026-10-16 that a widened band must still catch every derived injection. `row_1cos_max`
+itself is **not** moved: a `library` run is still judged at 2e-3, and the pin-facing cascade floor is
+untouched.
+
+**Does the widened band still bite?** The command, not the argument: `--break-ab-logits 2` (one row shifted by
+8 logits, the smallest defect this tree can inject at this check) lands at **4.316e-03** of 1-cos on the
+stand-in corpus — **1.57× above the new line** — and `gate.py --gemm lt --dry-run --break-ab-logits 2` exits 1
+with section (h) red. `--break-band 3` also exits 1 (step cos/meanrel), `--selftest --gemm lt` and
+`--selftest --gemm library` both print `SELFTEST PASS`. The consequence is an automatic guard: **any future
+move of this number above ~4.3e-3 turns `--selftest` red by itself**, so the band cannot grow until it cannot
+fail. The band and its provenance are also in `bench/band-history.jsonl`
+(`tools/band_history.py record` + `check`), whose header rule is that a widened floor must be written down
+beside the measurement that widened it.
+
+**Gate verdicts with the pins active** (all `rc=0`, `fail=0`; util at acquire 84–92 %,
+`tmp/gate_logs/ltjob_<route>_<fixture>.log`):
+
+| fixture | `--gemm lt` | `--gemm library` |
+|---|---|---|
+| dec8 | PASS 186/186, 5 s | PASS 186/186, 3 s |
+| dec64f | PASS 668/668, 10 s | PASS 668/668, 7 s |
+| wide1024f | PASS 221/221, 45 s | PASS 221/221, 39 s |
+| wide640f | PASS 221/221, 32 s | PASS 221/221, 30 s |
+
+`dec64f` is the fixture that was red, and its section (h) now prints `worst per-row 1-cos 2.204e-03 against
+band 2.75e-03` where the same run used to print `FAIL (2.204e-03 > 2.00e-03)`; the `library` run on the same
+fixture prints `1.889e-03 against band 2.00e-03` and is unchanged. The route echo carries the version the
+pins are provenance-bound to: `GEMM route=hipblaslt … version=10.4.1 … pins=3`, and each shape’s own line
+distinguishes `source=pin` from `source=heuristic-rank-0`.
+
+**Still open, and it is the reason the default is still `library`.** One paired timing window, main-agent
+work: `M=512`, `--gemm lt` vs `--gemm library` inside the same lock hold, per-shape `ms` lines for the three
+pinned shapes plus the whole-wave family lines, to confirm `mlp_down` is at or above the library figure in
+situ rather than only in a burst. Until that prints, D-11 stays open at step 2 and the 1.120× whole-wave
+figure from `prototype/gemm_algo_sweep/results.md` §3c stays an offer.
+
+## Route (c) follow-up 2 (2026-10-16): the gate learns `--gemm-pins`, the `lt` wave band is re-taken on the table that ships, and the one red row turns out to be a one-ULP tie
+
+The predecessor section ended with two debts: a red row (`wide520f --gemm lt`, section (h), prefill row 180)
+that stopped the default flip, and a band whose provenance named a three-entry algo-pin table the binary had
+already trimmed to one (`prototype/gemm_algo_sweep/results.md` §3d, D28). Both are closed here, and neither
+moved a band. The attribution and the census live in
+`prototype/gemm_algo_sweep/results.md` §3e; this section records what changed in the gate and the probe.
+
+**The gate can now be told which pin set a run used, and refuses to judge one it was not asked for.**
+`--gemm-pins` was a `decode_run` flag with no `gate.py` equivalent, which made any pin-subset argument
+unmakeable: the echo printed a bare count, so `pins=1` could mean “asked for `all`, table of one” or “asked
+for `down_proj`”. Three changes, in that order:
+
+* `engine/kernels_gemm.cpp` prints **`pins=<in force>/<in the table>`** (`pins=1/1`, `pins=0/1`). A
+  denominator the run reads out of its own table is the only thing that can falsify “this run ran the pins I
+  asked for”; a count alone cannot.
+* `engine/gate.py` grew `--gemm-pins` (default `all`, the engine’s default, for the same reason `--attn-tile`
+  has to move with the engine’s default: a gate whose default differs from the shipped binary silently judges
+  a different build). It is passed to the main run **and to every side of every `run_batched_ab`**, because a
+  pin that binds on one side of a wave-width A/B and not the other is an attribution error, not a comparison.
+* `gemm_pin_checks` runs immediately after the route echo and **fails the run** when the echo contradicts the
+  request — a pin-naming spec on a route that has no pins, a `pins=` absent from an `lt` run, a force count
+  that differs from the requested set, or a denominator that does not equal the size of the requested set.
+  `--selftest` carries the injected mismatch case, so the forcing is witnessed rather than asserted: ask for
+  `none`, have the stand-in echo `pins=2/3`, require RED. The dry-run side-injection is `--break-pins N`.
+
+`engine/wave_band_floor_probe.py` takes the same flag and prints the pin set on its header and on each
+`FLOOR-PROPOSE` line, so a proposed band arrives with the configuration that produced it. The `library` leg
+runs `--gemm-pins all` but has no pins to select (D27), which is now said in the band text rather than left
+to inference.
+
+**The band re-take, and why the value did not move.** One lock hold, `util` 93 %, wall 137 s, correctness
+only, 9 fixtures / 2951 rows: `lt` worst row **2.204122e-03** (`dec64f/logits45.bin`), `library` worst
+**1.888942e-03** at the same row. The previous three-pin measurement read 2.2041e-03 and 1.8889e-03 at the
+same fixture and row, so `CASCADE_BAND.row_1cos_max_lt` stays **2.75e-03** and needs no
+`tools/band_history.py` line — a value that did not move is not a band change, and inventing a ledger entry
+for it would imply one. What the trim did move is where pins can bind: `wide640f`/`wide1024f`, the only
+fixtures with 512-row bodies, went 2.0330e-04 → 1.4517e-04. The ceiling row lives in a fixture whose widest
+body is 17 rows, and a pin binds only at `M = kMaxWaveRows`, so trimming the table bought a cheaper corpus
+and an unchanged band. The band text now says all of that, including the honest form of the margin: 2.75e-03
+is 1.2476× the measured max, and the probe’s stated 1.25 convention would have owed 2.755e-03 — the line is
+kept at the tighter number, not raised to the convention.
+
+**The three witnesses, re-run after the text change.** `--break-ab-logits 2` → `rc=1`, the band check itself
+red at 4.316e-03 against 2.75e-03 (1.57×), which is what keeps this band from growing into a check that
+cannot fail; `--break-band 3` → `rc=1` at step 3 on both cos and meanrel; `--selftest` → PASS on `lt`,
+`library` and `hand`, including the new pins cases. `tools/band_history.py check` → 20 values, green.
+
+**`engine/wave_flip_census.py`, new, CPU-only.** It re-runs §A2’s room-bucket census on a pairing you hand
+it, importing the room definition, the bucket edges and the threshold from `tools/route_c_audit.py` and
+`CASCADE_BAND` instead of restating them, and it buckets the same rows twice — once in logits (the unit the
+0.10 line was measured in) and once in BF16 ULPs of each side’s own top-1. It refuses a pair whose two sides
+did not dump the same rows, and it prints `planned=`/`measured=` counts, because a census whose row list can
+quietly be empty is the `prototype/gdn_collapse/run.py` failure mode again. `--show-rows 180` prints both
+sides’ top-3 with each side’s own gap, which is the answer to “is this a bug or a coin toss” in a form a
+reader can check without rerunning anything.
+
+**Device runs behind this section** (one lock hold each, correctness only, **no timing taken**): the three
+`wide520f` configs of the attribution, `--gemm library` / `--gemm lt --gemm-pins none` /
+`--gemm lt --gemm-pins down_proj` at 17 s / 16 s / 18 s wall, `util` 92 % at acquire, dumps under
+`tmp/gemm_lt_attrib/`; the band probe at 137 s, `util` 93 %, log `tmp/gate_logs/band_probe_shipping_pins.log`;
+two bit-identical repeats of `dec64f`+`chunk64b` on the `lt` leg to separate run noise from a real move. The
+red row itself, the ULP census over the corpus, and what a re-derivation of `flip_room_max` would need are in
+`prototype/gemm_algo_sweep/results.md` §3e. **`--gemm` still defaults to `library`; nothing here flips it.**

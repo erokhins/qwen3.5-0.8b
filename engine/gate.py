@@ -574,13 +574,54 @@ SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller 
 # while the stage ladder stays flat (×8.8 end to end, `embed` bit-identical) — the band, not the engine.
 # So what is priced here is not a tighter op-level bound but the measured size of a legal cascade.
 #
-# THE FOUR NUMBERS, and what each one is a ceiling ON:
+# THE FIVE NUMBERS, and what each one is a ceiling ON:
 #
-#   row_1cos_max   2e-3   one LOGITS ROW against another row of the same prompt. A2 measured the hand
-#                         route against the library route over 1694 dumped rows of all eight fixtures:
-#                         max 1.889e-3 (dec64f), mean 5.2e-5..2.0e-4 per fixture. The line is 6 %
-#                         above the worst row ever seen, and A4's three injected bugs sit 2-3 orders
-#                         worse (their 1-cos separations run 8e7-3e8 ×).
+#   row_1cos_max   2e-3   one LOGITS ROW against another row of the same prompt, on the hand<->hipBLAS
+#                         pairing. A2 measured the hand route against the library route over 1694
+#                         dumped rows of all eight fixtures: max 1.889e-3 (dec64f), mean 5.2e-5..2.0e-4
+#                         per fixture. The line is 6 % above the worst row ever seen, and A4's three
+#                         injected bugs sit 2-3 orders worse (their 1-cos separations run 8e7-3e8 ×).
+#                         It does double duty: section (h)'s wave-width band on a `library` run, and the
+#                         floor under every step's own cap (rule 1 below). Both are the same pairing,
+#                         hand-vs-hipBLAS, which is why one number served both until `lt` arrived.
+#   row_1cos_max_lt 2.75e-3 the SAME statistic on the hand<->hipBLASLt pairing, i.e. what section (h)
+#                         compares when the run is `--gemm lt`: `resolve_wave_gemm` forces the hand GEMV
+#                         at one row, so the wide side of that pair is a hipBLASLt kernel, not a hipBLAS
+#                         one, and a band sized on the old pairing is a claim about a pair this gate no
+#                         longer runs. Measured, not adjusted, and re-measured on the algo-pin table
+#                         the shipping binary actually carries: `engine/wave_band_floor_probe.py` over 9
+#                         fixtures and 2951 compared rows reads a worst row of 2.204122e-03 (dec64f/
+#                         logits45.bin — the same row that is the worst on the hipBLAS leg too, at
+#                         1.888942e-03), and the line is that max x a stated 1.25 margin (2.755e-03,
+#                         rounded down to 2.75e-3 rather than up). The SAME probe re-measured the
+#                         hipBLAS leg at 1.8889e-03, i.e. `row_1cos_max` needed no move,
+#                         and it is NOT loosened for `lt`: a `library` run is still judged at 2e-3. The
+#                         two legs do not even order the same way per fixture — lt is the *lower* spread
+#                         on dec8, chunk64b, p128 and both wide fixtures and the higher one on dec64f,
+#                         dec64t, mt32f, wide520f — which is the reason this is a second number and not
+#                         a bump of the first.
+#                         WHY TRIMMING THE PIN TABLE DID NOT MOVE IT, and what it did move. A pin binds
+#                         on (N, K, M) with M = `kMaxWaveRows` (engine/kernels_gemm.cpp `lt_plan_for`),
+#                         so it can only ever serve a body of exactly 512 rows. The row that SETS this
+#                         band lives in dec64f, whose widest body is 17 rows — no pin reaches it, on
+#                         three entries or one — so when D28 cut the table from three pins to one
+#                         (`down_proj` alone) the max came back the same number to every printed digit,
+#                         and the band could not tighten. What did move is where the pins actually
+#                         bound: wide640f/wide1024f, the two fixtures with 512-row waves, went from
+#                         2.0330e-04 to 1.4517e-04 (-29 %). A cheaper corpus, same ceiling. Recorded
+#                         here because the first version of this comment cited a three-entry table the
+#                         binary no longer carries; the re-take is
+#                         `engine/wave_band_floor_probe.py --gemm-pins all`, 2026-10-16, and the echo
+#                         that proves which set a run ran is `pins=<in force>/<in the table>` on the
+#                         `GEMM route=` line.
+#                         DOES IT STILL BITE? Yes, and the proof is a command rather than an argument:
+#                         the smallest defect this tree can inject at this check is `--break-ab-logits`
+#                         (one row shifted 8 logits), which lands at 4.316e-03 of 1-cos on the stand-in
+#                         corpus — 1.57x above the new line, and `--selftest` asserts it goes RED. So a
+#                         future move of this number above ~4.3e-3 turns `--selftest` red by itself; the
+#                         band cannot quietly grow until it cannot fail, which is the property
+#                         `prototype/gdn_collapse/results.md` §1 demands of any driver that judges by a
+#                         threshold it did not measure.
 #   stage_meanrel  3e-2   one STAGE TILE (a `DecodeScratch` tile, not a logits row) against the same
 #                         tile on the other route. A3's ladder spans meanrel 1.92e-3..1.70e-2 over 56
 #                         comparisons; 3e-2 is that ladder's top with 1.8x of headroom, and A4's bugs
@@ -643,7 +684,8 @@ SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller 
 # and handed to the operator; the audit derived them before this task from measurements already on disk,
 # and a band tuned to the fixture it is judging is the thing `AGENTS.md` forbids.
 CASCADE_BAND = {
-    "row_1cos_max": 2.0e-3,       # per logits row, one route/one wave width against another
+    "row_1cos_max": 2.0e-3,       # per logits row, hand<->hipBLAS (also the floor under a step's cap)
+    "row_1cos_max_lt": 2.75e-3,   # per logits row, hand<->hipBLASLt — section (h) under `--gemm lt`
     "stage_meanrel_max": 3.0e-2,   # per stage tile (a3), NOT per logits row
     "stage_cos_min": 0.9998,       # ditto
     "flip_room_max": 0.10,         # top-1/top-2 room the pin (= the hand route) had
@@ -651,6 +693,43 @@ CASCADE_BAND = {
 CASCADE_RULE = ("a reassociating route is judged by the step's own band floored at the measured cascade"
                 " (cos deficit >= 2e-3, meanrel >= 3e-2), and a flipped token is admissible only where"
                 " the pin (= the hand route) had < 0.10 of top-1/top-2 room")
+
+# Where each wave-width row band came from, in the gate's own output rather than in a reader's memory.
+# A band that does not name its denominator is a band nobody can re-check — see `prototype/attn_tile_model.py`'s
+# rule that a frozen form must be spelled with its own words, and `tools/route_c_audit.py`'s A2 for the
+# leg that predates this file. The measured MAX lives here and the band lives in CASCADE_BAND, so the
+# number that gates appears once.
+WAVE_ROW_BAND_SOURCE = {
+    "library": ("hand GEMV (--wave-rows 1) vs hipBLAS (--wave-rows 512): D-11's A2 measured max"
+                " 1.8889e-03 over 1694 rows, line at +6 %; re-measured 2026-10-16 by"
+                " engine/wave_band_floor_probe.py at 1.888942e-03 over 9 fixtures/2951 rows, so this"
+                " leg is UNCHANGED — and it is pin-independent by construction: D27 keeps the whole"
+                " `library` route on hipBLAS' default algorithm choice, so no `--gemm-pins` set can"
+                " move a number on this leg"),
+    "lt": ("hand GEMV (--wave-rows 1) vs hipBLASLt (--wave-rows 512): measured max 2.204122e-03"
+           " (dec64f/logits45.bin) over 9 fixtures/2951 rows; the line 2.75e-03 is that max x 1.2476"
+           " — the probe's stated 1.25 margin would owe 2.755e-03, and the line is kept at the tighter"
+           " round number below it; engine/wave_band_floor_probe.py 2026-10-16 with `--gemm-pins all`"
+           " against the SHIPPING algo table: engine/kernels_gemm.cpp `algo_pins()`, ONE entry"
+           " (`down_proj` 1024x3584 @ M=512, D28). The first version of this line named the three-entry"
+           " table the binary no longer carries; re-taken so provenance matches the build. No pin can"
+           " reach the row that carries this number (dec64f's widest body is 17 rows, pins bind only at"
+           " M=512), which is why the trim left the max where it was"),
+}
+
+
+def wave_row_1cos_band() -> tuple[float, str]:
+    """(the per-row `1-cos` band for the pairing this route creates, the sentence naming its provenance).
+
+    Section (h) compares two runs of one prompt at two widths, and on a library route the one-row side
+    is the hand GEMV whatever `--gemm` says (`resolve_wave_gemm`). So the pairing — and therefore the
+    band — is a function of the route, not a constant: hand-vs-hipBLAS under `library`,
+    hand-vs-hipBLASLt under `lt`. `hand` has no band at all (byte-identity is what that route owes) and
+    never reaches this function; section (h) runs its byte comparison instead.
+    """
+    if GEMM_ROUTE == "lt":
+        return CASCADE_BAND["row_1cos_max_lt"], WAVE_ROW_BAND_SOURCE["lt"]
+    return CASCADE_BAND["row_1cos_max"], WAVE_ROW_BAND_SOURCE["library"]
 
 # Which GEMM route the run being judged used (`decode_run --gemm`). Module state for the same reason
 # `REFS` is: five sections need it and none of them owns it. `library` is the default because it is the
@@ -670,6 +749,70 @@ def set_route(name: str) -> None:
     if name not in GEMM_ROUTES:
         raise SystemExit(f"gate: --gemm takes {'|'.join(GEMM_ROUTES)}, got {name!r}")
     GEMM_ROUTE = name
+
+
+# Which hipBLASLt algo pins the run being judged was given (`decode_run --gemm-pins`), in the same
+# module-state shape as `GEMM_ROUTE` and for the same reason: which algorithm served which shape is part
+# of what its bits are, so a log that says `lt` but not WHICH `lt` cannot be cited for a pin claim. This
+# is the attribution hole D28 left open: `wide520f --gemm lt` read one red row and the gate had no knob
+# to ask whether the pinned kernel or the heuristic's rank-0 produced it. `all` is the default because
+# that is `decode_run`'s own default (`kernels_gemm.cpp::gemm_pins_select`), and the two defaults move
+# together for `--attn-tile`'s reason: a gate that judged a different config than the engine ships is
+# judging the wrong binary.
+GEMM_PINS = "all"
+
+
+def parse_pins(spec: str) -> list[str]:
+    """The shape a `--gemm-pins` spec selects, spelled the way the engine spells it: `all` is the `"*"`
+    sentinel `gemm_pins_select` uses, `none` is the empty list, anything else is the shape names.
+
+    Parsed here rather than only forwarded, for the engine's own reason: a spec that silently meant "no
+    pins" would price rank-0 twice and report the pin as a null. Which names EXIST is the engine's
+    question — it holds `algo_pins()` and refuses an unknown name before any launch — so this adjudicates
+    the shape of the spec and the count it implies, which `gemm_pin_checks` then compares with the run's
+    own echoed `pins=`.
+    """
+    if spec == "all":
+        return ["*"]
+    if spec == "none":
+        return []
+    names = spec.split(",")
+    if any(n == "" for n in names):
+        raise SystemExit(f"gate: --gemm-pins {spec!r} has an empty entry — use all, none, or a"
+                         " comma-separated list of pinned shape names")
+    return names
+
+
+def pin_expectation(spec: str, table: int) -> tuple[int, str]:
+    """(how many pins `spec` puts in force, the clause saying why) against a table `table` wide.
+
+    The table size is an ARGUMENT because it comes from the run's own `pins=<allowed>/<total>` echo and
+    not from a constant in this file. That is the whole point: with `--gemm-pins all` the only honest
+    expectation is the relation `allowed == total`, and a hardcoded table size here would be a second
+    authority over a table owned by `algo_pins()` — the exact drift that put a measured band on the
+    wrong pin set (prototype/gemm_algo_sweep/results.md §3d, D28).
+    """
+    names = parse_pins(spec)
+    if names == ["*"]:
+        return table, "`all` asks for every entry the binary has"
+    if not names:
+        return 0, "`none` asks for the heuristic's rank-0 everywhere"
+    return len(names), f"a list of {len(names)} name(s) asks for exactly those"
+
+
+def set_pins(spec: str) -> None:
+    """Declare the algo-pin set the run being judged was given. Runs after `set_route`, because the two
+    are not independent: a pin IS a hipBLASLt algo record, so `--gemm-pins down_proj` on a `library` or
+    `hand` run selects nothing, and a gate that let it through would spend the run claiming a pin set the
+    binary cannot honour. Refused here, not judged silently."""
+    global GEMM_PINS
+    names = parse_pins(spec)
+    if names != ["*"] and GEMM_ROUTE != "lt":
+        raise SystemExit(f"gate: --gemm-pins {spec!r} names hipBLASLt algo pins, but --gemm"
+                         f" {GEMM_ROUTE!r} runs no hipBLASLt at all. The knob would be a no-op and the"
+                         " log would claim a pin set nothing honoured; leave `--gemm-pins all` on this"
+                         " route, or run `--gemm lt`.")
+    GEMM_PINS = spec
 
 
 def route_is_library() -> bool:
@@ -3361,6 +3504,56 @@ def numerics_provenance_checks(run: dict, *, stand_in: bool, write: bool = False
               " called it (rows<=1 is the hand GEMV whatever the flag says).")
 
 
+def gemm_pin_checks(run: dict, *, stand_in: bool) -> None:
+    """Which algo pins the run SAYS it ran, asserted against the spec this gate asked for.
+
+    The route echo's forcing, one knob down, and the reason it exists is the same: section (h)'s band,
+    the `GEMM-LT source=` lines and every pin-facing claim in this tree are properties of the algorithm
+    that served each shape, and `--gemm-pins` made that set a runtime choice. A log that cannot say which
+    pin set ran therefore adjudicates neither — which is exactly how `wide520f --gemm lt`'s one red row
+    ended up unattributable (D28: `library` did not flip it, and nothing in the log said whether the
+    pinned `down_proj` kernel or the heuristic's rank-0 did).
+
+    The engine prints `pins=<in force>/<in the table>`, both counted out of `algo_pins()` in the process
+    that ran. Three equalities follow, and there are no other cases: `all` means allowed == total, `none`
+    means allowed == 0, and a csv means allowed == its own length. A missing field is an error rather
+    than a skip for `--attn-touch`'s reason — a binary that predates the knob cannot be judged as though
+    it honoured it, and silence would let a pre-`--gemm-pins` build pass as a post- one.
+    """
+    if GEMM_ROUTE != "lt":
+        # Nothing to assert. hipBLAS and the hand GEMV have no algo-pin concept, and `set_pins` has
+        # already refused a spec that named one, so an absent `pins=` field on this route is correct
+        # bookkeeping rather than a gap in it.
+        return
+    field = run.get("gemm", {}).get("pins")
+    if field is None:
+        check(False, "the run said which algo pins it ran (`--gemm-pins`)",
+              "its GEMM line carried no `pins=` — the binary predates `--gemm-pins`, or the flag never"
+              " reached it, so nothing in this log says whether a pinned kernel or the heuristic's"
+              " rank-0 served these shapes and no claim about either can be made from these bits"
+              + (" (dry-run: the stand-in does echo the field, and `--selftest`'s mismatch case is what"
+                 " proves this check discriminates)" if stand_in else ""))
+        return
+    allowed, sep, total = str(field).partition("/")
+    if not (allowed.isdigit() and sep and total.isdigit()):
+        check(False, "the run's `pins=` field is readable",
+              f"`pins={field}` does not read `<in force>/<in the table>` — refusing to guess which half"
+              " is which, because the two readings give opposite answers about whether a pin ran")
+        return
+    got, table = int(allowed), int(total)
+    want, why = pin_expectation(GEMM_PINS, table)
+    verdict = ("and it did" if got == want else
+               f"but {got} did — this log is a judgment about"
+               + (" rank-0 everywhere" if got == 0 else " a different pin subset")
+               + ", not about the config this gate was asked to judge")
+    check(got == want,
+          "the run ran the algo-pin set this gate is judging it under"
+          f" (--gemm-pins {GEMM_PINS})",
+          f"GEMM line echoed pins={got}/{table} — {why}, so {want} in force was owed, " + verdict
+          + (" (stand-in echo: the table width is this file's arithmetic, not the engine's, so what"
+             " is exercised here is the comparison — a real run counts its own table)" if stand_in else ""))
+
+
 def wave_row_ceiling() -> int:
     """`kMaxWaveRows` — how many rows the wave scratch is tall — read from `engine/decode_step.h`,
     never retyped here. Same reason `lane_geometry()` reads its two constants out of the code that
@@ -3637,7 +3830,12 @@ def wave_band_checks(a_dir: Path, b_dir: Path, a_label: str, b_label: str, what:
     and `M=512` are three different summation orders and §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured what that costs (worst per-row
     `1-cos` 1.9e-03, worst per-row `meanrel` 6.1e-02, pooled `meanrel` <= 1.56e-02 over 1694 rows).
     The band is that measurement, adopted as policy: per-row `1-cos <= 2e-03`, pooled `meanrel <= 3e-02`,
-    pooled `cos >= 0.9998`.
+    pooled `cos >= 0.9998`. The POOLED two are route-independent — they price one cascade of stage work
+    against another and the library on the wide side does not change what a stage tile is — but the
+    per-row one is not: it is a property of the pairing, and the pairing is hand-vs-whichever-library.
+    So the row line comes from `wave_row_1cos_band()` and prints its own provenance, and the two library
+    routes are judged by two measured numbers rather than by one number inherited across a change of
+    independent variable.
 
     What is LOST to bit-identity has to be said, because it is the reason this section was written the
     other way: a wrong-but-self-consistent conv-window carry can no longer be caught by a byte
@@ -3654,21 +3852,24 @@ def wave_band_checks(a_dir: Path, b_dir: Path, a_label: str, b_label: str, what:
         check(False, f"{a_label} and {b_label} wrote the same-shaped corpus",
               drift["mismatch"])
         return
-    ok_1cos = drift["worst_1cos"] <= CASCADE_BAND["row_1cos_max"]
+    row_band, row_source = wave_row_1cos_band()
+    ok_1cos = drift["worst_1cos"] <= row_band
     ok_rel = drift["meanrel"] <= CASCADE_BAND["stage_meanrel_max"]
     ok_cos = drift["one_cos"] <= 1.0 - CASCADE_BAND["stage_cos_min"]
     line = (f"{drift['rows']} rows, {drift['identical']} of them still bit-identical;"
-            f" pooled meanrel {drift['meanrel']:.3e} (band {CASCADE_BAND['stage_meanrel_max']:.0e}),"
+            f" pooled meanrel {drift['meanrel']:.3e} (band {CASCADE_BAND['stage_meanrel_max']:.0e})"
+            f" [route-independent: a stage tile is the same tile whichever library made it],"
             f" pooled 1-cos {drift['one_cos']:.3e}"
             f" (band {1.0 - CASCADE_BAND['stage_cos_min']:.0e}); worst per-row 1-cos"
             f" {drift['worst_1cos']:.3e} at logits{drift['worst_1cos_row']}.bin"
-            f" (band {CASCADE_BAND['row_1cos_max']:.0e}); worst per-row meanrel"
+            f" (band {row_band:.2e} — {row_source}); worst per-row meanrel"
             f" {drift['worst_row_rel']:.3e} at logits{drift['worst_rel_row']}.bin, which is printed"
             " and NOT gated — a logits row's own meanrel reaches 6.1e-02 across the audit's corpus"
             " because one small-magnitude row can carry it, and the adopted band puts meanrel at the"
             " stage level, where it is pooled and bounded")
     check(ok_1cos, f"{a_label} and {b_label} keep every logits row inside the cascade band"
-                   f" (per-row 1-cos <= {CASCADE_BAND['row_1cos_max']:.0e}) — {what}", line)
+                   f" (per-row 1-cos <= {row_band:.2e} for the `--gemm {GEMM_ROUTE}` pairing)"
+                   f" — {what}", line)
     check(ok_rel, f"{a_label} and {b_label} pool to a stage meanrel inside the cascade band"
                   f" (<= {CASCADE_BAND['stage_meanrel_max']:.0%})", line)
     check(ok_cos, f"{a_label} and {b_label} pool to a cosine inside the cascade band"
@@ -4022,6 +4223,11 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
                # default: section (h) chooses bit-identity or the cascade band on this, and the three
                # sides have to be the same route for either reading to mean anything.
                "--gemm", GEMM_ROUTE,
+               # The pin set too, and for the identical reason with a sharper edge: the pinned
+               # `down_proj` algo and the heuristic's rank-0 are different kernels with different
+               # reduction orders, so a width A/B whose sides ran different pin sets measures two things
+               # at once — and section (h)'s band is keyed to the pairing, not to a route word.
+               "--gemm-pins", GEMM_PINS,
                # Same argument as the main run, one level down: an A/B of WAVE WIDTHS in which the two
                # sides silently ran different attention FORMS compares two things at once. §13's device
                # pass is exactly the pass that was read while one side had silently thrown inside
@@ -4056,7 +4262,8 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             break_band: int = -1,
             break_state_fp: str = "", prefill_logits: str = PREFILL_LOGITS_LAST,
             break_y0: bool = False, y0_alt: bool = False,
-            slack_alt: int = -1, break_slack: int = -1, break_runnerup: int = -1) -> tuple[
+            slack_alt: int = -1, break_slack: int = -1, break_runnerup: int = -1,
+            break_pins: int = -1) -> tuple[
                 str, int]:
     """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
 
@@ -4111,9 +4318,22 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
     # prints the value a check is hunting for is a check that can never fail — this one printed
     # `route=library` while the engine printed `route=hipblas`, which is how every dry run was green and
     # every real library run was red. `--selftest` asserts this spelling.
+    # The route echo has a sibling the real engine prints and this stand-in has to fake: `pins=`. This
+    # file has no algo table to count — `algo_pins()` is C++, and the counts belong to the process that
+    # ran — so the two numbers are stand-in arithmetic over the spec: a table exactly as wide as the
+    # names asked for, all of it in force unless the spec says `none`. That is enough to exercise the
+    # parser and the equality; `--break-pins` is what proves the equality can FAIL, and a real run counts
+    # its own table. Same standing limit as `hipblas=dry-run` below.
+    pins_names = parse_pins(GEMM_PINS)
+    pins_total = 1 if pins_names == ["*"] else max(len(pins_names), 1)
+    pins_in = 0 if not pins_names else pins_total
+    if break_pins >= 0:
+        pins_in = break_pins
     lines.append("GEMM route=" + ("hipblaslt" if GEMM_ROUTE == "lt" else "hipblas")
                  + " handle=1 workspace_mib=128 dtype=bf16-in/bf16-C/f32-compute"
-                 " stream=default" if route_is_library() else "GEMM route=hand")
+                 + (f" algo_source=heuristic-rank-0-per-shape pins={pins_in}/{pins_total}"
+                    if GEMM_ROUTE == "lt" else "")
+                 + " stream=default" if route_is_library() else "GEMM route=hand")
     # Same reasoning as the GEMM line above, and the same limit: the stand-in has no hipBLAS to ask, so
     # it echoes `hipblas=dry-run` and `numerics_provenance_checks` refuses to assert anything from it.
     # `gemm=` here is the route the gate was invoked with, and it is the field the route check reads.
@@ -4494,7 +4714,10 @@ def selftest(fixture: str = "dec8") -> int:
     base = [sys.executable, str(Path(__file__).resolve()), "--fixture", fixture,
             # The route the selftest is run under is the route its children are judged under, otherwise
             # `--selftest --gemm library` would prove the hand route's rules bite and call it done.
-            "--gemm", GEMM_ROUTE]
+            "--gemm", GEMM_ROUTE,
+            # ...and so is the pin set, for the identical reason: `--selftest --gemm lt --gemm-pins
+            # none` has to prove the NONE config's rules bite, not borrow the `all` config's verdict.
+            "--gemm-pins", GEMM_PINS]
     # The cos band line is NAMED by the rule that produced it, so the needle has to know which rule this
     # fixture is under: with a priced allowance the same injected noise reads as
     # `step 5: cos deficit … inside the route allowance …`. `allow_step` is where the allowance
@@ -4567,6 +4790,29 @@ def selftest(fixture: str = "dec8") -> int:
          "[FAIL] the tokens the engine fed itself are the ones the reference fed",
          "generation step 4 was fed the wrong token (a replay list off by one)"),
     ]
+    # The algo-pin echo, on the only route that has pins. Two directions, because a stand-in that can
+    # only agree with the gate proves nothing (`prototype/gdn_collapse/results.md` §1: a check whose
+    # input cannot be empty-and-wrong is decoration). The clean case pins the field's spelling — the
+    # engine's, not this file's invention — and the second injects the count the current spec does NOT
+    # imply, which is the failure the equality exists for: a run asked for `none` that quietly ran the
+    # pin, or the reverse, reads as a pin verdict while pricing rank-0.
+    if GEMM_ROUTE == "lt":
+        names = parse_pins(GEMM_PINS)
+        table = 1 if names == ["*"] else max(len(names), 1)
+        in_force = 0 if not names else table
+        wrong_pins = 0 if in_force else 1
+        cases += [
+            ([], 0, f"echoed pins={in_force}/{table}",
+             "the clean stand-in carries the engine's `pins=<in force>/<in the table>` field and the"
+             " check read BOTH halves of it: a field this file could not parse prints no such line, and"
+             " a binary that stopped printing it altogether hits the missing-field FAIL two sections up"),
+            (["--break-pins", str(wrong_pins)], 1,
+             "[FAIL] the run ran the algo-pin set this gate is judging it under",
+             f"the stand-in echoed {wrong_pins} pin(s) in force while --gemm-pins {GEMM_PINS} owes"
+             f" {in_force}. A log like that is a judgment about some other algo config and the gate"
+             " must refuse to read it as one about this one — which is exactly how D28's red wide520f"
+             " row reached this tree with no way to ask whether the pin or rank-0 produced it"),
+        ]
     if noise_caught:
         size = ("" if noise_cap is None else
                 f" — deficit {noise_deficit:.3e} over this step's own cap {noise_cap:.3e}")
@@ -4846,11 +5092,12 @@ def selftest(fixture: str = "dec8") -> int:
          f"position {ab_pos}'s logits are shifted 8 logits on the one-row side: the output comparison must"
          " bite and name that one file, while every launch count stays correct (the locality rule"
          " `prototype/mlp_gemv/results.md` demands — a negative every check catches proves nothing)."
-         " Sized 8 logits rather than one byte because on the library route the row band is 2e-03 of 1-cos"
-         " and a 1-ULP flip would sit inside it: the negative would have gone extinct the moment the band"
-         " arrived. The row's order is untouched, so no id moves here; and because it is ONE row of a"
-         " 25-row stand-in corpus it does not move the POOLED meanrel past its 3e-02 stage band either"
-         " (asserted green above), which is what separates a row rule from a stage rule"),
+         " Sized 8 logits rather than one byte because the row band on either library route is ~2e-03"
+         " of 1-cos and a 1-ULP flip would sit inside it: the negative would have gone extinct the"
+         " moment the band arrived. The row's order is untouched, so no id moves here; and because it"
+         " is ONE row of a 25-row stand-in corpus it does not move the POOLED meanrel past its 3e-02"
+         " stage band either (asserted green above), which is what separates a row rule from a stage"
+         " rule"),
         (["--break-ab-ids", str(ab_pos)], 1,
          ([f"[FAIL] batched and one-row sample the same tokens at every row that was not a coin toss",
            "![FAIL] batched and one-row keep every logits row inside the cascade band",
@@ -5142,6 +5389,20 @@ def main() -> int:
                          " binary. The flag is passed to every `decode_run` this gate starts and the"
                          " run's echoed route is checked against it, so a log cannot be judged under"
                          " the wrong rule.")
+    ap.add_argument("--gemm-pins", default="all",
+                    help="which entries of the hipBLASLt algo-pin table the run being judged was"
+                         " given, passed straight to `decode_run --gemm-pins`: `all` (the default, and"
+                         " `decode_run`'s own default), `none` (the heuristic's rank-0 everywhere), or"
+                         " a comma-separated list of pinned shape names. The table itself is"
+                         " `engine/kernels_gemm.cpp::algo_pins()` — one entry today, `down_proj`,"
+                         " trimmed in situ from three (D28) — and this file never copies its size: the"
+                         " run echoes `pins=<in force>/<in the table>` and the check is an equality, so"
+                         " `all` means \"everything the binary has\" rather than a number a reader has"
+                         " to remember. Named on every run and asserted against that echo, exactly like"
+                         " `--gemm`: a log that says `lt` but not which algorithm ran cannot be cited"
+                         " for a pin claim either way, and D28's red `wide520f` row is what that"
+                         " blindness cost. Only meaningful with `--gemm lt`, and a spec that names pins"
+                         " on another route is refused rather than judged.")
     ap.add_argument("--write-provenance", action="store_true",
                     help="with a real (not --dry-run) run: write engine/numerics_provenance.json from"
                          " this run's NUMERICS line (wave-row ceiling + hipBLAS version, D-11) and"
@@ -5220,6 +5481,14 @@ def main() -> int:
                          " against its echo. 64 is the value Phase 0's budget selected; 16 is"
                          " measured and rejected (per-row 1-cos 3.388e-4 > the 3.2e-4 ceiling), so"
                          " the refusal text matters more than the number")
+    ap.add_argument("--break-pins", type=int, default=-1, metavar="N",
+                    help="with --dry-run: echo N as the in-force pin count instead of the one this"
+                         " gate's own --gemm-pins spec implies. That is the bug the check exists to"
+                         " catch — a run asked for `none` that quietly ran the pin, or the reverse,"
+                         " which reads as a pin verdict while pricing rank-0 — and without an"
+                         " injection the stand-in could only ever agree with itself. The selftest"
+                         " derives N as the wrong value for the current spec and requires the gate to"
+                         " go RED")
     ap.add_argument("--break-wave", action="store_true",
                     help="with --dry-run: make the wide-wave side of section (h) report one-row-per-"
                          "token launch counters, which is what a refactor that silently drops back to "
@@ -5310,6 +5579,10 @@ def main() -> int:
 
     set_fixture(args.fixture)
     set_route(args.gemm)
+    # After `set_route` and not before: the pin set is a hipBLASLt concept, and the pair is adjudicated
+    # together so a `--gemm library --gemm-pins down_proj` invocation is refused instead of spending a
+    # whole device window asserting a pin that no code path could reach.
+    set_pins(args.gemm_pins)
     set_scope(args.scope)
 
     if args.slack_region:
@@ -5405,6 +5678,11 @@ def main() -> int:
            # different band per route (CASCADE_BAND), so a run whose route came from the binary's own
            # default could be judged by the wrong rule. The echo is checked right after the run.
            "--gemm", GEMM_ROUTE,
+           # The algo-pin set, named here and asserted against the run's own `pins=` echo for the same
+           # reason as the route: which algorithm served `down_proj` at the full wave width is a runtime
+           # choice now, so a log that cannot say which one ran cannot be cited for a pin claim in
+           # either direction — which is how D28's one red row arrived unattributable.
+           "--gemm-pins", GEMM_PINS,
            # The attention form, named for the same reason and asserted against the same kind of echo:
            # section (i) exists to decide §15's question, and a log that cannot say which form produced
            # its rows is not evidence about either of them.
@@ -5448,7 +5726,8 @@ def main() -> int:
                              args.break_state_fp,
                              args.prefill_logits, break_y0=args.break_y0, y0_alt=args.y0_alt,
                              slack_alt=args.slack_alt, break_slack=args.break_slack,
-                             break_runnerup=args.break_runnerup)
+                             break_runnerup=args.break_runnerup,
+                             break_pins=args.break_pins)
         notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
                      " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
                      " run is not also the first time this file parses a STEP line. Section (d) is"
@@ -5530,6 +5809,10 @@ def main() -> int:
            if echoed_route is None else
            f"NUMERICS echoed gemm={echoed_route}, this gate was run with --gemm {GEMM_ROUTE}"
            f" (GEMM line says {run.get('gemm', {}).get('route', 'nothing')})"))
+    # Which ALGORITHM the route was allowed to use, asserted immediately after the route itself and for
+    # the same reason: `--gemm lt` names a library, `--gemm-pins` names which of its algorithms ran, and
+    # section (h)'s band plus every `source=pin` claim are statements about the second one.
+    gemm_pin_checks(run, stand_in=args.dry_run)
     # D-11's provenance half, immediately after the route echo and for the same reason: with two GEMMs
     # in the tree, what produced the bits is part of what they mean.
     numerics_provenance_checks(run, stand_in=args.dry_run, write=args.write_provenance)
@@ -5812,6 +6095,10 @@ def main() -> int:
     # ---- (b) logits ------------------------------------------------------------------------------
     section("(b) logits vs the pinned dumps — the rule in force is named on every step")
     print(f"  route in force: --gemm {GEMM_ROUTE}."
+          + (f" Algo pins in force: --gemm-pins {GEMM_PINS} (asserted against the run's own `pins=`"
+             " echo above) — the pinned algo and the heuristic's rank-0 are different kernels, so a"
+             " wave-width verdict on this route is a verdict about THIS pin set and no other."
+             if GEMM_ROUTE == "lt" else "")
           + (" The cascade floor is ARMED: no step is judged by a cap tighter than the measured"
              f" hand<->library cascade (cos deficit {CASCADE_BAND['row_1cos_max']:.0e}, meanrel"
              f" {CASCADE_BAND['stage_meanrel_max']:.0%}), because a route whose dots reassociate cannot"
@@ -6002,6 +6289,10 @@ def main() -> int:
             "gdn_scan": args.gdn_scan,
             "gdn_chunk": args.gdn_chunk,
             "gemm": GEMM_ROUTE,
+            # Which algorithms that route was allowed to use. The sidecar exists so two runs can be
+            # diffed without reading two logs, and a diff of two `lt` runs taken under different pin
+            # sets would otherwise be a diff of two different numerics.
+            "gemm_pins": GEMM_PINS,
             "reason": WAVE_CARRY_REASON,
             "n_checks": len(deferred_records),
             "n_failed": sum(1 for r in deferred_records if not r["ok"]),

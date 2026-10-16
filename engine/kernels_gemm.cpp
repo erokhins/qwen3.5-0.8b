@@ -369,9 +369,18 @@ std::string build_lt_route() {
                      + std::to_string(version % 100);
     }
     std::ostringstream os;
+    // `pins=<in force>/<in the table>`, both counted by THIS process out of algo_pins(). Two numbers,
+    // not one, because one is undecidable from the outside: `pins=1` is the correct line both for a
+    // one-entry table asked for in full and for a three-entry table the run was never given, so a gate
+    // judging `--gemm-pins all` would have to remember the table size to check it — and a remembered
+    // number is the provenance rot D28 records for the band (prototype/gemm_algo_sweep/results.md §3d,
+    // where a band was cited against a pin set the binary no longer used). With the denominator in the
+    // line every spec is an equality: `all` means allowed == total, `none` means allowed == 0, and a
+    // csv means allowed == its own length. See `gemm_pin_checks` in engine/gate.py.
     os << "route=hipblaslt handle=1 workspace_mib=" << (kWorkspaceBytes >> 20)
        << " version=" << lt_version << " algo_source=heuristic-rank-0-per-shape pins="
        << [] { size_t n = 0; for (const AlgoPin& p : algo_pins()) { if (pin_allowed(p.name)) ++n; } return n; }()
+       << "/" << algo_pins().size()
        << " stream=default";
     r.description = os.str();
     return r.description;
