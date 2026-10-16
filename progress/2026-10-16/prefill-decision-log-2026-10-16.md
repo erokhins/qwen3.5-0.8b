@@ -288,3 +288,40 @@ Next, in order: (i) route the dot2-bf16 finding into the attention score loop, w
 reduction already exists and the format is unchanged; (ii) prototype a WMMA score path through the
 fragment abstraction with the layout question closed properly; (iii) re-take the byte-vs-issue call
 for M-tiling now that the issue wall is half as tall as claimed.
+
+## D17 — D16's headline retracted: the matrix prize over the engine is 1.4–1.6×, not 11.2×
+
+Written the same night, from `progress/2026-10-16/ceiling-based-route-ranking-2026-10-16.md`. The
+measurement in D16 item 1 is sound — 52.63 TFLOP/s out of a hand-written `v_wmma` loop, 88.8 % of
+roof — and the comparison built on it was wrong in both of its inputs.
+
+1. **The baseline was retired.** D16 compared the WMMA loop against 4.696 TFLOP/s. That number is the
+   **F32-`C`** form of `rocblas_gemm_ex`; `devices/strix-halo-compute.md` has a section headed
+   *"Second correction, same day: every rate above is an F32-`C` rate, and it is 6–8× below the same
+   call"*, and the engine passes `HIP_R_16BF` for its output, so the engine is on the fast form:
+   **33.2–37.7 TFLOP/s** at its own shapes, 22.3–23.3 across the 24-layer mix at `M ≥ 512`. Prize:
+   **1.4–1.6×** on GEMM-shaped families, not an order of magnitude.
+2. **"Nothing in the shipped stack issues a matrix instruction" was false.** The census behind it
+   covered the `TensileLibrary_Type_*_fallback_*.hsaco` files because `llvm-objdump` can read those,
+   and did not cover the tuned kernels, which are CCO containers and lazy `.dat` files it refuses.
+   The arithmetic proves the tuned path is a matrix path without needing any disassembly: 33–37.7
+   TFLOP/s is **above** the 2-MAC vector roof of 29.63 TFLOP/s, so no 1-MAC or 2-MAC kernel can be
+   producing it. A census over the files you can read is not a census over the files that run.
+3. **`dot2` is not a universal win.** At 23.28 TFLOP/s it is *below* `mlp_down`'s measured 28.59
+   TFLOP/s in situ, so swapping that family to `dot2` would be a ~23 % regression. The arithmetic-class
+   levers apply to our own scalar kernels and to families whose rate is far below any ceiling, not to
+   the library's GEMMs, which are already near or above the vector roofs.
+
+Guards taken, in the shape of a rule rather than a feeling: **before a number is allowed to size a
+route, open the file it came from and look for a correction section** — this repo corrects itself in
+place and marks the retired figure, and I quoted across that mark. And **a census must state which
+files it could read**, since "0 of 55" and "0 of the readable 55" read identically and mean different
+things. Both are in `AGENTS.md` with this entry.
+
+What survives D16 unchanged: item 3 (the 1-wide issue floor does not exist, so `attn` sits near 47 %
+of a 2-wide issue and traffic is the front wall), the corrected `pct_of_ceiling` trap, and item 5's
+ban on hand-rolling WMMA fragment layouts before the layout is proven. Funded next, per
+`ceiling-based-route-ranking-2026-10-16.md` §6: **R1, attention row-tiling at M = 2**, bit-identity on
+the per-row lane order as the admission gate — the largest prize that needs no user decision
+(194.6 ms of a 1307.75 ms wave at `M = 2`, 355.6 ms at `M = 8`), chosen over the fact-B routes precisely
+because fact B turned out to be 1.4–1.6× and not 11×.

@@ -283,3 +283,21 @@ is orders of magnitude larger than a format change and would need bands material
 and **widening a band that a pinned gate depends on for its discriminating power** — if the only way
 to make a switch pass is to loosen a check that currently catches a real bug, that is the second
 bullet's failure case, and it is reported, not routed around.
+
+## Two provenance rules from a retracted headline (user-visible, 2026-10-16)
+
+Appended at the end for the standing line-citation reason; the entry it belongs to is decision log
+**D17** in `progress/2026-10-16/prefill-decision-log-2026-10-16.md`.
+
+- **Check a number's file for a correction section before letting it size a route.** A WMMA route was
+  priced at 11.2× the engine's rate against 4.696 TFLOP/s, which `devices/strix-halo-compute.md`
+  had already retired in a section titled *"Second correction, same day: every rate above is an
+  F32-`C` rate, and it is 6–8× below the same call"*. The engine was on the fast form all along, so
+  the true prize was 1.4–1.6×. This repo corrects itself in place and marks the dead figure; quoting
+  across that mark is the failure, not the arithmetic.
+- **A census must name the files it could read.** "0 of the 55 `gfx1151` code objects contain a matrix
+  instruction" was taken over the `*.hsaco` fallback libraries that `llvm-objdump` parses, and missed
+  the tuned kernels in CCO containers it refuses — and the engine's measured 33–37.7 TFLOP/s is
+  *above* the 2-MAC vector roof of 29.63, which proves the tuned path is a matrix path with no
+  disassembly at all. "0 of 55" and "0 of the readable 55" read the same and mean different things;
+  write the second form until the first is actually true.

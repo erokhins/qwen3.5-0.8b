@@ -44,21 +44,34 @@ loops), `irp_kv_read` rows in §4.
 Roofs, at 40 CU × 64 FP32 lanes × 2.894 GHz: scalar 1 MAC/lane/clk = 14.82 TFLOP/s; packed/dot2
 2 = 29.6; dot4 and WMMA 4 = 59.4; dot8 8 = 118.8.
 
-## 2. The headline: the matrix instruction is real and we are nowhere near it
+## 2. The headline, corrected the same day: the matrix instruction is real, and the library is already most of the way there
 
 `v_wmma_f32_16x16x16_f16` sustains **52.63 TFLOP/s**, 88.8 % of the 59.36 TFLOP/s roof that
-`tools/isa_probe.sh` §7.2 derives from AMD's own 512 FLOP/clk/CU figure. Against the engine's
-current arithmetic:
+`tools/isa_probe.sh` §7.2 derives from AMD's own 512 FLOP/clk/CU figure. The first version of this
+section compared that against **4.696 TFLOP/s** and concluded 11.2×. That baseline is retired:
+`devices/strix-halo-compute.md` shows it is the **F32-`C`** form of the call, 6–8× below the same call
+with a 16-bit `C`, and the engine passes `HIP_R_16BF` for its output (`engine/kernels_gemm.cpp`).
+Against the number that is true for the engine:
 
-| path | TFLOP/s | multiple for WMMA |
+| path | TFLOP/s | WMMA multiple over it |
 |---|---|---|
-| engine today, `--gemm library` bf16 through hipBLASLt | 4.696 | **11.2×** |
-| engine's own scalar kernels (`v_fma_mix_f32` / `v_fmac_f32_e32` at 1 MAC) | 7.30 (this probe's floor leg) | 7.2× |
-| best shipped library number in the ledger | 6.885 | 7.6× |
+| **engine today, library bf16 with 16-bit `C`, at engine shapes** | **33.2–37.7** (`strix-halo-compute.md`, window `prefill-Wclean`) | **1.4–1.6×** |
+| engine's 24-layer wave mix at `M ≥ 512` | 22.3–23.3 | 2.3–2.4× |
+| `mlp_down` in situ, 1024 lanes | 28.59 | 1.84× |
+| this probe's scalar `v_fma_f32` leg (what our hand-written kernels execute) | 7.30 | 7.2× |
+| ~~engine through hipBLASLt, 4.696~~ | ~~4.696~~ | retired baseline, F32-`C` form |
 
-So the answer to "is AMD's 60 TFLOPS marketing" is settled on device: the instruction reaches it in
-a loop, and the gap is entirely that nothing in the shipped stack or in this engine issues a matrix
-instruction (`tools/isa_probe.sh`: 0 of 55 `gfx1151` code objects contain one).
+Two consequences that change the plan, both arithmetic rather than opinion. First, since 33–38
+TFLOP/s is **above the 2-MAC vector roof** of 29.63, the library's fast path must already be a matrix
+path — so "nothing in the shipped stack issues a matrix instruction" was false, and §7.3 of the specs
+doc retracts it. Second, **`dot2` is not a win everywhere**: at 23.28 TFLOP/s it is below `mlp_down`'s
+measured 28.59, so swapping `mlp_down` to `dot2` would be a ~23 % regression. `dot2` and WMMA are
+levers against *our own* scalar kernels and against families that are arithmetic-bound at low rates,
+not against the library's GEMMs.
+
+**Everything else in this section stands as measured**: the WMMA loop really does hit 88.8 % of the
+roof on this part, and AMD's 60 TFLOPS is a real matrix roof rather than a sparsity number — it is
+just that the shipped library already gets 56–64 % of it.
 
 **Equally important and cheaper: `v_dot2_f32_bf16` reaches 23.28 TFLOP/s**, 4.1× what our library
 path delivers, and it is a **bf16 instruction** — same input format as the weights and activations

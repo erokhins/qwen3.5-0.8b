@@ -111,10 +111,11 @@ allocate from.
 
 These are recorded as **open**, not resolved; each has an experiment attached.
 
-1. **60 TFLOPS FP16 (AMD) vs 5.667 TFLOP/s measured bf16 matmul.** → **RESOLVED in §7.** Short version:
-   the 60 is the WMMA matrix roof (a real instruction this compiler can emit, 4× the vector roof), and
-   **0 of the 55 gfx1151 code objects shipped with rocBLAS contain a matrix instruction** — so the gap
-   is in the library stack, not the silicon and not marketing.
+1. **60 TFLOPS FP16 (AMD) vs 5.667 TFLOP/s measured bf16 matmul.** → **RESOLVED in §7.** The 60 is
+   the WMMA matrix roof (a real instruction this compiler emits), and the library path — in the output
+   form this engine actually uses — already reaches **56–64 % of it**. An earlier version of §7 said
+   7.9 %, resting on a retired F32-`C` baseline and a census of *fallback* code objects; that claim is
+   retracted in §7.3.
 2. **The on-die cache hierarchy.** Our own probes say a **2 MiB** tier at ~1.4 TB/s and a **~54 MiB**
    tier at ~876 GB/s (`strix-halo-memory-bandwidth.md`, `strix-halo-mixed-traffic.md`). `rocminfo`
    agrees on 2 MiB of L2. Chips and Cheese, measuring the same part, reports a **4 MB GPU L2 at ~2.5 TB/s**
@@ -182,47 +183,74 @@ this exact APU independently: *"RDNA3 has a theoretical 512 FP16 FLOPS/clock/CU.
 Radeon 8060S has 40 CUs at a max clock of 2.9GHz should have a peak 59.392 FP16 TFLOPS"*. So the vendor
 figure is a real instruction-level roof — not sparsity, not fp16-accumulate, not GPU+NPU summed.
 
-### 7.3 The gap is in the libraries, and it is nearly the whole gap
+### 7.3 The gap is real but modest — and an earlier version of this section got it badly wrong
 
-`tools/isa_probe.sh` §3 disassembles every gfx1151 code object shipped with ROCm 10.0:
+**Retracted, same day.** This section originally said the library path sits at 7.9 % of the matrix
+roof, resting on two things: a measured **4.696 TFLOP/s**, and a disassembly census finding **0 of
+the 55 `gfx1151` code objects shipped with rocBLAS contain a matrix instruction**. Both failed a
+provenance check, and the second was a census of the files that could be read, not of the files that
+run.
+
+- **4.696 TFLOP/s is a retired number.** `devices/strix-halo-compute.md` carries a section titled
+  *"Second correction, same day: every rate above is an **F32-`C`** rate, and it is 6–8× below the same
+  call"*: `rocblas_gemm_ex` with a 32-bit `C` selects radically different kernels from the byte-
+  identical call with a 16-bit `C`, and **the engine uses the 16-bit form** (`engine/kernels_gemm.cpp`
+  passes `HIP_R_16BF` for the output type). Measured cleanly in window `prefill-Wclean` with the form
+  the engine uses: **33.2–37.7 TFLOP/s** at the engine's own shapes, 22.3–23.3 TFLOP/s across the full
+  24-layer wave mix at `M ≥ 512`.
+- **The census sampled the fallbacks.** It covered `TensileLibrary_Type_*_fallback_gfx1151.hsaco`,
+  which `llvm-objdump` reads, and not the tuned kernels, which live in CCO containers and lazy `.dat`
+  files that `llvm-objdump` refuses. A census over the files you can read is not a census over the
+  files that run.
+
+The arithmetic settles it with no disassembly at all:
 
 ```
-matrix-instruction census across every gfx1151 code object shipped with rocBLAS:
-  0 of 55 code objects contain a matrix instruction.
+1-MAC vector roof (v_fma_f32, v_fma_mix_f32)        = 14.82 TFLOP/s
+2-MAC vector roof (v_pk_fma_f16, v_dot2_f32_bf16)   = 29.63 TFLOP/s
+library rate, engine's own 16-bit-C form           = 33.2 - 37.7 TFLOP/s   (taken at 1857-2401 MHz, below boost)
+WMMA loop, this repo's probe                        = 52.63 TFLOP/s
 ```
 
-| rocBLAS gfx1151 library | arithmetic it actually executes | MACs/lane/clk |
+No 1-MAC or 2-MAC kernel can retire the rate in the third line, so **the fast library path is already
+a matrix path** — which is what the tuned kernel names in the engine's launch census say too
+(`…_MI16x16x16x1_…` = a 16×16×16 matrix tile). Corrected answer to the question this section was
+written to answer:
+
+> the 60 TFLOPS is a real matrix roof; the shipped library already reaches **56–64 % of it** with tuned
+> WMMA kernels on the output form this engine uses; and what is left for a hand-written kernel is
+> **1.4–1.6×**, not an order of magnitude.
+
+| rocBLAS gfx1151 **fallback** library | arithmetic it executes | MACs/lane/clk |
 |---|---|---|
-| `BB_HPA` (bf16 in/out — **our path**) | `v_fmac_f32_e32` only | **1** |
-| `BS_HPA` (bf16 in, f32 out) | `v_fmac_f32_e32` only | 1 |
+| `BB_HPA`, `BS_HPA` (bf16) | `v_fmac_f32_e32` | 1 — **fallback only, not the shipped fast path** |
 | `HH` (fp16) | `v_pk_fma_f16` | 2 |
 | `HS_HPA` (fp16 in, f32 out) | `v_fma_mix_f32` | 1 |
 | `4xi8I_HPA` (int8) | `v_dot4_i32_i8` | 4 |
 
-So the 4.696 TFLOP/s we measure through hipBLASLt was never a matrix measurement: it is a scalar-FMA
-kernel judged against a scalar roof — **32 % of the vector roof, 7.9 % of the matrix roof**. Nothing in
-this repo, and nothing in the shipped stack, has touched the matrix roof, because Tensile ships no WMMA
-kernel for `gfx1151`. Independent evidence that this is an ecosystem gap rather than our local
-misfortune, same silicon, from `llm-tracker.info` (Llama-2-7B Q4_0, pp512): Vulkan **881.71 tok/s**,
-HIP **348.96**, HIP+FA 331.96, llama.cpp's own WMMA build 322.63, CPU 294.64 — with their note that
-*"the HIP version performs far below what you'd expect in terms of tok/TFLOP efficiency for prompt
-processing even vs other RDNA3 architectures"* (a `gfx1103` 780M was measured at 14.51 tok/TFLOP; at
-that efficiency this box would do ~850). The llama.cpp side records the same ISA fact: `gfx1151`
-builds must stub out the MFMA flash-attention kernel because *gfx1151 lacks MFMA*.
+The ecosystem measurements quoted before still stand as observations about **llama.cpp's** HIP path
+(`llm-tracker.info`: Vulkan 881.71 vs HIP 348.96 tok/s pp512 on identical silicon; llama.cpp stubbing
+its MFMA flash-attention kernel because *gfx1151 lacks MFMA*), but they were not evidence about this
+engine's library GEMM and this section should not have used them as if they were.
 
 ### 7.4 What follows
 
-1. **Re-price the fast tier.** It was booked against 38 % of a 14.85 "MFMA" roof. Framed correctly,
-   today's scoring runs at 1 MAC/lane/clk and a WMMA fp16 path has a **4×** arithmetic roof, with the
-   score cost (0.246 ms at 1024 lanes) still untouched. Whether a hand-written WMMA kernel lands near
-   that roof is unmeasured — at 41 % lane coverage it may be latency-bound rather than issue-bound —
-   and `prototype/issue_rate_probe` now carries a WMMA leg to discriminate.
+1. **The fast tier is a 1.4–1.6× question, not a 4× one.** Against the engine's own library rate
+   (33–38 TFLOP/s at 16-bit `C`) the measured WMMA loop (52.63 TFLOP/s,
+   `prototype/issue_rate_probe/results.md` §1) is worth a third to a half on the families that are
+   GEMM-shaped *and* arithmetic-bound. The route survives; its size does not.
 2. **The fast tier is fp16, not bf16.** WMMA here is fp16-only and `v_pk_fma_bf16` does not exist, so a
    matrix fast tier means fp16 inputs with f32 accumulate (10-bit mantissa, far narrower range than
-   bf16) — a numerics band this repo has never admitted.
+   bf16). The range question is closed by `tools/fp16_range_probe.py` — nothing pinned exceeds fp16
+   range, and inside range fp16 is the more precise format — so it is a gate question, not a band
+   question (decision log D13/D14).
 3. **8-bit means int8, and it is the same 4× multiplier with half the bytes.** `v_dot4_i32_i8` is the
    lever; FP8 does not exist on this ISA, so any plan written against FP8 must be restated as int8 plus
    scales.
+4. **The largest family is outside all of this.** `gdn_rec` is 40–51 % of the wave at 0.265 TFLOP/s and
+   is latency-bound, not arithmetic-bound
+   (`progress/2026-10-16/ceiling-based-route-ranking-2026-10-16.md` §3.5). No matrix instruction helps
+   a recurrence that is waiting on its own previous token.
 
 Sources used in this section (external, accessed 2026-10-16): AMD product page for the Ryzen AI Max+ 395
 (§1); GPUOpen *How to accelerate AI applications on RDNA 3 using WMMA* (512 FLOP/clk/CU, 16×16-only
