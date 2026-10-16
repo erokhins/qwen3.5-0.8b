@@ -514,3 +514,32 @@ What happened to the plan, in one line each:
 5. **What the day's reversals have in common**: every one of them came from reading a *rate* as a *wall* —
    41 wavefronts/CU, 237 GB/s demanded, 4.696 TFLOP/s. The guard that actually works is not a smarter
    model but a cheaper experiment: change one thing and see which side moves.
+
+## D23 — `gdn_rec` got its instructions counted, and the answer is a funded **no**
+
+`prototype/gdn_rec_isa/` (census + four MODE kernels + two control rows, no device run needed for the
+verdict). The method that paid off on attention was pointed at the biggest family in the wave — ~509 ms
+of 1105 ms at 4096 lanes, 52 % at 1024 — which had been argued about with rates for weeks and never
+counted.
+
+What the count says: **1,523 issue slots per wavefront (97,472 per launch)**, prologue 323 / loop A 384 /
+loop B 816; the cross-lane class is a **226-slot spill (14.8 %, of which 127 are exec-guards)**; 11
+barriers; one over-full `vmcnt(0)` store drain. What is *absent*, and that is half the finding: no runtime
+trip counts (both hot loops are already unrolled), **zero `v_movrels`**, no bf16↔f32 conversions, and no
+per-step SALU to hoist — there is no token loop to hoist out of, because one launch is one token.
+
+The arithmetic that decides it: the measured per-launch time is 6.8–6.9 µs against a 0.69 µs issue floor,
+i.e. **the family runs at ~10 % of its own issue roof**. That inverts the attention case — `attn` was near
+its roof, which is why cutting 61 % of its slots bought 31 % of its time. Here the same surgery is capped
+between ~1 % (slot view) and ~13 % (best-case critical-path view) of a 509 ms family. **Not funded.**
+This is the D22 guard applied on the way *in* rather than after a reversal: check whether the rate is even
+achievable before funding the cut.
+
+Both controls passed before any delta was read — the MODE-0 copy censuses identically to the shipped
+`rec_kernel` (1523 vs 1523 slots/token-step) and the engine TU matches the prototype TU — so the null is a
+measurement and not a census artifact. The written levers (MODE 1 −2.3 %, MODE 2 −8.7 %, MODE 2c −2.0 % of
+slots, all bit-identity-clean) stay in the tree as a **falsifier of this model**, not as a win: MODE 0 vs
+MODE 2 in one burst returning > 1.10× refutes the latency reading, < 1.02× kills the instruction route for
+this family. Given the harness does not exist yet and the family's own numbers cap the prize, the queue
+takes the attention re-test first — `M = 2`'s traffic halving against a touch bill that is now 45 slots
+instead of 116, where the harnesses already exist and the family is still 275 ms.

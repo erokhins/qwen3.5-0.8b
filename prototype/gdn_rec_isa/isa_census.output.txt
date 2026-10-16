@@ -1,0 +1,288 @@
+listing  /tmp/tmpwvgez0h7/isa_tu-hip-amdgcn-amd-amdhsa-gfx1151.s
+rules    76 patterns, selftest PASS (each matches its own example line)
+unit     token-step = one rec_kernel launch = one (token, GDN layer); grid 16x128 threads, wave32 -> 64 wavefronts; trip counts derived from the listing
+
+===== CONTROL
+  shipped rec_kernel vs MODE-0 copy rec0_kernel: IDENTICAL (1523 vs 1523 slots/token-step)
+  engine-TU rec_kernel vs prototype-TU rec_kernel: IDENTICAL (1523 vs 1523 slots/token-step)
+  control verdict: OK — deltas below mean what they say
+
+===== rec_kernel
+  walk loopA_state_dot      hdr=.LBB2_20 depth=1 state-accesses/trip=16 trips=8 (D/16, loop-bound says None)
+  walk loopB_state_update   hdr=.LBB2_22 depth=1 state-accesses/trip=8 trips=16 (D/8, loop-bound says 16)
+  never-executed lines (divergent-shuffle trap blocks): 86
+  prologue  static  382 lines  slots  323  x  1 trips  ->    323 slots/token-step
+  loopA     static   73 lines  slots   48  x  8 trips  ->    384 slots/token-step
+  loopB     static   65 lines  slots   51  x 16 trips  ->    816 slots/token-step
+  TOKEN-STEP, per wavefront: 2006 lines issued, 1523 issue slots
+  TOKEN-STEP, per launch   : 97,472 issue slots  (64 wavefronts = 16 blocks x 4)
+  pipe slots               : {'LDS': 125, 'SALU': 352, 'VALU': 645, 'VMEM': 390, 'encode': 483, 'other': 11}
+  category rollup per token-step per wavefront (unclassified=7):
+    encode.bookkeeping          482   31.6%
+    state.fma                   321   21.1%
+    state.load                  261   17.1%
+    state.store                 129    8.5%
+    addr.math                   127    8.3%
+    xlane.exec-guard            127    8.3%
+    state.mul                   122    8.0%
+    loop.salu                   101    6.6%
+    state.coef-lds-load          96    6.3%
+    vmem.clause                  64    4.2%
+    valu.mov                     31    2.0%
+    xlane.add                    22    1.4%
+    xlane.permute                20    1.3%
+    norm.expf                    18    1.2%
+    barrier.invalidate           11    0.7%
+    barrier.sync                 11    0.7%
+    salu.mov                     10    0.7%
+    xlane.addr-math               9    0.6%
+    xlane.lds-round-trip          9    0.6%
+    unclassified                  7    0.5%
+    xlane.range-select            7    0.5%
+    norm.lane-id                  6    0.4%
+    salu.kernarg                  3    0.2%
+    norm.rsqrt                    2    0.1%
+    norm.warp-count               2    0.1%
+    salu.branch                   2    0.1%
+    salu.exit                     2    0.1%
+    salu.offload                  2    0.1%
+    barrier.drain                 1    0.1%
+    xlane.lane-id                 1    0.1%
+
+===== rec0_kernel
+  walk loopA_state_dot      hdr=.LBB3_20 depth=1 state-accesses/trip=16 trips=8 (D/16, loop-bound says None)
+  walk loopB_state_update   hdr=.LBB3_22 depth=1 state-accesses/trip=8 trips=16 (D/8, loop-bound says 16)
+  never-executed lines (divergent-shuffle trap blocks): 86
+  prologue  static  382 lines  slots  323  x  1 trips  ->    323 slots/token-step
+  loopA     static   73 lines  slots   48  x  8 trips  ->    384 slots/token-step
+  loopB     static   65 lines  slots   51  x 16 trips  ->    816 slots/token-step
+  TOKEN-STEP, per wavefront: 2006 lines issued, 1523 issue slots
+  TOKEN-STEP, per launch   : 97,472 issue slots  (64 wavefronts = 16 blocks x 4)
+  pipe slots               : {'LDS': 125, 'SALU': 352, 'VALU': 645, 'VMEM': 390, 'encode': 483, 'other': 11}
+  category rollup per token-step per wavefront (unclassified=7):
+    encode.bookkeeping          482   31.6%
+    state.fma                   321   21.1%
+    state.load                  261   17.1%
+    state.store                 129    8.5%
+    addr.math                   127    8.3%
+    xlane.exec-guard            127    8.3%
+    state.mul                   122    8.0%
+    loop.salu                   101    6.6%
+    state.coef-lds-load          96    6.3%
+    vmem.clause                  64    4.2%
+    valu.mov                     31    2.0%
+    xlane.add                    22    1.4%
+    xlane.permute                20    1.3%
+    norm.expf                    18    1.2%
+    barrier.invalidate           11    0.7%
+    barrier.sync                 11    0.7%
+    salu.mov                     10    0.7%
+    xlane.addr-math               9    0.6%
+    xlane.lds-round-trip          9    0.6%
+    unclassified                  7    0.5%
+    xlane.range-select            7    0.5%
+    norm.lane-id                  6    0.4%
+    salu.kernarg                  3    0.2%
+    norm.rsqrt                    2    0.1%
+    norm.warp-count               2    0.1%
+    salu.branch                   2    0.1%
+    salu.exit                     2    0.1%
+    salu.offload                  2    0.1%
+    barrier.drain                 1    0.1%
+    xlane.lane-id                 1    0.1%
+
+===== rec1_kernel
+  walk loopA_state_dot      hdr=.LBB4_42 depth=1 state-accesses/trip=16 trips=8 (D/16, loop-bound says None)
+  walk loopB_state_update   hdr=.LBB4_44 depth=1 state-accesses/trip=8 trips=16 (D/8, loop-bound says 16)
+  never-executed lines (divergent-shuffle trap blocks): 40
+  prologue  static  317 lines  slots  256  x  1 trips  ->    256 slots/token-step
+  loopA     static   73 lines  slots   48  x  8 trips  ->    384 slots/token-step
+  loopB     static   65 lines  slots   53  x 16 trips  ->    848 slots/token-step
+  TOKEN-STEP, per wavefront: 1941 lines issued, 1488 issue slots
+  TOKEN-STEP, per launch   : 95,232 issue slots  (64 wavefronts = 16 blocks x 4)
+  pipe slots               : {'LDS': 125, 'SALU': 284, 'VALU': 678, 'VMEM': 390, 'encode': 453, 'other': 11}
+  category rollup per token-step per wavefront (unclassified=7):
+    encode.bookkeeping          452   30.4%
+    state.fma                   371   24.9%
+    state.load                  261   17.5%
+    addr.math                   129    8.7%
+    state.store                 129    8.7%
+    state.mul                   104    7.0%
+    loop.salu                    99    6.7%
+    state.coef-lds-load          96    6.5%
+    vmem.clause                  65    4.4%
+    xlane.exec-guard             65    4.4%
+    valu.mov                     28    1.9%
+    xlane.add                    20    1.3%
+    xlane.permute                20    1.3%
+    norm.expf                    18    1.2%
+    xlane.range-select           14    0.9%
+    barrier.invalidate           11    0.7%
+    barrier.sync                 11    0.7%
+    xlane.lds-round-trip          9    0.6%
+    unclassified                  7    0.5%
+    norm.lane-id                  6    0.4%
+    salu.mov                      6    0.4%
+    xlane.addr-math               6    0.4%
+    salu.kernarg                  3    0.2%
+    norm.rsqrt                    2    0.1%
+    norm.warp-count               2    0.1%
+    salu.exit                     2    0.1%
+    barrier.drain                 1    0.1%
+    dual.other                    1    0.1%
+    salu.branch                   1    0.1%
+    salu.offload                  1    0.1%
+    xlane.lane-id                 1    0.1%
+
+===== rec2_kernel
+  walk loopA_state_dot      hdr=.LBB5_9 depth=1 state-accesses/trip=16 trips=8 (D/16, loop-bound says None)
+  walk loopB_state_update   hdr=.LBB5_11 depth=1 state-accesses/trip=8 trips=16 (D/8, loop-bound says 16)
+  never-executed lines (divergent-shuffle trap blocks): 0
+  prologue  static  210 lines  slots  159  x  1 trips  ->    159 slots/token-step
+  loopA     static   73 lines  slots   48  x  8 trips  ->    384 slots/token-step
+  loopB     static   65 lines  slots   53  x 16 trips  ->    848 slots/token-step
+  TOKEN-STEP, per wavefront: 1834 lines issued, 1391 issue slots
+  TOKEN-STEP, per launch   : 89,024 issue slots  (64 wavefronts = 16 blocks x 4)
+  pipe slots               : {'LDS': 122, 'SALU': 216, 'VALU': 660, 'VMEM': 388, 'encode': 443, 'other': 5}
+  category rollup per token-step per wavefront (unclassified=12):
+    encode.bookkeeping          443   31.8%
+    state.fma                   371   26.7%
+    state.load                  259   18.6%
+    addr.math                   130    9.3%
+    state.store                 129    9.3%
+    state.mul                   102    7.3%
+    loop.salu                    96    6.9%
+    state.coef-lds-load          96    6.9%
+    vmem.clause                  65    4.7%
+    valu.mov                     27    1.9%
+    xlane.permute                20    1.4%
+    norm.expf                    18    1.3%
+    xlane.add                    18    1.3%
+    unclassified                 12    0.9%
+    xlane.exec-guard              8    0.6%
+    xlane.range-select            8    0.6%
+    barrier.invalidate            5    0.4%
+    barrier.sync                  5    0.4%
+    salu.kernarg                  5    0.4%
+    salu.mov                      4    0.3%
+    xlane.lds-round-trip          3    0.2%
+    dual.other                    2    0.1%
+    norm.lane-id                  2    0.1%
+    norm.rsqrt                    2    0.1%
+    norm.warp-count               2    0.1%
+    salu.exit                     1    0.1%
+    xlane.addr-math               1    0.1%
+
+===== rec2c_kernel
+  walk loopA_state_dot      hdr=.LBB6_49 depth=1 state-accesses/trip=16 trips=8 (D/16, loop-bound says None)
+  walk loopB_state_update   hdr=.LBB6_51 depth=1 state-accesses/trip=8 trips=16 (D/8, loop-bound says 16)
+  never-executed lines (divergent-shuffle trap blocks): 84
+  prologue  static  347 lines  slots  292  x  1 trips  ->    292 slots/token-step
+  loopA     static   73 lines  slots   48  x  8 trips  ->    384 slots/token-step
+  loopB     static   65 lines  slots   51  x 16 trips  ->    816 slots/token-step
+  TOKEN-STEP, per wavefront: 1971 lines issued, 1492 issue slots
+  TOKEN-STEP, per launch   : 95,488 issue slots  (64 wavefronts = 16 blocks x 4)
+  pipe slots               : {'LDS': 122, 'SALU': 337, 'VALU': 638, 'VMEM': 390, 'encode': 479, 'other': 5}
+  category rollup per token-step per wavefront (unclassified=12):
+    encode.bookkeeping          479   32.1%
+    state.fma                   321   21.5%
+    state.load                  261   17.5%
+    addr.math                   129    8.6%
+    state.store                 129    8.6%
+    state.mul                   122    8.2%
+    xlane.exec-guard            120    8.0%
+    loop.salu                    99    6.6%
+    state.coef-lds-load          96    6.4%
+    vmem.clause                  65    4.4%
+    valu.mov                     27    1.8%
+    xlane.add                    22    1.5%
+    xlane.permute                20    1.3%
+    norm.expf                    17    1.1%
+    unclassified                 12    0.8%
+    salu.mov                      8    0.5%
+    xlane.range-select            8    0.5%
+    xlane.addr-math               6    0.4%
+    barrier.invalidate            5    0.3%
+    barrier.sync                  5    0.3%
+    salu.branch                   3    0.2%
+    salu.kernarg                  3    0.2%
+    xlane.lds-round-trip          3    0.2%
+    norm.rsqrt                    2    0.1%
+    norm.warp-count               2    0.1%
+    salu.exit                     2    0.1%
+    salu.offload                  2    0.1%
+    dual.other                    1    0.1%
+    norm.lane-id                  1    0.1%
+    xlane.lane-id                 1    0.1%
+
+===== DELTA vs shipped, per token-step per wavefront
+  rec1_kernel: 1488 slots (shipped 1523, -2.3%)
+    addr.math                   127 ->    129      +2
+    dual.other                    0 ->      1      +1
+    encode.bookkeeping          482 ->    452     -30
+    loop.salu                   101 ->     99      -2
+    salu.branch                   2 ->      1      -1
+    salu.mov                     10 ->      6      -4
+    salu.offload                  2 ->      1      -1
+    state.fma                   321 ->    371     +50
+    state.mul                   122 ->    104     -18
+    valu.mov                     31 ->     28      -3
+    vmem.clause                  64 ->     65      +1
+    xlane.add                    22 ->     20      -2
+    xlane.addr-math               9 ->      6      -3
+    xlane.exec-guard            127 ->     65     -62
+    xlane.range-select            7 ->     14      +7
+  rec2_kernel: 1391 slots (shipped 1523, -8.7%)
+    addr.math                   127 ->    130      +3
+    barrier.drain                 1 ->      0      -1
+    barrier.invalidate           11 ->      5      -6
+    barrier.sync                 11 ->      5      -6
+    dual.other                    0 ->      2      +2
+    encode.bookkeeping          482 ->    443     -39
+    loop.salu                   101 ->     96      -5
+    norm.lane-id                  6 ->      2      -4
+    salu.branch                   2 ->      0      -2
+    salu.exit                     2 ->      1      -1
+    salu.kernarg                  3 ->      5      +2
+    salu.mov                     10 ->      4      -6
+    salu.offload                  2 ->      0      -2
+    state.fma                   321 ->    371     +50
+    state.load                  261 ->    259      -2
+    state.mul                   122 ->    102     -20
+    unclassified                  7 ->     12      +5
+    valu.mov                     31 ->     27      -4
+    vmem.clause                  64 ->     65      +1
+    xlane.add                    22 ->     18      -4
+    xlane.addr-math               9 ->      1      -8
+    xlane.exec-guard            127 ->      8    -119
+    xlane.lane-id                 1 ->      0      -1
+    xlane.lds-round-trip          9 ->      3      -6
+    xlane.range-select            7 ->      8      +1
+  rec2c_kernel: 1492 slots (shipped 1523, -2.0%)
+    addr.math                   127 ->    129      +2
+    barrier.drain                 1 ->      0      -1
+    barrier.invalidate           11 ->      5      -6
+    barrier.sync                 11 ->      5      -6
+    dual.other                    0 ->      1      +1
+    encode.bookkeeping          482 ->    479      -3
+    loop.salu                   101 ->     99      -2
+    norm.expf                    18 ->     17      -1
+    norm.lane-id                  6 ->      1      -5
+    salu.branch                   2 ->      3      +1
+    salu.mov                     10 ->      8      -2
+    unclassified                  7 ->     12      +5
+    valu.mov                     31 ->     27      -4
+    vmem.clause                  64 ->     65      +1
+    xlane.addr-math               9 ->      6      -3
+    xlane.exec-guard            127 ->    120      -7
+    xlane.lds-round-trip          9 ->      3      -6
+    xlane.range-select            7 ->      8      +1
+
+===== RESOURCES (VGPR / SGPR / LDS / spill, from -Rpass-analysis=kernel-resource-usage)
+  gates_kernelPKfS         Dynamic Stack=False  LDS Size [bytes/block]=0  Occupancy [waves/SIMD]=16  SGPRs Spill=0  ScratchSize [bytes/lane]=0  TotalSGPRs=15  VGPRs=16  VGPRs Spill=0
+  conv_kernelPKfS          Dynamic Stack=False  LDS Size [bytes/block]=0  Occupancy [waves/SIMD]=16  SGPRs Spill=0  ScratchSize [bytes/lane]=0  TotalSGPRs=20  VGPRs=17  VGPRs Spill=0
+  rec_kernelPKfS           Dynamic Stack=False  LDS Size [bytes/block]=1152  Occupancy [waves/SIMD]=16  SGPRs Spill=0  ScratchSize [bytes/lane]=0  TotalSGPRs=25  VGPRs=33  VGPRs Spill=0
+  rec                      Dynamic Stack=False  LDS Size [bytes/block]=1152  Occupancy [waves/SIMD]=16  SGPRs Spill=0  ScratchSize [bytes/lane]=0  TotalSGPRs=25  VGPRs=33  VGPRs Spill=0
+  rec                      Dynamic Stack=False  LDS Size [bytes/block]=1152  Occupancy [waves/SIMD]=16  SGPRs Spill=0  ScratchSize [bytes/lane]=0  TotalSGPRs=22  VGPRs=33  VGPRs Spill=0
+  rec                      Dynamic Stack=False  LDS Size [bytes/block]=1280  Occupancy [waves/SIMD]=16  SGPRs Spill=0  ScratchSize [bytes/lane]=0  TotalSGPRs=20  VGPRs=33  VGPRs Spill=0
+  rec                      Dynamic Stack=False  LDS Size [bytes/block]=1280  Occupancy [waves/SIMD]=16  SGPRs Spill=0  ScratchSize [bytes/lane]=0  TotalSGPRs=24  VGPRs=33  VGPRs Spill=0

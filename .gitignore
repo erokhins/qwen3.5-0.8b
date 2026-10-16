@@ -101,6 +101,7 @@ prototype/gdn_gated_norm/gdn_gated_norm
 prototype/gdn_collapse/gdn_collapse_check
 prototype/gdn_collapse/neg_*/
 prototype/attn_m2/attn_m2
+prototype/attn_valu_slim/attn_valu_slim
 # engine/build.sh writes its binary next to the sources; name the file exactly, never a
 # `engine/**/loader_test` pattern (that matches directories — see the block above).
 engine/loader_test
@@ -115,3 +116,4 @@ engine/loader_test
 
 # built binary of the issue-rate probe (the source and gate are tracked; this is the product)
 prototype/issue_rate_probe/issue_rate_probe
+prototype/gdn_rec_isa/gdn_rec_isa
