@@ -5926,7 +5926,7 @@ def main() -> int:
                          " run that cannot say which scan it ran is evidence about neither, and a"
                          " silent fall back to `seq` would price the shipped form twice and report it"
                          " as the other one")
-    ap.add_argument("--gdn-spell", choices=("ship", "unroll4"), default="ship",
+    ap.add_argument("--gdn-spell", choices=("ship", "unroll4"), default="unroll4",
                     help="which SPELLING of the sequential recurrence's state walks a `gdn_rec` launch"
                          " runs, passed straight to `decode_run --gdn-spell`"
                          " (`engine/gdn_rec_unroll4_kernels.h`, `prototype/gdn_rec_isa/results.md` §10,"
