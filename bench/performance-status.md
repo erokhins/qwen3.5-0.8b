@@ -666,3 +666,32 @@ since that row give paired ratios of 1.0186 (§10) and 1.0140 (this one), which 
 wording is deliberate — chained ratios from two different windows compound each window's drift, so this is
 arithmetic on two measurements and not a third measurement. Decode is **71.3 tok/s, unchanged by
 construction**: a one-row body never takes either path.
+
+## 12. Ruler re-take: prefill is **4419 tok/s** at 4096 tokens, and the chained derivation was right to 0.14 % (2026-10-17)
+
+§10 and §11 each declined to move the headline, so this is the dedicated window that replaces it. Shipped
+binary (`47274f4` + `31848bb`), shipped defaults (`--gemm lt --gemm-pins all`), one lock hold, `util` 90 % at
+acquire, blocking, zero subagents, five reps, `ids4096.txt` / `ids1024.txt`:
+
+| width | rep walls (ms) | median | best | **tok/s (median)** |
+|---|---|---|---|---|
+| 4096 | 926.70 · 928.23 · 924.32 · 929.23 · 924.72 | **926.70** | 924.32 | **4419** (best 4431) |
+| 1024 | 187.90 · 183.53 · 187.63 · 192.38 · 186.83 | 186.83 | 183.53 | 5481 |
+
+**Recorded headline: prefill 4284 → 4419 tok/s (+3.15 %)** at 4096 tokens, from the two ships in §10 (the F32
+seam deletion) and §11 (the embedding gather). This window is the tightest of the session — 924.3–929.2 ms, a
+0.53 % spread over five reps, no bimodality — which is what a bandwidth-shaped wave looks like once the
+launch-shaped work has been taken out of it.
+
+**The methodological result is worth more than the number.** §11 derived ≈ 4425 tok/s by chaining two paired
+ratios from two different windows and explicitly warned that chaining compounds drift. The measured answer is
+4419 — **0.14 % apart**. So on this box, paired ratios taken inside their own lock holds *are* portable, and
+the drift that made §9's absolute rows untrustworthy was drift in the *level*, not in the *ratio*: the same
+window that reads a wall 3 % high reads its own A/B pair 3 % high on both sides. That is the licence for
+quoting a paired ratio as the ship's effect without re-taking a full ruler row each time, which is how §10 and
+§11 were written.
+
+Decode: **71.3 tok/s, not re-measured in this window.** Unchanged by construction rather than by measurement —
+a one-row body never takes the library route (§10) and keeps the per-token embedding copy verbatim (§11), and
+the nine decode fixtures in both routes' admissions came back bit-identical. If a decode-shaped number is
+needed, take it from a decode ruler, not from this row.
