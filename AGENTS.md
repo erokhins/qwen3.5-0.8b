@@ -319,3 +319,32 @@ Appended at the end for the standing line-citation reason; the entry it belongs 
   — 2.0 % of the wave, not 5 %. Before aggregating any per-shape sweep, derive the call width the
   engine can actually emit and aggregate at that width; keep the other widths only as a bound on a
   future geometry, labelled as such. | `prototype/gemm_algo_sweep/results.md` §3a |
+
+## A subagent "needs attention (no observed activity for 300s)" notice on this box is usually the child's own compaction, not a wedge
+
+Appended at the end for the line-citation reason stated at the top of the citation-hygiene section.
+
+Both workers launched in the 2026-10-16 prefill session were reported stalled at exactly 300 s of no
+observed activity, and **both were mid-work**: `tools/subagent_stall_check.py` over their event logs
+reads 3 `compaction_start(reason=threshold)` events, 2 attention notices, and
+`attention_directly_after_compaction=2` — every notice was preceded immediately by a compaction. The
+mechanism is this file's own premise applied one level over: the children are served by the same
+checkpoint on the same iGPU, so a threshold compaction is a multi-minute generation with no tool call
+inside it, which is precisely what the stall detector cannot see past.
+
+Consequences for the parent, in order:
+
+- **Read `events.jsonl` before interrupting.** A `compaction_start` on the line above the notice means
+  the child is alive and the correct action is to wait, not to `interrupt`, `stop`, or re-brief. An
+  interrupt aimed at a compacting child destroys work that was about to resume.
+- **Expect the notice after any long CPU analysis**, since long analysis is what fills the child's
+  context. A worker that goes quiet after its third file read is normal here; one that goes quiet
+  mid-device-run is not, and that distinction is what the event log's last real tool result shows.
+- **Tell the worker to checkpoint *before* the compaction, not after.** The useful version of this
+  arrived by accident on 2026-10-16: steering a child to append its partial tables to its output path
+  as its next tool call means the work that survives a compaction is on disk rather than in a window
+  that has just been summarised. `a3e0693f` lost real numbers that way and its checkpoint was
+  reconstructing from memory of a table it had already printed.
+- **The 300 s constant is the detector's, not the machine's.** Two notices at the same interval, on two
+  different runs, in unrelated phases, is a signature of a timer; look for a periodic cause before
+  diagnosing the child.
