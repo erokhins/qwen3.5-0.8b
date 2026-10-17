@@ -753,3 +753,64 @@ Specifically §11's "a decode step's bill is **424 on both routes**" and §6's c
 on their own dates* and were not touched; §13 carries the re-take, and `engine/gate.py` section (d) now
 polices 97/406 with `selftest_launch_bill()` shown biting at +1 and −1 (D39). The §12 ruler row — **4419
 tok/s** — was taken after `62b73e9` and needs no correction.
+
+## 15. The conv coalesced read ships, and a correction to the admission claims in §10/§11/§13 (2026-17)
+
+### 15.1 the item: `gdn_conv` 26.90 → 16.76 ms at 4096 lanes (−37.7 %), shipped `5096a57`
+
+`62b73e9` halved the conv read side and the kernel got **32.5 % slower**. §13 recorded that as a refuted
+prediction; this section records why it was refuted and what recovered it. The deleted packed F32 tile had
+been doing a second job as a **coalescing layout**: one contiguous fetch per lane instead of three strided
+2-byte fetches. The listing states the mechanism without interpretation — base issued `global_load_u16`
+(2 B/lane = 64 B per wavefront, half a line) with `s_waitcnt vmcnt(0)` immediately after every tap, 29
+immediate drains; the shipped form issues `global_load_b64`/`b128` (8 B/lane = 256 B) with the whole K-row
+window fetched before any of it is consumed, 4 loads → 1 and 4 drains → 1 per output element at 4× the
+width. `CONV_VEC = 4`, grid 24 blocks → 6.
+
+**Measurement (main agent, one lock hold, five pairs, blocking, canary asserted before any timing).** Paired
+at 4096 lanes, `--steps 0 --time-waves --gemm lt --gemm-pins all`, `ids4096.txt`:
+
+| rep | base `gdn_conv` | new `gdn_conv` | base wall | new wall |
+|---|---|---|---|---|
+| 1 | 26.90 | 16.76 | 926.30 | 934.72 |
+| 2 | 28.64 | 16.82 | 925.30 | 987.14 |
+| 3 | 29.25 | 15.64 | 936.75 | 916.43 |
+| 4 | 26.68 | 16.80 | 944.21 | 923.35 |
+| 5 | 26.90 | 16.30 | 931.82 | 911.74 |
+| **median** | **26.90** | **16.76** | **931.82** | **923.35** |
+
+All **five** pairs negative on the conv row; the row is the stable number (base spread 9.6 %, new spread 7.6 %,
+every pair −10.1 to −13.6 ms). Wall median **−8.47 ms = −0.91 % of wave**, above the 0.1 % refuse bar, but
+quoted with its spread: 911.7–987.1 on the new side is dispatch-bound bimodality, not a 8 ms story. **The §12
+headline of 4419 tok/s is not restated from this table** — §12's ruler (926.70) and this window's base (931.82)
+are different windows, and a ruler re-taken in another window is not an A/B. A clean ruler re-take is owed
+before the headline moves; the honest claim today is the conv row and a −0.9 % paired wall delta.
+
+Attribution note, because it is the whole point of the item: the win came from **latency, not traffic**. The
+new form reads 4 bytes per element more than the ideal and is still 37.7 % faster than a form that read half
+what the old one did. Byte accounts did not predict this in either direction (D21 one level down, again).
+
+### 15.2 correction: three admissions this session claimed "18/18 gates — nine canonical fixtures" and the fixture list was wrong
+
+Lines 616, 657 and 725 of this file say *18/18 gates — nine canonical fixtures × both routes*. The list used
+for those runs was `wide520f dec64f wide3100f prefill_all3093f prefill_t256f prefill_t1024f prefill_t1552f
+prefill_t1832f prefill_t2464f`. **Only `wide520f` and `dec64f` exist.** `data/refs/` holds manifests for
+`chunk64b corpus48 corpus48engine corpus48sdpa dec300f dec64f dec64t dec8 mt32f p128 p300 p64 p8
+prefix24dec8 smoke wide1024f wide520f wide640f zz`, and `gate.py` exits with *"fixture X has no manifest"* for
+any other name. So each of those admissions ran **4 real gate runs, not 18**, and the other 14 were error
+exits that my harness reported as `PASS=0` without me reading them; the `18/18` figure was carried from a
+worker's report and repeated by me without checking the population behind it.
+
+What that actually invalidates is narrow but real: the numerics of §10 (4.1-a), §11 (4.2′) and §13 (1.′) rest on
+`wide520f` + `dec64f` on both routes, which is thin for a claim of whole-engine admission, and the *wide* cases
+(`wide1024f`, `wide640f`, `wide3100f`-intent) were never run at all on those two changes. What it does not
+invalidate: every one of those changes is bit-identical by its own differential or gate on the fixtures that do
+exist, `gate.py`'s own structural checks (plan parity, launch bill, band history) ran and bit, and nothing was
+loosened to pass.
+
+The conv change shipped today is the first admission in this session run against the real population:
+`wide520f wide1024f wide640f dec64f dec64t mt32f dec300f` on `--gemm lt` plus `wide520f dec64f p300` on
+`--gemm hand`. Three of those — `p300`, `corpus48engine`, `prefix24dec8` — raise **inside `gate.py`**
+(`IndexError` in `pairing_checks`, `KeyError: sources`), and they raise **identically on the base binary**, so
+they are a pre-existing gap between those fixtures and this invocation style, recorded here rather than hidden:
+they are not evidence for or against anything. Fixing that invocation gap is now a task, not a footnote.

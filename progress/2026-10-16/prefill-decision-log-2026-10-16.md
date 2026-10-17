@@ -1250,3 +1250,10 @@ work, and it was caught by `git status` before any of it was trusted. And the fi
 as a clean null**: `plan_match` stayed green because the bill deriver is compiled into the same binary, so the
 self-consistency check could not see staleness. A behavioural canary asserted inside the window is now mandatory
 in these A/Bs; see the trap in `AGENTS.md`.
+
+## D40 — the conv coalesced read ships; and an admission-honesty correction (2026-10-17)
+
+- **Decision.** `CONV_VEC=4` ships as the conv spelling (`5096a57`): four consecutive channels per lane in one aligned 8-byte fetch, K-row window staged before consumption. `gdn_conv` 26.90 → 16.76 ms at 4096 lanes, five of five pairs negative, wall −0.91 % paired.
+- **Why it was winnable at all.** §13's refuted prediction was that halving the conv read should speed it up; it slowed it down because the packed F32 tile was also a coalescing layout. The fix is therefore about *access shape*, and the ISA said so before anything was built: strided 2-byte loads with a drain after each tap, versus one 8-byte load with the window batched. This is the first D30 item sized by a refuted prediction instead of a byte census, and it is the second time in two days that a byte account pointed the wrong way (D21).
+- **What is refused.** No headline restatement. §12's 4419 tok/s stands untouched until a clean ruler re-take in one window; this section's own base (931.82 ms) is a different window from §12's (926.70 ms), so the only number carried forward is the paired delta and the conv row.
+- **Correction carried, not buried.** §10/§11/§13 claimed 18/18 gate admissions over nine fixtures; seven of those nine fixture names do not exist, so those three admissions were 4 real runs each. Recorded in §15.2 with the true population, what it does and does not invalidate, and the two gate-internal crashes on fixtures that do exist. The lesson generalises past this repo: a fixture list typed from memory is not a gate, and `grep -c PASS` over an error message is 0 — which reads as a failure of the code under test rather than of the harness, and so is invisible unless the harness asserts its own case count.
