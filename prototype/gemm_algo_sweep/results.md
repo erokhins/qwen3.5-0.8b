@@ -236,7 +236,7 @@ the 324 sites against the source:
 
 | family | sites/wave | **library calls/wave** | non-library launches inside the same segment |
 |---|---|---|---|
-| `proj` | 228 | **156** | 72 — `in_proj_a`/`in_proj_b` at `N=16`. `proj_gemm` refuses `N < 512` (`kernels_proj.cpp:135-142`, `kSmallestLibraryRows`) and the two sites call the hand `proj_gemv` directly at any width (`decode_step.cpp:532,535`) |
+| `proj` | 228 | **156** | 72 — `in_proj_a`/`in_proj_b` at `N=16`. `proj_gemm` refuses `N < 512` (`kernels_proj.cpp:135-142`, `kSmallestLibraryRows`) and the two sites call the hand `proj_gemv` directly at any width (`decode_step.cpp:602,605`) |
 | `mlp_gateup` | 48 | **96** | 48 — the `silu(gate)*up` epilogue kernel: `mlp_gateup_gemm` is three GPU submissions counted as **one** site (`kernels_mlp.cpp:253-268`), so its third launch carries no family note of its own |
 | `mlp_down` | 48 | **48** | 0 |
 | **total** | **324** | **300 = 2 × 150** | **120** |
@@ -254,13 +254,13 @@ inside `matmul_ms`.
 
 | shape | N | K | M | calls/wave | family | call site | engine-call ms | family ms/wave |
 |---|---|---|---|---|---|---|---|---|
-| `q_proj` | 4096 | 1024 | 512 | 12 | `proj` | `decode_step.cpp:513` | 0.1551 | 1.861 |
-| `k_proj`, `v_proj` (two weights, one shape) | 512 | 1024 | 512 | 24 | `proj` | `decode_step.cpp:516,519` | 0.0328 | 0.787 |
-| `o_proj` (attn) / `out_proj` (GDN) — same shape, one site | 1024 | 2048 | 512 | 48 | `proj` | `decode_step.cpp:721` | 0.0801 | 3.845 |
-| `in_proj_qkv` | 6144 | 1024 | 512 | 36 | `proj` | `decode_step.cpp:526` | 0.1989 | 7.160 |
-| `in_proj_z` | 2048 | 1024 | 512 | 36 | `proj` | `decode_step.cpp:529` | 0.0930 | 3.348 |
-| `in_proj_b` | 16 | 1024 | 512 | 36 | `proj` **(hand)** | `decode_step.cpp:532` | — | below |
-| `in_proj_a` | 16 | 1024 | 512 | 36 | `proj` **(hand)** | `decode_step.cpp:535` | — | below |
+| `q_proj` | 4096 | 1024 | 512 | 12 | `proj` | `decode_step.cpp:583` | 0.1551 | 1.861 |
+| `k_proj`, `v_proj` (two weights, one shape) | 512 | 1024 | 512 | 24 | `proj` | `decode_step.cpp:586,589` | 0.0328 | 0.787 |
+| `o_proj` (attn) / `out_proj` (GDN) — same shape, one site | 1024 | 2048 | 512 | 48 | `proj` | `decode_step.cpp:810` | 0.0801 | 3.845 |
+| `in_proj_qkv` | 6144 | 1024 | 512 | 36 | `proj` | `decode_step.cpp:596` | 0.1989 | 7.160 |
+| `in_proj_z` | 2048 | 1024 | 512 | 36 | `proj` | `decode_step.cpp:599` | 0.0930 | 3.348 |
+| `in_proj_b` | 16 | 1024 | 512 | 36 | `proj` **(hand)** | `decode_step.cpp:602` | — | below |
+| `in_proj_a` | 16 | 1024 | 512 | 36 | `proj` **(hand)** | `decode_step.cpp:605` | — | below |
 | `gate_proj`, `up_proj` (two weights, one shape) | 3584 | 1024 | 512 | 96 | `mlp_gateup` | `kernels_mlp.cpp:262-263` | 0.1462 | 14.035 |
 | `down_proj` | 1024 | 3584 | 512 | 48 | `mlp_down` | `kernels_mlp.cpp:276` | 0.1313 | 6.302 |
 | **library total** | | | | **300** | | | | **37.338** |

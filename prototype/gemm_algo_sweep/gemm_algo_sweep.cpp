@@ -94,11 +94,11 @@ struct EngineShape {
 };
 
 const EngineShape kShapes[] = {
-    {"q_proj", "proj", "engine/decode_step.cpp:514", 4096, 1024, 6},
-    {"k_proj+v_proj", "proj", "engine/decode_step.cpp:517,520", 512, 1024, 12},
-    {"o_proj+out_proj", "proj", "engine/decode_step.cpp:722", 1024, 2048, 24},
-    {"in_proj_qkv", "proj", "engine/decode_step.cpp:527", 6144, 1024, 18},
-    {"in_proj_z", "proj", "engine/decode_step.cpp:530", 2048, 1024, 18},
+    {"q_proj", "proj", "engine/decode_step.cpp:583", 4096, 1024, 6},
+    {"k_proj+v_proj", "proj", "engine/decode_step.cpp:586,589", 512, 1024, 12},
+    {"o_proj+out_proj", "proj", "engine/decode_step.cpp:810", 1024, 2048, 24},
+    {"in_proj_qkv", "proj", "engine/decode_step.cpp:596", 6144, 1024, 18},
+    {"in_proj_z", "proj", "engine/decode_step.cpp:599", 2048, 1024, 18},
     {"gate_proj+up_proj", "mlp_gateup",
      "engine/kernels_mlp.cpp:262,263 <- decode_step.cpp:748", 3584, 1024, 48},
     {"down_proj", "mlp_down", "engine/kernels_mlp.cpp:276 <- decode_step.cpp:762", 1024, 3584, 24},

@@ -266,3 +266,7 @@ checker is for.
    file was touched, so nothing in that suite could be affected by a change to an engine launcher. Per the
    standing budget rule I cited the existing green instead of re-making it. `engine/gate.py` is byte-for-byte
    unchanged.
+
+---
+
+**Dated correction (2026-10-17, later same day).** The line-form cites in this document are *as of* the revision it was written against. `62b73e9` and the docs cascade that followed retired the 424/115 launch bill (cast 97, total 406) and re-pointed the projection call-site cites in `prototype/gemm_algo_sweep/` from the 51x/72x block to 583-605/810, and `specification/ASSUMPTIONS.md`'s A-32 gate cite from 3692 to 3765. Nothing here was rewritten to match - the record of what was true when this was measured is the point of it.

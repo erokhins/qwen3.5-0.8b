@@ -255,3 +255,7 @@ lines (+14/−2) at ~3497 and ~3955.
    counter for section (h) to judge.
 6. `wide1024f`, the 9-fixture sweep, every paired A/B, every `ms` figure and every ledger line: yours, per
    the brief. No timings were taken by me and none of my wall-clock numbers above is a device measurement.
+
+---
+
+**Dated correction (2026-10-17, later same day).** The line-form cites in this document are *as of* the revision it was written against. `62b73e9` and the docs cascade that followed retired the 424/115 launch bill (cast 97, total 406) and re-pointed the projection call-site cites in `prototype/gemm_algo_sweep/` from the 51x/72x block to 583-605/810, and `specification/ASSUMPTIONS.md`'s A-32 gate cite from 3692 to 3765. Nothing here was rewritten to match - the record of what was true when this was measured is the point of it.

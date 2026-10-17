@@ -483,3 +483,7 @@ MLP is spelled the same way at 763-772, with the engine's own comment at 765 say
 16-bit `A` operand"* while the cast two lines above widens to F32 unconditionally. So the widening is not
 merely unread on the library route — the source already knows it and does it anyway. That is the whole of
 4.1-a, and it is a guard rather than a kernel.
+
+---
+
+**Dated correction (2026-10-17, later same day).** The line-form cites in this document are *as of* the revision it was written against. `62b73e9` and the docs cascade that followed retired the 424/115 launch bill (cast 97, total 406) and re-pointed the projection call-site cites in `prototype/gemm_algo_sweep/` from the 51x/72x block to 583-605/810, and `specification/ASSUMPTIONS.md`'s A-32 gate cite from 3692 to 3765. Nothing here was rewritten to match - the record of what was true when this was measured is the point of it.
