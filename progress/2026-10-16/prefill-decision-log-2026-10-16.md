@@ -781,7 +781,7 @@ So two families are 73.8 % of the wave, and anything that does not touch `gdn_re
 | 2.2 | M=2 row tiling (traffic halving) | **PARKED, measured twice** | D18/D24: bit-identical, bytes halved, **5.5–13.4 % slower** both before and after the slim levers. Re-opens only above 4096 lanes, which needs 2.5 |
 | 2.3 | further scalar instruction cuts on the 45-slot touch | **CLOSED by the same census** | 45 slots is the post-slim number; the remaining content is 8 WMMAs-worth of arithmetic plus the softmax; D20 priced arithmetic-class changes at ≤ 10.5 %, below the 15 % kill line |
 | 2.4 | **`v_wmma_f32_16x16x16_w32` for the score and PV dots** | **UNTESTED, it is *not* 2.2 — and its stated premise was false** | the matrix-unit form replaces the score dot's whole 16-slot loop with one instruction per 16×16×16 tile across 16 rows at once — an instruction lever wearing a traffic costume, which is the direction D21 said wins. **Correction made while preparing it: the row required fp16 operands, and it does not.** `v_wmma_f32_16x16x16_bf16` is present on gfx1151 (`tools/wmma_operand_types.sh`, `devices/strix-halo-official-specs.md` §7.1), so this route needs no format change and no D13/D14 band decision — the operands stay bf16 exactly as the engine holds them, and every plan that costed the conversion was pricing a premise nobody had checked. Ceiling is the remaining arithmetic share, ~28 % of the touch, and `attn` is **26.94 %** of the wave (257.56 ms of 956.12 ms) since the `gdn_rec` flip, which is what ranks this second |
-| 2.5 | raise `kAttnMaxSplit` / lane ceiling above 4096 | **BLOCKED, needs numerics admission** | D4/D5. It is also the only route that could re-open 2.2 (traffic that actually reaches DRAM). Unblocking needs an admitted band for > MAXSC straddles, not a constant |
+| 2.5 | raise `kAttnMaxSplit` / lane ceiling above 4096 (user, 2026-10-17) — see D41: **FUNDED, dump-first.** The admission is still required and still has to be sized, but the blocking step was the wide pinned dumps, and generating them is now approved. The one line the raise cannot be: a constant. | D4/D5. It is also the only route that could re-open 2.2 (traffic that actually reaches DRAM). Unblocking needs an admitted band for > MAXSC straddles, not a constant |
 | 2.6 | occupancy / wave shape of the tiled kernel | **UNTESTED cheaply** | the tile form's realised occupancy is not recorded; one `--time-waves` run with a couple of block-size variants costs minutes and would say whether 2.4 has a scheduling headroom to spend |
 
 ## 3. matmul group — `proj` + `mlp_gateup` + `mlp_down` = 199.26 ms, 17.92 %
@@ -1257,3 +1257,38 @@ in these A/Bs; see the trap in `AGENTS.md`.
 - **Why it was winnable at all.** §13's refuted prediction was that halving the conv read should speed it up; it slowed it down because the packed F32 tile was also a coalescing layout. The fix is therefore about *access shape*, and the ISA said so before anything was built: strided 2-byte loads with a drain after each tap, versus one 8-byte load with the window batched. This is the first D30 item sized by a refuted prediction instead of a byte census, and it is the second time in two days that a byte account pointed the wrong way (D21).
 - **What is refused.** No headline restatement. §12's 4419 tok/s stands untouched until a clean ruler re-take in one window; this section's own base (931.82 ms) is a different window from §12's (926.70 ms), so the only number carried forward is the paired delta and the conv row.
 - **Correction carried, not buried.** §10/§11/§13 claimed 18/18 gate admissions over nine fixtures; seven of those nine fixture names do not exist, so those three admissions were 4 real runs each. Recorded in §15.2 with the true population, what it does and does not invalidate, and the two gate-internal crashes on fixtures that do exist. The lesson generalises past this repo: a fixture list typed from memory is not a gate, and `grep -c PASS` over an error message is 0 — which reads as a failure of the code under test rather than of the harness, and so is invisible unless the harness asserts its own case count.
+
+## D41 — item 2.5 unblocked: wide pinned reference dumps are approved, and a caveat I had stated wrong (2026-10-17)
+
+- **Approved by the user.** Generating new pinned reference dumps at wide prompt lengths — the thing 2.5 was
+  waiting on — is funded, and the numerics band that a > MAXSC straddle needs is **my call when we get there**,
+  not a separate approval round. Item 2.5's row flips from BLOCKED to dump-first accordingly.
+- **What I said wrong.** I justified the new bands by citing A-18, "greedy token equality decays with depth, so
+  long-generation token match is not a gate". That is a *generation* statement and this is prefill: a long prompt
+  is fed once and every row's logits are read from the same forward pass, so there is no generation depth for
+  chaos to accumulate over, and the obvious move — take a long prompt, dump it — is exactly right. The caveat was
+  inherited from the note rather than re-derived for the case in front of me, which is the same failure as
+  quoting a number across a correction mark: the citation was real, the applicability was not.
+- **The two caveats that do survive, and they are different animals.**
+  1. **Wave carry, not chaos.** A multi-wave prefill legitimately is not bit-identical to a single-wave run of
+     the same prompt, because the conv window carries across interior wave boundaries and reads rows an earlier
+     wave wrote. `gate.py` already prints this on `dec64f` — "logits inside the cascade band rather than
+     byte-identical … a WEAKER claim" — and the same will bind every > MAXSC dump taken at `--wave-rows` below
+     prompt length. So the band is a **cascade band**, sized by comparing a one-wave reference against the
+     multi-wave shipping geometry, and it has to be derived on the straddle geometry, not imported from the
+     existing small-prompt bands.
+  2. **Decision margin at depth, which is the legitimate descendant of A-18.** Deep rows frequently have a razor
+     thin top-2 margin, so *argmax* agreement with the reference at depth is a weak test whatever the pass type.
+     The tree's existing answer is decision-room-conditioned floors — rows with room must match, rows without
+     are reported as ties — and `--prefill-logits all` plus the `prefill_row_coverage` forcing in `gate.py` are
+     the instruments. So the band is per-row-conditioned, not global. Neither caveat is a blocker; both are
+     sizing inputs.
+- **Sizing, because `--prefill-logits all` is not free.** All-row logits are `rows × 151936 × 4 B` in F32: ~622 MB
+  at 1024 lanes, ~2.5 GB at 4096. `--logits-bits bf16` halves that and is the first lever, not a compromise,
+  since the pins are already read as BF16 downstream. Plan, cheapest first: re-dump the existing `wide640f` /
+  `wide1024f` prompts with `--prefill-logits all` (pins rows above MAXSC immediately, no new prompt
+  engineering), then a 4096-lane dump, then 8192, and 20k last and only if the cheaper widths do not settle the
+  straddle question — a 20k eager reference pass materialises ~13 GB of attention per layer on CPU, so it is a
+  deliberate step rather than a default.
+- **Not implied by this approval, still stop-and-ask:** 5.1 int8/int4 (orders-of-magnitude error class, R8), and
+  any change of scope beyond `Qwen3.5-0.8B` text path.
