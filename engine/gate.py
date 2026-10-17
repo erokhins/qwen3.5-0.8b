@@ -70,6 +70,16 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       rule printed for that step: the measured ROUTE ALLOWANCE where `engine/route_allowance.py` has
       priced this fixture, the flat published §10 floors where it has not. The rule in force is named on
       every step line, and the derivation of its margins is in the ROUTE ALLOWANCE block below.
+  (b2) THE SAME STEPS AT IDENTICAL CONDITIONING — the fixture re-run with `decode_run --replay` fed the
+      reference's own token at every step, so the engine's sample is never fed back and every row is
+      comparable with the pin that was computed on that same token (§10.5's alignment rule). NO BAND IS
+      WIDER HERE: same `rule_for_step` caps, same G5 §10.1 floor, same §10.2 ceiling, same flip line,
+      same three admission rules — only what the engine was fed changes, and that is asserted from the
+      run's own STEP lines rather than assumed from the flag. This section is what makes the ECHO
+      attribution below safe to have: a defect the echo window legitimately stops counting in (a)/(b) is
+      judged here with no echo window at all. It costs one extra engine run on a free-running fixture;
+      on a replayed one (a)/(b) were already teacher-forced and it says so instead of running twice, and
+      a `--decode 0` fixture has no self-fed chain to re-feed.
   (c) STATE SIZES — the bytes the engine reports for its request state must equal what
       `engine/state_sizes.py` derives from `state.h`; that file is *run*, not re-typed.
   (d) LAUNCH PLAN — one token's launch bill, counted from §07 in Python and compared with the engine's.
@@ -113,6 +123,20 @@ A/B of §16/§17: section (h)'s wave-width OUTPUT comparisons still run and stil
 beside the dumps, but they are not counted into that run's verdict, because their independent variable
 is `--wave-rows` while the form is held identical on every side. Nothing is skipped or softened: the
 summary line says how many were deferred, and `--scope full` counts them again.
+
+THE THIRD BUCKET — ECHO. A FREE-RUNNING run that takes an admitted thin-margin token at step N (by the
+tie policy, the quantization-slack rule, or the cascade room rule) is, from step N+1 on, answering a
+different question than the pin, because the pin at step N+k was computed on the reference's own chain
+and this run was computed on its own. `prefix24dec8 --gemm lt --attn-tile 1` printed 19 red lines for
+ONE such flip at step 2, and 15 of them were that flip's downstream, not 15 defects. So a check on a
+step downstream of an admitted flip prints as `[ECHO-PASS]`/`[ECHO-FAIL]`, is recorded with the flip,
+the two tokens and the admitting rule in `echo_attribution.json`, is counted in the verdict line, and is
+NOT counted as an independent failure. Nothing is skipped: the check runs and prints, a step with nothing
+admitted upstream stays `[FAIL]` exactly as before, an admitted flip in a REPLAY opens no window at all
+(there is no fork to attribute anything to), and `--selftest` proves both directions with the must-catch
+and must-not-catch steps derived from the corpus's geometry. What this can no longer catch is stated in
+`teacher_forced_checks`: a defect that perturbs only the continuation of the engine's own different token
+and leaves the teacher-forced chain untouched.
 
 The two phases, and the line protocol that shows them. Since P2 the prompt is fed as ONE prefill wave
 (`engine/prefill.h`, §06.1) and its STEP lines say `kind=prefill`; generation steps say `kind=decode`.
@@ -1138,6 +1162,71 @@ def defer(reason: str, *, on: bool = True):
         DEFER_REASON = prev
 
 
+# ---- the echo attribution ------------------------------------------------------------------------
+# A FREE-RUNNING run that takes an ADMITTED thin-margin token at step N is, from step N+1 on, answering
+# a different question than the pin: the pin at step N+k was computed on the reference's own chain and
+# this run was computed on its own. §10.5's alignment rule already says a comparison must name which
+# alignment it used; past an admitted flip the two sides share no alignment at all. `prefix24dec8
+# --gemm lt --attn-tile 1` was 19 red lines for ONE coin flip the slack rule admits at step 2: the flip,
+# the id it caused, the fed-chain line, 11 band failures at steps 3..7 whose pins were computed on
+# tokens this run was never fed, and 4 cross-width lines that compared a forked wave with an unforked
+# one. A storm that reads as 19 defects is how a real defect hides, so the downstream lines are named
+# ECHO: printed, counted, and attributed to the flip that caused them.
+# An ECHO is NOT a waiver. The step is still judged, at identical conditioning, in section (b2), which
+# feeds the reference's own tokens and has no echo window; that is where a real numeric defect has to be
+# caught (see `--selftest`'s late-injection case).
+echoes: list[str] = []                       # echoed checks that FAILED
+echo_records: list[dict] = []                # every echoed check, pass or fail, for the sidecar
+ECHO_REASON: str | None = None               # set by `echo()`; None means a failure is a failure
+ECHO_WINDOW: str = ""                        # what this run's echo window is, for the verdict line
+ECHO_FILE_NAME = "echo_attribution.json"     # the sidecar, beside `wave_carry_deferred.json`
+
+
+@contextlib.contextmanager
+def echo(reason: str, *, on: bool = True):
+    """Attribute every check failure inside the block to an admitted divergence upstream, and say so.
+
+    The sibling of `defer()`, same shape on purpose: the attribution must be impossible to lose at a
+    call site, and the checks still run, still print, and still land in a sidecar. `on=False` is the
+    ordinary path, which is what lets one call site serve both an echoed step and an un-echoed one.
+    A block that is both deferred and echoed goes in the echo bucket — it names a concrete cause, where
+    `defer` only names a scope — and its record is written to both sidecars so neither attribution loses
+    the line."""
+    global ECHO_REASON
+    if not on:
+        yield
+        return
+    ECHO_REASON = reason
+    try:
+        yield
+    finally:
+        ECHO_REASON = None
+
+
+def echo_first_step(admitted) -> int | None:
+    """The first generation step DOWNSTREAM of an explicitly admitted divergence, or None.
+
+    Pure, so the classifier is testable in process. `admitted` holds the step indices whose engine-vs-pin
+    divergence one of the three proved rules ADMITTED (tie policy, quantization slack, cascade room);
+    `PREFILL_ROW` — §06.5's first answer token — counts as step -1 because everything after it is
+    downstream. The answer is `min(admitted) + 1`: the flip's OWN step is still judged normally, because
+    up to and including that step the run was fed the pin's own tokens. An empty list returns None, and
+    None is the case that must keep every line red — "nothing was admitted" is the only state in which a
+    divergence has no attribution and each band failure is a real defect."""
+    real = [j for j in admitted if j is not None]
+    return None if not real else min(real) + 1
+
+
+def echo_reason(step: int, engine_id, pin_id, rule: str) -> str:
+    """The sentence an echoed line must carry: which flip, which tokens, which rule admitted it."""
+    where = "the prefill row (§06.5's y0)" if step == PREFILL_ROW else f"step {step}"
+    return (f"downstream of the admitted flip at {where}: the engine was fed {engine_id} where the pin"
+            f" was computed on {pin_id} (admitted by the {rule}). From the next step on the two sides"
+            " are answering different questions (§10.5's alignment rule), so a divergence there is an"
+            " ECHO of this flip, not a second defect — section (b2) judges the same steps with the"
+            " reference's own tokens fed, and has no echo window")
+
+
 def check(ok: bool, name: str, detail: object = "") -> bool:
     # `detail` is stringified rather than typed as str because several call sites pass a list of ids,
     # which is exactly the thing an operator needs to see when a step fails.
@@ -1145,14 +1234,23 @@ def check(ok: bool, name: str, detail: object = "") -> bool:
     ok = bool(ok)
     # Inside a `defer()` block the line still prints and is still recorded; only the bucket changes, and
     # the tag says so so that no reader can mistake a deferred line for a pass or quietly for a failure.
-    tag = (("[DEFERRED-PASS] " if ok else "[DEFERRED-FAIL] ") if DEFER_REASON is not None
+    # `ECHO` is the third bucket and means the same thing about the verdict with a different cause: the
+    # check ran, printed, is recorded, and is NOT counted as an independent failure.
+    tag = (("[ECHO-PASS] " if ok else "[ECHO-FAIL] ") if ECHO_REASON is not None else
+           ("[DEFERRED-PASS] " if ok else "[DEFERRED-FAIL] ") if DEFER_REASON is not None
            else ("[PASS] " if ok else "[FAIL] "))
     print("  " + tag + name + ((" — " + text) if text else ""))
     if DEFER_REASON is not None:
         deferred_records.append({"check": name, "ok": ok, "reason": DEFER_REASON, "detail": text})
+    if ECHO_REASON is not None:
+        echo_records.append({"check": name, "ok": ok, "reason": ECHO_REASON, "detail": text})
+        if not ok:
+            print("           [ECHO CAUSE] " + ECHO_REASON)
     if not ok:
         line = name + (": " + text if text else "")
-        if DEFER_REASON is None:
+        if ECHO_REASON is not None:
+            echoes.append(line)
+        elif DEFER_REASON is None:
             fails.append(line)
             fail_names.append(name)
         else:
@@ -5301,7 +5399,8 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
                      f" top_logit=1 pos_before={pos} pos_after={pos + 1} stop=0")
         (work / f"logits{pos}.bin").write_bytes(logits.astype(np.float32).tobytes())
     lines += state_fp_stand_in_lines(man, len(prompt_ids), len(dec_logits), break_state_fp)
-    lines.append(f"RESULT mode={'replay' if replay else 'run'} steps=25 ms_total=0 ms_per_step=0"
+    lines.append(f"RESULT mode={'replay' if replay else 'run'}"
+                 f" steps={len(prompt_ids) + len(dec_logits)} ms_total=0 ms_per_step=0"
                  f" last_sampled={greedy[-1]} prefix_len={cap - 1} stopped=0")
     return "\n".join(lines), 0
 
@@ -5504,6 +5603,177 @@ def selftest_declared_gaps(fixture: str) -> list:
                    " (aimed at --dry-run: the refusal fires before a binary is started)")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+    return bad
+
+
+def echo_injection_target() -> dict:
+    """Which fixture can carry the echo case, and the two steps to aim at — DERIVED, never typed.
+
+    The case needs a step the pin could NOT decide (so a proved rule admits a flip there, which is the
+    only thing that opens an echo window) and a DECIDABLE step downstream of it (so the injected defect
+    is one the pin DID decide — a real defect, not a coin the rule already admitted). Both come from the
+    same caps the gate polices (`slack_region_steps`, `step_slack`), walked over every fixture that has a
+    manifest, so the must-catch and must-not-catch sets follow the corpus's geometry rather than a
+    hand-listed name that rots the day a fixture is re-dumped — the `attn_tile_model.py` lesson, one layer
+    over. Returns `{fixture, host, late, passed}`, with `fixture` None when nothing offers both (the
+    caller reports that as a hole in the corpus, not a skip, because an unadjudicated echo allowance is
+    the whole risk) and `passed` naming every fixture the walk priced and why it rejected it — a census
+    that does not say what it read is the "0 of 55" mistake in `AGENTS.md`.
+    """
+    saved = REFS
+    passed: list[str] = []      # the census: what the walk priced and rejected, and why
+    try:
+        for d in sorted((ROOT / "data" / "refs").iterdir()):
+            if not (d / "manifest.json").exists():
+                continue
+            man = json.loads((d / "manifest.json").read_text())
+            if man.get("kind") is not None and "pins" not in man:
+                # A carried record, not a pin set — the same discriminator `refuse_non_pin_fixture`
+                # uses to exit 3, applied BEFORE `set_fixture`, because a walk of the population must
+                # not be able to end the selftest. It is named in the census, not silently passed over.
+                passed.append(f"{d.name}: carried record, not a pin set")
+                continue
+            n_steps = len(man.get("greedy_continuation", [])) - 1
+            if n_steps < 2:
+                passed.append(f"{d.name}: {n_steps} decode step(s)")
+                continue
+            if n_steps > FREE_RUN_BOUND:
+                passed.append(f"{d.name}: {n_steps} steps, replayed, so it cannot fork")
+                continue
+            set_fixture(d.name)
+            try:
+                inside, _narrowest = slack_region_steps(n_steps)
+            except SystemExit as exc:
+                passed.append(f"{d.name}: {str(exc).strip()[:70]}")
+                continue
+            if not inside:
+                passed.append(f"{d.name}: no step inside the slack region")
+                continue
+            host = min(inside)
+            decidable = [j for j in range(host + 1, n_steps)
+                         if (sl := step_slack(j, pin_row(j))) is not None
+                         and sl["margin"] >= sl["bound"]]
+            if not decidable:
+                passed.append(f"{d.name}: nothing decidable downstream of step {host}")
+                continue
+            return {"fixture": d.name, "host": host, "late": max(decidable), "passed": passed}
+        return {"fixture": None, "passed": passed}
+    finally:
+        set_fixture(saved.name)
+
+
+def selftest_echo_window() -> list[str]:
+    """The echo attribution's own teeth, all on the CPU. Four things have to be proved.
+
+      1. the classifier: nothing admitted opens nothing; `PREFILL_ROW` opens the window at step 0, since
+         every decode step is downstream of the first answer token; a flip admitted at step j opens it
+         at j+1 and never at j, because up to and including j the run was fed the pin's own tokens.
+      2. a fixture where NOTHING is admitted: no line may read ECHO and no sidecar may be written. A
+         bucket that fills when nothing was admitted is a bucket that swallows failures for free.
+      3. MUST-CATCH — a real numeric defect at a LATE step, downstream of an admitted early one. The
+         free-run sections must call it ECHO (printed, counted, attributed) and section (b2) — which has
+         no echo window because both sides are fed the same tokens — must be the half that fails the run.
+         If (b2) did not fail, the echo allowance would be a hiding place for a defect, and that is the
+         only honest objection to this design.
+      4. the sidecar's record count must equal the printed line count in both directions, and the
+         summary's count must equal the sidecar's (the `gdn_collapse/run.py` trap: a driver whose parse
+         matched nothing prints PASS over an empty list).
+    """
+    bad: list[str] = []
+
+    def case(ok: bool, what: str, detail: str = "") -> None:
+        print(f"  [{'PASS' if ok else 'FAIL'}] {what}" + (f" — {detail}" if detail else ""))
+        if not ok:
+            bad.append(f"{what}: {detail}")
+
+    case(echo_first_step([]) is None, "nothing admitted opens no echo window",
+         f"echo_first_step([]) -> {echo_first_step([])}")
+    case(echo_first_step([PREFILL_ROW]) == 0,
+         "an admitted §06.5 prefill row puts every generation step in the window",
+         f"echo_first_step([PREFILL_ROW]) -> {echo_first_step([PREFILL_ROW])}")
+    case(echo_first_step([5, 2]) == 3 and echo_first_step([0]) == 1,
+         "a flip admitted at step j opens the window at j+1, at the EARLIEST admission, never at j",
+         "[5,2] -> 3 and [0] -> 1")
+    tgt = echo_injection_target()
+    if tgt["fixture"] is None:
+        case(False, "a fixture exists whose geometry can carry the echo case",
+             "no fixture under data/refs has a step inside the quantization-slack region AND a"
+             " decidable step downstream of it, so the echo allowance is unadjudicated. That is a hole"
+             " in the corpus, not a pass. The walk priced: " + " | ".join(tgt["passed"]))
+        return bad
+    fx, host, late = tgt["fixture"], tgt["host"], tgt["late"]
+    gate = str(Path(__file__).resolve())
+
+    def run(extra: list, work: Path) -> tuple[int, str, dict | None]:
+        p = subprocess.run([sys.executable, gate, "--fixture", fx, "--gemm", GEMM_ROUTE,
+                            "--gemm-pins", GEMM_PINS, "--dry-run", "--work", str(work)] + extra,
+                           capture_output=True, text=True)
+        side = work / ECHO_FILE_NAME
+        rec = json.loads(side.read_text()) if side.exists() else None
+        return p.returncode, p.stdout, rec
+
+    def tally(out: str) -> tuple[int, int]:
+        return (len(re.findall(r"^  \[ECHO-", out, re.M)),
+                len(re.findall(r"^  \[ECHO-FAIL\]", out, re.M)))
+
+    print(f"  [info] aimed at {fx}: step {host} sits inside the quantization-slack region (a flip"
+          f" there is admitted) and step {late} is the latest step downstream of it that the pin DID"
+          " decide — both read from the caps the gate polices, not typed here (`--slack-region"
+          f" --fixture {fx}` prints the same two lists). The walk priced "
+          + f"{len(tgt['passed'])} other candidate(s): " + " | ".join(tgt["passed"]))
+    with tempfile.TemporaryDirectory(prefix="gate_echo_") as td:
+        work = Path(td)
+        rc, out, rec = run([], work)
+        n_all, n_fail = tally(out)
+        case(rc == 0 and n_all == 0 and rec is None,
+             "a clean run admits nothing, so no line is an ECHO and no sidecar is written",
+             f"rc={rc} want 0; {n_all} ECHO lines want 0; sidecar"
+             f" {'written' if rec is not None else 'absent'}")
+        case("[echo]" not in out, "the nothing-admitted case prints no echo window at all",
+             "a `[echo]` line appeared" if "[echo]" in out else "absent, as it must be")
+
+        rc, out, rec = run(["--slack-alt", str(host)], work)
+        case(rc == 0 and f"admitted flip at step {host}" in out and rec is not None
+             and rec["n_failed"] == 0 and rec["admitted_step"] == host,
+             "MUST-NOT-CATCH: an admitted flip at its own step, with nothing wrong downstream, stays"
+             " green and names the flip it attributed to",
+             f"rc={rc} want 0; window line"
+             f" {'seen' if f'admitted flip at step {host}' in out else 'MISSING'}; sidecar"
+             f" {rec['n_failed'] if rec else 'absent'} failed, want 0")
+
+        rc, out, rec = run(["--slack-alt", str(host), "--break-runnerup", str(late)], work)
+        n_all, n_fail = tally(out)
+        echoed_argmax = f"[ECHO-FAIL] step {late}: argmax agrees with the pin" in out
+        caught_b2 = f"[FAIL] b2 step {late}" in out
+        counted_a = f"[FAIL] generation step {late} samples" in out
+        case(rc == 1 and echoed_argmax and caught_b2 and not counted_a,
+             "MUST-CATCH: a one-BF16-step lift at a LATE decidable step, downstream of an admitted"
+             " flip, is echoed by the free-run sections and RED in section (b2) — the defect is moved,"
+             " never lost",
+             f"rc={rc} want 1; late step echoed {'yes' if echoed_argmax else 'NO'}; (b2) red"
+             f" {'yes' if caught_b2 else 'NO'}; still counted as an ordinary (a) failure"
+             f" {'YES — the echo did not apply' if counted_a else 'no'}")
+        case(rec is not None and rec["n_checks"] == n_all and rec["n_failed"] == n_fail
+             and f"{n_fail} check(s) failed" in out,
+             "the sidecar records exactly the lines that printed, in both directions, and the summary"
+             " counts the same number",
+             f"sidecar {rec['n_checks'] if rec else '-'} records / {n_all} printed;"
+             f" {rec['n_failed'] if rec else '-'} failed recorded / {n_fail} printed"
+             if rec else "no sidecar was written at all")
+        case(rec is not None and rec["echo_from"] == host + 1
+             and rec["admitted_as"] == "quantization-slack rule",
+             "the sidecar names its own cause: which step, which rule, and where the window starts",
+             f"echo_from={rec['echo_from'] if rec else '-'}, admitted_as="
+             f"{rec['admitted_as'] if rec else '-'}")
+
+        rc, out, rec = run(["--break-runnerup", str(late)], work)
+        n_all, n_fail = tally(out)
+        case(rc == 1 and n_all == 0 and rec is None
+             and f"[FAIL] step {late}: argmax agrees with the pin" in out,
+             "MUST-CATCH, other half: the same late defect with NOTHING admitted upstream is an"
+             " ordinary counted failure with no echo window at all",
+             f"rc={rc} want 1; {n_all} ECHO lines want 0; the step's own argmax line"
+             f" {'failed as usual' if f'[FAIL] step {late}: argmax agrees with the pin' in out else 'DID NOT FAIL'}")
     return bad
 
 
@@ -6082,6 +6352,8 @@ def selftest(fixture: str = "dec8") -> int:
     bad += selftest_launch_bill()
     section("(h2) the flip rule's TWO room readings, on one injected row — in process")
     bad += selftest_room_readings(fixture, slack_out)
+    section("(b2) the echo window's own teeth — nothing admitted, an admitted flip, and a late defect")
+    bad += selftest_echo_window()
     section("(i) the prefill-row section's own negatives — synthetic rows, in process")
     row_bad = selftest_prefill_rows()
     bad += row_bad
@@ -6236,6 +6508,7 @@ def smoke_run(n_steps: int, args) -> int:
 
 
 def main() -> int:
+    global ECHO_WINDOW
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", default=str(DEFAULT_BINARY))
     ap.add_argument("--model", default=str(ROOT / "models" / "Qwen3.5-0.8B"))
@@ -6665,6 +6938,10 @@ def main() -> int:
     # judging, and a missing dump has to read as missing.
     for stale in work.glob("logits*.bin"):
         stale.unlink()
+    # The same argument for the echo sidecar: a summary that reads "3 check(s) echoed" must describe THIS
+    # run, and a file left by a previous one would say the opposite — a green run leaving a red run's
+    # echoes behind is the stale-dump trap section (b) already clears logits for.
+    (work / ECHO_FILE_NAME).unlink(missing_ok=True)
     # A replay above A-18's bound, a free run below it: see FREE_RUN_BOUND's comment. `--replay`
     # also tells `decode_run` not to let §07.5 end the run, because dec64f's own chain samples the
     # stop id at generation step 24 and teacher forcing feeds it straight back in.
@@ -7019,6 +7296,36 @@ def main() -> int:
     # One tie decision per step, in the pin's payload space (see TIE POLICY). `tie_ok` is what (b)'s
     # argmax line reuses, so the two sections cannot disagree about what a tied step means.
     tie_ok: dict[int, bool] = {}
+    allow_steps = (allowance or {}).get("steps", {})
+    # ---- which steps are DOWNSTREAM of an admitted divergence ---------------------------------
+    # Decided ONCE, before any of the three rules prints, because the attribution needs the whole
+    # picture and the three rules print from three loops: a step is downstream of a flip only if some
+    # rule admitted it, and the room rule — the last of the three — would otherwise be the one admit
+    # nothing could have been attributed to. `admitted` says which engine-vs-pin divergences a proved
+    # rule let through and by which rule; `echo_from` is the first step whose FED token therefore
+    # differs from the pin's. Every check at or after that step is an ECHO: it ran, it printed, and it
+    # is not counted as a second defect, because the two sides stopped answering the same question
+    # (§10.5's alignment rule). The map is asserted at the end of this section against what the three
+    # loops admit on their own lines, so the two cannot drift apart silently.
+    admitted = admitted_divergences(n_decode, got_ids, greedy, eng_logits, dec_logits,
+                                    allow_steps, y0, y0_matches, y0_ok, y0_room_ok)
+    # An echo window needs a FORK to attribute a failure to, and a replayed run has none: `--replay`
+    # feeds the reference's own token at every step, so a flip admitted at step 2 changes nothing about
+    # what step 3 was fed, and every band failure downstream of it is a real failure. Section (a)'s own
+    # `the tokens the engine fed itself are the ones the reference fed` line is what guarantees this,
+    # three lines below, so the two cannot drift: if a replay ever failed to deliver the pinned chain, it
+    # is that line that goes red.
+    echo_from = None if replay else echo_first_step(admitted)
+    if echo_from is not None:
+        cause = min(admitted)
+        e_id, p_id, rule = admitted[cause]
+        ECHO_WINDOW = echo_reason(cause, e_id, p_id, rule)
+        notes.append(f"ECHO window in force from generation step {echo_from}: " + ECHO_WINDOW
+                     + ". Nothing was widened to get here — the same three proved rules admitted one"
+                        " token, and this attribution only moves where the downstream failures are"
+                        " counted. Section (b2) judges the same steps at identical conditioning, with"
+                        " no echo window.")
+        print("  [echo] " + ECHO_WINDOW)
     for j in range(min(n_decode, len(got_ids))):
         kind, admissible, line = tie_verdict(j, eng_logits[j][0], got_ids[j])
         if kind == "no-tie":
@@ -7031,9 +7338,10 @@ def main() -> int:
             print("  [info] " + line)
             continue
         ties.append(f"step {j} -> {got_ids[j]}")
-        check(admissible,
-              f"generation step {j}: exact tie in the pin and the engine picked a different id"
-              " — tested against the tie policy", line)
+        with echo(ECHO_WINDOW, on=echo_from is not None and j >= echo_from):
+            check(admissible,
+                  f"generation step {j}: exact tie in the pin and the engine picked a different id"
+                  " — tested against the tie policy", line)
         tie_ok[j] = admissible
     # One slack decision per step, on the pin's VALUES this time (see QUANTIZATION SLACK). The tie
     # policy already had its turn, and `step_slack` returns None on the steps it owns — a pin with no
@@ -7042,7 +7350,6 @@ def main() -> int:
     # a step where the engine reproduced the pin's own id is an ordinary match and consults nothing,
     # even when the step sits inside the region — it gets a note, not a counted use.
     slack_ok: dict[int, bool] = {}
-    allow_steps = (allowance or {}).get("steps", {})
     for j in range(min(n_decode, len(got_ids))):
         sl = step_slack(j, dec_logits[j], allow_steps.get(j))
         if sl is None or sl["margin"] >= sl["bound"]:
@@ -7058,9 +7365,11 @@ def main() -> int:
                       " is an exception, and nothing is counted)")
             continue
         ok, line = slack_verdict(sl, eng_logits[j][0], got_ids[j])
-        check(ok,
-              f"generation step {j}: the pin's winner is unique but its margin is under the element"
-              " error this step's band licenses — tested against the quantization-slack rule", line)
+        with echo(ECHO_WINDOW, on=echo_from is not None and j >= echo_from):
+            check(ok,
+                  f"generation step {j}: the pin's winner is unique but its margin is under the"
+                  " element error this step's band licenses — tested against the quantization-slack"
+                  " rule", line)
         if ok:
             # Only ADMITTED steps are counted and named: a refused one is a FAIL line that says NOT
             # ADMISSIBLE, and putting it in the same list as the admitted ones would make the summary
@@ -7082,9 +7391,11 @@ def main() -> int:
             if got_ids[j] == greedy[j + 1] or tie_ok.get(j) or slack_ok.get(j):
                 continue      # not a flip, or a step an earlier exception already decided
             ok, line = room_verdict(f"step {j}", dec_logits[j], eng_logits[j][0], got_ids[j])
-            check(ok,
-                  f"generation step {j}: the engine's id differs from the pin's at a step neither the"
-                  " tie policy nor the slack rule covers — tested against the cascade room rule", line)
+            with echo(ECHO_WINDOW, on=echo_from is not None and j >= echo_from):
+                check(ok,
+                      f"generation step {j}: the engine's id differs from the pin's at a step neither"
+                      " the tie policy nor the slack rule covers — tested against the cascade room"
+                      " rule", line)
             if ok:
                 room_ok[j] = True
                 p_id, p_val, p_gap = top2(dec_logits[j])
@@ -7095,31 +7406,60 @@ def main() -> int:
         by_tie = g != w and tie_ok.get(j, False)
         by_slack = g != w and slack_ok.get(j, False)
         by_room = g != w and room_ok.get(j, False)
-        check(g == w or by_tie or by_slack or by_room,
-              f"generation step {j} samples greedy_continuation[{j + 1}]",
-              f"{g} vs {w}" + (" — admitted as a proved tie, see the TIE line above" if by_tie else
-                               " — admitted as tie-by-quantization-slack, see the SLACK line above"
-                               if by_slack else
-                               " — admitted as a thin-room flip, see the ROOM line above" if by_room
-                               else ""))
+        with echo(ECHO_WINDOW, on=echo_from is not None and j >= echo_from):
+            check(g == w or by_tie or by_slack or by_room,
+                  f"generation step {j} samples greedy_continuation[{j + 1}]",
+                  f"{g} vs {w}" + (" — admitted as a proved tie, see the TIE line above" if by_tie
+                                   else " — admitted as tie-by-quantization-slack, see the SLACK line"
+                                        " above" if by_slack else
+                                   " — admitted as a thin-room flip, see the ROOM line above" if by_room
+                                   else ""))
+    # The two halves of the attribution must be the same set. `admitted_divergences` decided the echo
+    # window before any of these three rules printed, using the same predicates and the same guards; if
+    # a guard is ever added in one place and not the other, this line says so instead of letting a step
+    # be attributed to a rule that refused it (or the reverse: a real failure silently echoed).
+    loop_admitted = {j for j in tie_ok if tie_ok[j]} | set(slack_ok) | set(room_ok)
+    if (y0_ok or y0_room_ok) and not y0_matches:
+        loop_admitted.add(PREFILL_ROW)
+    check(set(admitted) == loop_admitted,
+          "the echo window was attributed to exactly the steps the three rules admitted on their own"
+          " lines — one predicate decides an admission, not two",
+          f"attributed {sorted(admitted)} vs admitted on the lines above {sorted(loop_admitted)}")
     unresolved = [j for j, (g, w) in enumerate(zip(got_ids, greedy[1:]))
                   if g != w and not tie_ok.get(j, False) and not slack_ok.get(j, False)
                   and not room_ok.get(j, False)]
-    check(not unresolved,
-          f"all {n_decode} generated ids match, in order — exactly, or as a tie, a quantization"
-          " slack, or a thin-room flip proved from the pin",
-          f"{len(tie_ok)} step(s) resolved by the tie policy"
-          f" ({', '.join(sorted(ties)) if ties else 'none'})"
-          + (f"; {len(slack)} admitted by quantization slack"
-             f" ({'; '.join(slack) if slack else 'none'})" if slack_ok else "")
-          + (f"; {len(rooms)} admitted as thin-room flips"
-             f" ({'; '.join(rooms) if rooms else 'none'})" if room_ok else "")
-          + f" | unmatched steps {unresolved}"
-          f" | engine {got_ids} / pinned {greedy[1:]}")
+    # The aggregate line follows the steps it aggregates. If every unmatched step is downstream of an
+    # admitted flip there is nothing left for THIS line to fail on; leaving it red would be the storm
+    # talking again, and leaving it silently green would hide the count, so it prints as an ECHO.
+    hard_unresolved = [j for j in unresolved
+                       if not (echo_from is not None and j >= echo_from)]
+    with echo(ECHO_WINDOW, on=bool(unresolved) and not hard_unresolved):
+        check(not hard_unresolved,
+              f"all {n_decode} generated ids match, in order — exactly, or as a tie, a quantization"
+              " slack, or a thin-room flip proved from the pin",
+              f"{len(tie_ok)} step(s) resolved by the tie policy"
+              f" ({', '.join(sorted(ties)) if ties else 'none'})"
+              + (f"; {len(slack)} admitted by quantization slack"
+                 f" ({'; '.join(slack) if slack else 'none'})" if slack_ok else "")
+              + (f"; {len(rooms)} admitted as thin-room flips"
+                 f" ({'; '.join(rooms) if rooms else 'none'})" if room_ok else "")
+              + (f" | unmatched steps {unresolved}, all of them downstream of the admitted flip at"
+                 f" step {min(admitted)} — see the [ECHO] lines" if unresolved and
+                    not hard_unresolved else
+                    f" | unmatched steps {unresolved}")
+              + f" | engine {got_ids} / pinned {greedy[1:]}")
     fed = [int(s["input"]) for s in decode_steps]
-    check(fed == greedy[:-1],
-          "the tokens the engine fed itself are the ones the reference fed (the engine feeds itself,"
-          " so this is the chain being re-derived, not replayed)", f"{fed}")
+    # The fed-chain line is the statement of the fork itself, so it is the one line that cannot be
+    # dropped: it is where the log says which step the engine took its own road. Same rule as above —
+    # every differing index downstream of the admitted flip is the flip's own consequence.
+    fed_diff = [j for j, (f, w) in enumerate(zip(fed, greedy[:-1])) if f != w]
+    with echo(ECHO_WINDOW, on=bool(fed_diff) and not
+              [j for j in fed_diff if not (echo_from is not None and j >= echo_from)]):
+        check(fed == greedy[:-1],
+              "the tokens the engine fed itself are the ones the reference fed (the engine feeds"
+              " itself, so this is the chain being re-derived, not replayed)",
+              f"{fed}" + (f" | differs from the pinned chain at generation step(s) {fed_diff}, from"
+                          " the admitted flip onward" if fed_diff else ""))
     if replay:
         # Same check, different meaning, so it is said out loud: here the fed list is what THIS gate
         # handed `decode_run --replay`, so it proves the delivery. What proves the model is the
@@ -7207,32 +7547,41 @@ def main() -> int:
               f" maxabs {m['maxabs']:.4g} | ref top1−top2 gap {m['gap12']:.3f}"
               f" = {gap_x} the largest element error | rule: {rule_line}")
         if allowance is None:
-            check(deficit <= cos_cap, f"step {j}: cos >= {BAND['cos_hard']} (§10.1 G5)")
-            check(m["meanrel"] <= rel_cap,
-                  f"step {j}: meanrel <= {BAND['meanrel_hard']:.0%} (§10.2)")
+            with echo(ECHO_WINDOW, on=echo_from is not None and j >= echo_from):
+                check(deficit <= cos_cap, f"step {j}: cos >= {BAND['cos_hard']} (§10.1 G5)")
+                check(m["meanrel"] <= rel_cap,
+                      f"step {j}: meanrel <= {BAND['meanrel_hard']:.0%} (§10.2)")
         else:
             ok_cos = deficit <= cos_cap
-            check(ok_cos,
-                  f"step {j}: cos deficit {deficit:.4e} inside the route allowance {cos_cap:.4e}",
-                  "" if ok_cos else _counterfactual(deficit, 1.0 - BAND["cos_hard"],
-                                                    "§10.1 G5 floor"))
+            with echo(ECHO_WINDOW, on=echo_from is not None and j >= echo_from):
+                check(ok_cos,
+                      f"step {j}: cos deficit {deficit:.4e} inside the route allowance"
+                      f" {cos_cap:.4e}",
+                      "" if ok_cos else _counterfactual(deficit, 1.0 - BAND["cos_hard"],
+                                                        "§10.1 G5 floor"))
             ok_rel = m["meanrel"] <= rel_cap
-            check(ok_rel,
-                  f"step {j}: meanrel {m['meanrel']:.4%} inside the route allowance {rel_cap:.4%}",
-                  "" if ok_rel else _counterfactual(m["meanrel"], BAND["meanrel_hard"],
-                                                    "§10.2 ceiling"))
-        check(argmax_ok or tie_ok.get(j, False) or slack_ok.get(j, False) or room_ok.get(j, False),
-              f"step {j}: argmax agrees with the pin",
-              f"{argmax_low(eng)}" + ("" if argmax_ok else
-                                      (" — but the pin is tied here and the engine's id is one of the"
-                                       " tied ids, so the tie policy admits it"
-                                       if tie_ok.get(j, False) else
-                                       " — but this is the step the quantization-slack rule admits: "
-                                       + step_slack(j, ref, allow_steps.get(j))["numbers"]
-                                       if slack_ok.get(j, False) else
-                                       " — but this is the thin-room flip the cascade rule admits: "
-                                       + room_verdict(f"step {j}", ref, eng, argmax_low(eng))[1]
-                                       if room_ok.get(j, False) else decision_margin(ref, eng, m))))
+            with echo(ECHO_WINDOW, on=echo_from is not None and j >= echo_from):
+                check(ok_rel,
+                      f"step {j}: meanrel {m['meanrel']:.4%} inside the route allowance"
+                      f" {rel_cap:.4%}",
+                      "" if ok_rel else _counterfactual(m["meanrel"], BAND["meanrel_hard"],
+                                                        "§10.2 ceiling"))
+        with echo(ECHO_WINDOW, on=echo_from is not None and j >= echo_from):
+            check(argmax_ok or tie_ok.get(j, False) or slack_ok.get(j, False) or room_ok.get(j, False),
+                  f"step {j}: argmax agrees with the pin",
+                  f"{argmax_low(eng)}" + ("" if argmax_ok else
+                                          (" — but the pin is tied here and the engine's id is one of"
+                                           " the tied ids, so the tie policy admits it"
+                                           if tie_ok.get(j, False) else
+                                           " — but this is the step the quantization-slack rule"
+                                           " admits: "
+                                           + step_slack(j, ref, allow_steps.get(j))["numbers"]
+                                           if slack_ok.get(j, False) else
+                                           " — but this is the thin-room flip the cascade rule"
+                                           " admits: "
+                                           + room_verdict(f"step {j}", ref, eng, argmax_low(eng))[1]
+                                           if room_ok.get(j, False)
+                                           else decision_margin(ref, eng, m))))
         if m["cos"] < BAND["cos_report"]:
             under_g6.append(f"{j}:{m['cos']:.6f}")
     if ratios:
@@ -7258,6 +7607,12 @@ def main() -> int:
 
     state_checks(run["state"])
     curve_checks(per_step, n_decode)
+    # (b2) runs the SAME fixture a second time with the reference's own tokens fed at every step, so a
+    # defect that the echo window above legitimately stopped counting is still judged, at identical
+    # conditioning, by the same bands. It costs one extra engine run on a free-running fixture and none
+    # on a replayed one, where (a)/(b) were already teacher-forced.
+    teacher_forced_checks(args, man, prompt_ids, dec_logits, greedy, n_decode, allowance, work,
+                          vocab, replay)
     if rows_pin is not None:
         if args.dry_run:
             notes.append("section (i) did NOT run in this dry run: the stand-in dumps only §06.5's"
@@ -7320,6 +7675,21 @@ def main() -> int:
     # 128, 300) — a side that divided evenly would put the prompt end on a boundary and test the case
     # the wide run already tests.
     carry_rows = 5
+    # BOTH RUN-VS-RUN SECTIONS ARE TEACHER-FORCED WHENEVER THE FIXTURE HAS A DECODE PHASE, and the reason
+    # is the same in (h) and (j): their independent variable is a width or a spelling, and on a
+    # free-running fixture the two sides can each take their own thin-margin token and fork — after which
+    # one side is answering a different prompt than the other and every row downstream compares two
+    # different questions. `prefix24dec8 --gemm lt --attn-tile 1` is the exhibit: the batched side took
+    # the coin flip the slack rule admits at step 2, the one-row side did not, and four cross-width lines
+    # went red on rows that were no longer comparable (worst per-row 1-cos 1.79e-01 against a 2.75e-03
+    # line, which is a fork, not a route). Replaying both sides with the reference's own tokens — the same
+    # `--replay` the deep fixtures already run at — makes width the only difference, and the replayed pair
+    # measures 9.4e-03 pooled meanrel and 4.5e-04 worst-row 1-cos where the forked pair measured
+    # 4.6e-02 and 1.79e-01. Nothing that was being proved is lost: a width or spelling difference that
+    # changes a decision still shows as a RED flip at that row, because both sides are now fed the same
+    # tokens and have to agree on them. A fixture with no decode phase gets nothing: `--replay` with an
+    # empty list is not a thing.
+    ab_replay = replay or n_decode >= 1
     if args.dry_run:
         sides = batched_ab_stand_in(man, prompt_ids, dec_logits, counts, work, wave_rows,
                                     args.break_wave, args.break_ab_logits, args.break_ab_ids,
@@ -7327,7 +7697,7 @@ def main() -> int:
                                     args.break_gdn_one_row, args.break_attn_one_row,
                                     args.break_ab_room)
     else:
-        sides = run_batched_ab(args, prompt_ids, n_decode, greedy, replay, work, wave_rows,
+        sides = run_batched_ab(args, prompt_ids, n_decode, greedy, ab_replay, work, wave_rows,
                                carry_rows)
     batched_proof_checks(sides, counts, len(prompt_ids), n_decode, wave_rows,
                          stand_in=args.dry_run)
@@ -7337,7 +7707,7 @@ def main() -> int:
     # test — D32's bit-identity — is checked rather than assumed.
     section("(j) the two gdn_rec spellings — bit-identical, both run in this gate (§04.4, D32)")
     spell_sides = (gdn_spell_stand_in(work) if args.dry_run else
-                   run_gdn_spell_ab(args, prompt_ids, n_decode, greedy, replay, work))
+                   run_gdn_spell_ab(args, prompt_ids, n_decode, greedy, ab_replay, work))
     gdn_spell_checks(spell_sides, stand_in=args.dry_run)
     # The deferred half, written where the two forms' dumps already are. `--scope form` produces one of
     # these per run, so the question "did the wave carry fail identically on both forms?" is a diff of
@@ -7366,6 +7736,42 @@ def main() -> int:
                      f" recorded with every pass beside them in {record.name}. Re-run with"
                      " `--scope full` to have them counted; compare the two forms' files to see whether"
                      " a carry failure is a form finding or a wave-carry finding.")
+    # The echoed half, beside it, for the same reason: the question "was that a real defect or the"
+    # downstream consequence of an admitted coin flip?" should be answerable from a small file, and a
+    # deferral that only exists in a long log is a deferral nobody can audit.
+    if echo_records:
+        record = work / ECHO_FILE_NAME
+        cause = min(admitted) if admitted else None
+        record.write_text(json.dumps({
+            "fixture": REFS.name,
+            "gemm": GEMM_ROUTE,
+            "gemm_pins": GEMM_PINS,
+            "attn_tile": args.attn_tile,
+            "gdn_scan": args.gdn_scan,
+            "gdn_chunk": args.gdn_chunk,
+            "free_running": not replay,
+            # The flip every echoed line is attributed to, in the engine's own words and the pin's: which
+            # step, which token each side took, and which proved rule admitted it. A reader of the sidecar
+            # must be able to re-check the attribution without re-reading the log.
+            "admitted_step": cause,
+            "admitted_as": (admitted[cause][2] if cause is not None else None),
+            "engine_token": (admitted[cause][0] if cause is not None else None),
+            "pin_token": (admitted[cause][1] if cause is not None else None),
+            "admitted_steps": sorted(admitted),
+            "echo_from": echo_from,
+            "reason": ECHO_WINDOW,
+            "n_checks": len(echo_records),
+            "n_failed": sum(1 for r in echo_records if not r["ok"]),
+            "checks": echo_records,
+        }, indent=1) + "\n")
+        notes.append(f"{len(echoes)} check(s) ECHO of the admitted flip at"
+                     f" {'the prefill row' if cause == PREFILL_ROW else 'step ' + str(cause)}"
+                     f" (of {len(echo_records)} judged from generation step {echo_from} on) — they ran,"
+                     " they are printed, and they are not counted as independent failures because the"
+                     " two sides were not answering the same question there. All of them, passes"
+                     f" included, are in {record.name} beside the dumps; the same steps at identical"
+                     " conditioning are judged by the same bands in section (b2), which has no echo"
+                     " window and did gate.")
     return report()
 
 
@@ -7442,6 +7848,237 @@ def decision_margin(ref: np.ndarray, eng, m: dict) -> str:
 EXPECTED_RED: dict = {}
 
 
+def admitted_divergences(n_decode: int, got_ids: list, greedy: list, eng_logits: list,
+                         dec_logits: list, allow_steps: dict, y0, y0_matches: bool,
+                         y0_ok: bool, y0_room_ok: bool) -> dict:
+    """Which engine-vs-pin divergences this run EXPLICITLY ADMITTED, and by which rule.
+
+    Returns `{step: (engine_id, pin_id, rule)}`, with `PREFILL_ROW` for §06.5's first answer token.
+    One function because the echo attribution needs the whole picture at once and the three rules print
+    from three different loops: an attribution computed inside the loop that finds it would classify a
+    step against a half-filled map (the room rule runs last, so a slack line printed above it could not
+    know about a flip admitted below). Pure — the same three predicates, the same guards, no printing —
+    and `main` asserts the map against what the three loops admit on their own lines, so a guard added
+    in one place and not the other cannot drift quietly. Precedence matches the loops: tie, then slack,
+    then room, first match wins.
+    """
+    admitted: dict[int, tuple] = {}
+    if y0 is not None and not y0_matches and (y0_ok or y0_room_ok):
+        admitted[PREFILL_ROW] = (y0, greedy[0],
+                                 "exact-tie policy" if y0_ok else "cascade room rule")
+    for j in range(min(n_decode, len(got_ids))):
+        eng = eng_logits[j][0]
+        kind, admissible, _ = tie_verdict(j, eng, got_ids[j])
+        if kind == "tie" and admissible:
+            admitted[j] = (got_ids[j], greedy[j + 1], "exact-tie policy")
+            continue
+        sl = step_slack(j, dec_logits[j], allow_steps.get(j))
+        if sl is not None and sl["margin"] < sl["bound"] and got_ids[j] != sl["top1"]:
+            if slack_verdict(sl, eng, got_ids[j])[0]:
+                admitted[j] = (got_ids[j], greedy[j + 1], "quantization-slack rule")
+                continue
+        if route_is_library() and got_ids[j] != greedy[j + 1]:
+            if room_verdict(f"step {j}", dec_logits[j], eng, got_ids[j])[0]:
+                admitted[j] = (got_ids[j], greedy[j + 1], "cascade room rule")
+    return admitted
+
+
+def teacher_forced_checks(args, man: dict, prompt_ids: list, dec_logits: list, greedy: list,
+                         n_decode: int, allowance, work: Path, vocab: int, replay: bool) -> None:
+    """Section (b2): the same decode steps judged with the REFERENCE's own tokens fed at every step.
+
+    WHY A SECOND RUN EXISTS. Section (a)/(b) run the engine free-running — the engine feeds itself — and
+    that is the stronger claim when it holds. But one admitted thin-margin token at step N and the run is
+    answering a different question from step N+1 on, so every band failure there is a fact about a prompt
+    nobody asked, and section (a)/(b) have to call them ECHO rather than pretend. A real numeric defect
+    must not be able to hide in that window, and the only way to be sure is to judge the same steps with
+    both sides fed the same tokens: `decode_run --replay` with the pinned fed sequence, which is exactly
+    what the deep fixtures already run (§A-18's bound). Here conditioning is identical by construction,
+    so the section has NO echo window and every failure it prints is a real one.
+
+    NO BAND IS WIDER HERE. Same `rule_for_step` caps, same G5 §10.1 floor, same §10.2 meanrel ceiling,
+    same 1.50-ULP flip line, same three admission rules. The only thing that changes is what the engine
+    was fed, and that is asserted from the run's own STEP lines rather than assumed.
+
+    WHAT IT CANNOT CATCH, in one sentence: a defect that perturbs only the continuation of the engine's
+    OWN different token — a state-carry fault that fires only once the engine is fed its own flip, say —
+    is ECHOed by (a)/(b) and invisible here too, because this section never runs that chain, and no pin
+    describes it (§10.5 rule 2: there is no reference for a prompt nobody fed). The free-run's own lines
+    still print it, labelled ECHO with the flip blamed, so it is visible in the log and in the sidecar —
+    it is simply not adjudicable, and it is the price of not printing fifteen red lines for one coin.
+
+    Returns nothing; its checks are ordinary `check()` calls and they gate.
+    """
+    section("(b2) the same steps at identical conditioning — fed the reference's own tokens (§10.5"
+            " rule 2, A-18's replay)")
+    if replay:
+        print("  [info] nothing added here: this fixture is deeper than"
+              f" A-18's {FREE_RUN_BOUND}-token bound, so the main run above was ALREADY run with"
+              " `--replay`. Sections (a)/(b) judged it at identical conditioning, there is no echo"
+              " window to adjudicate around, and a second identical run would buy nothing.")
+        return
+    if n_decode == 0:
+        print("  [info] nothing added here: this fixture has no decode phase, so there is no"
+              " self-fed chain to re-feed. §06.5's prefill row is fed by the prompt, not by the"
+              " engine, so it is already at identical conditioning in section (a).")
+        return
+
+    tf_work = work / "tf"
+    tf_work.mkdir(parents=True, exist_ok=True)
+    for stale in tf_work.glob("logits*.bin"):
+        stale.unlink()          # same rule as the main run: judge this run, not the last one's leftovers
+    fed_list = ",".join(str(t) for t in greedy[:-1])
+    if args.dry_run:
+        stdout, rc = dry_run(man, prompt_ids, dec_logits, tf_work, replay=True,
+                             prefill_logits=args.prefill_logits, break_ids=args.break_ids,
+                             break_logits=args.break_logits, break_noise=args.break_noise,
+                             break_prompt_stop=args.break_prompt_stop, break_feed=args.break_feed,
+                             break_tie=args.break_tie, tie_alt=args.tie_alt,
+                             break_allow=args.break_allow, tie_same_ulp=args.tie_same_ulp,
+                             tie_far=args.tie_far, break_band=args.break_band,
+                             break_state_fp=args.break_state_fp, break_y0=args.break_y0,
+                             y0_alt=args.y0_alt, slack_alt=args.slack_alt,
+                             break_slack=args.break_slack, break_runnerup=args.break_runnerup,
+                             break_pins=args.break_pins, break_pin_names=args.break_pin_names,
+                             break_heur_width=args.break_heur_width,
+                             break_cand=args.break_cand)
+        notes.append("section (b2) ran against the same CPU stand-in as the main run, replayed: it"
+                     " proves this section's plumbing parses and can FAIL, and nothing about the engine.")
+    else:
+        cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
+               "--steps", str(n_decode), "--out", str(tf_work),
+               "--prefill-logits", args.prefill_logits,
+               "--gemm", GEMM_ROUTE, "--gemm-pins", GEMM_PINS,
+               "--attn-tile", args.attn_tile, "--attn-touch", args.attn_touch,
+               "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk),
+               "--gdn-spell", args.gdn_spell,
+               # THE ONE DIFFERENCE FROM THE MAIN RUN, and it is the whole section: the fed token at step
+               # j is the reference's own, so the engine's sample is never fed back and every row is
+               # comparable with the pin that was computed on that same token. `--state-fp` is deliberately
+               # NOT passed: this section judges logits and ids, and the §08.6 fingerprints are the main
+               # run's claim, already gated in section (g).
+               "--replay", fed_list]
+        print("  $ " + " ".join(cmd))
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        stdout, rc = proc.stdout, proc.returncode
+        for line in proc.stdout.splitlines():
+            print("      " + line)
+    if not check(rc == 0, "the teacher-forced run exits 0", f"rc={rc}"):
+        return
+    tf = parse_run(stdout)
+    tf_steps = [s for s in tf["steps"] if s["kind"] == DECODE_KIND]
+    # A driver that parses another program's output must show it read what the program printed: an empty
+    # list here would judge nothing and print a PASS over it (the `gdn_collapse/run.py` trap). The count
+    # comes from the run's own RESULT line, so the two independent readings have to agree with each
+    # other and with the number of steps this fixture has.
+    printed = (tf["result"] or {}).get("steps")
+    check(printed is not None and int(printed) == len(tf["steps"])
+          and len(tf_steps) == n_decode,
+          "the teacher-forced run printed, and this gate parsed, every step it printed, and the"
+          f" generation half of them is the fixture's {n_decode}",
+          f"RESULT says steps={printed}, {len(tf['steps'])} STEP lines parsed of"
+          f" {len(prompt_ids) + n_decode} expected, of which {len(tf_steps)} are"
+          f" kind={DECODE_KIND}")
+    if len(tf_steps) != n_decode:
+        notes.append("section (b2) stopped after the count check: it will not judge a partial replay"
+                     " and call the missing steps green.")
+        return
+    mode = (tf["result"] or {}).get("mode")
+    check(mode == "replay",
+          "the run this section judges really was teacher-forced (RESULT mode=replay)",
+          f"mode={mode} — the fed sequence this section is owed is the reference's own, and a run that"
+          " fed itself is section (a)/(b)'s question, not this one")
+    if mode != "replay":
+        return
+    tf_fed = [int(s["input"]) for s in tf_steps]
+    if not check(tf_fed == greedy[:-1],
+                 "every token this run was fed is the reference's own — the identical conditioning"
+                 " this section exists to create, asserted from the run's STEP lines rather than"
+                 " assumed from the flag",
+                 f"fed {tf_fed} vs the pinned chain {greedy[:-1]}"):
+        notes.append("section (b2)'s premise failed: the replay did not deliver the pinned fed"
+                     " sequence, so nothing below it is a like-for-like comparison and no band line"
+                     " here should be read as a result.")
+        return
+    tf_ids = [int(s["sampled"]) for s in tf_steps]
+    eng_tf = read_engine_logits(tf_work, n_decode, len(prompt_ids), vocab)
+    allow_steps = (allowance or {}).get("steps", {})
+    # The same three admission rules, applied in the same order, with NO echo window anywhere: at
+    # identical conditioning a divergence has no upstream cause to blame, which is the whole point.
+    ties_b2, slack_b2, room_b2 = [], [], []
+    admit: dict[int, bool] = {}
+    for j in range(n_decode):
+        eng, why = eng_tf[j]
+        ref = dec_logits[j]
+        if eng is None:
+            check(False, f"b2 step {j}: engine wrote {tf_work.name}/logits{len(prompt_ids) + j}.bin",
+                  why + " — check --out")
+            continue
+        if eng.shape != ref.shape:
+            check(False, f"b2 step {j}: vocabulary length", f"{eng.shape} vs {ref.shape}")
+            continue
+        kind, ok_tie, line = tie_verdict(j, eng, tf_ids[j])
+        if kind == "tie":
+            check(ok_tie, f"b2 step {j}: the pin is an exact tie and the engine picked another id"
+                          " — tested against the tie policy at identical conditioning", line)
+            if ok_tie:
+                admit[j] = True
+                ties_b2.append(f"step {j} -> {tf_ids[j]}")
+        sl = step_slack(j, ref, allow_steps.get(j))
+        if j not in admit and sl is not None and sl["margin"] < sl["bound"] \
+                and tf_ids[j] != sl["top1"]:
+            ok_sl, line = slack_verdict(sl, eng, tf_ids[j])
+            check(ok_sl, f"b2 step {j}: the pin's winner is unique but its margin is under the element"
+                         " error this step's band licenses — tested against the quantization-slack"
+                         " rule at identical conditioning", line)
+            if ok_sl:
+                admit[j] = True
+                slack_b2.append(f"step {j} -> {tf_ids[j]} (pin margin {sl['margin']:.6g}"
+                                f" = {sl['ulps']:.1f} ULP vs bound {sl['bound']:.6g})")
+        if j not in admit and route_is_library() and tf_ids[j] != greedy[j + 1]:
+            ok_room, line = room_verdict(f"b2 step {j}", ref, eng, tf_ids[j])
+            check(ok_room, f"b2 step {j}: the engine's id differs from the pin's where neither the tie"
+                           " policy nor the slack rule covers it — tested against the cascade room"
+                           " rule at identical conditioning", line)
+            if ok_room:
+                admit[j] = True
+                room_b2.append(f"step {j} -> {tf_ids[j]}")
+        check(tf_ids[j] == greedy[j + 1] or admit.get(j, False),
+              f"b2 step {j} samples greedy_continuation[{j + 1}] with the reference's own token fed"
+              " in", f"{tf_ids[j]} vs {greedy[j + 1]}"
+              + ("" if tf_ids[j] == greedy[j + 1] else " — and nothing upstream admits it, because at"
+                                                   " identical conditioning there is no upstream flip"
+                                                   " to blame"))
+        m = metrics(eng, ref)
+        deficit = 1.0 - m["cos"]
+        cos_cap, rel_cap, rule_line = rule_for_step(allowance, j)
+        check(True, f"b2 step {j}: metrics at identical conditioning",
+              f"cos {m['cos']:.6f} deficit {deficit:.6e} meanrel {m['meanrel']:.4%}"
+              f" ndiff {m['ndiff']}/{ref.size} maxabs {m['maxabs']:.4g}"
+              f" | fed {tf_fed[j]} (the pin's own) | rule: {rule_line}")
+        ok_cos = deficit <= cos_cap
+        check(ok_cos, f"b2 step {j}: cos deficit {deficit:.4e} inside the band in force"
+                      f" {cos_cap:.4e} — at identical conditioning, so this is the number that"
+                      " cannot be blamed on a forked chain",
+              "" if ok_cos else _counterfactual(deficit, 1.0 - BAND["cos_hard"], "§10.1 G5 floor"))
+        ok_rel = m["meanrel"] <= rel_cap
+        check(ok_rel, f"b2 step {j}: meanrel {m['meanrel']:.4%} inside the band in force"
+                      f" {rel_cap:.4%}",
+              "" if ok_rel else _counterfactual(m["meanrel"], BAND["meanrel_hard"],
+                                                "§10.2 ceiling"))
+    for label, items in (("TIE", ties_b2), ("SLACK", slack_b2), ("ROOM", room_b2)):
+        if items:
+            notes.append(f"section (b2): {len(items)} step(s) needed the {label} rule even with the"
+                         " reference's own tokens fed — the same rules as the free run, the same caps,"
+                         " and no echo anywhere: " + "; ".join(items))
+    if echoes:
+        notes.append(f"section (b2) is the answer to the {len(echoes)} ECHO line(s) above: the same"
+                     f" {n_decode} steps were re-run fed the reference's own tokens"
+                     f" ({tf_work.name}/) and judged by the same bands with no echo window. If a"
+                     " failure were a real numeric defect rather than the admitted flip's downstream"
+                     " consequence, it is red here instead.")
+
+
 def report() -> int:
     section("summary")
     for n in notes:
@@ -7489,6 +8126,17 @@ def report() -> int:
               " a form finding or a separate one about the wave carry.")
         for d in deferred:
             print("  - [DEFERRED] " + d)
+    # The echo block is the same shape for the same reason: a reader who jumps to the bottom must not
+    # read an echoed failure as a pass, and must not have to scroll to find out which flip caused it.
+    if echoes:
+        print(f"  [ECHO] {len(echoes)} check(s) failed but are NOT counted as independent failures:"
+              f" they sit downstream of an explicitly admitted divergence, so the engine and the pin"
+              f" were not answering the same question there. {len(echo_records)} check(s) in total"
+              f" ran inside that window ({len(echo_records) - len(echoes)} of them passed). Every one"
+              f" is listed in {ECHO_FILE_NAME} beside the dumps, and the same steps at identical"
+              f" conditioning are judged in section (b2): {echoes[0].split(' — ')[0]}")
+        for e in echoes:
+            print("  - [ECHO] " + e)
     if fails:
         print(f"ENGINE GATE FAIL — {len(fails)} failed"
               + (f" ({len(ties)} step(s) reported TIE and not counted as failures"
@@ -7496,7 +8144,8 @@ def report() -> int:
                                       " slack rule" if slack else "")
               + (f"{', ' if (ties or slack) else '('}{len(rooms)} flip(s) admitted as thin-room"
                  if rooms else "")
-              + (")" if (ties or slack or rooms) else ""))
+              + (")" if (ties or slack or rooms) else "")
+              + (f"; {len(echoes)} more ECHO of an admitted flip and not counted" if echoes else ""))
         for f in fails:
             print("  - " + f)
         # D-9's reporting half: name the recorded failures so a NEW one on an already-red fixture stays
@@ -7528,6 +8177,12 @@ def report() -> int:
         # verdict line itself, so the exit code cannot be the only place the deferral is visible.
         reported.append(f"{len(deferred)} wave-width check(s) DEFERRED and belonging to neither form"
                         " (--scope form; see the [DEFERRED] lines above)")
+    if echoes:
+        # Same rule as the deferral above, and the same reason: an exit code of 0 must not be the only
+        # place a whole class of failures is visible. The count names both halves so a reader can see the
+        # size of the window, not just how much of it went red.
+        reported.append(f"{len(echoes)} check(s) ECHO of an admitted flip ({len(echo_records)} judged"
+                        " downstream of it; see the [ECHO] lines and section (b2)")
     print("ENGINE GATE PASS" + (f" — with {' and '.join(reported)}" if reported else ""))
     return 0
 
