@@ -695,3 +695,49 @@ Decode: **71.3 tok/s, not re-measured in this window.** Unchanged by constructio
 a one-row body never takes the library route (§10) and keeps the per-token embedding copy verbatim (§11), and
 the nine decode fixtures in both routes' admissions came back bit-identical. If a decode-shaped number is
 needed, take it from a decode ruler, not from this row.
+
+## 13. The packed GDN cast goes away: `cast` −81 %, `gdn_conv` **+32 %**, net **−0.50 %** of wave (2026-10-17)
+
+D30 1.7′ deleted `cast_bf16_to_f32_3` by having `conv_kernel`/`gates_kernel` widen their BF16 operands
+in-register. It was the first deletion in the line with no route to guard it on, so it moved the §07
+per-token launch bill (cast 115 → 97, total 424 → 406) rather than a route-scoped row — see D39 for why
+that was admissible. Detail: `progress/2026-10-17/HANDOFF_17prime.md`.
+
+Paired in one lock hold, medians of 3, canary asserted before any timing (`tmp/gcc/ab17p_retake.txt`):
+
+| width | family | base | 1.7′ | Δ | prediction that was on file |
+|---|---|---|---|---|---|
+| 4096 | `cast` (289 → **145** launches) | 13.8637 | **2.5964** | **−81.3 %** | ≈ −33 % (to ~7 ms) — **beat** |
+| 4096 | `gdn_conv` | 19.9876 | **26.4833** | **+32.5 %** | −22 % (to ~15 ms) — **refuted, wrong sign** |
+| 4096 | `gdn_gates` | 1.5980 | 1.5835 | −0.9 % | ≈ flat — held |
+| 4096 | net of those three | 35.449 | 30.663 | **−4.79 ms = −0.50 %** | — |
+| 1024 | net of those three | 8.075 | 7.411 | **−0.66 ms = −0.36 %** | — |
+
+**The refutation is the finding.** The census argued that halving `gdn_conv`'s read side (1.81 GB → 0.90 GB
+per wave) would take ~4.5 ms off it. It went 6.5 ms *slower* instead: the packed F32 copy was not merely a
+format conversion, it was a **coalescing layout** — one contiguous tile read instead of three strided BF16
+tiles widened per lane. So the byte account was right and the timing consequence was backwards, which is
+the same lesson as D21 one level down: bytes demanded do not determine time, and a consumer's access pattern
+can be worth more than the traffic you delete. **The recoverable prize is therefore named and sized: ~6.5 ms
+= 0.68 % of wave**, by giving the conv kernel a coalesced read of the BF16 operands. That is a new D30 item,
+not a reason to revert — the deletion's own win (−11.27 ms) is real and is what nets out positive here.
+
+**Admission.** 18/18 gates — nine canonical fixtures × both routes — with the *new* bill in both engine and
+checker, bit-identical outputs (worker's byte diffs: `wide520f` 26/26 files, `dec64f` paired HEAD-vs-new on
+both routes 66/66 each), `plan_match=1`, and `selftest_launch_bill()` shown biting at **+1 and −1** so the
+moved row cannot rot into a check that passes vacuously.
+
+**Decode did not move, and that was the prediction.** 18 launches per token at the 1.72 µs floor is ~31 µs on
+a 13.3 ms step (≈0.23 %), and the measured pair sat inside the ruler's own spread with the three pairs
+disagreeing in sign (base alone spread 8 %). **71.3 tok/s stands.** Wave headline stands at §12's **4419**
+pending a re-take; this item is booked at the family rows, −0.50 % of wave.
+
+**Trap, and it cost a full A/B: a stale binary produced a false null.** The first run of this A/B printed a
+clean "nothing moved" — which would have refuted the whole item — because the `new` side was a pre-change
+binary: `engine/build.sh`'s output had been discarded and `cmp` between the two saved binaries was used as
+proof the change was compiled in, but builds on this box are not bit-reproducible, so *any* two builds differ.
+Worse, `plan_match=1` stayed green throughout, because `wave_plan_bill` is compiled **into** `decode_run`: a
+stale binary agrees with itself, and a self-consistency check cannot detect staleness. The fix is a
+**behavioural canary asserted inside the measurement window** — here, `new` must print `cast=97 other=20
+total=406` and `base` must print `115/424`, or the script aborts before timing. Every A/B script from now on
+carries one, and it is `run_ab_17p_retake.sh` that produced the numbers above.
