@@ -1344,3 +1344,15 @@ then 2.2 / 2.4 under class 5, then a full re-adjudication of class 3 once `wide4
 **What this item must not become.** Not a re-run of green gates (cite what is on disk), and not a licence to
 widen a band: the delegated rule still binds, and a widened check must catch every injection in the must-catch
 set derived from geometry, or the original rejection stands.
+
+## D43 — retraction: the `prefix24dec8` "shipping-path correctness defect" was a comparison artifact (2026-10-17)
+
+Commit `99fa8a7` says `prefix24dec8` "FAILS on the shipping `--gemm lt` route … at a row with 22 BF16 ULP of
+room", and that framing went into a commit message on the strength of a gate log I misread twice (first as 0
+failures, because the failure lines are indented and I grepped `^[FAIL]`; then as 19 real ones). It is
+retracted: teacher-forced with the pin's own fed tokens, `--gemm lt` reproduces **every** pinned top-1, worst
+cos deficit 1.2427e-04 against the 2.0000e-03 floor in force, and the 22-ULP row is among them. The one thing
+the route moves is step 2, whose pin margin is exactly 1.00 ULP and which the gate already admits; the other 18
+were the free-run echo of that admitted flip, compared against pins conditioned on a different fed token. The
+instrument was fixed in `2ea4826` (section (b2) plus the ECHO bucket), and the handoff carries the blind spot
+that fix cannot cover. Recorded here because a retraction that lives only in a chat log is not a retraction.
