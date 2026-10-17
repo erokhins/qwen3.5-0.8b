@@ -4,7 +4,7 @@
  * Every roofline in this repo is a READ number: `tools/bw_probe_hip.cpp` streams a 1 GiB buffer
  * with a grid-stride sum and the box answers 237 GB/s, and `bench/performance-status.md` then bills
  * ~1.5 GB of weights against it. But a decode step is not a read-only workload: it streams weights
- * WHILE writing activations, the ~115 bf16->f32 cast outputs, the KV append and the GDN state
+ * WHILE writing activations, the 97 bf16->f32 cast outputs (115 before `62b73e9`), the KV append and the GDN state
  * (18.87 MB read + 18.87 MB written per token, plus the conv window). Q7's M1 refuted the
  * fresh-window story — the same MLP kernels at a 528 MB cold window run at 93 % of the probe in
  * isolation and 52 % inside the step — so the surviving candidate for the ~3.2 ms residue is that
@@ -617,7 +617,7 @@ bool parse(int argc, char** argv, Cfg& c) {
 //     DRAM traffic and silently change what is being measured.
 //   * everything: pick the grid that fits the most bytes, and among the grids within 0.5 % of the
 //     best fit take the LARGEST. A tiny grid is dispatch-limited rather than bandwidth-bound, and a
-//     424-launch decode step already has plenty of dispatch limitation to study elsewhere.
+//     406-launch decode step already has plenty of dispatch limitation to study elsewhere.
 Plan resolve(const Cfg& c) {
     const int nbuf = (c.mode == "mix" || c.mode == "wthenr") ? 1 : std::max(1, c.nbuf);
     // The gate/up shape reads TWO tensors per wavefront, so a launch pairs two regions and each
@@ -941,7 +941,7 @@ bool guards_intact(const Dev& d, std::string* why) {
 // the timing so the cold / warm / write-then-read variants all share one launch shape.
 //
 // Note on what `mixlaunch` measures: launches on one stream are serialized, so its read and write
-// passes do NOT overlap in flight — that is the engine's own shape (one stream, 424 launches per
+// passes do NOT overlap in flight — that is the engine's own shape (one stream, 406 launches per
 // token), and it is a different question from `mix`, where both streams are in flight inside one
 // kernel. Rows carry --mode for exactly this reason; do not compare across them as if they were one
 // experiment.

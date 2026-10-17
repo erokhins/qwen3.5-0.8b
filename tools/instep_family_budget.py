@@ -11,7 +11,7 @@ explanations for the residue:
   (a) a per-launch ramp — a small launch never reaches peak bandwidth because it spends its first
       tens of microseconds getting started, so the deficit is a per-launch constant that amortizes
       with launch size;
-  (b) interleaved traffic / locality — the step walks ~1.5 GB of distinct weights in 424
+  (b) interleaved traffic / locality — the step walks ~1.5 GB of distinct weights in 406 (424 before `62b73e9`)
       launches, so every launch's pages/rows/TLB entries are cold, while a burst re-walks one
       small window and is flattered by it (the trap rule that `prototype/mlp_gemv/results.md`
       documents at L2 level, one level up);
@@ -211,7 +211,7 @@ def main(argv: list[str]) -> int:
         deficit = ms - fbytes[fam] / PROBE_GBS / 1e6
         print(f"  {fam:<8} deficit {deficit:+.3f} ms over {n:>3} launches = "
               f"{deficit*1000/n:+6.1f} us/launch = {deficit*1000/mb:+6.2f} us/MB")
-    n_all = int(tot["launches"]) if tot else 424
+    n_all = int(tot["launches"]) if tot else 406  /* §07 per-token bill as of `62b73e9`; fallback only, real value comes from tot */
     step_ms = statistics.median(tot["ms"]) if tot else float("nan")
     print("  a per-launch ramp sized to explain mlp would bill every one of the "
           f"{n_all} launches at that rate; the step is {step_ms:.2f} ms.")

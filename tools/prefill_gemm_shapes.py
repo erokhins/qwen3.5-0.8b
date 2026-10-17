@@ -203,7 +203,7 @@ def main() -> int:
     print("  The three attention/GDN epilogues are already separate passes reading a matmul output that")
     print("  is already written to memory, so a library matmul changes nothing there.")
     print("\n  What the library route gives BACK: `proj_gemv` runs PACK_X=false and so needs F32")
-    print("  activations, which is most of why 115 cast launches per token exist (engine/kernels_proj.cpp,")
+    print("  activations, which is most of why 97 cast launches per token (115 before `62b73e9`) exist (engine/kernels_proj.cpp,")
     print("  `engine/results.md` E2). A library GEMM taking a 16-bit A operand reads what glue wrote, so")
     print("  those casts disappear for the projections — a launch-and-dispatch saving at the measured")
     print("  dispatch floor, not a traffic one.")

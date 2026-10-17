@@ -61,7 +61,10 @@ FAMILY_INSITU_MS = {
     "mlp": 4.260, "proj": 4.237, "lm_head": 2.196, "host_tail": 0.718, "glue": 0.691,
     "gdn": 0.642, "cast": 0.914, "attn": 0.484, "copy": 0.208,
 }
-LAUNCHES = {"mlp": 48, "proj": 114, "lm_head": 1, "glue": 49, "gdn": 72, "cast": 115,
+# Measured medians, so they are a snapshot of the 2026-10-13 plan: `cast` costs 0.914 ms over 115
+# launches, and 18 of those launches were retired by `62b73e9` (packed GDN widening, no reader).
+# Do not divide the stale ms by the live launch count below to get a per-launch price.
+LAUNCHES = {"mlp": 48, "proj": 114, "lm_head": 1, "glue": 49, "gdn": 72, "cast": 97,
             "attn": 6, "copy": 19, "host_tail": 0}
 
 
@@ -71,7 +74,9 @@ def rows(k: dict[str, int], lanes: int) -> list[tuple[str, str, int, int, str]]:
     Every row is derived from state.h shapes. A decode step reads each weight row exactly once
     (x is one row), so weight bytes = 2 * rows * in_features; the activation traffic is derived
     from the launch plan in `engine/decode_step.cpp`'s header comment (49 glue / 114 proj /
-    48 mlp / 72 gdn / 115 cast / 20 other = 424 launches).
+    48 mlp / 72 gdn / 97 cast / 20 other = 406 launches; the cast row read 115 and the total 424
+    until `62b73e9` retired the packed `in_proj_qkv`+`a`+`b` widening, and the cast traffic below
+    moved with it rather than being rescaled).
     """
     hid, ff = k["kHidden"], k["kIntermediate"]
     ng, na, nl = k["kNumGdnLayers"], k["kNumAttnLayers"], k["kNumLayers"]
@@ -104,9 +109,10 @@ def rows(k: dict[str, int], lanes: int) -> list[tuple[str, str, int, int, str]]:
     add(("copy", "read", ng * cvw * cvc * 4, 0, "roll-back D2D copy reads conv_new"))
     add(("gdn", "read", ng * (3 * zval) * 4, 0, "conv output tile u: q,k,v as F32 into rec_kernel"))
     add(("gdn", "read", ng * zval * 4 + ng * zval * 2, 0, "gated_norm reads o (F32) and z (BF16)"))
-    add(("cast", "read", ng * (hid + (qkv + 2 * vh) + zval + hid + ff) * 2
+    add(("cast", "read", ng * (hid + zval + hid + ff) * 2
                      + na * (hid + qwidth + hid + ff) * 2 + hid * 2, 0,
-         "the 115 cast inputs, BF16 tiles: norm rows, packed qkv+a+b, block_out, MLP act"))
+         "the 97 cast inputs, BF16 tiles: norm rows, block_out, MLP act — the packed qkv+a+b row "
+         "(qkv + 2*vh per GDN layer, 0.222 MB) went out with `62b73e9`)"))
     add(("proj", "read", (ng * 5 + na * 4) * hid * 4 + nl * ff * 4, 0,
          "GEMV x inputs as F32 (the widening is why this is 4 B/elem, not 2)"))
     add(("mlp", "read", nl * ff * 4, 0, "mlp_down reads mlp_act_f32"))
@@ -123,9 +129,10 @@ def rows(k: dict[str, int], lanes: int) -> list[tuple[str, str, int, int, str]]:
     add(("copy", "write", ng * cvw * cvc * 4, 0, "roll-back D2D copy writes the window"))
     add(("gdn", "write", ng * zval * 4 + ng * vh * 4 * 2, 0, "u tile + g/beta stage rows"))
     add(("gdn", "write", ng * zval * 2, 0, "gated_norm BF16 out"))
-    add(("cast", "write", ng * (hid + (qkv + 2 * vh) + zval + hid + ff) * 4
+    add(("cast", "write", ng * (hid + zval + hid + ff) * 4
                       + na * (hid + qwidth + hid + ff) * 4 + hid * 4, 0,
-         "the 115 cast outputs as F32 — twice the bytes they read"))
+         "the 97 cast outputs as F32 — twice the bytes they read (the packed qkv+a+b row, "
+         "0.445 MB, went out with `62b73e9`)"))
     add(("proj", "write", ng * (qkv + zval + 2 * vh + hid) * 2
                      + na * (qproj + 2 * kvproj + hid) * 2, 0,
          "GEMV BF16 outputs: g_raw/g_z/g_a/g_b/delta, q/k/v/delta"))
@@ -274,7 +281,8 @@ def main(argv: list[str]) -> int:
         ("conv window read+write+roll-back copy", 3 * k["kNumGdnLayers"] * k["kConvWindow"]
          * k["kConvChannels"] * 4, 18,
          "kill the roll-back copy by writing the window in place (ring), §08.2's alternative"),
-        ("cast round-trip (115 launches)", sum(b for fam, d, b, *_ in rr if fam == "cast"), 115,
+        ("cast round-trip (97 launches; 115 before `62b73e9`)",
+         sum(b for fam, d, b, *_ in rr if fam == "cast"), 97,
          "BF16 staging in mlp/proj deletes ~48 of them; the prize is the launches, not the bytes"),
         ("logits write + D2H", int(k["kVocab"]) * 4 * 2, 0,
          "device argmax would delete the D2H read, but must keep §02.5's tie rule (lowest index) "
