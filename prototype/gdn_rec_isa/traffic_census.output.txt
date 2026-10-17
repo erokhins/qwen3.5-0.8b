@@ -1,0 +1,138 @@
+== 1. what is in memory (every row sourced; nothing typed in)
+  shape constants   engine/state_sizes.py (which re-derives state.h against §00.5)
+                    kNumLayers=24, kNumGdnLayers=18, kNumAttnLayers=6, kNumValueHeads=16, kDk=128, kDv=128, kConvChannels=6144, kConvKernel=4, kConvWindow=3, kNumKvHeads=2, kHeadDim=256
+  GDN state dtype   float per element, declared at engine/state.h:88
+                    (§00.5's BF16/0.63 MiB conv cell and §08.1's were corrected to F32/1.27 MiB; see engine/state.h's header comment — the brief's 0.63 MiB is the retired cell)
+  conv window       float at engine/state.h:89 = 1.266 MiB/request
+  one layer's state 262144 elems = 1.000 MiB; all 18 layers = 18.000 MiB/request
+  wavefronts        64 per launch (16 blocks x 4 warps)
+  launch            `rec_kernel<<<NH, D>>>` at engine/kernels_gdn.cpp:40  (16 blocks x 128 threads, wave32)
+  one launch = ONE (token, layer); the token loop is the host loop at engine/decode_step.cpp:682 inside engine/decode_step.cpp:677
+  kernel body       gdn_decode_kernels.h:179: 2 state read passes, 1 write pass
+
+== 2. resident or re-read?  RE-READ, EVERY TOKEN, because there is no token loop to be resident in
+  The shipped form's only loops are the two `for (int i = 0; i < D; ++i)` walks over the state
+  inside ONE launch (gdn_decode_kernels.h:179); the next token is the next launch
+  (engine/decode_step.cpp:677 -> engine/decode_step.cpp:682), so the state is read from global on every
+  token by construction. It is not a staging choice either: a block owns one head's 128x128 F32
+  strip = 64 KiB, which is the whole LDS budget of a CU (65,536 B), so the shipped geometry
+  CANNOT hold the state across tokens. The engine does own a resident form
+  (`--gdn-scan collapse`, engine/gdn_collapse_kernels.h) and it is measured, in §4 below.
+
+== 3. the census: bytes DEMANDED (read and written; DRAM later). lanes=4096, family=534.54 ms, launches=73,728
+  scope                                read        written            total
+  one token-step (1 layer)        2.024 MiB      1.008 MiB        3.031 MiB
+     of which state               2.000 MiB      1.000 MiB        3.000 MiB
+     of which q|k|v,g,beta,o      0.024 MiB      0.008 MiB        0.031 MiB
+  one token (18 layers)          36.424 MiB     18.141 MiB       54.565 MiB
+  one 4096-lane wave             156.440 GB      77.913 GB       234.354 GB
+  demand rate       438.4 GB/s total, state alone 433.9 GB/s
+  per launch        7.250 us (ledger bills the family at 6.8-6.9 us; D25 measured 6.319 us in the burst window)
+  operand share     1.03 % of the demand — the state is the whole traffic story of this kernel, and it is 96x the operands
+
+== the ceiling test, and what it can and cannot say
+  demanded bytes at 534.54 ms = 438.4 GB/s total (433.9 GB/s of it state)
+  the part moves 240 GB/s read / 210 GB/s copy at 1 GiB (devices/strix-halo-memory-bandwidth.md, `iGPU, 1 GiB`)
+  the SAME access pattern with the state warm measures 876 GB/s at an 18 MiB working set
+  and 255 GB/s once tiled to 108 MiB (prototype/gdn_decode/results.md, Performance)
+  EXCEEDED: 438.4 > 240 GB/s. That is not a bandwidth wall, it is a
+  units confession — AGENTS.md's D21 row: DEMANDED BYTES ARE NOT DRAM BYTES. L1/L2/MALL
+  absorb the reuse (hipGetDeviceProperties calls L2 2 MiB; the warm row above proves a
+  larger cache the query does not report is holding the 18 MiB). So the demand figure is
+  admissible ONLY as the ceiling argument this section makes, never as the wall.
+  against the measured warm-state rate the same shape achieves, the demand is 50.0 % of what the box demonstrably moves. Traffic therefore cannot be the binding constraint: the kernel asks for less than half the bytes-per-second the identical access pattern is measured delivering when the state is warm, and each launch still
+  takes 7.25 us.
+
+== the direct witness, which is better than any ceiling: the traffic has already been removed
+  `prototype/gdn_collapse/results.md` §4 measured route A, which keeps the state resident in
+  LDS: state round trip 38.7 GB -> 75 MB per 1024-lane wave (a 516x cut, essentially all of it) bought 125.36 -> 112.04 ms
+  = 1.119x of the family.
+  Attribute all 13.32 ms of that to traffic and a 2x cut is
+  still worth at most half of it. Attribute it the way the launch arithmetic says to — route A
+  also replaced 18,432 launches with 36, and the empty-kernel dispatch floor
+  is 1.75-2.08 us (devices/strix-halo-memory-bandwidth.md §0c), which more than covers the
+  13.3 ms on its own — and traffic bought close to nothing at all.
+
+== 5. what a 16-bit state would buy, priced with measured elasticities
+  bytes: it halves the STATE term, not the demand — the state is 99.0 % of the demand, so the wave's demand
+  falls from 234.354 GB to ~119.602 GB.
+  demand rate would fall from 438 to ~224 GB/s — i.e. from above the 240 GB/s package ceiling to about it, and the ceiling was
+  never what bounded the kernel (§3). A saving in a quantity that is not the constraint.
+  instructions: the recurrence consumes the state as F32 in FMA chains. An F16/BF16 state means a
+  conversion per state access, and the accesses are per thread per token-step: 2 x D reads + 1 x D
+  writes = 3 x 128 = 384 conversions on a 1523-slot bill (isa_census.output.txt) = +25.2 % slots. Packing two halves per 32-bit access cannot avoid it: a thread
+  owns ONE d_v column j and walks i, so the pair it would need is in a different thread — packing
+  the state means re-cutting the thread mapping, i.e. a different kernel, not a dtype flag.
+  D25's measured elasticity is ~0.8 (a -2.0 % slot cut returned -1.6 % of time), so +25 % slots
+  is roughly +20 % of the family ~ +108 ms, against a traffic saving the
+  §4 witness bounds at well under 13 ms for the WHOLE traffic term.
+  It is a net loss on this repo's own numbers, twice over. And it is already named as a defect:
+  `engine/gdn_collapse_kernels.h`'s fail-closed negative `rc_state_bf16` is 'the cheap *the state
+  is big, halve it* mistake', injected on purpose to break bit-identity. A 16-bit state is also a
+  numerics change with NO existing range evidence: §10.1 G3 gates `state_new`, but the pinned
+  `decode*.state_fp.npy` files are FINGERPRINT rows (tools/reference_dump.py -> tools/state_fp.py),
+  not raw values, so `tools/fp16_range_probe.py`'s D14 census (peak 82.5, 794x margin) covers
+  activations/logits/weights and says NOTHING about the state's dynamic range. Under D13 a
+  16-bit switch is adoptable if the gates stay green; here the gates could not go green or red,
+  because nothing pins the state's magnitudes. That is the missing measurement, not a band to ask
+  for. RECOMMENDATION: do not fund it.
+
+== 6. VERDICT
+  TRAFFIC-BOUND: NO. The demand rate (438 GB/s) exceeds the package ceiling,
+  which under D21 falsifies the traffic model instead of supporting it; the same access pattern
+  is measured at 876 GB/s warm, so the demand fits in half of what is demonstrably
+  available; and removing essentially ALL the state traffic in situ bought 1.119x (route A).
+  LATENCY-BOUND on the per-token dependency chain: STILL THE LIVE READING, and still unmeasured.
+  Everything this census could do without a device raises it: traffic is out, instructions are out
+  (D25, 1.0159x), launches are out (route A removed 18,396 of them for 13 ms), the working set is
+  inside the cache that holds it. What is left is the chain.
+  FALSIFIER THAT FOLLOWS: the dependency-break probes in this directory (§9 of results.md).
+  rec3 breaks the cross-token round trip at fixed volume (and a fixed bill: -1 slot), rec4
+  shortens the two serial accumulator chains at fixed volume, rec5 does both, and rec6 is rec4's
+  bill-matched control — same unroll-4 loop spelling, chain NOT broken, bit-identical to rec0 —
+  because the census found rec4 10.5 % cheaper in slots and D25's elasticity says a bill that
+  much is worth up to 8.4 % of time by itself. Read rec4 against rec6, not against rec0. If the
+  probes move the clock, the chain binds and D30 items 1.4/1.5 get funded; if they all sit in the
+  noise, `gdn_rec` needs a model that D23's census has still not named, and the counters pass
+  (HANDOFF.md §4) is next, not more levers.
+
+== limits of this census (CPU-only; no device was touched and NO TIMING WAS TAKEN)
+  * demanded bytes, not DRAM bytes: no counter pass was taken, so the absorbed fraction is unknown
+    and only the ceiling argument above is admissible.
+  * the measured 876/255 GB/s rows are decode-step measurements of the same access pattern, not of
+    the prefill wave, and the 108 MiB row is quoted from a build that no longer exists
+    (prototype/gdn_decode/results.md says so). They bound the argument; they are not this kernel.
+  * route A is a different geometry (64 blocks/CU resident), so its 1.119x bundles dispatch and
+    traffic; the attribution is argued in §4 and not measured apart.
+  * the conv window is a different kernel (`gdn_conv`, 20.71 ms, D30 item 1.7) and is only listed
+    here for the per-request arithmetic; this census bills `gdn_rec`.
+listing  /home/erokhins/erokhins_projects/qwen3.5-0.8b/tmp/gdn_isa/gdn_rec_isa.s
+unit     one token-step = one launch = 64 wavefronts x 32 lanes; a global_load_b32 is one
+         4 B lane access, so bytes/launch = count x 8192 B
+         state = the two state walks; step = the whole token-step, prologue operands in
+  kernel                   slots  st_ld  st_st  step_ld  step_st  read/launch  write/launch verdict
+  rec_kernel                1523    256    128      261      129    2.000 MiB     1.000 MiB reference
+  rec0_kernel               1523    256    128      261      129    2.000 MiB     1.000 MiB VOLUME_SAME_AS_rec_kernel
+  recx_indep_kernel         1522    256    128      261      129    2.000 MiB     1.000 MiB VOLUME_SAME_AS_rec_kernel
+  recx_unchain_kernel       1363    256    128      261      129    2.000 MiB     1.000 MiB VOLUME_SAME_AS_rec_kernel
+  recx_shape_kernel         1406    256    128      261      129    2.000 MiB     1.000 MiB VOLUME_SAME_AS_rec_kernel
+  recx_both_kernel          1473    256    128      261      129    2.000 MiB     1.000 MiB VOLUME_SAME_AS_rec_kernel
+VOLUME-CHECK reference=rec_kernel modes=6 volume_differing=0 verdict=OK
+admitted the state and step load/store columns: they are the bytes. A probe that changes any
+of them is a different kernel and this script exits non-zero so a timing run cannot proceed.
+reported, not admitted — the instruction bill, with D25's measured slot elasticity ~0.8
+(a -2.0 % slot cut returned -1.6 % of time on this kernel) applied to it:
+    rec_kernel                +0 slots =   +0.0 % of rec_kernel -> up to   +0.0 % of time explainable by the bill alone
+    rec0_kernel               +0 slots =   +0.0 % of rec_kernel -> up to   +0.0 % of time explainable by the bill alone
+    recx_indep_kernel         -1 slots =   -0.1 % of rec_kernel -> up to   -0.1 % of time explainable by the bill alone
+    recx_unchain_kernel     -160 slots =  -10.5 % of rec_kernel -> up to   -8.4 % of time explainable by the bill alone
+    recx_shape_kernel       -117 slots =   -7.7 % of rec_kernel -> up to   -6.1 % of time explainable by the bill alone
+    recx_both_kernel         -50 slots =   -3.3 % of rec_kernel -> up to   -2.6 % of time explainable by the bill alone
+A probe whose bill is materially cheaper cannot attribute its delta to the dependency it
+broke; read the timing against the elasticity column, and where the two disagree the probe
+needs a bill-matched sibling (that is MODE rec6) before its number means anything.
+SELFTEST traffic cases=6 bad=0 ok=1 claim=the census reproduces §00.5's 1 MiB/18 MiB rows and route A's 38.7 GB figure from the engine's own constants, and its two must-catch controls (BF16 state, one read pass) each move the reconstructed figure
+  must-catch recx_indep_kernel    state-walk store removed         exit=1 route=refused-listing state_cols=- step_cols=- (MODE 0 state=(256, 128) step=(261, 129))
+  must-catch recx_both_kernel     prologue operand load removed    exit=1 route=step-columns state_cols=(256, 128) step_cols=(260, 129) (MODE 0 state=(256, 128) step=(261, 129))
+  must-not-catch unmutated listing: exit=0 (want 0)
+SELFTEST volume cases=3 bad=0 ok=1 claim=the volume admission refuses a removed state-walk store and a removed prologue operand load, the second of which is invisible to the state columns and is caught only because the step columns are admitted too, and it passes the unmutated listing
