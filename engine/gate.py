@@ -204,14 +204,170 @@ PREFILL_LOGITS_LAST = "last"
 PREFILL_LOGITS_ALL = "all"
 
 
+# ---- carried records in `data/refs/` that are not pins: named and skipped, never silently ignored --
+# `data/refs/` holds two kinds of directory. Most are pinned HF dumps — a `manifest.json` plus the
+# `.npy` files this gate pairs against. Three are CORPUS records that other tools read instead:
+# `speccheck/gates/run_g7.py` (G7's token agreement against the reference's own self-consistency
+# floor, §10.5 rule 3), `tools/corpus_freerun.py` and `tools/corpus_margin.py`. A corpus record
+# carries `kind: "corpus"` with `prompts[]` (text, ids, the reference's greedy continuation) and no
+# `sources`, no `greedy_continuation`, no `pins` and no `.npy` at all, so `--fixture` has nothing to
+# pair against: `pairing_checks` reached `man["sources"]` and died with `KeyError: 'sources'` on
+# `corpus48engine` — one of the three gate-internal crashes §15.2 recorded, and one whose exit code
+# an admission could not tell apart from a numerics result.
+#
+# The remedy is `tools/reference_dump.py::CARRIED_NOT_PINNED` applied one level up: a carried file is
+# NAMED and skipped, with the reason printed, so a reader of the log can see that the directory was
+# looked at and what it is. The list is DERIVED-checked by `refuse_non_pin_fixture` rather than
+# remembered — every `kind`-carrying, `pins`-less manifest must appear here, and a listed name must
+# still read that way — because a hand-typed fixture list is the exact mistake §15.2 and D40 recorded.
+NOT_A_PIN_FIXTURE: dict[str, str] = {
+    "corpus48": "the reference corpus (49 plain-text prompts with the HF greedy continuation of"
+                " each). It is a token-agreement corpus, not a pin set: `speccheck/gates/run_g7.py`"
+                " compares a free run's prefixes against it and `tools/corpus_margin.py` prices the"
+                " floor, which is §10.5 rule 3's tripwire. It carries no `.npy`, so there is no"
+                " step, state or logits to pair.",
+    "corpus48sdpa": "the same corpus re-dumped with `--attn_implementation sdpa`, i.e. the"
+                    " reference's own self-consistency floor (A-18: the 0.8776 token-equality"
+                    " floor, sdpa against eager). Same shape as `corpus48`, same reason.",
+    "corpus48engine": "the ENGINE free-run record over `corpus48`'s prompts — its own manifest"
+                      " names `binary: engine/build/decode_run` and `reference_corpus: corpus48`,"
+                      " so it records engine output, not reference output, and it carries no `.npy`"
+                      " either. `tools/corpus_freerun.py` writes it; its `gen[i]` pairs with"
+                      " `corpus48`'s `greedy_continuation[i]`, which is a corpus comparison, not a"
+                      " gate pairing.",
+}
+
+# A refusal that is neither green nor red. An admission needs three outcomes, not two: a fixture this
+# gate declines to adjudicate is a fact about the fixture, and folding it into exit 1 makes it read as
+# a numerics failure — which is how `PASS=0` from an error message was tabled as a result (§15.2).
+EXIT_SKIPPED = 3
+
+
+def refuse_non_pin_fixture(name: str, man: dict) -> None:
+    """Stop, naming the fixture and why, when its manifest is a carried record rather than a pin set.
+
+    Two failure modes are refused and one is announced:
+      * a `kind`-carrying manifest with no `pins` that is NOT listed → refuse, and say what to do.
+        Guessing here is what would let a schema gap read as a numerics result.
+      * a listed name whose manifest has since become a real pin set → refuse, because the carried
+        reason printed beside it would be a lie.
+      * a listed carried record → print `ENGINE GATE SKIPPED` with its reason and exit
+        `EXIT_SKIPPED`, so no caller can mistake it for either verdict.
+    """
+    carried = man.get("kind") is not None and "pins" not in man
+    listed = name in NOT_A_PIN_FIXTURE
+    if listed and not carried:
+        raise SystemExit(
+            f"gate: {name!r} is on NOT_A_PIN_FIXTURE but its manifest now carries `pins` (or has"
+            " dropped `kind`) — it has become a pinned fixture. Re-read why it was listed, then"
+            " remove the entry; leaving it here would skip a fixture this gate can judge.")
+    if not listed:
+        if not carried:
+            return
+        raise SystemExit(
+            f"gate: fixture {name!r} carries kind={man.get('kind')!r} and no `pins`, so it is a"
+            " carried record rather than a pin set — and it is not on `engine/gate.py`"
+            "::NOT_A_PIN_FIXTURE. Add it there with a printed reason (the"
+            " `tools/reference_dump.py::CARRIED_NOT_PINNED` rule: named and skipped, never silently"
+            " ignored), or point --fixture at a pinned dump. Refusing rather than guessing, so a"
+            " schema gap cannot be mistaken for a numerics result.")
+    print(f"ENGINE GATE SKIPPED — {name} is not a pinned fixture: {NOT_A_PIN_FIXTURE[name]}")
+    raise SystemExit(EXIT_SKIPPED)
+
+
+def selftest_non_pin_fixtures() -> list[str]:
+    """Prove the carried-record list has teeth, in process — no engine, no device, nothing written.
+
+    One case per way the list can rot, each naming what it must catch:
+      * a LISTED carried record is skipped BY NAME, with its reason printed and `EXIT_SKIPPED` returned
+        (a silent skip is §15.2's bug wearing a different hat);
+      * an UNLISTED carried record is refused by name and prints no verdict at all — a refusal that
+        reads as a result is exactly how a `PASS=0` from an error message got tabled as one;
+      * a listed name whose manifest has since become a pin set is refused too, because a stale pardon
+        would retire a fixture this gate can judge;
+      * the population walk: every manifest under `data/refs/` that reads as a carried record is on the
+        list. This is what makes the list DERIVED rather than remembered — delete an entry while its
+        directory is still on disk and this case goes red, with no need to run that fixture at all;
+      * and the must-not-catch side: a real pinned manifest, read from disk exactly as it is, passes
+        through with nothing printed and nothing raised. If that case ever fired, the list would be
+        eating fixtures, which is the opposite failure and a worse one.
+    """
+    bad: list[str] = []
+
+    def attempt(name: str, man: dict) -> tuple[object, str]:
+        """(exit code or None, everything printed) for one `refuse_non_pin_fixture` call."""
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                refuse_non_pin_fixture(name, man)
+            return None, buf.getvalue()
+        except SystemExit as exc:
+            return exc.code, buf.getvalue()
+
+    listed = sorted(NOT_A_PIN_FIXTURE)
+    if listed:
+        name = listed[0]
+        code, out = attempt(name, {"kind": "corpus"})
+        ok = code == EXIT_SKIPPED and out.startswith(f"ENGINE GATE SKIPPED — {name}")
+        print(f"  [{'PASS' if ok else 'FAIL'}] a listed carried record is skipped by name, with its"
+              f" reason printed and rc={EXIT_SKIPPED}"
+              f" — rc={code!r} printed={out.strip()[:60]!r}")
+        if not ok:
+            bad.append(f"{name}: a listed carried record must print ENGINE GATE SKIPPED and exit"
+                       f" {EXIT_SKIPPED}; got rc={code!r} printed={out.strip()[:60]!r}")
+        code, out = attempt(name, {"pins": {"x": {"step": 0}}})
+        ok = isinstance(code, str) and "become a pinned fixture" in code and "SKIPPED" not in out
+        print(f"  [{'PASS' if ok else 'FAIL'}] a listed name whose manifest now carries `pins` is"
+              f" refused, not skipped — because a stale pardon skips a judgeable fixture"
+                           f" — rc={str(code)[:60]!r}")
+        if not ok:
+            bad.append(f"{name}: a listed manifest that became a pin set must be refused;"
+                       f" got rc={str(code)[:80]!r}")
+    else:
+        bad.append("NOT_A_PIN_FIXTURE is empty while data/refs/ is expected to hold carried records")
+    code, out = attempt("zz-unlisted-carried-record", {"kind": "corpus"})
+    ok = isinstance(code, str) and "NOT_A_PIN_FIXTURE" in code and "ENGINE GATE" not in out
+    print(f"  [{'PASS' if ok else 'FAIL'}] an unlisted carried record is refused by name and prints no"
+          f" verdict line — rc={str(code)[:60]!r}")
+    if not ok:
+        bad.append("an unlisted carried record must be refused with no verdict line;"
+                   f" got rc={str(code)[:80]!r} printed={out.strip()[:60]!r}")
+    real = json.loads((REFS / "manifest.json").read_text())
+    code, out = attempt(REFS.name, real)
+    ok = code is None and out == ""
+    print(f"  [{'PASS' if ok else 'FAIL'}] must-not-catch: the real pinned manifest of"
+          f" {REFS.name!r} passes through untouched — rc={code!r} printed={out.strip()[:60]!r}")
+    if not ok:
+        bad.append(f"{REFS.name}: a pinned manifest must never be refused as a carried record")
+    unclassified = []
+    for mf in sorted((ROOT / "data" / "refs").glob("*/manifest.json")):
+        man = json.loads(mf.read_text())
+        if man.get("kind") is not None and "pins" not in man and mf.parent.name not in NOT_A_PIN_FIXTURE:
+            unclassified.append(mf.parent.name)
+    ok = not unclassified
+    print(f"  [{'PASS' if ok else 'FAIL'}] the list matches the population: {len(listed)} listed,"
+          f" and every carried manifest under data/refs/ is one of them"
+          f" — unclassified: {unclassified or 'none'}")
+    if unclassified:
+        bad.append("carried manifests not on NOT_A_PIN_FIXTURE: " + ", ".join(unclassified)
+                   + " — add them with a reason, or the list has become a silent hole")
+    return bad
+
+
 def set_fixture(name: str) -> None:
     """Point every pin read at `data/refs/<name>`. Module state rather than a parameter on nine
-    functions because `load_pin` is called from the pairing, curve and integrity checks alike."""
+    functions because `load_pin` is called from the pairing, curve and integrity checks alike.
+
+    The carried-record check belongs here rather than in `main` because this is the one choke point
+    every mode passes through — `--selftest`, `--smoke`, `--dry-run` and a device run all call it
+    before they read a pin, so a corpus directory is refused the same way in all four."""
     global REFS
     REFS = ROOT / "data" / "refs" / name
-    if not (REFS / "manifest.json").exists():
+    manifest = REFS / "manifest.json"
+    if not manifest.exists():
         raise SystemExit(f"gate: fixture {name!r} has no manifest at {REFS}/manifest.json"
                          " — make it with tools/reference_dump.py (see engine/results.md)")
+    refuse_non_pin_fixture(name, json.loads(manifest.read_text()))
 
 
 def lane_geometry() -> tuple[int, int, int]:
@@ -2887,10 +3043,35 @@ def pairing_checks(man: dict) -> tuple[list, list, np.ndarray]:
           "argmax(bare logits_last.npy) == greedy_continuation[0] — so the bare name is the PREFILL",
           f"{argmax_low(prefill_logits)} vs {greedy[0]}")
     bare_inputs = load_pin("input_ids.npy").reshape(-1)
-    check(int(bare_inputs[0]) == greedy[-2],
-          f"bare input_ids.npy is decode{len(greedy) - 2}'s input, NOT the prompt — recorded so it"
-          " is never used as one (§10.5's last-writer-wins trap)",
-          f"{bare_inputs.astype(int).tolist()} == greedy_continuation[-2] == {greedy[-2]}")
+    if n_steps == 0:
+        # No decode step ran, so there was never a second writer of the bare names: `--decode 0`
+        # fixtures (`p8`, `p64`, `p300` — see `tools/dump_fixtures.sh`) leave `input_ids.npy` holding
+        # THE PROMPT, which is the pairing a reader wants anyway, and §10.5's last-writer-wins trap
+        # has nothing to bite on. The line below cannot be evaluated at all here — `greedy[-2]` has no
+        # referent when the chain is one token long — and it raised IndexError out of this section on
+        # all three fixtures (§15.2's first crash). The GEOMETRY decides which of the two facts is
+        # asserted, not a hand-listed fixture name, so a future `--decode 0` fixture is covered the
+        # day it is dumped. And the replacement is a check, not a waiver: it compares every id, so a
+        # bare `input_ids.npy` that came from anywhere other than the prompt still fails.
+        check(bare_inputs.astype(int).tolist() == list(man["prefill_ids"]),
+              "bare input_ids.npy IS the prompt: this fixture has no decode step, so nothing"
+              " overwrote it (§10.5's last-writer-wins trap needs a decode phase, and `--decode 0`"
+              " has none)",
+              f"first 6 of {bare_inputs.size} ids {bare_inputs.astype(int).tolist()[:6]}"
+              f" vs prefill_ids ({len(man['prefill_ids'])} ids); full-list equality required")
+        notes.append(
+            f"{REFS.name} has no decode step (`--decode 0`), so the per-step half of (a) and all of"
+            " (b) judge zero steps and prove nothing about a decode chain. What this fixture DOES"
+            " prove is named where it is proved: §06.5's prefill row against the bare"
+            " `logits_last.npy` (section (0) proves the pin's argmax, section (a) re-judges the"
+            " engine's y0 against it), the prompt wave's step count, §08.6's state pins for the"
+            " prefill pass, and the chunk-64 padding §10.5 requires p64/p300 for. A PASS here is"
+            " that claim, and it is not a decode claim.")
+    else:
+        check(int(bare_inputs[0]) == greedy[-2],
+              f"bare input_ids.npy is decode{len(greedy) - 2}'s input, NOT the prompt — recorded so it"
+              " is never used as one (§10.5's last-writer-wins trap)",
+              f"{bare_inputs.astype(int).tolist()} == greedy_continuation[-2] == {greedy[-2]}")
     seen = first_pinned_logits(dec_logits)
     print(f"  [info] prompt ids come from the manifest's sources[0].ids; the prompt's own logits"
           f" come from the bare logits_last.npy, whose argmax was just proved to be"
@@ -5895,6 +6076,8 @@ def selftest(fixture: str = "dec8") -> int:
         if len(fails) > before:
             bad.append("fp-of-pins identity (section (g)'s mechanical case): " + fails[-1][:160])
     bad += selftest_declared_gaps(fixture)
+    section("(k) the carried-record list's own teeth — in process, no fixture written")
+    bad += selftest_non_pin_fixtures()
     section("(d2) the launch bill's own teeth — both directions, in process")
     bad += selftest_launch_bill()
     section("(h2) the flip rule's TWO room readings, on one injected row — in process")
@@ -6782,7 +6965,13 @@ def main() -> int:
     # The engine's logits vectors, read here rather than in (b): the tie policy is proved against what
     # the engine actually computed, so (a) needs them, and a tie that cannot be proved must FAIL at (a)
     # rather than be waived.
-    vocab = first_pinned_logits(dec_logits).size
+    # The vocabulary width comes from the pins when the fixture carries any, which is what `vocab_pin`
+    # above already decided — and it is reused rather than recomputed so the two cannot disagree about
+    # how wide a logits row is. Reading `.size` off `first_pinned_logits` unguarded was an
+    # `AttributeError: 'NoneType' has no attribute 'size'` on every `--decode 0` fixture (p8/p64/p300)
+    # the moment section (0) stopped crashing first: such a fixture has no per-step pin at all, and its
+    # width then comes from the manifest's own `text_config.vocab_size`.
+    vocab = vocab_pin
     eng_logits = read_engine_logits(work, n_decode, len(prompt_ids), vocab)
     # ---- §06.5's `y0`: the wave's last row, judged by the same predicate as every other step (D-8) --
     # The tie policy is a statement about a PIN that never chose a winner, not about a generation phase,
