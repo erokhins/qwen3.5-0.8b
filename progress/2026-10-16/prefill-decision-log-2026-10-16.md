@@ -952,3 +952,51 @@ exited 0 and timed **nothing**. Three windows were burned on that before it was 
 this session of a driver printing PASS over an empty parse (`gdn_collapse/run.py`, `gate.py`'s prefill-row
 count, `mixed_bw`'s block sum, and now this), which is why every new driver in this repo is now expected to
 assert its own record count rather than print a verdict.
+
+# D33 — the spelling survives the wave: `gdn_rec` **1.153×** in situ, prefill **3927 → 4284 tok/s**, and a burst winner is not necessarily an in-situ loser (2026-10-16)
+
+`bench/performance-status.md` §7 is the ledger row; this is the decision and the correction to the reasoning
+that surrounded it.
+
+Paired inside one lock hold per width, alternating, medians of 3, blocking, zero subagents: **4096 lanes**
+`gdn_rec` 496.55 → **430.69 ms (1.153×)**, whole wave 1043.11 → **956.12 ms (1.091×)**, prefill
+**3927 → 4284 tok/s**; **1024 lanes** 1.100× on the family and 1.060× on the wave. Every `unroll4` rep beat
+every `ship` rep (worst-vs-worst 1.110×), and all twelve runs carried `plan_match=1 launchstats_match=1
+WAVEPARITY tokens_identical=1 logits_bitidentical=1`. Admission: ten fixtures green across both spellings, with
+`gate.py` section (j) byte-comparing the two logits corpora inside every run (`wide1024f`: 1032 rows,
+**1025.1 MB per side, identical**).
+
+**The correction, stated as a rule and not as luck.** D32 said the burst claim was "explicitly not a win until
+an in-situ A/B says so", citing D28's precedent that burst winners can be in-situ losers — and it was right to
+say that, but the session's working inference had quietly become *burst numbers do not transfer*. Here the
+launch-level 1.149–1.158× reproduced as 1.153× at family level, because the burst ran the engine's own launch
+geometry (one `16×128` grid per token-step, 73,728 of them per 4096-lane wave), and D28's burst-vs-wave
+divergence came from a different source: **library call ordering and L2 sharing across families, not from the
+kernel's own micro-schedule.** The general form is therefore not "never trust a burst" but **ask what the burst
+holds fixed**: a probe that keeps the shipped launch geometry and byte account transfers; a probe that changes
+which calls surround it does not. Two precedents with different mechanisms were being quoted as one.
+
+**What moved, and what it did not.** `gdn_rec` fell from 48.07 % to **44.79 %** of the wave and `attn` is now the
+largest remaining non-recurrence family at **26.94 %** (257.56 ms of 956.12 ms), which is what re-ranks the
+WMMA-attention question (D30 item 2.4) to second place. Decode moved **~0.1 %** by arithmetic — 18 launches per
+step at 6.73 → 5.88 µs is 0.11 % of a 14.028 ms step, four times under the ruler's spread — so the 71.3 tok/s
+row stands as an upper bound with the reason written down, and it is owed a re-take if the decode ruler ever
+gets tighter than 1 %.
+
+Two plumbing decisions, both forced by the flip rather than chosen for style. `gate.py`'s `--gdn-spell` default
+moved in the same commit as the engine's, because a gate whose default disagrees with the shipped binary silently
+judges a build nobody ships (the trap is already written up for `--attn-tile`). And the collapse-pair refusal is
+now keyed on the flag having been **given**, not on the value differing from `ship`: with `unroll4` as the
+default, a bare `--gdn-scan collapse` would otherwise have become an error the user never asked for — the same
+class as `gate.py`'s inert-knob rule, one layer over. A default must not criminalise a legal run, and the echo
+says `gdn_spell=inert-under-collapse` rather than naming a spelling that did not run.
+
+**Residual, honestly.** The win is a schedule effect and the census cannot say *why* 117 fewer slots bought 15 %
+rather than the 6.1 % D25's elasticity predicts — plausible candidates are address arithmetic leaving the serial
+chain, or the unroll letting loads issue ahead of the accumulator they feed, and neither is measured. That gap
+matters because it is the reason D30 item 1.9 generalises: if schedule is the axis, then the shipped
+`rec_kernel`'s 1.15× is evidence that **other serial kernels may have the same free win in their spelling**, and
+`prototype/gdn_rec_isa` now has the harness pattern (bit-identity gate + volume admission + bill-matched control)
+to look for it cheaply. Also fixed in passing, found while plumbing the knob: `engine/gate.py --help` raised
+`ValueError` from argparse's `%`-formatting in `--gemm`'s help text — the flag reference of the main gate driver
+was unreachable since the lt flip, which is what the second commit says.
