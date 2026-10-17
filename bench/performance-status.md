@@ -564,3 +564,23 @@ is `mlp_gateup` **63.95 → 58.25 ms** at 4096 and **16.05 → 14.16** at 1024, 
 `down_proj` row contributes nothing measurable. Numerics admission: **9/9 canonical fixtures green** under the new
 default (`pins=2/2 pin_names=down_proj,deep_gate_proj+up_proj cand=0/3`), including `wide1024f`. No `tok/s` headline
 is claimed, for the §9 reason: the wave column is carried by families no pin touches.
+
+**New default vs old default, paired (`tmp/pinab/ab4.txt`, one lock hold, 3 pairs, alternating, `util` 91 %).**
+`new` = `all` as shipped now (`down_proj` + `deep_gate_proj+up_proj`), `old` = `--gemm-pins down_proj`, which *is*
+the previous default spelled out:
+
+| width | cfg | `proj` | `mlp_gateup` | `mlp_down` | sum3 | wall |
+|---|---|---|---|---|---|---|
+| 4096 | **`new`** | 98.91 | **58.51** | 27.02 | **184.44** | **963.28** |
+| 4096 | `old` | 98.85 | 62.92 | 26.55 | 188.32 | 985.44 |
+| 1024 | **`new`** | 24.47 | **14.28** | 6.57 | 45.32 | 201.81 |
+| 1024 | `old` | 24.50 | 15.77 | 6.62 | 46.89 | 195.19 |
+
+The attributable effect is the family row: **`mlp_gateup` −7.0 % at 4096 and −9.4 % at 1024**, every pair, which is
+**−4.4 ms and −1.5 ms = −0.46 % and −0.75 % of the two waves**, and `proj`/`mlp_down` sit where they should for a
+change that touches neither. The wall is reported and then set aside: at 4096 it reads **+2.3 % with the three pairs
+non-overlapping** (every `new` rep beat every `old` rep), which is ~5× more than this pin can cause, and at 1024 the
+same window reads **−3.4 %** on the same pin while its own family row wins by 9 % — so the wave column is still being
+carried by drift in families no pin touches, exactly as §9 said. **No new tok/s headline is claimed from this
+window**; the recorded 4284 stays as the last clean cross-window ruler row, and the honest number for this ship is
+the family row's **≈ −0.5 % of wave**.
