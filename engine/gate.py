@@ -5818,7 +5818,7 @@ def main() -> int:
                          " priced meanrel band, so it cannot degrade into the ordinary wrong-id test")
     ap.add_argument("--gemm", choices=list(GEMM_ROUTES), default="lt",
                     help="which GEMM route the run being judged uses (route (c), `decode_run --gemm`)."
-                         " `lt` — the shipped default since the in-situ A/B (+11.0% / +8.4% whole wave,"
+                         " `lt` — the shipped default since the in-situ A/B (+11.0%% / +8.4%% whole wave,"
                          " D28) and the default `decode_run` itself now carries; `library` remains a"
                          " first-class value so the claim stays A/B-able in one binary. Either one"
                          " arms the cascade floor (CASCADE_BAND): each step's cos/meanrel cap"
