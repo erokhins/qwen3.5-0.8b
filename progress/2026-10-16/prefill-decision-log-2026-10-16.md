@@ -839,7 +839,10 @@ anything else on the list.
 
 **Queue status, updated as items close.** Item 1 (3.2, workspace budget) **closed negative — see D31**, and its
 replacement is **3.7, select beyond the shallow heuristic answer** (≈ 2.2 % ceiling, burst-priced, in-situ
-adjudication required), inserted at position 7b below 3.4/3.5. Everything else in the list stands as written.
+adjudication required), inserted at position 7b below 3.4/3.5. Item 2 (1.6, state dtype/traffic) and item 3
+(1.3, the dependency-break falsifier) are **closed by D32**: not traffic-bound, not latency-bound on either
+chain, so 1.4 and 1.5 close with them and **1.9, loop spelling at bit-identity, is the new head of the queue**
+at a ~6.3 % ceiling pending in-situ adjudication. Item 4 (2.4, the WMMA attention price) is next after it.
 
 # D31 — D30 item 3.2 comes back **negative**, and the thing it found instead is candidate depth (2026-10-16)
 
