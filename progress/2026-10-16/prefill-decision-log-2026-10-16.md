@@ -1185,3 +1185,32 @@ fail was being counted as plumbing that had to move.
 **Next.** `4.2′` (one gather kernel replacing 4096 submissions, ~0.87 %, gated by its own §5-C A/B), then
 `1.7′`. `2.6` (attn tile occupancy) and `3.3` (hand WMMA GEMM) are untouched; `2.5` needs a numerics admission
 and `5.1` is out of authority.
+
+# D38 — **per-op submission cost is *not* absorbed by a busy stream, so launch count is a real lever and D30 gets re-read** (2026-10-17)
+
+Source: `47274f4`, `bench/performance-status.md` §11, `tmp/gcc/ab42p.txt`.
+
+The submission probe said a 2 KiB copy is 84 % submission, but it ran with an idle CPU, where the submit rate
+is by definition the binding rate. The open question was whether the same cost is exposed when the device is
+busy — and the census wrote the answer as a **two-sided test**, not a hope: row collapses to ≲0.5 ms **and**
+wall drops ≥5 ms, or the submissions were absorbed and every launch-shaped row in D30 needs re-reading.
+
+**It is exposed.** Six of six pairs negative across two widths, wall −1.38 % at 4096 (−12.9 ms) for a row that
+fell 9.34 ms, and the wall fell *more* than the row at both widths. So three things follow:
+
+1. **Launch count is a lever in its own right on this box**, not a proxy for bytes. The empty-launch floor is
+   1.72 µs and a real 2 KiB copy is 2.05 µs; at 4096 submissions per wave that is ~7 ms of wave that no amount
+   of bandwidth can buy back.
+2. **`glue`'s launch component gets re-read upward.** D30 4.3 was refused as a fusion and that stands, but its
+   launch part is now priced by the same arithmetic rather than waved away as "dispatch-bound and bimodal" —
+   392 submissions per wave is ~0.67 ms of floor, small but real and measurable.
+3. **`gdn_rec` is the counterexample that keeps this honest.** Its 73,728 submissions per wave are *not*
+   submission-shaped at 140 µs/launch (≈80× the floor), so this finding does not open a big new item there.
+   A lever being real is not the same as every family being vulnerable to it, and the same ratio that made 4.2′
+   fundable is what keeps `gdn_rec` out of scope.
+
+**Method, second confirmation.** This is the D34 pattern working twice in two days on the same box: price the
+mechanism with a small probe *before* building, state the refuting result as a finding, and let the build
+follow the prediction. 4.2′ is the second D30 item whose ceiling a pre-measurement confirmed (4.1 was the
+first, via the census's own bytes). Both times the pre-measurement also *shrank* the work: 4.1 needed one bill
+deriver where the census priced two, and 4.2′ needed no `gate.py` change at all.
