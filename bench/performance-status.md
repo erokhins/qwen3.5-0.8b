@@ -478,3 +478,49 @@ two corpora inside every one of those runs — `wide1024f` compared **1032 logit
 found them identical**. The engine dumps no state *values* (`--state-fp` rows are order-invariant moment sums and
 cannot witness bit-identity), so the per-element witness lives in the harness, where the engine's own header is
 compiled into the probe TU (`--modes … receng`, `ndiff_o_vs0 = ndiff_state_vs0 = 0`).
+
+## 9. The deep-field algo pins: 4 admitted at burst, **2 ship**, and a subset that is worse than no change (2026-10-17)
+
+**Instrument:** `decode_run --time-waves --steps 0`, `ids4096.txt` / `ids1024.txt`, three configs and both widths
+**paired inside two `gpu_lock` holds** (one per config set), alternating per spec, medians of 3, blocking, zero
+subagents, `util` 91 %/92 % at acquire (discounted per §6). Prerequisite, not a formality: the four candidates were
+first admitted by the numerics gate under the existing bands — **9/9 canonical fixtures green with all four bound**
+(`pins=4/1 cand=4/4`, four `source=candidate` plans at M=512), and the default path re-verified unchanged
+(`pins=1/1 pin_names=down_proj cand=0/4`). Analysis: `tmp/pinab/{ab.txt,ab2.txt}`, `tmp/pinab/tab.py`.
+
+Judge this **only** on the per-family rows of the pinned shapes. The `wall_ms` column cannot adjudicate a four-shape
+pin change: between the `all` and `cand` runs `gdn_rec` moved 470.04 → 426.42 ms and `attn` 272.48 → 259.29 ms,
+families **no algo pin can touch**, and those two drifts (−56.8 ms) account for essentially all of the −50.25 ms
+wall movement. A null test on the same logs sizes the row noise: `proj` under a config that cannot change it reads
+**+3.1 % at 4096 and +1.9 % at 1024**.
+
+Medians, `gu` = the `gate_proj+up_proj` candidate alone, `gud` = that plus the `down_proj` candidate, `cand` = all
+four admitted:
+
+| width | cfg | `proj` | `mlp_gateup` | `mlp_down` | sum3 | wall |
+|---|---|---|---|---|---|---|
+| 4096 | `all` (shipped) | 99.23 | 63.95 | 26.87 | 190.05 | 988.34 |
+| 4096 | `gu` | 102.33 | **57.59** | 32.16 | 192.07 | 963.20 |
+| 4096 | **`gud`** | 98.10 | **57.89** | **26.62** | **182.62** | 979.09 |
+| 4096 | `cand` | **125.18** | 57.66 | 26.63 | 209.47 | 981.83 |
+| 1024 | `all` | 24.70 | 16.05 | 6.61 | 47.36 | 203.54 |
+| 1024 | **`gud`** | 24.60 | **14.48** | **6.45** | **45.54** | 200.81 |
+| 1024 | `cand` | **31.29** | 14.18 | 6.75 | 52.22 | 202.62 |
+
+**What ships: two of the four, and only together.** `deep_gate_proj+up_proj` is a clean −10.0 % on its family at
+*both* widths, every rep; `deep_down_proj` is small but consistently positive. The two `proj` candidates —
+`deep_o_proj+out_proj` and `deep_in_proj_qkv`, winners at burst by 1.34× and 1.13× — run **+26 % and +27 % slower
+in situ**, which is the same pair D28 rejected from a shallower field, now rejected a second time from a deeper one.
+Net of what actually ships: **sum3 190.05 → 182.62 ms (−3.9 %) at 4096 and 47.36 → 45.54 (−3.8 %) at 1024**
+= **−0.75 % of the wave**, not the +1.903 % the burst table promised, and the wall is unchanged within its own
+noise so no headline tok/s number is claimed from this window.
+
+**The finding that outranks the win: algo pins are not independent, and one admissible subset is worse than shipping
+nothing.** With the `gate_proj+up_proj` candidate in force and the *shipped* `down_proj` pin left alone (`gu`),
+`mlp_down` goes **26.87 → 32.16 ms (+19.7 %) at 4096 and 6.61 → 7.97 (+20.6 %) at 1024 — in all three reps at both
+widths** — so `gu` is net-negative on sum3 (192.07 vs 190.05) despite winning 10 % on its own shape. Add the
+`down_proj` candidate and it comes back to 26.62: the deep-field `down_proj` algo is the one that suits the
+*new* `gateup` kernel's L2 state, while the old pin is not. Two consequences kept as rules: a pin set is adjudicated
+**as a set** or not at all, and **a per-shape winner that changes a neighbouring shape's L2 can turn a win into a
+loss on a family the flag does not name** — which is the D33 mechanism ("ask what the burst holds fixed") arriving
+inside a single binary, with nothing but a pin changed between the two sides.
