@@ -584,3 +584,44 @@ same window reads **−3.4 %** on the same pin while its own family row wins by 
 carried by drift in families no pin touches, exactly as §9 said. **No new tok/s headline is claimed from this
 window**; the recorded 4284 stays as the last clean cross-window ruler row, and the honest number for this ship is
 the family row's **≈ −0.5 % of wave**.
+
+## 10. The F32 seam deletion: `cast` −57 %, prefill **+1.86 %** at 4096 lanes (2026-10-17)
+
+D30 4.1 was booked as a fusion and turned out to be a deletion: 78 of the 114 casts per wave body widen a
+BF16 tile into an F32 scratch buffer the library route never reads, because `project()` and the MLP call
+sites pick the 16-bit operand under `lib_gemm` and the widening happened anyway. Deleting them cannot move a
+bit, so no numerics band was touched and the gate set is the witness. Detail in
+`progress/2026-10-17/glue-cast-copy-bytes-census.md` §3/§8 and D37.
+
+Paired inside one lock hold, alternating per rep, medians of 3, blocking, zero subagents, `util` 92 %
+(`tmp/gcc/ab.txt`, `tmp/gcc/run_ab.sh`; base binary saved beside the new one so the A/B is the change and
+not the window):
+
+| width | family | base | 4.1-a | Δ | Δ % |
+|---|---|---|---|---|---|
+| 4096 | `cast` (913 → **289** launches) | 27.3218 | **11.7545** | −15.5673 | **−56.98 %** |
+| 4096 | `glue` | 14.1991 | 15.4061 | +1.2070 | +8.50 % (noise; not touched) |
+| 4096 | `proj` | 99.8226 | 97.3716 | −2.4510 | −2.46 % (noise; not touched) |
+| 4096 | **wall** | 966.0399 | **948.3901** | −17.6498 | **−1.83 %** |
+| 1024 | `cast` (229 → 73 launches) | 6.3860 | **2.8893** | −3.4967 | **−54.76 %** |
+| 1024 | **wall** | 194.6688 | **185.6256** | −9.0432 | **−4.65 %** |
+
+The reason this ship is trusted where the algo pin was not: **the row and the wall agree at both widths**.
+The row predicts −15.57 ms and the wall gives −17.65 ms at 4096; the row predicts −3.50 ms and the wall
+gives −9.04 at 1024. D21's null was a row that collapsed while the wall sat still — here they move together,
+so the deleted work was on the critical path and not absorbed by L2. The two untouched families move at
+their usual spread (±2.5 % on `proj`, ±8.5 % on `glue`), which is what bounds the noise floor of this
+window.
+
+**Admission.** 18/18 gates — the nine canonical fixtures on **both** routes (`--gemm lt` and `--gemm hand`),
+which is the control that matters: the guard is a route test, so the hand route had to come back unchanged
+and did. The per-token cast bill stays **115 on both routes** (section (d) never moved, because
+`resolve_wave_gemm` forces the hand GEMV at `rows <= 1`), `plan_match=1` and `counts_match=1` in every
+wave-timed run, and the new deriver self-check `body1_library_plan_matches_token_plan=1` printed in every
+one.
+
+**Headline.** The recorded prefill row stays **4284 tok/s** until a dedicated ruler window re-takes it; the
+paired ratio here is **1.0186 at 4096 and 1.0487 at 1024**, which *derives* **≈ 4364 tok/s** by applying
+this window's own ratio to the last clean row. Stated as a derivation, not as a ruler row, because §9's
+lesson is that a short-window wall is not portable between windows. Decode is untouched (71.3 tok/s): a
+one-row body never takes this route.
