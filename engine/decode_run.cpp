@@ -58,9 +58,9 @@
 
 namespace {
 
-// Slot count a `--session` allocates when `--cap` is not given. Not a limit the engine enforces:
-// the attention stage refuses above its own lane ceiling long before 4096 (`kernels_attn.cpp`'s
-// MAXSC, written up in `engine/results.md`), and 48 MiB of KV is nothing on this box.
+// Slot count a `--session` allocates when `--cap` is not given. Not a limit the engine enforces, and
+// after the 2.5 ceiling raise it is no longer the first bound either: attention now serves 512 x 9 =
+// 4608 lanes, so a session hits this cap first and `--cap` is how it reaches the wider geometry.
 constexpr int64_t kSessionDefaultCap = 4096;
 
 struct Options {

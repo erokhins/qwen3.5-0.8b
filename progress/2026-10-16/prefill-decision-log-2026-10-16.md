@@ -13,7 +13,7 @@ plan and command list), `bench/performance-status.md` (the ruler),
 
 ## D1 — The requested 20k-token prefill cannot be measured as asked, and that is a finding
 
-`engine/kernels_attn.cpp:60` sets `kAttnMaxSplit = 8` and the staging is `MAXSC = 512`
+`engine/kernels_attn.cpp:65` sets `kAttnMaxSplit = 8` and the staging is `MAXSC = 512`
 (`prototype/attn_decode/attn_decode_kernels.h:32`), so the lane ceiling is **4096 tokens**;
 `engine/prefill.cpp:49-57` says a prompt past it refuses rather than overrunning. A 20,480-token
 prompt is therefore refused today. Measured proof (refusal text, and the wave behaviour right up to

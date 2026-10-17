@@ -188,8 +188,8 @@
 #define ATTN_M2_G GQA                // 4 query heads of one KV group per block (the shipped lever)
 #define ATTN_M2_THREADS 256          // ATTN_M2_M * ATTN_M2_G warps: ONE WARP PER (row, head) pair
 #define ATTN_M2_L 8                  // K lane rows staged per pass-1 sub-block (= warps per block)
-#define ATTN_M2_MAXSPLIT 8           // engine `kAttnMaxSplit` (engine/kernels_attn.cpp:60); the lane
-                                     // ceiling is MAXSC * ATTN_M2_MAXSPLIT = 4096
+#define ATTN_M2_MAXSPLIT 8           // this prototype's OWN cap, not the engine's `kAttnMaxSplit`
+                                     // (raised to 9 for `wide4096f`); 2.2's numbers were taken at 8.
 #define ATTN_M2_STAGE (MAXSC + ATTN_M2_MAXSPLIT)   // worst union of two adjacent rows' slices, lanes
 #define ATTN_M2_VSLOT (TILE + ATTN_M2_MAXSPLIT)    // worst union of the pair's two CURRENT tiles
 #define ATTN_M2_PAIR (ATTN_M2_M * ATTN_M2_G)       // (row, head) pairs one block holds = warps

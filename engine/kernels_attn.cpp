@@ -56,13 +56,13 @@ namespace {
 // engine's lane ceiling: `MAXSC × kAttnMaxSplit`. It is what makes that ceiling a bounded,
 // allocatable number rather than "as much shared memory as the row happens to need", and going past
 // it is a refusal, never an overrun: `attn_decode_layer` throws rather than write past the staging or
-// past the `part` scratch. 8 is the number that makes the ceiling the context the engine already
-// hands out by default (`decode_run`'s `kSessionDefaultCap` = 4096 slots); it is not a limit the
-// arithmetic has, and a longer request gets this comment, not a wrong token.
+// past the `part` scratch. 9 admits the widest PINNED plan — `wide4096f`'s 4096 prompt + 8 generated
+// = 4104 lanes, which 8's 4096 refused — on `wide4096p`'s 4096 judged rows (D44); nothing above 4104
+// is pinned. No address reads this cap, so a plan 8 ran is bit-identical, and only the scratch grows.
 //
 // `engine/gate.py::lane_ceiling()` READS both halves of that product out of the files that enforce
 // them, so neither constant can be retyped into the gate.
-constexpr int kAttnMaxSplit = 8;
+constexpr int kAttnMaxSplit = 9;
 
 // The split a row of `lanes` needs: `split = ceil(lanes / staging)`, so no block is handed more lanes
 // than the staging width the split was derived from (`ceil(n / ceil(n/s)) <= s`).
@@ -90,12 +90,12 @@ hip_bfloat16* bf16(const uint16_t* p) {
 
 std::size_t attn_part_floats(int rows) {
     // `attn_core`'s own partial layout: one `(max, sum, acc[DH])` tuple per (query head, split
-    // block), F32 — `a.part + ((qrow*N_Q + head)*split + blockIdx.y)*(DH + 2)` in the kernel. Sized
-    // for `kAttnMaxSplit`, which is what makes the lane ceiling allocatable instead of hopeful, and
-    // for `rows` query rows because P8 put a whole wave through one launch: at `kMaxWaveRows` = 512
-    // that is 512 x 8 x 8 x 258 F32 = 33.8 MB, which is the largest number in the scratch and is
-    // ~1 % of this model's whole footprint (`AGENTS.md`'s budget table). It is written only by rows
-    // above the staging, so a request that never goes past 512 lanes never touches it.
+    // block), F32 — `a.part + ((qrow*N_Q + head)*split + blockIdx.y)*(DH + 2)` in the kernel. The
+    // slot index never exceeds `rows*N_Q*split - 1`, and the throw in `attn_decode_layer` is what
+    // keeps `split <= kAttnMaxSplit`, so sizing for the cap cannot overrun. At `kMaxWaveRows` = 512
+    // it is 512*8*9*258 F32 = 38,043,648 B (33,816,576 B at cap 8), ~2.5 % of the 1.5457 GB
+    // checkpoint; cap 40 (20480 lanes) would be 169,082,880 B — cheap, unfunded, no pin reaches it.
+    // It is written only by rows above the staging, so a request under 512 lanes never touches it.
     return static_cast<size_t>(rows) * N_Q * kAttnMaxSplit * (DH + 2);
 }
 
@@ -150,10 +150,10 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                                      ", more blocks than the engine's kAttnMaxSplit=" +
                                      std::to_string(kAttnMaxSplit) + " (lane ceiling " +
                                      std::to_string(MAXSC * kAttnMaxSplit) + " = staging MAXSC " +
-                                     std::to_string(MAXSC) + " x split). Raising it means raising the"
-                                     " `part` scratch too — `attn_part_floats(rows)` sizes it, and"
-                                     " `engine/gate.py::lane_ceiling()` reads both constants rather"
-                                     " than trusting a number");
+                                     std::to_string(MAXSC) + " x split). One constant moves both"
+                                     " halves: `attn_part_floats(rows)` sizes the `part` scratch from"
+                                     " this same `kAttnMaxSplit`, and `gate.py::lane_ceiling()` reads"
+                                     " both factors from the files that enforce them");
         }
         if (a.part == nullptr) {
             throw std::runtime_error("attn_decode_layer: widest row is " +
