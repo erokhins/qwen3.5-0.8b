@@ -741,3 +741,15 @@ stale binary agrees with itself, and a self-consistency check cannot detect stal
 **behavioural canary asserted inside the measurement window** — here, `new` must print `cast=97 other=20
 total=406` and `base` must print `115/424`, or the script aborts before timing. Every A/B script from now on
 carries one, and it is `run_ab_17p_retake.sh` that produced the numbers above.
+
+## 14. Dated correction to §6 and §11: the per-token launch bill moved (2026-10-17)
+
+Appended at the end rather than edited in place, because §1–§6 are cited by line number from `progress/` and
+the ledger's older sections are banner-marked rather than rewritten for exactly that reason.
+
+`62b73e9` deleted the packed GDN widening at **every** width and both routes, so the two route-symmetric
+counts quoted earlier moved: **cast 115 → 97 per token, per-token bill 424 → 406, wave plan 76346 → 76202**.
+Specifically §11's "a decode step's bill is **424 on both routes**" and §6's cast row are the plan *as measured
+on their own dates* and were not touched; §13 carries the re-take, and `engine/gate.py` section (d) now
+polices 97/406 with `selftest_launch_bill()` shown biting at +1 and −1 (D39). The §12 ruler row — **4419
+tok/s** — was taken after `62b73e9` and needs no correction.

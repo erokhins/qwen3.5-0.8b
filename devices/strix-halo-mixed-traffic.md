@@ -637,3 +637,11 @@ the two-stream interleave in `mlp_gateup`, i.e. read `gate` and `up` as two cont
 contiguous pass over a co-allocated pair) instead of interleaving rows between them — with the usual proof
 standard: byte-identical outputs, `margin_delta` ×1.0000, gate counts unchanged, and a measured A/B in one
 locked window against the 4.264 ms in-step row it is meant to move.
+
+**Dated correction (2026-10-17, `62b73e9`).** The `cast` family in this document's rows is **97 launches per
+token, not 115**: the packed `g_raw│g_a│g_b` widening lost its only reader when `conv_kernel`/`gates_kernel`
+began widening their BF16 operands in-register. The **per-launch figures in the rows stand** — they were
+measured per launch and are unaffected — but the family byte totals move to **0.371 MB read / 0.741 MB written
+per token** (from 0.593 / 1.186, i.e. −0.222 read and −0.445 written), and `G_step`'s read:write denominator
+moves **61.7 : 1 → 62.8 : 1**. Rows L45 and L249-250 were left exactly as taken; this note is the correction,
+because a measured number and the date it was taken on are both part of the measurement.
