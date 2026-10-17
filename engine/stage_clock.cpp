@@ -64,7 +64,8 @@ std::array<int, kStageCount> plan_bill() {
 //   glue  1 + 2 x 24 per body                                proj  5 x 18 + 4 x 6 per body
 //   gdn_conv / gdn_gates / gdn_gated_norm  1 x 18 per body   gdn_rec  1 x 18 PER TOKEN (a scan)
 //   attn  6 per body (sites)                                 mlp_gateup / mlp_down  24 per body each
-//   cast  3 x 24 + 2 x 18 + 6 per body, + 1 per priced row   copy  tokens + 18 per body
+//   cast  3 x 24 + 2 x 18 + 6 per body on the hand route, 2 x 18 on a library body,
+//         + 1 per priced row                       copy  tokens + 18 per body
 //   lm_head  1 per priced row                               host_tail  0 (a D2H and a host loop)
 //
 // The `cast` row is the one worth reading twice: per layer the body casts the norm tile for the mixer
@@ -72,6 +73,13 @@ std::array<int, kStageCount> plan_bill() {
 // the gated-norm output cast (18), an attention layer adds the gated-output cast (6) — 3x24 + 2x18 + 6 =
 // 114 per body. For a body of one token with one priced row that must be, and is checked to be, the
 // per-token plan's 115.
+//
+// The hand bill is the whole story only on the hand route. `submit_wave_body` guards every widening whose
+// sole reader is a hand kernel on the same predicate its call sites use, so on a library route the only
+// casts a wide body still submits are the two per GDN layer that the 16-row `in_proj_b`/`in_proj_a` pair
+// and `gdn_conv`/`gdn_gates` read whatever the GEMM chose: 2x18 = 36 per body, of which `gdn_conv`'s
+// packed `cast_bf16_to_f32_3` is one. The `priced` term is route-blind: `finish_token`'s widening feeds
+// `lm_head_full`, which is a hand kernel at every width.
 struct WavePlanBill {
     std::array<long long, kStageCount> subs{};
 };
@@ -116,7 +124,26 @@ WavePlanBill wave_plan_bill(const WaveShape& sh) {
     p.subs[kAttn] = A * bodies;
     p.subs[kMlpGateup] = L * bodies;
     p.subs[kMlpDown] = L * bodies;
-    p.subs[kCast] = (3 * L + 2 * G + A) * bodies + priced;
+    // The one row the GEMM route moves, and it moves because of who READS the widening, not who wrote
+    // it (`decode_step.cpp` guards each site on `wave_gemm_is_library`, the predicate its `project()` /
+    // `mlp_*` branches already use). Hand: §07's 3L + 2G + A = 114 per body. Library: 2G = 36, the two
+    // per-GDN-layer casts whose readers (`in_proj_b`/`in_proj_a`, the conv and the gates) are not GEMMs
+    // at any width. A one-row body owes the HAND count whatever the run asked for — `resolve_wave_gemm`
+    // again — so that body is derived from the shape here rather than trusted to the caller, exactly as
+    // the chunked branch above derives it.
+    const long long casts_hand = 3 * L + 2 * G + A;
+    const long long casts_library = 2 * G;
+    long long lib_bodies = 0;
+    long long hand_bodies = bodies;
+    if (sh.gemm_library) {
+        const long long last_body_rows =
+            sh.bodies > 0 ? sh.tokens - (sh.bodies - 1) * sh.wave_rows : 0;
+        const long long single =
+            sh.wave_rows <= 1 ? bodies : ((last_body_rows == 1) ? 1 : 0);
+        lib_bodies = bodies - single;
+        hand_bodies = single;
+    }
+    p.subs[kCast] = casts_hand * hand_bodies + casts_library * lib_bodies + priced;
     p.subs[kCopy] = tokens + G * bodies;
     p.subs[kLmHead] = priced;
     p.subs[kHostTail] = 0;
@@ -427,14 +454,27 @@ std::string Clock::describe_wave(const WaveShape& shape) const {
         const std::array<int, kStageCount> tok = plan_bill();
         // `gdn` and `mlp` are the two rows the tables spell differently: §07 bills them as 72 and 48 under
         // one name each, the wave bill carries them under six. Fold, then compare everything.
-        const long long gdn_wave = w1.subs[kGdnConv] + w1.subs[kGdnGates] + w1.subs[kGdnRec] +
-                                   w1.subs[kGdnChunk] + w1.subs[kGdnGatedNorm];
-        const long long mlp_wave = w1.subs[kMlpGateup] + w1.subs[kMlpDown];
-        const bool same = w1.subs[kGlue] == tok[kGlue] && w1.subs[kProj] == tok[kProj] &&
-                          gdn_wave == tok[kGdn] && w1.subs[kAttn] == tok[kAttn] &&
-                          mlp_wave == tok[kMlp] && w1.subs[kCast] == tok[kCast] &&
-                          w1.subs[kCopy] == tok[kCopy] && w1.subs[kLmHead] == tok[kLmHead];
-        std::snprintf(buf, sizeof buf, " body1_plan_matches_token_plan=%d", same ? 1 : 0);
+        const auto matches_token_plan = [&](const WavePlanBill& w) {
+            const long long gdn_wave = w.subs[kGdnConv] + w.subs[kGdnGates] + w.subs[kGdnRec] +
+                                       w.subs[kGdnChunk] + w.subs[kGdnGatedNorm];
+            const long long mlp_wave = w.subs[kMlpGateup] + w.subs[kMlpDown];
+            return w.subs[kGlue] == tok[kGlue] && w.subs[kProj] == tok[kProj] &&
+                   gdn_wave == tok[kGdn] && w.subs[kAttn] == tok[kAttn] &&
+                   mlp_wave == tok[kMlp] && w.subs[kCast] == tok[kCast] &&
+                   w.subs[kCopy] == tok[kCopy] && w.subs[kLmHead] == tok[kLmHead];
+        };
+        const bool same = matches_token_plan(w1);
+        // The same one-row body on a library route. `resolve_wave_gemm` gives a one-row body the hand
+        // GEMV whatever the run asked for, so the route-aware `cast` row must fold back to §07's 115
+        // here: this is the witness that the guard is a row-count rule and not a flag rule, and a guard
+        // that could fire at n == 1 — i.e. one that could move a decode step — would read 0 in
+        // every run instead of being a claim nobody can check.
+        WaveShape one_library = one;
+        one_library.gemm_library = true;
+        const bool same_library = matches_token_plan(wave_plan_bill(one_library));
+        std::snprintf(buf, sizeof buf,
+                      " body1_plan_matches_token_plan=%d body1_library_plan_matches_token_plan=%d",
+                      same ? 1 : 0, same_library ? 1 : 0);
         out += buf;
     }
     if (notes_ignored_) {

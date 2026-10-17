@@ -204,6 +204,16 @@ struct WaveShape {
     // A one-row body routes to `gdn_rec` by `resolve_gdn_scan`'s rule and costs one launch either way,
     // which is why the bill below needs no single-row special case.
     bool gdn_resident = false;
+    // Which GEMM the pass ran, as the ROUTE the run asked for rather than as a per-body resolution: the
+    // plan needs it because `submit_wave_body` guards the F32 widenings whose only reader is a hand
+    // kernel, so a library body and a hand body owe DIFFERENT `cast` counts. It is the requested route
+    // and not a row-count answer on purpose: `resolve_wave_gemm` sends a one-row body to the hand GEMV
+    // whatever the run asked for, and `wave_plan_bill` derives that exception from
+    // `tokens`/`bodies`/`wave_rows` exactly as it derives `gdn_chunked`'s, so the plan and the dispatch
+    // cannot disagree about which bodies were wide enough to take the library. Left false, the plan
+    // bills the hand (larger) count, and a library run that forgot to set it reads `plan_match=0`
+    // rather than a plausible low number.
+    bool gemm_library = false;
 };
 
 // One measured pass of serialized submission. Constructed per pass, armed for its duration; not

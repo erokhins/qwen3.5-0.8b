@@ -443,10 +443,18 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     // two interchangeable at a call site rather than a numerics change dressed as one.
     //
     // What deliberately does NOT go through it: `in_proj_a`/`in_proj_b` (N=16, below the ridge at every
-    // width, §3.2 and §7 W4) call `proj_gemv` directly at any width, and every mixer, glue, cast and
-    // `lm_head` site is untouched. The F32 widenings stay where they are even when this route makes one
-    // of them unread: deleting a launch is a change to the §07 launch bill (`planned_launch_counts()`,
-    // `gate.py` section (d), the wave plan in `stage_clock.cpp`), and §7 W5 prices that separately.
+    // width, §3.2 and §7 W4) call `proj_gemv` directly at any width, and every mixer, glue and
+    // `lm_head` site is untouched.
+    //
+    // The widenings this route leaves unread are guarded on THIS `lib_gemm`, at the sites named below.
+    // The dead set is derived from "which call reads this destination", not from a remembered count:
+    // every reader of a `norm_f32`/`block_out_f32`/`mlp_act_f32` tile in this body is either `project()`'s
+    // hand branch, `mlp_gateup`/`mlp_down`'s hand branch, or the two 16-row `proj_gemv` calls that never
+    // go through `project` — so a wide body on a library route writes 78 of its 114 casts to nothing, and
+    // a one-row body writes all 114 because `resolve_wave_gemm` will not give it the library.
+    // Deleting a submission is a change to the §07 launch bill, so the derivers moved in the same commit
+    // this guard did: `planned_launch_counts()` is untouched (it is the per-token bill, and the row rule
+    // keeps it 115) and `stage_clock.cpp`'s `wave_plan_bill` learned the route from `WaveShape`.
     const bool lib_gemm = kernels::wave_gemm_is_library(sc.wave_gemm, n);
     const auto project = [&](const void* weight, const uint16_t* x_bf16, const float* x_f32,
                              uint16_t* out, int rows, int in) {
@@ -492,13 +500,24 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                                 sc.norm, n);
 
     for (int layer = 0; layer < kNumLayers; ++layer) {
+        const bool attn_layer = is_full_attention(layer);
+
         // Every projection in this layer reads the SAME rows, and `proj_gemv` is instantiated with
         // PACK_X=false, so it reads F32 (`kernels.h`, and E2 in `engine/results.md`). One widening
         // for the tile, which is the part of "48 casts/token" that batching removes.
-        stageclock::note(stageclock::kCast);
-        kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
-
-        const bool attn_layer = is_full_attention(layer);
+        //
+        // The GDN half of this one stays at every width and the attention half goes on the route, because
+        // their readers differ: a GDN layer's `in_proj_b`/`in_proj_a` call `proj_gemv` on `sc.norm_f32`
+        // directly (§3.2, below the ridge at any width), while an attention layer's three input
+        // projections all go through `project`, which reads the BF16 `sc.norm` whenever the library won.
+        // So on a library route an attention layer's widening is a whole-tile store with no reader.
+        // The polarity of the guard is the reader list, not the layer word: `!lib_gemm || !attn_layer`
+        // casts for every hand body and for every GDN layer, and skips only the library body's attention
+        // layers.
+        if (!lib_gemm || !attn_layer) {
+            stageclock::note(stageclock::kCast);
+            kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
+        }
 
         // ---- the mixer's INPUT projections: ONE launch each for the whole wave (P5, §06.2's "one
         // GEMM per projection"). Each reads the [n, H] norm tile and writes a [n, rows] tile that the
@@ -632,8 +651,13 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // One widening over the whole [n][2048] tile, for the same reason P5 packed the casts
             // around the projections: it is elementwise, so a wider call is the same bits in fewer
             // submissions (and `cast` is not a launchstats family, so nothing has to re-derive it).
-            stageclock::note(stageclock::kCast);
-            kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32, (size_t)n * kQwidth);
+            // Guarded: the o_proj `project` call below is this tile's only reader, and it names
+            // `a_gated` as the BF16 operand and this widening as the F32 one, so on a library route the
+            // widening is written and never read.
+            if (!lib_gemm) {
+                stageclock::note(stageclock::kCast);
+                kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32, (size_t)n * kQwidth);
+            }
         } else {
             // The GDN mixer, and the one place the §04.4 scan FORM is chosen. `resolve_gdn_scan` is
             // the whole rule: a one-row body is `rec_kernel` whatever the run asked for, so a
@@ -707,8 +731,13 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             kernels::gdn_gated_norm(sc.g_o, sc.g_z,
                                     (const float*)layer_dev(weights, layer, leaf::kGatedNorm),
                                     sc.block_out, nullptr, n);
-            stageclock::note(stageclock::kCast);
-            kernels::cast_bf16_to_f32(sc.block_out, sc.block_out_f32, n * kValueDim);
+            // The GDN twin of the attention widening above, and guarded for the identical reason: the
+            // out_proj `project` call below reads `sc.block_out` when the library won and this
+            // widening only when the hand GEMV is in charge.
+            if (!lib_gemm) {
+                stageclock::note(stageclock::kCast);
+                kernels::cast_bf16_to_f32(sc.block_out, sc.block_out_f32, n * kValueDim);
+            }
         }
 
         // ---- the mixer's OUTPUT projection, one launch over the [n, 2048] tile the loop just
@@ -717,13 +746,16 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // `add_norm` below consumes for every row of the wave.
         stageclock::note(stageclock::kProj);
         // The BF16 operand is NOT one tile: the attention mixer leaves its [n,2048] output in
-        // `a_gated` and widens that straight into `block_out_f32`, while the GDN gated norm is what
-        // writes `block_out`. The hand GEMV never noticed, because it only ever read the F32 widening —
-        // so `block_out` is stale for every attention layer, and a library call pointed at it computes
-        // the output projection from whatever the last GDN layer left there (measured on dec8: logits
-        // cos 0.42 against the pins, 37 failed rows, every one of them downstream of layer 1). Same
-        // numbers either way once the right tile is named: `a_gated` and `block_out` are both
-        // [wave_rows,2048] BF16 at ld = 2048.
+        // `a_gated` and the GDN gated norm leaves its [n,2048] output in `block_out`, and the one named
+        // here is the one this layer wrote. The hand GEMV never noticed which of the two it was pointed
+        // at, because it only ever read the shared F32 widening — so `block_out` was stale for every
+        // attention layer, and a library call pointed at it computes the output projection from
+        // whatever the last GDN layer left there (measured on dec8: logits cos 0.42 against the pins,
+        // 37 failed rows, every one of them downstream of layer 1). Same numbers either way once the
+        // right tile is named: `a_gated` and `block_out` are both [wave_rows,2048] BF16 at ld = 2048.
+        // On a library route neither side widens into `block_out_f32` any more (the only reader of that
+        // scratch is this call's hand branch), so it holds whatever the last hand body wrote — which is
+        // legal for exactly one reason: nothing on that route reads it.
         project(layer_dev(weights, layer, attn_layer ? leaf::kOProj : leaf::kOutProj),
                 attn_layer ? sc.a_gated : sc.block_out, sc.block_out_f32, sc.delta, kHidden,
                 attn_layer ? kQwidth : kValueDim);
@@ -732,11 +764,15 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // ---- §03.2 add #1: the mixer's output onto the residual, and the post-attention norm.
         add_norm(sc.delta, layer_dev(weights, layer, leaf::kPostAttnNorm));
 
-        // ---- §03.3 MLP, batched over the wave's rows (P4). Both halves still want F32 input (there
-        // is no BF16-staged form of these two kernels — the deferral in results.md), so the norm
-        // rows and `act` are both widened, once for the tile rather than once per token.
-        stageclock::note(stageclock::kCast);
-        kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
+        // ---- §03.3 MLP, batched over the wave's rows (P4). The two HAND halves want F32 input (there
+        // is no BF16-staged form of `mlp_gateup`/`mlp_down` — the deferral in results.md), so the norm
+        // rows and `act` are widened once for the tile rather than once per token. The library halves
+        // read the BF16 `sc.norm` and `sc.mlp_act` directly, so both widenings are guarded on that
+        // difference instead of being submitted and ignored.
+        if (!lib_gemm) {
+            stageclock::note(stageclock::kCast);
+            kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
+        }
         // Which of the two bit-identical gate/up walks this body runs is decided HERE, by the body's
         // row count, because the one-row and the many-row body measurably prefer opposite walks
         // (Q10b; the numbers and the honest statement about the mechanism are in `engine/results.md`
@@ -759,11 +795,14 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                                 (const uint16_t*)layer_dev(weights, layer, leaf::kUpProj),
                                 sc.norm_f32, sc.mlp_act, kIntermediate, kHidden, n, gate_up_map);
         }
-        stageclock::note(stageclock::kCast);
-        kernels::cast_bf16_to_f32(sc.mlp_act, sc.mlp_act_f32, n * kIntermediate);
+        if (!lib_gemm) {
+            stageclock::note(stageclock::kCast);
+            kernels::cast_bf16_to_f32(sc.mlp_act, sc.mlp_act_f32, n * kIntermediate);
+        }
         stageclock::note(stageclock::kMlpDown);
         if (lib_gemm) {
-            // `sc.mlp_act`, not the widening above: the library reads a 16-bit `A` operand.
+            // `sc.mlp_act`, not the widening above: the library reads a 16-bit `A` operand, which is
+            // why that widening is now guarded rather than submitted for nobody.
             kernels::mlp_down_gemm(layer_dev(weights, layer, leaf::kDownProj), sc.mlp_act, sc.delta,
                                    kHidden, kIntermediate, n);
         } else {

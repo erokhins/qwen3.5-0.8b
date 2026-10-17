@@ -3499,6 +3499,13 @@ def launch_plan(n_layers: int, n_gdn: int, n_attn: int) -> dict:
            gated o_proj operand, MLP norm row, MLP act), plus ONE more for the final norm before
            lm_head. Every one of these is a dtype disagreement between graduated kernels, not model
            math — `kernels_cast.cpp` says why they cannot be dropped today.
+           PER TOKEN, and that is what section (d) judges: a one-row body runs the hand GEMV whatever
+           `--gemm` asked for (`resolve_wave_gemm`), so all of them arrive for a decode step at any
+           setting and this row does not move with the route. A WIDE body on a library route submits
+           fewer, because the widenings whose only reader is a hand kernel are guarded on that route;
+           the deriver of THAT count is `engine/stage_clock.cpp`'s `wave_plan_bill`, which is the only
+           reader of a per-body cast row (the wave report). Two tables, two shapes — do not "fix" one
+           to look like the other.
     other  the embedding row read (§02.3), one conv-window roll-back per GDN layer (§08.2), lm_head.
     """
     return {
@@ -3957,8 +3964,13 @@ def wave_expect(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int
     "Per body" means one `submit_wave_body` call, and for all three batchable families that number is
     the per-TOKEN bill from §07 whether the body was one token or 295: glue issues one launch per fused
     add+norm, the MLP one per half, and `proj` one per projection (§06.2's "one GEMM per projection"),
-    each covering every row of the body — so 49/24/24/114 launches arrive per body at any width, and
-    what the width changes is `rows` on each of them. That is why the same table serves both sides.
+    each covering every row of the body — so 49/24/24/114 launches arrive per body at any width (49
+    glue, 24+24 MLP halves, 114 proj: five projections for each of 18 GDN layers, four for each of 6
+    attention layers), and what the width changes is `rows` on each of them. That is why the same table
+    serves both sides. `cast` is NOT in this table and must not be added to it: it has no launcher
+    counter (`engine/launch_stats.h`), and a wide body's cast count is route-dependent —
+    `engine/stage_clock.cpp`'s `wave_plan_bill` prices it against the wave report, per body and per
+    route, which is where a per-body cast row is read.
 
     A generation step is a body of one token (`submit_token_body` is `submit_wave_body` with n = 1),
     which is why the decode steps join the wave sizes below and why `rows_total` comes out

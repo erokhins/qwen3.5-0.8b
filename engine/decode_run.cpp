@@ -1050,6 +1050,13 @@ WavePassResult wave_pass(const Options& o, const engine::WeightStore& store, eng
         // The single-row-body exception is derived from the shape inside `wave_plan_bill`, not here.
         shape.gdn_chunked = (o.gdn_scan == engine::kernels::GdnScan::kChunk);
         shape.gdn_resident = (o.gdn_scan == engine::kernels::GdnScan::kCollapse);
+        // Which GEMM a wide body ran, so the plan bills the cast row the way the body submitted it. Asked
+        // at `kMaxWaveRows` rather than at a body width on purpose: the only width
+        // `resolve_wave_gemm` overrides is `rows <= 1`, and `wave_plan_bill` derives that one-row body
+        // from `tokens`/`bodies`/`wave_rows` itself, so what the plan needs from the driver is the route
+        // the run asked for and nothing else. Same question the `GEMM` banner asks above.
+        shape.gemm_library =
+            engine::kernels::wave_gemm_is_library(o.wave_gemm, engine::kMaxWaveRows);
         std::printf("%s\n", clock->describe_wave(shape).c_str());
     }
     return out;
