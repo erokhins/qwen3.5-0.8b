@@ -157,6 +157,7 @@ disassemble only, no device, no GPU lock.
 |---|---|---|
 | `v_mfma_f32_16x16x16f16`, `v_mfma_f32_16x16x16bf16_1k` | **absent** ("instruction not supported on this GPU") | MFMA is CDNA (Instinct); RDNA never had it |
 | `v_wmma_f32_16x16x16_f16` | **present** | reachable via `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32` with `ext_vector_type(16)` fp16 operands and an `ext_vector_type(8)` f32 accumulator; such a kernel compiles for `gfx1151` and `llvm-objdump` shows the instruction emitted |
+| `v_wmma_f32_16x16x16_bf16` | **present** | found 2026-10-16 while pricing a matrix-path attention, by `tools/wmma_operand_types.sh` (compile-and-disassemble, no device needed): `__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32` compiles for `gfx1151` and the listing carries the instruction. The consequence is specific and it is not a speed number: **a WMMA path does not have to convert the engine's bf16 operands to fp16**, so the format change every earlier plan assumed as its price of admission is not required. Every plan that priced that conversion was pricing a premise nobody had checked |
 | `v_dot2_f32_f16`, `v_dot2_f32_bf16` | present | 2 MACs/lane/clk |
 | `v_pk_fma_f16` | present | 2 MACs/lane/clk — what rocBLAS's fp16 kernels use |
 | `v_pk_fma_bf16` | **absent** | bf16 has no packed FMA on this part |
