@@ -837,3 +837,26 @@ the median of a clean-window ruler, and the claim about a change is the paired d
 stable-kernel behaviour the ledger expects and not dispatch bimodality — the row is bandwidth/latency-bound
 enough to repeat. Decode unchanged at **71.3 tok/s** and not re-measured: the conv change is prefill-path only
 at these widths, and a decode re-take would need its own paired window to say anything.
+
+## 17. The lane ceiling moves to 4608, and it is not a speed item (2026-10-17)
+
+`kAttnMaxSplit` 8 → 9 (`0f5dca8`), so the attention stage plans up to `512 × 9 = 4608` lanes where it threw
+above 4096. **No timing claim is made for it, deliberately.** Three reps at 4096 lanes in one window read
+**914.12 / 919.70 / 920.17 ms** with `plan_match=1`, median 919.70 against §16's 921.56 — a 0.2 % move inside
+this box's noise, and the change only enlarges the partial buffer (32.25 → 36.28 MiB per wave), so there is
+nothing to bank. The §16 headline of **4444 tok/s** stands; re-measuring a ruler to record a no-op is not a
+result.
+
+What this row *is* for: the geometry is now admissible. `wide4096f` — 4096 prompt + 8 generated = **4104
+lanes**, which the launcher refused outright until today — PLANS and PASSES, with **all 4096 pinned rows
+judged** inside floors already in force (worst cos deficit 4.3696e-04, worst meanrel 3.5902 %), and
+`wide4096p` / `wide1024f` / `dec64f` stay green. Bit-identity below the old ceiling was proved twice over: the
+CPU census in `tools/attn_ceiling_proof.py` (the cap reaches the allocation and the throw and nothing else;
+three writers, the reader and the mirror share one address expression that never names the cap), and a direct
+old-binary-vs-new comparison at 1024 lanes, **ndiff 0 in all four pairings**.
+
+One instrument trap recorded here because it nearly produced a false finding: the first bit-identity A/B looked
+like a mismatch, and the mismatch was mine — `md5sum dir/logits*.bin | md5sum` hashes the *path text* in
+md5sum's output, so two different `--out` directories hash differently no matter what the tensors contain.
+Element-level comparison is the only honest form of this check; an aggregate hash over a glob of two different
+directories is not a comparison at all.

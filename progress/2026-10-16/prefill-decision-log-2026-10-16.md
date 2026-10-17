@@ -1381,3 +1381,24 @@ that fix cannot cover. Recorded here because a retraction that lives only in a c
   not run reporting as a verdict* (after the phantom fixture names and the indented `[FAIL]` grep), which makes
   it a pattern rather than a mistake: **a gate log must be read for how many checks executed, not only for how
   many failed.** Worth a row in `AGENTS.md` when the audit next touches it.
+
+## D45 — 2.5 ships at the minimum raise; the long-context target stays unfunded (2026-10-17)
+
+- **Decision.** Ship `kAttnMaxSplit = 9` (ceiling 4608), not a larger number. The evidence covers exactly what
+  is pinned — 4096 lanes of rows judged inside existing floors, plus the 4104-lane decode-bearing geometry —
+  and the band **4105..4608 is legal but unpinned**, which is stated as a capacity bound rather than smuggled in
+  as an admitted numerics claim. Going to 40 for the 20480-lane target would cost 161 MiB of partials
+  (10.94 % of the checkpoint, affordable) but would admit 15 kB of width no reference has ever touched, and
+  that is not this item's evidence to spend.
+- **`kSessionDefaultCap` stays 4096.** It used to sit on the ceiling and now sits below it, so a session hits its
+  own cap first and `--cap` is how a session reaches the wider geometry. Raising it costs +6 MiB of KV per
+  request and no gate asserts it. That is a product default, and product defaults are not a mechanical
+  follow-on from a constant someone else widened.
+- **What this unlocks for the D42 audit.** Class 3 (re-adjudicate claims made on a population that did not
+  exist) can now run at real width: `wide4096f` and `wide4096p` exist, are reproducible from
+  `tools/dump_fixtures.sh`, and pass. Claims like "no ground truth above MAXSC" are dead in writing as well as
+  in fact.
+- **Next in queue** is class 4: re-price 1.1 (instruction surgery) and 1.2 (chunked scan) in cycles-per-
+  dependency at realised occupancy rather than instruction slots, per the Route A lesson — and both re-pricings
+  must be doable on recorded numbers with no build, because `gdn_rec` is 47.34 % of the wave and a wrong price
+  there has already cost this project one 9.8× miss.
