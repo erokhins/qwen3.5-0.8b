@@ -11,13 +11,14 @@
 
 namespace engine::kernels {
 
-// §04.2 over a wave. grid.x is the channel strip — the single-token launch's 24 blocks of 256 — and
-// grid.y the token, so `tokens == 1` is the same grid, not a grid padded to one, and the per-element
-// arithmetic (F32 taps in j order, one BF16 round, SiLU) is the one `prototype/gdn_decode/check.py`
-// has always pinned against `q/k/v_post_conv`. What the wave adds is the window rule: the three
-// columns before row 0 come from `win` (§08.2's carried window), never from zeros, and the launch
-// writes the window's new contents once for the whole wave instead of once per token — the copy
-// `decode_step.cpp` used to issue per token is what collapses here.
+// §04.2 over a wave. grid.x is the channel strip — CH/(256*CONV_VEC) blocks, i.e. the 24 the
+// single-token launch used at one channel per lane, four lanes wide now — and grid.y the token, so
+// `tokens == 1` is the same grid, not a grid padded to one, and the per-element arithmetic (F32 taps
+// in j order, one BF16 round, SiLU) is the one `prototype/gdn_decode/check.py` has always pinned
+// against `q/k/v_post_conv`. What the wave adds is the window rule: the three columns before row 0
+// come from `win` (§08.2's carried window), never from zeros, and the launch writes the window's new
+// contents once for the whole wave instead of once per token — the copy `decode_step.cpp` used to
+// issue per token is what collapses here.
 //
 // `raw` is the BF16 tile `in_proj_qkv` wrote, not a widening of it (D30 1.7'): the kernel widens the
 // taps in-register, a BF16->F32 widening is exact, and so the F32 values the taps take are the same
@@ -25,8 +26,14 @@ namespace engine::kernels {
 // state dtype and a separate question from the tile's (§08.3, `engine/state.h`'s note).
 void gdn_conv(const uint16_t* raw, const float* win, const float* conv_weight, float* u,
               float* new_win, int tokens) {
-    conv_kernel<<<dim3(CH / 256, tokens), 256>>>((const hip_bfloat16*)raw, win, conv_weight, u,
-                                                 new_win, tokens, GCK_NONE);
+    // A lane owns CONV_VEC consecutive channels, so the strip is CONV_VEC blocks narrower than the
+    // 24 it was: 6 blocks of 256 for the whole [CH] row, and `tokens == 1` is still that same grid.
+    // The divisor is asserted here rather than trusted, because a non-dividing CH would silently hand
+    // the last channels to nobody (the kernel's own guard returns instead of wrapping).
+    static_assert(CH % (256 * CONV_VEC) == 0, "conv_kernel's grid must be a whole number of blocks");
+    conv_kernel<<<dim3(CH / (256 * CONV_VEC), tokens), 256>>>((const hip_bfloat16*)raw, win,
+                                                             conv_weight, u, new_win, tokens,
+                                                             GCK_NONE);
     launchstats::gdn_conv().record(tokens);
 }
 

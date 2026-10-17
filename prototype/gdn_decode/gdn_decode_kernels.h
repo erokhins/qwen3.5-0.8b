@@ -84,10 +84,11 @@ __global__ void gates_kernel(const hip_bfloat16* a_raw, const hip_bfloat16* b_ra
 
 /* ---- S04.2 causal depthwise conv over a [tokens][CH] tile -------------- */
 // ONE body at two widths, the way `prototype/proj_gemv` ships its GEMV: `conv_kernel` at
-// tokens = 1 is the launch this file shipped with (CH/256 blocks of 256 threads, same tap order,
-// same F32 accumulation, same round-once-then-silu) and a wave is that launch replicated on
+// tokens = 1 is the launch this file shipped with (CH/(256*CONV_VEC) blocks of 256 threads, same tap
+// order, same F32 accumulation, same round-once-then-silu) and a wave is that launch replicated on
 // gridDim.y. Nothing about a wider tile changes a per-element reduction, so the two widths owe
-// each other bit-for-bit and `check.py --tokens` demands it.
+// each other bit-for-bit and `check.py --tokens` demands it. What a lane owns is CONV_VEC consecutive
+// channels rather than one, which is an access-width change and nothing else (`CONV_VEC`'s note).
 //
 // The tile's `raw` is BF16, the dtype the projection wrote, and `win`/`new_win` are F32: the window
 // is §08.1's carried state and its dtype follows this kernel's window half, which is a separate
@@ -131,67 +132,147 @@ enum GdnConvNeg {
     GC_ZERO_PAD,
 };
 
-// The one tap rule. `k` is the token offset from this tile's first token; k < 0 is the carried
-// window. `zero_pad` is the injected reading that is only right at request start.
+// CONV_VEC consecutive tile columns are one lane's work, fetched as ONE aligned word.
 //
-// The two branches return the same KIND of number on purpose: a tile column is BF16 and is widened
-// here, a window column is already F32, and both name the same value the caller would have had in a
-// pre-widened tile. Nothing in the arithmetic downstream can tell the two apart.
-__device__ __forceinline__ float conv_tap(const hip_bfloat16* __restrict__ raw,
-                                          const float* __restrict__ win, int c, int k,
-                                          bool zero_pad) {
-    if (k < 0) return zero_pad ? 0.f : win[(k + K - 1) * CH + c];
-    return float(raw[(size_t)k * CH + c]);
+// WHY A CHUNK AND NOT A CHANNEL (§13 of bench/performance-status.md, D30 1.7'). Reading the tile in
+// its own BF16 dtype instead of a pre-widened F32 copy halved the bytes and made the row 32.5 %
+// SLOWER, and the ISA says why in two counts. The one-column form issues 23 `global_load_u16`s — two
+// bytes per lane, so a wavefront asks for 64 bytes, half a line — and every one of them is followed
+// immediately by `s_waitcnt vmcnt(0)`, because the `v_lshlrev_b32_e32` that widens the value is its
+// only consumer and sits in the same exec-guarded tap branch. The K taps of one output were K
+// separate memory round trips with the whole VMEM queue drained between them; the F32 tile they
+// replaced issued `global_load_b32`s back to back and drained that batch with one counted
+// `vmcnt(3)…vmcnt(0)` group, i.e. K loads in flight. The same listing rules out the other three
+// candidates: no `ds_*` instruction exists in either form (so no LDS, so no bank conflicts), the
+// widening is one shift per tap (not 6.5 ms of VALU), and a block covers its tap rows contiguously
+// (so no line is fetched twice). What was left is access width and load batching, and a per-lane
+// chunk is the one spelling that fixes both: K loads of 8 bytes each, all issued before any of them
+// is widened, instead of K loads of 2 bytes each with a full drain after every one.
+#define CONV_VEC 4
+// The launcher hands out CH/(256*CONV_VEC) blocks of 256 lanes, so a lane's chunk never straddles the
+// end of a row, and every row start a lane can name is a whole number of chunks: `raw` rows are
+// CH*2 = 12288 bytes, `win`/`u`/`new_win` rows are CH*4 = 24576. That is what makes the wide
+// accesses below legal rather than merely requested — together with the 256-byte alignment every one
+// of these buffers gets from `hipMalloc` (`decode_step.cpp`'s `alloc`, and the prototype's own).
+static_assert(CH % (256 * CONV_VEC) == 0,
+              "the conv's channel strip must divide into blocks of 256 lanes of CONV_VEC channels; a "
+              "remainder would leave the tail of every row unconvolved and no thread to notice.");
+static_assert(CH % CONV_VEC == 0, "a lane's CONV_VEC columns must fit inside one row");
+
+// CONV_VEC columns of a BF16 tile row, as one 8-byte access. The explicit alignment is what makes it
+// one: four hip_bfloat16 have natural alignment 2, and at alignment 2 the compiler must emit CONV_VEC
+// 2-byte loads no matter how the source is written.
+struct __attribute__((aligned(8))) ConvCols {
+    hip_bfloat16 h[CONV_VEC];
+};
+static_assert(sizeof(ConvCols) == 2 * CONV_VEC, "ConvCols is the packed tile row, with no padding");
+static_assert(alignof(ConvCols) == 2 * CONV_VEC, "ConvCols must be one wide access, not a split one");
+
+// The same chunk in the window's dtype: F32, so one 16-byte access per row chunk. Widening a BF16
+// value is exact, so a window column and a widened tile column name the same number either way
+// (§08.3) — which is why one lane can mix the two sources in one tap set.
+struct __attribute__((aligned(16))) ConvColsF {
+    float f[CONV_VEC];
+};
+static_assert(sizeof(ConvColsF) == 4 * CONV_VEC && alignof(ConvColsF) == 4 * CONV_VEC,
+              "ConvColsF is one 16-byte window row chunk; a smaller alignment means a split access");
+
+// The one tap rule, at chunk width: the CONV_VEC columns at token offset `k` of this tile, widened to
+// F32 and written to `tap[CONV_VEC]`. `k` is the token offset from this tile's first token; k < 0 is
+// the carried window. `zero_pad` is the injected reading that is only right at request start.
+//
+// The branches return the same KIND of number on purpose: a tile column is BF16 and is widened here,
+// a window column is already F32, and both name the value the caller would have had in a pre-widened
+// tile. Nothing in the arithmetic downstream can tell them apart.
+//
+// `channel_major` is the `GC_TAP_STRIDE` reading: the same [tokens][CH] buffer indexed as if it were
+// still HF's [CH][tokens]. In bounds for every (c, src) this kernel can ask for —
+// c*tokens + src <= (CH-1)*tokens + tokens-1 = CH*tokens-1 — and wrong for every token but 0. That
+// injection IS a different address rather than a different width, so it keeps a scalar gather: the
+// negative stays live on the path the engine runs instead of moving to a side path nothing runs.
+__device__ __forceinline__ void conv_tap(const hip_bfloat16* __restrict__ raw,
+                                         const float* __restrict__ win, int c0, int k, int tokens,
+                                         bool zero_pad, bool channel_major, float* tap) {
+    if (k < 0) {
+        if (zero_pad) {
+#pragma unroll
+            for (int i = 0; i < CONV_VEC; ++i) tap[i] = 0.f;
+        } else {
+            const ConvColsF w =
+                *reinterpret_cast<const ConvColsF*>(win + (size_t)(k + K - 1) * CH + c0);
+#pragma unroll
+            for (int i = 0; i < CONV_VEC; ++i) tap[i] = w.f[i];
+        }
+    } else if (channel_major) {
+#pragma unroll
+        for (int i = 0; i < CONV_VEC; ++i) tap[i] = float(raw[(size_t)(c0 + i) * tokens + k]);
+    } else {
+        const ConvCols r = *reinterpret_cast<const ConvCols*>(raw + (size_t)k * CH + c0);
+#pragma unroll
+        for (int i = 0; i < CONV_VEC; ++i) tap[i] = float(r.h[i]);   // the same widening as before
+    }
 }
 
-// The conv's value at offset k of this tile: taps in F32, one BF16 round, then SiLU (§04.2). The
-// tile body and the `GC_WIN_FROM_U` injection both call it, so the injected bug cannot depend on
+// The conv's values at offset k of this tile, for a whole chunk: the K tap rows first, then per
+// column the F32 dot in `j` order, one BF16 round, then SiLU (§04.2) — the same operations in the
+// same order the one-column body did, so the values are bit-for-bit what it produced. Fetching all K
+// rows before any of them is consumed is deliberate: it is the half of the fix the widening cost.
+// The tile body and the `GC_WIN_FROM_U` injection both call it, so the injected bug cannot depend on
 // another block's already-written output (there is no grid-wide sync to read `u` from). `k` must
 // be >= 0, because a tap at k < 0 is a carried window row, not a tile row, and the conv of a
 // position before this wave is not this launch's to compute.
-// `channel_major` is the `GC_TAP_STRIDE` reading: the same [tokens][CH] buffer indexed as if it
-// were still HF's [CH][tokens]. In bounds for every (c, src) this kernel can ask for —
-// c*tokens + src <= (CH-1)*tokens + tokens-1 = CH*tokens-1 — and wrong for every token but 0.
-__device__ __forceinline__ float conv_value(const hip_bfloat16* __restrict__ raw,
-                                            const float* __restrict__ win,
-                                            const float* __restrict__ C, int c, int k,
-                                            int tokens, bool zero_pad, bool channel_major) {
-    float acc = 0.f;
+__device__ __forceinline__ void conv_value(const hip_bfloat16* __restrict__ raw,
+                                           const float* __restrict__ win,
+                                           const float* __restrict__ C, int c0, int k, int tokens,
+                                           bool zero_pad, bool channel_major, float* out) {
+    float tap[K][CONV_VEC];
 #pragma unroll
     for (int j = 0; j < K; ++j) {
-        const int src = k - (K - 1) + j;
-        const float tap = (src < 0)
-                              ? conv_tap(raw, win, c, src, zero_pad)
-                              : (channel_major ? float(raw[(size_t)c * tokens + src])
-                                               : float(raw[(size_t)src * CH + c]));
-        acc += tap * C[c * K + j];
+        conv_tap(raw, win, c0, k - (K - 1) + j, tokens, zero_pad, channel_major, tap[j]);
     }
-    const float rounded = bf16_round(acc);
-    return bf16_round(rounded / (1.f + expf(-rounded)));
+#pragma unroll
+    for (int i = 0; i < CONV_VEC; ++i) {
+        float acc = 0.f;
+#pragma unroll
+        for (int j = 0; j < K; ++j) acc += tap[j][i] * C[(c0 + i) * K + j];
+        const float rounded = bf16_round(acc);
+        out[i] = bf16_round(rounded / (1.f + expf(-rounded)));
+    }
 }
 
 // raw is [tokens][CH] BF16 (the projection's own output); win is [K-1][CH] F32 (oldest row first);
-// u is [tokens][CH] F32, written bf16-rounded-then-silu.
+// u is [tokens][CH] F32, written bf16-rounded-then-silu. A lane owns CONV_VEC consecutive channels of
+// one token, so `blockIdx.x` is a strip of channel chunks and `blockIdx.y` the token.
 __global__ void conv_kernel(const hip_bfloat16* __restrict__ raw, const float* __restrict__ win,
                             const float* __restrict__ C, float* __restrict__ u,
                             float* __restrict__ new_win, int tokens, int neg) {
-    const int c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c >= CH) return;
+    const int c0 = (blockIdx.x * blockDim.x + threadIdx.x) * CONV_VEC;
+    if (c0 >= CH) return;
     const int t = blockIdx.y;
-    u[(size_t)t * CH + c] = conv_value(raw, win, C, c, t, tokens, neg == GC_ZERO_PAD,
-                                       neg == GC_TAP_STRIDE);
+
+    float val[CONV_VEC];
+    conv_value(raw, win, C, c0, t, tokens, neg == GC_ZERO_PAD, neg == GC_TAP_STRIDE, val);
+    ConvColsF out{};
+#pragma unroll
+    for (int i = 0; i < CONV_VEC; ++i) out.f[i] = val[i];
+    *reinterpret_cast<ConvColsF*>(u + (size_t)t * CH + c0) = out;
+
     // The end condition: the window after this tile is its last K-1 raw columns. Every thread owns
-    // column `c` on both sides of the write, so this is safe against its own reads whatever the
+    // the same columns on both sides of the write, so this is safe against its own reads whatever the
     // relationship between `win` and `new_win` is — the engine still rolls through a scratch row
     // (`decode_step.cpp` keeps `conv_new`), which is what lets both pointers stay __restrict__.
 #pragma unroll
     for (int j = 0; j < K - 1; ++j) {
         const int k = tokens - (K - 1) + j + ((neg == GC_WIN_LAG) ? -1 : 0);
-        float v = conv_tap(raw, win, c, k, false);   // widened here if k >= 0, already F32 if not
+        float v[CONV_VEC];
+        conv_tap(raw, win, c0, k, tokens, false, false, v);   // widened here if k >= 0, F32 if not
         // GC_WIN_FROM_U: A-04's exact trap, the window written from the POST-conv value. Only
         // positions inside this tile have one; a carried row is already pre-conv by construction.
-        if (neg == GC_WIN_FROM_U && k >= 0) v = conv_value(raw, win, C, c, k, tokens, false, false);
-        new_win[j * CH + c] = v;
+        if (neg == GC_WIN_FROM_U && k >= 0) conv_value(raw, win, C, c0, k, tokens, false, false, v);
+        ConvColsF w{};
+#pragma unroll
+        for (int i = 0; i < CONV_VEC; ++i) w.f[i] = v[i];
+        *reinterpret_cast<ConvColsF*>(new_win + (size_t)j * CH + c0) = w;
     }
 }
 

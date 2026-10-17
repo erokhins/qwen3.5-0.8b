@@ -176,9 +176,9 @@ int main(int argc, char** argv) {
         CK(hipMemcpy(draw, raw.data(), nraw * 2, hipMemcpyHostToDevice));
         CK(hipMemcpy(dwin, win.data(), (K - 1) * CH * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dC, C.data(), CH * K * 4, hipMemcpyHostToDevice));
-        // grid.x is the channel strip (the single-token launch's 24 blocks), grid.y the token.
-        // tokens = 1 is therefore the same grid, not a grid padded to one.
-        const dim3 grid(CH / 256, tokens);
+        // grid.x is the channel strip (the single-token launch's blocks, CONV_VEC channels per lane),
+        // grid.y the token. tokens = 1 is therefore the same grid, not a grid padded to one.
+        const dim3 grid(CH / (256 * CONV_VEC), tokens);
         conv_kernel<<<grid, 256>>>(draw, dwin, dC, du, dnew, tokens, gneg);
         CK(hipGetLastError()); CK(hipDeviceSynchronize());
         dump_f32(out + "/u.f32", du, nraw);
