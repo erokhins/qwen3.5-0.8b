@@ -814,3 +814,26 @@ The conv change shipped today is the first admission in this session run against
 (`IndexError` in `pairing_checks`, `KeyError: sources`), and they raise **identically on the base binary**, so
 they are a pre-existing gap between those fixtures and this invocation style, recorded here rather than hidden:
 they are not evidence for or against anything. Fixing that invocation gap is now a task, not a footnote.
+
+## 16. Ruler re-take after the conv coalesced read: 4444 tok/s at 4096 (2026-10-17)
+
+Five reps, one lock hold, blocking, zero subagents, shipped binary (`5096a57`), `ids4096.txt`, `--steps 0
+--time-waves --gemm lt --gemm-pins all`, every rep `plan_match=1`:
+
+| rep | 1 | 2 | 3 | 4 | 5 | **median** |
+|---|---|---|---|---|---|---|
+| wall_ms | 954.09 | 984.09 | 920.18 | 913.90 | 921.56 | **921.56** |
+| `gdn_conv` ms | 16.41 | 16.95 | 16.79 | 15.57 | 16.39 | 16.41 |
+
+**4096 tokens / 921.56 ms = 4444 tok/s**, from §12's 4419 — **+0.56 %**. Stated with its weakness rather than
+without it: this window's spread is **7.7 %** (913.9–984.1, two reps above 950), where §12's five reps sat inside
+0.53 %. The iGPU was at 83–87 % `util` throughout, which the ledger already records as unusable as a gate. So
+the paired A/B in §15 is the stronger evidence for the conv change (five of five pairs negative, **−0.91 %**
+median wall, conv row −37.7 %) and the ruler here is a *confirmation that nothing regressed*, not the proof of
+the win. Two numbers of different strength, both kept, because they were measured differently: the headline is
+the median of a clean-window ruler, and the claim about a change is the paired delta inside one window.
+
+`gdn_conv` in this window reads 16.41 ms, agreeing with §15's new side (16.76 median) to 2 %, which is the
+stable-kernel behaviour the ledger expects and not dispatch bimodality — the row is bandwidth/latency-bound
+enough to repeat. Decode unchanged at **71.3 tok/s** and not re-measured: the conv change is prefill-path only
+at these widths, and a decode re-take would need its own paired window to say anything.
