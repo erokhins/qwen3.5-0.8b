@@ -132,26 +132,26 @@ no number here is a measurement of anything except the compiler's willingness.
 1. **Unpacked projections.** `proj_gemv` is called once per projection (q, k, v, o, in_proj_qkv,
    in_proj_z, in_proj_b, in_proj_a, out_proj…) rather than through the packed multi-weight form the
    kernel supports. Now that `decode_step` exists the real bill is known rather than estimated:
-   **424 launches/token, 114 of them projection GEMVs** (`gate.py` section (d) asserts the split).
+   **406 launches/token, 114 of them projection GEMVs** (`gate.py` section (d) asserts the split; the total read 424 until `62b73e9` retired the packed GDN widening — item 2 says what moved).
    The packable part is `in_proj_a`+`in_proj_b` (16 rows, 32 KiB each, same input row) alongside
    `in_proj_qkv`/`in_proj_z`: one packed launch instead of four per GDN layer, so 54 launches ≈
    **0.10 ms/token** at the ≈1.85 µs floor (`tools/launch_overhead_hip.cpp`). The earlier "≈358
    launches, ≈0.12 ms removable" in this file was arithmetic over a plan the loop does not use.
-2. **Dtype adapters: 115 cast launches/token.** `mlp_gemv` and `gdn_decode`'s conv/gates/rec take
-   F32 activations, while `glue`/`proj_gemv`/`gdn_gated_norm` emit BF16, so the engine widens: 5 per
-   GDN layer, 4 per attention layer, 1 before `lm_head`. 48 of the 115 are the MLP's (its input row
-   and its `act`, twice across 24 layers). `kernels_cast.cpp` now exists, and the GDN layer's three
-   widenings (`in_proj_qkv`, `in_proj_a`, `in_proj_b`) are already folded into ONE launch
-   (`cast_bf16_to_f32_3`), which is why a GDN layer costs 5 casts and not 7. The real fix is still a
-   BF16-staged form of `mlp_gateup`/`mlp_down` — `proj_gemv` proved that is bit-identical for a dot
-   product — which would delete 48 of the 115. Not done: it means touching a graduated kernel and
-   re-gating it, and `mlp_gemv`'s gate belongs to another phase. What was done here instead is the
-   other half of the old estimate: `conv1d.weight` and `dt_bias` are widened **once per request** by
-   `prepare_weight_adapters`, not once per token, so those 36 rows cost 36 launches per request.
+2. **Dtype adapters: 97 cast launches/token — it read 115 until `62b73e9` retired 18 of them**, one launch
+   per GDN layer, worth 18 × 1.85 µs = 33.3 µs/token at the dispatch floor. What is left is what the
+   hand-path readers take (`mlp_gemv`, `gdn_rec`, the two 16-row `proj_gemv`s, `lm_head_gemv`): F32
+   activations, because `glue`/`proj_gemv`/`gdn_gated_norm` emit BF16, so the engine widens 4 per GDN layer,
+   4 per attention layer and 1 before `lm_head` (4·18 + 4·6 + 1 = 97). It used to be 5 per GDN layer: the
+   three widenings of `in_proj_qkv`/`in_proj_a`/`in_proj_b` shared ONE launch (`cast_bf16_to_f32_3`) — **that
+   launch is the retired one**, because once `conv_kernel` and `gates_kernel` widened their own BF16 operands
+   it had no reader at any width or on either route. 48 of the 97 are the MLP's (its input row and its `act`,
+   twice across 24 layers) and 1.7′ touched none of those; the real fix is still a BF16-staged
+   `mlp_gateup`/`mlp_down`, which would delete those 48 and is not done because it means re-gating a
+   graduated kernel. `conv1d.weight`/`dt_bias` are still widened per REQUEST, not per token (36 launches).
 
 Both deferrals are launch-count, not bandwidth: at ≈240 GB/s the token's memory floor is well under
-1 ms and 424 launches is ≈0.78 ms, so they are the first thing a perf pass should attack — after the
-token matches.
+1 ms and 406 launches is ≈0.75 ms (406 × 1.85 µs = 0.751 ms, where the 424 this line carried was
+0.784 ms), so they are the first thing a perf pass should attack — after the token matches.
 
 ## Open questions this phase did not decide
 
@@ -214,7 +214,7 @@ What is settled without a device:
 * The block plan is agreed between two independent implementations: `gate.py` counts one token's
   launches from §07 in Python, `planned_launch_counts()` derives the same numbers from §00's
   constants in C++, and the gate fails on any mismatch. glue 49 · proj 114 · gdn 72 · attn 6 ·
-  mlp 48 · cast 115 · other 20 = **424**.
+  mlp 48 · cast 115 · other 20 = **424**. *(2026-10-17: that was the bill at the first device pass; `62b73e9` retired the packed GDN widening, so the row is cast 97 and the total 406 — both derivers moved in that commit, so the two readings still agree, at the new numbers.)*
 
 What a first device run is most likely to break, in the order to look at them:
 
@@ -256,7 +256,7 @@ Nothing here is a timing except where it explicitly says it is not one.
 `check_weights: PASS` — the rank-3 `conv1d.weight` claim that aborted the very first attempt is closed
 by `92d8e5f` and `engine/weights_contract.py`, which is the CPU-side reason it cannot come back.
 The `state:` and `LAUNCH` lines verify against §00/§07 item by item (gate sections (c) and (d) pass),
-so the 424-launch plan and the per-request byte counts are agreed between the two independent readings
+so the launch plan (424 then, 406 since `62b73e9`) and the per-request byte counts are agreed between the two independent readings
 and the binary. Risk 0 above ("the weight table") is retired, and so is the part of the hand-off that
 said no engine code had ever touched the device.
 
@@ -317,14 +317,14 @@ ledger's §6 op-sum is **8.03 ms → ~124 tok/s** (7.975 ms before the `gdn_deco
 families, one replaced row), so the unwarmed engine is ~1.8× that. The two most likely causes, in order
 of expected size, are both launch-side:
 
-1. **424 launches per token plus one device sync per step.** At the measured 1.85 µs dispatch floor
-   (`tools/launch_overhead_hip.cpp`) the launch bill alone is ≈0.78 ms/token, and that assumes a warm,
+1. **406 launches per token plus one device sync per step** (424 when this paragraph was written; `62b73e9` retired 18 of the casts). At the measured 1.85 µs dispatch floor
+   (`tools/launch_overhead_hip.cpp`) the launch bill alone is ≈0.75 ms/token (406 × 1.85 µs = 0.751 ms; the 424-launch bill was 0.784 ms), and that assumes a warm,
    deep queue; the step then syncs at the logits, so the host waits on all of it every token. **HIP
-   graphs** — capture one token's 424 launches once, replay them — are the tool that removes the
+   graphs** — capture one token's 406 launches once, replay them — are the tool that removes the
    per-launch cost, and they are now the first perf item, because nothing about correctness still needs
    the launches to be individually visible.
 2. The two deferrals named above (packed projections ≈0.10 ms, a BF16-staged MLP to delete 48 of the
-   115 casts), which shrink that same bill rather than its overhead.
+   97 casts — 115 before `62b73e9` took 18 of them), which shrink that same bill rather than its overhead.
 
 The honest caveat on the comparison: 8.03 ms is a **sum of per-op cold bursts measured separately**, and
 `progress/2026-10-11/commit-review-2026-10-11.md` already graded that sum "overstated as a description of the engine",
@@ -515,12 +515,12 @@ probe**; the sum of its parts implies **200 GB/s = 84 %**. The gap is worth 0.94
 ### The part of the gap that is plan structure — priced, not guessed
 
 The ledger's 8.03 ms is a sum of per-family cold bursts, each measured on **its own** launch plan. Pricing
-the plan `decode_step` actually runs (424 launches, cited per row) accounts for **1.27 ms** of the gap:
+the plan `decode_step` actually ran when this table was written (424 launches, cited per row) accounts for **1.27 ms** of the gap — on the 406-launch plan `62b73e9` left behind the cast row below is 0.364 ms instead of 0.431 and the priced total is **+1.20 ms**:
 
 | item | ledger §6 bills (frozen: progress/2026-10-16/performance-status-2026-10-16.md:271) | the engine pays | Δ | basis |
 |---|---|---|---|---|
 | projections | 3.039 ms — the **packed 48-launch** plan at rows/block 8 | **3.600 ms** — 114 launches, unpacked (`PACK_X=false`), rows/block 8 | **+0.56** | `prototype/proj_gemv/results.md` per-shape cold table summed over the engine's plan (3.541 ms), scaled by the 1.0166 clean/contended ratio §6 measures on the same plan |
-| cast launches | **not billed at all** | **0.431 ms** — 115 launches × 3.75 µs | **+0.43** | 3.75 µs/launch is glue's measured cost for one 256-thread block (glue §4; §6's re-take reads 2.545 µs at the same width, which would price it at 0.293 ms — this is the least certain row in the table, and §6 already says dispatch-bound numbers here are bimodal). Their traffic is 1.74 MB = 0.007 ms, so this row is dispatch and nothing else |
+| cast launches | **not billed at all** | **0.431 ms** — 115 launches × 3.75 µs **[moved to 0.364 ms = 97 × 3.75 µs on 2026-10-17; `62b73e9` retired 18 casts — see the Deferred section above. Their traffic halves too: the deleted widening was 0.222 MB read + 0.445 MB written per token]** | **+0.43 → +0.36** | 3.75 µs/launch is glue's measured cost for one 256-thread block (glue §4; §6's re-take reads 2.545 µs at the same width, which would price it at 0.293 ms at 115 launches, 0.247 ms at 97 — this is the least certain row in the table, and §6 already says dispatch-bound numbers here are bimodal). Their traffic is 1.74 MB = 0.007 ms, so this row is dispatch and nothing else |
 | `gdn_conv` 18 + `gdn_gates` 18 | not billed | ≈0.130 ms | +0.13 | **estimate** — 5 µs/launch for a 24-block conv, 2.2 µs for `gates_kernel<<<1,16>>>`. Neither has a measured per-launch cost anywhere in this repo |
 | the 19 D2D copies (embedding row + 18 conv-window rolls) | not billed | ≈0.057 ms | +0.06 | **estimate** at 3 µs/copy; the conv rolls alone are 1.33 MB/token of traffic, which is nothing, so this is dispatch |
 | GDN recurrence | 0.0646 ms — the prototype's **one-launch 18-layer** form | 0.115 ms — 18 separate launches × the re-taken 6.4 µs | +0.05 | §6's `rec alone 0.0064 ms` |
@@ -540,12 +540,12 @@ That residue is 21 % of the token, and it is the finding: **the sum of the parts
 box, and nothing in `bench/` can say why.** The candidates, in the order I would test them:
 
 1. **Per-layer serialization between the wide GEMVs and the small kernels.** Every launch in a token
-   depends on the one before it, and 237 of the 424 are short (49 glue launches of *one block each*, 115
-   casts, 18 `<<<1,16>>>` gates kernels, 19 memcpys, 36 16-row `in_proj_a`/`_b` GEMVs). In a family burst
-   those launches queue behind each other with a deep pipeline; in the engine each one is a rendezvous
-   between two bandwidth-bound kernels that have to drain around it. At ~3.75 µs each they cost 0.89 ms —
-   priced above. At ~10 µs of exposed bubble each they cost 2.4 ms, which is the residue. Nothing on this
-   box distinguishes those two numbers today.
+   depends on the one before it, and 237 of the 424 are short (49 glue launches of *one block each*, 115 casts,
+   18 `<<<1,16>>>` gates kernels, 19 memcpys, 36 16-row `in_proj_a`/`_b` GEMVs) — 219 of the 406 since
+   `62b73e9`, the cast term down by the same 18. In a family burst those launches queue behind each other
+   with a deep pipeline; in the engine each one is a rendezvous between two bandwidth-bound kernels that
+   have to drain around it. At ~3.75 µs each they cost 0.89 ms (0.82 ms = 219 × 3.75 µs at today's bill),
+   and at ~10 µs of exposed bubble each, 2.4 ms (2.19 ms at 219). Nothing on this box distinguishes them.
    *Confirm with:* per-family clocks inside `decode_step` — a `--time-stages` flag that syncs and reads
    `steady_clock` at the family boundaries and prints ms/token per family from inside a real step. That
    instrument does not exist; it is ~40 lines and it is the one thing that would turn this list into a
@@ -568,7 +568,7 @@ box, and nothing in `bench/` can say why.** The candidates, in the order I would
 |---|---|---|---|---|
 | 1 | **`proj` rows/block 8 → 32** — all 114 engine projections launch at 256 threads (`kRowsPerBlock = 8` × 32 lanes), the width the §4 curve prices at 3.75 µs against 2.776 µs at 1024, and the block-starved narrow shapes are the ones that care | **−0.50 ms** — a clean-window pair on the same 48-job plan: 3.039 ms at rpb 8 (§6) vs 2.534 ms at rpb 32 (E2's 0.0528 ms/launch × 48, same window as the engine's 11.978) | **yes, by construction**: one wavefront owns a row (`proj_gemv_kernels.h:116-133` — `row = blockIdx.x*rpb + threadIdx.x/ws`, the K loop strides by lane, `reduce_row` is a within-warp butterfly), so `rpb` moves rows per block and nothing that touches a value | re-take the rpb ladder in one clean window, then A/B the engine (commands below). It is one constant in `engine/kernels_proj.cpp`, and it is a decision, not a fix: 8 is the op's gated default |
 | 2 | **Pack the GDN input projections** — `in_proj_qkv` + `z` + `b` + `a` in one launch per GDN layer, −54 launches. The deferral in this file priced it at ≈0.10 ms from launch count; the per-shape table prices the *same bytes* 4× faster merged | **−0.11 ms** (the `b`/`a` fold, as `proj_gemv` measured it) to **−0.57 ms** (the full four-into-one; cross-`tile` comparison, so treat as the upper bound) | same kernel, fewer launches — the outputs are the same dots | `prototype/proj_gemv/run.py --layers all --steps all --time --sweep`; the gap between `PACK_inproj` (181.9 GB/s) and the four separate shapes (141 GB/s) *is* the price |
-| 3 | **The 115 cast launches** — upper bound −0.43 ms, and the cheap deletion is not the one this file has been carrying. Folding the widening into the *producer* (`glue_add_norm` holds the norm row in registers and could also write the F32 copy for a 4 KB store) removes 49 of them for near-zero marginal traffic. Folding them into the *consumer*, which is the old `mlp_gateup`/`mlp_down` plan, has a measured precedent against it: `PACK_X` cost **+0.278 ms** over 48 launches to save 48 casts | −0.18 … −0.43 ms, and plausibly net-negative if done the consumer way | yes (every BF16 is exact in F32) | anchor the µs/launch at 256 threads (command below), then decide which producer to touch — both are graduated kernels, so both cost a re-gate |
+| 3 | **The 97 cast launches** *(this row read "**the 115 cast launches** — upper bound −0.43 ms" until `62b73e9` took 18 of them: the packed `g_raw│g_a│g_b` widening, worth 18 × 3.75 µs = **−0.068 ms/token** of dispatch — and §13's decode A/B could not resolve that, while the wave-side win it did measure (−81 % of `cast`) came with `gdn_conv` going 32 % the wrong way, so the net was −0.50 % of wave, not −0.43 ms/token. The open part of this lever is unchanged and is still the cheap deletion this file kept pointing at the wrong way.)* — folding the widening into the *producer* (`glue_add_norm` holds the norm row in registers and could also write the F32 copy for a 4 KB store) removes 49 of the remaining 97 for near-zero marginal traffic. Folding them into the *consumer*, which is the old `mlp_gateup`/`mlp_down` plan, has a measured precedent against it: `PACK_X` cost **+0.278 ms** over 48 launches to save 48 casts | −0.18 … −0.36 ms remaining (97 × 3.75 µs = 0.364 ms is the new ceiling, down from 115 × 3.75 µs = 0.431 ms), and plausibly net-negative if done the consumer way | yes (every BF16 is exact in F32) | anchor the µs/launch at 256 threads (command below), then decide which producer to touch — both are graduated kernels, so both cost a re-gate |
 | 4 | **The per-step logits tail** — 0.128 ms of host scan/alloc + 0.015 ms D2H, always serial with the GPU, plus 0.254 ms when a run dumps logits. The sync itself is **not** the lever: §03.4's lowest-id tie rule put the argmax on the host, and a tie-correct fused argmax would shrink the D2H from 0.993 MB to 4 B but could not remove the wait | −0.14 … −0.40 ms | n/a — no value changes | A/B `decode_run` with and without `--out` (command below); the CPU pieces are already measured above |
 | 5 | ~~HIP graphs~~ | **−0.06 ms** | — | **retired by measurement**: §1's probe replays 64 captured launches at 1.78 µs against 1.85 µs eager. This file's earlier "graphs are the first perf item" line is superseded (note added there) |
 | — | per-step allocation churn | −0.007 ms | — | measured; not a lever |
@@ -599,14 +599,14 @@ IDS=248045,846,198,760,6511,314,9338,369,248046,198,248045,74455,198,248068,271,
 .venv/bin/python prototype/glue/run.py --time --threads 1024 --iters 300
 ```
 
-### Q6 (2026-10-13): the 424-launch bill, priced at the widths each site actually uses
+### Q6 (2026-10-13): the 424-launch bill, priced at the widths each site actually uses — **[2026-10-17, `62b73e9`: this bill has moved, cast 115 → 97 and total 424 → 406, because the packed GDN widening lost its only reader. The rows below are that date's plan and are left exactly as priced; the recomputation, arithmetic shown rather than scaled by eye: the cast row is 97 × 3.75 µs = 0.364 ms (97 × 2.545 µs = 0.247 ms at §6's re-taken anchor), so the dispatch column sums to 1.63 − 0.067 = ≈1.56 ms and the two never-billed families are 0.364 + 0.057 = 0.42 ms of dispatch, not 0.49.]**
 
 The question this section owes `progress/2026-10-12/plan-2026-10-12.md` Q6 is whether the step is launch-bound:
 **12.949 ms/token at 128 lanes against a 6.52 ms floor for 1.5457 GB of weights at the 237 GB/s probe**
 (all three figures are §6's, and the effective rate is 124 GB/s — half the probe). Everything below is
 either a §6 figure or arithmetic on one, and each row says which. Nothing here is a new device timing:
 the only device work in this pass was correctness-shaped (launch counters, byte-identity, the eight
-fixtures), and the by-product `ms_per_step` that `decode_run` prints in those runs is not quoted.
+fixtures), and the by-product `ms_per_step` that `decode_run` prints in those runs is not quoted. **[2026-10-17, `62b73e9`: the bill this section prices has moved — cast 115 → 97, total 424 → 406, because the packed GDN widening lost its only reader. Every figure below is that date's plan and is left as recorded; the recomputations are cast dispatch 115 × 3.75 µs = 0.431 ms → 97 × 3.75 µs = 0.364 ms, so the dispatch column sums to 1.63 → 1.56 ms, and the never-billed cast+copy pair is 0.364 + 0.057 = 0.42 ms (0.30 ms at the 2.545 µs re-take anchor: 97 × 2.545 µs + 0.057 ms), not the 0.35–0.49 ms quoted below.]**
 
 First, what does *not* explain it, because the arithmetic is quick. At 128 lanes the §05 attention read
 is 128 × 12 KiB = 1.5 MB, which is 0.006 ms at the probe. The 18.66 MiB of per-request state is per
@@ -626,7 +626,7 @@ cancel), lock `q6-launchcount`, `util` 94 % recorded and discounted, no timing t
 | `mlp` | 48 = 24 gate_up + 24 down | 448 and 128 blocks × 256 t | counters: 72 → 168 each |
 | `cast` | 115 = 5 per GDN layer + 4 per attention layer + 1 final norm | ≤ 14 blocks × 256 t | `LAUNCH` plan line only — casts are not a launchstats family |
 | `other` | 20 = 1 embedding memcpy + 18 conv-window memcpys + 1 `lm_head` | — | plan line |
-| **total** | **424** | | matches `planned_launch_counts()` and `gate.py` section (d) |
+| **total** | **424** | | matches `planned_launch_counts()` and `gate.py` section (d) — **[today 406; both derivers moved in `62b73e9`, so the two independent readings still agree, at the new number]** |
 
 Now price it with §6's width curve — 2.776 / 3.06 / 3.75 / 5.30 µs per launch at 1024 / 512 / 256 / 128
 threads (`prototype/glue/results.md` §4), each family at the width its own launcher uses, which is the
@@ -638,14 +638,14 @@ correction this task was asked for rather than a single guessed µs/launch:
 | MLP | 48 | 256 t | 0.180 | **2.594** | 2.230 | traffic-bound at 86 %; its +0.36 over roofline is kernel efficiency, not dispatch |
 | projections, engine's 114-launch plan | 114 | 256 t → 1024 t | 0.428 → 0.317 | not measured as the engine runs it; the 48-launch packed plan is **3.081**, and the per-shape table summed over this plan gives 3.54–3.60 (derived, §6's 1.0166 clean/contended ratio applied) | 1.973 | **the biggest named inefficiency: +1.6 ms over its own roofline**, and it is a shape problem — `in_proj_a`/`_b` 5 %, `k_proj`/`v_proj` 40 %, `o_proj`/`out_proj` 46–49 % of the probe |
 | `glue` | 49 | 256 t, one block each | 0.184 | **0.1904** | 0.002 | pure dispatch — and the only family where the curve can be checked against itself: derived 0.184 against measured 0.190, 3 % apart |
-| casts | 115 | 256 t | 0.431 (0.293 if §6's 2.545 µs re-take is the anchor) | never measured | 0.007 | dispatch and nothing else, whatever the anchor |
+| casts | 115 | 256 t | 0.431 (0.293 if §6's 2.545 µs re-take is the anchor) | never measured | 0.007 | dispatch and nothing else, whatever the anchor — **[97 launches since `62b73e9`: 0.364 ms at 3.75 µs, 0.247 ms at 2.545 µs]** |
 | GDN recurrence | 18 | 16 blocks × 128 t | 0.095 | 0.0646 for the prototype's one-launch form; 0.115 as 18 launches (derived, 18 × the re-taken 6.4 µs) | 0.228 cold | the warm-burst figure understates an in-step cold pass; priced at +0.16 above |
 | §04.5 gated norm | 18 | 16 × 128 t | 0.095 | **0.053** | 0.0016 | pure dispatch — and the curve's weak spot: it prices this launch at 5.30 µs while the kernel's own measured cost is 2.958 µs, i.e. the curve over-prices small multi-block launches by up to 1.8× |
 | `gdn_conv` + `gdn_gates` | 36 | 256 t / 1 block × 16 t | ≈0.13 | never measured | ~0.01 | dispatch (the estimate this file already carried) |
 | attention | 6 | 8 blocks × 256 t | 0.023 | 0.114 at 128 lanes, derived from the re-taken 0.89 µs per lane per token (at the older ≤327-lane fit of 2.014 µs/lane the same 128 lanes price at 0.258) | 0.006 | latency-bound at low lane counts |
 | 19 D2D copies | 19 | — | ≈0.057 | never measured | 0.006 | dispatch |
 | host tail (argmax + alloc + D2H) | — | — | — | 0.14 (CPU-measured) | — | serial with the GPU, always paid |
-| **sum of the rows** | **424** | | **≈1.63 ms of dispatch** | **≈9.35–9.55 ms** | 6.52 | |
+| **sum of the rows** | **424** | | **≈1.63 ms of dispatch** | **≈9.35–9.55 ms** | 6.52 | | **[406 launches and ≈1.56 ms of dispatch on the 2026-10-17 plan: only the cast row moved, by −0.067 ms = 18 × 3.75 µs]** |
 
 **So the honest answer to Q6.1/Q6.2 is: launch overhead is not the gap.** All 424 launches, priced at
 the width each one uses, are ≈1.63 ms of a 12.949 ms token — 12.6 % — and most of that is already
@@ -692,7 +692,7 @@ one constant (D-9).
   against the pins differs with the width (2 of 384 norm rows at 256 t, 1 at 1024 t — E1, §6), both
   inside band. Moving bits for 0.4 % of the token, with `dec300f` step 86 at 0.9992 and `wide520f`
   step 17 at 0.9996 filled, is a margin re-price, not a free win.
-- **Folding the casts into a producer** (49 of 115, −0.18 … −0.43 ms). `glue_add_norm` holds the norm
+- **Folding the casts into a producer** (49 of 115, −0.18 … −0.43 ms; 49 of 97 and −0.18 … −0.36 ms since `62b73e9` took the packed GDN widening out of the bill). `glue_add_norm` holds the norm
   row in registers and could write the F32 copy for a 4 KB store, but `prototype/glue/glue_kernels.h`
   is graduated code and editing it costs that op's device gate (≈2 min — outside a worker's allowance,
   so it is written here rather than done). The consumer side already has a measured counter-example:
@@ -802,9 +802,9 @@ per-kernel event timing would report a column of zeros and look like fast kernel
 The stages are the families the launch bill already names, so every row can be set against a row of the
 Q6 table: `glue` `proj` `gdn` `attn` `mlp` `cast` `copy` `lm_head` `host_tail`. And the clock *counts*
 submissions as well as timing them, so it audits its own segmentation against the gate-policed plan:
-`launches_per_step=424 plan_per_step=424 plan_match=1` with the family counts matching §07 line for line
+`launches_per_step=424 plan_per_step=424 plan_match=1` with the family counts matching §07 line for line *(that is the 2026-10-13 log quoted as printed; since `62b73e9` the same audit line reads `launches_per_step=406 plan_per_step=406` with cast 97)*
 (glue 49, proj 114, gdn 72, attn 6, mlp 48, cast 115, copy 19, lm_head 1, host_tail 0 — the last is the
-D2H plus the argmax, which is not a launch). Above the attention lane staging an `attn` site legitimately
+D2H plus the argmax, which is not a launch). **[2026-10-17: that is what the clock printed against the 2026-10-13 plan; the same audit line now reads `launches_per_step=406 plan_per_step=406` with cast 97, so a re-take takes N = 406 and prices the cast row at 97 × 3.75 µs = 0.364 ms instead of 0.431.]** Above the attention lane staging an `attn` site legitimately
 issues 2 kernels where the plan says 1, and the totals then exceed the plan and say so rather than
 quietly agreeing.
 
@@ -818,7 +818,7 @@ serialized granularity
 pattern of each step's top logit, or it prints `note=COMPARISON_VOID` and the gap numbers are meaningless.
 
 **The arithmetic that makes it a discriminator.** In the serialized passes a launch costs its host
-dispatch *plus* its execution *plus* the wait, so with N = 424 launches, per-launch dispatch h (§6's width
+dispatch *plus* its execution *plus* the wait, so with N = 424 launches (406 since `62b73e9`), per-launch dispatch h (§6's width
 curve, ≈2.9–3.8 µs, total **D ≈ 1.63 ms** per Q6's own table) and idle-wait cost s (the `calib` line):
 
     K ≈ Σ exec_in_situ + D + N·s          S ≈ Σ exec_in_situ + D_stages + n_stages·s
@@ -854,9 +854,9 @@ That gives two independent readings, which should agree:
    two readings — that is its whole design — so nothing about the measurement depends on which one wins.
 
 **Pre-registered predictions, written before the window.** So that the answer cannot be fitted to the
-number afterwards. Anchors, all from this repo: N = 424 launches; E_iso = 9.35–9.55 ms (Q6's own column
-sum); **D = 1.1–1.63 ms** — 1.63 is Q6's dispatch column as written, and 1.1 is the same column with the
-small-multi-block rows divided by the curve's own 1.8× over-price, which is the honest lower end; s = the
+number afterwards. Anchors, all from this repo: N = 424 launches **[now 406 — see the Q6 header note]**; E_iso = 9.35–9.55 ms (Q6's own column
+sum); **D = 1.1–1.63 ms** — 1.63 is Q6's dispatch column as written **[on the 406-launch plan the upper end is 1.56 ms: 1.63 − 18 × 3.75 µs = 1.563]**, and 1.1 is the same column with the
+small-multi-block rows divided by the curve's own 1.8× over-price, which is the honest lower end **[that divisor was applied to "the small multi-block rows" and the record does not say whether the 18 deleted casts were inside that set, so a re-take should re-derive D from the plan rather than shift this band by the same 0.067 ms]**; s = the
 `STAGECAL idle_sync_us` line the same window prints; B must land on §6's 12.7–13.0 ms or nothing below
 means anything.
 
@@ -865,7 +865,7 @@ means anything.
 | `exposed = K − B` | ≈ `N·s` only → **≤0.2 ms** if the calib line reads sub-µs, ≤1.3 ms if it reads 3 µs | ≈ `D + N·s` → **1.1–1.7 ms** plus `N·s` | between the two bands |
 | `Σ exec_in_situ = K − (D + N·s)` | ≈ E_iso, 9.4–9.6 | ≈ B, **12.7–13.0** | between |
 | `K` itself | ≈ B + `N·s` → **12.8–14.3** | ≈ B + `D` + `N·s` → **13.9–16.0** | between |
-| consequence | fund submission work first (fold the 115 casts, pack the 114 projections) | stop submission work; fund shape/memory (Q6 lever 4) and the two unpriced families | **report it as a split, never as the nearer story** |
+| consequence | fund submission work first (fold the 115 casts **[97 since `62b73e9`]**, pack the 114 projections) | stop submission work; fund shape/memory (Q6 lever 4) and the two unpriced families | **report it as a split, never as the nearer story** |
 
 And the split, if it lands in the middle — which the arithmetic above makes the *likely* outcome, because
 `D ≤ 1.63 ms < 3.4 ms`, so **no outcome of this experiment can make the residue entirely a dispatch
@@ -893,14 +893,14 @@ Two sub-cases the family rows decide and the aggregate cannot, also pre-register
 
 **The experiment, and the if/then table.** One locked window, a fixed 128-lane context (cheapest point
 that is pure one-row decode: under the 512-lane staging the attention site is one fused kernel and the
-plan is exactly 424 launches), three runs, medians and spread quoted the way §6 quotes everything. The
+plan is exactly 424 launches **[406 since `62b73e9`, which is the number a re-take must use]**), three runs, medians and spread quoted the way §6 quotes everything. The
 4032-lane point goes in the same window because that is the one §6 could not settle (16.9 % spread over
 five runs, and more repetitions did not move it).
 
 | outcome (128-lane point, medians of 3) | reading | what to do |
 |---|---|---|
 | `K−B` within ~±0.4 ms of `D + N·s`, and `Σ exec_in_situ` ≈ B (12.7–13.0) | dispatch is fully hidden; the step's own kernels cost ~3.2–3.7 ms more in situ than the isolated bursts said | **Story B. Stop all submission work** (packed projections, cast folding, graphs — §6's graph result of ~4 % is then explained, not a missed opportunity). The next move is the shape/memory work: Q6 lever 4 (the 5 %-efficient `in_proj_a/b`, 40 % `k/v_proj`, 46–49 % `o/out_proj`), and a re-examination of the burst-vs-situ cache asymmetry — `prototype/README.md` rule 8 is the measured case: 6 back-to-back replicas of one kernel re-read cached bytes and reported 344 GB/s for a kernel that streams 237, so an isolated burst whose repetitions touch the same weights is *expected* to flatter the step. **Then split B1/B2 with the family rows before funding anything:** if the excess is inside the named families it is in-situ cost; if it is in `cast`/`copy`, nothing slowed and the lever is folding casts, which is submission work — the opposite instruction. |
-| `K−B ≲ 0.3 ms` (sub-µs `s`) | the queue is already empty in production: dispatch is exposed, launch for launch | **Story A, capped at D ≈ 1.1–1.6 ms of the 3.4** — go submission-side in Q6's own order: fold the 49 of 115 casts a producer can write, then packed projections (114 → 48 launches). The remaining ≥1.8 ms is in-kernel by the arithmetic above and needs its own finding; do not spend the fusion work expecting the residue to close. |
+| `K−B ≲ 0.3 ms` (sub-µs `s`) | the queue is already empty in production: dispatch is exposed, launch for launch | **Story A, capped at D ≈ 1.1–1.6 ms of the 3.4** — go submission-side in Q6's own order: fold the 49 of 115 casts a producer can write **[49 of 97 since `62b73e9` — 1.7′ took 18 of the 115, none of them a producer-foldable norm row]**, then packed projections (114 → 48 launches). The remaining ≥1.8 ms is in-kernel by the arithmetic above and needs its own finding; do not spend the fusion work expecting the residue to close. |
 | `0.3 ms ≲ K−B ≲ D + N·s` | partly hidden — the expected case, given `D < residue` | Compute both halves (`exposed_dispatch`, `in_kernel`, above) and report the **split**, never the nearer story. Fund whichever half is larger first, and say in the ledger row that the other half exists. |
 | `S−B > K−B`, or `plan_match=0`, or any `STAGEPARITY` not `1`, or the split identity off by more than ~0.3 ms | the instrument or the window is broken — per-kernel serialization is a superset of per-stage, so it cannot be the cheaper one, and a failed identity means the three-term model does not describe the step | **Stop and fix the instrument.** Do not interpret any number from that run. |
 | any doubt about window exclusivity (`gpu_lock.sh util` high at acquire, a subagent alive, serving in flight) | contention inflates every sync, i.e. it *manufactures* the story-B signature | Void, not noisy. Re-take with zero subagents. This is the one failure mode that fakes the answer rather than blurring it. |
@@ -3488,7 +3488,7 @@ with. No pin was created, priced or compared against; `data/refs/` is untouched 
 cut of this note credited the 512-row wave with the mixing; it does not mix, and the narrower claim is the
 one worth keeping.
 
-## Q7 (2026-10-13): the ~3.2 ms residue is the memory system treating a fresh window poorly, not a per-launch ramp — and the reporting bug was in the ledger sentence, not the instrument
+## Q7 (2026-10-13): the ~3.2 ms residue is the memory system treating a fresh window poorly, not a per-launch ramp — and the reporting bug was in the ledger sentence, not the instrument — **[2026-10-17, `62b73e9`: the step this section priced bills 406 launches with 97 casts, not 424 with 115. The stage-clock rows below are recorded log values and stand as taken; the launch-count arithmetic in them recomputes to 406 launches → 407 kernel-granularity waits (406 + `host_tail`), and the ramp absurdity to 42.4 µs × 406 = 17.2 ms rather than 18.0 ms.]**
 
 Again no millisecond in this section is this worker's. Every input is already on disk: the stage-clock
 family rows are `tmp/q61/stage128_{1,2,3}.log` and `tmp/q61/stage4032_{1,2,3}.log` as the main agent took
@@ -3529,7 +3529,7 @@ family's own roofline is +42.4 µs (`mlp`, 48 launches), +19.9 µs (`proj`, 114)
 1). Those are not flat, so there is no per-launch constant to find; and they are the *wrong sign* for a
 ramp that amortizes with size — the launch 46× bigger than the MLP's carries the same per-launch
 deficit while its per-MB deficit is 35× smaller (+0.11 vs +3.85 µs/MB). And scale it up: a ramp of
-42.4 µs per launch billed across the step's 424 launches is 18.0 ms, in a step that is 12.74 ms of
+42.4 µs per launch billed across the step's 424 launches is 18.0 ms (406 launches on the 2026-10-17 plan makes it 17.2 ms = 42.4 µs × 406), in a step that is 12.74 ms of
 kernel time. The flat quantity that does fit the two many-launch families is per byte — +3.85 and
 +4.87 µs/MB, i.e. both families stream the step's weights at **124 and 110 GB/s against a 237 GB/s
 probe** — and the aggregate agrees: 1504 MB of weights over 12.72 ms of `Σ exec_in_situ` is 118 GB/s.
@@ -3542,7 +3542,7 @@ the reason `engine/weights_contract.py` gives) and divides by the measured probe
 the error was `o_proj`, which is `[1024, 2048]`, not `[1024, 4096]` — the ledger row was right.)
 
 **The residue has two components, and only one of them is launch-shaped.** The `cast` (115 launches,
-0.9216 ms), `glue` (49, 0.6888), `copy` (19, 0.2146) and `gdn` (72, 0.6375) families carry essentially no
+0.9216 ms at that window's launch count; the family bills 97 since `62b73e9`, so a re-take prices a smaller slice of the same floor), `glue` (49, 0.6888), `copy` (19, 0.2146) and `gdn` (72, 0.6375) carry essentially no
 weight bytes at n = 1, so their 2.46 ms is traffic-free and therefore per-launch: 8–14 µs per launch
 in-situ against the dispatch curve's 2.6–3.8 µs, i.e. ~4–11 µs of launch floor each, of which the
 instrument's own exposed submission is a part. That is where fewer launches still buys something, and it
@@ -3587,7 +3587,7 @@ row of every log that window produced — `tmp/q61/stage128_{1,2,3}.log`, `tmp/q
 whole tree returns exactly two distinct values, 323 and 425. `tools/instep_family_budget.py` prints both
 per log, so the claim can be re-checked without a device. 425 is also what the instrument must produce:
 `syncs_` counts closed segments (`stage_clock.cpp`'s `close_segment`), kernel granularity opens a segment
-per submission, and the per-step bill is 424 launches + the `host_tail` segment. So the field was right,
+per submission, and the per-step bill is 424 launches + the `host_tail` segment (on the 2026-10-17 plan: 406 + 1 = 407 waits). So the field was right,
 the subtraction it feeds was never at risk, and the wrong thing was the sentence in
 `bench/performance-status.md` — corrected there, with the pointer to this section, in the same pass that
 wrote these numbers. `stage`'s 323 is also correct (it is segments, not launches: 424 launches collapse
