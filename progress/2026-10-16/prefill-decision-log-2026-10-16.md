@@ -1214,3 +1214,39 @@ mechanism with a small probe *before* building, state the refuting result as a f
 follow the prediction. 4.2′ is the second D30 item whose ceiling a pre-measurement confirmed (4.1 was the
 first, via the census's own bytes). Both times the pre-measurement also *shrank* the work: 4.1 needed one bill
 deriver where the census priced two, and 4.2′ needed no `gate.py` change at all.
+
+# D39 — **the per-token launch bill is an engine contract, not a specification claim, so a gate's expectation may move with the engine — under four conditions** (2026-10-17)
+
+Source: `62b73e9`, `bench/performance-status.md` §13, `progress/2026-10-17/HANDOFF_17prime.md`.
+
+The worker hit the branch my brief had reserved as a stop-and-tell: 1.7′'s deletion is **route-blind and
+width-blind**, so it removes a launch from §07's *per-token* bill (cast 115 → 97, total 424 → 406), which
+`engine/gate.py` section (d) polices. Editing a checker's expectation to match a kernel inverts the direction
+of proof, so it stopped instead of doing it. That was the right call and the decision was mine, not the user's,
+because I checked where the number lives: **`grep` finds neither 115 nor 424 anywhere in `specification/`** —
+§07 names operations, not dtype adapters. The bill is a derived formula in `gate.py` plus prose in
+`engine/results.md`. A contract the checker derives from the engine's own structure is engine-internal, so
+4.1-a's rule applied: engine and deriver in one commit.
+
+**The four conditions, because "the gate moved" is only safe if they hold.** (1) the check stays an exact
+integer equality *and* is re-proved to bite in both directions — `selftest_launch_bill()` now catches the cast
+re-added (98 vs 97), a different cast wrongly dropped (96 vs 97), and a row the engine never printed, the last
+being the case a `dict.get()` turns into a silent None; (2) `specification/`, `progress/`, `bench/` and
+`devices/` were off-limits to the worker — journals and recorded measurements are re-pointed or annotated by the
+main agent, not silently rewritten; (3) the live count claims in `engine/results.md`/`README`/`step_traffic_model.py`
+move in their own commits, marking the booked opportunity that was taken rather than editing it out; (4) the
+ship is contingent on the main agent's A/B, with the refuse-and-revert price stated in advance.
+
+**Condition 4 is what nearly mattered.** The census predicted `gdn_conv` at ≈15 ms; it came back **+32 % slower**
+(19.99 → 26.48 ms), because the packed F32 tile was a coalescing layout and not merely a format conversion. Net
+of the three affected families the item is **−0.50 % of wave**, which clears `MIN_PCT_OF_WAVE`, so it ships —
+but the refutation is booked as a named follow-up worth ~0.68 % of wave, and it is the third time this session
+that a bytes-demanded argument predicted a timing consequence wrongly (D21, the census's `region_census`
+calibration, and now this).
+
+**Two provenance notes, one of them mine.** The handoff asserted "nothing in `engine/gate.py` was touched" while
+the working tree carried 80 changed lines there including the bill formula — the state claim was stale, not the
+work, and it was caught by `git status` before any of it was trusted. And the first A/B measured a **stale binary
+as a clean null**: `plan_match` stayed green because the bill deriver is compiled into the same binary, so the
+self-consistency check could not see staleness. A behavioural canary asserted inside the window is now mandatory
+in these A/Bs; see the trap in `AGENTS.md`.
