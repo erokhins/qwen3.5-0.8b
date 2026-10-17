@@ -1141,3 +1141,47 @@ a subset must be read from the per-shape `source=` echoes before its family rows
 to state what is *not* pinned. For the deriver: `superseded` is a claim about an interaction, and an interaction
 verdict must name the config that produced it — a verdict keyed to "shape + algo" without the co-named pin set can
 record a coverage effect as an algo judgement, which is exactly how D35 got it backwards.
+
+# D37 — **the bytes-vs-launches cut re-frames three D30 items at once, and the first one ships the same day** (2026-10-17)
+
+Source: `progress/2026-10-17/glue-cast-copy-bytes-census.md` (worker, CPU-only), `tools/submission_probe.cpp`
+and `tmp/gcc/ab.txt` (main agent, device). Detail lives there; what follows is the disposition.
+
+**The framing that did the work.** Before pricing any fusion, ask of each family whether it is bound by
+*bytes* or by *submissions*. That question was not in D30, and it moved three items at a stroke:
+
+| item | D30 framed it as | the cut says | disposition |
+|---|---|---|---|
+| **4.1 `cast`** | a fusion | 29.25 µs/launch = **17× the dispatch floor**, 271.9 GB/s demanded | **funded as a deletion, shipped today** (`26cd5d6`, ledger §10) |
+| **4.2 `copy`** | in-place staging to save bytes | 2.56 µs/launch = **1.4× floor**; whole family's bytes are 0.16 ms against a 10.86 ms row | **funded no as written**; redirected to `4.2′` |
+| **4.3/`glue`** | fusion | 35.77 µs/launch but only 5 % floor-share and 116 GB/s — neither | **funded no** (D30's disposition stands, its stated reason does not) |
+| **1.7 GDN trio** | fuse conv+gates+gated_norm into `rec` | `gdn_conv` is at **90.5 % of the copy probe** — at the wall, so fusing cannot recover its bytes | **funded no as framed**; `1.7′` (BF16 `g_raw`) stays funded pending §5-B |
+
+**4.1 shipped: −57 % on the `cast` row, +1.86 % paired prefill.** 78 of 114 casts per wave body widened a
+tile the library route never reads. The dead set was **derived from the readers, not from the census's line
+numbers**, and that mattered: `norm_f32` is dead for attention layers only, because `in_proj_b`/`in_proj_a`
+call `proj_gemv` directly at **every** width, so 18 of 24 mixer-input casts per body are live. The wall and
+the row agreed at both widths (−17.65 ms measured against −15.57 ms predicted), which is the D21 test run in
+the other direction — the deleted work was on the critical path, not L2-absorbed.
+
+**A new device fact, and it re-prices a class.** `tools/submission_probe.cpp` submits the engine's own shape
+(4096 separate 2 KiB D2D copies): **2.05 µs/op against an empty launch's 1.72 µs**, so a copy's bytes are
+~0.33 µs and **its submission is 84 % of the op**; the identical work as one operation costs **0.10 ms
+instead of 8.40 ms**. The repo's carried dispatch floor of 1.85 µs is re-taken at **1.72 µs** — the first
+timing figure this box has produced that is not bimodal. Consequence: **4.2′ is funded at ~8.3 ms ≈ 0.87 % of
+wave, inside the census's own predicted band** — the first D30 item whose ceiling a pre-measurement confirmed
+*before* anything was built. What it does not settle is the engine half (an idle CPU submits at its own rate;
+a busy stream may absorb submissions), so §5-C's paired A/B on a real gather kernel remains the gate, with
+predictions numeric in both directions now.
+
+**Two corrections to my own record, one of them the census correcting me.** D30 4.2's bytes framing is refuted
+above. And the census's §5-A.3 claim that `gate.py`'s `wave_expect()` "must stop assuming a wave body owes 114
+casts" **misread its own docstring**: that `49/24/24/114` is `proj` per body (5×18 + 4×6), and section (h)
+cannot price `cast` at all because `engine/launch_stats.h` has no cast counter — a check over a family with no
+counter cannot fail. So the item needed one bill deriver, not two. This is the same failure class I have been
+logging all session, now caught in a *cost estimate* rather than a result: a check that structurally cannot
+fail was being counted as plumbing that had to move.
+
+**Next.** `4.2′` (one gather kernel replacing 4096 submissions, ~0.87 %, gated by its own §5-C A/B), then
+`1.7′`. `2.6` (attn tile occupancy) and `3.3` (hand WMMA GEMM) are untouched; `2.5` needs a numerics admission
+and `5.1` is out of authority.
