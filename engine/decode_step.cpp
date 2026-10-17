@@ -684,7 +684,13 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                                      sc.g_u + (size_t)t * kQkvRows + 2 * kValueDim,
                                      sc.g_g + (size_t)t * kNumValueHeads,
                                      sc.g_beta + (size_t)t * kNumValueHeads,
-                                     st.gdn_state_layer(layer), sc.g_o + (size_t)t * kValueDim);
+                                     st.gdn_state_layer(layer), sc.g_o + (size_t)t * kValueDim,
+                                     // The SPELLING, from the run (`--gdn-spell`). It reaches the
+                                     // launcher here and nowhere else, which is what keeps the two
+                                     // forms one flag apart inside one binary; the stage-clock site is
+                                     // above it, so both forms land on the same `gdn_rec` row of the
+                                     // wave report and the A/B is a diff of one family line.
+                                     sc.gdn_spell);
                 }
             }
         }  // the mixer

@@ -143,6 +143,18 @@ struct Options {
     // way — which is the property that makes it safe to A/B a scan from the same binary at all.
     engine::kernels::GdnScan gdn_scan = engine::kernels::GdnScan::kSeq;
     bool gdn_scan_given = false;
+    // Which SPELLING of the sequential recurrence's state walks `gdn_rec` submits (`--gdn-spell`,
+    // `kernels.h::GdnRecSpell`). `ship` is the shipped `rec_kernel`; `unroll4` is the same operations in
+    // the same order with `#pragma unroll 4` on both state walks, bit-identical to `ship`
+    // (`prototype/gdn_rec_isa/results.md` §10) and 1.149-1.158x at launch level. Both spellings are
+    // compiled in either way, so one binary and one window can price them against each other — the
+    // AGENTS.md rule that a ruler re-taken in another window is not an A/B. Echoed on the NUMERICS line,
+    // like every other knob here, because a timing log that cannot say which spelling produced its
+    // family row is not evidence.
+    engine::kernels::GdnRecSpell gdn_spell = engine::kernels::GdnRecSpell::kShip;
+    // Whether the flag was actually given, as distinct from the default above: naming it next to
+    // `--gdn-scan collapse` is a refused contradiction rather than a silently ignored one.
+    bool gdn_spell_given = false;
     // The chunk size. Only 64 is accepted, and the refusal prints the measured reason rather than
     // "unsupported": C=16 lost §2.3's per-row budget on the pinned dumps, which is the argument for
     // why 64 is the default at all.
@@ -245,6 +257,10 @@ Options parse_args(int argc, char** argv) {
         } else if (a == "--gdn-scan") {
             o.gdn_scan = engine::kernels::parse_gdn_scan(next());
             o.gdn_scan_given = true;
+        } else if (a == "--gdn-spell") {
+            // Parses or throws, like `--gdn-scan`: this names which side of an A/B the run is.
+            o.gdn_spell = engine::kernels::parse_gdn_rec_spell(next());
+            o.gdn_spell_given = true;
         } else if (a == "--gdn-chunk") {
             const std::string v = next();
             int n = 0;
@@ -287,6 +303,19 @@ Options parse_args(int argc, char** argv) {
     }
     if (!o.sizes_only && !o.session && o.steps < 0) {
         throw std::runtime_error("decode_run needs --steps >= 0");
+    }
+    if (o.gdn_spell_given && o.gdn_spell != engine::kernels::GdnRecSpell::kShip &&
+        o.gdn_scan == engine::kernels::GdnScan::kCollapse) {
+        // The re-spelled walks belong to the SEQUENTIAL kernel; `collapse` submits
+        // `gdn_rc::rec_collapse_kernel` and never looks at the flag. A run that printed
+        // `gdn_spell=unroll4` while running the collapse kernel would price the same kernel twice and
+        // report the second price as the spelling's win, which is the failure this whole knob exists to
+        // avoid, so it is refused rather than echoed with a caveat.
+        throw std::runtime_error("--gdn-spell " + std::string(engine::kernels::gdn_rec_spell_name(
+                                     o.gdn_spell)) +
+                                 " selects the spelling of the sequential recurrence's state walks and"
+                                 " is inert under --gdn-scan collapse, which launches a different"
+                                 " kernel. Use --gdn-scan seq (the default) for this A/B");
     }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
@@ -471,7 +500,7 @@ void print_usage(FILE* out) {
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
                  " [--prefill-logits last|all] [--wave-rows N]"
                  " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
-                 " [--gemm-pins all|none|<csv>] [--attn-touch 0|1]"
+                 " [--gemm-pins all|none|<csv>] [--attn-touch 0|1] [--gdn-spell ship|unroll4]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -523,6 +552,16 @@ void print_usage(FILE* out) {
                  " clamp. Wave-only, like --attn-tile: a one-row body is the fused single-row form under"
                  " either setting, so no decode bit moves, and BOTH spellings are compiled into the binary"
                  " whatever this says, so a paired timing is one window rather than two builds\n"
+                 "  --gdn-spell ship|unroll4  which SPELLING of the sequential recurrence's state walks"
+                 " a `gdn_rec` launch runs (`engine/gdn_rec_unroll4_kernels.h`, "
+                 "prototype/gdn_rec_isa/results.md §10, decision D32). `ship`, the default, is the"
+                 " shipped `rec_kernel` and the form every pin is pinned through. `unroll4` is the same"
+                 " operations in the same order with `#pragma unroll 4` on both walks — BIT-identical"
+                 " (zero elements of `o` and of the state moved in 4/4 harness cases), 7.7%% fewer"
+                 " slots, and 1.149-1.158x at launch level over a resident 1 MiB state. Inert under"
+                 " `--gdn-scan collapse`, which launches a different kernel; naming this flag alongside"
+                 " it is REFUSED rather than echoed with a spelling that did not run. Both kernels are"
+                 " compiled in either way, so the paired wave timing is one window\n"
                  "  --gdn-scan seq|chunk  which §04.4 scan a GDN body runs (P9, §04.7,"
                  " progress/2026-10-14/p9-phase1-2026-10-14.md). `seq`, the default, is the shipped recurrence: ONE"
                  " launch per token per layer, 18,432 launches per 1024-token wave, and the form the"
@@ -1124,12 +1163,13 @@ int main(int argc, char** argv) {
         // the library it is linked against, not about the run — and read by `gate.py`'s
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
         std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d"
-                    " attn_touch=%d gdn_scan=%s gdn_chunk=%d\n",
+                    " attn_touch=%d gdn_scan=%s gdn_chunk=%d gdn_spell=%s\n",
                     engine::kMaxWaveRows, o.wave_rows,
                     engine::kernels::wave_gemm_name(o.wave_gemm),
                     engine::kernels::gemm_route_version().c_str(), o.attn_tile,
                     o.attn_touch,
-                    engine::kernels::gdn_scan_name(o.gdn_scan), o.gdn_chunk);
+                    engine::kernels::gdn_scan_name(o.gdn_scan), o.gdn_chunk,
+                    engine::kernels::gdn_rec_spell_name(o.gdn_spell));
         if (o.sizes_only) {
             std::printf("RESULT mode=sizes-only tensors=%zu check_weights=PASS\n", stats.n_loaded);
             std::fflush(stdout);
@@ -1144,6 +1184,7 @@ int main(int argc, char** argv) {
         sc.attn_touch = o.attn_touch;
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;
+        sc.gdn_spell = o.gdn_spell;
         if (engine::kernels::wave_gemm_is_library(o.wave_gemm, engine::kMaxWaveRows)) {
             // Pin filter first: it decides what `gemm_route_plan` below fetches and what the version
             // line counts, so setting it after the plan would print one route and run another.

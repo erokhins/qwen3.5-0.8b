@@ -118,6 +118,14 @@
 
 #include "gdn_rec_isa_kernels.h"   // rec0/rec1/rec2/rec2c, and through them rec_kernel, block_sum, D, NH, Q_SCALE
 
+// The engine's OWN port of `recx_shape_kernel`, so the bit-identity verdict is taken on the source text
+// the engine compiles and not on a third copy of it. Precedent:
+// `prototype/gdn_collapse/gdn_collapse_check.hip.cpp:60` includes `engine/gdn_collapse_kernels.h` for
+// the same reason — a port may be witnessed on the copy, but the copy that matters is the shipped one.
+// `--modes receng` is that witness: `receng` over `rec0` is the engine kernel versus the shipped
+// kernel, bit for bit, on `o` AND on the final state, over T tokens.
+#include "engine/gdn_rec_unroll4_kernels.h"
+
 namespace {
 
 constexpr int kD = D;                       // 128: d_k = d_v, one thread per d_v column
@@ -149,9 +157,10 @@ namespace {
 // on a different launch plan from the one that was gated. `rec0` is MODE 0 and is the reference every
 // other MODE is bit-diffed against; `ship` is optional and gives the census's static control row
 // (rec0_kernel censuses identical to rec_kernel) a device witness when someone wants one.
-enum Mode { M_SHIP = 0, M_REC0, M_REC1, M_REC2, M_REC2C, M_REC3, M_REC4, M_REC5, M_REC6, NMODES };
+enum Mode { M_SHIP = 0, M_REC0, M_REC1, M_REC2, M_REC2C, M_REC3, M_REC4, M_REC5, M_REC6, M_RECENG,
+            NMODES };
 static const char* kModeName[] = {"ship", "rec0", "rec1", "rec2", "rec2c",
-                                  "rec3", "rec4", "rec5", "rec6"};
+                                  "rec3", "rec4", "rec5", "rec6", "receng"};
 
 /* The three dependency-break probes. Their VALUE is meaningless by design — a probe whose value was
  * still correct would still be waiting on the dependency — so they are never admitted against MODE 0's
@@ -161,7 +170,8 @@ static const char* kModeName[] = {"ship", "rec0", "rec1", "rec2", "rec2c",
  * volume is asserted about them. */
 inline bool mode_splits_state(int m) { return m == M_REC3 || m == M_REC5; }
 inline bool mode_value_gated(int m) { return m == M_SHIP || m == M_REC0 || m == M_REC1 ||
-                                           m == M_REC2 || m == M_REC2C || m == M_REC6; }
+                                           m == M_REC2 || m == M_REC2C || m == M_REC6 ||
+                                           m == M_RECENG; }
 inline bool mode_band_gated(int m) { return m == M_REC4; }
 // The three dependency probes: value is not the gate, volume is.
 inline bool mode_is_probe(int m) { return m == M_REC3 || m == M_REC4 || m == M_REC5; }
@@ -207,7 +217,7 @@ static ModeSet modes_of(const std::string& spec) {
             if (tok == kModeName[i]) found = i;
         if (found < 0) {
             std::fprintf(stderr, "--modes: no mode \"%s\"; known:"
-                         " ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6\n", tok.c_str());
+                         " ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6,receng\n", tok.c_str());
             std::exit(2);
         }
         ms.add(found);
@@ -242,6 +252,11 @@ void launch_mode(int mode, const float* q, const float* k, const float* v, const
         case M_REC4: recx_unchain_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;
         case M_REC5: recx_both_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, S_out, o, kNH); break;
         case M_REC6: recx_shape_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;
+        // The engine's port. Same launch plan as every other carried MODE, so a `receng`/`rec6` pair
+        // differing at all would mean the two source texts differ, not the geometry.
+        case M_RECENG:
+            rec_unroll4_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH);
+            break;
         default:
             std::fprintf(stderr, "no kernel for mode %d\n", mode);
             std::exit(3);
@@ -1150,7 +1165,7 @@ int main(int argc, char** argv) {
         else if (a == "--selftest-mirror") return selftest_mirror();
         else {
             std::fprintf(stderr,
-                         "usage: gdn_rec_isa [--modes ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6]"
+                         "usage: gdn_rec_isa [--modes ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6,receng]"
                          " [--tokens T --state zeros|random --decay D --seed S] [--repeat N]\n"
                          "                 [--volume [--pool N]] [--burst N --reps R [--pool N]]"
                          " [--out DIR] [--selftest-lane] [--selftest-mirror]\n"
@@ -1161,7 +1176,10 @@ int main(int argc, char** argv) {
                          "  dependency broken by a split state), rec4 (both serial chains shortened from\n"
                          "  128 links to 32 at identical volume), rec5 (both) and rec6 (rec4's loop\n"
                          "  shape with the chain NOT broken: its bill-matched control, bit-identical to\n"
-                         "  rec0); rec3/rec4/rec5 are meaningless\n"
+                         "  rec0); receng is `engine/gdn_rec_unroll4_kernels.h::rec_unroll4_kernel`, the\n"
+                         "  ENGINE's port of recx_shape_kernel, gated by bit-identity against rec0 for\n"
+                         "  the same reason rec6 is — it is the witness that the port moved no bits;\n"
+                         "  rec3/rec4/rec5 are meaningless\n"
                          "  by design, admitted on VOLUME, and a --burst runs that volume check itself and\n"
                          "  refuses to time unless it passes. --pool N indexes N independent state slots per token (the\n"
                          "  literal indexed-per-token form); N=1 keeps the working set smallest, which\n"

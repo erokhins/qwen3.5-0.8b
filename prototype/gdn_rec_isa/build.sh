@@ -13,11 +13,15 @@
 # libm calls — correct, but slow enough that four cases of the mirror would dominate the run. It does
 # not touch device codegen; the census row in isa_census.harness.output.txt is the witness that the
 # kernel side of this TU is still the shipped 1,523-slot bill.
+#
+# -I. -Iengine follow engine/build.sh and prototype/gdn_collapse/build.sh: the harness now includes
+# `engine/gdn_rec_unroll4_kernels.h` (MODE `receng`, the engine's own port of `recx_shape_kernel`) and
+# that header names its op header as `prototype/...`, which only resolves from the repo root.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 FLAGS=(-O3 -Wno-unused-command-line-argument -Xcompiler -mfma -Wl,-rpath,/opt/rocm/lib
-       --offload-arch=gfx1151)
+       --offload-arch=gfx1151 -I. -Iengine)
 if [[ -n ${SAVE_TEMPS:-} ]]; then
     mkdir -p tmp/gdn_isa
     hipcc "${FLAGS[@]}" --save-temps -c prototype/gdn_rec_isa/gdn_rec_isa.hip.cpp \

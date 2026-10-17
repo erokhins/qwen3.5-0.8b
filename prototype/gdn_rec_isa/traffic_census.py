@@ -315,7 +315,11 @@ def main() -> int:
                     help="device .s for --volume-check (default: tmp/gdn_isa/gdn_rec_isa.s)")
     ap.add_argument("--volume-check", action="store_true")
     ap.add_argument("--modes", default="rec_kernel,rec0_kernel,recx_indep_kernel,"
-                                      "recx_unchain_kernel,recx_shape_kernel,recx_both_kernel")
+                                      "recx_unchain_kernel,recx_shape_kernel,recx_both_kernel,"
+                                      # The engine's port of recx_shape_kernel, present in the harness TU
+                                      # because `--modes receng` runs it: the volume row for the kernel
+                                      # the engine actually ships, asserted beside the probe it came from.
+                                      "rec_unroll4_kernel")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--selftest-volume", action="store_true",
                     help="must-catch witnesses that the volume admission can fail")

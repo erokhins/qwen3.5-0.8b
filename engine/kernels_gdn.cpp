@@ -4,6 +4,7 @@
 
 #include "engine/launch_stats.h"
 #include "engine/gdn_collapse_kernels.h"
+#include "engine/gdn_rec_unroll4_kernels.h"
 #include "prototype/gdn_chunk/gdn_chunk_kernels.h"
 #include "prototype/gdn_decode/gdn_decode_kernels.h"
 #include "prototype/gdn_gated_norm/gdn_gated_norm_kernels.h"
@@ -33,13 +34,43 @@ void gdn_gates(const float* a_raw, const float* b_raw, const float* a_log, const
 }
 
 void gdn_rec(const float* q, const float* k, const float* v, const float* g, const float* beta,
-             float* S, float* o) {
+             float* S, float* o, GdnRecSpell spell) {
     // One layer per launch: the model interleaves GDN and attention layers (§03.5), so a token
     // never has two adjacent GDN layers to batch. `all` mode (18 layers, one launch) in the
     // prototype is a bandwidth-measurement shape, not a token shape.
-    rec_kernel<<<NH, D>>>(q, k, v, g, beta, S, o, NH);
+    //
+    // Which SPELLING runs (`--gdn-spell`, `kernels.h::GdnRecSpell`). The two launches differ in the
+    // called kernel and in nothing else — same `<<<NH, D>>>`, same operands, same state buffer, so the
+    // flag cannot move an address and an A/B between them measures the schedule rather than the plan
+    // (the `attn_slim_kernels.h` / `--attn-touch` shape, one level down the tree).
+    if (spell == GdnRecSpell::kUnroll4) {
+        rec_unroll4_kernel<<<NH, D>>>(q, k, v, g, beta, S, o, NH);
+    } else {
+        rec_kernel<<<NH, D>>>(q, k, v, g, beta, S, o, NH);
+    }
     // Not counted: this launcher has no token width (see `engine/launch_stats.h`), and a family
     // that can only ever report rows=1 would give section (h) a check that cannot fail.
+}
+
+// `--gdn-spell`, and it parses or throws for the standing reason: the flag names which side of an A/B
+// the run is. `ship` is the default and stays the default until D30 item 1.9's in-situ A/B is read;
+// `unroll4` is the bit-identical re-spelling worth 1.149-1.158x at launch level and possibly nothing
+// in situ (`prototype/gdn_rec_isa/results.md` §10).
+GdnRecSpell parse_gdn_rec_spell(const std::string& name) {
+    if (name == "ship") return GdnRecSpell::kShip;
+    if (name == "unroll4") return GdnRecSpell::kUnroll4;
+    throw std::runtime_error("--gdn-spell takes `ship` (the shipped rec_kernel, the default) or "
+                             "`unroll4` (engine/gdn_rec_unroll4_kernels.h, bit-identical, unroll-4 "
+                             "state walks); got '" + name + "'. Refusing rather than guessing, because "
+                             "this flag names which side of an A/B the run is");
+}
+
+const char* gdn_rec_spell_name(GdnRecSpell s) {
+    switch (s) {
+        case GdnRecSpell::kShip: return "ship";
+        case GdnRecSpell::kUnroll4: return "unroll4";
+    }
+    return "invalid";
 }
 
 // Route A, D-12: the same recurrence, one launch per BODY. `dim3(kStrips, kNH)` = (4, 16) = 64 blocks

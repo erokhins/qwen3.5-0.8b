@@ -89,6 +89,14 @@ struct DecodeScratch {
     // token has nothing to win. The default is `kSeq`: the chunked form's device gate has not run,
     // and a form that has not met the device does not become the engine's default by being written.
     kernels::GdnScan gdn_scan = kernels::GdnScan::kSeq;
+    // Which SPELLING of the sequential recurrence's state walks a `gdn_rec` launch runs
+    // (`--gdn-spell`, `kernels.h::GdnRecSpell`). Same riding reason as the four above: it has to reach
+    // the launch site, which is inside the body loop. The default is `ship` — the shipped kernel —
+    // because the re-spelling's 1.15x is a burst number and D30 item 1.9's in-situ A/B has not been
+    // read; `unroll4` is that A/B side and it is bit-identical (`engine/gdn_rec_unroll4_kernels.h`).
+    // Inert under `kCollapse`, which submits a different kernel, and `decode_run` refuses the pair
+    // rather than price the shipped form twice under the other flag's name.
+    kernels::GdnRecSpell gdn_spell = kernels::GdnRecSpell::kShip;
     // The chunk size in tokens, echoed so a run states which chunk it claimed. Only 64 is accepted
     // (`kernels.h:kGdnChunkTokens`); the refusal text carries the measured reason.
     int gdn_chunk = kernels::kGdnChunkTokens;
