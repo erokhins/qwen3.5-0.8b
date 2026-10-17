@@ -65,7 +65,9 @@ std::array<int, kStageCount> plan_bill() {
 //   gdn_conv / gdn_gates / gdn_gated_norm  1 x 18 per body   gdn_rec  1 x 18 PER TOKEN (a scan)
 //   attn  6 per body (sites)                                 mlp_gateup / mlp_down  24 per body each
 //   cast  3 x 24 + 2 x 18 + 6 per body on the hand route, 2 x 18 on a library body,
-//         + 1 per priced row                       copy  tokens + 18 per body
+//         + 1 per priced row
+//   copy  18 per body (the conv-window rolls) + the embedding lookup: 1 per one-row body,
+//         2 per wider body (one id upload + one gather), so tokens + 18 for a per-token pass
 //   lm_head  1 per priced row                               host_tail  0 (a D2H and a host loop)
 //
 // The `cast` row is the one worth reading twice: per layer the body casts the norm tile for the mixer
@@ -131,20 +133,34 @@ WavePlanBill wave_plan_bill(const WaveShape& sh) {
     // at any width. A one-row body owes the HAND count whatever the run asked for — `resolve_wave_gemm`
     // again — so that body is derived from the shape here rather than trusted to the caller, exactly as
     // the chunked branch above derives it.
+    //
+    // How many of this pass's bodies were ONE ROW — the one derivation two rows below depend on, so it
+    // lives here once rather than twice. Both are rules about a body's WIDTH rather than about a flag,
+    // and both therefore have to re-derive the exception from the shape the driver reports instead of
+    // trusting a caller to announce it: `resolve_wave_gemm` gives a one-row body the hand GEMV whatever
+    // was asked, and `submit_wave_body` gives a one-row body the embedding MEMCPY whatever its gather
+    // rule would otherwise allow. Same rule the chunked branch above applies to `gdn_rec`.
+    const long long last_body_rows =
+        sh.bodies > 0 ? sh.tokens - (sh.bodies - 1) * sh.wave_rows : 0;
+    const long long single_row_bodies =
+        sh.wave_rows <= 1 ? bodies : ((last_body_rows == 1) ? 1 : 0);
     const long long casts_hand = 3 * L + 2 * G + A;
     const long long casts_library = 2 * G;
     long long lib_bodies = 0;
     long long hand_bodies = bodies;
     if (sh.gemm_library) {
-        const long long last_body_rows =
-            sh.bodies > 0 ? sh.tokens - (sh.bodies - 1) * sh.wave_rows : 0;
-        const long long single =
-            sh.wave_rows <= 1 ? bodies : ((last_body_rows == 1) ? 1 : 0);
-        lib_bodies = bodies - single;
-        hand_bodies = single;
+        lib_bodies = bodies - single_row_bodies;
+        hand_bodies = single_row_bodies;
     }
     p.subs[kCast] = casts_hand * hand_bodies + casts_library * lib_bodies + priced;
-    p.subs[kCopy] = tokens + G * bodies;
+    // `copy` is the conv-window rolls plus the §02.3 embedding lookup, and the LOOKUP half is now a
+    // row-count row too (D30 4.2′): a one-row body still submits the one `hipMemcpyAsync` §07 billed
+    // (so a decode step's bill did not move, which `body1_plan_matches_token_plan` below proves), and a
+    // wider body submits TWO operations — one upload of the body's token ids and one gather over the
+    // table — where it used to submit one 2 KiB copy per row. That is the whole of the item: a 512-row
+    // body went from 512 operations to 2, and the wave's 4096 embedding copies became 16.
+    // Route-blind (unlike `cast` above): which form a body runs depends on `n` and on nothing else.
+    p.subs[kCopy] = single_row_bodies + 2 * (bodies - single_row_bodies) + G * bodies;
     p.subs[kLmHead] = priced;
     p.subs[kHostTail] = 0;
     return p;

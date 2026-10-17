@@ -14,6 +14,8 @@
 // and it is what makes the whole token 1 + 24×2 = 49 glue launches with the final norm falling out
 // of the last one for free.
 
+#include <hip/hip_runtime.h>   // hipEvent_t for the embedding-gather id staging below
+
 #include <cstdint>
 #include <vector>
 
@@ -181,6 +183,36 @@ struct DecodeScratch {
     uint16_t* mlp_up_raw = nullptr;    // [wave_rows][3584]
 
     float* logits = nullptr;        // [kVocab] F32 — §03.4's full-logit form, see kernels_lmhead.cpp
+
+    // §02.3's wave gather (D30 4.2′): the body's token ids, where the gather kernel can read them.
+    //
+    // WHY THESE EXIST AT ALL. `submit_wave_body` is handed a HOST id array, and a gather kernel needs
+    // it on the device, so one body costs one H2D upload plus one gather where it used to cost `n`
+    // memcpys. What is NOT allowed is a copy per token, which would be the item's own bug in miniature.
+    //
+    // WHY THE STAGING IS PINNED, AND WHY IT IS A RING. The upload must be `hipMemcpyAsync` from *pinned*
+    // host memory: from pageable memory HIP's async copy is synchronous, and a synchronous H2D on the
+    // legacy stream drains everything queued in front of it — i.e. the whole previous body — which would
+    // flatten exactly the queue depth this item exists to exploit. And a pinned buffer cannot simply be
+    // reused by the next body: the host runs bodies ahead of the device, so a single slot would be
+    // overwritten while an earlier body's copy still had to read it. Therefore `kEmbedIdSlots` slots,
+    // each with an event recorded right after its copy, and a body waits on its slot's event before it
+    // writes it. That wait is a correctness bound, and it is honest about what it costs: it caps how far
+    // ahead of the device the host may submit at `kEmbedIdSlots` bodies. At 512 rows a body is ~120 ms of
+    // device work and the host submits one in well under a millisecond, so the queue still holds seven
+    // whole bodies in front of the device at every wait and nothing can starve — the bound bites only on
+    // a prompt long enough to wrap the ring, and it buys correctness on exactly the path that wraps it.
+    // The first `kEmbedIdSlots` bodies a scratch serves do not attempt the wait at all, and a shipped
+    // 4096-lane wave is exactly 8 bodies, so the window this item is measured in is wait-free.
+    //
+    // Allocated with the scratch and reused by every body of every request, like the row family above;
+    // `kEmbedIdSlots * kMaxWaveRows` ints is 16 KiB on each side, which is not what this is about.
+    static constexpr int kEmbedIdSlots = 8;
+    int* token_ids_dev = nullptr;                    // [kEmbedIdSlots][wave_rows] device
+    int* token_ids_pin = nullptr;                    // [kEmbedIdSlots][wave_rows] pinned host
+    hipEvent_t token_id_copied[kEmbedIdSlots] = {};  // completed once that slot's upload has run
+    long long token_id_bodies = 0;       // bodies served, so the slot is derivable and a first-pass
+                                         // body knows its slot was never written, let alone uploaded
 
     // Set by `prepare_weight_adapters`, which is where `g_dt_bias`/`g_conv_w` get filled. Zeroed by
     // `allocate_scratch`, so a forgotten call is a refusal rather than a read of uninitialised memory.

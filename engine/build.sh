@@ -65,7 +65,7 @@ hipcc "${FLAGS[@]}" \
   engine/launch_stats.cpp engine/stage_clock.cpp \
   engine/kernels_glue.cpp engine/kernels_proj.cpp engine/kernels_mlp.cpp \
   engine/kernels_gdn.cpp engine/kernels_attn.cpp engine/kernels_lmhead.cpp \
-  engine/kernels_cast.cpp engine/kernels_gemm.cpp \
+  engine/kernels_cast.cpp engine/kernels_embed.cpp engine/kernels_gemm.cpp \
   -lhipblas -lhipblaslt \
   -o "$BIN/decode_run"
 echo "built $BIN/decode_run"

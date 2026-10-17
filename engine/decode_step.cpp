@@ -25,7 +25,11 @@
 // The GDN family is the one that does NOT collapse whole: of its four launches per layer, three are
 // now per body and `rec_kernel` (§04.4's sequential scan) stays per token until P9 chunks it. Same
 // for `other`'s 18 conv-window copies: per token at n = 1, per wave from P6 on, because the window
-// is written once per wave whatever T_w is.
+// is written once per wave whatever T_w is. The embedding lookup joined them at D30 4.2′ — a one-row
+// body still pays the one row copy the table below bills, and a wider body pays two operations (one id
+// upload and one gather, `kernels_embed.cpp`) instead of one 2 KiB copy per row. So this table is the
+// plan for BOTH paths at n = 1 and the wave.s own shape at n > 1, and the wave half is what
+// `stage_clock.cpp`'s `wave_plan_bill` derives rather than what this table asserts.
 //
 //   glue   1 norm-only (layer 0's input norm) + 2 × 24 fused add+norm = 49   (§03.2, = glue's own
 //          gated 49-launch token plan; the final norm is the last of them, not an extra launch)
@@ -293,6 +297,18 @@ DecodeScratch allocate_scratch(int wave_rows) {
     sc.mlp_gate_raw = alloc<uint16_t>(i);
     sc.mlp_up_raw = alloc<uint16_t>(i);
     sc.logits = alloc<float>(kVocab);
+
+    // The §02.3 gather's id staging (`decode_step.h` owns why it is pinned and why it is a ring).
+    // Allocated unconditionally, like the chunked-scan staging above: a decode-only run never fills it,
+    // and a conditional allocation here would be a branch in the body and a path the wide gates cannot
+    // exercise.
+    sc.token_ids_dev = alloc<int>((size_t)DecodeScratch::kEmbedIdSlots * wave_rows);
+    ENGINE_CK(hipHostMalloc((void**)&sc.token_ids_pin,
+                            (size_t)DecodeScratch::kEmbedIdSlots * wave_rows * sizeof(int),
+                            hipHostMallocDefault));
+    for (hipEvent_t& ev : sc.token_id_copied) {
+        ENGINE_CK(hipEventCreateWithFlags(&ev, hipEventDisableTiming));
+    }
     return sc;
 }
 
@@ -341,6 +357,13 @@ void free_scratch(DecodeScratch& sc) {
     (void)hipFree(sc.mlp_gate_raw);
     (void)hipFree(sc.mlp_up_raw);
     (void)hipFree(sc.logits);
+    // The §02.3 id staging. A hipFree/hipFreeHost/hipEventDestroy cannot be handled past the log, hence
+    // the (void) casts (same convention as above and `state.cpp`). Resetting the ring cursor comes free
+    // from `sc = DecodeScratch{}` below, which is also what nulls the events so a freed scratch cannot
+    // be gathered into.
+    (void)hipFree(sc.token_ids_dev);
+    (void)hipFreeHost(sc.token_ids_pin);
+    for (hipEvent_t& ev : sc.token_id_copied) (void)hipEventDestroy(ev);
     sc = DecodeScratch{};
 }
 
@@ -466,16 +489,47 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         }
     };
 
-    // ---- §02.3: x = E[y] for every row of the wave. One row of the tied table per token, one D2D
-    // copy each (§01.1: there is no second table, so `lm_head.weight` and this are the same bytes).
-    // A gather kernel would fold these n copies into one launch; that is P5's launch-bill question,
-    // not this package's, and a copy's arithmetic is not in doubt.
+    // ---- §02.3: x = E[y] for every row of the wave. One row of the tied table per row of the body
+    // (§01.1: there is no second table, so `lm_head.weight` and this are the same bytes).
+    //
+    // THE ROW-COUNT RULE, the same one `resolve_wave_gemm` and `resolve_gdn_scan` apply and for the same
+    // reason: it is a rule about the body's width, not a flag, and it is decided here because this is
+    // where `n` is. A ONE-ROW body keeps the single `hipMemcpyAsync` it has always issued — a decode
+    // step's submission bill cannot move, and §07's per-token plan (`planned_launch_counts()`, `gate.py`
+    // section (d)) is that body's bill. A WIDER body issues one upload of the body's ids plus one gather
+    // instead of `n` copies, because those copies were the wave's single biggest pile of submissions:
+    // 4096 of 4240 `copy` operations, 2.05 µs each against an empty launch's 1.72 µs, i.e. 84 % of each
+    // op was the submission and the same bytes as one operation cost 0.10 ms instead of 8.40 ms
+    // (`tools/submission_probe.cpp`, `progress/2026-10-17/glue-cast-copy-bytes-census.md` §8). That is
+    // D30 4.2′ and it is the answer to the question this comment used to leave open.
+    //
+    // What is deliberately NOT done: no per-token id upload (that would be the same bug one level down),
+    // and no double-buffering of `sc.embed`. The gather writes the same rows the copies wrote, byte for
+    // byte, and `kernels_embed.cpp` says why no bit can move.
     const uint16_t* table = (const uint16_t*)weights.at(kEmbedding).device;
-    for (int t = 0; t < n; ++t) {
+    if (n == 1) {
         stageclock::note(stageclock::kCopy);
-        ENGINE_CK(hipMemcpyAsync(sc.embed + (size_t)t * kHidden,
-                                 table + (size_t)tokens[t] * kHidden,
+        ENGINE_CK(hipMemcpyAsync(sc.embed, table + (size_t)tokens[0] * kHidden,
                                  kHidden * sizeof(uint16_t), hipMemcpyDeviceToDevice));
+    } else {
+        // Slot `slot` of the staging ring (`decode_step.h` explains why it is pinned and why it is a
+        // ring). Waiting on its event before writing it is what makes reuse safe rather than lucky; on a
+        // real wave that event completed bodies ago, so the wait returns without blocking.
+        const int slot = (int)(sc.token_id_bodies % DecodeScratch::kEmbedIdSlots);
+        if (sc.token_id_bodies >= DecodeScratch::kEmbedIdSlots) {
+            ENGINE_CK(hipEventSynchronize(sc.token_id_copied[slot]));
+        }
+        int* ids_pin = sc.token_ids_pin + (size_t)slot * sc.wave_rows;
+        int* ids_dev = sc.token_ids_dev + (size_t)slot * sc.wave_rows;
+        std::memcpy(ids_pin, tokens, (size_t)n * sizeof(int));
+        stageclock::note(stageclock::kCopy);
+        ENGINE_CK(hipMemcpyAsync(ids_dev, ids_pin, (size_t)n * sizeof(int), hipMemcpyHostToDevice));
+        // Recorded after the upload and before the gather, so "this event completed" means exactly
+        // "the device has read this slot", which is the only thing the next occupant of the slot needs.
+        ENGINE_CK(hipEventRecord(sc.token_id_copied[slot], 0));
+        ++sc.token_id_bodies;
+        stageclock::note(stageclock::kCopy);
+        kernels::embed_gather_rows(table, ids_dev, sc.embed, n);
     }
 
     // ---- §03.2's pairing, as glue's own gate pairs it (`prototype/glue/glue_pins.py`).

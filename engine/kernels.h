@@ -12,6 +12,11 @@
 // and returns. Nothing here syncs: a decode step is submitted as a stream of launches and the
 // host waits once, at the logits (§07.1 / W5's "no host round-trip per op").
 //
+// Two launchers in this header are not graduated from a `prototype/<op>/` directory: `cast_*`
+// (`kernels_cast.cpp`) and `embed_gather_rows` (`kernels_embed.cpp`). Both are shape the engine grew for
+// its own reasons — a dtype seam, and a lookup that used to be one memcpy per token — and both carry no
+// model math, which is what makes them safe to hold in a TU with no gate of its own: they move bytes.
+//
 // The `neg` parameter each op carries for its own negative tests is always the clean value here.
 // The engine is not a place to inject bugs; the injections stay in the op's gate.
 
@@ -469,5 +474,14 @@ void cast_f32_to_bf16(const float* src, uint16_t* dst, int n);
 // pointer is a throw, not a wild write.
 void cast_bf16_to_f32_3(const uint16_t* s0, float* d0, int n0, const uint16_t* s1, float* d1,
                         int n1, const uint16_t* s2, float* d2, int n2);
+
+// ---- §02.3: the embedding lookup for a whole wave in ONE launch (D30 4.2′).
+// `out[r] = table[ids[r]]` for `rows` rows, BF16, `kHidden` wide — byte-identical to `rows` copies of
+// one table row, because there is no arithmetic in it (`kernels_embed.cpp` says why the engine grew a
+// kernel for a lookup: 4096 of a wave's copy operations were 2 KiB memcpys and 84 % of each one was
+// the submission). `ids` is a DEVICE array of `rows` token ids in [0, vocab); the caller owns it and has
+// already range-checked the values, because a bad id here is an out-of-bounds read of the tied table
+// rather than a throw.
+void embed_gather_rows(const uint16_t* table, const int* ids, uint16_t* out, int rows);
 
 }  // namespace engine::kernels
