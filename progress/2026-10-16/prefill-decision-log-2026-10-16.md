@@ -1356,3 +1356,28 @@ the route moves is step 2, whose pin margin is exactly 1.00 ULP and which the ga
 were the free-run echo of that admitted flip, compared against pins conditioned on a different fed token. The
 instrument was fixed in `2ea4826` (section (b2) plus the ECHO bucket), and the handoff carries the blind spot
 that fix cannot cover. Recorded here because a retraction that lives only in a chat log is not a retraction.
+
+## D44 — D42 audit opens: 4.3 re-closed by arithmetic, and the >MAXSC evidence arrived unbidden (2026-10-17)
+
+- **4.3 (`glue` launch count) is re-closed, and the correction is mine.** D42 said it re-opened on the spot
+  because the submission floor and the shipped `copy` reduction contradicted the old closure. The arithmetic
+  says the opposite: `glue` is 392 launches for 15.115 ms at 4096 lanes, 38.6 µs per launch against a
+  **1.72 µs** submission floor, so deleting *every* glue launch — not a thing anyone can do — recovers
+  392 × 1.72 µs = **0.674 ms = 0.073 %** of the 920 ms wave, and a realistic halving is **0.037 %**. Both sit
+  under the `MIN_PCT_OF_WAVE = 0.1 %` refuse bar. `copy` was different in kind: 4240 launches at 2.6 µs each,
+  i.e. launch-dominated, which is why cutting it moved 1 % of wave. **Lesson for the rest of the audit: the
+  launch-floor bound is `launches × 1.72 µs`, and it must be computed before a launch-count item is re-opened,
+  not after.**
+- **The >MAXSC numerics admission has data now, and it says no new band is needed.** `wide4096p` (4096 lanes,
+  `--decode 0`, one prompt family with `wide640f`/`wide1024f`) PASSes on `--gemm lt`: **4096 rows judged, worst
+  cos deficit 4.3696e-04, worst meanrel 3.5902 %**, all inside floors already in force. D41 hedged that a
+  cascade band for >MAXSC straddles would have to be derived first; at this width the existing floors hold with
+  4×–8× margin, so 2.5 can proceed on evidence rather than on a borrowed band. What this does *not* settle: the
+  decode-bearing side (4104 lanes) is still unjudged, because the ceiling refuses the plan.
+- **And I fell into the same trap a third time in one day, caught before it landed.** My first read of the
+  `wide4096f` gate run was "only 2 failures, both structural, so the rows passed". Zero rows had been judged:
+  the launcher threw on the 4104-lane plan, `decode_run` exited 1, and the entire row section never ran — a
+  `FAIL` count of 2 was read as "everything else passed". Third instance today of *a check that silently did
+  not run reporting as a verdict* (after the phantom fixture names and the indented `[FAIL]` grep), which makes
+  it a pattern rather than a mistake: **a gate log must be read for how many checks executed, not only for how
+  many failed.** Worth a row in `AGENTS.md` when the audit next touches it.
