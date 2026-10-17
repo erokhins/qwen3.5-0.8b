@@ -625,3 +625,44 @@ paired ratio here is **1.0186 at 4096 and 1.0487 at 1024**, which *derives* **�
 this window's own ratio to the last clean row. Stated as a derivation, not as a ruler row, because §9's
 lesson is that a short-window wall is not portable between windows. Decode is untouched (71.3 tok/s): a
 one-row body never takes this route.
+
+## 11. The gather kernel: `copy` −85 %, prefill **+1.40 %**, and the finding that submissions are *not* absorbed (2026-10-17)
+
+`copy` was 4096 per-token 2 KiB row copies of the embedding table, one submission per token in the wave
+(§02.3). Its bytes are worth **0.16 ms against its own 10.86 ms row**, so the family was never a traffic item;
+`tools/submission_probe.cpp` had already shown **2.05 µs/op for a real copy against 1.72 µs for an empty
+launch**, i.e. 84 % of the op is the submission. One gather kernel plus one id upload per body replaces all
+4096. Detail: `progress/2026-10-17/glue-cast-copy-bytes-census.md` §3/§8, D37, D38.
+
+Paired inside one lock hold, alternating per rep, medians of 3, blocking, zero subagents, base binary saved
+beside the new one (`tmp/gcc/ab42p.txt`, `tmp/gcc/run_ab_42prime.sh`):
+
+| width | family | base | gather | Δ | Δ % |
+|---|---|---|---|---|---|
+| 4096 | `copy` (**4240 → 160** launches) | 10.9677 | **1.6240** | −9.3437 | **−85.19 %** |
+| 4096 | `cast` (control, untouched) | 11.7342 | 11.4370 | −0.2972 | −2.5 % (noise) |
+| 4096 | **wall** | 936.5254 | **923.6193** | −12.9061 | **−1.38 %** |
+| 1024 | `copy` (1060 → 40 launches) | 2.7213 | **0.4658** | −2.2555 | **−82.88 %** |
+| 1024 | **wall** | 187.4449 | **185.4343** | −2.0106 | **−1.07 %** |
+
+**The prediction was written down before the measurement and it survived, two-sided.** `copy` had to collapse
+to ≲0.5 ms *and* the wall had to drop ≥5 ms. Row: −9.34 ms (predicted ~−10.4). Wall: −12.9 ms median, and
+**all three pairs negative at 4096 (−2.88, −13.00, −14.59) and all three at 1024 (−1.48, −2.01, −1.77)** —
+six of six. The refuting branch was the interesting one: had the row collapsed with a still wall, per-op
+submission cost would be absorbed by a busy stream and every launch-shaped row in D30 would have needed
+re-reading. It is not absorbed, so **launch-count reduction is a real lever on this box**, which re-prices
+`glue`'s launch component and confirms that `gdn_rec`'s 73,728 submissions per wave are not hiding behind the
+same mechanism (that family is at 140 µs/launch, ~80× the floor).
+
+**Admission.** 18/18 gates — nine canonical fixtures × both routes. The witness that matters is that the
+wide-vs-one-row logits comparison is now **gather-against-copy rather than gather-against-itself**, since the
+one-row path keeps the `hipMemcpyAsync` verbatim: a decode step's bill is **424 on both routes** and
+`--wave-rows 1` is unchanged to the launch, while the shipped wave's plan reads 80426 → **76346** with
+`family=copy launches=160 plan_launches=160 counts_match=1`. No numerics band was consulted: a byte-moving
+change with no arithmetic cannot reach one.
+
+**Headline.** Recorded prefill stays **4284 tok/s** pending a dedicated ruler window. Two shipped changes
+since that row give paired ratios of 1.0186 (§10) and 1.0140 (this one), which **derives ≈ 4425 tok/s**; the
+wording is deliberate — chained ratios from two different windows compound each window's drift, so this is
+arithmetic on two measurements and not a third measurement. Decode is **71.3 tok/s, unchanged by
+construction**: a one-row body never takes either path.
