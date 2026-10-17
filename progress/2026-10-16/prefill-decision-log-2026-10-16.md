@@ -1292,3 +1292,55 @@ in these A/Bs; see the trap in `AGENTS.md`.
   deliberate step rather than a default.
 - **Not implied by this approval, still stop-and-ask:** 5.1 int8/int4 (orders-of-magnitude error class, R8), and
   any change of scope beyond `Qwen3.5-0.8B` text path.
+
+## D42 — queue item: audit the rejections, not just the open items (user, 2026-10-17)
+
+Requested by the user after the `prefix24dec8` episode: **find the paths that were rejected because of this
+class of error and re-evaluate them.** It is a queue item rather than a footnote because the error was not in a
+kernel — it was in the *comparison*, and a comparison that misjudges one candidate has probably misjudged
+others. `prefix24dec8` read as 19 shipping-path failures when the truth was one already-admitted 1.00-ULP flip
+at step 2 whose free-run echo was then billed nineteen times. Every closed-negative on the ledger carries that
+same possible defect: the instrument, not the candidate, produced the "no".
+
+**Method — census, then a cheap named falsifier, in that order.** A rejection is re-opened only if (i) its
+recorded evidence falls into one of the classes below, and (ii) someone can name a falsifier that is cheap to
+run (a CPU re-analysis, a paired A/B inside one lock hold, a re-derived population). No candidate gets an
+expensive re-sweep on (i) alone — that is how budgets die re-verifying things that were already green.
+
+**The classes to search for, each already demonstrated in this repo:**
+
+1. **Comparison conditioning invalid** — free-run compared against pins conditioned on different fed tokens
+   (today), or any verdict drawn from a token-equality chain where an earlier step was admitted by tie, slack
+   or room. Search the record for rejections whose evidence reads "tokens differ" or "diverges from step N on".
+2. **A canary that cannot fail, or a stale binary.** AGENTS: a paired A/B against a stale binary reads as a
+   clean null, because the bill deriver is compiled into the binary under test. Any "no difference measured"
+   predating that rule (`bf1802f`) is suspect until re-taken with an in-window canary.
+3. **A population that did not exist.** §15.2: seven of nine fixture names behind three admissions were
+   phantoms. Any numerics or coverage claim citing `wide3100f` / `prefill_t*f` is re-adjudicated against the
+   real population, and thin coverage (`wide520f` + `dec64f` only) is re-run at `wide1024f` / `wide640f` too —
+   both of which pin every prefill row today, which also retires the old "no ground truth above MAXSC" limit.
+4. **A price built from instruction slots at low occupancy.** Route A was priced at 11.4 ms and measured
+   112.04 ms (9.8×) because the model assumed issue slots the machine does not have at ~1.6 realised wavefronts
+   per CU; the chunked scan mispriced the same way (≥1.5× priced, 5.9× measured). **1.1** (instruction surgery,
+   "CLOSED, funded no" on a 1523-slot census) and **1.2** (chunked scan, "measured loss") are the named
+   candidates: both closed on price, and both price models are the discredited kind.
+5. **A traffic claim taken near the plateau.** D21: `attn` looked bandwidth-bound at 225–248 GB/s against a 237
+   ceiling, then a bit-identical instruction cut made it 1.521× faster with the byte census unchanged. So **2.2**
+   (M=2 row tiling, parked on bytes-halved-but-slower) and **2.4** (WMMA, closed on a matrix-idle census) are
+   re-read under "demanded bytes are not DRAM bytes" — and 2.4's census must state whether it read CCO
+   containers or only the parseable `*.hsaco` set, since "0 of 55" and "0 of the readable 55" are not the same
+   claim.
+6. **A launch cost dismissed as absorbed.** **4.3** (`glue` launch count, "CLOSED for value, dispatch-bound and
+   bimodal") is already contradicted by today's numbers: submission floor 1.72 µs/op, 4.2′ shipped −85 % on
+   `copy` launches for −1.38 % wall, D38 re-priced `glue`'s launch component at ~0.67 ms per wave. **This one
+   re-opens on the spot rather than waiting** — it needs only a paired A/B over a `glue` launch-count reduction
+   inside one lock hold.
+
+**Queue position.** After the gate-conditioning fix lands — it is the instrument this audit reads through — and
+**before 2.6 and 3.3**, on the argument that re-opening a closed item is cheaper than opening a new one. Order
+inside the audit: 4.3 (already proved by inference), then the class-4 candidates by re-pricing with no build,
+then 2.2 / 2.4 under class 5, then a full re-adjudication of class 3 once `wide4096f` exists.
+
+**What this item must not become.** Not a re-run of green gates (cite what is on disk), and not a licence to
+widen a band: the delegated rule still binds, and a widened check must catch every injection in the must-catch
+set derived from geometry, or the original rejection stands.
