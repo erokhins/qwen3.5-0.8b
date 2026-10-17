@@ -701,7 +701,7 @@ needed, take it from a decode ruler, not from this row.
 D30 1.7′ deleted `cast_bf16_to_f32_3` by having `conv_kernel`/`gates_kernel` widen their BF16 operands
 in-register. It was the first deletion in the line with no route to guard it on, so it moved the §07
 per-token launch bill (cast 115 → 97, total 424 → 406) rather than a route-scoped row — see D39 for why
-that was admissible. Detail: `progress/2026-10-17/HANDOFF_17prime.md`.
+that was admissible. Detail: `progress/2026-10-17/HANDOFF_17prime_gdn-cast-deletion.md`.
 
 Paired in one lock hold, medians of 3, canary asserted before any timing (`tmp/gcc/ab17p_retake.txt`):
 

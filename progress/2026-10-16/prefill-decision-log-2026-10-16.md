@@ -1217,7 +1217,7 @@ deriver where the census priced two, and 4.2′ needed no `gate.py` change at al
 
 # D39 — **the per-token launch bill is an engine contract, not a specification claim, so a gate's expectation may move with the engine — under four conditions** (2026-10-17)
 
-Source: `62b73e9`, `bench/performance-status.md` §13, `progress/2026-10-17/HANDOFF_17prime.md`.
+Source: `62b73e9`, `bench/performance-status.md` §13, `progress/2026-10-17/HANDOFF_17prime_gdn-cast-deletion.md`.
 
 The worker hit the branch my brief had reserved as a stop-and-tell: 1.7′'s deletion is **route-blind and
 width-blind**, so it removes a launch from §07's *per-token* bill (cast 115 → 97, total 424 → 406), which
