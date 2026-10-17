@@ -201,6 +201,38 @@ tools/gpu_lock.sh release gdn_rec_isa_ab
 tools/gpu_lock.sh status        # stale holders show as `STALE (holder pid dead)`
 ```
 
+**3.8 The dependency-break probes (`results.md` §9) — the traffic question is closed, the chain is not.**
+§8's census (CPU-only) killed the traffic reading: the state is 99 % of a demand that already exceeds the
+package ceiling, and `prototype/gdn_collapse`'s route A removed essentially all of it for 1.119×. The live
+reading is the per-token dependency chain, and these are the MODEs that can falsify it. CPU-side first, no
+lock needed:
+
+```bash
+SAVE_TEMPS=1 ./prototype/gdn_rec_isa/build.sh
+.venv/bin/python prototype/gdn_rec_isa/traffic_census.py               # §8 census + verdict
+.venv/bin/python prototype/gdn_rec_isa/traffic_census.py --selftest-all  # 6 arithmetic + 3 must-catch
+.venv/bin/python prototype/gdn_rec_isa/traffic_census.py --volume-check  # bytes/launch must match MODE 0
+```
+
+Then the device, one lock hold, admission before any timing (`--burst` refuses to run if `--volume` fails):
+
+```bash
+tools/gpu_lock.sh acquire gdn_rec_isa_probe
+./prototype/gdn_rec_isa/gdn_rec_isa --modes rec0,rec3,rec4,rec5,rec6 --volume   # 0.27 s, correctness only
+./prototype/gdn_rec_isa/gdn_rec_isa --modes rec0,rec3,rec4,rec5,rec6            # 0.70 s, admission
+./prototype/gdn_rec_isa/gdn_rec_isa --modes rec0,rec3,rec4,rec5,rec6 --burst 40 --reps 5 \
+    | tee tmp/gdn_rec_isa_probes.log
+tools/gpu_lock.sh release gdn_rec_isa_probe
+```
+
+The first two of those have already been run (lock free, `util` 93 %, wall above, **no timing taken**):
+volume `VOLUME_OK` for all five and admission `PASS`, with `rec6` — the bill-matched control — bit-identical
+to `rec0` in 4/4 cases. Only the burst is outstanding. Read the result as `rec4` against `rec6` (the burst
+prints `DIFF … rec6_over_rec4` for exactly this), not against `rec0`: the census found `rec4` is −160 slots
+(−10.5 %) and D25's elasticity says a bill that much is worth up to 8.4 % of time by itself. `>1.10` on a
+probe funds D30 1.4/1.5; `<1.02` on all three means the family needs a different model and §4's counter pass
+is next.
+
 **What each threshold decision means** (`results.md` §6 restates this with the reasoning):
 
 | `rec0_over_rec2` | decision |

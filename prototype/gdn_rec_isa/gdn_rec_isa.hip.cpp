@@ -12,6 +12,24 @@
  *   rec1    `rec1_kernel`  — MODE 1, the cross-lane fold hand-spelled, shipped barrier structure kept.
  *   rec2    `rec2_kernel`  — MODE 2, both block reductions fused into one pass, hand-spelled folds.
  *   rec2c   `rec2c_kernel` — MODE 2c, the fused pair with compiler-lowered shuffles (spelling control).
+ *   rec3    `recx_indep_kernel` — DEPENDENCY PROBE, meaningless by design: reads one state buffer and
+ *           writes another, so no token waits for the previous token's result. Same bytes, new addresses.
+ *   rec4    `recx_unchain_kernel` — DEPENDENCY PROBE: same buffer, same addresses, same load/store mix,
+ *           but each of the two serial accumulator chains is shortened from 128 dependent links to 32.
+ *   rec5    `recx_both_kernel`  — DEPENDENCY PROBE: rec3's split and rec4's shortened chains together.
+ *   rec6    `recx_shape_kernel` — the CONTROL for rec4: same unroll-4 loop spelling, chain NOT broken,
+ *                            and therefore bit-identical to `rec0`. It exists because the census found
+ *                            rec4 10.5 % cheaper in slots; without rec6 a rec4 win cannot be split
+ *                            between its instruction bill and the chain it shortened.
+ *
+ * WHY THE PROBES ARE ADMITTED DIFFERENTLY. MODEs 0/1/2/2c/6 must reproduce MODE 0 bit for bit — 6 is a
+ * probe's control, not a probe, and its addition tree is MODE 0's term for term — so a bit move there is a
+ * defect. A probe that broke the dependency and still produced the right answer would not have broken it,
+ * so `rec3` and
+ * `rec5` are admitted on VOLUME only (their value is not a statement about anything), `rec4` re-
+ * associates two dots and is admitted inside the EXISTING §10.1 GDN band (cos ≥ 0.999, meanrel ≤ 5 %),
+ * and `--burst` REFUSES to time anything unless the volume self-check passed first (non-zero exit).
+ * The per-MODE policy is printed on each RESULT line as `gate=`, so no reader has to remember it.
  *
  * WHY IT EXISTS. The census's verdict is a funded NO — the family issues 1,523 slots per wavefront
  * against a measured 6.8-6.9 us per launch, so it runs at ~10 % of its own issue roof and instruction
@@ -20,12 +38,14 @@
  * instruction route for this family. This file is the missing instrument. It does not change the
  * verdict; it makes the verdict checkable.
  *
- * THE ADMISSION GATE IS BIT-IDENTITY, AND IT IS NOT SOFTER THAN THE CENSUS ASSUMED. Every MODE claims
- * to preserve each value's addition tree exactly (same 5+5 shuffle steps in the same order per value),
- * so the only acceptable difference against MODE 0 is ZERO, on `o` AND on the final state, over T
- * tokens. A band here would be a way of not checking the claim: MODE 1 re-spells a fold and MODE 2
- * fuses two of them, and a hand-written fold that changes association is not a lever, it is a numerics
- * change. `results.md` §6 says what each failure would mean.
+ * THE ADMISSION GATE IS BIT-IDENTITY FOR THE SPELLING MODES, AND IT IS NOT SOFTER THAN THE CENSUS
+ * ASSUMED. MODEs 1, 2 and 2c claim to preserve every value's addition tree exactly (same 5+5 shuffle
+ * steps in the same order per value), so the only acceptable difference against MODE 0 is ZERO, on `o`
+ * AND on the final state, over T tokens. A band there would be a way of not checking the claim: MODE 1
+ * re-spells a fold and MODE 2 fuses two of them, and a hand-written fold that changes association is
+ * not a lever, it is a numerics change. `results.md` §6 says what each failure would mean. The three
+ * dependency PROBES are the deliberate exception, gated on volume instead — the paragraph above and
+ * `results.md` §9 say why.
  *
  * WHAT THE CPU REFERENCE IS FOR, and what it is not. The host mirror below transcribes the shipped
  * expressions (including the FMA sites the listing proves the device fuses: `v_fmac_f32_e32` through
@@ -66,7 +86,8 @@
  * A/B the main agent runs under one lock hold: steady_clock, not `hipEventElapsedTime`, which returns
  * exactly 0 for a sub-ms kernel on this part (`bench/performance-status.md` §6), and every active MODE
  * is timed INSIDE each rep (the `prototype/attn_m2` `--forms` pattern) so the falsifier is one window
- * and not four.
+ * and not four. A burst also REFUSES to run (`NOT TIMED reason=volume_self_check_failed`, exit 1) if
+ * the `--volume` self-check does not pass, because a probe whose bytes changed is not a probe.
  *
  * TWO CPU-ONLY SELFTESTS, because a device gate nobody can run should still be half-checkable. On this
  * box the harness could be compiled and reviewed but not executed, so the two claims that do NOT need a
@@ -128,8 +149,22 @@ namespace {
 // on a different launch plan from the one that was gated. `rec0` is MODE 0 and is the reference every
 // other MODE is bit-diffed against; `ship` is optional and gives the census's static control row
 // (rec0_kernel censuses identical to rec_kernel) a device witness when someone wants one.
-enum Mode { M_SHIP = 0, M_REC0, M_REC1, M_REC2, M_REC2C, NMODES };
-static const char* kModeName[] = {"ship", "rec0", "rec1", "rec2", "rec2c"};
+enum Mode { M_SHIP = 0, M_REC0, M_REC1, M_REC2, M_REC2C, M_REC3, M_REC4, M_REC5, M_REC6, NMODES };
+static const char* kModeName[] = {"ship", "rec0", "rec1", "rec2", "rec2c",
+                                  "rec3", "rec4", "rec5", "rec6"};
+
+/* The three dependency-break probes. Their VALUE is meaningless by design — a probe whose value was
+ * still correct would still be waiting on the dependency — so they are never admitted against MODE 0's
+ * bits. MODE 4 (`recx_unchain`) is the one whose value is only re-associated rather than replaced, and
+ * it is judged against the EXISTING §10.1 GDN band (cos ≥ 0.999, the G3 `gdn` row), which is an
+ * existing gate rather than a new one; MODEs 3 and 5 replace what the recurrence reads, so nothing but
+ * volume is asserted about them. */
+inline bool mode_splits_state(int m) { return m == M_REC3 || m == M_REC5; }
+inline bool mode_value_gated(int m) { return m == M_SHIP || m == M_REC0 || m == M_REC1 ||
+                                           m == M_REC2 || m == M_REC2C || m == M_REC6; }
+inline bool mode_band_gated(int m) { return m == M_REC4; }
+// The three dependency probes: value is not the gate, volume is.
+inline bool mode_is_probe(int m) { return m == M_REC3 || m == M_REC4 || m == M_REC5; }
 
 struct ModeSet {
     int m[NMODES] = {0, 0, 0, 0, 0};
@@ -171,8 +206,8 @@ static ModeSet modes_of(const std::string& spec) {
         for (int i = 0; i < NMODES; ++i)
             if (tok == kModeName[i]) found = i;
         if (found < 0) {
-            std::fprintf(stderr, "--modes: no mode \"%s\"; known: ship,rec0,rec1,rec2,rec2c\n",
-                         tok.c_str());
+            std::fprintf(stderr, "--modes: no mode \"%s\"; known:"
+                         " ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6\n", tok.c_str());
             std::exit(2);
         }
         ms.add(found);
@@ -185,14 +220,28 @@ static ModeSet modes_of(const std::string& spec) {
 // The one launch site. Grid and thread count are the shipped geometry (`engine/kernels_gdn.cpp:40`
 // launches `rec_kernel<<<NH=16, D=128>>>`), identical for every MODE by construction: the MODEs differ
 // in the prologue's spelling and in nothing else, which is what makes the A/B single-variable.
+/* The one launch site. `S_in`/`S_out` are the SAME buffer for every MODE that carries state (the
+ * shipped geometry, unchanged) and DIFFERENT ones for the two split probes, which is what makes their
+ * launches independent of their predecessor's store. Grid and thread count are the shipped geometry
+ * (`engine/kernels_gdn.cpp:40` launches `rec_kernel<<<NH, D>>>`) and are identical for every MODE by
+ * construction, which is what keeps the A/B single-variable. */
 void launch_mode(int mode, const float* q, const float* k, const float* v, const float* g,
-                 const float* beta, float* S, float* o) {
+                 const float* beta, float* S_in, float* S_out, float* o) {
+    if (!mode_splits_state(mode) && S_in != S_out) {
+        std::fprintf(stderr, "mode %s is not a split-state MODE but was given distinct state buffers\n",
+                     kModeName[mode]);
+        std::exit(3);
+    }
     switch (mode) {
-        case M_SHIP: rec_kernel<<<kNH, kD>>>(q, k, v, g, beta, S, o, kNH); break;
-        case M_REC0: rec0_kernel<<<kNH, kD>>>(q, k, v, g, beta, S, o, kNH); break;
-        case M_REC1: rec1_kernel<<<kNH, kD>>>(q, k, v, g, beta, S, o, kNH); break;
-        case M_REC2: rec2_kernel<<<kNH, kD>>>(q, k, v, g, beta, S, o, kNH); break;
-        case M_REC2C: rec2c_kernel<<<kNH, kD>>>(q, k, v, g, beta, S, o, kNH); break;
+        case M_SHIP: rec_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;
+        case M_REC0: rec0_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;
+        case M_REC1: rec1_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;
+        case M_REC2: rec2_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;
+        case M_REC2C: rec2c_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;
+        case M_REC3: recx_indep_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, S_out, o, kNH); break;
+        case M_REC4: recx_unchain_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;
+        case M_REC5: recx_both_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, S_out, o, kNH); break;
+        case M_REC6: recx_shape_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;
         default:
             std::fprintf(stderr, "no kernel for mode %d\n", mode);
             std::exit(3);
@@ -229,6 +278,13 @@ int count_sentinel(const std::vector<float>& v) {
     return n;
 }
 
+// The same count straight off the device, for paths that did not copy the buffer into a vector first.
+long long count_sentinel_dev(const float* dptr, size_t n) {
+    std::vector<float> h(n);
+    CK(hipMemcpy(h.data(), const_cast<float*>(dptr), n * sizeof(float), hipMemcpyDeviceToHost));
+    return count_sentinel(h);
+}
+
 // Bit comparison, no band. -0.0 vs +0.0 and two NaN payloads must NOT be called equal here, because the
 // claim being checked is the bits.
 long bit_diff(const std::vector<float>& a, const std::vector<float>& b) {
@@ -251,6 +307,36 @@ double max_rel(const std::vector<float>& a, const std::vector<float>& b) {
         if (r > worst) worst = r;
     }
     return worst;
+}
+
+// The §10.1 definitions, spelled as §10.1 spells them, because `maxrel` here is NOT the per-element
+// ratio above: §10.1 says `maxrel = max |Δ| / (max |ref| + 1e-30)`, a TENSOR-relative quantity, and a
+// re-associated dot moves a cancelling element by a huge per-element ratio and a tiny tensor-relative
+// one (`prototype/gdn_collapse` §2's cancellation note is that exact case). Using the wrong
+// denominator would either pass a broken MODE or fail a legal one, and this tree has been bitten by
+// both.
+double maxrel_10_1(const std::vector<float>& a, const std::vector<float>& b) {
+    double ref_max = 0.0, worst = 0.0;
+    for (size_t i = 0; i < b.size(); ++i) {
+        const double r = std::fabs((double)b[i]);
+        if (r > ref_max) ref_max = r;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        const double d = std::fabs((double)a[i] - (double)b[i]);
+        if (d > worst) worst = d;
+    }
+    return worst / (ref_max + 1e-30);
+}
+
+double cosine_sim(const std::vector<float>& a, const std::vector<float>& b) {
+    double dot = 0.0, na = 0.0, nb = 0.0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        dot += (double)a[i] * (double)b[i];
+        na += (double)a[i] * (double)a[i];
+        nb += (double)b[i] * (double)b[i];
+    }
+    if (!(na > 0.0) || !(nb > 0.0)) return 0.0;   // also catches a NaN/Inf tensor: cos is not a number
+    return dot / (std::sqrt(na) * std::sqrt(nb));
 }
 
 // ---- the host mirror ------------------------------------------------------------------------------
@@ -537,16 +623,28 @@ struct Case {
     unsigned seed = 7u;
 };
 
+// How many floats of state are allocated for one MODE: one layer's worth for a MODE that carries its
+// state, or `pool` slots for a split probe, whose per-token slot index is what makes consecutive
+// launches independent even at the address level.
+struct Fixture;
+size_t state_span(const Fixture& f, int mode);
+
 struct Fixture {
     Case c;
+    int pool = 1;                       // per-token state slots; only split MODEs index it
     std::vector<float> u, g, beta, s0;
     // device, each between guard bands. `du/dg/db` are shared read-only operands; every MODE owns its
     // own state and `o`, so a stray write in one MODE cannot be laundered by another.
     float *bu = nullptr, *bg = nullptr, *bb = nullptr, *bs0 = nullptr;
     float *du = nullptr, *dg = nullptr, *db = nullptr, *ds0 = nullptr;
     float *bst[NMODES] = {nullptr}, *bso[NMODES] = {nullptr};
-    float *st[NMODES] = {nullptr}, *so[NMODES] = {nullptr};
+    float *st[NMODES] = {nullptr}, *so[NMODES] = {nullptr};     // WRITE side (and the only one, usually)
+    float *bsr[NMODES] = {nullptr}, *sr[NMODES] = {nullptr};    // READ side; == st for carried MODEs
 };
+
+size_t state_span(const Fixture& f, int mode) {
+    return (size_t)(mode_splits_state(mode) ? f.pool : 1) * kStateElems;
+}
 
 void fixture_build(Fixture& f) {
     const int tokens = f.c.tokens;
@@ -580,7 +678,14 @@ void fixture_build(Fixture& f) {
 void fixture_build_modes(Fixture& f, const ModeSet& ms) {
     for (int i = 0; i < ms.n; ++i) {
         const int m = ms.m[i];
-        f.bst[m] = alloc_guarded(kStateElems, &f.st[m]);
+        const size_t span = state_span(f, m);
+        f.bst[m] = alloc_guarded(span, &f.st[m]);
+        if (mode_splits_state(m)) {
+            f.bsr[m] = alloc_guarded(span, &f.sr[m]);   // a separate allocation: that IS the lever
+        } else {
+            f.bsr[m] = nullptr;                          // read side and write side are one buffer
+            f.sr[m] = f.st[m];
+        }
         f.bso[m] = alloc_guarded((size_t)f.c.tokens * kValueDim, &f.so[m]);
     }
 }
@@ -589,24 +694,39 @@ void fixture_free(Fixture& f) {
     (void)hipFree(f.bu); (void)hipFree(f.bg); (void)hipFree(f.bb); (void)hipFree(f.bs0);
     for (int m = 0; m < NMODES; ++m) {
         (void)hipFree(f.bst[m]);
+        (void)hipFree(f.bsr[m]);
         (void)hipFree(f.bso[m]);
     }
 }
 
-// Restore a MODE's state to the fixture's starting state. Used before every timed burst loop so a burst
-// walks the SAME state trajectory the gated launches walked, instead of decaying for `burst x tokens`
-// launches into values no real wave ever presents.
+// Restore a MODE's state to the fixture's starting state, one slot at a time so every slot of a split
+// pool starts from a real state. Used before every timed burst loop so a burst walks the SAME state
+// trajectory the gated launches walked, instead of decaying for `burst x tokens` launches into values
+// no real wave ever presents.
 void state_restore(const Fixture& f, int mode) {
-    CK(hipMemcpy(f.st[mode], f.ds0, kStateElems * sizeof(float), hipMemcpyDeviceToDevice));
+    const size_t slots = mode_splits_state(mode) ? (size_t)f.pool : 1u;
+    for (size_t s = 0; s < slots; ++s) {
+        CK(hipMemcpy(f.st[mode] + s * (size_t)kStateElems, f.ds0, kStateElems * sizeof(float),
+                     hipMemcpyDeviceToDevice));
+        if (f.sr[mode] != f.st[mode]) {
+            CK(hipMemcpy(f.sr[mode] + s * (size_t)kStateElems, f.ds0, kStateElems * sizeof(float),
+                         hipMemcpyDeviceToDevice));
+        }
+    }
 }
 
 // One token-step per token, which is the engine's shape: `rec_kernel` is launched once per
 // (token, GDN layer), so a sequence of T tokens is T launches and the unit the census bills.
+// A split probe indexes slot t%pool on BOTH sides, so the slot token t+1 reads is not the slot token t
+// wrote: no launch in the sequence waits for its predecessor's store.
 void run_sequence(const Fixture& f, int mode, int tokens) {
+    const size_t slots = mode_splits_state(mode) ? (size_t)f.pool : 1u;
     for (int t = 0; t < tokens; ++t) {
+        const size_t slot = slots ? ((size_t)t % slots) : 0u;
         const float* row = f.du + (size_t)t * kQkvRows;
         launch_mode(mode, row, row + kValueDim, row + 2 * kValueDim, f.dg + (size_t)t * kNH,
-                    f.db + (size_t)t * kNH, f.st[mode], f.so[mode] + (size_t)t * kValueDim);
+                    f.db + (size_t)t * kNH, f.sr[mode] + slot * (size_t)kStateElems,
+                    f.st[mode] + slot * (size_t)kStateElems, f.so[mode] + (size_t)t * kValueDim);
     }
 }
 
@@ -641,10 +761,165 @@ static const char* falsifier_band(double r) {
     return "INCONCLUSIVE-between-the-two-bands";
 }
 
-int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
-             const std::string& outdir) {
+// The dependency probes' thresholds, kept separate from `falsifier_band` on purpose: that one prices an
+// INSTRUCTION lever (>1.10 refutes the latency reading, <1.02 kills the instruction route) and reading a
+// latency probe through it would invert the meaning of both numbers. Here the question is whether the
+// chain is what costs, so a LARGE ratio is the positive result.
+static const char* dependency_band(double r) {
+    if (r > 1.10) return "LATENCY_BINDS-fund-occupancy-D30-1-4-and-chain-shortening-1-5";
+    if (r < 1.02) return "LATENCY_DOES_NOT_BIND-at-this_granularity-family_needs_another_model";
+    return "INCONCLUSIVE-between-the-two-bands-take-the-counters";
+}
+
+// ---- the VOLUME self-check ---------------------------------------------------------------------
+/* WHY THIS EXISTS AND WHAT IT IS NOT. The dependency probes are meaningless by design, so the only
+ * thing that may be compared between them and MODE 0 is WORK VOLUME. If a probe quietly wrote less, or
+ * read a smaller region, it would come back fast for a reason that has nothing to do with latency, and
+ * that is exactly how `tools/mixed_bw`'s first attempt produced plausible ms numbers over a checksum
+ * that counted 1/blockDim of the bytes it had read. So the check is on BYTES, on both sides:
+ *
+ *   WRITE SIDE (device, exact): the write-side state buffer starts as `kSentinel`, a value the
+ *     recurrence cannot produce, and after the sequence EVERY element must have stopped being it. That
+ *     is a per-element witness of which addresses were written, not an inference from the values.
+ *     For a split probe the READ-side buffer is checked for the mirror image: it must still be
+ *     byte-identical to the fixture state that was seeded into it, which is what proves the write pass
+ *     MOVED to another buffer instead of vanishing. Guard bands on both catch a write outside either.
+ *
+ *   READ SIDE (device, exact where the buffers are separate): a split probe's read region must still
+ *     equal the fixture bytes, i.e. the bytes it was supposed to read are the bytes that were there,
+ *     and nothing wrote them. For a MODE that reads and writes one buffer this cannot separate read
+ *     from write, so the read volume is witnessed where it actually lives: in the instruction stream,
+ *     by `traffic_census.py --volume-check`, which counts `global_load_b32`/`global_store_b32` per
+ *     token-step in the listing the binary runs and exits non-zero if they differ from MODE 0's. That
+ *     command is printed by this check and is a required part of the protocol, not a footnote.
+ *
+ *   THE PER-LAUNCH ACCOUNT is re-derived on the host from the same constants the launch is built from
+ *     (the `tools/mixed_bw` `plan_bounds` rule: never let the kernel certify its own geometry), and a
+ *     MODE whose account differs from MODE 0's fails here even if the device agrees with it.
+ */
+struct LaunchAccount {
+    long long state_read_elems = 0;      // state elements read per launch
+    long long state_write_elems = 0;     // state elements written per launch
+    long long operand_read_elems = 0;    // q|k|v rows plus g|beta, per launch
+    long long operand_write_elems = 0;   // the `o` row
+};
+
+/* Every form in this file walks the state in the same two loops: loop A reads the layer's whole
+ * [16][128][128] block once, loop B reads it again and writes it once. Hence 2 read passes and 1 write
+ * pass over exactly one layer's state per launch — for the split probes the write pass lands in a
+ * different buffer, which changes addresses, not bytes. The pass count is a property of the source
+ * (`rec0_kernel`'s two `for (i = 0; i < D; ++i)` walks) and `traffic_census.py --volume-check` is what
+ * proves the compiled listing really issues 2+1 passes at 4 B per access, per token-step. */
+LaunchAccount launch_account(int mode) {
+    LaunchAccount a;
+    a.state_read_elems = 2LL * kStateElems;
+    a.state_write_elems = 1LL * kStateElems;
+    a.operand_read_elems = 3LL * kValueDim + 2LL * kNH;
+    a.operand_write_elems = kValueDim;
+    (void)mode;
+    return a;
+}
+
+long long account_bytes(const LaunchAccount& a, bool read) {
+    return (long long)((read ? a.state_read_elems + a.operand_read_elems
+                              : a.state_write_elems + a.operand_write_elems) * sizeof(float));
+}
+
+int count_equal(const std::vector<float>& v, float want) {
+    int n = 0;
+    for (float x : v) n += (x == want) ? 1 : 0;
+    return n;
+}
+
+// How many of `have` differ from `want` (bit-compared, because "untouched" is a bits claim).
+long long bits_differ(const std::vector<float>& have, const std::vector<float>& want) {
+    if (have.size() != want.size()) return -1;
+    const uint32_t* ph = reinterpret_cast<const uint32_t*>(have.data());
+    const uint32_t* pw = reinterpret_cast<const uint32_t*>(want.data());
+    long long d = 0;
+    for (size_t i = 0; i < have.size(); ++i) d += (ph[i] != pw[i]) ? 1 : 0;
+    return d;
+}
+
+int volume_check(const ModeSet& ms, int pool) {
+    Case c{"volume", pool > 8 ? pool : 8, true, 0.4f, 5u};   // long enough to touch every pool slot
     Fixture f;
     f.c = c;
+    f.pool = pool;
+    fixture_build(f);
+    fixture_build_modes(f, ms);
+
+    const LaunchAccount want_account = launch_account(M_REC0);
+    int failed = 0;
+    for (int i = 0; i < ms.n; ++i) {
+        const int m = ms.m[i];
+        const size_t span = state_span(f, m);
+        // Fresh sentinel seeding: `alloc_guarded` pre-fills with kSentinel, so a slot nobody writes is
+        // still recognisable as unwritten. Seed both sides from the fixture state, then re-poison the
+        // WRITE side and leave the read side seeded: after the sequence, "still sentinel" on the write
+        // side means nobody wrote that element, and "still the fixture bits" on the read side of a
+        // split probe means the write pass moved to another buffer instead of disappearing.
+        state_restore(f, m);
+        std::vector<float> poison(span, kSentinel);
+        CK(hipMemcpy(f.st[m], poison.data(), span * sizeof(float), hipMemcpyHostToDevice));
+
+        run_sequence(f, m, c.tokens);
+        CK(hipDeviceSynchronize());
+
+        std::vector<float> back_w(span), back_r(span);
+        CK(hipMemcpy(back_w.data(), f.st[m], span * sizeof(float), hipMemcpyDeviceToHost));
+        const long long unwritten = count_equal(back_w, kSentinel);
+        const int guard_w = guards_clean(f.bst[m], span);
+        const int guard_r = f.bsr[m] ? guards_clean(f.bsr[m], span) : 0;
+        long long readside_untouched = -1;
+        if (mode_splits_state(m)) {
+            std::vector<float> one(kStateElems);
+            CK(hipMemcpy(one.data(), f.ds0, kStateElems * sizeof(float), hipMemcpyDeviceToHost));
+            CK(hipMemcpy(back_r.data(), f.sr[m], span * sizeof(float), hipMemcpyDeviceToHost));
+            long long diff = 0;
+            for (size_t s = 0; s < (size_t)f.pool; ++s)
+                diff += bits_differ(std::vector<float>(back_r.begin() + s * kStateElems,
+                                                       back_r.begin() + (s + 1) * kStateElems), one);
+            readside_untouched = diff;
+        }
+        const long long unwritten_o = count_sentinel_dev(f.so[m], (size_t)c.tokens * kValueDim);
+        const LaunchAccount a = launch_account(m);
+        const bool same_account = a.state_read_elems == want_account.state_read_elems &&
+            a.state_write_elems == want_account.state_write_elems &&
+            a.operand_read_elems == want_account.operand_read_elems &&
+            a.operand_write_elems == want_account.operand_write_elems;
+        const bool ok = same_account && unwritten == 0 && guard_w == 0 && guard_r == 0 &&
+            unwritten_o == 0 && (readside_untouched == 0 || (!mode_splits_state(m) && readside_untouched == -1));
+        if (!ok) ++failed;
+        std::printf("VOLUME mode=%s launches=%d pool=%d split=%d state_read_elems=%lld"
+                    " state_write_elems=%lld operand_read_elems=%lld operand_write_elems=%lld"
+                    " bytes_read_per_launch=%lld bytes_written_per_launch=%lld"
+                    " dev_unwritten_state_elems=%lld dev_unwritten_o=%lld guard=%d"
+                    " readside_bits_differing_vs_seeded=%lld account_same_as_rec0=%d verdict=%s\n",
+                    kModeName[m], c.tokens, f.pool, mode_splits_state(m) ? 1 : 0,
+                    a.state_read_elems, a.state_write_elems, a.operand_read_elems,
+                    a.operand_write_elems, account_bytes(a, true), account_bytes(a, false),
+                    unwritten, (long long)unwritten_o, guard_w + guard_r, readside_untouched,
+                    same_account ? 1 : 0, ok ? "VOLUME_OK" : "VOLUME_MISMATCH");
+    }
+    std::printf("VOLUME summary modes=%s ok=%d pool=%d" 
+                " note=instruction-count witness is NOT here, it is the ISA census; run:"
+                " .venv/bin/python prototype/gdn_rec_isa/traffic_census.py --volume-check" 
+                " --asm tmp/gdn_isa/gdn_rec_isa.s (default --modes covers every probe and rec6)\n",
+                ms.names().c_str(), failed ? 0 : 1, pool);
+    fixture_free(f);
+    return failed;
+}
+
+// Counts printed BURST lines so main() can require that the whole case x rep x mode matrix was timed.
+// A burst that silently timed a subset reads exactly like a clean run to a grep for RESULT.
+static long g_burst_lines = 0;
+
+int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
+             const std::string& outdir, int pool, bool volume_ok) {
+    Fixture f;
+    f.c = c;
+    f.pool = pool;
     fixture_build(f);
     fixture_build_modes(f, ms);
     const size_t n_o = (size_t)c.tokens * kValueDim;
@@ -675,10 +950,10 @@ int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
         }
     }
 
-    std::printf("CASE %s tokens=%d state=%-15s decay=%-6g seed=%u modes=%s repeat=%d"
+    std::printf("CASE %s tokens=%d state=%-15s decay=%-6g seed=%u modes=%s repeat=%d pool=%d"
                 " o_elems=%zu state_elems=%d grid=%dx%d wavefronts=%d\n",
                 c.label.c_str(), c.tokens, c.zero_state ? "zeros" : "carried-random", c.decay,
-                c.seed, ms.names().c_str(), repeat, n_o, kStateElems, kNH, kD,
+                c.seed, ms.names().c_str(), repeat, pool, n_o, kStateElems, kNH, kD,
                 kNH * (kD / kWave));
 
     const int guard_operand = guards_clean(f.bu, (size_t)c.tokens * kQkvRows) +
@@ -693,25 +968,48 @@ int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
         const std::vector<float>& o = ho[(size_t)m * repeat];
         const std::vector<float>& s = hs[(size_t)m * repeat];
         const long do0 = bit_diff(o, o0), ds0 = bit_diff(s, s0);
-        const long doc = bit_diff(o, cpu_o), dsc = bit_diff(s, cpu_s);
+        const long doc = mode_is_probe(m) ? -1 : bit_diff(o, cpu_o);
+        const long dsc = mode_is_probe(m) ? -1 : bit_diff(s, cpu_s);
         const int unwritten = count_sentinel(o);
-        const int guard = guards_clean(f.bso[m], n_o) + guards_clean(f.bst[m], kStateElems);
+        const int guard = guards_clean(f.bso[m], n_o) + guards_clean(f.bst[m], state_span(f, m)) +
+            (f.bsr[m] ? guards_clean(f.bsr[m], state_span(f, m)) : 0);
         long rerun_o = 0, rerun_s = 0;
         if (repeat > 1) {   // a racy hand permute disagrees with itself before it disagrees with anyone
             rerun_o = bit_diff(o, ho[(size_t)m * repeat + 1]);
             rerun_s = bit_diff(s, hs[(size_t)m * repeat + 1]);
         }
+        // Three admission policies, and the one that runs is printed so a reader never has to guess
+        // which column adjudicated. MODEs 1/2/2c must reproduce MODE 0's BITS (a re-spelled reduction
+        // that moves a bit is a numerics change, per `results.md` §6). `recx_unchain` re-associates two
+        // dots, so bits are the wrong question; it is judged inside the EXISTING §10.1 GDN band
+        // (cos ≥ 0.999, meanrel ≤ 5 %), which is an existing gate being applied, not a new one being
+        // invented. `recx_indep` and `recx_both` replace what the recurrence READS, so no value
+        // statement about them is meaningful at all and the volume check is the only gate they have.
         const bool bit_ok = (do0 == 0 && ds0 == 0);
-        const bool ok =
-            bit_ok && unwritten == 0 && guard == 0 && guard_operand == 0 && rerun_o == 0 && rerun_s == 0;
+        const double cos_o = cosine_sim(o, o0), cos_s = cosine_sim(s, s0);
+        const double mr_o = maxrel_10_1(o, o0), mr_s = maxrel_10_1(s, s0);
+        const bool band_ok = cos_o >= 0.999 && cos_s >= 0.999 && mr_o <= 5e-2 && mr_s <= 5e-2;
+        const char* gate = "none";
+        bool admitted = true;
+        if (mode_value_gated(m)) { gate = "bit-identity-vs-rec0"; admitted = bit_ok; }
+        else if (mode_band_gated(m)) { gate = "existing-10.1-GDN-band-cos-ge-0.999-meanrel-le-0.05";
+                                       admitted = band_ok; }
+        else if (mode_is_probe(m)) { gate = "volume-only-value-is-meaningless-by-design"; admitted = true; }
+        const bool ok = admitted && unwritten == 0 && guard == 0 && guard_operand == 0 &&
+            rerun_o == 0 && rerun_s == 0;
         if (!ok) ++failed;
-        std::printf("RESULT case=%s mode=%s tokens=%d ndiff_o_vs0=%ld ndiff_state_vs0=%ld"
-                    " ndiff_o_vs_cpu=%ld ndiff_state_vs_cpu=%ld maxrel_o_vs_cpu=%.3e"
-                    " maxrel_state_vs_cpu=%.3e unwritten_o=%d guard=%d rerun_ndiff_o=%ld"
-                    " rerun_ndiff_state=%ld verdict=%s\n",
-                    c.label.c_str(), kModeName[m], c.tokens, do0, ds0, doc, dsc, max_rel(o, cpu_o),
-                    max_rel(s, cpu_s), unwritten, guard + guard_operand, rerun_o, rerun_s,
-                    ok ? "BIT_IDENTICAL" : (bit_ok ? "CLEAN_BUT_UNWRITTEN_OR_STOMP" : "DIFFERS"));
+        std::printf("RESULT case=%s mode=%s tokens=%d gate=%s ndiff_o_vs0=%ld ndiff_state_vs0=%ld"
+                    " cos_o_vs0=%.6f cos_state_vs0=%.6f maxrel10_o_vs0=%.3e maxrel10_state_vs0=%.3e"
+                    " ndiff_o_vs_cpu=%ld ndiff_state_vs_cpu=%ld"
+                    " maxrel_o_vs_cpu=%.3e maxrel_state_vs_cpu=%.3e unwritten_o=%d guard=%d"
+                    " rerun_ndiff_o=%ld rerun_ndiff_state=%ld verdict=%s\n",
+                    c.label.c_str(), kModeName[m], c.tokens, gate, do0, ds0, cos_o, cos_s, mr_o, mr_s,
+                    doc, dsc,
+                    mode_is_probe(m) ? -1.0 : max_rel(o, cpu_o),
+                    mode_is_probe(m) ? -1.0 : max_rel(s, cpu_s),
+                    unwritten, guard + guard_operand, rerun_o, rerun_s,
+                    ok ? (bit_ok ? "BIT_IDENTICAL" : "ADMITTED_BY_POLICY")
+                       : (admitted ? "CLEAN_BUT_UNWRITTEN_OR_STOMP" : "FAILS_ADMISSION"));
         if (!outdir.empty()) {
             dump_file(outdir, c.label, m, "o", f.so[m], n_o);
             dump_file(outdir, c.label, m, "state", f.st[m], kStateElems);
@@ -733,9 +1031,13 @@ int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
     // Main-agent-only in practice: a worker may not take timings. The state is restored before each
     // timed loop so all MODEs measure the same trajectory, and the restore is OUTSIDE the timed region.
     if (burst > 0) {
-        if (failed) {
-            std::printf("NOT TIMED case=%s reason=admission_not_clean a timing on a MODE that is not"
-                        " bit-identical to MODE 0 is not a lever measurement\n",
+        if (!volume_ok) {
+            std::printf("NOT TIMED case=%s reason=volume_self_check_failed a probe whose bytes touched"
+                        " differ from MODE 0 would look fast for the wrong reason; fix the probe, do"
+                        " not read the number\n", sanitize(c.label).c_str());
+        } else if (failed) {
+            std::printf("NOT TIMED case=%s reason=admission_not_clean a timing on a MODE that failed"
+                        " its own admission gate is not a measurement\n",
                         sanitize(c.label).c_str());
         } else {
             std::vector<double> best(NMODES, 1e30);
@@ -758,6 +1060,7 @@ int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
                     std::printf("BURST case=%s rep=%d mode=%s ms_per_sequence=%.4f ms_per_launch=%.5f\n",
                                 sanitize(c.label).c_str(), r, kModeName[m], ms_seq,
                                 ms_seq / (double)c.tokens);
+                    ++g_burst_lines;
                 }
             }
             std::printf("RESULT case=%s mode=burst burst=%d reps=%d tokens=%d modes=%s",
@@ -769,10 +1072,28 @@ int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
                 const int m = ms.m[i];
                 if (m == M_REC0) continue;
                 const double r = best[M_REC0] / best[m];
-                std::printf("FALSIFIER case=%s mode=%s against=rec0 best_rec0_ms=%.4f"
-                            " best_mode_ms=%.4f rec0_over_mode=%.4f per_launch_rec0_us=%.3f band=%s\n",
-                            sanitize(c.label).c_str(), kModeName[m], best[M_REC0], best[m], r,
-                            best[M_REC0] * 1000.0 / c.tokens, falsifier_band(r));
+                std::printf("FALSIFIER case=%s mode=%s against=rec0 kind=%s best_rec0_ms=%.4f"
+                            " best_mode_ms=%.4f rec0_over_mode=%.4f per_launch_rec0_us=%.3f band=%s"
+                            " bill_delta=%s\n",
+                            sanitize(c.label).c_str(), kModeName[m],
+                            mode_is_probe(m) ? "dependency-break"
+                                             : (m == M_REC6 ? "control-bill-matched"
+                                                           : "instruction-lever"),
+                            best[M_REC0], best[m], r,
+                            best[M_REC0] * 1000.0 / c.tokens,
+                            mode_is_probe(m) ? dependency_band(r) : falsifier_band(r),
+                            "traffic_census.py --volume-check: a probe that is cheaper in slots owes"
+                            " part of its win to D25's ~0.8 slot elasticity, not to the dependency");
+            }
+            if (ms.has(M_REC4) && ms.has(M_REC6)) {
+                // The pair is the point of rec6: rec4 and rec6 differ in chain depth and in nothing else
+                // that a compiler would not report, so THIS ratio and not rec4/rec0 is the chain.
+                std::printf("DIFF case=%s what=chain_at_matched_shape rec4=%s rec6=%s"
+                            " rec6_over_rec4=%.4f note=rec6 is the bill-matched control, so this ratio"
+                            " has the loop-shape effect cancelled; subtract rec6's own slot delta from"
+                            " the census before calling the remainder the chain\n",
+                            sanitize(c.label).c_str(), kModeName[M_REC4], kModeName[M_REC6],
+                            best[M_REC6] / best[M_REC4]);
             }
         }
     } else {
@@ -789,7 +1110,8 @@ int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
 
 int main(int argc, char** argv) {
     std::string modespec, outdir, statename = "zeros";
-    int tokens = 128, repeat = 2, burst = 0, reps = 5, matrix = 1;
+    int tokens = 128, repeat = 2, burst = 0, reps = 5, matrix = 1, pool = 1;
+    bool volume_only = false;
     unsigned seed = 7u;
     float decay = 0.4f;
     for (int i = 1; i < argc; ++i) {
@@ -821,19 +1143,36 @@ int main(int argc, char** argv) {
         } else if (a == "--reps") {
             reps = std::atoi(next().c_str());
         } else if (a == "--out") outdir = next();
+        else if (a == "--pool") pool = std::atoi(next().c_str());
+        else if (a == "--volume") volume_only = true;
         else if (a == "--matrix") matrix = 1;
         else if (a == "--selftest-lane") return selftest_lane();
         else if (a == "--selftest-mirror") return selftest_mirror();
         else {
             std::fprintf(stderr,
-                         "usage: gdn_rec_isa [--modes ship,rec0,rec1,rec2,rec2c] [--tokens T --state"
-                         " zeros|random --decay D --seed S] [--repeat N] [--burst N --reps R]"
+                         "usage: gdn_rec_isa [--modes ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6]"
+                         " [--tokens T --state zeros|random --decay D --seed S] [--repeat N]\n"
+                         "                 [--volume [--pool N]] [--burst N --reps R [--pool N]]"
                          " [--out DIR] [--selftest-lane] [--selftest-mirror]\n"
-                         "  default: the four MODEs (rec0 is always the reference) over the T=128 case\n"
-                         "  matrix, twice each. --selftest-lane and --selftest-mirror are CPU-only and\n"
-                         "  touch no device.\n");
+                         "  --volume alone = the volume self-check and nothing else (no timing exists in"
+                         "  that mode); with --burst it is the same single check followed by timing.\n"
+                         "  default: the four spelling MODEs (rec0 is always the reference) over the\n"
+                         "  T=128 matrix, twice each. The dependency probes are rec3 (cross-token\n"
+                         "  dependency broken by a split state), rec4 (both serial chains shortened from\n"
+                         "  128 links to 32 at identical volume), rec5 (both) and rec6 (rec4's loop\n"
+                         "  shape with the chain NOT broken: its bill-matched control, bit-identical to\n"
+                         "  rec0); rec3/rec4/rec5 are meaningless\n"
+                         "  by design, admitted on VOLUME, and a --burst runs that volume check itself and\n"
+                         "  refuses to time unless it passes. --pool N indexes N independent state slots per token (the\n"
+                         "  literal indexed-per-token form); N=1 keeps the working set smallest, which\n"
+                         "  is the comparable choice — see gdn_rec_isa_kernels.h. --selftest-lane and\n"
+                         "  --selftest-mirror are CPU-only and touch no device.\n");
             return 2;
         }
+    }
+    if (pool < 1) {
+        std::fprintf(stderr, "--pool must be >= 1\n");
+        return 2;
     }
     if (repeat < 1) {
         std::fprintf(stderr, "--repeat must be >= 1 (2 is the default: a racy permute must disagree with itself)\n");
@@ -863,21 +1202,53 @@ int main(int argc, char** argv) {
         cases = {Case{"single", tokens, zero_state, decay, seed}};
     }
 
-    std::printf("plan modes=%s | reference=rec0 | cases=%zu | tokens(matrix)=%d | repeat=%d"
+    std::printf("plan modes=%s | reference=rec0 | cases=%zu | tokens(matrix)=%d | repeat=%d | pool=%d"
                 " | grid %dx%d, wave%d, %d wavefronts/token-step | state %d floats (1 layer)\n",
-                ms.names().c_str(), cases.size(), tokens, repeat, kNH, kD, kWave,
+                ms.names().c_str(), cases.size(), tokens, repeat, pool, kNH, kD, kWave,
                 kNH * (kD / kWave), kStateElems);
 
-    int failed = 0;
-    for (const auto& c : cases) failed += run_case(c, ms, repeat, burst, reps, outdir);
+    // The volume self-check runs BEFORE anything is timed, and a burst that cannot show it passing is
+    // refused with a non-zero exit. It is standalone under --volume so a correctness-only run (which is
+    // all a worker is allowed to take) can exercise it on its own.
+    int volume_failed = 0;
+    if (burst > 0 || volume_only) volume_failed = volume_check(ms, pool);
+    const bool volume_ok = (burst == 0 && !volume_only) || volume_failed == 0;
+    std::printf("VOLUME-GATE requested=%s run=%s ok=%s\n", (burst > 0 || volume_only) ? "yes" : "no",
+                (burst > 0 || volume_only) ? "yes" : "no-burst-so-not-needed",
+                volume_ok ? "yes" : "no");
+    // `--volume` ALONE is the standalone no-timing pass (the only device pass a worker may take). With
+    // `--burst` it must fall through to the timing. These two flags used to be overloaded: the
+    // documented `--volume --burst 40 --reps 5` printed VOLUME_OK, exited 0 and timed NOTHING - the
+    // "driver whose parse matches nothing still prints PASS" class, caught before any number was read
+    // off it. The burst's own line-count assertion below is the second net.
+    if (volume_only && burst == 0) {
+        std::printf("RESULT mode=volume-only failures=%d verdict=%s\n", volume_failed,
+                    volume_failed ? "VOLUME_MISMATCH" : "VOLUME_OK");
+        return volume_failed ? 1 : 0;
+    }
 
-    std::printf("RESULT mode=summary cases=%zu modes=%s repeat=%d admission=%s"
-                " gate=bit-identity-on-o-and-final-state-against-rec0\n",
-                cases.size(), ms.names().c_str(), repeat, failed ? "FAIL" : "PASS");
+    int failed = 0;
+    for (const auto& c : cases) failed += run_case(c, ms, repeat, burst, reps, outdir, pool, volume_ok);
+    if (burst > 0 && !volume_ok) ++failed;   // a timing that had to be refused is a failure, not a null
+    // A burst that printed fewer lines than it owes timed a subset, which reads exactly like a clean
+    // run to anything grepping for a RESULT line. Count them, require the product, fail otherwise.
+    if (burst > 0)
+    {
+        const long want = (long)cases.size() * (long)reps * (long)ms.n;
+        std::printf("BURST-LINES printed=%ld want=%ld (cases=%zu reps=%d modes=%d) ok=%d\n",
+                    g_burst_lines, want, cases.size(), reps, ms.n, (int)(g_burst_lines == want));
+        if (g_burst_lines != want) ++failed;
+    }
+
+    std::printf("RESULT mode=summary cases=%zu modes=%s repeat=%d volume=%s admission=%s"
+                " gates=bit-identity(0,1,2,2c,6) existing-10.1-GDN-band(4) volume-only(3,5)\n",
+                cases.size(), ms.names().c_str(), repeat, volume_ok ? "OK" : "FAILED-or-not-run",
+                failed ? "FAIL" : "PASS");
     if (failed)
-        std::printf("ADMISSION FAIL: %d MODE-case verdict(s) off bit-identity, unwritten, stomped or"
-                    " run-to-run unstable. A MODE that moves a bit is a numerics change, not a lever;"
-                    " see results.md §6 for which MODE means what.\n",
+        std::printf("ADMISSION FAIL: %d MODE-case verdict(s) failed their gate, or a burst was refused"
+                    " for want of a clean volume check. A MODE that moves a bit it should not move is a"
+                    " numerics change, not a slower lever; a probe whose volume moved is not a probe."
+                    " See results.md §9 for which MODE means what.\n",
                     failed);
     return failed ? 1 : 0;
 }

@@ -31,6 +31,11 @@
  *                     reduction and no barrier at all. This is the geometry lever, and it costs one
  *                     extra launch per token.
  *
+ * The three DEPENDENCY-BREAK probes at the bottom of this file (`recx_indep`, `recx_unchain`,
+ * `recx_both`) are not MODEs in this sense. They are numerically meaningless by design, they are
+ * admitted by VOLUME rather than by value, and the block comment above them says what each one breaks
+ * and what its result would falsify. Read that block before running one.
+ *
  * BIT-IDENTITY. Every MODE keeps each reduction's association identical to the shipped `block_sum`:
  * 5 `shfl_down` steps in the same order in-warp, then the same 5 steps over the per-warp partials.
  * A hand-spelled permute must therefore read the SAME source lane the compiler's lowering reads;
@@ -336,4 +341,262 @@ __global__ void rec2c_kernel(const float* __restrict__ q, const float* __restric
         acc += qs[i] * s;
     }
     o[h * D + j] = acc;
+}
+
+/* ============================ THE DEPENDENCY-BREAK PROBES (D30 queue item 1.3) ================== */
+/*
+ * WHY THESE EXIST, AND WHAT THEY ARE NOT. `results.md` §4 read `gdn_rec` as latency-bound on the
+ * per-token dependency chain at ~1.6 *working* wavefronts per CU, and D25's falsifier (rec0/rec2c =
+ * 1.0159x) closed the INSTRUCTION route without ever testing that reading: an instruction cut cannot
+ * refute a latency model, it can only shorten the stream. The cheap instrument that can is a form
+ * whose DEPENDENCY STRUCTURE is broken while its VOLUME is held. That is what these three are.
+ *
+ * THEY ARE NUMERICALLY MEANINGLESS, AND THAT IS THE POINT. None of them reproduces §04.4 and none is
+ * offered as a lever, a candidate, or a numerics proposal. `gdn_rec_isa.hip.cpp` admits MODEs 1/2/2c
+ * by bit-identity, admits these by VOLUME (and, for the one that only re-associates, by the §10.1 G3i
+ * band), and refuses to time anything whose volume moved. A probe that quietly removed work would come
+ * back fast for the wrong reason — that is the `tools/mixed_bw` bug (a per-thread store to a per-block
+ * slot made the read checksum report 1/blockDim of the bytes it had read, every warm row failed, and
+ * the ms/GB/s column looked entirely plausible), so the volume witness ships INSIDE this directory
+ * and must pass before a single launch is timed: `--volume` on the binary (device: elements written,
+ * read side untouched where the form claims it, guard bands, the host-derived per-launch byte account
+ * compared against MODE 0's) and `traffic_census.py --volume-check` (machine code: `global_load_b32`
+ * and `global_store_b32` per token-step and bytes/launch, identical to MODE 0 or non-zero exit).
+ *
+ * WHAT THE CHAIN IS, from `rec0_kernel`. One launch is one (token, layer); a thread owns one d_v
+ * column j and runs prologue (two block reductions) -> loop A (128 state loads, 128 FMAs into ONE
+ * accumulator `r`) -> `dv` -> loop B (128 iterations that read Sh[i][j], write Sh[i][j], and feed ONE
+ * accumulator `acc`). Two dependencies exist and they are separable:
+ *
+ *   CROSS-TOKEN. Token t+1's first state load is the address token t's last state store wrote — one
+ *     launch per token (`engine/decode_step.cpp:677-687`), so this is a RAW/WAR round trip through
+ *     global memory, and it is also what forces the `s_waitcnt vmcnt(0)` store drain inside loop B
+ *     (16 per token-step, `results.md` §3 class 3). `recx_indep_kernel` breaks it: read one buffer,
+ *     write another, so no launch waits on its predecessor's store.
+ *
+ *   INTRA-TOKEN. The two serial accumulator chains: 128 dependent FMAs, twice, at ~4-cycle FMA
+ *     latency with ~1.6 working wavefronts per CU to hide it (`prototype/gdn_collapse/results.md` §5).
+ *     `recx_unchain_kernel` shortens each chain from 128 links to 32 at identical volume. Its ceiling
+ *     is calculable and SMALL: ~2 x 96 saved dependent links ~= 0.09-0.17 us of a 6.3-6.9 us launch,
+ *     i.e. ~1.015-1.027x. A LARGE `unchain` effect would therefore not be the accumulator chain and
+ *     has to be looked for elsewhere; a null is the expected result and is still informative.
+ *     `recx_shape_kernel` is its bill-matched control (same unroll-4 spelling, chain NOT broken, and
+ *     bit-identical to MODE 0), because the census found the unchain probe 10.5 % cheaper in slots —
+ *     see its own comment for the difference table this makes readable.
+ *
+ * IDENTICAL VOLUME, enforced not claimed: same grid NH x D, same LDS (ks[D], qs[D], red[32]), same two
+ * state walks, two state read passes and one state write pass over the same byte count, `block_sum`
+ * called verbatim, same operands read, same launch count.
+ *
+ * NAMING. These are NOT the reserved MODE 3 of the header above (`rec3_kernel` = norms out of the
+ * launch, still unwritten, and it is a LEVER that must be bit-identical). The probes are named for
+ * what they break, because they are probes and can never be levers.
+ */
+
+/* indep: the cross-token dependency, at fixed volume. Reads `S_in`, writes `S_out`; every address this
+ * form reads is an address it does not write, so no launch in a sequence waits for an earlier launch's
+ * store, and the in-loop WAR that needs the vmcnt(0) drain is gone with it. Bytes are NOT reduced: one
+ * read pair over a 1 MiB region plus one write pass over another 1 MiB region is MODE 0's 3 MiB per
+ * launch exactly, just split in two. The harness can index a POOL of slots (--pool N) for the literal
+ * "indexed per token" form, but the default is ONE slot: the split already breaks the dependency, and
+ * a bigger pool only inflates the working set — which is a TRAFFIC change wearing a latency costume,
+ * and this directory has the number to prove it: `prototype/gdn_decode/results.md` measures this very
+ * access pattern at 876 GB/s with an 18 MiB warm state and 255 GB/s once tiled past ~64 MiB. Footprint
+ * belongs behind a flag, never inside the lever. */
+__global__ void recx_indep_kernel(const float* __restrict__ q, const float* __restrict__ k,
+                                  const float* __restrict__ v, const float* __restrict__ g,
+                                  const float* __restrict__ beta, const float* __restrict__ S_in,
+                                  float* __restrict__ S_out, float* __restrict__ o, int nheads) {
+    int h = blockIdx.x;
+    int j = threadIdx.x;                       // 128 threads, thread j owns column j
+    __shared__ float ks[D], qs[D], red[32];
+
+    float kq = k[h * D + j], qq = q[h * D + j];
+    float kn = kq * rsqrtf(block_sum(kq * kq, red) + 1e-6f);
+    __syncthreads();
+    float qn = qq * rsqrtf(block_sum(qq * qq, red) + 1e-6f) * Q_SCALE;
+    __syncthreads();
+    ks[j] = kn;
+    qs[j] = qn;
+    __syncthreads();
+
+    float gam = expf(g[h]), bet = beta[h];
+    const float* __restrict__ Sh_in = S_in + (size_t)h * D * D;
+    float* __restrict__ Sh_out = S_out + (size_t)h * D * D;
+
+    float r = 0.f;
+    for (int i = 0; i < D; ++i) r += Sh_in[i * D + j] * ks[i];
+    float dv = bet * (v[h * D + j] - gam * r);
+    float acc = 0.f;
+    for (int i = 0; i < D; ++i) {
+        float s = gam * Sh_in[i * D + j];
+        s += ks[i] * dv;
+        Sh_out[i * D + j] = s;
+        acc += qs[i] * s;
+    }
+    o[h * D + j] = acc;
+}
+
+/* unchain: the intra-token serial chains, shortened at fixed volume. Same buffer, same addresses, same
+ * load/store mix, same number of FMAs and adds (four partials carry the same 128 terms and cost 3
+ * adds each to combine). What changes is DEPTH: each chain goes from 128 dependent links to 32.
+ * Written as ONE loop carrying four explicit element bodies per trip, not four sub-loops, so the
+ * listing still has exactly two state walks — `isa_census.py` refuses a listing whose walk count is
+ * not two, which is the right way for a geometry change to fail. Re-associates both dots, so it is a
+ * numerics change: §04.4 measures these sums cancelling (1 element in 286 losing 84 % of its
+ * magnitude), which is why admission is the §10.1 G3i band and never bit-identity. */
+__global__ void recx_unchain_kernel(const float* __restrict__ q, const float* __restrict__ k,
+                                    const float* __restrict__ v, const float* __restrict__ g,
+                                    const float* __restrict__ beta, float* __restrict__ S,
+                                    float* __restrict__ o, int nheads) {
+    int h = blockIdx.x;
+    int j = threadIdx.x;
+    __shared__ float ks[D], qs[D], red[32];
+
+    float kq = k[h * D + j], qq = q[h * D + j];
+    float kn = kq * rsqrtf(block_sum(kq * kq, red) + 1e-6f);
+    __syncthreads();
+    float qn = qq * rsqrtf(block_sum(qq * qq, red) + 1e-6f) * Q_SCALE;
+    __syncthreads();
+    ks[j] = kn;
+    qs[j] = qn;
+    __syncthreads();
+
+    float gam = expf(g[h]), bet = beta[h];
+    float* Sh = S + (size_t)h * D * D;
+
+    float r0 = 0.f, r1 = 0.f, r2 = 0.f, r3 = 0.f;
+#pragma unroll 4                      // same shape as `recx_shape_kernel`, so the pair is bill-matched
+    for (int i = 0; i < D; i += 4) {
+        r0 += Sh[(i + 0) * D + j] * ks[i + 0];
+        r1 += Sh[(i + 1) * D + j] * ks[i + 1];
+        r2 += Sh[(i + 2) * D + j] * ks[i + 2];
+        r3 += Sh[(i + 3) * D + j] * ks[i + 3];
+    }
+    float r = (r0 + r1) + (r2 + r3);
+    float dv = bet * (v[h * D + j] - gam * r);
+
+    float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+    for (int i = 0; i < D; i += 4) {
+        float s0 = gam * Sh[(i + 0) * D + j]; s0 += ks[i + 0] * dv; Sh[(i + 0) * D + j] = s0;
+        float s1 = gam * Sh[(i + 1) * D + j]; s1 += ks[i + 1] * dv; Sh[(i + 1) * D + j] = s1;
+        float s2 = gam * Sh[(i + 2) * D + j]; s2 += ks[i + 2] * dv; Sh[(i + 2) * D + j] = s2;
+        float s3 = gam * Sh[(i + 3) * D + j]; s3 += ks[i + 3] * dv; Sh[(i + 3) * D + j] = s3;
+        a0 += qs[i + 0] * s0;
+        a1 += qs[i + 1] * s1;
+        a2 += qs[i + 2] * s2;
+        a3 += qs[i + 3] * s3;
+    }
+    o[h * D + j] = (a0 + a1) + (a2 + a3);
+}
+
+/* shape: the BILL-MATCHED CONTROL for `unchain`, and the only one of these that is meant to be
+ * bit-identical. Needed because the census caught the probe it controls being CHEAPER, not just
+ * shallower: `recx_unchain_kernel` comes out 160 slots (10.5 %) under MODE 0 — four bodies per trip
+ * fold the index arithmetic that MODE 0's one-per-trip spelling leaves behind — and D25's measured slot
+ * elasticity on this very kernel is ~0.8, so up to 8.4 % of any `rec4` speedup is explainable by its
+ * instruction bill alone and could not be attributed to the chain at all.
+ *
+ * This kernel is `unchain` with the partials folded back into ONE accumulator in MODE 0's own order
+ * (i = 0,1,2,3,…), so it keeps the unroll-4 shape and therefore nearly the same bill, and gives back the
+ * 128-link chain. The addition tree is MODE 0's addition tree term for term, so it is admitted by
+ * BIT-IDENTITY like the levers, not by volume alone: if the device says it is not bit-identical, that is
+ * LLVM re-associating under a spelling change and it is a finding about the prologue/barrier lesson
+ * (D25's q̃ row in `engine/gdn_collapse_kernels.h`), not something to route around.
+ *
+ * It turns the two probes into a difference that means something:
+ *     rec6 - rec0   the loop-shape and bill effect, chain NOT broken
+ *     rec4 - rec6   the chain-depth effect at matched shape and matched bill
+ * so a `rec4` win larger than `rec6`'s is the chain, and one equal to it is nothing but the bill. */
+__global__ void recx_shape_kernel(const float* __restrict__ q, const float* __restrict__ k,
+                                  const float* __restrict__ v, const float* __restrict__ g,
+                                  const float* __restrict__ beta, float* __restrict__ S,
+                                  float* __restrict__ o, int nheads) {
+    int h = blockIdx.x;
+    int j = threadIdx.x;
+    __shared__ float ks[D], qs[D], red[32];
+
+    float kq = k[h * D + j], qq = q[h * D + j];
+    float kn = kq * rsqrtf(block_sum(kq * kq, red) + 1e-6f);
+    __syncthreads();
+    float qn = qq * rsqrtf(block_sum(qq * qq, red) + 1e-6f) * Q_SCALE;
+    __syncthreads();
+    ks[j] = kn;
+    qs[j] = qn;
+    __syncthreads();
+
+    float gam = expf(g[h]), bet = beta[h];
+    float* Sh = S + (size_t)h * D * D;
+
+    float r = 0.f;
+#pragma unroll 4                      // keep the loop: see the comment above — this kernel exists to
+    for (int i = 0; i < D; i += 4) {   // match `unchain`'s bill, and LLVM fully unrolls it otherwise
+        r += Sh[(i + 0) * D + j] * ks[i + 0];
+        r += Sh[(i + 1) * D + j] * ks[i + 1];
+        r += Sh[(i + 2) * D + j] * ks[i + 2];
+        r += Sh[(i + 3) * D + j] * ks[i + 3];
+    }
+    float dv = bet * (v[h * D + j] - gam * r);
+
+    float acc = 0.f;
+#pragma unroll 4
+    for (int i = 0; i < D; i += 4) {
+        float s0 = gam * Sh[(i + 0) * D + j]; s0 += ks[i + 0] * dv; Sh[(i + 0) * D + j] = s0;
+        acc += qs[i + 0] * s0;
+        float s1 = gam * Sh[(i + 1) * D + j]; s1 += ks[i + 1] * dv; Sh[(i + 1) * D + j] = s1;
+        acc += qs[i + 1] * s1;
+        float s2 = gam * Sh[(i + 2) * D + j]; s2 += ks[i + 2] * dv; Sh[(i + 2) * D + j] = s2;
+        acc += qs[i + 2] * s2;
+        float s3 = gam * Sh[(i + 3) * D + j]; s3 += ks[i + 3] * dv; Sh[(i + 3) * D + j] = s3;
+        acc += qs[i + 3] * s3;
+    }
+    o[h * D + j] = acc;
+}
+
+/* both: the two breaks together. Two levers that each hide behind the other read as two nulls; if the
+ * cross-token round trip and the FMA chain are both on the critical path, only the pair shows it, and
+ * if the pair is a null too, the chain reading needs a different model rather than a wider band. */
+__global__ void recx_both_kernel(const float* __restrict__ q, const float* __restrict__ k,
+                                 const float* __restrict__ v, const float* __restrict__ g,
+                                 const float* __restrict__ beta, const float* __restrict__ S_in,
+                                 float* __restrict__ S_out, float* __restrict__ o, int nheads) {
+    int h = blockIdx.x;
+    int j = threadIdx.x;
+    __shared__ float ks[D], qs[D], red[32];
+
+    float kq = k[h * D + j], qq = q[h * D + j];
+    float kn = kq * rsqrtf(block_sum(kq * kq, red) + 1e-6f);
+    __syncthreads();
+    float qn = qq * rsqrtf(block_sum(qq * qq, red) + 1e-6f) * Q_SCALE;
+    __syncthreads();
+    ks[j] = kn;
+    qs[j] = qn;
+    __syncthreads();
+
+    float gam = expf(g[h]), bet = beta[h];
+    const float* __restrict__ Sh_in = S_in + (size_t)h * D * D;
+    float* __restrict__ Sh_out = S_out + (size_t)h * D * D;
+
+    float r0 = 0.f, r1 = 0.f, r2 = 0.f, r3 = 0.f;
+    for (int i = 0; i < D; i += 4) {
+        r0 += Sh_in[(i + 0) * D + j] * ks[i + 0];
+        r1 += Sh_in[(i + 1) * D + j] * ks[i + 1];
+        r2 += Sh_in[(i + 2) * D + j] * ks[i + 2];
+        r3 += Sh_in[(i + 3) * D + j] * ks[i + 3];
+    }
+    float r = (r0 + r1) + (r2 + r3);
+    float dv = bet * (v[h * D + j] - gam * r);
+
+    float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+    for (int i = 0; i < D; i += 4) {
+        float s0 = gam * Sh_in[(i + 0) * D + j]; s0 += ks[i + 0] * dv; Sh_out[(i + 0) * D + j] = s0;
+        float s1 = gam * Sh_in[(i + 1) * D + j]; s1 += ks[i + 1] * dv; Sh_out[(i + 1) * D + j] = s1;
+        float s2 = gam * Sh_in[(i + 2) * D + j]; s2 += ks[i + 2] * dv; Sh_out[(i + 2) * D + j] = s2;
+        float s3 = gam * Sh_in[(i + 3) * D + j]; s3 += ks[i + 3] * dv; Sh_out[(i + 3) * D + j] = s3;
+        a0 += qs[i + 0] * s0;
+        a1 += qs[i + 1] * s1;
+        a2 += qs[i + 2] * s2;
+        a3 += qs[i + 3] * s3;
+    }
+    o[h * D + j] = (a0 + a1) + (a2 + a3);
 }
