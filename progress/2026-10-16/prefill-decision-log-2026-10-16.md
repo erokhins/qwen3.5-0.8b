@@ -780,7 +780,7 @@ So two families are 73.8 % of the wave, and anything that does not touch `gdn_re
 | 2.1 | instruction surgery on the tile touch | **SHIPPED** | D21/D22: 116 → 45 slots per touch, family 1.466×, whole wave 1.125× |
 | 2.2 | M=2 row tiling (traffic halving) | **PARKED, measured twice** | D18/D24: bit-identical, bytes halved, **5.5–13.4 % slower** both before and after the slim levers. Re-opens only above 4096 lanes, which needs 2.5 |
 | 2.3 | further scalar instruction cuts on the 45-slot touch | **CLOSED by the same census** | 45 slots is the post-slim number; the remaining content is 8 WMMAs-worth of arithmetic plus the softmax; D20 priced arithmetic-class changes at ≤ 10.5 %, below the 15 % kill line |
-| 2.4 | **`v_wmma_f32_16x16x16_f16_w32` for the score and PV dots** | **UNTESTED, and it is *not* 2.2** | the matrix-unit form replaces the score dot's whole 16-slot loop with one instruction per 16×16×16 tile across 16 rows at once — it is an instruction lever wearing a traffic costume, which is precisely the direction D21 said wins. Needs fp16 operands (D13/D14 authority covers the format). First falsifier: price one tiled WMMA touch on CPU, then one device A/B against the 45-slot body; the ceiling is the remaining arithmetic share, ~28 % of the touch |
+| 2.4 | **`v_wmma_f32_16x16x16_w32` for the score and PV dots** | **UNTESTED, it is *not* 2.2 — and its stated premise was false** | the matrix-unit form replaces the score dot's whole 16-slot loop with one instruction per 16×16×16 tile across 16 rows at once — an instruction lever wearing a traffic costume, which is the direction D21 said wins. **Correction made while preparing it: the row required fp16 operands, and it does not.** `v_wmma_f32_16x16x16_bf16` is present on gfx1151 (`tools/wmma_operand_types.sh`, `devices/strix-halo-official-specs.md` §7.1), so this route needs no format change and no D13/D14 band decision — the operands stay bf16 exactly as the engine holds them, and every plan that costed the conversion was pricing a premise nobody had checked. Ceiling is the remaining arithmetic share, ~28 % of the touch, and `attn` is **26.94 %** of the wave (257.56 ms of 956.12 ms) since the `gdn_rec` flip, which is what ranks this second |
 | 2.5 | raise `kAttnMaxSplit` / lane ceiling above 4096 | **BLOCKED, needs numerics admission** | D4/D5. It is also the only route that could re-open 2.2 (traffic that actually reaches DRAM). Unblocking needs an admitted band for > MAXSC straddles, not a constant |
 | 2.6 | occupancy / wave shape of the tiled kernel | **UNTESTED cheaply** | the tile form's realised occupancy is not recorded; one `--time-waves` run with a couple of block-size variants costs minutes and would say whether 2.4 has a scheduling headroom to spend |
 
@@ -842,7 +842,9 @@ replacement is **3.7, select beyond the shallow heuristic answer** (≈ 2.2 % ce
 adjudication required), inserted at position 7b below 3.4/3.5. Item 2 (1.6, state dtype/traffic) and item 3
 (1.3, the dependency-break falsifier) are **closed by D32**: not traffic-bound, not latency-bound on either
 chain, so 1.4 and 1.5 close with them and **1.9, loop spelling at bit-identity, is the new head of the queue**
-at a ~6.3 % ceiling pending in-situ adjudication. Item 4 (2.4, the WMMA attention price) is next after it.
+at a ~6.3 % ceiling — **measured and shipped, see D33**: 1.153× on the family in situ, prefill 3927 → 4284 tok/s.
+Item 4 (2.4, the matrix-path attention) is the head of the queue now, re-ranked by D33 because `attn` is the
+largest non-recurrence family at 26.94 %, and its fp16-conversion premise was found false while preparing it.
 
 # D31 — D30 item 3.2 comes back **negative**, and the thing it found instead is candidate depth (2026-10-16)
 
