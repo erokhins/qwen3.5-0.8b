@@ -437,3 +437,44 @@ the default moved (worker window, util 93 %), and four fixtures re-taken here at
 reference's own room; both carry their provenance in the gate's own output
 (`prototype/gemm_algo_sweep/results.md` §3f holds the census: 74 flips over 11,804 comparisons, worst
 0.9985 ULP, 0 at or over the line).
+
+---
+
+## 8. The `gdn_rec` spelling flip: prefill 3927 → **4284 tok/s** at 4096 tokens (2026-10-16)
+
+Route: `gdn_rec` — **47.6 % of the wave** — is not traffic-bound, not instruction-count-bound and not
+dependency-latency-bound. It is bound by how its own loop gets scheduled, and a second spelling of the same
+operations with `#pragma unroll 4` on both state walks (`engine/gdn_rec_unroll4_kernels.h`, `--gdn-spell`,
+decision log D31/D32/D33) is **bit-identical** and 1.153× on the family row. The instrument history is
+`prototype/gdn_rec_isa/results.md` §8–§10; the falsifier that refuted the latency reading is §9.
+
+**Instrument:** `decode_run --time-waves --steps 0`, `ids4096.txt` / `ids1024.txt`, both spellings **paired
+inside one `gpu_lock` hold per width**, alternating per rep, medians of 3, blocking, zero subagents. `util` at
+acquire 91 % and 89 % (discounted per §6; the same-window pairing is what makes the ratio). Every rep carried
+`plan_match=1 launchstats_match=1` and `WAVEPARITY tokens_identical=1 logits_bitidentical=1`, which is what makes
+a 15 % number safe to read at all: this is not a route that trades precision for speed, because there is nothing
+to trade.
+
+| width | `gdn_rec` ms | whole wave `wall_ms` | prefill tok/s | family ratio | wave ratio |
+|---|---|---|---|---|---|
+| **4096 lanes (headline)** | 496.55 → **430.69** | 1043.11 → **956.12** | 3927 → **4284** | **1.153×** | **1.091×** |
+| 1024 lanes | 121.71 → **110.62** | 209.46 → **197.66** | 4889 → **5181** | **1.100×** | **1.060×** |
+
+Spread, because the `ship` side is the noisy one at this width: 4096-lane `ship` read 481.55 / 523.11 / 496.55 ms
+and `unroll4` read 433.83 / 428.21 / 430.69 ms — **every `unroll4` rep beat every `ship` rep**, worst-vs-worst
+1.110×, best-vs-best 1.222×, so the ordering does not depend on which rep is picked. §1's prefill row before this
+change was 3828 tok/s taken in a different window; the same-window pair here is **3927 → 4284**, and the ratio is
+the claim.
+
+**Decode moves ~0.1 %, by arithmetic, and was deliberately not re-taken.** One decode step submits 18 `gdn_rec`
+launches (one per layer, one row each) at 6.73 µs → 5.88 µs, i.e. 121 µs → 106 µs of a 14.028 ms step:
+**0.86 % of the step, and the saving is 0.11 %**, four times below the ruler's own ±3 % spread. The
+**71.3 tok/s** row therefore stands as an upper bound on this change rather than as a re-measurement, and if a
+future decode ruler gets tighter than 1 %, this row is owed a re-take.
+
+**Gate state at the flip:** ten fixtures green across both spellings (`dec8`, `dec64f`, `dec64t`, `dec300f`,
+`mt32f`, `p128`, `chunk64b`, `wide520f`, `wide640f`, `wide1024f`), and `gate.py`'s section (j) byte-compares the
+two corpora inside every one of those runs — `wide1024f` compared **1032 logits rows / 1025.1 MB per side and
+found them identical**. The engine dumps no state *values* (`--state-fp` rows are order-invariant moment sums and
+cannot witness bit-identity), so the per-element witness lives in the harness, where the engine's own header is
+compiled into the probe TU (`--modes … receng`, `ndiff_o_vs0 = ndiff_state_vs0 = 0`).
