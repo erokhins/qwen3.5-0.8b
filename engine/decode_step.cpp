@@ -37,14 +37,14 @@
 //   gdn    conv + gates + rec + gated_norm = 4 × 18                          =  72
 //   attn   one fused §05 block per attention layer                           =   6
 //   mlp    gateup + down = 2 × 24                                            =  48
-//   cast   GDN 5/layer × 18 + attention 4/layer × 6 + the final norm         = 115
+//   cast   GDN 4/layer × 18 + attention 4/layer × 6 + the final norm         =  97
 //   other  1 embedding row copy + 18 conv-window copies + 1 lm_head          =  20
 //                                                                          ─────────
-//                                                                          = 424
-// At the measured 1.85 µs dispatch floor (`tools/launch_overhead_hip.cpp`) that is ≈0.78 ms/token of
+//                                                                          = 406
+// At the measured 1.85 µs dispatch floor (`tools/launch_overhead_hip.cpp`) that is ≈0.75 ms/token of
 // pure launch cost on top of ~7.5 ms of weight traffic. It is the engine's current bill, not a
 // measurement: the two levers `engine/results.md` names — packed projections, and BF16-staged
-// `mlp_gateup`/`mlp_down` (which would delete 48 of the 115 casts) — are what shrink it.
+// `mlp_gateup`/`mlp_down` (which would delete 48 of the 97 casts) — are what shrink it.
 // `gate.py` re-derives every row of that table from §07 in Python and fails on a mismatch, so this
 // comment and the code cannot drift apart quietly.
 //
@@ -247,12 +247,9 @@ DecodeScratch allocate_scratch(int wave_rows) {
     sc.block_out_f32 = alloc<float>(vdim);
 
     sc.g_raw = alloc<uint16_t>(qkv);
-    sc.g_raw_f32 = alloc<float>(qkv);
     sc.g_z = alloc<uint16_t>(vdim);
     sc.g_a = alloc<uint16_t>(vheads);
     sc.g_b = alloc<uint16_t>(vheads);
-    sc.g_a_f32 = alloc<float>(vheads);
-    sc.g_b_f32 = alloc<float>(vheads);
     sc.g_dt_bias = alloc<float>(kNumGdnLayers * kNumValueHeads);
     sc.g_conv_w = alloc<float>(kNumGdnLayers * kConvChannels * kConvKernel);
     sc.g_g = alloc<float>(vheads);
@@ -324,12 +321,9 @@ void free_scratch(DecodeScratch& sc) {
     (void)hipFree(sc.block_out);
     (void)hipFree(sc.block_out_f32);
     (void)hipFree(sc.g_raw);
-    (void)hipFree(sc.g_raw_f32);
     (void)hipFree(sc.g_z);
     (void)hipFree(sc.g_a);
     (void)hipFree(sc.g_b);
-    (void)hipFree(sc.g_a_f32);
-    (void)hipFree(sc.g_b_f32);
     (void)hipFree(sc.g_dt_bias);
     (void)hipFree(sc.g_conv_w);
     (void)hipFree(sc.g_g);
@@ -473,11 +467,14 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     // The dead set is derived from "which call reads this destination", not from a remembered count:
     // every reader of a `norm_f32`/`block_out_f32`/`mlp_act_f32` tile in this body is either `project()`'s
     // hand branch, `mlp_gateup`/`mlp_down`'s hand branch, or the two 16-row `proj_gemv` calls that never
-    // go through `project` — so a wide body on a library route writes 78 of its 114 casts to nothing, and
-    // a one-row body writes all 114 because `resolve_wave_gemm` will not give it the library.
+    // go through `project` — so a wide body on a library route writes 78 of its 96 casts to nothing, and
+    // a one-row body writes all 96 because `resolve_wave_gemm` will not give it the library.
     // Deleting a submission is a change to the §07 launch bill, so the derivers moved in the same commit
-    // this guard did: `planned_launch_counts()` is untouched (it is the per-token bill, and the row rule
-    // keeps it 115) and `stage_clock.cpp`'s `wave_plan_bill` learned the route from `WaveShape`.
+    // this guard did: `planned_launch_counts()` stayed the per-token bill (the row rule keeps a decode
+    // step at the hand count, so a guard on `lib_gemm` cannot reach it) and `stage_clock.cpp`'s
+    // `wave_plan_bill` learned the route from `WaveShape`. D30 1.7' later moved the per-token bill from
+    // 115 to 97 by deleting a widening NO route reads (`cast_bf16_to_f32_3`), which is the same plumbing
+    // obligation one level up: both derivers moved with it, and neither number was edited to fit.
     const bool lib_gemm = kernels::wave_gemm_is_library(sc.wave_gemm, n);
     const auto project = [&](const void* weight, const uint16_t* x_bf16, const float* x_f32,
                              uint16_t* out, int rows, int in) {
@@ -607,12 +604,12 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             stageclock::note(stageclock::kProj);
             kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjA), sc.norm_f32, sc.g_a,
                                kNumValueHeads, kHidden, n);
-            // One launch for the three widenings this LAYER needs, not three per token: 6144 + 16 + 16
-            // elements for every row of the tile at once.
-            stageclock::note(stageclock::kCast);
-            kernels::cast_bf16_to_f32_3(sc.g_raw, sc.g_raw_f32, n * kQkvRows,
-                                        sc.g_a, sc.g_a_f32, n * kNumValueHeads,
-                                        sc.g_b, sc.g_b_f32, n * kNumValueHeads);
+            // No widening here, and that is the whole of D30 1.7'. The conv and the gates used to read
+            // a packed `g_raw|g_a|g_b` F32 copy of these three tiles because their kernels took
+            // `const float*`; both now widen their own operands in-register, and because a BF16->F32
+            // widening is exact the values are the same bits. The launch went with them at EVERY
+            // width and on BOTH routes — no consumer ever reads the F32 tiles — which is what makes
+            // this one a §07 launch-bill change, not a route guard like 4.1-a's.
         }
 
         // ---- the mixer. What has always ordered it is §08.2's ascending positions WITHIN a layer, and
@@ -626,7 +623,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // the tiles the launches around them filled (P5's projections, P6's conv and gates).
         //
         // ---- P6: §04.2's conv and §04.3's gates go ONCE per GDN layer for the whole wave. The conv
-        // reads the [n, 6144] F32 tile P5's `in_proj_qkv` just wrote and the layer's carried window,
+        // reads the [n, 6144] BF16 tile P5's `in_proj_qkv` just wrote and the layer's carried window,
         // and writes the wave's `u` tile plus the window's new contents — so the 3·6144·4 B window
         // copy that used to run 18 times per TOKEN now runs 18 times per WAVE (§2.4's end condition:
         // the window after a wave is raw[T−3..T−1], written once). The gates are the same story one
@@ -642,7 +639,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // them. Cheaper than double-buffering 1.27 MiB of state per request, which is the
             // alternative §08.2's "in-place ring update" wording invites; results.md carries it.
             stageclock::note(stageclock::kGdnConv);
-            kernels::gdn_conv(sc.g_raw_f32, st.conv_window_layer(layer),
+            kernels::gdn_conv(sc.g_raw, st.conv_window_layer(layer),
                               sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel,
                               sc.g_u, sc.conv_new, n);
             stageclock::note(stageclock::kCopy);
@@ -652,7 +649,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // §04.3, all n rows at once. `A_log` is one of the 36 tensors the checkpoint stores F32
             // (§01.6), so it goes to the kernel as-is; dt_bias came through the adapter.
             stageclock::note(stageclock::kGdnGates);
-            kernels::gdn_gates(sc.g_a_f32, sc.g_b_f32,
+            kernels::gdn_gates(sc.g_a, sc.g_b,
                                (const float*)layer_dev(weights, layer, leaf::kALog),
                                sc.g_dt_bias + (size_t)slot * kNumValueHeads,
                                sc.g_g, sc.g_beta, n);
@@ -964,7 +961,7 @@ LaunchCounts planned_launch_counts() {
     c.gdn = kNumGdnLayers * 4;
     c.attn = kNumAttnLayers;
     c.mlp = 2 * kNumLayers;
-    c.cast = 5 * kNumGdnLayers + 4 * kNumAttnLayers + 1;   // +1: the final norm before lm_head
+    c.cast = 4 * kNumGdnLayers + 4 * kNumAttnLayers + 1;   // +1: the final norm before lm_head
     c.other = 1 + kNumGdnLayers + 1;
     return c;
 }

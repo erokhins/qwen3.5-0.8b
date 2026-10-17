@@ -18,18 +18,26 @@ namespace engine::kernels {
 // columns before row 0 come from `win` (§08.2's carried window), never from zeros, and the launch
 // writes the window's new contents once for the whole wave instead of once per token — the copy
 // `decode_step.cpp` used to issue per token is what collapses here.
-void gdn_conv(const float* raw, const float* win, const float* conv_weight, float* u,
+//
+// `raw` is the BF16 tile `in_proj_qkv` wrote, not a widening of it (D30 1.7'): the kernel widens the
+// taps in-register, a BF16->F32 widening is exact, and so the F32 values the taps take are the same
+// numbers the deleted `cast_bf16_to_f32_3` used to store. `win`/`new_win` stay F32 — that is §08.1's
+// state dtype and a separate question from the tile's (§08.3, `engine/state.h`'s note).
+void gdn_conv(const uint16_t* raw, const float* win, const float* conv_weight, float* u,
               float* new_win, int tokens) {
-    conv_kernel<<<dim3(CH / 256, tokens), 256>>>((const float*)raw, win, conv_weight, u, new_win,
-                                                 tokens, GCK_NONE);
+    conv_kernel<<<dim3(CH / 256, tokens), 256>>>((const hip_bfloat16*)raw, win, conv_weight, u,
+                                                 new_win, tokens, GCK_NONE);
     launchstats::gdn_conv().record(tokens);
 }
 
 // §04.3: `<<<tokens, NH>>>`, one thread per (token, value head), so a decode step is still the
-// one-block launch it was and no element expression moved.
-void gdn_gates(const float* a_raw, const float* b_raw, const float* a_log, const float* dt_bias,
-               float* g, float* beta, int tokens) {
-    gates_kernel<<<tokens, NH>>>(a_raw, b_raw, a_log, dt_bias, g, beta, tokens, GG_NONE);
+// one-block launch it was and no element expression moved. `a_raw`/`b_raw` are the BF16 tiles
+// `in_proj_a`/`in_proj_b` wrote, widened in-register for the same reason and to the same effect as
+// the conv's `raw` above.
+void gdn_gates(const uint16_t* a_raw, const uint16_t* b_raw, const float* a_log,
+               const float* dt_bias, float* g, float* beta, int tokens) {
+    gates_kernel<<<tokens, NH>>>((const hip_bfloat16*)a_raw, (const hip_bfloat16*)b_raw, a_log,
+                                 dt_bias, g, beta, tokens, GG_NONE);
     launchstats::gdn_gates().record(tokens);
 }
 

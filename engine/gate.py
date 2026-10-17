@@ -3494,11 +3494,18 @@ def launch_plan(n_layers: int, n_gdn: int, n_attn: int) -> dict:
     gdn    conv (§04.2), gates (§04.3), recurrence (§04.4), gated norm (§04.5) = 4.
     attn   one fused §05.1-§05.7 launch per attention layer (§07.3).
     mlp    gate+up in one launch, down in another (§03.3) = 2 per layer.
-    cast   the widenings the F32-input kernels force: GDN 5 per layer (mixer norm row, one packed
-           qkv+a+b, gated-norm output, MLP norm row, MLP act) and attention 4 (mixer norm row, the
-           gated o_proj operand, MLP norm row, MLP act), plus ONE more for the final norm before
-           lm_head. Every one of these is a dtype disagreement between graduated kernels, not model
-           math — `kernels_cast.cpp` says why they cannot be dropped today.
+    cast   the widenings the F32-input kernels force. Four per GDN layer — the mixer norm row, the
+           gated-norm output, the MLP norm row, the MLP act — and four per attention layer (mixer norm
+           row, the gated o_proj operand, MLP norm row, MLP act), plus ONE more for the final norm
+           before lm_head. The four are exactly the sites whose reader is still a hand kernel that
+           takes `const float*`: `proj_gemv` (PACK_X=false) reads the norm row, `mlp_gemv` reads the
+           act, `lm_head_gemv` reads the final norm row. It used to be five per GDN layer: a packed
+           `g_raw│g_a│g_b` widening fed `conv_kernel`/`gates_kernel`, and D30 1.7' had both kernels
+           widen their own BF16 operands, so the widening lost its only reader at every width and on
+           both routes and left this row with them. That is the whole of why this row can move while
+           §07's own text — which names operations, not dtype adapters — does not.
+           Every one of these is a dtype disagreement between graduated kernels, not model
+           math — `kernels_cast.cpp` says why the rest of them cannot be dropped today.
            PER TOKEN, and that is what section (d) judges: a one-row body runs the hand GEMV whatever
            `--gemm` asked for (`resolve_wave_gemm`), so all of them arrive for a decode step at any
            setting and this row does not move with the route. A WIDE body on a library route submits
@@ -3514,9 +3521,71 @@ def launch_plan(n_layers: int, n_gdn: int, n_attn: int) -> dict:
         "gdn": 4 * n_gdn,
         "attn": n_attn,
         "mlp": 2 * n_layers,
-        "cast": 5 * n_gdn + 4 * n_attn + 1,
+        "cast": 4 * n_gdn + 4 * n_attn + 1,
         "other": 1 + n_gdn + 1,
     }
+
+
+def launch_plan_verdicts(want: dict, got: dict) -> list[tuple[str, bool, str]]:
+    """The whole of section (d)'s arithmetic: one verdict per row of the bill, plus one for the total.
+
+    It is a function rather than six inline `check` calls for one reason: `--selftest` has to aim
+    injections at the SAME comparison section (d) runs with, or the selftest witnesses a second spelling
+    of the rule and the one that ships goes untested (the trap `prototype/attn_tile_model.py` documents —
+    two self-consistent spellings, each agreeing with itself). Section (d) prints these verdicts and
+    nothing else, so there is exactly one comparison in the file.
+
+    Exact integer equality, in both directions, and the selftest requires both: +1 on `cast` (the
+    deleted widening re-added) and −1 on it (a different cast wrongly dropped) must each be caught. A
+    bill check that fires one way only is half an equality.
+    """
+    out: list[tuple[str, bool, str]] = []
+    for k in sorted(want):
+        out.append((f"launch count {k}", got.get(k) == want[k],
+                    f"engine {got.get(k)} vs §07 {want[k]}"))
+    total = int(got.get("total", -1))
+    out.append(("launch total", total == sum(want.values()), f"{total} vs {sum(want.values())}"))
+    return out
+
+
+def selftest_launch_bill() -> list[str]:
+    """Section (d)'s teeth, in both directions, on the CPU — no engine, no device.
+
+    The must-catch set is derived from what this row IS, not hand-listed: the bill is an exact sum of
+    per-layer counts, so the two ways it can be wrong by one are a launch re-added and a launch lost,
+    and each must be named at its own row. `total` gets its own case because a sum that no longer follows
+    from its rows is a different defect from a row that moved — and the third case (a row the engine
+    never printed at all) is the one a `dict.get()` would otherwise turn into a silent None.
+    """
+    bad: list[str] = []
+    want = launch_plan(24, 18, 6)          # §03.5: 24 layers, 18 GDN, 6 attention
+    clean = dict(want)
+    clean["total"] = sum(want.values())
+
+    def failing(got: dict) -> list[str]:
+        return [name for name, ok, _ in launch_plan_verdicts(want, got) if not ok]
+
+    def case(name: str, got: dict, must_name: str) -> None:
+        hits = failing(got)
+        ok = must_name in hits
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name} — caught by {hits or 'nothing'}")
+        if not ok:
+            bad.append(f"launch-bill selftest: {name} was not caught at {must_name!r}")
+
+    agree = not failing(clean)
+    print(f"  [{'PASS' if agree else 'FAIL'}] the clean bill reproduces §07 exactly "
+          f"(cast={want['cast']}, total={clean['total']})")
+    if not agree:
+        bad.append("launch-bill selftest: the clean bill does not reproduce §07")
+    case("the deleted GDN cast re-added (cast +1)", {**clean, "cast": want["cast"] + 1},
+         "launch count cast")
+    case("a different cast wrongly dropped (cast −1)", {**clean, "cast": want["cast"] - 1},
+         "launch count cast")
+    case("a total that no longer follows from its rows",
+         {**clean, "total": clean["total"] + 1}, "launch total")
+    case("a row the engine never printed", {k: v for k, v in clean.items() if k != "gdn"},
+         "launch count gdn")
+    return bad
 
 
 def parse_run(text: str) -> dict:
@@ -5826,6 +5895,8 @@ def selftest(fixture: str = "dec8") -> int:
         if len(fails) > before:
             bad.append("fp-of-pins identity (section (g)'s mechanical case): " + fails[-1][:160])
     bad += selftest_declared_gaps(fixture)
+    section("(d2) the launch bill's own teeth — both directions, in process")
+    bad += selftest_launch_bill()
     section("(h2) the flip rule's TWO room readings, on one injected row — in process")
     bad += selftest_room_readings(fixture, slack_out)
     section("(i) the prefill-row section's own negatives — synthetic rows, in process")
@@ -7021,11 +7092,9 @@ def main() -> int:
     n_gdn = sum(1 for t in cfg["layer_types"] if t == "linear_attention")
     n_attn = sum(1 for t in cfg["layer_types"] if t == "full_attention")
     want = launch_plan(n_layers, n_gdn, n_attn)
-    got = {k: int(v) for k, v in run["launch"].items() if k != "total"}
-    for k in sorted(want):
-        check(got.get(k) == want[k], f"launch count {k}", f"engine {got.get(k)} vs §07 {want[k]}")
-    total = int(run["launch"].get("total", -1))
-    check(total == sum(want.values()), "launch total", f"{total} vs {sum(want.values())}")
+    got = {k: int(v) for k, v in run["launch"].items()}
+    for name, ok, detail in launch_plan_verdicts(want, got):
+        check(ok, name, detail)
     check(want["glue"] == 49, "glue is the 49 `prototype/glue/run.py` pins its token plan against",
           f"{want['glue']}")
     check(n_gdn + n_attn == n_layers and n_attn == 6,

@@ -50,8 +50,8 @@
 // WHAT A STAGE IS: the families `planned_launch_counts()` already names, plus `copy` (the D2D memcpys)
 // and `host_tail` (the logits D2H and the argmax), so a stage row can be set against the launch bill
 // line for line. `note()` also counts submissions, and at a lane count inside the attention staging the
-// observed total equals the plan's 424 exactly — the report prints both and says whether they match,
-// which is what makes the instrument checkable rather than plausible. Above the staging an attention
+// observed total equals the plan exactly — 406 launches since D30 1.7' — the report prints both and
+// says whether they match, which is what makes the instrument checkable rather than plausible. Above the staging an attention
 // site legitimately issues 2 kernels instead of 1 (`kernels_attn.cpp`'s launch plan), so the observed
 // total exceeds the plan there; that is reported, not smoothed.
 //

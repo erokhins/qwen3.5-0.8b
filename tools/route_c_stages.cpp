@@ -127,10 +127,11 @@ std::vector<Stage> scratch_stages(const engine::DecodeScratch& sc) {
         // never writes it; `a_gated` is the attention mixer's output. The stale-operand bug this
         // audit re-creates in --inject is an o_proj call reading the former on layer 23.
         bf("block_out", sc.block_out, kValueDim),  f3("block_out_f32", sc.block_out_f32, kValueDim),
-        bf("g_raw", sc.g_raw, kQkvRows),           f3("g_raw_f32", sc.g_raw_f32, kQkvRows),
+        // The conv's operand is the BF16 `g_raw` itself now (D30 1.7'): there is no F32 copy of it,
+        // of `g_a`, or of `g_b` to dump, because `conv_kernel`/`gates_kernel` widen in-register.
+        bf("g_raw", sc.g_raw, kQkvRows),
         bf("g_z", sc.g_z, kValueDim),
         bf("g_a", sc.g_a, kNumValueHeads),         bf("g_b", sc.g_b, kNumValueHeads),
-        f3("g_a_f32", sc.g_a_f32, kNumValueHeads), f3("g_b_f32", sc.g_b_f32, kNumValueHeads),
         f3("g_g", sc.g_g, kNumValueHeads),         f3("g_beta", sc.g_beta, kNumValueHeads),
         f3("g_u", sc.g_u, kQkvRows),               f3("g_o", sc.g_o, kValueDim),
         // Attention: the three projections, the rope'd q/k, the de-interleaved gate, the mixer

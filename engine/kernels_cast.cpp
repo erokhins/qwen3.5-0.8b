@@ -4,12 +4,18 @@
 //
 // Why they exist at all: the graduated kernels disagree about activation dtype. `glue`,
 // `proj_gemv` and `gdn_gated_norm` write BF16 activations, while `proj_gemv` (PACK_X=false),
-// `mlp_gemv` and `gdn_decode`'s conv/gates/rec read them as `const float*` — so every producer/
-// consumer pair across that seam needs a widening. That is 115 launches/token in `decode_step`
+// `mlp_gemv` and `lm_head_gemv` read them as `const float*` — so every producer/consumer pair across
+// that seam needs a widening. That is 97 launches/token in `decode_step`
 // (the `cast` row of the table at the top of `decode_step.cpp`, which `planned_launch_counts()`
 // derives and `gate.py` section (d) re-derives), which is the price of the seam, not of these
 // kernels; `engine/results.md` keeps the deferral and the fix (a BF16-staged `mlp_gateup`/
 // `mlp_down`, which `proj_gemv` proved is bit-identical for a dot) on the books.
+//
+// The seam used to be wider. `gdn_decode`'s conv and gates read F32 too, which cost one packed
+// 3-region widening per GDN layer per body — 18 of the old 115 casts/token, and the largest single
+// byte item in the family at wave width. D30 1.7' closed it by having both kernels widen their own
+// BF16 operands in-register, and the packed form below went with it: a widening that no consumer
+// reads is not a dtype adapter, it is a store to an empty buffer.
 //
 // The rounding is not free to get wrong: `hip_bfloat16(float)` is round-to-nearest-even, which is
 // what torch's cast does and what every prototype's `fb()`/`bf()` helper uses (`hip_bfloat16`'s
@@ -22,8 +28,6 @@
 
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
-
-#include <stdexcept>
 
 namespace {
 constexpr int kThreads = 256;
@@ -40,26 +44,6 @@ __global__ void cast_f32_to_bf16_kernel(const float* __restrict__ src,
     if (i < n) dst[i] = hip_bfloat16(src[i]);
 }
 
-// Three regions in ONE launch. A GDN layer needs the same widening for in_proj_qkv's 6144 raw
-// columns and for two 16-element gate rows; three launches would each pay the ~1.85 µs dispatch
-// floor to move as little as 32 B. Regions are addressed by a linear index over n0+n1+n2, so a
-// zero-length region costs nothing and the caller does not need a second entry point.
-__global__ void cast_bf16_to_f32_3_kernel(const hip_bfloat16* __restrict__ s0,
-                                          float* __restrict__ d0, int n0,
-                                          const hip_bfloat16* __restrict__ s1,
-                                          float* __restrict__ d1, int n1,
-                                          const hip_bfloat16* __restrict__ s2,
-                                          float* __restrict__ d2, int n2) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n0) {
-        d0[i] = float(s0[i]);
-    } else if ((i -= n0) < n1) {
-        d1[i] = float(s1[i]);
-    } else if ((i -= n1) < n2) {
-        d2[i] = float(s2[i]);
-    }
-}
-
 int blocks_for(int n) { return (n + kThreads - 1) / kThreads; }
 }  // namespace
 
@@ -73,22 +57,6 @@ void cast_bf16_to_f32(const uint16_t* src, float* dst, int n) {
 void cast_f32_to_bf16(const float* src, uint16_t* dst, int n) {
     if (n <= 0) return;
     cast_f32_to_bf16_kernel<<<blocks_for(n), kThreads>>>(src, (hip_bfloat16*)dst, n);
-}
-
-void cast_bf16_to_f32_3(const uint16_t* s0, float* d0, int n0, const uint16_t* s1, float* d1,
-                        int n1, const uint16_t* s2, float* d2, int n2) {
-    const long total = (long)n0 + n1 + n2;
-    if (total <= 0) return;
-    // A null pointer with a non-zero count would be a wild write inside a region the caller
-    // promised exists; refuse it here rather than inside the kernel.
-    if ((n0 > 0 && (s0 == nullptr || d0 == nullptr)) ||
-        (n1 > 0 && (s1 == nullptr || d1 == nullptr)) ||
-        (n2 > 0 && (s2 == nullptr || d2 == nullptr))) {
-        throw std::runtime_error("cast_bf16_to_f32_3: a non-empty region has a null pointer");
-    }
-    cast_bf16_to_f32_3_kernel<<<blocks_for((int)total), kThreads>>>(
-        (const hip_bfloat16*)s0, d0, n0, (const hip_bfloat16*)s1, d1, n1,
-        (const hip_bfloat16*)s2, d2, n2);
 }
 
 }  // namespace engine::kernels

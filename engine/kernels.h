@@ -255,9 +255,9 @@ void mlp_gateup_gemm(const void* w_gate, const void* w_up, const void* x, void* 
 // `act` here is the BF16 `act` itself, not a widening of it — the library reads 16-bit `A`.
 void mlp_down_gemm(const void* w_down, const void* act, uint16_t* out, int rows, int in, int tokens);
 
-// ---- §04.2/§04.3/§04.4: conv, gates, recurrence (prototype/gdn_decode). All F32 on the state
-// side; `raw` is F32 because the conv kernel reads it that way, which is why decode_step casts the
-// BF16 `in_proj_qkv` output once per layer.
+// ---- §04.2/§04.3/§04.4: conv, gates, recurrence (prototype/gdn_decode). The STATE side is all F32
+// (window, `u`, `g`, `beta`, `S`, `o`); the gate OPERANDS are the BF16 tiles their projections wrote,
+// which the conv and the gates widen in-register (D30 1.7').
 // `tokens` is P6's token-parallel form (§06.2): `raw`/`u` are then [tokens, 6144] tiles and
 // `a_raw`/`b_raw`/`g`/`beta` [tokens, 16] ones, with the conv reading the [3][6144] window the
 // previous wave or decode step left and writing its own last-3-columns window once per wave
@@ -265,10 +265,10 @@ void mlp_down_gemm(const void* w_down, const void* act, uint16_t* out, int rows,
 // launcher issued before P6 — `prototype/gdn_decode/check.py --tokens` requires the two widths to
 // agree bit for bit, and the window rule (raw[k<0] is the CARRIED window, not zero) is the part
 // that a wider tile could get wrong while every single-wave fixture still passed.
-void gdn_conv(const float* raw, const float* win, const float* conv_weight, float* u,
+void gdn_conv(const uint16_t* raw, const float* win, const float* conv_weight, float* u,
               float* new_win, int tokens = 1);
-void gdn_gates(const float* a_raw, const float* b_raw, const float* a_log, const float* dt_bias,
-               float* g, float* beta, int tokens = 1);
+void gdn_gates(const uint16_t* a_raw, const uint16_t* b_raw, const float* a_log,
+               const float* dt_bias, float* g, float* beta, int tokens = 1);
 // Which SPELLING of the sequential recurrence's state walks a `gdn_rec` launch runs
 // (`decode_run --gdn-spell`). Both kernels are compiled into one binary so the A/B is one window
 // (`AGENTS.md`: a ruler re-taken in a different window is not an A/B), and the two are claimed
@@ -465,15 +465,11 @@ std::size_t attn_part_floats(int rows = 1);
 void lm_head_full(const uint16_t* table, const float* h, float* logits, int vocab);
 
 // ---- dtype adapters, engine's own (no model math here at all). These exist only because some
-// graduated kernels take F32 activations (gdn_decode's conv/gates/rec, mlp_gemv, lm_head_gemv)
-// while the activations the other kernels produce are BF16.
+// graduated kernels take F32 activations (`proj_gemv` with PACK_X=false, `mlp_gemv`, `lm_head_gemv`)
+// while the activations the other kernels produce are BF16. `gdn_decode`'s conv and gates used to be
+// on that list; they read the BF16 tiles their projections wrote as of D30 1.7'.
 void cast_bf16_to_f32(const uint16_t* src, float* dst, int n);
 void cast_f32_to_bf16(const float* src, uint16_t* dst, int n);
-// Three regions in ONE launch — this is what a per-layer GDN cast costs instead of three launches.
-// `kernels_cast.cpp` defines it; a region may be empty (n = 0) but a non-empty region with a null
-// pointer is a throw, not a wild write.
-void cast_bf16_to_f32_3(const uint16_t* s0, float* d0, int n0, const uint16_t* s1, float* d1,
-                        int n1, const uint16_t* s2, float* d2, int n2);
 
 // ---- §02.3: the embedding lookup for a whole wave in ONE launch (D30 4.2′).
 // `out[r] = table[ids[r]]` for `rows` rows, BF16, `kHidden` wide — byte-identical to `rows` copies of

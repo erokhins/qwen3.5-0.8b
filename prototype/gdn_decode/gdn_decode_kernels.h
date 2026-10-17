@@ -54,23 +54,31 @@ __device__ __forceinline__ float block_sum(float v, float* red) {
 }
 
 /* ---- S04.3 gates, T tokens wide ---------------------------------------- */
-// `a_raw`/`b_raw`/`g`/`beta` are [tokens][NH]; `blockIdx.x` is the token and `threadIdx.x` the
-// value head, so tokens == 1 is the launch this file shipped with (<<<1, NH>>>) and every element
-// expression is unchanged. Per-(token, head) work with no reduction: batching the gates cannot
-// move a bit, which is what `check.py --tokens` requires rather than assumes.
+// `a_raw`/`b_raw` are [tokens][NH] BF16 — the dtype `in_proj_a`/`in_proj_b` wrote — and `g`/`beta`
+// are [tokens][NH] F32. `blockIdx.x` is the token and `threadIdx.x` the value head, so tokens == 1
+// is the launch this file shipped with (<<<1, NH>>>) and every element expression is unchanged.
+// Per-(token, head) work with no reduction: batching the gates cannot move a bit, which is what
+// `check.py --tokens` requires rather than assumes.
+//
+// The BF16 operands are §04.3's own reading: the spec says `a_raw` is F32-cast before the addition,
+// and a widening of a BF16 value is exact, so converting here produces the same F32 a separate
+// widening pass would have stored (D30 1.7', which deleted the engine's packed cast for this
+// reason). `dt_bias` stays F32: the checkpoint stores `A_log` F32 and `dt_bias` BF16 (§01.6), and
+// both are widened once per layer by the engine's weight adapters, not per token.
 enum GdnGatesNeg {
     GG_NONE = 0,
     GG_ROW_ZERO,       // every token reads row 0's a_raw/b_raw: a batched kernel that forgot `t`
 };
 
-__global__ void gates_kernel(const float* a_raw, const float* b_raw, const float* A_log,
-                             const float* dt_bias, float* g, float* beta, int tokens, int neg) {
+__global__ void gates_kernel(const hip_bfloat16* a_raw, const hip_bfloat16* b_raw,
+                             const float* A_log, const float* dt_bias, float* g, float* beta,
+                             int tokens, int neg) {
     const int h = threadIdx.x;                 // 16 heads
     const int t = (neg == GG_ROW_ZERO) ? 0 : blockIdx.x;
-    float a = a_raw[(size_t)t * NH + h] + dt_bias[h];
+    float a = float(a_raw[(size_t)t * NH + h]) + dt_bias[h];
     float sp = (a > 20.f) ? a : log1pf(expf(a));
     g[(size_t)t * NH + h] = -expf(A_log[h]) * sp;
-    float b = b_raw[(size_t)t * NH + h];
+    float b = float(b_raw[(size_t)t * NH + h]);
     beta[(size_t)t * NH + h] = 1.f / (1.f + expf(-b));
 }
 
@@ -80,6 +88,12 @@ __global__ void gates_kernel(const float* a_raw, const float* b_raw, const float
 // same F32 accumulation, same round-once-then-silu) and a wave is that launch replicated on
 // gridDim.y. Nothing about a wider tile changes a per-element reduction, so the two widths owe
 // each other bit-for-bit and `check.py --tokens` demands it.
+//
+// The tile's `raw` is BF16, the dtype the projection wrote, and `win`/`new_win` are F32: the window
+// is §08.1's carried state and its dtype follows this kernel's window half, which is a separate
+// decision from the tile's (§08.3). That is deliberate and it is bit-neutral: the window holds
+// pre-conv `raw` columns, so every value `conv_tap` writes into it is the exact widening of a BF16
+// number either way.
 //
 // The window is the reason this is not a pure elementwise batch. `win` is [K-1][CH], oldest row
 // first, and holds the pre-conv `raw` of the three positions BEFORE this tile (§04.2's
@@ -119,11 +133,15 @@ enum GdnConvNeg {
 
 // The one tap rule. `k` is the token offset from this tile's first token; k < 0 is the carried
 // window. `zero_pad` is the injected reading that is only right at request start.
-__device__ __forceinline__ float conv_tap(const float* __restrict__ raw,
+//
+// The two branches return the same KIND of number on purpose: a tile column is BF16 and is widened
+// here, a window column is already F32, and both name the same value the caller would have had in a
+// pre-widened tile. Nothing in the arithmetic downstream can tell the two apart.
+__device__ __forceinline__ float conv_tap(const hip_bfloat16* __restrict__ raw,
                                           const float* __restrict__ win, int c, int k,
                                           bool zero_pad) {
     if (k < 0) return zero_pad ? 0.f : win[(k + K - 1) * CH + c];
-    return raw[(size_t)k * CH + c];
+    return float(raw[(size_t)k * CH + c]);
 }
 
 // The conv's value at offset k of this tile: taps in F32, one BF16 round, then SiLU (§04.2). The
@@ -134,7 +152,7 @@ __device__ __forceinline__ float conv_tap(const float* __restrict__ raw,
 // `channel_major` is the `GC_TAP_STRIDE` reading: the same [tokens][CH] buffer indexed as if it
 // were still HF's [CH][tokens]. In bounds for every (c, src) this kernel can ask for —
 // c*tokens + src <= (CH-1)*tokens + tokens-1 = CH*tokens-1 — and wrong for every token but 0.
-__device__ __forceinline__ float conv_value(const float* __restrict__ raw,
+__device__ __forceinline__ float conv_value(const hip_bfloat16* __restrict__ raw,
                                             const float* __restrict__ win,
                                             const float* __restrict__ C, int c, int k,
                                             int tokens, bool zero_pad, bool channel_major) {
@@ -142,17 +160,19 @@ __device__ __forceinline__ float conv_value(const float* __restrict__ raw,
 #pragma unroll
     for (int j = 0; j < K; ++j) {
         const int src = k - (K - 1) + j;
-        const float tap = (src < 0) ? conv_tap(raw, win, c, src, zero_pad)
-                                    : (channel_major ? raw[(size_t)c * tokens + src]
-                                                     : raw[(size_t)src * CH + c]);
+        const float tap = (src < 0)
+                              ? conv_tap(raw, win, c, src, zero_pad)
+                              : (channel_major ? float(raw[(size_t)c * tokens + src])
+                                               : float(raw[(size_t)src * CH + c]));
         acc += tap * C[c * K + j];
     }
     const float rounded = bf16_round(acc);
     return bf16_round(rounded / (1.f + expf(-rounded)));
 }
 
-// win is [K-1][CH] (oldest row first); u is [tokens][CH] and is written bf16-rounded-then-silu.
-__global__ void conv_kernel(const float* __restrict__ raw, const float* __restrict__ win,
+// raw is [tokens][CH] BF16 (the projection's own output); win is [K-1][CH] F32 (oldest row first);
+// u is [tokens][CH] F32, written bf16-rounded-then-silu.
+__global__ void conv_kernel(const hip_bfloat16* __restrict__ raw, const float* __restrict__ win,
                             const float* __restrict__ C, float* __restrict__ u,
                             float* __restrict__ new_win, int tokens, int neg) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
@@ -167,7 +187,7 @@ __global__ void conv_kernel(const float* __restrict__ raw, const float* __restri
 #pragma unroll
     for (int j = 0; j < K - 1; ++j) {
         const int k = tokens - (K - 1) + j + ((neg == GC_WIN_LAG) ? -1 : 0);
-        float v = conv_tap(raw, win, c, k, false);
+        float v = conv_tap(raw, win, c, k, false);   // widened here if k >= 0, already F32 if not
         // GC_WIN_FROM_U: A-04's exact trap, the window written from the POST-conv value. Only
         // positions inside this tile have one; a carried row is already pre-conv by construction.
         if (neg == GC_WIN_FROM_U && k >= 0) v = conv_value(raw, win, C, c, k, tokens, false, false);

@@ -119,13 +119,14 @@ struct DecodeScratch {
 
     // GDN (§07.2). `raw`/`u` are 6144 wide because in_proj_qkv is [q|k|v]; `a`/`b`/`g`/`beta` are the
     // 16 value heads. `conv_new` is the rolled window — see the conv note in decode_step.cpp.
-    uint16_t* g_raw = nullptr;      // [wave_rows][6144] in_proj_qkv out, BF16 as the GEMV wrote it
-    float* g_raw_f32 = nullptr;     // [wave_rows][6144]
+    // The three F32 widenings this struct used to carry (`g_raw_f32`, `g_a_f32`, `g_b_f32`) are gone:
+    // `conv_kernel` and `gates_kernel` read the BF16 tiles below and widen their operands
+    // in-register (D30 1.7'), so an F32 copy of them had no reader at any width or on either route.
+    uint16_t* g_raw = nullptr;      // [wave_rows][6144] in_proj_qkv out, BF16 as the GEMV wrote it;
+                                    // `conv_kernel`'s tap operand, widened in the kernel
     uint16_t* g_z = nullptr;        // [wave_rows][2048] in_proj_z out, stays BF16 (§04.5 reads it as BF16)
-    uint16_t* g_a = nullptr;        // [wave_rows][16]   in_proj_a out
-    uint16_t* g_b = nullptr;        // [wave_rows][16]   in_proj_b out
-    float* g_a_f32 = nullptr;       // [wave_rows][16]
-    float* g_b_f32 = nullptr;       // [wave_rows][16]
+    uint16_t* g_a = nullptr;        // [wave_rows][16]   in_proj_a out — `gates_kernel`'s operand, as BF16
+    uint16_t* g_b = nullptr;        // [wave_rows][16]   in_proj_b out, ditto
     float* g_dt_bias = nullptr;     // [kNumGdnLayers][16]: dt_bias is BF16 in the store (§01.6
                                     // keeps only A_log and linear_attn.norm.weight F32) and
                                     // gates_kernel reads `const float*`, so it is widened ONCE,
@@ -250,8 +251,8 @@ constexpr int kStopToken = 248046;
 
 // The body: `x = E[y]` → input norm → 24 blocks (GDN §07.2 or attention §07.3 by layer type, each
 // followed by the MLP §03.3 and the fused add+norm) → the final norm falling out of the last glue
-// call. Submits 423 of the token's 424 launches (`planned_launch_counts()` derives the bill; the
-// 424th is the `lm_head_full` that belongs to the tail) and WAITS FOR NONE OF THEM: no logits, no
+// call. Submits 405 of the token's 406 launches (`planned_launch_counts()` derives the bill; the
+// 406th is the `lm_head_full` that belongs to the tail) and WAITS FOR NONE OF THEM: no logits, no
 // D2H, no sync, no argmax, so bodies can be queued back to back on one stream.
 //
 // It still advances the state, because the next token's position depends on it: `pos` is

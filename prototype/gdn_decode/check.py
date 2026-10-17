@@ -446,6 +446,16 @@ def main() -> int:
             chosen = (label, err, (x @ Wa.T).astype(np.float32), (x @ Wb.T).astype(np.float32))
     label, err, a_raw, b_raw = chosen
     print("F1 input reading: %s (g matches to %.3g)" % (label, err))
+    # The kernel's operand is the BF16 tile `in_proj_a`/`in_proj_b` wrote, not an F32 widening of it
+    # (D30 1.7'), so the fixture has to hand it the dtype the engine hands it. The fp32 projection
+    # above is therefore narrowed here — and the unit-exact torch mirror below deliberately reads the
+    # NARROWED values, so it still checks the kernel's formula against the operands the kernel was
+    # actually given. This also removes the reason this comparison used to be "bounded, not matched":
+    # HF computed a_raw/b_raw with a bf16 matmul, and a fp32 fixture operand could never reproduce
+    # that (§04.3). The pinned 5e-3 bound is LEFT ALONE — making it tighter is a gate decision, not
+    # a side effect of this one.
+    a_raw = bf16(a_raw)
+    b_raw = bf16(b_raw)
     # s_in is dumped for one token, so the projections are already [16]; if a fixture ever
     # dumps a longer prefill, keep the last row.
     last = (lambda t: t[-1] if np.ndim(t) > 1 else t)
@@ -455,11 +465,11 @@ def main() -> int:
     put("dt_bias.f32", dt)
     run("gates")
     print("F1 gates (S04.3):")
-    # Two levels. (a) unit-exact: the kernel's formula vs torch on the *same* fp32 inputs —
+    # Two levels. (a) unit-exact: the kernel's formula vs torch on the *same* inputs —
     # this is the check that a wrong softplus/sigmoid/exp would fail. (b) against the pinned
-    # dump, which carries the reference's bf16 projection rounding, so it can only be
-    # bounded, not matched: a_raw here is fp32 while HF computed a_raw/b_raw with a bf16
-    # matmul, and that difference (not the kernel) sets the residual.
+    # dump, which carries the reference's bf16 projection rounding; the operand is narrowed to
+    # bf16 above, so the residual that used to be blamed on an fp32 fixture is gone, but the
+    # band below is unchanged and still bounds it.
     a_last = np.asarray(last(a_raw), dtype=np.float32)
     b_last = np.asarray(last(b_raw), dtype=np.float32)
     gt = (-torch.tensor(A_log).exp() * torch.nn.functional.softplus(

@@ -88,6 +88,27 @@ static void dump_f32(const std::string& p, const void* dptr, size_t n) {
     fclose(f);
 }
 
+// The conv tile and the two gate rows are read by the kernels as BF16, because that is the dtype
+// their producer writes; the fixtures this gate reads are the HF dumps, stored as F32. So the
+// fixture must be narrowed here — and that is only legitimate if it is exactly representable, which
+// it is, because HF's `mixed_qkv_pre_conv` / `in_proj_a` / `in_proj_b` outputs ARE bf16 tensors.
+// Assert it rather than assume it: a dump that ever became a true F32 would otherwise be silently
+// rounded here, and the gate would then be judging a kernel fed something the reference never had.
+static std::vector<hip_bfloat16> narrow_exact(const std::vector<float>& v, const char* what) {
+    std::vector<hip_bfloat16> out(v.size());
+    size_t bad = 0;
+    for (size_t i = 0; i < v.size(); ++i) {
+        out[i] = hip_bfloat16(v[i]);
+        if (float(out[i]) != v[i]) ++bad;
+    }
+    if (bad) {
+        fprintf(stderr, "%s: %zu of %zu values are not BF16-exact, so this fixture cannot be fed "
+                        "to a BF16-read kernel without rounding it\n", what, bad, v.size());
+        exit(1);
+    }
+    return out;
+}
+
 int main(int argc, char** argv) {
     std::string mode, dir, out, negname = "none";
     int iters = 20, nlayers = 18, trials = 3, restore_each = 0, tokens = 1;
@@ -122,14 +143,16 @@ int main(int argc, char** argv) {
 
     if (mode == "gates") {
         const size_t n = (size_t)tokens * NH;
-        auto a_raw = load_f32(path("a_raw.f32"), n), b_raw = load_f32(path("b_raw.f32"), n);
+        auto a_raw = narrow_exact(load_f32(path("a_raw.f32"), n), "a_raw.f32");
+        auto b_raw = narrow_exact(load_f32(path("b_raw.f32"), n), "b_raw.f32");
         auto A_log = load_f32(path("A_log.f32"), NH), dt = load_f32(path("dt_bias.f32"), NH);
-        float *da, *db, *dA, *dd, *dg, *dbt;
-        CK(hipMalloc(&da, n * 4)); CK(hipMalloc(&db, n * 4));
+        hip_bfloat16 *da, *db;
+        float *dA, *dd, *dg, *dbt;
+        CK(hipMalloc(&da, n * 2)); CK(hipMalloc(&db, n * 2));
         CK(hipMalloc(&dA, NH * 4)); CK(hipMalloc(&dd, NH * 4));
         CK(hipMalloc(&dg, n * 4)); CK(hipMalloc(&dbt, n * 4));
-        CK(hipMemcpy(da, a_raw.data(), n * 4, hipMemcpyHostToDevice));
-        CK(hipMemcpy(db, b_raw.data(), n * 4, hipMemcpyHostToDevice));
+        CK(hipMemcpy(da, a_raw.data(), n * 2, hipMemcpyHostToDevice));
+        CK(hipMemcpy(db, b_raw.data(), n * 2, hipMemcpyHostToDevice));
         CK(hipMemcpy(dA, A_log.data(), NH * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dd, dt.data(), NH * 4, hipMemcpyHostToDevice));
         gates_kernel<<<tokens, NH>>>(da, db, dA, dd, dg, dbt, tokens, gtneg);
@@ -142,14 +165,15 @@ int main(int argc, char** argv) {
 
     if (mode == "conv") {
         const size_t nraw = (size_t)tokens * CH;
-        auto raw = load_f32(path("raw.f32"), nraw);
+        auto raw = narrow_exact(load_f32(path("raw.f32"), nraw), "raw.f32");
         auto win = load_f32(path("win.f32"), (K - 1) * CH);
         auto C = load_f32(path("convw.f32"), CH * K);
-        float *draw, *dwin, *dC, *du, *dnew;
-        CK(hipMalloc(&draw, nraw * 4)); CK(hipMalloc(&dwin, (K - 1) * CH * 4));
+        hip_bfloat16 *draw;
+        float *dwin, *dC, *du, *dnew;
+        CK(hipMalloc(&draw, nraw * 2)); CK(hipMalloc(&dwin, (K - 1) * CH * 4));
         CK(hipMalloc(&dC, CH * K * 4)); CK(hipMalloc(&du, nraw * 4));
         CK(hipMalloc(&dnew, (K - 1) * CH * 4));
-        CK(hipMemcpy(draw, raw.data(), nraw * 4, hipMemcpyHostToDevice));
+        CK(hipMemcpy(draw, raw.data(), nraw * 2, hipMemcpyHostToDevice));
         CK(hipMemcpy(dwin, win.data(), (K - 1) * CH * 4, hipMemcpyHostToDevice));
         CK(hipMemcpy(dC, C.data(), CH * K * 4, hipMemcpyHostToDevice));
         // grid.x is the channel strip (the single-token launch's 24 blocks), grid.y the token.
