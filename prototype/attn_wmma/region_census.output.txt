@@ -1,0 +1,115 @@
+listing kernels_attn-hip-amdgcn-amd-amdhsa-gfx1151.s
+regions: 18 statement ranges in engine/attn_slim_kernels.h, boundaries text-checked at run time
+categories: attn_score_dot2 RULES < attn_valu_slim RULES < this file's EXTRA_RULES
+
+===== attn_slim_wave::CoreArgs
+  1708 executed instructions, 1360 issue slots (s_trap and %Flow blocks dropped); per-block regions billed at 1/512 touches
+  region          x/touch static  slots slots/touch  top categories
+  epilogue          0.000    844    631        0.00  encode.bookkeeping=213  UNCLASSIFIED=204  score.bf16-round=113  dot.fma=88
+  geom              0.000    114    101        0.00  UNCLASSIFIED=91  encode.bookkeeping=10  dual.other=5  wait.lgkmcnt=3
+  UNATTRIBUTED(slim header)    0.002     80     71        0.14  UNCLASSIFIED=52  dual.other=10  encode.bookkeeping=9  salu.branch=5
+  stage-k           0.500     70     63       31.50  UNCLASSIFIED=38  addr.math=18  encode.bookkeeping=5  fold.addr-math=4
+  pv-1pass          1.000     80     61       61.00  encode.bookkeeping=17  UNCLASSIFIED=16  dot.fma=15  dot.bf16-conv=7
+  score-store       1.000     70     55       55.00  UNCLASSIFIED=24  score.bf16-round=16  encode.bookkeeping=14  score.bf16-round-guard=6
+  stage-v-str       0.500     52     44       22.00  UNCLASSIFIED=25  addr.math=8  encode.bookkeeping=7  fold.addr-math=4
+  stage-v-1p        0.500     45     40       20.00  UNCLASSIFIED=20  addr.math=11  encode.bookkeeping=4  fold.addr-math=4
+  OTHER-FILE:amd_hip_bfloat16.h    0.002     38     36        0.07  UNCLASSIFIED=36  encode.bookkeeping=2
+  q-load            0.000     31     29        0.00  dot.bf16-conv=12  UNCLASSIFIED=8  addr.math=6  fold.addr-math=2
+  sm-max            1.000     35     29       29.00  UNCLASSIFIED=10  encode.bookkeeping=5  softmax.max=3  addr.math=2
+  sm-1pass          1.000     37     29       29.00  UNCLASSIFIED=9  encode.bookkeeping=6  softmax.max=3  dot.lds-load=2
+  dot               0.500     36     26       13.00  dot.bf16-conv=12  dot.fma=12  encode.bookkeeping=8  dot.lds-load=2
+  sm-exp            1.000     31     25       25.00  UNCLASSIFIED=10  encode.bookkeeping=5  dot.fma=2  fold.add=2
+  pv-tile           1.000     29     24       24.00  dot.fma=8  UNCLASSIFIED=7  dot.bf16-conv=5  encode.bookkeeping=4
+  OTHER-FILE:attn_decode_kernels.h    0.002     26     22        0.04  UNCLASSIFIED=18  encode.bookkeeping=4  salu.branch=2  fold.exec-guard=1
+  fold-addr         0.000     21     21        0.00  UNCLASSIFIED=8  addr.math=5  fold.range-select=4  score.bf16-round=4
+  OTHER-FILE:amd_device_functions.h    0.002     18     16        0.03  UNCLASSIFIED=15  encode.bookkeeping=2  salu.branch=1
+  fold-add          1.000     28     16       16.00  fold.permute=8  wait.lgkmcnt=8  fold.add=8  encode.bookkeeping=4
+  fold              1.000     12     10       10.00  fold.exec-guard=4  UNCLASSIFIED=2  fold.permute=2  wait.lgkmcnt=2
+  acc-rescale       1.000      9      9        9.00  other.mul=8  UNCLASSIFIED=1
+  OTHER-FILE:__clang_hip_math.h    0.002      2      2        0.00  UNCLASSIFIED=2
+  TOTAL                     1708   1360      344.79
+  whole-kernel per-touch, WIDE row (streaming pass 2) = 234.79 slots/touch
+  whole-kernel per-touch, SHORT row (one-pass)       = 235.79 slots/touch
+
+  PER-TOUCH category rollup, WIDE route — this is the denominator D30 item 2.4 names
+    UNCLASSIFIED                85.74   29.2%
+    encode.bookkeeping          42.03   14.3%
+    score.bf16-round            20.00    6.8%
+    dot.fma                     18.00    6.1%
+    wait.lgkmcnt                16.50    5.6%
+    addr.math                   16.00    5.5%
+    dot.bf16-conv               15.00    5.1%
+    fold.add                    13.00    4.4%
+    other.mul                   12.00    4.1%
+    fold.permute                10.00    3.4%
+    salu.branch                  6.52    2.2%
+    score.bf16-round-guard       6.50    2.2%
+    fold.exec-guard              6.01    2.0%
+    dual.other                   4.02    1.4%
+    fold.addr-math               4.00    1.4%
+    dot.lds-load                 4.00    1.4%
+    transcend.expf               4.00    1.4%
+    stage.lds-store              3.00    1.0%
+    softmax.max                  3.00    1.0%
+    UNBOUND.convert              2.00    0.7%
+    fold.range-select            1.00    0.3%
+    dot.q-indexed                1.00    0.3%
+    salu.exit                    0.00    0.0%
+    transcend.divide             0.00    0.0%
+
+  statement detail (line:count, source text) for the dot-shaped regions
+    dot          L107:34 for (int t = 0; t < ND; ++t) dot += bf(kk[t])  | L103:2 const uint4 ku = *reinterpret_cast<const uint4
+    fold         L144:12 v = v + __shfl_down_sync(FULL_MASK, v, 16);
+    score-store  L224:66 if (lane == 0) s_sc[h][rr] = fb(bf(fb(dot)) *  | L240:4 __syncthreads();                              
+    pv-tile      L307:21 for (int u = 0; u < 8; ++u) acc[u] += e[slot]  | L305:5 for (int slot = 0; slot < nt; ++slot) { | L310:3 __syncthreads();                              
+    pv-1pass     L267:53 const float wt = bf(fb(expf(bf(s_sc[h][rr]) -  | L269:20 for (int u = 0; u < 8; ++u) acc[u] += wt * bf( | L271:3 __syncthreads();                               | L268:2 const hip_bfloat16* v = &s_v[(rr - s_lo) * DH  | L266:2 for (int rr = s_lo; rr < s_hi; ++rr) {
+    sm-exp       L300:23 e[slot] = expf(bf(s_sc[h][base - blo + slot])  | L299:7 for (int slot = 0; slot < nt; ++slot) { | L301:1 ls += e[slot];
+    sm-max       L297:18 const float rescale = expf(m - mn); | L295:15 for (int slot = 0; slot < nt; ++slot) mt = fma | L296:2 const float mn = fmaxf(m, mt);
+    acc-rescale  L304:9 for (int u = 0; u < 8; ++u) acc[u] *= rescale;
+
+===== attn_tile_wave::CoreArgs
+  1625 executed instructions, 1294 issue slots (s_trap and %Flow blocks dropped); per-block regions billed at 1/512 touches
+  region          x/touch static  slots slots/touch  top categories
+  OTHER-FILE:attn_decode_kernels.h    0.002    886    723        1.41  UNCLASSIFIED=313  encode.bookkeeping=150  dot.fma=102  transcend.divide=86
+  OTHER-FILE:amd_hip_bfloat16.h    0.002    459    354        0.69  UNCLASSIFIED=177  score.bf16-round=108  encode.bookkeeping=97  dot.bf16-conv=46
+  OTHER-FILE:__clang_hip_math.h    0.002    218    165        0.32  UNCLASSIFIED=57  encode.bookkeeping=53  transcend.expf=24  score.bf16-round=24
+  OTHER-FILE:amd_device_functions.h    0.002     21     17        0.03  UNCLASSIFIED=15  wait.lgkmcnt=4  salu.branch=2
+  OTHER-FILE:amd_warp_functions.h    0.002     19     16        0.03  fold.range-select=7  fold.permute=5  fold.addr-math=4  encode.bookkeeping=3
+  OTHER-FILE:amd_warp_sync_functions.h    0.002     11     11        0.02  fold.exec-guard=10  UNCLASSIFIED=1
+  OTHER-FILE:amd_hip_runtime.h    0.002      5      5        0.01  UNCLASSIFIED=5
+  OTHER-FILE:attn_decode" "attn_decode_kernels.h    0.002      6      3        0.01  UNCLASSIFIED=3  encode.bookkeeping=3
+  TOTAL                     1625   1294        2.53
+  whole-kernel per-touch, WIDE row (streaming pass 2) = 2.53 slots/touch
+  whole-kernel per-touch, SHORT row (one-pass)       = 2.53 slots/touch
+
+  PER-TOUCH category rollup, WIDE route — this is the denominator D30 item 2.4 names
+    UNCLASSIFIED                 1.12   35.1%
+    encode.bookkeeping           0.60   18.8%
+    score.bf16-round             0.26    8.2%
+    dot.fma                      0.23    7.3%
+    transcend.divide             0.17    5.3%
+    addr.math                    0.13    4.0%
+    dot.bf16-conv                0.13    4.0%
+    other.mul                    0.09    2.8%
+    fold.addr-math               0.05    1.7%
+    fold.add                     0.05    1.7%
+    dual.other                   0.05    1.6%
+    wait.lgkmcnt                 0.05    1.5%
+    transcend.expf               0.05    1.5%
+    salu.branch                  0.04    1.4%
+    fold.exec-guard              0.04    1.2%
+    score.bf16-round-guard       0.04    1.1%
+    UNBOUND.convert              0.02    0.7%
+    fold.range-select            0.02    0.5%
+    dot.lds-load                 0.02    0.5%
+    softmax.max                  0.01    0.4%
+    fold.permute                 0.01    0.3%
+    stage.lds-store              0.01    0.2%
+    dot.q-indexed                0.00    0.1%
+    salu.exit                    0.00    0.1%
+
+  statement detail (line:count, source text) for the dot-shaped regions
+
+CALIBRATION against attn_valu_slim's independent loop-fingerprint number
+  attn_slim_wave::CoreArgs: pass-1 rollup 125.5 slots/touch vs published 45 (SOFT-CALIBRATION-FAIL)
+  attn_tile_wave::CoreArgs: pass-1 rollup 0.0 slots/touch vs published 116 (SOFT-CALIBRATION-FAIL)

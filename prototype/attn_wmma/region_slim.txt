@@ -1,0 +1,60 @@
+kernel attn_slim_wave::CoreArgs   listing kernels_attn-hip-amdgcn-amd-amdhsa-gfx1151.s
+1838 executed instructions, 1483 issue slots (s_trap and %Flow blocks dropped)
+
+STATIC bill by statement region, and its PER-TOUCH multiplier
+  region        mult   static  slots  per-touch  top categories
+  OTHER-FILE:amd_hip_bfloat16.h block       0    445       0.87  UNCLASSIFIED=232  score.bf16-round=116  encode.bookkeeping=106  dot.bf16-conv=70
+  OUTSIDE-the-wave-body block     428    415       0.81  UNCLASSIFIED=152  encode.bookkeeping=117  transcend.divide=80  dot.fma=80
+  OTHER-FILE:__clang_hip_math.h block       0    164       0.32  UNCLASSIFIED=56  encode.bookkeeping=52  transcend.expf=24  score.bf16-round=24
+  dot           lane      116     92      92.00  UNCLASSIFIED=32  addr.math=17  encode.bookkeeping=13  dot.fma=12
+  geom          block      85     73       0.14  UNCLASSIFIED=64  encode.bookkeeping=10  dual.other=5  wait.lgkmcnt=2
+  OTHER-FILE:attn_decode_kernels.h block       0     60       0.12  UNCLASSIFIED=50  encode.bookkeeping=8  salu.branch=4  fold.exec-guard=2
+  stage-v-1p    lane       57     48      48.00  UNCLASSIFIED=16  dot.fma=13  encode.bookkeeping=9  addr.math=8
+  OTHER-FILE:amd_device_functions.h block       0     40       0.08  UNCLASSIFIED=36  wait.lgkmcnt=4  salu.branch=4  encode.bookkeeping=2
+  stage-k       lane       22     21      21.00  UNCLASSIFIED=11  addr.math=6  fold.addr-math=2  encode.bookkeeping=1
+  sm-exp        lane       21     21      21.00  UNCLASSIFIED=8  other.mul=8  dot.fma=1  fold.range-select=1
+  stage-v-str   lane       22     20      20.00  UNCLASSIFIED=10  addr.math=5  fold.addr-math=2  encode.bookkeeping=2
+  q-load        block      17     16       0.03  UNCLASSIFIED=8  addr.math=6  fold.addr-math=2  encode.bookkeeping=1
+  acc-rescale   tile       18     16       2.00  dot.fma=8  UNCLASSIFIED=4  encode.bookkeeping=2  dot.lds-load=1
+  sm-1pass      lane       13     13      13.00  UNCLASSIFIED=7  addr.math=4  fold.add=1  fold.exec-guard=1
+  OTHER-FILE:amd_warp_sync_functions.h block       0     11       0.02  fold.exec-guard=4  UNCLASSIFIED=4  dead.trap=2  salu.branch=1
+  sm-max        tile       10     10       1.25  UNCLASSIFIED=7  addr.math=2  salu.branch=1
+  score-store   lane       10      8       8.00  stage.lds-store=2  score.bf16-round-guard=2  UNCLASSIFIED=2  other.mul=2
+  OTHER-FILE:amd_hip_runtime.h block       0      5       0.01  UNCLASSIFIED=5
+  OTHER-FILE:   block       0      3       0.01  UNCLASSIFIED=3  encode.bookkeeping=3
+  OTHER-FILE:amd_warp_functions.h block       0      2       0.00  fold.permute=2
+  TOTAL                  1838   1483     228.66
+
+PER-TOUCH category rollup (the denominator D30 item 2.4 needs)
+  UNCLASSIFIED                88.57   33.1%
+  addr.math                   41.31   15.4%
+  encode.bookkeeping          27.83   10.4%
+  dot.fma                     27.19   10.2%
+  fold.add                    12.04    4.5%
+  other.mul                   11.07    4.1%
+  wait.lgkmcnt                11.03    4.1%
+  fold.addr-math               8.03    3.0%
+  fold.permute                 8.00    3.0%
+  transcend.divide             5.16    1.9%
+  fold.range-select            5.00    1.9%
+  stage.lds-store              5.00    1.9%
+  score.bf16-round             4.28    1.6%
+  dot.lds-load                 3.13    1.2%
+  dual.other                   3.04    1.1%
+  score.bf16-round-guard       3.04    1.1%
+  fold.exec-guard              2.14    0.8%
+  salu.branch                  1.30    0.5%
+  dot.bf16-conv                0.15    0.1%
+  dot.q-indexed                0.12    0.0%
+  transcend.expf               0.05    0.0%
+  UNBOUND.convert              0.02    0.0%
+  softmax.max                  0.01    0.0%
+  dead.trap                    0.00    0.0%
+  salu.exit                    0.00    0.0%
+
+  statement detail for the two dot regions (which source line each slot came from)
+  dot: L200:27 for (int s_lo = 0; s_lo < ns; s_lo += ATTN_T | L123:20 asm volatile("ds_bpermute_b32 %0, %1, %2\n\t | L201:17 const int s_hi = std::min(ns, s_lo + ATTN_TI | L107:17 for (int t = 0; t < ND; ++t) dot += bf(kk[t] | L136:13 return 4u * (unsigned)src; | L135:8 const int src = (lane + delta < warpSize) ? 
+  sm-exp: L304:9 for (int u = 0; u < 8; ++u) acc[u] *= rescal | L299:7 for (int slot = 0; slot < nt; ++slot) { | L300:3 e[slot] = expf(bf(s_sc[h][base - blo + slot] | L303:1 l = l * rescale + ls; | L301:1 ls += e[slot];
+  sm-max: L295:9 for (int slot = 0; slot < nt; ++slot) mt = f | L297:1 const float rescale = expf(m - mn);
+  acc-rescale: L307:13 for (int u = 0; u < 8; ++u) acc[u] += e[slot | L305:5 for (int slot = 0; slot < nt; ++slot) {
+  score-store: L224:10 if (lane == 0) s_sc[h][rr] = fb(bf(fb(dot)) 

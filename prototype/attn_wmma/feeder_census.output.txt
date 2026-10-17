@@ -1,0 +1,151 @@
+# feeder census of tmp/attn_wmma_price/wmma_feeder_probe-hip-amdgcn-amd-amdhsa-gfx1151.s
+# LANE-MOVEMENT categories are the fragment-map tax: they exist only because the
+# hardware's operand layout differs from the layout the loads were written in.
+
+== wm_score_tile
+   155 executed instructions | MATRIX.wmma=1 | lane-movement=24 | LDS.load=6 LDS.store=6 | 
+     SALU.other                 47
+     WAIT                       19
+     SHUFFLE.ds_swizzle         16
+     VALU.other                 15
+     MOV.reg                    10
+     SHUFFLE.dpp                8
+     SALU.mov                   4
+     ADDR.add                   4
+     ADDR.add_ci                4
+     LDS.store_other            4
+     ADDR.shr                   3
+     ADDR.shl                   3
+     VMEM.store_b32             3
+     ADDR.and                   2
+     VMEM.load_b128             2
+     LDS.store_b128             2
+     LDS.load_u16               2
+     LDS.load_b128              2
+     LDS.load_b32               2
+     BARRIER                    1
+     UNCLASSIFIED.buffer_gl0_inv 1
+     MATRIX.wmma                1
+
+== wm_score_k256
+   358 executed instructions | MATRIX.wmma=16 | lane-movement=144 | LDS.load=36 LDS.store=6 | 
+     SHUFFLE.ds_swizzle         136
+     SALU.other                 50
+     WAIT                       50
+     LDS.load_b128              32
+     MATRIX.wmma                16
+     VALU.other                 14
+     MOV.reg                    10
+     SHUFFLE.dpp                8
+     ADDR.shl                   6
+     SALU.mov                   4
+     ADDR.add                   4
+     ADDR.add_ci                4
+     LDS.store_other            4
+     ADDR.and                   3
+     ADDR.shr                   3
+     VMEM.store_b32             3
+     VMEM.load_b128             2
+     LDS.store_b128             2
+     LDS.load_u16               2
+     LDS.load_b32               2
+     BARRIER                    1
+     UNCLASSIFIED.buffer_gl0_inv 1
+     ADDR.and_or                1
+
+== wm_pv_tile
+   160 executed instructions | MATRIX.wmma=1 | lane-movement=24 | LDS.load=12 LDS.store=6 | 
+     SALU.other                 37
+     WAIT                       22
+     VALU.other                 17
+     SHUFFLE.ds_swizzle         16
+     LDS.load_u16               9
+     MOV.reg                    9
+     SHUFFLE.dpp                8
+     ADDR.shl                   7
+     ADDR.add                   5
+     ADDR.add_ci                4
+     LDS.store_other            4
+     ADDR.shr                   3
+     SALU.mov                   3
+     ADDR.and                   2
+     VMEM.load_b128             2
+     LDS.store_b128             2
+     VMEM.store_b32             2
+     ADDR.and_or                2
+     LDS.load_b32               2
+     BARRIER                    1
+     UNCLASSIFIED.buffer_gl0_inv 1
+     LDS.load_b128              1
+     MATRIX.wmma                1
+
+== wm_pv_n256
+   858 executed instructions | MATRIX.wmma=16 | lane-movement=324 | LDS.load=132 LDS.store=66 | 
+     SHUFFLE.ds_swizzle         196
+     WAIT                       166
+     LDS.load_u16               129
+     SHUFFLE.dpp                128
+     VALU.other                 69
+     LDS.store_other            64
+     SALU.other                 40
+     MATRIX.wmma                16
+     SALU.mov                   11
+     MOV.reg                    7
+     ADDR.shl                   6
+     ADDR.add                   5
+     ADDR.add_ci                4
+     ADDR.shr                   3
+     VMEM.load_b128             2
+     LDS.store_b128             2
+     VMEM.store_b32             2
+     ADDR.and_or                2
+     LDS.load_b32               2
+     ADDR.and                   1
+     BARRIER                    1
+     UNCLASSIFIED.buffer_gl0_inv 1
+     LDS.load_b128              1
+
+== wm_raw_floor_k256
+   220 executed instructions | MATRIX.wmma=16 | lane-movement=0 | LDS.load=68 LDS.store=4 | 
+     LDS.load_b128              64
+     SALU.other                 54
+     WAIT                       25
+     MATRIX.wmma                16
+     VALU.other                 13
+     MOV.reg                    10
+     ADDR.shl                   5
+     SALU.mov                   4
+     ADDR.add                   4
+     ADDR.add_ci                4
+     LDS.store_b128             4
+     VMEM.store_b32             3
+     ADDR.and                   2
+     ADDR.shr                   2
+     VMEM.load_b128             2
+     LDS.load_u16               2
+     BARRIER                    2
+     UNCLASSIFIED.buffer_gl0_inv 2
+     LDS.load_b32               2
+
+== wm_raw_floor
+   122 executed instructions | MATRIX.wmma=1 | lane-movement=0 | LDS.load=8 LDS.store=4 | 
+     SALU.other                 46
+     VALU.other                 13
+     WAIT                       10
+     MOV.reg                    10
+     ADDR.shl                   5
+     SALU.mov                   4
+     ADDR.add                   4
+     ADDR.add_ci                4
+     LDS.store_b128             4
+     LDS.load_b128              4
+     VMEM.store_b32             3
+     ADDR.and                   2
+     ADDR.shr                   2
+     VMEM.load_b128             2
+     LDS.load_u16               2
+     BARRIER                    2
+     UNCLASSIFIED.buffer_gl0_inv 2
+     LDS.load_b32               2
+     MATRIX.wmma                1
+
