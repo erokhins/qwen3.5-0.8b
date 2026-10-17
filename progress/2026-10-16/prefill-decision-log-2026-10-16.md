@@ -899,3 +899,53 @@ Two instrument defects fell out of the same window, both recorded rather than pa
 12-candidate window and 0.1303 ms in the 64-candidate window, same budget, same shape, minutes apart — **7.5 %
 on a 0.12 ms call**. Any single-shape burst claim below that is not a finding; it is why 3.7 must be adjudicated
 in situ and not adopted from this table.
+
+# D32 — **the latency reading is refuted**, and what `gdn_rec` is actually bound by is a bit-identical 1.15× (2026-10-16)
+
+D30 item 1.3 was written as "the single highest-value open measurement on the box", because half the wave was
+modelled as latency-bound at ~1.6 working wavefronts per CU on an inference from a census. It is measured now
+(`prototype/gdn_rec_isa/results.md` §10; probes and their volume admission in §9, census in §8), and the answer
+is no on both chains, with something better attached.
+
+Best-of-5 of 40-bursts at the engine's own launch geometry (`16×128` per token-step), two windows, `rec0` =
+6.29–6.36 µs per launch, windows agreeing to 0.5 %:
+
+| probe | what it breaks | `rec0 / probe` |
+|---|---|---|
+| `rec3` | cross-token dependency (each token reads an independent state) | **0.918–0.923 — 8.4 % slower** |
+| `rec4` | intra-token chain, 128 links → 4 × 32 | 1.073–1.089 (−160 slots explains ~8.4 % of it) |
+| `rec5` | both | 0.977–0.982 |
+| `rec6` | **nothing** — `rec4`'s loop shape, chain intact, −117 slots | **1.149–1.158** |
+
+At matched loop shape `rec6_over_rec4` = **0.933–0.941**: splitting the serial accumulator costs 6.5 %. So
+**neither dependency chain is what this kernel waits on**, and D30 items **1.3, 1.4 and 1.5 are closed** — no
+occupancy work, no re-association, and the counters pass is no longer next either. Item **1.6 (16-bit state) is
+closed too**, priced rather than waved away: it halves a term that is not the constraint (438.4 GB/s demanded
+against a 240 plateau falsifies the traffic model per D21, and route A already removed essentially all of that
+traffic for 1.119×) while costing 384 conversions against 1,523 slots, and its numerics question cannot be
+posed with today's pins at all, because `state_fp.npy` rows are fingerprints rather than values.
+
+**What it opens is item 1.9, and it is bit-identical.** `rec6` differs from the shipped kernel in loop *spelling*
+only: same operations, same order, same values — `ndiff_o_vs0 = ndiff_state_vs0 = 0` in 4/4 cases and
+`ndiff_*_vs_cpu` equal to `rec0`'s digit for digit. It removes 117 slots (−7.7 %), which at D25's measured
+elasticity of 0.8 predicts **6.1 %**; it delivers **15 %**. That gap is the finding: the family is not
+instruction-count-bound and not dependency-latency-bound, it is bound by **how its own loop gets scheduled**, and
+unroll-4 spelling that folds address arithmetic out of the serial chain buys about twice what its instruction
+delta buys. **D25 does not get extended, it gets restated**: what D25 closed was fusion and hand-folded
+reductions — the axis it could price — and the axis that pays is spelling, which it never probed because a
+spelling change looks like a no-op to an instruction census.
+
+Prize arithmetic, stated as a ceiling and not a win: `gdn_rec` is 534.54 ms of a 1111.95 ms wave, so 1.15× at
+launch level is **≈ 70 ms ≈ 6.3 % of the whole wave**, prefill 3828 → ~4080 tok/s if it survives. **If it
+survives.** This is a burst over a 1 MiB single-layer state that stays resident for 128 tokens, and the engine
+walks 18 layers per token with everything else competing for L2; D28 is exactly the precedent that a burst
+winner can be an in-situ loser, and it is the reason nothing here enters `bench/performance-status.md` until an
+in-situ A/B says so. A run that does not reproduce at wave level costs the plan the port and nothing else.
+
+Instrument defect found before any number was read off it, and fixed: `--volume` was overloaded as both "run the
+volume check" and "volume-only mode", so the documented `--volume --burst 40 --reps 5` printed `VOLUME_OK`,
+exited 0 and timed **nothing**. Three windows were burned on that before it was caught. The burst now prints
+`BURST-LINES printed=N want=cases×reps×modes` and fails when the matrix is incomplete — the fourth instance
+this session of a driver printing PASS over an empty parse (`gdn_collapse/run.py`, `gate.py`'s prefill-row
+count, `mixed_bw`'s block sum, and now this), which is why every new driver in this repo is now expected to
+assert its own record count rather than print a verdict.
