@@ -213,34 +213,37 @@ struct AlgoPin {
     PinSet set;
 };
 
-// ONE shape is pinned today, and the reason it is pinned is the reason the table exists at all: at the
-// shipping width the heuristic's rank-0 — which is all an unpinned `lt` run gets — is SLOWER than the
-// call this engine already makes through hipBLAS. Taking rank-0 there gives back part of the win
-// `prototype/gemm_algo_sweep/results.md` §3c measured. This used to be three rows; the two others were
-// warm-burst winners that lost in situ (§3d), and the table shrank to this while this paragraph kept
-// claiming three. The test is therefore `default_ms` vs `engine_call_ms`, never `best_ms` vs either, and
-// that section's lesson 2 is that reading the
-// "best" column as though it were the "default" column is how `mlp_down` was shipped at 0.812x.
-// Numbers are `prototype/gemm_algo_sweep/results.md` §1's `RESULT` lines at M=512 (the sweep's
-// `--rows 512 --max-algos 12` window); the bytes are that same build's `--verify --algo-dump`
-// `ALGODUMP` lines, matched to each winner by `best_seq`/`best_idx` — not hand-written.
+// TWO shapes are pinned today — `gate_proj+up_proj` and `down_proj`, each by its deep-field algo — and
+// every byte in this table was captured, not hand-written or reconstructed-and-trusted. The reason the
+// table exists at all is the original one: at the shipping width the heuristic's rank-0 — which is all an
+// unpinned `lt` run gets — is SLOWER than the call this engine already makes through hipBLAS, and taking
+// rank-0 there gives back part of the win `prototype/gemm_algo_sweep/results.md` §3c measured. The test
+// is therefore `default_ms` vs `engine_call_ms` for a regression, and `best_ms` vs WHATEVER THE SHIPPING
+// PATH RUNS for that shape for a new win; reading the "best" column as though it were the "default"
+// column is how `mlp_down` was shipped at 0.812x (§3d's lesson 2), and reading a deep winner against
+// rank-0 when the shape already had a pin is the same error one layer over.
+// The table below is the pre-adjudication candidate list from the 12-candidate window, kept because it is
+// the evidence for a decision and not the decision. `down_proj` was the row that survived that first
+// in-situ round; `o_proj+out_proj` and `in_proj_qkv` did not, and cost `proj` 5.5 ms when tried. Both of
+// them came back a second time from the 64-deep field and were rejected a second time — see the candidate
+// rows, which carry the re-adjudication.
 //
 //   shape              rank-0 ms  engine ms  winner ms   rank-0/engine   winner/engine
 //   o_proj+out_proj      0.0871     0.0801     0.0766      1.087x slow     0.956x
 //   in_proj_qkv          0.2000     0.1989     0.1862      1.006x slow     0.936x
 //   down_proj            0.1439     0.1313     0.1169      1.096x slow     0.890x
 //
-// The other four shapes of `kLtShapes` need nothing and so get nothing, by the same measurement: their
-// rank-0 already beats the engine's own call (q_proj 0.820x, `k_proj+v_proj` 0.616x, in_proj_z 0.736x,
-// gate_proj+up_proj 0.861x of `engine_call_ms`), and a pin is provenance-bound — it freezes one kernel
-// against one hipBLASLt version (these were captured on 10.4.1) — so a shape that owes nothing is not
-// worth a re-capture obligation. `gate_proj+up_proj`'s winner IS a further 1.067x over its own rank-0
-// and is deliberately NOT taken here: that is new speed, not a recovered regression, and it belongs in
-// its own funded change with its own A/B.
+// Three shapes of `kLtShapes` need nothing and so get nothing, by the same measurement: their rank-0
+// already beats the engine's own call (`q_proj` 0.820x, `k_proj+v_proj` 0.616x, `in_proj_z` 0.736x of
+// `engine_call_ms`), and a pin is provenance-bound — it freezes one kernel against one hipBLASLt version
+// (these were captured on 10.4.1) — so a shape that owes nothing is not worth a re-capture obligation.
+// `gate_proj+up_proj` is the fourth, and it is pinned for the OTHER reason: its winner was a further
+// 1.067x over its own rank-0, which is new speed rather than a recovered regression, so it waited for a
+// funded change with its own A/B (D30 3.7, adjudicated by D35) instead of riding in with the regression
+// fixes below.
 //
 // The table above is the pre-adjudication candidate list, kept because it is the evidence for the
-// decision below and not the decision. `down_proj` is the row that survived in situ; `o_proj+out_proj`
-// and `in_proj_qkv` did not, and cost `proj` 5.5 ms when tried.
+// decision below and not the decision.
 //
 // Two facts about what a pin may name, because both were assumed this session and only one of them is
 // true. TRUE: a pin bypasses the heuristic query entirely — the predicates below are "valid hex, not
@@ -291,48 +294,97 @@ bool pin_allowed(const AlgoPin& pin) {
 const std::vector<AlgoPin>& algo_pins() {
     static const std::vector<AlgoPin> kPins = [] {
         std::vector<AlgoPin> v;
-        // Pinned by measurement, and only this one. The other two candidates (`o_proj+out_proj`,
-        // `in_proj_qkv`) were warm-burst winners — rank-0 slower than the engine's call, this algo
-        // faster — and measured in situ they cost `proj` 5.5 ms of a 24.8 ms family (24.82 -> 30.35 ms,
-        // one window, three reps, `prototype/gemm_algo_sweep/results.md` §3d). A burst winner can be an
-        // in-situ loser, so a pin earns its place in situ or not at all. `down_proj` stayed: 7.81 ->
-        // 6.78 ms against the library's 6.43 ms, the only shape where rank-0 was a regression.
+        // Provenance for all five rows: the four `deep_*` records were derived by
+        // `prototype/gemm_algo_sweep/deep_pins.py` out of `tmp/wsjob/w64_128.log` (one window, 64
+        // candidates, 128 MiB, M=512) and matched byte-for-byte against the `ALGODUMP` capture of the same
+        // query — none of these hexes was hand-written or reconstructed-and-trusted — and the retirement of
+        // candidates is recorded as a verdict in the in-situ table that deriver reads
+        // (`prototype/gemm_algo_sweep/insitu_verdicts.tsv`, whose numbers come from
+        // `bench/performance-status.md` §9). `CHECK-TABLE` in that tool refuses to let this table and that
+        // data disagree in either direction, so the rows below cannot rot into a transcription.
+        //
+        // One baseline rule for the burst column, because it is the second version of a mistake already
+        // made here: the baseline for a shape that ALREADY has a pin is that pin, not rank-0. Reading the
+        // deep `down_proj` winner against rank-0 books 0.97 ms per wave when the pin in force had already
+        // banked most of it and the real prize was 0.2644 (§3d's wrong-baseline column, one layer over).
+        //
+        //   record                 burst baseline   candidate     saved/wave   admitted because (gain vs
+        //                          ms/call          ms/call       ms           that shape's own window noise)
+        //   deep_gate_proj+up_proj    0.1293          0.1072       1.0608       17.1 % >  4.0 % median
+        //   deep_o_proj+out_proj      0.0853          0.0639       0.5136       25.1 % >  0.8 % median
+        //   deep_in_proj_qkv          0.2064          0.1822       0.4356       11.7 % >  1.6 % median
+        //   deep_down_proj            0.1160 (pin)    0.1050       0.2644        9.5 % >  1.9 % median
+        //
+        // The noise column is not a taste: it is the median movement of the SAME algorithm's `best_ms`
+        // between the two windows on disk (12-deep `tmp/wsjob/ws128.log` vs 64-deep `w64_128.log`, keyed on
+        // the algo record, printed by `deep_pins.py --noise-log`). A gain that does not clear its own
+        // shape's movement is not a slow shape, it is noise with a hex string attached. Three shapes were
+        // measured and REJECTED on that rule, and the rejection is as much of this table as the rows:
+        // `in_proj_z`'s deep winner IS its rank-0 (ratio 1.000, nothing to pin); `q_proj` gains 4.8 %
+        // against a median movement of 4.3 % (worst same-algo pair 12.9 %) and would buy 0.03 % of a wave;
+        // `k_proj+v_proj` gains 6.1 % against a 5.4 % worst movement on a 0.021 ms call, for 0.016 ms per
+        // wave. Any of them can be re-tried by name once a deeper or steadier field separates them.
+        //
+        // ---- shipped set: what `--gemm-pins all` puts in force --------------------------------------
+        //
+        // Two rows, and the SECOND one is here for a reason that is not "it is the fastest algo": it is here
+        // because *being pinned* is what earns a shape. §9's gu side named only the gateup row, and since
+        // `--gemm-pins <csv>` REPLACES the admissible set, that side ran `down_proj` with no pin at all —
+        // and an unpinned `down_proj` costs about a fifth of that family (mlp_down 32.16 ms vs 26.87 ms at
+        // 4096, 7.97 vs 6.61 at 1024, §9). D35 read that as a bad algo interacting with the new neighbour;
+        // D36 refuted it by naming this row explicitly: mlp_down came back at 26.82 / 6.56, i.e. +2.4 % /
+        // −0.5 % against the deep-field alternative and inside §9's own ±3.1 % / ±1.9 % null. So the cost
+        // axis is PIN COVERAGE, not algo identity, and the wave gain is the gateup row's alone (≈ −0.63 %).
+        // Numbers: `bench/performance-status.md` §9 and its same-day correction; raw medians
+        // `tmp/pinab/ab3.txt` (paired 3 reps, both widths, one lock hold). The `wall_ms` column still could
+        // not have adjudicated any of it: §9's null test reads family-row drift of +3.1 % at 4096 / +1.9 %
+        // at 1024 on a family no pin can touch, so only the pinned families' rows are readable. Both rows
+        // were admitted by the EXISTING numerics bands first, so no band moved for this.
+        //
+        //   shape               burst gain vs baseline      in situ                        verdict
+        //   gate_proj+up_proj   0.1293→0.1072 ms (§3f)      −10.0 % on its family, both    SHIPS (the win)
+        //   down_proj           already banked by D28       0.834 / 0.819 vs NO pin        SHIPS (coverage)
         v.push_back({"down_proj", kHidden, kIntermediate, kMaxWaveRows,
                      "890300000000000000000000000000000000000800000000", PinSet::kShipped});
-        // The four candidates from the deep field, derived by
-        // `prototype/gemm_algo_sweep/deep_pins.py` out of `tmp/wsjob/w64_128.log` (one window, 64
-        // candidates, 128 MiB, M=512) and matched byte-for-byte against the `ALGODUMP` capture of the
-        // same query - none of these hexes was reconstructed-and-trusted. Each row says what it is worth
-        // and what stands today, and the baseline for a shape that ALREADY has a pin is that pin, not
-        // rank-0: reading the deep winner against rank-0 here would book 0.97 ms per wave for
-        // `down_proj` when the shipped pin already banked most of it (the §3d trap, one layer over).
-        // NOT in force under `all`; each needs an in-situ A/B to become `kShipped`.
-        //
-        //   candidate                 today        candidate      saved/wave   admitted because (burst gain,
-        //                             ms/call      ms/call        ms           vs that shape's own window noise)
-        //   deep_gate_proj+up_proj    0.1293       0.1072         1.0608       17.1 % >  4.0 % median
-        //   deep_o_proj+out_proj      0.0853       0.0639         0.5136       25.1 % >  0.8 % median
-        //   deep_in_proj_qkv          0.2064       0.1822         0.4356       11.7 % >  1.6 % median
-        //   deep_down_proj            0.1160(pin)  0.1050         0.2644        9.5 % >  1.9 % median
-        //
-        // The noise column is not a taste: it is the median movement of the SAME algorithm's best_ms
-        // between the two windows on disk (12-deep tmp/wsjob/ws128.log vs 64-deep w64_128.log, keyed on
-        // the algo record, printed by `deep_pins.py --noise-log`). A gain that does not clear its own
-        // shape's movement is not a slow shape, it is noise with a hex string attached — and D28 is what
-        // a burst-only winner costs when it ships. Three shapes were measured and REJECTED on that rule,
-        // and the rejection is as much of this table as the rows: `in_proj_z`'s deep winner IS its rank-0
-        // (ratio 1.000, nothing to pin); `q_proj` gains 4.8 % against a median movement of 4.3 % (worst
-        // same-algo pair 12.9 %) and would buy 0.03 % of a wave; `k_proj+v_proj` gains 6.1 % against a
-        // 5.4 % worst movement on a 0.021 ms call, for 0.016 ms per wave. Any of them can be re-tried by
-        // name once a deeper or steadier field separates them.
         v.push_back({"deep_gate_proj+up_proj", kIntermediate, kHidden, kMaxWaveRows,
-                     "820400000000000000000000000000000000000800000000", PinSet::kCandidate});
+                     "820400000000000000000000000000000000000800000000", PinSet::kShipped});
+        //
+        // ---- candidate set: compiled in, reachable only by name ---------------------------------------
+        //
+        // A TIE against the shipped `down_proj` row, not a loser, and not shipped for `MIN_PCT_OF_WAVE`'s
+        // own reason rather than by measurement. Burst it is the best this shape has (0.1160 → 0.1050 ms/call
+        // against the incumbent as baseline, 9.5 % — clear of this shape's own 1.9 % cross-window movement,
+        // and 1.096x over rank-0 as well, §3d). In situ the two are indistinguishable: paired in one lock
+        // hold, `mlp_down` measures 26.19 with this algo and 26.82 with the incumbent at 4096, and the sign
+        // FLIPS at 1024 (6.59 vs 6.53) — both inside the ±3.1 % / ±1.9 % null, so no measurement separates
+        // them. A tie buys nothing measurable, and every shipped pin is a re-capture obligation on the next
+        // hipBLASLt bump (the A-32 class: a library rebuild can change what a stored record means), so the
+        // incumbent keeps the slot and this stays reachable by name. The earlier claim that this row was
+        // superseded by an L2 interaction is DEAD — D36 showed that harm was the shape running with no pin
+        // at all while a subset spec named only the gateup row. Recorded as `tie` in
+        // `prototype/gemm_algo_sweep/insitu_verdicts.tsv`, which `deep_pins.py` refuses to ship.
+        //
+        // What would reopen it, stated as a number so this is falsifiable and not a preference: a paired
+        // in-situ re-take that puts `mlp_down` outside the null on this row's side at BOTH widths (i.e.
+        // better by more than 3.1 % at 4096 AND more than 1.9 % at 1024, every rep). D36's refutation run
+        // came out −2.4 % / +1.0 % on exactly that test, so the burden is on a re-take, not on this row.
+        // Reachable meanwhile: `--gemm-pins down_proj,deep_down_proj` is refused (one shape, two pins), but
+        // naming this row alone in place of the shipped one is the A/B anyone would want.
+        v.push_back({"deep_down_proj", kHidden, kIntermediate, kMaxWaveRows,
+                     "690300000000000000000000000000000000000800000000", PinSet::kCandidate});
+        // Rejected in situ for the SECOND time. Both were admitted at burst (`o_proj+out_proj` by 1.34x of
+        // its shipping baseline, `in_proj_qkv` by 1.13x, each clearing its own cross-window noise), and both
+        // went the other way in situ: the `proj` family row moved +26 % / +27 % (`all` 99.23 → `cand`
+        // 125.18 ms at 4096; 24.70 → 31.29 at 1024, §9) — the identical pair D28 rejected from an 8-deep
+        // field, now rejected again from a 64-deep one, which is the third independent confirmation in this
+        // tree that a warm-burst per-call winner on these shapes is not an in-situ prediction. They stay
+        // candidates — reachable by name for a future window, unreachable by default — and `deep_pins.py`
+        // re-derives them as admitted-at-burst while `insitu_verdicts.tsv` holds the verdict that keeps
+        // them out of the shipped set.
         v.push_back({"deep_o_proj+out_proj", kHidden, kQwidth, kMaxWaveRows,
                      "8e0300000000000000000000000000000000000800000000", PinSet::kCandidate});
         v.push_back({"deep_in_proj_qkv", kQkvRows, kHidden, kMaxWaveRows,
                      "920400000000000000000000000000000000000800000000", PinSet::kCandidate});
-        v.push_back({"deep_down_proj", kHidden, kIntermediate, kMaxWaveRows,
-                     "690300000000000000000000000000000000000800000000", PinSet::kCandidate});
         return v;
     }();
     return kPins;

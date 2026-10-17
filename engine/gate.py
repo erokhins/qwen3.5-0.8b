@@ -786,11 +786,18 @@ WAVE_ROW_BAND_SOURCE = {
            " (dec64f/logits45.bin) over 9 fixtures/2951 rows; the line 2.75e-03 is that max x 1.2476"
            " — the probe's stated 1.25 margin would owe 2.755e-03, and the line is kept at the tighter"
            " round number below it; engine/wave_band_floor_probe.py 2026-10-16 with `--gemm-pins all`"
-           " against the SHIPPING algo table: engine/kernels_gemm.cpp `algo_pins()`, ONE entry"
-           " (`down_proj` 1024x3584 @ M=512, D28). The first version of this line named the three-entry"
-           " table the binary no longer carries; re-taken so provenance matches the build. No pin can"
-           " reach the row that carries this number (dec64f's widest body is 17 rows, pins bind only at"
-           " M=512), which is why the trim left the max where it was"),
+           " against the SHIPPING algo table: engine/kernels_gemm.cpp `algo_pins()`, which held ONE"
+           " entry then (`down_proj` 1024x3584 @ M=512, D28) and holds TWO since D35, restated by D36"
+           " (`deep_gate_proj+up_proj` 3584x1024 and `down_proj` 1024x3584, both @ M=512). The"
+           " first version of this line named the three-entry table the binary no longer carries;"
+           " re-taken so provenance matches the build. No pin can reach the row that carries THIS"
+           " number (dec64f's widest body is 17 rows, pins bind only at M=512), which is why the trim"
+           " left the max where it was — and why the promotion does not either. What the promotion does"
+           " move is the 512-row fixtures, and those were priced for exactly this two-pin set in"
+           " §3e of prototype/gemm_algo_sweep/results.md at 1.2446e-04 on wide640f, i.e. 22x inside"
+           " this line, so nothing here widens; a fresh"
+           " `engine/wave_band_floor_probe.py --gemm-pins all` under the two shipped pins is the"
+           " re-take that would restate the table itself)."),
 }
 
 
@@ -3786,6 +3793,45 @@ def gemm_pin_checks(run: dict, *, stand_in: bool) -> None:
                      " different sets")
                   + (" (stand-in echo)" if stand_in else ""))
 
+    # `cand=<in force>/<candidates in the table>` is the third half of the same line, and it is the one
+    # that guards the promotion itself: `all` means SHIPPED, and the moment a candidate could bind under
+    # it, every log this file ever produced would be ambiguous about which kernel served the shape. Under
+    # `all` or `none` the owed answer is zero candidates in force, and that is decidable here without
+    # knowing which rows are candidates — unlike a csv, where the gate cannot tell a candidate name from a
+    # shipped one (the engine owns that, and `deep_pins.py`'s CHECK-TABLE is what adjudicates it against
+    # `insitu_verdicts.tsv`), so a csv only owes `in force <= names given`.
+    cand_field = run.get("gemm", {}).get("cand")
+    if cand_field is None:
+        check(False, "the run said whether any candidate pin was in force (`cand=`)",
+              "its GEMM line carried `pins=` but no `cand=`, so this log cannot show that `all` meant"
+              " the shipped set and nothing else" + (" (dry-run: the stand-in does echo the field, and"
+                                                    " `--selftest`'s mismatch case is what proves this"
+                                                    " check discriminates)" if stand_in else ""))
+    else:
+        cin, sep2, ctot = str(cand_field).partition("/")
+        if not (cin.isdigit() and sep2 and ctot.isdigit()):
+            check(False, "the run's `cand=` field is readable", f"`cand={cand_field}` does not read"
+                  " `<in force>/<candidates in the table>` — the same refusal as `pins=`: guessing "
+                  " which half is which is how a candidate gets read as shipped")
+        else:
+            cin, ctot = int(cin), int(ctot)
+            if parse_pins(GEMM_PINS) in (["*"], []):
+                check(cin == 0,
+                      f"`--gemm-pins {GEMM_PINS}` bound no candidate pin"
+                      " (candidates bind only when named, so `all` stays a synonym for shipped)",
+                      f"GEMM line echoed cand={cand_field}" + (" — it did" if cin == 0 else
+                       f": {cin} candidate(s) ran while the spec names none, which means `all` "
+                       "has stopped meaning `the shipped set` and every band and verdict taken under"
+                       " it is now a claim about an unknown kernel")
+                      + (" (stand-in echo)" if stand_in else ""))
+            else:
+                check(cin <= len(parse_pins(GEMM_PINS)),
+                      f"the run's candidate count is inside its own spec ({len(parse_pins(GEMM_PINS))}"
+                      f" name(s) given)",
+                      f"GEMM line echoed cand={cand_field} against --gemm-pins {GEMM_PINS}, which is"
+                      " more candidates in force than names in the spec — one line, two configs"
+                      + (" (stand-in echo)" if stand_in else ""))
+
     # The pool the run queried, asserted the same way. `--gemm-heur` is a runtime knob, so a log that does
     # not say its width cannot be read as "the shipped pool ran"; and this gate holds no width flag, so
     # the only admissible answer is the shipped default. The reason that matters is not the common case
@@ -3833,6 +3879,44 @@ def heuristic_width_default() -> int:
                          " this gate asserts runs used has to be read from the code that uses it, not"
                          " remembered")
     return int(m.group(1))
+
+
+def shipped_pin_count() -> int:
+    """How many rows `algo_pins()` marks `PinSet::kShipped`, counted out of the C++ source.
+
+    Read, never remembered, for the standing reason (`heuristic_width_default()` below, `wave_row_ceiling()`
+    above): a literal here would be a second authority over a table the engine owns, and this file has
+    already been caught once carrying a band whose pin set the binary no longer had
+    (`prototype/gemm_algo_sweep/results.md` §3d, D28). What it is for: the dry-run stand-in has no engine
+    to ask, so it needs a shipped count to echo `pins=<i>/<n>` with, and the selftest's clean case must
+    expect the same number the stand-in prints or the selftest is checking a spelling nobody emits. When D35
+    promoted the set from one row to two, and when D36 swapped one of those rows back, every literal of
+    \"one\" or \"two\" in this file would have had to be found by hand; counted this way, the stand-in and its
+    clean case both moved on their own.
+    """
+    text = (ROOT / "engine" / "kernels_gemm.cpp").read_text()
+    n = len(re.findall(r'"[0-9a-f]{48}",\s*PinSet::kShipped', text))
+    if n == 0:
+        raise SystemExit("gate: no `PinSet::kShipped` row in engine/kernels_gemm.cpp — either the shipped"
+                         " set is genuinely empty (then `--gemm-pins all` means nothing and this gate"
+                         " should say so loudly) or the row shape changed and the count must be read"
+                         " from the real spelling, not guessed")
+    return n
+
+
+def standin_pin_counts(names: list[str]) -> tuple[int, int]:
+    """(in force, denominator) for the dry-run stand-in's `pins=` echo, from the shipped count.
+
+    One helper, because the stand-in and the selftest's clean case must not compute this twice and drift.
+    The stand-in still has no table of its own: for a csv it echoes \"every name you gave me is in force\",
+    which is stand-in arithmetic by design and is labelled as such where the check reads it.
+    """
+    if not names:
+        return 0, shipped_pin_count()
+    if names == ["*"]:
+        n = shipped_pin_count()
+        return n, n
+    return len(names), shipped_pin_count()
 
 
 def wave_row_ceiling() -> int:
@@ -4742,7 +4826,7 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
             break_y0: bool = False, y0_alt: bool = False,
             slack_alt: int = -1, break_slack: int = -1, break_runnerup: int = -1,
             break_pins: int = -1, break_pin_names: str = "",
-            break_heur_width: int = -1) -> tuple[
+            break_heur_width: int = -1, break_cand: str = "") -> tuple[
                 str, int]:
     """A stand-in for `decode_run`, on the CPU, that replays the pins as if the engine were perfect.
 
@@ -4799,23 +4883,30 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
     # every real library run was red. `--selftest` asserts this spelling.
     # The route echo has a sibling the real engine prints and this stand-in has to fake: `pins=`. This
     # file has no algo table to count — `algo_pins()` is C++, and the counts belong to the process that
-    # ran — so the two numbers are stand-in arithmetic over the spec: a table exactly as wide as the
-    # names asked for, all of it in force unless the spec says `none`. That is enough to exercise the
-    # parser and the equality; `--break-pins` is what proves the equality can FAIL, and a real run counts
-    # its own table. Same standing limit as `hipblas=dry-run` below.
+    # ran — so the two numbers come from `standin_pin_counts()`, which reads the SHIPPED count out of the
+    # source and otherwise echoes the spec back. That is enough to exercise the parser and the equality;
+    # `--break-pins` is what proves the equality can FAIL, and a real run counts its own table. Same
+    # standing limit as `hipblas=dry-run` below.
     # `pin_names=` is faked the same way, from the spec: the stand-in has no rows to name, so it names
     # what it was asked for (`--break-pin-names` overrides that to prove the name check discriminates).
     pins_names = parse_pins(GEMM_PINS)
-    pins_total = 1 if pins_names == ["*"] else max(len(pins_names), 1)
-    pins_in = 0 if not pins_names else pins_total
+    pins_in, pins_total = standin_pin_counts(pins_names)
     if break_pins >= 0:
         pins_in = break_pins
+    # The names a stand-in prints are stand-in names: `shipped-1…N` for the shipped set, where N comes
+    # from the source rather than from a remembered \"one\", the given names for a csv, `none` for none.
     pin_names_echo = break_pin_names if break_pin_names else (
-        "none" if not pins_names else ("shipped-1" if pins_names == ["*"] else ",".join(pins_names)))
+        "none" if not pins_names else
+        ",".join(f"shipped-{i + 1}" for i in range(pins_in)) if pins_names == ["*"]
+        else ",".join(pins_names))
+    # `cand=` is the candidate half of the same line, and the stand-in has no candidates to count either:
+    # under `all`/`none` it owes zero in force, which is the only half of this field this file can decide.
+    cand_echo = break_cand if break_cand else ("0/0" if pins_names == ["*"] or not pins_names
+                                              else f"{len(pins_names)}/{len(pins_names)}")
     lines.append("GEMM route=" + ("hipblaslt" if GEMM_ROUTE == "lt" else "hipblas")
                  + " handle=1 workspace_mib=128 dtype=bf16-in/bf16-C/f32-compute"
                  + (f" algo_source=heuristic-rank-0-per-shape heur_width={break_heur_width if break_heur_width >= 0 else heuristic_width_default()}"
-                    f" pins={pins_in}/{pins_total} pin_names={pin_names_echo}"
+                    f" pins={pins_in}/{pins_total} pin_names={pin_names_echo} cand={cand_echo}"
                     if GEMM_ROUTE == "lt" else "")
                  + " stream=default" if route_is_library() else "GEMM route=hand")
     # Same reasoning as the GEMM line above, and the same limit: the stand-in has no hipBLAS to ask, so
@@ -5282,21 +5373,24 @@ def selftest(fixture: str = "dec8") -> int:
     # pin, or the reverse, reads as a pin verdict while pricing rank-0.
     if GEMM_ROUTE == "lt":
         names = parse_pins(GEMM_PINS)
-        table = 1 if names == ["*"] else max(len(names), 1)
-        in_force = 0 if not names else table
+        # Derive the stand-in's own arithmetic from the same helper the stand-in uses, or this "clean"
+        # case would be pinning a spelling the stand-in no longer prints — which is how a selftest becomes
+        # a second authority over the thing it is supposed to be checking.
+        in_force, table = standin_pin_counts(names)
         wrong_pins = 0 if in_force else 1
-        # The names check needs its own injection, and the wrong list depends on what the spec owes:
-        # two names where `all` owes one, one name where `none` owes none, and a substituted name where
-        # a csv owes its own list. Deriving it per spec is what keeps the case meaningful for whatever
-        # `--gemm-pins` the selftest is being run under.
-        wrong_names = ("a,b" if names == ["*"] else
+        # The names check needs its own injection, and the wrong list depends on what the spec owes: a
+        # short list where `all` owes the shipped set, one name where `none` owes none, and a substituted
+        # name where a csv owes its own list. Deriving it per spec is what keeps the case meaningful for
+        # whatever `--gemm-pins` the selftest is being run under.
+        wrong_names = ("a" if names == ["*"] else
                        "someone" if not names else
                        ",".join(["not_a_pin_in_force"] + names[1:]))
         cases += [
             ([], 0, f"echoed pins={in_force}/{table}",
-             "the clean stand-in carries the engine's `pins=<in force>/<in the table>` field and the"
-             " check read BOTH halves of it: a field this file could not parse prints no such line, and"
-             " a binary that stopped printing it altogether hits the missing-field FAIL two sections up"),
+             "the clean stand-in carries the engine's `pins=<shipped in force>/<shipped rows>` field and"
+             " the check read BOTH halves of it: a field this file could not parse prints no such line,"
+             " and a binary that stopped printing it altogether hits the missing-field FAIL two sections"
+             " up"),
             (["--break-pins", str(wrong_pins)], 1,
              "[FAIL] the run ran the algo-pin set this gate is judging it under",
              f"the stand-in echoed {wrong_pins} pin(s) in force while --gemm-pins {GEMM_PINS} owes"
@@ -5309,10 +5403,15 @@ def selftest(fixture: str = "dec8") -> int:
               "the run named exactly the pins this gate asked for"),
              f"the stand-in echoed pin_names={wrong_names} while --gemm-pins {GEMM_PINS} owes"
              + (" no pins at all" if not names else
-                " one shipped name" if names == ["*"] else f" {names}")
-             + ". The counts can agree while the SETS do not — `down_proj` (shipped) and"
-               " `deep_down_proj` (candidate) are both exactly one pin — and a log that cannot tell"
-               " them apart cannot adjudicate a candidate at all"),
+                f" the {in_force}-row shipped set" if names == ["*"] else f" {names}")
+             + ". The counts can agree while the SETS do not — `down_proj` (D28's pin, restored by D36)"
+               " and `deep_gate_proj+up_proj` are each exactly one pin; this check is about the set"),
+            (["--break-cand", "2/3"], 1,
+             "bound no candidate pin",
+             "the stand-in echoed cand=2/3 under `--gemm-pins all`, i.e. two CANDIDATE kernels served"
+             " the wave while the spec names no candidate at all. That is the drift a promotion invites:"
+             " if `all` could acquire a candidate, every band and token verdict taken under it would be"
+             " a claim about an unknown kernel, and this line is what stops that being silent"),
             (["--break-heur-width", str(heuristic_width_default() + 8)], 1,
              "the run queried the shipped heuristic pool",
              f"the stand-in echoed heur_width={heuristic_width_default() + 8} while the shipped"
@@ -5970,21 +6069,28 @@ def main() -> int:
                          " given, passed straight to `decode_run --gemm-pins`: `all` (the default, and"
                          " `decode_run`'s own default), `none` (the heuristic's rank-0 everywhere), or"
                          " a comma-separated list of pin names. The table itself is"
-                         " `engine/kernels_gemm.cpp::algo_pins()`, which holds TWO sets: the shipped"
-                         " rows adjudicated in situ (one today, `down_proj`, trimmed from three by"
-                         " D28) and the CANDIDATE rows the deep sweep derived (`deep_*`), which bind"
-                         " only when named — so `all` means the shipped set and never silently acquires"
-                         " a candidate. Naming a candidate here is how an in-situ A/B gets gated under"
-                         " the existing bands. This file never copies the table's size: the run echoes"
-                         " `pins=<shipped in force>/<shipped rows>` and `pin_names=<list>`, and the"
-                         " checks are equalities on both, so `all` means \"every shipped row the binary"
-                         " has\" and a same-size-but-wrong set still gets caught — a count alone cannot"
-                         " tell `down_proj` from `deep_down_proj`. Named on every run and asserted"
-                         " against those echoes, exactly like `--gemm`: a log that says `lt` but not"
-                         " which algorithm ran cannot be cited for a pin claim either way, and D28's"
-                         " red `wide520f` row is what that blindness cost. Only meaningful with"
-                         " `--gemm lt`, and a spec that names pins on another route is refused rather"
-                         " than judged.")
+                         " `engine/kernels_gemm.cpp::algo_pins()`, which holds TWO sets: the shipped rows"
+                         " adjudicated in situ (two today, `down_proj` and `deep_gate_proj+up_proj`: D28's"
+                         " row, restored by D36 when §9's same-day correction refuted the reason it had"
+                         " been retired, and the gateup row §9 promoted) and the CANDIDATE rows, which"
+                         " bind only when named — so `all` means the shipped set and never silently"
+                         " acquires a candidate. And a named subset REPLACES the set: the §9 side that"
+                         " named only the gateup row left `down_proj` unpinned, and an unpinned"
+                         " `down_proj` costs about a fifth of that family, so read a spec from the run's"
+                         " `pin_names=` echo, never from its name — a tie may not buy a pin either. What"
+                         " decides a set is not this file: it is `deep_pins.py`'s CHECK-TABLE against"
+                         " `insitu_verdicts.tsv`, so a pin moves only with a measurement behind it. Naming"
+                         " a candidate here is how an in-situ A/B gets gated under the existing bands."
+                         " This file never copies the table's size: the run echoes"
+                         " `pins=<shipped in force>/<shipped rows>`, `pin_names=<list>` and"
+                         " `cand=<in force>/<candidates>`, and the checks are equalities on all three, so"
+                         " `all` means \"every shipped row the binary has\" and a same-size-but-wrong set"
+                         " still gets caught — a count alone cannot tell `down_proj` from"
+                         " `deep_down_proj`. Named on every run and asserted against those echoes,"
+                         " exactly like `--gemm`: a log that says `lt` but not which algorithm ran cannot"
+                         " be cited for a pin claim either way, and D28's red `wide520f` row is what that"
+                         " blindness cost. Only meaningful with `--gemm lt`, and a spec that names pins on"
+                         " another route is refused rather than judged.")
     ap.add_argument("--write-provenance", action="store_true",
                     help="with a real (not --dry-run) run: write engine/numerics_provenance.json from"
                          " this run's NUMERICS line (wave-row ceiling + hipBLAS version, D-11) and"
@@ -6099,6 +6205,11 @@ def main() -> int:
                          " `kHeuristicWidth`. A run that queried a different pool than the gate"
                          " assumes is a different config, and the only witness is that echo, so the"
                          " check on it needs an injection to be worth anything.")
+    ap.add_argument("--break-cand", default="", metavar="I/T",
+                    help="with --dry-run: echo this as the run's `cand=` instead of what the spec owes."
+                         " The interesting injection is a nonzero candidate count under `--gemm-pins all`:"
+                         " `all` meaning `shipped and nothing else` is the property that makes every"
+                         " pinned-set verdict in this tree citable, so it needs an injection of its own.")
     ap.add_argument("--break-wave", action="store_true",
                     help="with --dry-run: make the wide-wave side of section (h) report one-row-per-"
                          "token launch counters, which is what a refactor that silently drops back to "
@@ -6378,7 +6489,8 @@ def main() -> int:
                              break_runnerup=args.break_runnerup,
                              break_pins=args.break_pins,
                              break_pin_names=args.break_pin_names,
-                             break_heur_width=args.break_heur_width)
+                             break_heur_width=args.break_heur_width,
+                             break_cand=args.break_cand)
         notes.append("DRY RUN: the gate's own plumbing was exercised against a stand-in that replays"
                      " the pins. NOTHING ENGINE-RELATED WAS MEASURED. It exists so the first device"
                      " run is not also the first time this file parses a STEP line. Section (d) is"
@@ -6763,9 +6875,13 @@ def main() -> int:
              f" Flip line in force, per pairing — cross-width (two engine sides, no reference):"
              f" {flip_room_line('cross-width')} | reference (pin vs engine):"
              f" {flip_room_line('reference')}.")
-          + (f" Algo pins in force: --gemm-pins {GEMM_PINS} (asserted against the run's own `pins=`"
-             " echo above) — the pinned algo and the heuristic's rank-0 are different kernels, so a"
-             " wave-width verdict on this route is a verdict about THIS pin set and no other."
+          + (f" Algo pins in force: --gemm-pins {GEMM_PINS}, the run echoed"
+             f" pins={run.get('gemm', {}).get('pins', '?')}"
+             f" pin_names={run.get('gemm', {}).get('pin_names', '?')}"
+             f" cand={run.get('gemm', {}).get('cand', '?')} (all three asserted above) — the pinned algo"
+             " and the heuristic's rank-0 are different kernels, and coverage is the axis that bites: an"
+             " UNpinned shape costs about a fifth of its family once a neighbour changes (D36, on §9's"
+             " correction), so a wave-width verdict here is a verdict about THIS pin set, named above."
              if GEMM_ROUTE == "lt" else "")
           + (" The cascade floor is ARMED: no step is judged by a cap tighter than the measured"
              f" hand<->library cascade (cos deficit {CASCADE_BAND['row_1cos_max']:.0e}, meanrel"
