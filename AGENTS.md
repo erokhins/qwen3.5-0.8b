@@ -348,3 +348,26 @@ Consequences for the parent, in order:
 - **The 300 s constant is the detector's, not the machine's.** Two notices at the same interval, on two
   different runs, in unrelated phases, is a signature of a timer; look for a periodic cause before
   diagnosing the child.
+
+## A paired A/B against a stale binary reads as a clean null — assert a behavioural canary inside the window (2026-10-17)
+
+Appended at the end for the line-citation reason stated in the citation section.
+
+`engine/build.sh` is not bit-reproducible on this box, so `cmp` between two saved binaries proves only that
+they are two builds, **not** that either carries the change under test. The first D30 1.7′ A/B therefore timed
+a pre-change binary as the `new` side and reported "nothing moved" — a null that would have refuted an item worth
+−0.5 % of wave — while every parity field in the run stayed green:
+
+- `plan_match=1` cannot detect staleness, because `wave_plan_bill` is compiled *into* `decode_run`: a stale
+  binary agrees with itself. Any self-consistency check that lives inside the binary under test is blind to the
+  one failure mode that matters here.
+- Discarding the build log (`>/dev/null 2>&1`) removed the only other signal, and this session had already been
+  bitten by discarded output once before (§"a gate driver whose parser silently matches nothing reports PASS").
+
+**The rule: every A/B script asserts a behavioural canary before it times anything** — a field the change is
+*required* to move, read in the same breath as the measurement, aborting the script if it does not read as
+expected on both sides. In §13 that was the per-token bill line (`new` must print `cast=97 other=20 total=406`,
+`base` must print `115/424`); for a change that moves no plan field, pick a launcher counter or a dump hash.
+Reference implementation: `tmp/gcc/run_ab_17p_retake.sh`. The general form is the same class as every other
+empty-parse failure logged in this file — a check whose input can silently fail to arrive must be shown to have
+arrived, in the window that produces the number.
