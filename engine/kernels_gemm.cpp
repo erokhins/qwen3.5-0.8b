@@ -150,6 +150,22 @@ std::string build_route() {
 // default; the wider answer is here so a shape whose measured winner is NOT rank-0 can be adopted by a
 // pin row without a second selection path. The query is per (shape, M) at plan time, never per call.
 constexpr int kHeuristicWidth = 8;
+// The deepest pool any window in this tree has actually priced is 64 — D31 of
+// progress/2026-10-16/prefill-decision-log-2026-10-16.md, whose deep sweep found winners sitting at ranks
+// 16-55 and booked the ≈ 2.2 % ceiling this knob exists to chase. That is the ceiling of the knob rather
+// than a library limit: asking for more is refused rather than trusted, because past 64 nobody has
+// measured what the query costs or what it returns.
+constexpr int kHeuristicWidthMax = 64;
+// `--gemm-heur N`. A knob and not a define because the pool a run queried is a property of the run: an
+// in-situ A/B has to ask for the deep pool and the shallow pool with one binary in one window, and the
+// prefix test (`prototype/gemm_algo_sweep/deep_pins.py --prefix-check`) says the two pools are NOT nested
+// — rank-0 is identical at width 8 and width 64 for all seven shapes, but the lists diverge from as low
+// as rank 2, and the sets themselves differ — so a rebuilt default could not be compared with the shipped
+// one in the same window. Defaulting to
+// `kHeuristicWidth` keeps every existing run's behaviour: the engine takes the first admissible record,
+// which at both widths is rank-0 (`RESULT default_seq=0` for all seven shapes at M=512), so widening
+// the pool is inert until a pin names something from it.
+int g_heuristic_width = kHeuristicWidth;
 
 // The shape census the plan pass walks: the same seven distinct (N,K) leaves that
 // `prototype/gemm_algo_sweep --list` books and exits 0 on, spelled with the engine's own constants
@@ -178,12 +194,23 @@ constexpr ShapeRow kLtShapes[] = {
 // same version of the library to save compute time", hipblaslt.h:419-433), and the same sentence is
 // why a pin is provenance-bound: after a hipBLASLt version bump (printed on the `GEMM` line) a pin must
 // be re-captured, not inherited.
+// Which set a row belongs to, and the whole point of this enum is that the two are not the same
+// authority. `kShipped` is the adjudicated set: what `--gemm-pins all` — the default, and every log
+// taken since D28 — puts in force. `kCandidate` is compiled in so a deep-field winner can be A/B'd
+// in situ by name, which is the only instrument that can decide it (D28: two of three warm-burst
+// winners were in-situ losers), without the default silently becoming an unadjudicated pin. Promoting a
+// row is the one-word edit `PinSet::kCandidate` -> `PinSet::kShipped` on that row; nothing else reads
+// the enum. Keeping both sets in ONE table is what makes the promotion an edit rather than a move, and
+// it is also what makes the echo honest: the run can print which set each in-force row came from.
+enum class PinSet { kShipped, kCandidate };
+
 struct AlgoPin {
     const char* name;
     int n;
     int k;
     int m;
     const char* algo_hex;
+    PinSet set;
 };
 
 // ONE shape is pinned today, and the reason it is pinned is the reason the table exists at all: at the
@@ -246,9 +273,17 @@ struct AlgoPin {
 // family do not move by the same factor, so the subset question can only be answered in situ.
 std::vector<std::string> g_pin_allow{std::string("*")};
 
-bool pin_allowed(const char* name) {
+// `*` means "every SHIPPED row", which is what `all` has always meant and what every log taken since D28
+// ran under. A candidate row therefore binds only when an operator names it, which is the whole
+// distinction this exists to keep: the default must never silently acquire a pin that nobody adjudicated
+// in situ, and one burst winner already cost `proj` 5.5 ms by that route (§3d).
+bool pin_allowed(const AlgoPin& pin) {
     for (const std::string& s : g_pin_allow) {
-        if (s == "*" || s == name) return true;
+        if (s == "*") {
+            if (pin.set == PinSet::kShipped) return true;
+        } else if (s == pin.name) {
+            return true;
+        }
     }
     return false;
 }
@@ -263,10 +298,55 @@ const std::vector<AlgoPin>& algo_pins() {
         // in-situ loser, so a pin earns its place in situ or not at all. `down_proj` stayed: 7.81 ->
         // 6.78 ms against the library's 6.43 ms, the only shape where rank-0 was a regression.
         v.push_back({"down_proj", kHidden, kIntermediate, kMaxWaveRows,
-                     "890300000000000000000000000000000000000800000000"});
+                     "890300000000000000000000000000000000000800000000", PinSet::kShipped});
+        // The four candidates from the deep field, derived by
+        // `prototype/gemm_algo_sweep/deep_pins.py` out of `tmp/wsjob/w64_128.log` (one window, 64
+        // candidates, 128 MiB, M=512) and matched byte-for-byte against the `ALGODUMP` capture of the
+        // same query - none of these hexes was reconstructed-and-trusted. Each row says what it is worth
+        // and what stands today, and the baseline for a shape that ALREADY has a pin is that pin, not
+        // rank-0: reading the deep winner against rank-0 here would book 0.97 ms per wave for
+        // `down_proj` when the shipped pin already banked most of it (the §3d trap, one layer over).
+        // NOT in force under `all`; each needs an in-situ A/B to become `kShipped`.
+        //
+        //   candidate                 today        candidate      saved/wave   admitted because (burst gain,
+        //                             ms/call      ms/call        ms           vs that shape's own window noise)
+        //   deep_gate_proj+up_proj    0.1293       0.1072         1.0608       17.1 % >  4.0 % median
+        //   deep_o_proj+out_proj      0.0853       0.0639         0.5136       25.1 % >  0.8 % median
+        //   deep_in_proj_qkv          0.2064       0.1822         0.4356       11.7 % >  1.6 % median
+        //   deep_down_proj            0.1160(pin)  0.1050         0.2644        9.5 % >  1.9 % median
+        //
+        // The noise column is not a taste: it is the median movement of the SAME algorithm's best_ms
+        // between the two windows on disk (12-deep tmp/wsjob/ws128.log vs 64-deep w64_128.log, keyed on
+        // the algo record, printed by `deep_pins.py --noise-log`). A gain that does not clear its own
+        // shape's movement is not a slow shape, it is noise with a hex string attached — and D28 is what
+        // a burst-only winner costs when it ships. Three shapes were measured and REJECTED on that rule,
+        // and the rejection is as much of this table as the rows: `in_proj_z`'s deep winner IS its rank-0
+        // (ratio 1.000, nothing to pin); `q_proj` gains 4.8 % against a median movement of 4.3 % (worst
+        // same-algo pair 12.9 %) and would buy 0.03 % of a wave; `k_proj+v_proj` gains 6.1 % against a
+        // 5.4 % worst movement on a 0.021 ms call, for 0.016 ms per wave. Any of them can be re-tried by
+        // name once a deeper or steadier field separates them.
+        v.push_back({"deep_gate_proj+up_proj", kIntermediate, kHidden, kMaxWaveRows,
+                     "820400000000000000000000000000000000000800000000", PinSet::kCandidate});
+        v.push_back({"deep_o_proj+out_proj", kHidden, kQwidth, kMaxWaveRows,
+                     "8e0300000000000000000000000000000000000800000000", PinSet::kCandidate});
+        v.push_back({"deep_in_proj_qkv", kQkvRows, kHidden, kMaxWaveRows,
+                     "920400000000000000000000000000000000000800000000", PinSet::kCandidate});
+        v.push_back({"deep_down_proj", kHidden, kIntermediate, kMaxWaveRows,
+                     "690300000000000000000000000000000000000800000000", PinSet::kCandidate});
         return v;
     }();
     return kPins;
+}
+
+// Counted from the one table, never from a remembered number: the GEMM line prints both of these and
+// gate.py asserts against them, so a hardcoded width here would be a second authority over a table
+// owned by `algo_pins()` - the drift D28 records for the band.
+size_t pins_in_set(PinSet set) {
+    size_t n = 0;
+    for (const AlgoPin& p : algo_pins()) {
+        if (p.set == set) ++n;
+    }
+    return n;
 }
 
 // An all-zero `hipblasLtMatmulAlgo_t` is an uninitialised one, and launching it is the fault the sweep
@@ -388,10 +468,33 @@ std::string build_lt_route() {
     // where a band was cited against a pin set the binary no longer used). With the denominator in the
     // line every spec is an equality: `all` means allowed == total, `none` means allowed == 0, and a
     // csv means allowed == its own length. See `gemm_pin_checks` in engine/gate.py.
+    // `pins=<in force>/<SHIPPED rows>`, both counted by THIS process. The denominator is the shipped
+    // set and not the whole table, and that is what keeps `all` meaning exactly what it meant before
+    // candidates existed: gate.py's equality is `all -> allowed == total`, so with a 4-row candidate
+    // class folded into the denominator every `--gemm-pins all` gate in this tree would have gone red
+    // for a reason that was arithmetic and not measurement. The candidate class is therefore a third
+    // number (`cand=<in force>/<candidates>`), and the names actually in force are printed verbatim in
+    // `pin_names=` - which is the field that makes a candidate A/B auditable: a log that says `lt` but
+    // not WHICH algo each shape served is the blindness D28's `wide520f` row was unattributable because
+    // of. See `gemm_pin_checks` in engine/gate.py.
     os << "route=hipblaslt handle=1 workspace_mib=" << (kWorkspaceBytes >> 20)
-       << " version=" << lt_version << " algo_source=heuristic-rank-0-per-shape pins="
-       << [] { size_t n = 0; for (const AlgoPin& p : algo_pins()) { if (pin_allowed(p.name)) ++n; } return n; }()
-       << "/" << algo_pins().size()
+       << " version=" << lt_version << " algo_source=heuristic-rank-0-per-shape"
+       << " heur_width=" << g_heuristic_width << " pins="
+       << [] { size_t n = 0; for (const AlgoPin& p : algo_pins()) { if (pin_allowed(p)) ++n; } return n; }()
+       << "/" << pins_in_set(PinSet::kShipped)
+       << " pin_names="
+       << [] {
+              std::string s;
+              for (const AlgoPin& p : algo_pins()) {
+                  if (!pin_allowed(p)) continue;
+                  if (!s.empty()) s += ",";
+                  s += p.name;
+              }
+              return s.empty() ? std::string("none") : s;
+          }()
+       << " cand="
+       << [] { size_t n = 0; for (const AlgoPin& p : algo_pins()) { if (p.set == PinSet::kCandidate && pin_allowed(p)) ++n; } return n; }()
+       << "/" << pins_in_set(PinSet::kCandidate)
        << " stream=default";
     r.description = os.str();
     return r.description;
@@ -432,31 +535,53 @@ LtPlan& lt_plan(LtRoute& r, const char* name, int n, int k, int m, std::string& 
     size_t ws_requested = 0;
     float waves = 0.0f;
     int returned = 0, skipped_ws = 0, skipped_state = 0;
+    // Collect every in-force row for THIS (N,K,M) before deciding, rather than taking the first match:
+    // `down_proj` (shipped) and `deep_down_proj` (candidate) are the same shape, so a loop that broke on
+    // the first hit would silently let table order pick between them and never notice the collision. Two
+    // in-force rows for one shape is a spec that asks an unanswerable question, so it is refused.
+    const AlgoPin* match = nullptr;
+    int matches = 0;
     for (const AlgoPin& pin : algo_pins()) {
         if (pin.n != n || pin.k != k || pin.m != m) continue;
-        if (!pin_allowed(pin.name)) continue;  // filtered out by `--gemm-pins`; rank-0 stands
+        if (!pin_allowed(pin)) continue;  // filtered out by `--gemm-pins`; rank-0 stands
+        ++matches;
+        match = &pin;
+    }
+    if (matches > 1) {
+        throw std::runtime_error(std::string("gemm lt: two pins are in force for the same shape (N=")
+                                 + std::to_string(n) + " K=" + std::to_string(k) + " M="
+                                 + std::to_string(m) + "), so which one runs would be decided by "
+                                 "table order. Name exactly one per shape - for down_proj that is "
+                                 "`down_proj` (shipped) or `deep_down_proj` (candidate), not both");
+    }
+    if (match != nullptr) {
+        const AlgoPin& pin = *match;
         hipblasLtMatmulAlgo_t pinned{};
         if (!algo_from_hex(pin.algo_hex, pinned) || algo_all_zero(pinned)
             || pinned.max_workspace_bytes > kWorkspaceBytes) {
-            throw std::runtime_error(std::string("gemm lt: the pin for ") + pin.name + " (N="
-                                     + std::to_string(n) + " K=" + std::to_string(k) + " M="
-                                     + std::to_string(m) + ") is unusable — it must be "
+            throw std::runtime_error(std::string("gemm lt: the ")
+                                     + (pin.set == PinSet::kCandidate ? "candidate " : "pin ")
+                                     + pin.name + " (N=" + std::to_string(n) + " K=" + std::to_string(k)
+                                     + " M=" + std::to_string(m) + ") is unusable — it must be "
                                      + std::to_string(sizeof(hipblasLtMatmulAlgo_t) * 2)
                                      + " hex chars, not all zero, and want at most "
                                      + std::to_string(kWorkspaceBytes >> 20)
-                                     + " MiB of workspace");
+                                     + " MiB of workspace (it wants "
+                                     + std::to_string(pinned.max_workspace_bytes)
+                                     + "). Refused, not run smaller: the 128 MiB cap is a measured fact "
+                                       "(D31), so a row needing more is a row to re-derive, and a "
+                                       "candidate was stamped under a cap this engine does not have");
         }
         p.algo = pinned;
         ws_requested = pinned.max_workspace_bytes;
-        source = "pin";
+        source = pin.set == PinSet::kCandidate ? "candidate" : "pin";
         have_algo = true;
-        break;
     }
 
-    std::vector<hipblasLtMatmulHeuristicResult_t> heur((size_t)kHeuristicWidth);
+    std::vector<hipblasLtMatmulHeuristicResult_t> heur((size_t)g_heuristic_width);
     if (!have_algo) {
         ENGINE_LT(hipblasLtMatmulAlgoGetHeuristic(r.handle, p.desc, p.la, p.lb, p.lc, p.ld, r.pref,
-                                                 kHeuristicWidth, heur.data(), &returned));
+                                                 g_heuristic_width, heur.data(), &returned));
         for (int i = 0; i < returned; ++i) {
             const hipblasLtMatmulHeuristicResult_t& h = heur[(size_t)i];
             // Every one of these three predicates was printed-but-unenforced somewhere in the sweep's
@@ -549,6 +674,21 @@ void gemm_pins_select(const std::string& spec) {
         }
     }
     g_pin_allow = v;
+}
+
+// `--gemm-heur N`: how many candidates to ask the heuristic for, per (shape, M). Bounds checked here
+// rather than at the call site so a bad value is a startup error before any launch, and so the refusal
+// says which bound it hit. The ceiling is 64 because that is the deepest field this tree has priced
+// (D31 of progress/2026-10-16/prefill-decision-log-2026-10-16.md); the floor is 1 because a zero-wide pool
+// is how a route ends up throwing "no algorithm serves N=..." for a shape that has dozens.
+void gemm_heuristic_width_select(int requested) {
+    if (requested < 1 || requested > kHeuristicWidthMax) {
+        throw std::runtime_error("gemm lt: --gemm-heur " + std::to_string(requested)
+                                 + " is outside 1.." + std::to_string(kHeuristicWidthMax)
+                                 + " (the default is " + std::to_string(kHeuristicWidth)
+                                 + ", and 64 is the deepest pool any window here has measured)");
+    }
+    g_heuristic_width = requested;
 }
 
 std::string gemm_route_init(WaveGemm want) {

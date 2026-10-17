@@ -108,6 +108,12 @@ struct Options {
     // Which algo pins are in force (`all` / `none` / csv of shape names). Only meaningful with
     // `--gemm lt`; see `kernels.h::gemm_pins_select`.
     std::string gemm_pins = "all";
+    // How many candidates the lt heuristic query is asked for per (shape, M). -1 means "not given", so
+    // the DEFAULT lives in one place (`kernels_gemm.cpp::kHeuristicWidth`) and cannot drift here the way
+    // `gate.py`'s `--attn-tile` default would have if it had been copied instead of read — and the
+    // sentinel is -1 and not 0 because 0 is a value worth refusing, not a value to silently ignore.
+    // Named only by an A/B that wants a different pool; see `kernels.h::gemm_heuristic_width_select`.
+    int gemm_heur = -1;
     // Which attention FORM a wave body runs (Phase 2, `kernels.h:AttnLayerArgs::wave_tile`). 1 is the
     // SHIPPED default since `prototype/attn_decode/results.md` §21: the G x 1 tiled `attn_tile_wave`, which
     // measured 26.70 ms against the shipped form's 107.67 ms at 1024 lanes and is BIT-identical to it on
@@ -236,6 +242,10 @@ Options parse_args(int argc, char** argv) {
         } else if (a == "--gemm-pins") {
             // Parses or throws, like `--gemm`: an unrecognised name must not silently mean "no pins".
             o.gemm_pins = next();
+        } else if (a == "--gemm-heur") {
+            // Parsed here, validated by the setter: the bounds belong to the code that owns the pool,
+            // and a value outside them is an error at startup rather than a pool of a different size.
+            o.gemm_heur = std::atoi(next().c_str());
         } else if (a == "--attn-tile") {
             const std::string v = next();
             if (v != "0" && v != "1") {
@@ -502,7 +512,8 @@ void print_usage(FILE* out) {
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
                  " [--prefill-logits last|all] [--wave-rows N]"
                  " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
-                 " [--gemm-pins all|none|<csv>] [--attn-touch 0|1] [--gdn-spell ship|unroll4]"
+                 " [--gemm-pins all|none|<csv>] [--gemm-heur N] [--attn-touch 0|1]"
+                 " [--gdn-spell ship|unroll4]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -529,6 +540,18 @@ void print_usage(FILE* out) {
                  " (prototype/gemm_algo_sweep/results.md §3d, D28). The `GEMM` line echoes"
                  " `pins=<in force>/<in the table>` so a log says which config produced its bits, and"
                  " `engine/gate.py` refuses a run whose echo disagrees with what it asked for\n"
+                 "  --gemm-heur N  how many candidates the lt heuristic query is asked for per"
+                 " (shape, M); ceiling 64, and meaningless unless `--gemm lt` is running. The default is"
+                 " `kHeuristicWidth` in `engine/kernels_gemm.cpp` (8 today) and is deliberately not"
+                 " repeated here, so this usage line cannot drift from it. The"
+                 " engine still runs the FIRST admissible record, so widening the pool does not change"
+                 " what an unpinned shape executes — measured, not assumed: rank-0 is the same algorithm"
+                 " at width 8 and width 64 for all seven shapes, while rank 2 of the two lists is NOT"
+                 " (`deep_pins.py --prefix-check`), so the deep field is a partly different"
+                 " list rather than a longer one. Its use is that a deep-field candidate can be"
+                 " reproduced in situ, and that a shape whose top ranks turn out inadmissible gets a"
+                 " wider net; the `GEMM` line echoes `heur_width=` so every log says which pool it ran"
+                 " under\n"
                  "  --attn-tile 0|1  which attention FORM a WAVE body runs (Phase 2, "
                  "progress/2026-10-14/attn-wave-diagnosis-2026-10-14.md §9). `1`, the default since results.md §21, runs"
                  " `attn_tile_wave`, in which one K/V row load feeds the G=4 GQA heads of ONE query row"
@@ -1201,6 +1224,10 @@ int main(int argc, char** argv) {
             // Pin filter first: it decides what `gemm_route_plan` below fetches and what the version
             // line counts, so setting it after the plan would print one route and run another.
             engine::kernels::gemm_pins_select(o.gemm_pins);
+            // Only when named, so the engine's own constant stays the single default. Before the plan
+            // for the same reason as the pin filter: the pool width is decided when each shape's plan is
+            // built, and a setting applied after the plan would print one width and run another.
+            if (o.gemm_heur != -1) engine::kernels::gemm_heuristic_width_select(o.gemm_heur);
             // Created here, once, before the first body: the handle and the pinned workspace must not
             // be first touched 400 launches into a prefill. Only when the route is actually on, so a
             // `--gemm hand` run allocates nothing the pre-route run did not.

@@ -134,6 +134,13 @@ void gemm_route_shutdown();
 // list of pinned shape names. A pin choice is a measurement variable, so it is a knob and not a
 // rebuild: pin-vs-rank-0 must be one window with one binary. Throws on an unknown name.
 void gemm_pins_select(const std::string& spec);
+// Runtime width of the per-(shape,M) heuristic query — how many candidates the library is asked for. The
+// engine still takes the first admissible record (rank-0 in every measured field), so this knob changes
+// the POOL and not the default pick; it exists so an in-situ A/B can ask for the deep pool and the
+// shallow one with one binary, which a rebuilt default could not do (the deep list is not a prefix of
+// the 8-wide one: same rank-0, different algorithms from rank ~5 down). Throws outside 1..64, the
+// deepest pool measured so far. Echoed as `heur_width=` on the `GEMM` line.
+void gemm_heuristic_width_select(int requested);
 
 // PLAN-TIME algo selection for the hipBLASLt route, one call per (shape, M) instead of one per matmul.
 // The engine issues 150 library calls per 24-layer wave and a heuristic query costs more than the win
