@@ -883,7 +883,7 @@ That gives a new queue item, and it is bigger than the one that closed:
 best) is **1.387 `down_proj`, 1.407/1.336 `o_proj+out_proj`, 1.207 `gate_proj+up_proj`, 1.133 `in_proj_qkv`**
 — winners sitting at ranks 16–55, which is where the engine's `kHeuristicWidth = 8` cannot see them. Worth
 noting against the code: a **pin is not bound by that width** (it is validated only as "valid hex, non-zero,
-workspace fits", `engine/kernels_gemm.cpp:427-447`), so adopting a deep winner needs no new selection path —
+workspace fits", `engine/kernels_gemm.cpp:531-551`), so adopting a deep winner needs no new selection path —
 only an algo capture at a deep query and an in-situ adjudication. The prize, priced on the per-wave call counts
 `--list` books (24/48/24/18 calls) and the 64-candidate `default_ms` vs `best_ms`: ≈ **3.0 ms per 150-call wave,
 ≈ 24 ms of a 4096-lane prefill ≈ 2.2 %** — a ceiling, taken at burst rates, and D28's precedent is that
@@ -1108,3 +1108,36 @@ rather than a rank, because the deep list is a **partly different list** — ran
 does not. Two refusals were needed as real fixes, not features: two pins in force for one `(N,K,M)` had previously
 been resolved by table order, which would have made row order a measurement variable; and a workspace stamp above
 the 128 MiB cap is now a refusal with its reason, since D31 closed raising the cap.
+
+---
+
+# D36 — **D35's shipped pair was wrong: the `down_proj` row is not superseded, and a pin set's coverage is what costs** (2026-10-17)
+
+D35 shipped two pins and retired the original `down_proj` pin on an L2-state story. I stated a falsifier for it
+before measuring, as the worker required: with the gateup candidate shipped and the *retired* pin named, `mlp_down`
+should come back at ≈ 32.16 ms (4096) and ≈ 7.97 ms (1024), i.e. +17 %/+20 %. **It measured 26.82 and 6.56 —
++2.4 % and −0.5 %, both inside §9's own null.** Numbers, instrument and the corrected table in
+`bench/performance-status.md` §9's same-day correction; the shipped set is now `down_proj` (the original D28 pin,
+restored) **+** `deep_gate_proj+up_proj`, and the wave gain is the gateup row's alone at ≈ **−0.63 %**.
+
+**The cause was a config label, and it is the kind of error a gate cannot catch.** `--gemm-pins <csv>` *replaces*
+the admissible pin set; it does not extend the shipped one. So §9's `gu` side, which named only
+`deep_gate_proj+up_proj`, did not hold "the gateup candidate plus the shipped `down_proj` pin" — it held the gateup
+candidate and **nothing on `down_proj`**, which ran rank-0. The +20 % I attributed to a bad algo's interaction was a
+shape with no pin at all. The binary said this out loud every time (`source=heuristic-rank-0` on every unpinned
+shape in the `GEMM-LT` echoes, which is also what the worker's own §5 quote shows); I read the label and not the
+echo, and the label was mine.
+
+Two things follow, and both are stronger than what they replace. **Pin coverage is the expensive axis, not algo
+identity**: on this family, once a neighbour changes, *removing* a shape from `all` costs ~20 % while swapping
+between two near-equal winners costs nothing measurable — which is also why the retirement is not merely unsupported
+but pointless: `deep_down_proj` is a tie against the incumbent, and a tie is exactly what `deep_pins.py`'s 0.1 %
+materiality floor exists to refuse, since every pin is a re-capture obligation on the next library bump. And the
+worker's verdict machinery turns out to have been load-bearing in the way I wanted: it enforces sets, and I stated
+plainly in the handoff that **sets are not physics** — the falsifier existed precisely to catch this and it did.
+
+**Trap, both directions.** For the main agent: a subset spec silently means an exclusion, so any A/B whose spec names
+a subset must be read from the per-shape `source=` echoes before its family rows, and a config described in prose has
+to state what is *not* pinned. For the deriver: `superseded` is a claim about an interaction, and an interaction
+verdict must name the config that produced it — a verdict keyed to "shape + algo" without the co-named pin set can
+record a coverage effect as an algo judgement, which is exactly how D35 got it backwards.
