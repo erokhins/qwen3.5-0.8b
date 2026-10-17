@@ -524,3 +524,35 @@ widths** — so `gu` is net-negative on sum3 (192.07 vs 190.05) despite winning 
 **as a set** or not at all, and **a per-shape winner that changes a neighbouring shape's L2 can turn a win into a
 loss on a family the flag does not name** — which is the D33 mechanism ("ask what the burst holds fixed") arriving
 inside a single binary, with nothing but a pin changed between the two sides.
+
+### Correction to §9, same day: the `gu` harm was **an unpinned shape**, not a bad algo, and one row of the shipped set comes back out
+
+§9 claimed the `gate_proj+up_proj` candidate, shipped while the shipped `down_proj` pin was left alone, made
+`mlp_down` +20 % through L2 state, and that the deep-field `down_proj` algo was the row that suited the new kernel.
+**That mechanism is refuted by a direct test.** With the gateup candidate shipped *and the original `down_proj` pin
+named explicitly*, paired 3× against the two-promoted-rows default, both widths, one lock hold, `util` 92 %
+(`tmp/pinab/ab3.txt`):
+
+| width | side | `mlp_gateup` | `mlp_down` |
+|---|---|---|---|
+| 4096 | `deep_gate_proj+up_proj,deep_down_proj` (the §9 "good" config) | 57.88 | 26.19 |
+| 4096 | `deep_gate_proj+up_proj,down_proj` (gateup + the *retired* pin) | 58.25 | **26.82** — not the predicted 32.16 |
+| 1024 | same two sides | 14.09 / 14.16 | **6.59 / 6.56** |
+
+The prediction was `+17 %/+20 %` on `mlp_down`; measured **+2.4 % and −0.5 %**, inside the ±3.1 %/±1.9 % null of §9.
+So the old `down_proj` algo and the deep-field one are **indistinguishable when either is in force**, and nothing is
+superseded by anything.
+
+**What the §9 harm actually was.** `--gemm-pins <csv>` *replaces* the pin set, it does not extend it, so §9's `gu`
+side named only `deep_gate_proj+up_proj` — which left `down_proj` **unpinned, running rank-0 heuristic**. The +20 %
+was not "the wrong algo suits the new neighbour", it was **no pin at all** on that shape once the neighbour changed.
+That is a stronger and more useful finding than the one it replaced: on this box the *coverage* of the pin set is
+what costs, and dropping a shape from `all` is a bigger perturbation than swapping which of two near-equal winners
+runs it. The correct shipped set is therefore **`down_proj` (the original D28 pin) + `deep_gate_proj+up_proj`**: the
+gateup candidate's −10 % is reproduced again here (`mlp_gateup` 63.95 → 57.88 at 4096, 16.05 → 14.09 at 1024) and
+the `down_proj` row earns its place by *being pinned*, not by which algo is pinned.
+
+**No headline number changes**: the wave gain is the gateup row's, ≈ **−0.63 % of wave**, and the `down_proj` row
+contributes nothing measurable either way. The trap that produced the error is worth carrying: a config label that
+names a *subset* silently describes an *exclusion*, and the exclusion was the measured effect. `decode_run` did say
+so — every unpinned shape echoed `source=heuristic-rank-0` — but the label was read before the echo was.
