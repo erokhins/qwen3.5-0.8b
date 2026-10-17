@@ -217,3 +217,36 @@ if want wide1024f; then
       --logits-bits bf16 --prefill-logits all \
       --first-stop "none in 300 (probed to 300 generated tokens; legacy stop 248044 also none)"
 fi
+
+# --- wide4096f / wide4096p: the 4096-lane pair (2026-10-17, D44) -------------------------------------
+# Same one-prompt-at-increasing-length family: `progress/bench/evidence/prefill-occupancy-2026-10-16/ids1024.txt`
+# is a verified bit-exact prefix of `ids4096.txt`, and the text below re-tokenizes to exactly 4096 ids with
+# the head identical, so the three wide fixtures are one prompt at 640 / 1024 / 4096 lanes rather than three
+# prompts. Cost: logits_rows is 1940.0 MiB at 4096 rows, and the lean recipe keeps total pins at 2.1 GiB
+# (wide4096f) against 15.6 GiB for the plain one (wide4096p) — stated because the plain recipe is not a
+# default, it is what the prefill-only sibling needs (see below).
+#
+# WHY THERE ARE TWO OF THEM. `attn` caps lanes per row at staging MAXSC 512 x kAttnMaxSplit 8 = 4096, and the
+# launcher throws rather than truncating. So the decode-bearing fixture cannot run today: 4096 prompt + 8
+# generated = 4104 lanes, and `gate.py` reports exactly that and exits 1 — with **zero** prefill rows judged,
+# which is why this pair is recorded as a pair. `wide4096p` is the same prompt with `--decode 0`, so its
+# planned run is exactly 4096 lanes, it fits, and every one of the 4096 pinned rows is adjudicable: as of
+# 2026-10-17 the gate PASSes it with worst cos deficit 4.3696e-04 and worst meanrel 3.5902 %, all rows inside
+# the floors already in force. That is the evidence the >MAXSC numerics admission needed, and it is what
+# unblocks the ceiling raise; when `kAttnMaxSplit` moves, `wide4096f` becomes the fixture that judges the
+# long-context geometry end to end, decode steps included.
+if want wide4096f; then
+  want_raw_tokens "$FIX/wide4096f.txt" 4096
+  run wide4096f --prompt "$(cat "$FIX/wide4096f.txt")" --decode 8 --lean --deep-steps 7 \
+      --logits-bits bf16 --prefill-logits all \
+      --first-stop "none in 300 (probed to 300 generated tokens; legacy stop 248044 also none)"
+fi
+if want wide4096p; then
+  want_raw_tokens "$FIX/wide4096f.txt" 4096
+  # Plain recipe, no --lean: there are no decode steps to be lean about, and --deep-steps is refused outright
+  # when the forced chain is empty ("step 0 is outside the forced chain"). 15.6 GiB, gitignored like the rest
+  # of data/, and it is the only way to judge 4096-lane rows under the ceiling as it stands.
+  run wide4096p --prompt "$(cat "$FIX/wide4096f.txt")" --decode 0 \
+      --logits-bits bf16 --prefill-logits all \
+      --first-stop "n/a: --decode 0 prefill-only sibling of wide4096f; that fixture records the stop probe for this prompt"
+fi
