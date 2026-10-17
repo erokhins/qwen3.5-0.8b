@@ -1002,3 +1002,71 @@ matters because it is the reason D30 item 1.9 generalises: if schedule is the ax
 to look for it cheaply. Also fixed in passing, found while plumbing the knob: `engine/gate.py --help` raised
 `ValueError` from argparse's `%`-formatting in `--gemm`'s help text — the flag reference of the main gate driver
 was unreachable since the lt flip, which is what the second commit says.
+
+---
+
+# D34 — **D30 item 2.4 (matrix-path attention) is a funded no**, and it dies at the ceiling this log itself had already adopted (2026-10-16)
+
+`attn` is the largest non-recurrence family at **26.94 %** of the post-flip wave (257.56 ms of 956.12 ms), which
+is why 2.4 was ranked second after `gdn_rec`. It is closed without a device measurement and without a kernel, and
+the evidence is `prototype/attn_wmma/results.md` §1–§6.
+
+**The verdict in one number.** At the arithmetic share this log already measured — D20's **27.9 %** of the touch
+is the two dots' FMA work, the figure D30's own 2.4 row booked as the route's ceiling — and this kernel's own
+measured slot→time elasticity (`time ∝ slots^0.39–0.44`, D21/D22), the whole WMMA prize after paying the feeder
+cost is **−9.6 % of `attn`**, against a geometry tax whose floor was measured in kind at **7 %** and whose prior
+for exactly this class of re-tile is negative. It does not clear the 15 % kill band; at the central case it does
+not clear **zero**.
+
+**Why the ceiling is the whole argument: the matrix unit is ~99.99 % idle for this workload.** One wave demands
+≈1.07e9 MACs; the whole-device matrix roof is 2.96e13 MACs/s, so the matrix work is **≈36 µs against 257.56 ms**
+of `attn`. That single ratio is why a faster arithmetic unit is not a prize here — the route can only win by
+*retiring slots from the stream that is already the bottleneck*, and the retirable share is capped at 27.9 %. Any
+row of the price table that clears the band needs the matrix-addressable share to be ≥ ~50 %, i.e. **more than was
+measured and more than the row itself booked**.
+
+**What the feeder probe settled, which `issue_rate_probe` §5.1 had explicitly refused to assume.**
+`prototype/attn_wmma/wmma_feeder_probe.cpp` is compile-only — built with `-O3 --offload-arch=gfx1151
+--save-temps -c`, **never launched**, no timing, no lock — and stages A/B in the engine's own row-major bf16
+layouts. Marginal cost is differenced between the 1-tile and 16-tile variants of the same kernel, so prologue and
+epilogue cancel:
+
+| leg | slots per 16×16×16 tile | per touch-equivalent | vs the shipped 45-slot touch bill |
+|---|---|---|---|
+| score, map-aware (`rocwmma`) | **13.5** | 0.84 | **1.9 %** |
+| PV, map-aware, fed from an `s_sc` row | **53.6** | 3.35 | **7.4 %** |
+| score, hand-fed raw builtin (floor) | **6.5** | 0.41 | 0.9 % |
+
+**Did the compiler have to move lanes? Yes** — 8 lane-movement ops per score tile, 20 per PV tile
+(`ds_swizzle_b32` + `dpp`), because the WMMA operand map is not the engine's row-major 8-dims-per-lane slice. The
+tax is real (~7 slots/tile) and it is **irrelevant**, because even paying it the score leg retires the dot for ~2 %
+of what the dot costs today. That is the honest shape of the answer: the one unknown that could have rescued the
+route came back *favourable*, and the route still dies. Two findings outlive the verdict: the **PV leg's 4× feed
+cost is a layout fact, not a WMMA fact** (feeding A from `s_sc`'s 1024-byte row lowers to element-wise
+`ds_load_u16`, 8 per tile), and this is the machinery a hand-written GEMM (3.3) would want — where, unlike here,
+the arithmetic share is near-total, so the ceiling that killed 2.4 does not apply.
+
+**Two source-forced costs no earlier plan for this route contained.** WMMA `16×16×16` needs **M = 16**, and the
+shipped tile is `ATTN_TILE_M = 1` with a `static_assert` tying `blockDim.x / warpSize` to `ATTN_TILE_G`
+(`engine/attn_slim_kernels.h:164`) — so this was never an instruction substitution, only a re-tile. And PV output
+is `DH = 256`, so one warp keeping a whole row in D fragments is **16 fragments = 128 VGPR/lane against the
+shipped kernel's 47 total**; N-splitting is mandatory, which changes the block shape again. The one geometry that
+costs no wavefronts/CU (4×4 packing with flash-style tile-local scores, ~9 KB LDS) requires abandoning the
+two-pass structure that exists so pass 2 can re-read whole-row scores — a deeper restructure than any item here.
+
+**And a numerics cost the bf16 finding did not remove.** D33 corrected 2.4's premise — the *score* dot's bf16
+operands need no conversion, since `v_wmma_f32_16x16x16_bf16` is present. The **streaming PV leg is still a
+format change**, because it accumulates with **f32** weights `e[slot]` (`engine/attn_slim_kernels.h:307`) while
+WMMA's P operand is bf16. That leg would need a floor probe and possibly a band decision, so 2.4 was never
+format-free after all — only half of it was.
+
+**Method note, because this is the third route closed by a ceiling rather than a measurement.** D31's workspace
+budget, D32's dependency reading and now 2.4 were each refuted by asking what the prize could be *at most*, given
+a number already in the ledger, before spending a device window. Here that cost one compile-only probe; the
+alternative was implementing a re-tile to discover a −9.6 % against a 7 % tax. Related hygiene, applied at
+admission: `prototype/attn_wmma/region_census.py` was handed over printing a plausible roll-up that was
+**exactly 0.0** for `attn_tile_wave` against a published 116 while **exiting 0** — the fifth instance this session
+of a check whose input can come back empty and therefore cannot fail (after `gdn_census/run.py`, `mixed_bw`, the
+prefill-row count and the `gdn_rec_isa` `--volume` parse). It now aborts on both a zero roll-up and any calibration
+miss. Its roll-up is unused for exactly this reason, and the file is committed labelled half-finished rather than
+quietly trusted: the static bills and the 48-example rule selftest are the parts worth keeping.
