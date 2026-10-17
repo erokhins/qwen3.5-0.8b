@@ -31,7 +31,14 @@ Three rules from this repo's own trap table are enforced rather than mentioned:
     only beats `engine_call_ms` and not rank-0 is labelled as such, because the unpinned `lt` route
     gets rank-0, not the winner;
   * the 128 MiB workspace cap is a fact (D31 closed raising it), so a candidate whose stamped
-    workspace demand exceeds it is REFUSED with a printed reason instead of quietly launched smaller.
+    workspace demand exceeds it is REFUSED with a printed reason instead of quietly launched smaller;
+  * the burst window cannot see inside a wave, and what it cannot see has twice been wrong (D35). So the
+    in-situ adjudication lives in `insitu_verdicts.tsv` as data, keyed by (shape, algo hex) — shape as
+    well as hex because one kernel record can rank in two shapes' fields — and `CHECK-TABLE` requires
+    shipped == (pinnable ∩ in-situ wins), candidates == ((pinnable − shipped) ∪ retired pins), and NO
+    pinnable shape left unverdicted. There is deliberately no shape allow-list in this file: what may ship
+    is read from the verdict rows, so a re-take changes the answer by adding a measurement, not by
+    editing a rule.
 
 Usage (all read-only, no device):
 
@@ -40,7 +47,8 @@ Usage (all read-only, no device):
       --algo-dump /tmp/gas_algos.txt \
       --engine prototype/gemm_algo_sweep/gemm_algo_sweep \
       --wave-ms 956.12
-  python3 prototype/gemm_algo_sweep/deep_pins.py --selftest-rule  # rule vs the committed pin
+  python3 prototype/gemm_algo_sweep/deep_pins.py --selftest-rule    # rule + witness + verdicts, no window
+  python3 prototype/gemm_algo_sweep/deep_pins.py --selftest-checks  # tamper the data, require each guard red
 """
 
 from __future__ import annotations
@@ -56,6 +64,15 @@ from pathlib import Path
 # here would be a second authority that can drift (the same reason `gate.py` reads kMaxWaveRows).
 ENGINE_GEMM = Path("engine/kernels_gemm.cpp")
 SHIPPED_PIN_MARK = "// ONE shape is pinned today"
+# The whole vocabulary a verdict row may use, and `tie` is in it because D36 needed it: the two
+# `down_proj` records are not separable in situ, and the honest word for "better than rank-0, not
+# separable from the incumbent" is a tie — not `superseded` wearing a mechanism that was refuted. A tie
+# may never ship (see `check_verdict_data`), so `shipped == the win rows` keeps holding without anyone
+# having to fake a measurement in the losing direction.
+VERDICT_WORDS = ("win", "lose", "tie", "superseded")
+# How much a verdict outranks another, for the one derived rule that needs an ordering: a shipped row may
+# not be dominated by a strictly better-measured record for the same shape.
+VERDICT_RANK = {"win": 2, "tie": 1, "lose": 0, "superseded": 0}
 # The materiality floor for a candidate, as a share of the whole 4096-lane wave. A pin is not free: it
 # freezes one kernel against one hipBLASLt version and has to be re-captured on every bump (the
 # provenance note in `algo_pins()`), so a winner worth 0.03 % of a wave is cheaper to leave alone than
@@ -136,6 +153,223 @@ def read_engine_cap(path: Path) -> tuple[int, int]:
     cap = int(m.group(1)) << int(m.group(2))
     w = re.search(r"kHeuristicWidth\s*=\s*(\d+)", text)
     return cap, (int(w.group(1)) if w else -1)
+
+
+def pin_shape(name: str) -> str:
+    """The sweep's shape name for a pin row: `deep_down_proj` and `down_proj` are both the `down_proj`
+    shape. Stripping the derivation prefix, rather than keeping a name list, is what lets the engine name a
+    promoted row `deep_*` and a retired row by its shape without the deriver having to be told twice.
+    """
+    return name.removeprefix("deep_")
+
+
+def read_verdicts(path: Path) -> dict[tuple[str, str], dict]:
+    """The in-situ adjudication, as data — `insitu_verdicts.tsv` holds the column meanings.
+
+    Keyed by **(shape, algo hex)**, and the shape half is not decoration: the same kernel record can rank
+    in several shapes' candidate lists, so a verdict keyed on hex alone lets a `q_proj` field winner that
+    happens to be the same 24 bytes as a `down_proj` pin read as adjudicated. That is not hypothetical —
+    the first version of this check reported `q_proj` as shipped-by-verdict for exactly that reason. A
+    missing row is NOT "no verdict yet, ship anyway": both checks below treat that as an error.
+    """
+    if not path.exists():
+        raise SystemExit(f"deep_pins: no in-situ verdict file at {path}. A burst-derived pin cannot be "
+                         "shipped on burst evidence alone (D35: two admitted winners ran +26 % / +27 % "
+                         "slower in situ), so this tool refuses to guess. The format is "
+                         "`prototype/gemm_algo_sweep/insitu_verdicts.tsv`; pass --verdicts to point at "
+                         "a different copy of it.")
+    out: dict[tuple[str, str], dict] = {}
+    header: list[str] | None = None
+    for line in path.read_text().splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        cells = line.split("\t")
+        if header is None:
+            header = cells
+            continue
+        if len(cells) != len(header):
+            raise SystemExit(f"deep_pins: {path} line is not {len(header)} tab-separated fields: "
+                             f"{line[:80]!r}")
+        rec = dict(zip(header, cells))
+        for key in ("own_4096", "own_1024", "inter_4096", "inter_1024",
+                    "null_floor_4096_pct", "null_floor_1024_pct"):
+            raw = rec[key]
+            if raw in ("", "?"):
+                rec[key] = None
+                continue
+            try:
+                rec[key] = float(raw)
+            except ValueError:
+                raise SystemExit(f"deep_pins: {path} {key}={raw!r} is not a number. A verdict needs the "
+                                 "null floor its instrument actually measured (§9 reads +3.1 % at 4096, "
+                                 "+1.9 % at 1024); `auto` or a remembered guess cannot size one")
+        if (rec["null_floor_4096_pct"] is None or rec["null_floor_1024_pct"] is None):
+            raise SystemExit(f"deep_pins: {path} row {rec['shape']}/{rec['hex'][:16]}… carries no null "
+                             "floor. Every verdict is adjudicated against a measured null, so the floor "
+                             "is a required column, not an annotation")
+        if rec["verdict"] not in VERDICT_WORDS:
+            raise SystemExit(f"deep_pins: {path} verdict {rec['verdict']!r} is not one of "
+                             "/".join(sorted(VERDICT_WORDS)) + " — inventing a verdict word is how a "
+                             "table quietly stops meaning anything")
+        # D36, as a parse rule. `--gemm-pins <csv>` REPLACES the admissible set, so a spec that names a
+        # subset silently excludes every shape it does not name; §9's `gu` side named one row and therefore
+        # ran `down_proj` unpinned, and the +20 % that produced was recorded as a judgement about an algo.
+        # A ratio whose two sides are not spelled out cannot be re-checked, so an unnamed side is a parse
+        # error here rather than a hole a later reader falls into.
+        for key in ("pins_treated", "pins_reference"):
+            if rec.get(key, "") in ("", "?"):
+                raise SystemExit(f"deep_pins: {path} row {rec['shape']}/{rec['hex'][:16]}… has "
+                                 f"{key}={rec.get(key, '(absent)')!r}. Every ratio is a PAIR of pin sets; "
+                                 "name both sides in full (use `none` for an all-rank-0 side) so a "
+                                 "coverage effect can never again be recorded as algo physics (D36)")
+        if rec["pins_treated"] == rec["pins_reference"]:
+            raise SystemExit(f"deep_pins: {path} row {rec['shape']}/{rec['hex'][:16]}… names the same "
+                             "pin set on both sides, so its ratio measures nothing")
+        if rec["carry"] not in ("own", "interaction"):
+            raise SystemExit(f"deep_pins: {path} carry={rec['carry']!r} must name which evidence the "
+                             "verdict rests on: own or interaction")
+        if rec["carry"] == "interaction" and not rec["inter_4096"]:
+            raise SystemExit(f"deep_pins: {path} carry=interaction but inter_4096 is empty")
+        key = (rec["shape"], rec["hex"])
+        if key in out:
+            raise SystemExit(f"deep_pins: {path} has two verdict rows for {key}")
+        out[key] = rec
+    if not out:
+        raise SystemExit(f"deep_pins: {path} has a header and no rows — a verdict table that cannot fail "
+                         "is not a check (the vacuous-check class this repo keeps hitting)")
+    return out
+
+
+def carrying_ratio(rec: dict) -> tuple[float, float, str]:
+    """(ratio at 4096, ratio at 1024, label) for the evidence a verdict rests on.
+
+    A verdict is only as good as the number it points at. `own` is the family of THIS shape with the
+    treated pin set in force over the reference set; `interaction` is a family row this record does not
+    own but measurably moves. Naming which pair carries a verdict is what stops an inside-the-noise own-
+    ratio being quietly propped up by a big neighbour — and the label now prints both pin sets, because a
+    pair that cannot name its two sides is what D36 was about.
+    """
+    pair = f"{rec['pins_treated']} vs {rec['pins_reference']}"
+    if rec["carry"] == "own":
+        return rec["own_4096"], rec["own_1024"], f"own ({pair})"
+    return rec["inter_4096"], rec["inter_1024"], f"interaction ({pair})"
+
+
+def check_verdict_data(verdicts: dict[tuple[str, str], dict], engine_rows: list[dict]) -> int:
+    """The verdict file against the engine table, with no sweep window needed.
+
+    Four things, each in a direction that can actually fail:
+      * every row the engine carries has a verdict for its (shape, hex), and every verdict names a row the
+        engine carries — a verdict for a record nobody carries is rotted data, a row with no verdict is an
+        unadjudicated pin;
+      * `kShipped` is exactly the `win` rows and `kCandidate` is exactly `lose` + `superseded`, so a pin
+        cannot move in C++ without moving in the data too;
+      * at most one shipped row per shape (two is the runtime refusal, caught at derive time instead);
+      * a `win`'s carrying evidence must clear that row's own null-test floor and must be faster at both
+        widths — a verdict inside the noise of the instrument that produced it is not a verdict.
+    """
+    rc = 0
+    eng = {r["hex"]: r for r in engine_rows}
+    if len(eng) != len(engine_rows):
+        print("VERDICTS FAIL reason=two engine rows carry the same algo hex")
+        rc = 1
+    eng_keys = {(pin_shape(r["name"]), r["hex"]) for r in engine_rows}
+    missing = sorted(f"{s}/{h[:16]}…" for (s, h) in eng_keys if (s, h) not in verdicts)
+    orphan = sorted(f"{s}/{h[:16]}…" for (s, h) in verdicts if (s, h) not in eng_keys)
+    if missing or orphan:
+        print(f"VERDICTS FAIL reason=the engine table and the verdict file are not the same set of "
+              f"records. in_engine_without_verdict={missing} verdict_without_engine_row={orphan}. Retire "
+              "a row as `superseded`, do not delete it: a deleted pin cannot be re-adjudicated without a "
+              "re-capture, and a verdict nobody carries is data that has already rotted.")
+        rc = 1
+    mismatch = []
+    for r in engine_rows:
+        v = verdicts.get((pin_shape(r["name"]), r["hex"]))
+        if v is None:
+            continue
+        want = "kShipped" if v["verdict"] == "win" else "kCandidate"
+        if r["set"] != want:
+            mismatch.append(f"{r['name']}(PinSet::{r['set']}, verdict={v['verdict']} wants {want})")
+    if mismatch:
+        print(f"VERDICTS FAIL reason=PinSet disagrees with the verdicts: {sorted(mismatch)}. A pin moves "
+              "by editing the row's PinSet AND its verdict row, in one commit; anything weaker lets the "
+              "data and the binary drift apart, which is how a table starts describing a build nobody "
+              "ran.")
+        rc = 1
+    shipped_shapes = [pin_shape(r["name"]) for r in engine_rows if r["set"] == "kShipped"]
+    dupe = sorted({s for s in shipped_shapes if shipped_shapes.count(s) > 1})
+    if dupe:
+        print(f"VERDICTS FAIL reason=two shipped rows for shape(s) {dupe} — the engine refuses two pins on "
+              "one (N,K,M) at plan time, so this table could not launch")
+        rc = 1
+    for v in verdicts.values():
+        r4096, r1024, label = carrying_ratio(v)
+        f4096 = v["null_floor_4096_pct"] / 100.0
+        f1024 = v["null_floor_1024_pct"] / 100.0
+        separated = (abs(r4096 - 1.0) > f4096, abs(r1024 - 1.0) > f1024)
+        if v["verdict"] == "tie":
+            if any(separated):
+                print(f"VERDICTS FAIL shape={v['shape']} hex={v['hex'][:16]}… verdict=tie reason=its "
+                      f"carrying evidence ({label}: {r4096:.4f} at 4096, {r1024:.4f} at 1024) separates "
+                      f"past its own null ({v['null_floor_4096_pct']} % / "
+                      f"{v['null_floor_1024_pct']} %). A tie is the word for TWO RECORDS THE INSTRUMENT "
+                      "CANNOT TELL APART; once it separates, restate the row as win or lose — do not leave "
+                      "a measuring-tie in a table that decides what ships")
+                rc = 1
+        elif not all(separated):
+            print(f"VERDICTS FAIL shape={v['shape']} hex={v['hex'][:16]}… verdict={v['verdict']} "
+                  f"reason=its carrying evidence ({label}: {r4096:.4f} at 4096, {r1024:.4f} at 1024) is "
+                  f"inside its own null test ({v['null_floor_4096_pct']} % / "
+                  f"{v['null_floor_1024_pct']} %). §9's null test — the `proj` family under a config that "
+                  "cannot change it — exists so a row like this cannot be read as a result in either "
+                  "direction. If it is genuinely not separable, the verdict word is `tie`.")
+            rc = 1
+        if v["verdict"] == "win" and max(r4096, r1024) >= 1.0:
+            print(f"VERDICTS FAIL shape={v['shape']} reason=verdict=win but its carrying ratios are "
+                  f"{r4096:.4f}/{r1024:.4f}, i.e. not faster at both widths")
+            rc = 1
+        if v["verdict"] in ("lose", "superseded") and min(r4096, r1024) <= 1.0:
+            print(f"VERDICTS FAIL shape={v['shape']} reason=verdict={v['verdict']} but its carrying ratios "
+                  f"are {r4096:.4f}/{r1024:.4f}, i.e. not slower at both widths")
+            rc = 1
+    # The config a verdict was measured under is part of the verdict, not a comment on it. D36 is the
+    # reason: `--gemm-pins <csv>` replaces the admissible set, so a side that named one row silently ran
+    # every other shape unpinned, and the +20 % that came out was recorded as physics about an algo.
+    eng_names = {r["name"] for r in engine_rows}
+    phantom, misown, nocouple = [], [], []
+    for v in verdicts.values():
+        treated = [s.strip() for s in v["pins_treated"].split(",") if s.strip()]
+        reference = [s.strip() for s in v["pins_reference"].split(",") if s.strip()]
+        for spec, side in ((treated, "treated"), (reference, "reference")):
+            for token in spec:
+                if token != "none" and token not in eng_names:
+                    phantom.append(f"{v['shape']}/{v['hex'][:8]}… {side} names {token!r}")
+        own = [r["name"] for r in engine_rows
+               if pin_shape(r["name"]) == v["shape"] and r["hex"] == v["hex"]]
+        if not own or own[0] not in treated:
+            misown.append(f"{v['shape']}/{v['hex'][:8]}… treated={v['pins_treated']!r} "
+                          f"does not name this row ({own[0] if own else 'no such engine row'})")
+        if v["carry"] == "interaction" and not any(pin_shape(t) != v["shape"] for t in treated):
+            nocouple.append(f"{v['shape']}/{v['hex'][:8]}… carry=interaction but pins_treated="
+                            f"{v['pins_treated']!r} names no other shape's pin")
+    if phantom or misown or nocouple:
+        print(f"VERDICTS FAIL reason=a verdict does not name a pin set the engine can express. "
+              f"phantom_pin_names={phantom} treated_side_missing_its_own_row={misown} "
+              f"interaction_without_a_co_named_pin={nocouple}. `--gemm-pins` REPLACES the set, so a verdict "
+              "keyed to shape+algo without its two pin sets can record a coverage effect as algo physics — "
+              "exactly how D35 got the `down_proj` row backwards.")
+        rc = 1
+    if not rc:
+        ship = sorted(r["name"] for r in engine_rows if r["set"] == "kShipped")
+        cand = sorted(r["name"] for r in engine_rows if r["set"] == "kCandidate")
+        words = ",".join(f"{v['verdict']}:{v['shape']}/{v['hex'][:8]}…" for v in
+                         sorted(verdicts.values(), key=lambda v: (v["shape"], v["hex"])))
+        print(f"VERDICTS file_verdicts={len(verdicts)} engine_rows={len(engine_rows)} "
+              f"shipped={len(ship)} ({','.join(ship)}) candidates={len(cand)} ({','.join(cand)}) "
+              f"by_word=[{words}] PASS (every row has a verdict, the sets match the verdicts, every "
+              "verdict's carrying evidence is separated-or-tied against its own null, and both sides of "
+              "every pair are pin sets the engine can express)")
+    return rc
 
 
 def read_committed_pins(path: Path) -> list[dict]:
@@ -293,7 +527,19 @@ def analyse(log: TimeLog, dump: Dump, cap: int, wave_ms: float, m: int, top: int
             engine_rows: list[dict] | None = None) -> list[dict]:
     rows = []
     engine_rows = engine_rows or []
-    pin_by_name = {r["name"]: r["hex"] for r in engine_rows if r["set"] == "kShipped"}
+    # Keyed by SHAPE (the row's name with the `deep_` derivation prefix stripped), because a promoted row
+    # is named `deep_down_proj` while the sweep calls the shape `down_proj`, and a retired row named
+    # `down_proj` must not be mistaken for what ships today. Two shipped rows for one shape is the runtime
+    # refusal, so stop here rather than pick one.
+    pin_by_shape: dict[str, str] = {}
+    for r in engine_rows:
+        if r["set"] != "kShipped":
+            continue
+        s = pin_shape(r["name"])
+        if s in pin_by_shape:
+            raise SystemExit(f"deep_pins: two shipped rows map to shape {s!r} "
+                             f"({pin_by_shape[s]} and {r['name']})")
+        pin_by_shape[s] = r["hex"]
     for key in sorted(k for k in log.result if k[1] == m):
         res, plan = log.result[key], log.plan.get(key, {})
         shape = key[0]
@@ -341,7 +587,7 @@ def analyse(log: TimeLog, dump: Dump, cap: int, wave_ms: float, m: int, top: int
         # ms per wave when the shipped pin already banked 0.71 of it and the real prize is 0.2644. That
         # is the §3d "wrong baseline column" error one layer over, so the pin's own measured time in THIS
         # window is found by hex and used when it exists; the pairing is in-window, so it is paired.
-        pin_hex = pin_by_name.get(shape)
+        pin_hex = pin_by_shape.get(shape)
         pin_seq = pin_ms = None
         for t in top_list_full:
             if t["hex"] and t["hex"] == pin_hex:
@@ -369,6 +615,27 @@ def analyse(log: TimeLog, dump: Dump, cap: int, wave_ms: float, m: int, top: int
         if per_prefill < MIN_PCT_OF_WAVE / 100.0 * wave_ms:
             reasons.append(f"buys {100*per_prefill/wave_ms:.3f} % of a wave, under the "
                            f"{MIN_PCT_OF_WAVE} % floor a re-capture obligation is worth")
+        # A SECOND, narrower question, and the reason CHECK-TABLE survives a promotion. `admitted` above is
+        # about the *change* — what this window says should move — so after a winner ships, the baseline
+        # becomes that winner, the gain is 1.000, and `admitted` correctly goes False. If CHECK-TABLE keyed
+        # on `admitted` alone, the shipped set would evaporate the moment its pins were promoted. `pinnable`
+        # is the change-independent question — does this shape want a pin at all, and which record is it —
+        # measured against rank-0, which is what an shape with NO pin gets. The verdict identity is written
+        # over `pinnable`.
+        pin_reasons = []
+        if not winner["admissible"]:
+            pin_reasons.append(winner["refuse_reason"])
+        if winner["witness"] != "matched":
+            pin_reasons.append("winner hex is not witnessed in any ALGODUMP capture")
+        if win_ms >= d_ms:
+            pin_reasons.append("the deep winner is rank-0 or slower: this shape wants no pin")
+        if floor is not None and (1.0 - win_ms / d_ms) <= floor:
+            pin_reasons.append(f"gain over rank-0 {100*(1-win_ms/d_ms):.1f} % does not clear this shape's "
+                               f"own cross-window movement {100*floor:.1f} %")
+        rank0_prefill = calls * (d_ms - win_ms) * 8.0
+        if rank0_prefill < MIN_PCT_OF_WAVE / 100.0 * wave_ms:
+            pin_reasons.append(f"worth {100*rank0_prefill/wave_ms:.3f} % of a wave over rank-0, under the "
+                               f"{MIN_PCT_OF_WAVE} % floor a re-capture obligation is worth")
         rows.append({
             "shape": shape, "M": m, "n": res["N"], "k": res["K"], "calls_per_wave": calls,
             "family": plan.get("family", "?"),
@@ -377,6 +644,7 @@ def analyse(log: TimeLog, dump: Dump, cap: int, wave_ms: float, m: int, top: int
             "baseline_name": base_name,
             "noise_floor": floor, "noise_worst": worst,
             "admitted": not reasons, "reject_reasons": reasons,
+            "pinnable": not pin_reasons, "unpinnable_reasons": pin_reasons,
             "default_tflops": float(res["default_tflops"]),
             "engine_call_ms": eng_ms, "field": len(times),
             "winner": winner, "top": top_list,
@@ -394,13 +662,17 @@ def analyse(log: TimeLog, dump: Dump, cap: int, wave_ms: float, m: int, top: int
     return rows
 
 
-def print_report(rows: list[dict], dump: Dump, cap: int, heur_width: int, wave_ms: float) -> int:
+def print_report(rows: list[dict], dump: Dump, cap: int, heur_width: int, wave_ms: float,
+                 verdicts: dict[tuple[str, str], dict]) -> int:
     print(f"\nDEPTH shape-level (M={rows[0]['M'] if rows else '?'}; the engine's only shippable "
           f"width is kMaxWaveRows=512, engine/decode_step.h:49). BASE is what runs TODAY for that "
-          f"shape: its shipped pin where one exists, else rank-0.")
+          f"shape: its shipped pin where one exists, else rank-0. PINNABLE is the change-independent "
+          "question (does this shape want a pin at all, measured against rank-0); ADMIT is what this "
+          "window says should MOVE; the last column is the in-situ verdict, which outranks both.")
     print(f"{'shape':18s} {'calls':>5} {'BASE ms':>8} {'best ms':>8} {'best rank':>9} "
           f"{'best/BASE':>9} {'noise':>6} {'saved/wave':>10} {'%/wave':>7} verdict")
-    total = admitted_total = 0.0
+    total = 0.0
+    admitted_total = 0.0
     blockers = 0
     for r in rows:
         w = r["winner"]
@@ -409,11 +681,21 @@ def print_report(rows: list[dict], dump: Dump, cap: int, heur_width: int, wave_m
         admitted_total += r["saved_ms_per_wave"] if r["admitted"] else 0.0
         per_prefill = r["saved_ms_per_wave"] * 8.0
         noise_txt = f"{100*r['noise_floor']:.1f} %" if r["noise_floor"] is not None else "n/a"
-        verdict = "ADMIT" if r["admitted"] else "reject: " + "; ".join(r["reject_reasons"])
+        head = "ADMIT" if r["admitted"] else "no change: " + "; ".join(r["reject_reasons"])
+        if r["pinnable"]:
+            v = verdicts.get((r["shape"], w["hex"]))
+            if v is None:
+                tail = " | PINNABLE but UNVERDICTED — cannot be shipped until measured in situ"
+            else:
+                r4096, r1024, label = carrying_ratio(v)
+                tail = (f" | in-situ {v['verdict']} ({label} {r4096:.4f}/{r1024:.4f}, "
+                        f"floor {v['null_floor_4096_pct']}/{v['null_floor_1024_pct']} %)")
+        else:
+            tail = " | " + "; ".join(r["unpinnable_reasons"])
         base_tag = "" if r["shipped_pin_ms"] is None else f" ({r['baseline_name']})"
         print(f"{r['shape']:18s} {r['calls_per_wave']:>5} {r['baseline_ms']:>8.4f} {w['ms']:>8.4f} "
               f"{w['heur_rank']:>9} {w['ms'] / r['baseline_ms']:>9.4f} {noise_txt:>6} "
-              f"{r['saved_ms_per_wave']:>10.4f} {100*per_prefill/wave_ms:>7.3f} {verdict}{base_tag}")
+              f"{r['saved_ms_per_wave']:>10.4f} {100*per_prefill/wave_ms:>7.3f} {head}{base_tag}{tail}")
         for extra in r["top"][1:]:
             print(f"{'  +':18s} {'':>5} {'':>8} {extra['ms']:>8.4f} {extra['heur_rank']:>9} "
                   f"{extra['ms'] / r['baseline_ms']:>9.4f} {'':>6} {'':>10} {'':>7}"
@@ -424,95 +706,212 @@ def print_report(rows: list[dict], dump: Dump, cap: int, heur_width: int, wave_m
     print(f"DEEP-PRIZE every-shape-vs-BASE: per_4096_lane_prefill={per_prefill_all:.4f} ms "
           f"= {100.0*per_prefill_all/wave_ms:.3f} % of the {wave_ms:.2f} ms wave — a CEILING, because "
           "it credits a burst win on shapes the admission rule rejected")
-    print(f"DEEP-PRIZE admitted-set-only: saved_per_24layer_wave={admitted_total:.4f} "
+    print(f"DEEP-PRIZE wanting-a-change-set: saved_per_24layer_wave={admitted_total:.4f} "
           f"per_4096_lane_prefill={admitted_total*8.0:.4f} "
-          f"pct_of_wave({wave_ms:.2f} ms)={100.0*admitted_total*8.0/wave_ms:.3f}")
+          f"pct_of_wave({wave_ms:.2f} ms)={100.0*admitted_total*8.0/wave_ms:.3f} — this is what the burst "
+          "says should MOVE, and it is not what ships: on today's verdicts every shape in it is an "
+          "in-situ loser or a tie, so booking this figure would be booking the +26 % in reverse")
+    shipped_burst = sum(r["calls_per_wave"] * (r["default_ms"] - r["winner"]["ms"]) for r in rows
+                        if verdicts.get((r["shape"], r["winner"]["hex"]), {}).get("verdict") == "win")
+    print(f"DEEP-PRIZE shipped-set-worth-vs-no-pin (burst, vs rank-0, counted on the win rows that are "
+          f"also this window's field winner): saved_per_24layer_wave={shipped_burst:.4f} "
+          f"pct_of_wave({wave_ms:.2f} ms)={100.0*shipped_burst*8.0/wave_ms:.3f} — two omissions are "
+          "deliberate, not a bug: the shipped `down_proj` incumbent is not this window's winner (its tie "
+          "challenger is), and its burst value against rank-0 was banked by D28, so re-counting it here "
+          "would double-book a win the shipping path already has. §9 measured the delivered set at -0.63 % "
+          "of wave in situ, so this burst figure is ~2-3x the delivered win: right about the sign, wrong "
+          "about the size. Quote §9 for the wave; this line exists to show the gap rather than hide it.")
     print(f"DEEP-PRIZE blocked={blockers} (unwitnessed hex or over-cap workspace stamp) — a blocked "
           "winner is not a candidate, it is a capture that has not been taken yet")
-    print("DEEP-PRIZE reading: best/BASE < 1 is the ONLY thing that changes the shipping path, because "
-          "an unpinned `lt` run gets rank-0 and a pinned shape gets its pin. rank0/eng is the "
-          "already-shipped route gap (D26), a different question. Both are warm-burst per-call figures "
-          "read out of tmp/wsjob/ logs, and D28 is the precedent that they do not transfer to family "
-          "time in situ: two of three burst winners were in-situ losers. Treat the admitted-set number "
-          "as an upper bound and adjudicate in one lock hold.")
+    print("DEEP-PRIZE reading: best/BASE < 1 is what changes the shipping path, and the verdict in "
+          "`insitu_verdicts.tsv` is what decides whether it is allowed to: two shapes admitted here ran "
+          "+26 % and +27 % slower in situ, and a third is a tie that may not buy a pin. What D36 settled is "
+          "the direction of the arrow — a pin set's COVERAGE costs, not which of two near-equal winners runs "
+          "a shape: leaving `down_proj` unpinned moved its family about 20 %, swapping its two winners moved "
+          "it inside the null. So a burst number is an upper bound, the in-situ verdict is the decision, "
+          "and `wall_ms` cannot adjudicate either way (§9's null test reads +3.1 % / +1.9 % on a family no "
+          "pin can touch).")
     return blockers
 
 
-def check_table(rows: list[dict], engine_rows: list[dict]) -> int:
-    """The engine's candidate rows must be exactly the set this derivation admits — no more, no fewer.
+def check_table(rows: list[dict], engine_rows: list[dict],
+                verdicts: dict[tuple[str, str], dict]) -> int:
+    """The engine's pin table must equal what this window derives, MODULO the in-situ verdicts.
 
-    Without this, the table in `kernels_gemm.cpp` is a transcription that rots the first time a winner
-    moves, and a stale pin is worse than no pin: it names a kernel nobody re-measured while reading as
-    adjudicated. Counts AND hexes are compared, and an empty engine candidate set with a non-empty
-    derived set is a failure, not a pass.
+    Two identities, and they are the whole point of the tool having verdict data at all:
+
+        shipped    ==  the in-situ-win rows
+        candidates ==  every non-win verdict (lose ∪ tie ∪ superseded)
+
+    plus three derived rules that only make sense with a window in hand: anything pinnable with no verdict
+    is an ERROR rather than a silent absence (a re-take must record a verdict before a pin can move); a
+    `tie` may never be shipped and must BE the field winner it claims to tie against; and a shipped row may
+    not be dominated by a strictly better-measured record for the same shape. `pinnable` is what this burst
+    window says the shape wants at all (rank-0 as the baseline, so it does not move when a pin is promoted),
+    and the verdict file is the only thing that can turn a burst winner into a shipped pin.
+
+    `tie` is why the first identity is stated over verdicts and not over `pinnable ∩ wins`: the shipped
+    `down_proj` row is an incumbent, and this window's fastest record for that shape is a different algo
+    that measures a tie against it (D36). Keying the identity on the field winner alone would demand that
+    a tie displace a win, which is the opposite of what a tie means.
+
+    Note what this does NOT do: it does not re-litigate a verdict. The burst window cannot see what a
+    neighbouring pin changes, and pretending it could is how `o_proj+out_proj` and `in_proj_qkv` were
+    admitted twice and rejected twice.
     """
-    eng_cand = {r["hex"]: r["name"] for r in engine_rows if r["set"] == "kCandidate"}
-    eng_ship = {r["hex"]: r["name"] for r in engine_rows if r["set"] == "kShipped"}
-    derived = {r["winner"]["hex"]: "deep_" + r["shape"] for r in rows if r["admitted"]}
-    print(f"\nCHECK-TABLE engine_shipped={len(eng_ship)} engine_candidates={len(eng_cand)} "
-          f"derived_admitted={len(derived)}")
+    # Shape-AND-hex keyed, never hex alone: one kernel record can rank in two shapes' fields (the first
+    # version of this check reported `q_proj` as shipped because its fastest record happened to be the same
+    # 24 bytes as the `down_proj` pin), and an identity that collapses two shapes into one cannot adjudicate
+    # either of them.
+    eng_ship = {(pin_shape(r["name"]), r["hex"]) for r in engine_rows if r["set"] == "kShipped"}
+    eng_cand = {(pin_shape(r["name"]), r["hex"]) for r in engine_rows if r["set"] == "kCandidate"}
+    pinnable = {(r["shape"], r["winner"]["hex"]) for r in rows if r["pinnable"]}
+    admitted = sum(1 for r in rows if r["admitted"])
+    retired = {(s, h) for (s, h), v in verdicts.items() if v["verdict"] == "superseded"}
+    eng_all = eng_ship | eng_cand
+    word = {k: v["verdict"] for k, v in verdicts.items()}
+    # The one row per shape that this window says is worth anything, and its verdict if it has one.
+    field_winner = {r["shape"]: (r["shape"], r["winner"]["hex"]) for r in rows if r["pinnable"]}
+
+    def nm(keys):
+        return sorted(f"{s}:{h[:8]}" for s, h in keys)
+
+    unverdicted = sorted(f"{s}:{h[:8]}" for (s, h) in pinnable if (s, h) not in verdicts)
+    want_ship = {k for k, w in word.items() if w == "win"}
+    want_cand = {k for k, w in word.items() if w != "win"} | (retired & eng_all)
+    ties = {k for k, w in word.items() if w == "tie"}
+    # A tie is a claim about THIS window's best record, so it can only be checked against this window.
+    tie_offfield = sorted(f"{s}:{h[:8]}" for (s, h) in ties
+                          if field_winner.get(s) != (s, h))
+    tie_shipped = sorted(f"{s}:{h[:8]}" for (s, h) in (ties & eng_ship))
+    # A shipped row may not be dominated: if the field's best record for a shape carries a strictly
+    # better verdict than the row the engine ships, the better one is sitting unpinned.
+    dominated = []
+    for key in sorted(eng_ship):
+        win_key = field_winner.get(key[0])
+        if win_key and win_key != key and VERDICT_RANK.get(word.get(win_key, ""), -1) > \
+                VERDICT_RANK.get(word.get(key, ""), -1):
+            dominated.append(f"{key[0]}: ships {key[1][:8]}…({word.get(key)}) while the field winner "
+                             f"{win_key[1][:8]}… is {word.get(win_key)}")
+    print(f"\nCHECK-TABLE derived_pinnable={len(pinnable)} of {len(rows)} shapes "
+          f"(wanting_a_change={admitted}) verdicts={len(verdicts)} "
+          f"win={len(want_ship)} tie={len(ties)} lose={sum(1 for w in word.values() if w == 'lose')} "
+          f"superseded={len(retired)} engine_shipped={len(eng_ship)} engine_candidates={len(eng_cand)}")
     rc = 0
-    if len(eng_ship) != 1:
-        print(f"CHECK-TABLE FAIL reason=the shipped set is asserted to be exactly 1 row (D28's "
-              f"adjudication left down_proj standing); found {len(eng_ship)}. A check that can come "
-              "back empty passes vacuously, which is the failure class this repo has hit five times.")
+    if unverdicted:
+        print(f"CHECK-TABLE FAIL reason=these shapes are pinnable on burst evidence but carry NO in-situ "
+              f"verdict: {unverdicted}. That is the hole D35 closed: a burst winner is not a pin until the "
+              "in-situ measurement is recorded in `insitu_verdicts.tsv`, and refusing to guess is the only "
+              "way this table keeps meaning `measured by someone, in situ`.")
         rc = 1
-    if derived and set(derived) != set(eng_cand):
-        missing = sorted(set(derived) - set(eng_cand))
-        extra = sorted(set(eng_cand) - set(derived))
-        print(f"CHECK-TABLE FAIL reason=the engine's candidate rows are not what this log derives. "
-              f"derived_but_not_in_engine={missing} in_engine_but_not_derived={extra}. Either the "
-              "table is stale against the sweep, or the sweep was re-taken and the table was not "
-              "re-derived — a stale candidate is a kernel nobody measured wearing an adjudicated label.")
+    if tie_offfield:
+        print(f"CHECK-TABLE FAIL reason=these rows claim `tie` but are not their shape's field winner in "
+              f"this window: {tie_offfield}. A tie is `best the field has vs the incumbent`; asserted for a "
+              "mid-field record it is unverifiable here, and the shape's actual winner would be silently "
+              "unadjudicated.")
+        rc = 1
+    if tie_shipped:
+        print(f"CHECK-TABLE FAIL reason=a tie is shipped: {tie_shipped}. A tie means the instrument cannot "
+              "separate it from what already ships, so it buys nothing and inherits a re-capture obligation "
+              "on every library bump — which is `MIN_PCT_OF_WAVE`'s own reason for refusing a candidate, "
+              "applied in situ rather than at burst.")
+        rc = 1
+    if dominated:
+        print(f"CHECK-TABLE FAIL reason=a shipped row is dominated by a better-measured record for the same "
+              f"shape: {dominated}. Either the better record is the one that ships, or its verdict is not "
+              "a win; shipping the weaker of two separated records is an unexplained edit.")
+        rc = 1
+    if not want_ship:
+        print("CHECK-TABLE FAIL reason=no verdict says win, so the shipped set would be empty. A check "
+              "whose expected answer is empty cannot fail, and a pin table with no shipped rows is not "
+              "what `--gemm-pins all` means.")
+        rc = 1
+    if want_ship != eng_ship:
+        print(f"CHECK-TABLE FAIL reason=shipped set is not the set of in-situ wins. "
+              f"should_be_shipped={nm(want_ship)} missing={nm(want_ship - eng_ship)} "
+              f"shipped_without_a_win={nm(eng_ship - want_ship)}. Either the C++ row's PinSet was edited "
+              "without the verdict file, or a re-take changed the field and nobody re-adjudicated it.")
+        rc = 1
+    if want_cand != eng_cand:
+        print(f"CHECK-TABLE FAIL reason=candidate set is not every non-win verdict (lose ∪ tie ∪ "
+              f"superseded). should_be_candidate={nm(want_cand)} missing={nm(want_cand - eng_cand)} "
+              f"in_engine_but_not_derived={nm(eng_cand - want_cand)}. A stale candidate is a kernel nobody "
+              "re-measured wearing an adjudicated label; a missing one is a retired pin that was deleted "
+              "instead of kept-and-labelled.")
         rc = 1
     if not rc:
-        print("CHECK-TABLE PASS (every candidate the engine carries is one this log derives, and "
-              "every winner the log admits is in the engine)")
+        print(f"CHECK-TABLE PASS shipped == the win rows == {nm(want_ship)}; candidates == every non-win "
+              f"verdict == {nm(want_cand)}; nothing pinnable is unverdicted; no shipped row is dominated by "
+              "its shape's field winner; no tie is shipped")
     return rc
 
 
-def emit_pins(rows: list[dict], engine_rows: list[dict], cap: int) -> None:
-    shipped_hexes = {r["hex"] for r in engine_rows if r["set"] == "kShipped"}
-    cand_hexes = {r["hex"]: r["name"] for r in engine_rows if r["set"] == "kCandidate"}
-    print("\n=== algo_pins() CANDIDATE rows (promotion to the shipped set is a one-word edit; "
-          "the default `all` does not reach these) ===")
+def emit_pins(rows: list[dict], engine_rows: list[dict], cap: int,
+              verdicts: dict[tuple[str, str], dict]) -> None:
+    """Print what each shape's row should be, set included — derived, so it cannot print a stale table.
+
+    The set on each printed row is what the verdict file says, not what `algo_pins()` currently says, so a
+    re-take tells you which rows need editing and in which direction. A pinnable shape with no verdict is
+    printed as an error line rather than as a candidate, because "we did not measure it" and "it is a
+    candidate" are different claims and only the second one gets copied into a build.
+    """
+    shipped_now = {r["hex"] for r in engine_rows if r["set"] == "kShipped"}
+    winners = {x["winner"]["hex"] for x in rows}
+    print("\n=== algo_pins() rows as the derivation + the in-situ verdicts say they should be "
+          "(a row moves by editing PinSet AND its verdict row, in one commit) ===")
     n = 0
     for r in rows:
         w = r["winner"]
-        if not r["admitted"]:
-            print(f"# {r['shape']}: NOT a candidate — {'; '.join(r['reject_reasons'])}")
+        if not r["pinnable"]:
+            print(f"# {r['shape']}: wants no pin — {'; '.join(r['unpinnable_reasons'])}")
             continue
-        if w["hex"] in shipped_hexes:
-            print(f"# {r['shape']}: the deep winner IS the already-SHIPPED pin "
-                  f"(hex {w['hex'][:16]}…); nothing new to pin")
+        v = verdicts.get((r["shape"], w["hex"]))
+        if v is None:
+            print(f"# {r['shape']}: PINNABLE on burst ({w['ms']:.4f} ms vs rank-0 "
+                  f"{r['default_ms']:.4f}) but UNVERDICTED. Adjudicate it in situ and record the row in "
+                  "insitu_verdicts.tsv before any pin may move; it is deliberately not emitted as a "
+                  "candidate, because an unmeasured record and a measured-then-rejected one are not the "
+                  "same thing.")
             continue
-        if w["hex"] in cand_hexes:
-            print(f"# {r['shape']}: already carried as the candidate `{cand_hexes[w['hex']]}` — "
-                  f"unchanged by this derivation")
-            continue
+        want = "kShipped" if v["verdict"] == "win" else "kCandidate"
+        r4096, r1024, label = carrying_ratio(v)
+        moved = "" if (want == "kShipped") == (w["hex"] in shipped_now) else "  <-- CHANGES the shipped set"
+        fields = '{"deep_%s", %s, %s, 512, "%s", PinSet::%s},' % (
+            r["shape"], r["n"], r["k"], w["hex"], want)
+        why = ("heur_rank=%s idx=%s %.4f ms vs rank-0 %.4f and vs BASE %.4f (%s); in-situ %s on %s = "
+               "%.4f at 4096 / %.4f at 1024 (floor %s %%, reps %s, %s); ws_stamp=%s <= cap %s, "
+               "witnessed in ALGODUMP%s") % (
+            w["heur_rank"], w["idx"], w["ms"], r["default_ms"], r["baseline_ms"], r["baseline_name"],
+            v["verdict"], label, r4096, r1024,
+            f"{v['null_floor_4096_pct']}/{v['null_floor_1024_pct']}", v["reps"], v["source"],
+            w["ws_stamped"], cap, moved)
+        print(fields + "  // " + why)
         n += 1
-        floor_txt = (f"{100*r['noise_floor']:.1f} %" if r["noise_floor"] is not None
-                     else "not measured — pass --noise-log")
-        print(f'{{"deep_{r["shape"]}", {r["n"]}, {r["k"]}, 512, "{w["hex"]}", PinSet::kCandidate}},  '
-              f'// heur_rank={w["heur_rank"]} idx={w["idx"]} '
-              f'{w["ms"]:.4f} ms vs BASE {r["baseline_ms"]:.4f} ({r["baseline_name"]}) '
-              f'= {w["ms"] / r["baseline_ms"]:.3f}x, shape noise floor {floor_txt}, '
-              f'saved {r["saved_ms_per_wave"]:.4f} ms/wave = '
-              f"{100*r['saved_ms_per_wave']*8.0/r['wave_ms']:.3f} % of a {r['wave_ms']:.2f} ms wave, "
-              f'ws_stamp={w["ws_stamped"]} <= cap {cap}, witnessed in ALGODUMP; '
-              f'{w["solution"][:72]}')
-    print(f"=== {n} candidate row(s) out of {len(rows)} shapes ===")
+    for r in engine_rows:
+        if r["hex"] in winners:
+            continue
+        v = verdicts.get((pin_shape(r["name"]), r["hex"]))
+        why = (v["note"][:110] if v else "no verdict row")
+        print(f"# {r['name']}: carried but not this window's winner (PinSet::{r['set']}) — {why}")
+    print(f"=== {n} row(s) the derivation and the verdicts agree on, out of {len(rows)} shapes ===")
 
 
-def selftest_rule(dump_paths: list[Path], cap: int) -> int:
-    """The reconstruction rule, checked against the one pin whose bytes are independently known.
+def selftest_rule(dump_paths: list[Path], cap: int, verdicts_path: Path) -> int:
+    """Three independent things, none of which needs a sweep window or a device.
 
-    `algo_pins()` carries one row, `down_proj`, and results.md §3d states its provenance: it is the
-    ALGODUMP record at seq=1 idx=905, captured not hand-written. So: take down_proj heur_rank=1 from
-    a sweep log's ALGO line, reconstruct with the rule, and require byte equality with BOTH the
-    committed pin in engine/kernels_gemm.cpp and the ALGODUMP line. If the rule is wrong about the
-    endianness or about the stamped cap, this fails — which is the only reason the rest of the tool
-    is allowed to reconstruct anything.
+    1. THE RECONSTRUCTION RULE, against the one record whose bytes are independently known. §3d of
+       `prototype/gemm_algo_sweep/results.md` states its provenance: the `down_proj` pin is the ALGODUMP
+       record at heur_rank=1 idx=905, captured not hand-written. So take that record from the capture and
+       require byte equality with the row the engine compiles — and note the row's SET is no longer part of
+       the test: the witness is about the bytes, so it still works now that the row is a retired candidate.
+       If the rule were wrong about endianness or about the stamped cap, this is what says so.
+    2. EVERY ROW WITNESSED. Each hex in `algo_pins()` must appear in an `ALGODUMP` capture for its own
+       shape. One hand-typed character in any row — promoted or retired — fails here, which is the general
+       form of the check in (1).
+    3. THE SET STRUCTURE: `check_verdict_data`, which derives the expected shipped and candidate sets from
+       the verdict FILE and compares them with the table in both directions. The counts printed here are
+       counted out of the table; nothing asserts a remembered number, so the assertion cannot be satisfied
+       by retyping it — which is the vacuous-check class this repo has now hit five times.
     """
     pins = read_committed_pins(ENGINE_GEMM)
     shipped = [p for p in pins if p["set"] == "kShipped"]
@@ -520,31 +919,51 @@ def selftest_rule(dump_paths: list[Path], cap: int) -> int:
     unknown = [p for p in pins if p["set"] not in ("kShipped", "kCandidate")]
     print(f"SELFTEST-RULE rows={len(pins)} shipped={len(shipped)} candidates={len(cands)} "
           f"unset={len(unknown)} names={','.join(p['name'] for p in pins)}")
-    if len(shipped) != 1 or unknown:
-        print(f"SELFTEST-RULE FAIL reason=the shipped set is asserted to be exactly 1 row "
-              f"(D28's adjudication) and every row must name a set; found shipped={len(shipped)} "
-              f"unset={len(unknown)}. A check that reads the pin table and can come back empty or "
-              "wrong-sized passes vacuously, which is the failure class this repo has now hit five "
-              "times.")
+    if not pins or not shipped or unknown:
+        print(f"SELFTEST-RULE FAIL reason=the table must be non-empty, must ship at least one row, and "
+              f"every row must name a set; found rows={len(pins)} shipped={len(shipped)} "
+              f"unset={len(unknown)}. A check whose expected answer can be empty passes vacuously.")
         return 1
-    committed = shipped[0]["hex"]
+    rc = check_verdict_data(read_verdicts(verdicts_path), pins)
+    if rc:
+        return rc
     dump = Dump(dump_paths)
+    watched = [p for p in pins
+               if p["hex"] in dump.by_shape.get((pin_shape(p["name"]), 512), {})]
+    unwatched = sorted(p["name"] for p in pins if p not in watched)
+    print(f"SELFTEST-RULE engine_rows_witnessed_in_ALGODUMP={len(watched)}/{len(pins)}")
+    if unwatched:
+        print(f"SELFTEST-RULE FAIL reason=these rows name bytes that appear in no ALGODUMP capture for "
+              f"their shape: {unwatched}. A pin is a capture, not a transcription — regenerate the capture "
+              "with `--verify --algo-dump` or fix the row.")
+        return 1
+    by_name = {p["name"]: p for p in pins}
+    anchor = by_name.get("down_proj")
+    if anchor is None:
+        print("SELFTEST-RULE FAIL reason=the table no longer carries a `down_proj` row at all, which was "
+              "the anchor for the byte rule; pick a new record whose provenance is written down before "
+              "deleting it")
+        return 1
     recs = [f for f in dump.by_shape.get(("down_proj", 512), {}).values()
             if f["heur_rank"] == "1" and int(f["idx"]) == 905]
     if not recs:
         print("SELFTEST-RULE FAIL reason=no ALGODUMP line for down_proj heur_rank=1 idx=905")
         return 1
     rec = recs[0]
-    ok_dump = rec["data"] == committed
+    ok_dump = rec["data"] == anchor["hex"]
     print(f"SELFTEST-RULE algodump_down_proj_rank1_matches_committed={1 if ok_dump else 0} "
-          f"algodump={rec['data']} committed={committed}")
+          f"algodump={rec['data']} committed={anchor['hex']} "
+          f"row_set={anchor['set']} "
+          f"note=\"keyed by row NAME, not shape: `down_proj` and `deep_down_proj` are the same shape and "
+          "different records, so a shape-keyed lookup would anchor on whichever row came last\"")
     if not ok_dump:
         print("SELFTEST-RULE FAIL reason=the capture and the committed pin disagree; nothing this "
               "tool reconstructs can be trusted until that is explained")
         return 1
     print("SELFTEST-RULE note=\"the ALGO-line half of the rule is checked in --check-rule-vs-log, "
           "which needs a --time-log; run both together\"")
-    print("SELFTEST-RULE PASS (the pin form the engine parses is the form the library writes)")
+    print("SELFTEST-RULE PASS (the pin form the engine parses is the form the library writes, every row is "
+          "witnessed, and the sets match the recorded verdicts)")
     return 0
 
 
@@ -638,6 +1057,161 @@ def prefix_check(dumps: list[Path], m: int, engine_width: int) -> int:
     return 1 if bad else 0
 
 
+def selftest_checks(verdicts_path: Path) -> int:
+    """Prove the two new checks discriminate, in-process, with no sweep window and no device.
+
+    A guard nobody has watched fail is decoration — the trap this repo has written up five times, and the
+    reason `gate.py` carries `--break-*` injections. Each scenario below is a small tamper on the real
+    verdict file or the real pin table (so the numbers stay honest), and must FAIL for its own reason while
+    the untouched configuration PASSES. If someone later softens a check into a no-op, this is what goes
+    red. The scenarios:
+
+      clean                       — the shipped state, must pass both checks;
+      an unverdicted pinnable shape — the re-take case D35 closed: burst says pin it, nobody measured it;
+      a drifted PinSet            — a shipped row whose verdict says lose, i.e. C++ edited without the data;
+      a win inside its floor      — an own ratio the null test cannot resolve, passed off as a win;
+      a tie promoted to shipped   — D36's boundary: a tie may be a good algo, but it may not take a pin, so
+                                    flipping only the C++ set must be caught;
+      a tie promoted by relabel   — the other way round: calling the tie a `win` without moving its numbers
+                                    must be caught, so the verdict cannot be faked to buy a pin;
+      a verdict that lost its pair — an interaction verdict whose treated side names no other shape, and a
+                                    row whose treated side does not name itself, which is the exact shape
+                                    of D36's error (a coverage effect labelled as algo physics);
+    """
+    verdicts = read_verdicts(verdicts_path)
+    engine_rows = read_committed_pins(ENGINE_GEMM)
+
+    def make_rows(verd):
+        """One synthetic window row per shape, for `check_table`, which needs a field winner.
+
+        There is no sweep window in a selftest, so the field winner is modelled as the lowest-ranked
+        verdict present for the shape — which in the real table IS the burst winner: the `tie` row beats the
+        incumbent it ties against, the `lose` rows are their shapes' field winners, and the gateup `win` is
+        its shape's. Modelling it any other way would make the dominance rule test nothing.
+        """
+        best: dict[str, tuple[int, str, dict]] = {}
+        for order, ((s, h), v) in enumerate(verd.items()):
+            rank = VERDICT_RANK[v["verdict"]]
+            if s not in best or rank < best[s][0]:
+                best[s] = (rank, h, v)
+        return [{"shape": s, "winner": {"hex": h, "ms": 0.1}, "default_ms": 0.12,
+                 "baseline_ms": 0.1, "baseline_name": "selftest", "calls_per_wave": 24,
+                 "saved_ms_per_wave": 0.48, "wave_ms": 956.12, "admitted": v["verdict"] == "lose",
+                 "pinnable": True, "unpinnable_reasons": [], "reject_reasons": []}
+                for s, (_rank, h, v) in best.items()]
+
+    rc_all = 0
+    ok = check_table(make_rows(verdicts), engine_rows, verdicts) == 0 \
+        and check_verdict_data(verdicts, engine_rows) == 0
+    print(f"SELFTEST-CHECKS case=clean expect_fail=False got_fail={not ok} {'ok' if ok else 'NOT OK'}")
+    rc_all |= 0 if ok else 1
+
+    verd = dict(verdicts)
+    extra = {"in_proj_z": "f0" + "0" * 46}
+    rows = make_rows(verdicts) + [{"shape": s, "winner": {"hex": h, "ms": 0.1}, "default_ms": 0.2,
+                                   "baseline_ms": 0.2, "baseline_name": "selftest",
+                                   "calls_per_wave": 18, "saved_ms_per_wave": 0.288,
+                                   "wave_ms": 956.12, "admitted": True, "pinnable": True,
+                                   "unpinnable_reasons": [], "reject_reasons": []}
+                                  for s, h in extra.items()]
+    got = check_table(rows, engine_rows, verd)
+    ok = bool(got)
+    print(f"SELFTEST-CHECKS case=an unverdicted pinnable shape expect_fail=True got_fail={ok} "
+          f"{'ok' if ok else 'NOT OK'}")
+    rc_all |= 0 if ok else 1
+
+    drifted = [dict(r) for r in engine_rows]
+    for r in drifted:
+        if (pin_shape(r["name"]), r["hex"]) in {(s, h) for (s, h), v in verdicts.items()
+                                                if v["verdict"] == "win"}:
+            r["set"] = "kCandidate"
+            break
+    got = check_verdict_data(verdicts, drifted) or check_table(make_rows(verdicts), drifted, verdicts)
+    ok = bool(got)
+    print(f"SELFTEST-CHECKS case=a drifted PinSet (shipped row whose verdict is not a win) "
+          f"expect_fail=True got_fail={ok} {'ok' if ok else 'NOT OK'}")
+    rc_all |= 0 if ok else 1
+
+    import copy
+    tampered = copy.deepcopy(verdicts)
+    key = next((k for k, v in tampered.items() if v["verdict"] == "win"), None)
+    if key is None:
+        print("SELFTEST-CHECKS FAIL reason=no win verdict in the file to tamper with")
+        return 1
+    inside = 1.0 - tampered[key]["null_floor_4096_pct"] / 400.0
+    for f in ("own_4096", "own_1024", "inter_4096", "inter_1024"):
+        if tampered[key][f] is not None:
+            tampered[key][f] = inside
+    got = check_verdict_data(tampered, engine_rows)
+    ok = bool(got)
+    print(f"SELFTEST-CHECKS case=a win pulled inside its own null test expect_fail=True got_fail={ok} "
+          f"{'ok' if ok else 'NOT OK'}")
+    rc_all |= 0 if ok else 1
+
+    # D36's boundary, in the C++ direction: promoting a tie by editing its PinSet alone.
+    tie_key = next((k for k, v in verdicts.items() if v["verdict"] == "tie"), None)
+    if tie_key is None:
+        print("SELFTEST-CHECKS FAIL reason=no tie verdict in the file, so the "
+              "\"a tie cannot ship\" guard has nothing to test. Delete the guard, or measure a tie.")
+        return 1
+    promoted = [dict(r) for r in engine_rows
+                if not (pin_shape(r["name"]) == tie_key[0] and r["hex"] == tie_key[1])]
+    for r in engine_rows:
+        if pin_shape(r["name"]) == tie_key[0] and r["hex"] == tie_key[1]:
+            r2 = dict(r)
+            r2["set"] = "kShipped"
+            promoted.append(r2)
+    promoted.sort(key=lambda r: r["name"])
+    got = check_verdict_data(verdicts, promoted) or check_table(make_rows(verdicts), promoted, verdicts)
+    ok = bool(got)
+    print(f"SELFTEST-CHECKS case=a tie promoted to shipped in C++ expect_fail=True got_fail={ok} "
+          f"{'ok' if ok else 'NOT OK'}")
+    rc_all |= 0 if ok else 1
+
+    # ...and in the data direction: relabelling the tie a `win` while its ratios stay inside the null.
+    relabel = copy.deepcopy(verdicts)
+    relabel[tie_key] = dict(relabel[tie_key], verdict="win")
+    got = check_verdict_data(relabel, engine_rows) or check_table(make_rows(relabel), engine_rows, relabel)
+    ok = bool(got)
+    print(f"SELFTEST-CHECKS case=a tie relabelled win without moving its numbers expect_fail=True "
+          f"got_fail={ok} {'ok' if ok else 'NOT OK'}")
+    rc_all |= 0 if ok else 1
+
+    # The D36 error itself, twice: an interaction verdict naming no co-named pin, and a row whose treated
+    # side does not name the row it claims to adjudicate. Both are label-only tampers — same numbers.
+    orphan_pair = copy.deepcopy(verdicts)
+    ikey = next(iter(verdicts))
+    own_name = [r["name"] for r in engine_rows
+                if pin_shape(r["name"]) == ikey[0] and r["hex"] == ikey[1]][0]
+    rec = dict(orphan_pair[ikey], carry="interaction")
+    rec["inter_4096"], rec["inter_1024"] = rec["own_4096"], rec["own_1024"]
+    # Names its OWN row and nothing else: the treated set is well-formed and self-consistent, but an
+    # interaction verdict that names no second shape is an interaction with nothing.
+    rec["pins_treated"] = own_name
+    orphan_pair[ikey] = rec
+    got = check_verdict_data(orphan_pair, engine_rows)
+    ok = bool(got)
+    print(f"SELFTEST-CHECKS case=an interaction verdict naming no other shape's pin expect_fail=True "
+          f"got_fail={ok} {'ok' if ok else 'NOT OK'}")
+    rc_all |= 0 if ok else 1
+
+    selfless = copy.deepcopy(verdicts)
+    selfless[tie_key] = dict(selfless[tie_key], pins_treated="deep_gate_proj+up_proj")
+    got = check_verdict_data(selfless, engine_rows)
+    ok = bool(got)
+    print(f"SELFTEST-CHECKS case=a verdict whose treated side omits its own row expect_fail=True "
+          f"got_fail={ok} {'ok' if ok else 'NOT OK'}")
+    rc_all |= 0 if ok else 1
+
+    if rc_all:
+        print("SELFTEST-CHECKS FAIL reason=a scenario did not fail when it should have, which means the "
+              "check behind it cannot fail and is therefore not a check")
+        return 1
+    print("SELFTEST-CHECKS PASS (each guard fires on its own scenario and passes the clean one)")
+    return 0
+
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--time-log", type=Path, default=Path("tmp/wsjob/w64_128.log"))
@@ -650,6 +1224,10 @@ def main() -> int:
     ap.add_argument("--wave-ms", type=float, default=956.12,
                     help="the ledger's whole-wave denominator (D33: 956.12 ms at 4096 lanes)")
     ap.add_argument("--selftest-rule", action="store_true")
+    ap.add_argument("--selftest-checks", action="store_true",
+                    help="tamper with the verdict file and the pin table in memory and require each guard "
+                         "to go red for its own reason — the injections that prove the verdict checks are "
+                         "not decoration")
     ap.add_argument("--prefix-check", action="store_true",
                     help="compare the first two --algo-dump captures and report whether the shallow "
                          "heuristic list is a prefix of the deep one")
@@ -658,6 +1236,14 @@ def main() -> int:
                     help="a SECOND --time window at the same M and budget, same-algorithm pairs from "
                          "which set the floor a candidate must clear. Pass `none` to skip the "
                          "admission rule (the print then says so per shape rather than pretending).")
+    ap.add_argument("--verdicts", type=Path,
+                    default=Path("prototype/gemm_algo_sweep/insitu_verdicts.tsv"),
+                    help="the in-situ adjudication as data: per (shape, algo hex) a verdict of "
+                         "win/lose/superseded with the measured family ratios, the null-test floor they "
+                         "must clear, and the ledger section they came from. The burst window cannot see "
+                         "what happens inside a wave (D35: two admitted winners ran +26 % in situ), so "
+                         "this is the only input allowed to turn a derived winner into a shipped pin. A "
+                         "missing file is an error, not a pass.")
     ap.add_argument("--no-check-table", action="store_true",
                     help="skip the engine-table-vs-derived comparison. Off by default on purpose: a "
                          "stale pin table is a kernel nobody measured wearing an adjudicated label.")
@@ -669,7 +1255,10 @@ def main() -> int:
           f"({cap >> 20} MiB) kHeuristicWidth={heur_width}")
 
     if a.selftest_rule:
-        return selftest_rule(dumps, cap)
+        return selftest_rule(dumps, cap, a.verdicts)
+
+    if a.selftest_checks:
+        return selftest_checks(a.verdicts)
 
     if a.prefix_check:
         return prefix_check(dumps, a.m, heur_width)
@@ -684,6 +1273,13 @@ def main() -> int:
     if rc:
         return rc
     engine_rows = read_committed_pins(ENGINE_GEMM)
+    verdicts = read_verdicts(a.verdicts)
+    print(f"VERDICTS file={a.verdicts} rows={len(verdicts)} "
+          + " ".join(f"{w}={sum(1 for v in verdicts.values() if v['verdict'] == w)}"
+                      for w in VERDICT_WORDS))
+    rc_verdicts = check_verdict_data(verdicts, engine_rows)
+    if rc_verdicts:
+        return rc_verdicts
     noise = None
     if str(a.noise_log) != "none":
         if not a.noise_log.exists():
@@ -698,16 +1294,26 @@ def main() -> int:
               "spread, so every ADMIT below is unproven")
     rows = analyse(log, dump, cap, a.wave_ms, a.m, a.top, heur_width, noise=noise,
                    engine_rows=engine_rows)
-    emit_pins(rows, engine_rows, cap)
+    emit_pins(rows, engine_rows, cap, verdicts)
     print()
-    blockers = print_report(rows, dump, cap, heur_width, a.wave_ms)
+    blockers = print_report(rows, dump, cap, heur_width, a.wave_ms, verdicts)
     if not a.no_check_table:
-        rc = check_table(rows, engine_rows)
+        rc = check_table(rows, engine_rows, verdicts)
         if rc:
             return rc
     admitted = [r for r in rows if r["admitted"]]
-    print(f"DERIVE-OUTCOME admitted={len(admitted)}/{len(rows)} "
-          f"names={','.join('deep_' + r['shape'] for r in admitted) if admitted else 'NONE'}")
+    shipped_now = sorted({s for (s, _h), v in verdicts.items() if v["verdict"] == "win"})
+    print(f"DERIVE-OUTCOME wants_a_change={len(admitted)}/{len(rows)} "
+          f"names={','.join('deep_' + r['shape'] for r in admitted) if admitted else 'NONE'} "
+          "note=\"burst-admitted, not ship-admitted: a name here whose winner's verdict is `lose` or "
+          "`tie` was admitted at burst and refused in situ, which is the whole reason two lists exist\"")
+    print(f"DERIVE-OUTCOME shipped_per_verdicts={len(shipped_now)} "
+          f"names={','.join(shipped_now) if shipped_now else 'NONE'} — these are the shapes whose "
+          "in-situ verdict is a win, counted on the VERDICT ROWS and not on this window's winners, because "
+          "a shipped incumbent need not be the field's fastest record: the `down_proj` pin is a win "
+          "against running that shape with no pin at all, while this window's fastest `down_proj` algo "
+          "measures a tie against it (D36). The burst admits more than this on purpose: a burst winner is "
+          "a candidate, an in-situ winner is a pin (D35).")
     return 0 if blockers == 0 else 3
 
 

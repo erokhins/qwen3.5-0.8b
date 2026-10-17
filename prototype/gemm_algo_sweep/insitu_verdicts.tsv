@@ -1,0 +1,53 @@
+# In-situ verdicts for the hipBLASLt algo-pin table (D30 item 3.7; D35 promoted, D36 corrected).
+#
+# This file, not the burst sweep, is the authority for what may SHIP. `deep_pins.py` reads it and refuses
+# to emit a pin table that disagrees with it in either direction.
+#
+# WHY IT EXISTS. A warm-burst per-call win on these shapes is not an in-situ prediction: D28's round lost
+# two of three candidates, and the 64-deep round's `o_proj+out_proj` / `in_proj_qkv` winners lost a second
+# time. `tmp/wsjob/w64_128.log` answers "who wins a 64-deep burst field"; it does not answer "what is
+# faster inside a wave", and this file is where that second answer is recorded so the deriver can adjudicate
+# without guessing. Copy only from `bench/performance-status.md` §9 and its same-day correction (paired
+# medians of 3, both widths, one lock hold per config; raw lines in `tmp/pinab/ab3.txt`), and record the
+# arithmetic, because `bench/` is the main agent's file.
+#
+# COLUMNS
+#   shape/hex   Identifies a row by the ENGINE shape AND the algorithm record, not by the candidate name:
+#               the same 24 bytes can rank in another shape's candidate list (the `down_proj` pin's record
+#               IS `q_proj`'s fastest record in the deep field, 0.0451 ms), so a hex-only key can move a
+#               verdict from one shape to another. The deriver cross-checks every hex here against the
+#               engine table, and refuses a row naming a record the engine does not carry.
+#   verdict     "win"          faster in situ than the config that ran without it -> MAY SHIP (kShipped)
+#               "lose"         slower in situ than that config -> may not ship (kCandidate)
+#               "tie"          better than rank-0, NOT separable from the incumbent within the null; may
+#                              never ship, because a tie buys nothing and every pin is a re-capture
+#                              obligation on the next library bump — MIN_PCT_OF_WAVE's own reason, applied
+#                              in situ. D36: "superseded" is NOT a place to put a tie.
+#               "superseded"   genuinely displaced by a record that measured better in situ, for an
+#                              interaction reason the pins_in_* columns make reproducible. No row uses it
+#                              now: the one that did was a coverage effect mislabelled as algo physics.
+#   own_4096 /  Ratio of the treated side to the reference side on the family row that belongs to THIS
+#   own_1024    shape's own family (<1 = treated faster). Empty "?" only if that family row cannot isolate
+#               this record — then the row cannot be a win or a tie on own evidence.
+#   inter_4096 /
+#   inter_1024  Ratio on a family row this record does NOT own but measurably moves (an interaction).
+#   carry       Which pair decides the verdict: "own" or "interaction". A verdict is adjudicated on the
+#               pair its own data names, never on a pair the checker prefers.
+#   pins_treated /    THE POINT OF THIS PAUSE IN THE SCHEMA, and D36 is why: `--gemm-pins <csv>` REPLACES
+#   pins_reference    the admissible set, so naming a subset silently *excludes* everything else. §9's `gu`
+#                     side named only the gateup row and so ran `down_proj` with no pin at all, and I
+#                     recorded the resulting +20 % as an algo judgement. A verdict that does not name the
+#                     pin set on BOTH sides cannot be re-checked, because "what was not pinned" is the
+#                     effect. Spell a set out fully, comma-separated, exactly as passed to --gemm-pins;
+#                     "none" means every shape ran heuristic rank-0; "?" is refused.
+#   null_floor_*_pct  §9's null test: family-row drift measured on a family no pin can touch (+3.1 % at
+#               4096, +1.9 % at 1024). A difference inside it is not a difference, and `tie` is the word
+#               for exactly that. "auto" is refused: a null no one measured cannot size a verdict.
+#   reps        Number of paired reps behind the ratio. §9's rows are medians of 3.
+#   source      File and section, plus the arithmetic — so a row can be re-derived, not just believed.
+shape	hex	verdict	own_4096	own_1024	inter_4096	inter_1024	carry	pins_treated	pins_reference	null_floor_4096_pct	null_floor_1024_pct	reps	source	note
+gate_proj+up_proj	820400000000000000000000000000000000000800000000	win	0.9052	0.9022	?	?	own	deep_gate_proj+up_proj,deep_down_proj	down_proj	3.1	1.9	3	§9 table, mlp_gateup column: all 63.95 -> gud 57.89 ms at 4096; 16.05 -> 14.48 at 1024. §9's correction reproduces it (57.88 / 14.09) with the incumbent on the other side	the only row whose presence or absence moves its own family: -10.0 %, every rep, both widths, and it holds whichever down_proj algo sits beside it, so the set is not load-bearing for it. The wave gain is this row's alone (~ -0.63 %, §9 correction).
+down_proj	890300000000000000000000000000000000000800000000	win	0.8340	0.8188	?	?	own	deep_gate_proj+up_proj,down_proj	deep_gate_proj+up_proj	3.1	1.9	3	restored by D36. §9 gu row (down_proj UNPINNED, so rank-0) mlp_down 32.16 / 7.97 ms vs tmp/pinab/ab3.txt `old` medians 26.8237 / 6.5262 -> 0.8340 / 0.8188; §9's own within-window pair (all 26.87 / 6.61) gives 0.8355 / 0.8294, agreeing to 0.2 %	It earns the row by BEING PINNED, not by which algo is pinned: an unpinned down_proj costs ~17 % of that family once the gateup neighbour changes. Honest caveat, recorded rather than hidden: the two sides differ in the neighbour too (gateup pinned on both, down_proj only on one), so the claim is "pinned beats unpinned", and the primary pair spans two lock windows while the within-§9 pair is the witness.
+down_proj	690300000000000000000000000000000000000800000000	tie	0.9763	1.0102	?	?	own	deep_gate_proj+up_proj,deep_down_proj	deep_gate_proj+up_proj,down_proj	3.1	1.9	3	tmp/pinab/ab3.txt, paired per rep inside one lock hold, util 92 %: mlp_down medians 26.1885 vs 26.8237 ms at 4096 (-2.4 %); 6.5924 vs 6.5262 at 1024 (+1.0 %)	TIE, not a loser, and the sign flips with the width: better than rank-0 in burst (0.1160 -> 0.1050 ms/call against the incumbent as baseline, 9.5 % over this shape's own 1.9 % cross-window movement; 1.096x rank-0 per §3d) and NOT separable from the incumbent in situ (both inside the +/-3.1 % / +/-1.9 % null). Refused by MIN_PCT_OF_WAVE's own reason, not by a measurement: a tie buys nothing and every shipped pin is a re-capture obligation on the next hipBLASLt bump (A-32). The D35 "superseded by an L2 interaction" story is DEAD — that +19.7 %/+20.6 % was this shape running with NO pin at all while the subset spec named only the gateup row (D36). Reopens only if a paired re-take puts mlp_down outside the null on this side at BOTH widths.
+o_proj+out_proj	8e0300000000000000000000000000000000000800000000	lose	1.2614	1.2668	?	?	own	deep_gate_proj+up_proj,deep_o_proj+out_proj,deep_in_proj_qkv,deep_down_proj	down_proj	3.1	1.9	3	§9 table, proj column: all 99.23 -> cand 125.18 ms at 4096; 24.70 -> 31.29 at 1024	+26 % on the `proj` family — the identical pair D28 rejected from an 8-deep field, rejected a second time from a 64-deep one. CONFOUND TO RECORD: the `proj` row cannot separate these two records (both sit in the treated set), AND the reference side left both shapes unpinned, so this verdict cannot separate "these algos are slow" from "pinning these shapes at all costs" — the same axis D36 exposed. Re-adjudicate with a one-row-different pair (`...down_proj` vs `...down_proj,deep_o_proj+out_proj`) before reading it as physics.
+in_proj_qkv	920400000000000000000000000000000000000800000000	lose	1.2614	1.2668	?	?	own	deep_gate_proj+up_proj,deep_o_proj+out_proj,deep_in_proj_qkv,deep_down_proj	down_proj	3.1	1.9	3	§9 table, proj column: all 99.23 -> cand 125.18 ms at 4096; 24.70 -> 31.29 at 1024	Same pair, same confound, same conclusion: not shippable on this evidence. Admitted at burst (1.13x over its shipping baseline, clear of its own 1.6 % cross-window movement), which is the third independent confirmation in this tree that a warm-burst per-call winner on these shapes is not an in-situ prediction.

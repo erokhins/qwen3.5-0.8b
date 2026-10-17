@@ -556,3 +556,11 @@ the `down_proj` row earns its place by *being pinned*, not by which algo is pinn
 contributes nothing measurable either way. The trap that produced the error is worth carrying: a config label that
 names a *subset* silently describes an *exclusion*, and the exclusion was the measured effect. `decode_run` did say
 so — every unpinned shape echoed `source=heuristic-rank-0` — but the label was read before the echo was.
+
+**Admission of the corrected set (same window, no re-take).** The shipped pair is now `down_proj` + 
+`deep_gate_proj+up_proj`, and the timing for *exactly that set* is the `old` column above — cited from
+`tmp/pinab/ab3.txt` rather than re-measured, because nothing feeding it changed. Against §9's shipped baseline that
+is `mlp_gateup` **63.95 → 58.25 ms** at 4096 and **16.05 → 14.16** at 1024, ≈ **−0.6 % of the wave**, and the
+`down_proj` row contributes nothing measurable. Numerics admission: **9/9 canonical fixtures green** under the new
+default (`pins=2/2 pin_names=down_proj,deep_gate_proj+up_proj cand=0/3`), including `wide1024f`. No `tok/s` headline
+is claimed, for the §9 reason: the wave column is carried by families no pin touches.

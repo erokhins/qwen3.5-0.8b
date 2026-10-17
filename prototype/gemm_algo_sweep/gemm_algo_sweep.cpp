@@ -111,7 +111,7 @@ const EngineShape kShapes[] = {
 //       bench/performance-status.md §3 lists `lm_head` as a wave FAMILY, which is true of the hand
 //       kernel; nothing routes it to hipBLAS, so sweeping it here would price a call not made.
 //   a body of one row — `resolve_wave_gemm` sends M=1 to the hand GEMV whatever the run asked for
-//       (engine/kernels_gemm.cpp:641-647), so M>=2 is the library's domain and --rows refuses 1.
+//       (engine/kernels_gemm.cpp:844-850), so M>=2 is the library's domain and --rows refuses 1.
 
 struct Options {
     enum Mode { kList, kVerify, kTime, kSelftestLayout, kSelftestSys, kFloorProbe };
@@ -296,7 +296,7 @@ bool parse_args(int argc, char **argv, Options &o) {
     for (int r : o.rows) {
         if (r < 2) {
             std::printf("ARG_ERROR --rows takes 2..N: M=1 is the hand GEMV whatever the run asked "
-                        "for (engine/kernels_gemm.cpp:641-647), so the library has no one-row shape\n");
+                        "for (engine/kernels_gemm.cpp:844-850), so the library has no one-row shape\n");
             return false;
         }
     }
@@ -2789,7 +2789,7 @@ int print_list() {
                 "to the hand GEMV\n");
     std::printf("EXCLUDED lm_head (248320x1024): hand GEMV at engine/kernels_lmhead.cpp:25, once "
                 "per request; no route reaches hipBLAS with it\n");
-    std::printf("EXCLUDED M=1: engine/kernels_gemm.cpp:641-647 sends a one-row body to the hand "
+    std::printf("EXCLUDED M=1: engine/kernels_gemm.cpp:844-850 sends a one-row body to the hand "
                 "GEMV whatever the run asked for\n");
     std::printf("\nWave width: the shipped per-call cap is 512 rows (engine/decode_step.h:49 "
                 "kMaxWaveRows; engine/decode_run.cpp:264 refuses more), so M=1024 and M=4096 are "
