@@ -1070,3 +1070,41 @@ of a check whose input can come back empty and therefore cannot fail (after `gdn
 prefill-row count and the `gdn_rec_isa` `--volume` parse). It now aborts on both a zero roll-up and any calibration
 miss. Its roll-up is unused for exactly this reason, and the file is committed labelled half-finished rather than
 quietly trusted: the static bills and the 48-example rule selftest are the parts worth keeping.
+
+---
+
+# D35 — **D30 item 3.7: the deep algo field ships 2 pins of 4, at −0.75 % of wave, and the admissible subset that is worse than nothing** (2026-10-17)
+
+Numbers and the paired instrument in `bench/performance-status.md` §9; the deriver and its admission rule in
+`prototype/gemm_algo_sweep/deep_pins.py`; the mechanism in `engine/kernels_gemm.cpp`'s `PinSet`. Decision taken and
+logged here rather than asked, per the standing rule.
+
+**The burst ceiling was real and did not transfer.** `deep_pins.py` admitted 4 of 7 shapes at **1.903 % of wave**
+warm-burst, against a per-shape cross-window noise floor it measures rather than assumes. In situ, paired, medians
+of 3, both widths: `gate_proj+up_proj` **−10.0 % on its family at both widths, every rep**; the two `proj`
+candidates `deep_o_proj+out_proj` and `deep_in_proj_qkv` **+26 % and +27 % slower** — the identical pair D28
+rejected from an 8-deep field, now rejected again from a 64-deep one, which is the third independent confirmation
+that a warm-burst per-call winner on this family is not an in-situ prediction. What ships is 2 of 4, worth
+**−0.75 % of the wave** (sum3 190.05 → 182.62 ms at 4096), not the 1.9 %. No tok/s headline is claimed from this
+window: `wall_ms` cannot resolve it, because between the two configs `gdn_rec` moved 470 → 426 ms and `attn`
+272 → 259 ms — families **no algo pin can touch** — and those drifts carry the entire wall column. The null test on
+the same logs (`proj` under a config that cannot change it: **+3.1 % / +1.9 %**) is what says which rows are
+readable at all, and it is written into the ledger so a later reader does not quote the wall.
+
+**The finding that outranks the win.** With only the `gateup` candidate in force and the *shipped* `down_proj` pin
+untouched, `mlp_down` measured **+19.7 % at 4096 and +20.6 % at 1024, in all three reps at both widths** — a family
+the flag does not name, moved by nothing but which kernel ran before it. That subset is **net-negative** (sum3
+192.07 vs 190.05) even though its own shape won 10 %; adding the `down_proj` candidate restores `mlp_down` to 26.62,
+so the deep-field `down_proj` algo is the one that suits the new `gateup` kernel's L2 state and the old pin is not.
+Two rules follow, both now repo policy: **a pin set is adjudicated as a set or not at all** — per-shape promotion
+from per-shape measurements can ship a loss — and the D33 instruction *"ask what the burst holds fixed"* now applies
+**inside one binary**: two configs differing by one compiled-in row are not independent measurements of two shapes.
+
+**Mechanism, because the adjudication was only possible with it.** Candidates are compiled in and unreachable by
+default (`--gemm-pins all` means every *shipped* row and can never silently acquire an unadjudicated one), promotion
+is a one-word `PinSet::kCandidate` → `kShipped` edit, `--gemm-heur` widens the pool at runtime without changing the
+default pick (measured: rank-0 identical at width 8 and 64), and a candidate is addressed by its 24-byte record
+rather than a rank, because the deep list is a **partly different list** — rank-0 agrees at both widths, rank 2
+does not. Two refusals were needed as real fixes, not features: two pins in force for one `(N,K,M)` had previously
+been resolved by table order, which would have made row order a measurement variable; and a workspace stamp above
+the 128 MiB cap is now a refusal with its reason, since D31 closed raising the cap.
