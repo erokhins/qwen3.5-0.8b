@@ -147,7 +147,7 @@ struct Options {
     // a form that has not met the device does not become the engine's default by having been written.
     // Parse-or-throw like `--attn-tile`, and echoed on the NUMERICS line for the same reason: a log that
     // cannot say which form produced its bits adjudicates neither side.
-    int attn_fattn = 0;
+    int attn_fattn = 1;   // default since the form met the device (1.3955x attn at 4096 lanes, wide1024f green on both flag values, streaming rows inside the floors in force). THIS is the CLI default; the field of the same name in decode_step.h is an internal struct and was flipped alongside it, not instead of it.
     // Which §04.4 scan a GDN body runs (P9, §04.7; route A is D-12). `seq` is the shipped recurrence —
     // one launch per token per layer, the form every decode pin is pinned through — and `collapse` is
     // the same recurrence held resident, one launch per layer per BODY. `chunk` is refused at
