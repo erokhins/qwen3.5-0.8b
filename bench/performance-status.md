@@ -1504,3 +1504,24 @@ teach `derive()` to read that source from the source text; the constant may not 
 Bet 2 (3 warps/block sharing one K/V stage, 6 wf/CU at zero spill) is now the test of whether 8 is still too
 few: if 6 wf/CU with no spill at all beats 8 wf/CU with 50 spilled, the two suspects are separable and spill is
 the cheaper of the two.
+
+## §32. Bet 2 compiled exactly as designed and is numerically dead — but it proved the spill is avoidable (2026-10-18)
+
+`tmp/gcc/fattn_bet2.patch` (96 threads = 3 warps/block, each owning a 16-row block of one head, one shared K/V
+stage): **the compile-time target was met** — `vgpr_count 178, vgpr_spill_count 0, private_segment 0,
+group_segment 32768` ⇒ **6 wf/CU with zero spill and zero scratch**, driver-confirmed. That alone retires a
+belief: **the 50 spilled VGPRs Bet 1 carries are not intrinsic to the round** — widening the block clears them
+(50→0 spilled, 72→0 B scratch).
+
+But the form **cannot be admitted**: every covered row emits non-finite logits (248320/248320). The bisect is
+informative rather than mysterious — the same patch at `FATTN_WARPS=1` is finite and reproduces Bet 1's
+`1−cos = 2.104e-05` exactly, while `WARPS=2` and `3` are all-NaN. So the per-warp Q re-stage, per-warp
+transpose staging and per-warp publish are individually correct, and the defect lives in what only appears when
+warps share the stage: coordination across warps, not geometry. That is the third NaN on this kernel in one day,
+and each time the signature was "whole rows non-finite", which is a missing/aliased write, not a wrong value.
+
+**Interim read of the programme:** residency is real (4→8 wf/CU = +20 % of the family, §31); spill is avoidable
+(here); whether *spill-free at 6* beats *spilled at 8* is still unmeasured, and it is the discriminator between
+"interleave is the wall" and "spill traffic is the wall". Fixing the multi-warp coordination is the next
+experiments' gate, and no timing of a non-finite form is permitted (the burst refuses `SPILL`, and admission
+section (i) now refuses non-finite — both by design, and both earned).
