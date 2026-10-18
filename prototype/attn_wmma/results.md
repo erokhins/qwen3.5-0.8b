@@ -329,3 +329,43 @@ Let me check those quickly and fix.
 
 <tool_call>
 <function=bash>
+---
+
+# D62 addendum — the `m16_fattn_score` form (2026-10-18)
+
+Appended at the end deliberately: everything above is cited by line number elsewhere and an insertion
+here shifts nothing.
+
+§8 named the condition that would reopen this item, and D62 funded it: one WMMA round that replaces both
+shipped attention passes, priced against `progress/2026-10-18/llama-fattn-anatomy.md` §4.2's two bars. It
+is built, compile-only, and both CPU-side bars are met. The detail is NOT in this file — read
+`fattn_score_handover.md` beside this section, plus the recorded `fattn_census.output.txt` and
+`evidence/occupancy-fattn.txt`. Headlines, with the currency named:
+
+- **Claim (i), occupancy: PASS at exactly the bar.** 193 VGPR / 16,384 B static LDS, and the driver
+  (`hipOccupancyMaxActiveBlocksPerMultiprocessor`, canary: the 12,288 B control reproduces the recorded
+  `attn_slim_wave` row's 5 blocks) returns **4 blocks/CU, 16 wavefronts/CU of 32**. The LDS term is what
+  binds and it has zero slack: Q(8 KiB) + K(8 KiB) = 16,384 B exactly, with V aliased over the K stage as
+  llama.cpp's `nstages == 0` does. One more byte of `__shared__` is 3 blocks/CU.
+- **Claim (ii), pipe-weighted cost: PASS with room.** **9.719** pipe-weighted slots/touch against a bar of
+  20 (waits counted as work, each `v_wmma` billed at 32 clocks — §3.1's currency in
+  `progress/2026-10-18/llama-fattn-anatomy.md`, in which their round is 7.16). Of that, 4.00 is the matrix
+  itself and 5.72 is everything else. In `m16_census.py`'s slots currency (waits excluded) it is
+  4.855/touch, against D58's 1.98 for a round that does not contain the softmax.
+- **And occupancy is probably not the mechanism.** §28 of `bench/performance-status.md` timed the M = 16
+  re-tile at 3 and at 5 blocks/CU and measured at most a 5 % change, concluding the kernel was never
+  occupancy-limited. Claim (i) is a funded bar here, not a predicted win; the lever this form has is the
+  instruction stream above.
+- The gap to §3.1's 7.16 is named, not waved: the **bf16 → f16 operand conversion**, which llama.cpp does
+  not pay because its KV cache is already f16 (0.79 CVT-class ops/touch in staging alone, 1.35 overall),
+  plus the shipped score round, which was kept on purpose so the numerics difference stays confined to the
+  dot's summation order and the 16-bit operands.
+- Two findings that outlive this form. **A rolled accumulator loop puts the 128 accumulator registers in
+  scratch** (544 B/thread, `.enable_private_segment 1`) while clang's own remark still says
+  `VGPRs Spill: 0` — the note block's private segment is the witness, not the remark. And the D57
+  occupancy policy's 512-lane-VGPR-per-SIMD term is **retired by the recorded evidence**: it predicts 1
+  block/CU for `m16_bf16rt` and for this form where the driver says 3 and 4; it reproduced the shipped row
+  only because that row is LDS-bound. `fattn_census.py:validate_rules()` prints the mismatch.
+- **Claim (iii) is untouched** — it is a timing claim and this is a compile-only artifact. What it needs,
+  including the engine port it cannot skip and the behavioural canary that must differ between sides, is in
+  `run_fattn_burst_window.sh` and §5 of the handover. Both are written, neither has been run.

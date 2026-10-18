@@ -1,0 +1,134 @@
+listing          /home/erokhins/erokhins_projects/qwen3.5-0.8b/tmp/attn_wmma_fattn/wmma_fattn_score-hip-amdgcn-amd-amdhsa-gfx1151.s
+geometry         DH=256 MROWS=16 MLANES=16 NWARPS=4 THREADS=128 KTILES=16 VTILES=16
+denominator      256 touches per warp-round (16 Q rows x 16 KV lanes x one head)
+matrix bill      1 v_wmma = 32 clk pipe time (class roof); 32 clk/touch, 4.0 for 32 tiles per round
+
+OCCUPANCY RULE VALIDATION against evidence/occupancy-m16.txt (five recorded driver rows)
+  R-512 (D57 policy)     MISMATCH: m16_scalar_ob: says 1, recorded 3; m16_bf16rt: says 1, recorded 3
+  R-halved               reproduces all five rows
+  R-HIP                  reproduces all five rows
+  note: the five recorded rows are all LDS-bound, so they do NOT separate R-halved from R-HIP;
+        a form whose register term could bind (this one) needs the driver itself: build_occupancy_fattn.sh
+  => the D57 policy's 512-lane-VGPR-per-SIMD term is retired by this evidence (it is m16_census.py:325, kept here only as the comparison)
+
+== m16_fattn_empty   21 VGPR (gran 24), 12 SGPR, LDS 16384 B, vgpr_spill 0
+    region .LBB0_2 [41,97] (1 back edge): 28 instrs, x4 (staging region (global load + LDS store) -> rows/warp = 4)
+    region .LBB0_4 [113,167] (1 back edge): 28 instrs, x4 (staging region (global load + LDS store) -> rows/warp = 4)
+    region .LBB0_7 [201,247] (1 back edge): 35 instrs, x4 (staging region (global load + LDS store) -> rows/warp = 4)
+   one warp-round: 393 slots + 35 encode-only = 428 instructions for 256 touches
+   occupancy: R-512 (D57 policy) = 4 blocks/CU (16 wf/CU), R-halved = 4 blocks/CU (16 wf/CU), R-HIP = 4 blocks/CU (16 wf/CU)
+   --------------------------------------------------------------------------
+     <wait>                         35     0.137/touch
+     BARRIER                         3     0.012/touch
+     CVT.bf16-widen-or-addr        106     0.414/touch
+     CVT.other                      96     0.375/touch
+     LDS.load_u16                    2     0.008/touch
+     LDS.store_b128                  8     0.031/touch
+     LDS.store_other                32     0.125/touch
+     SALU                           54     0.211/touch
+     UNCLASSIFIED.buffer_gl0_inv      3     0.012/touch
+     VALU                           75     0.293/touch
+     VALU.dual-packet                1     0.004/touch
+     VMEM.load                      12     0.047/touch
+     VMEM.store                      1     0.004/touch
+
+== m16_fattn_scoreleg   31 VGPR (gran 32), 12 SGPR, LDS 16384 B, vgpr_spill 0
+    region .LBB1_2 [38,92] (1 back edge): 28 instrs, x4 (staging region (global load + LDS store) -> rows/warp = 4)
+    region .LBB1_4 [108,162] (1 back edge): 28 instrs, x4 (staging region (global load + LDS store) -> rows/warp = 4)
+    region .LBB1_9 [228,274] (1 back edge): 35 instrs, x4 (staging region (global load + LDS store) -> rows/warp = 4)
+    region .LBB1_6 [185,207] (1 back edge): 13 instrs, x16 (1 v_wmma in region -> KTILES/1)
+   one warp-round: 1077 slots + 175 encode-only = 1252 instructions for 256 touches
+   occupancy: R-512 (D57 policy) = 4 blocks/CU (16 wf/CU), R-halved = 4 blocks/CU (16 wf/CU), R-HIP = 4 blocks/CU (16 wf/CU)
+   --------------------------------------------------------------------------
+     <wait>                        175     0.684/touch
+     BARRIER                         3     0.012/touch
+     CVT.bf16-widen                 33     0.129/touch
+     CVT.bf16-widen-or-addr        169     0.660/touch
+     CVT.other                     136     0.531/touch
+     LDS.load_b128                  64     0.250/touch
+     LDS.store_b128                  8     0.031/touch
+     LDS.store_other                32     0.125/touch
+     MMA.wmma                       16     0.062/touch
+     SALU                          245     0.957/touch
+     SHUFFLE.lane-movement           9     0.035/touch
+     UNCLASSIFIED.buffer_gl0_inv      3     0.012/touch
+     VALU                          319     1.246/touch
+     VALU.dual-packet               27     0.105/touch
+     VMEM.load                      12     0.047/touch
+     VMEM.store                      1     0.004/touch
+
+== m16_fattn_score   193 VGPR (gran 200), 18 SGPR, LDS 16384 B, vgpr_spill 0
+    region .LBB2_2 [38,92] (1 back edge): 28 instrs, x4 (staging region (global load + LDS store) -> rows/warp = 4)
+    region .LBB2_4 [108,162] (1 back edge): 28 instrs, x4 (staging region (global load + LDS store) -> rows/warp = 4)
+    region .LBB2_9 [228,274] (1 back edge): 35 instrs, x4 (staging region (global load + LDS store) -> rows/warp = 4)
+    region .LBB2_6 [185,207] (1 back edge): 13 instrs, x16 (1 v_wmma in region -> KTILES/1)
+   one warp-round: 1243 slots + 253 encode-only = 1496 instructions for 256 touches
+   occupancy: R-512 (D57 policy) = 1 blocks/CU (4 wf/CU), R-halved = 3 blocks/CU (12 wf/CU), R-HIP = 4 blocks/CU (16 wf/CU)
+   --------------------------------------------------------------------------
+     <wait>                        253     0.988/touch
+     BARRIER                         3     0.012/touch
+     CVT.bf16-widen                 17     0.066/touch
+     CVT.bf16-widen-or-addr        171     0.668/touch
+     CVT.other                     120     0.469/touch
+     LDS.load_b128                  96     0.375/touch
+     LDS.store_b128                  8     0.031/touch
+     LDS.store_other                32     0.125/touch
+     MMA.wmma                       32     0.125/touch
+     SALU                          262     1.023/touch
+     SHUFFLE.lane-movement          10     0.039/touch
+     UNCLASSIFIED.buffer_gl0_inv      3     0.012/touch
+     VALU                          458     1.789/touch
+     VALU.dual-packet               18     0.070/touch
+     VMEM.load                      12     0.047/touch
+     VMEM.store                      1     0.004/touch
+
+== CANARY: expanded per-warp-round counts vs the numbers the source geometry implies
+  v_wmma_f32_16x16x16_f16       32 want    32  ok
+  global_load_b128              12 want    12  ok
+  ds_store_b128                  8 want     8  ok
+  ds_store_b16*                 32 want    32  ok
+  ds_load_b128                  96 want    96  ok
+  s_barrier                      3 want     3  ok
+  PASS: the expansion reproduces the derived instruction census exactly
+
+== CLAIMS
+  m16_fattn_empty      slots/touch   1.535   instr/touch   1.672   PIPE-WEIGHTED   1.672 (36 clk: 1.672)   blocks/CU 4..4 (16..16 wf/CU)
+  m16_fattn_scoreleg   slots/touch   4.207   instr/touch   4.891   PIPE-WEIGHTED   6.828 (36 clk: 7.078)   blocks/CU 4..4 (16..16 wf/CU)
+  m16_fattn_score      slots/touch   4.855   instr/touch   5.844   PIPE-WEIGHTED   9.719 (36 clk: 10.219)   blocks/CU 3..4 (12..16 wf/CU)
+
+  (i)   OCCUPANCY (bar: >= 4 blocks/CU)
+        rule range: 3 blocks/CU on a 98,304 lane-VGPR file (HIP's 196,608 halved, per AGENTS.md's halved-SM-count trap) to 4 on HIP's 196,608 as §3.4 reads it
+        193 VGPR x 128 threads; LDS 16384 B allows 4, and that is the ONLY term that binds if the file is 196,608
+        DRIVER AUTHORITY (hipOccupancyMaxActiveBlocksPerMultiprocessor, occupancy_fattn_probe): 4 blocks/CU, 16 wavefronts/CU of the 32 the part allows -> PASS
+  (ii)  PIPE-WEIGHTED 9.719 slots/touch, bar <= 20 -> PASS
+        matrix term alone is 4.00 of it; non-matrix 5.72 — the room §4.2 bets on is the non-matrix term
+
+== LEG DIFFERENCES (each kernel differs from the one on the right by ONE leg)
+  m16_fattn_scoreleg - m16_fattn_empty  (score tile + fold + exp + P (change 1 + 2))
+     slots    684 =  2.672/touch   instr    824 =  3.219/touch   pipe-weighted  5.156/touch
+     by category: VALU=244  SALU=191  <wait>=140  LDS.load_b128=64  CVT.bf16-widen-or-addr=63  CVT.other=40
+  m16_fattn_score - m16_fattn_scoreleg  (P*V: 16 independent f32 chains (change 3))
+     slots    166 =  0.648/touch   instr    244 =  0.953/touch   pipe-weighted  2.891/touch
+     by category: VALU=139  <wait>=78  LDS.load_b128=32  SALU=17  MMA.wmma=16  CVT.bf16-widen-or-addr=2
+
+== FRAGMENT RELABELLING, SPILLS, Q RESIDENCY, ADDRESS DISCIPLINE
+  lane-movement ops (ds_swizzle/ds_permute/v_permlane/ds_bpermute): 10 per warp-round = 0.0391/touch
+     expected for m16_fattn_score: 9 inside the round (1 max fold, fattn-mma-f16.cuh:861-872 with offset_first == offset_last; + 8 get_half2 exchanges, mma.cuh:729-743) + 1 deferred rowsum combine outside it (fattn-mma-f16.cuh:1421) = 10
+     the P*V leg alone adds 1 lane-movement ops over the score leg (the get_half2 exchange is what change (3) pays)
+  CVT-class ops: 308 per warp-round = 1.203/touch (the bf16->f16 operand conversion at staging is most of this)
+  vgpr_spill_count per kernel: {'m16_fattn_empty': 0, 'm16_fattn_scoreleg': 0, 'm16_fattn_score': 0}
+  private_segment (scratch) bytes per thread: {'m16_fattn_empty': 0, 'm16_fattn_scoreleg': 0, 'm16_fattn_score': 0}
+     why this is printed: a rolled accumulator loop puts the 128 accumulator registers in
+     scratch at 544 B/thread while clang's own remark still says "VGPRs Spill: 0". The
+     note block's private segment is what caught it, so it is checked, not assumed.
+  Q in registers? NO, by construction: the score A operand is an LDS read — 64 ds_load_b128 per round are the score leg's A+B tiles (2 per operand), so Q is LDS-resident, not register-resident. Register-resident Q would be 8 VGPR per K-step x 16 steps of live values.
+  address expressions, one per staged object (AGENTS.md §20.1: two self-consistent layouts
+  joined by a branch are invisible to both sides):
+     s_kv         4 sites, all through a *_addr() helper
+     s_q          3 sites, all through a *_addr() helper
+     staged dst   1 sites, all through a *_addr() helper
+     PASS: no raw index into a staged array anywhere in the source
+  note: s_kv carries TWO layouts (k_addr for K, v_addr for V transposed) with a __syncthreads
+  between the last K reader and the first V writer. That is the aliasing llama.cpp does at
+  fattn-mma-f16.cuh:1252 when nstages == 0, and it is forced: 3 x 8 KiB of stages is 24 KiB,
+  which is 2 blocks/CU on a 64 KiB LDS.
