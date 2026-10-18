@@ -1425,3 +1425,39 @@ that fix cannot cover. Recorded here because a retraction that lives only in a c
 - **What class 4 bought overall:** two closures made durable (resting on measured elasticity and a failed
   hand-schedule rather than on a roof ratio), one mispriced claim retired, and the queue cleared to class 5
   without a re-open that would have burned a device budget on a kernel shape nobody had built.
+
+## D47 — queue item: the absolute ceiling, and the distance to it (user, 2026-10-17)
+
+The user asked what the theoretical operation count is from the model spec, what the maximum prefill speed on
+this GPU would be at known fp16/bf16 matrix rates, and how far off it we are. First pass done at the desk
+(`tools/prefill_ceiling_bound.py`, CPU-only, every input cited in its header); the rigorous version is the
+queue item.
+
+- **FLOPs per prefill token, derived from the spec: 1.603 GFLOP.** Body matmuls 0.994 (from the engine's own
+  `(N,K)` table: `q_proj 4096×1024`, `k/v 512×1024`, `o/out 1024×2048`, `in_proj_qkv 6144×1024`,
+  `in_proj_z 2048×1024`, `gate/up 3584×1024 ×2`, `down 1024×3584`), `lm_head` **per prefill row** 0.509 (the
+  tied 248320×1024 table — and the launch bill confirms one `lm_head` per token body, so this is real work in
+  the timed path, not an artifact of the gate's all-rows mode), causal-average full attention at 4096 ctx 0.101.
+- **The independent cross-check lands**: `devices/strix-halo-compute.md` records the whole prefill achieving
+  1.55 TFLOP/s at 967 tok/s, which implies **1.60 GFLOP/token** — the spec-derived count agrees to the third
+  digit from a measurement taken before this item existed.
+- **Engine today demands 7.14 TFLOP/s** (4454 tok/s × 1.603 GFLOP). Against the **measured achievable mix**
+  (22.3–23.3 TFLOP/s at `M ≥ 512`, window `prefill-Wclean`) the ceiling is **~13,900–14,500 tok/s** and we are
+  at **30.6–32.0 %** of it. Against the best single measured shape (37.7 TFLOP/s) it is **~23,500 tok/s** and
+  we are at **18.9 %**. Weight traffic is nowhere near binding for prefill: a 512-row wave reads the weights once
+  in ~6.5 ms, which bounds at ~78,500 tok/s.
+- **Decode's wall is bytes, and it is much closer.** 1.5457 GB of bf16 weights per token at the measured
+  ~237 GB/s is **~153 tok/s** as an absolute bound; today's **71.3 tok/s is ~46 %** of that, which is the same
+  arithmetic as D21's 75.9 GB/s aggregate read against the 164–168 GB/s plateau.
+- **The honest reading of "a ceiling we won't break": the matrix roof is not the binding one.** 47 % of the wave
+  is `gdn_rec`, a serial per-token scan that issues no matmul at all, and its own measured behaviour (unroll8
+  changing nothing; 1.6 working wavefronts per CU) says it is latency-bound, not op-bound. So ~14k tok/s is what
+  the matrix units would allow **if every non-matmul cost went to zero** — a bound, not a target. The item's
+  real output is the per-family split: ops roof, bytes roof, measured, per family, so "how close are we" is
+  answered per family rather than in aggregate.
+- **Queued work.** (1) the clean dense-matrix peak probe at 16-bit `C`, which `devices/strix-halo-compute.md`
+  explicitly says is still owed — without it the 37.7 figure is a shape we use, not a peak; (2) the per-family
+  ops/bytes/measured table; (3) confirming `lm_head`'s per-row cost is the shipping intent rather than an
+  artefact — if only the last row needed logits, 0.509 of 1.603 GFLOP/token, **32 % of the arithmetic**, would
+  vanish, which makes it the largest single lever this census has found and squarely a design question, not an
+  optimisation.
