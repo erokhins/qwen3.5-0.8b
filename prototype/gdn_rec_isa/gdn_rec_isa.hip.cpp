@@ -21,8 +21,17 @@
  *                            and therefore bit-identical to `rec0`. It exists because the census found
  *                            rec4 10.5 % cheaper in slots; without rec6 a rec4 win cannot be split
  *                            between its instruction bill and the chain it shortened.
+ *   receng  `rec_unroll4_kernel` — the ENGINE's shipping kernel, compiled out of
+ *                            `engine/gdn_rec_unroll4_kernels.h` by the same TU. Bit-identity-gated like
+ *                            rec6, and the witness that the engine's port moved no bits.
+ *   rec2c4  `rec2c4_kernel` — MODE 2c's fused prologue MERGED with those unroll4 walks, i.e. the form
+ *                            §18/D46 could not adjudicate because it had never been built. Admitted by
+ *                            bit-identity like every spelling MODE, and its A/B partner is `receng`, the
+ *                            spelling the engine runs — NOT `rec0`, which is the pre-unroll4 form §18
+ *                            wrongly screened against.
  *
- * WHY THE PROBES ARE ADMITTED DIFFERENTLY. MODEs 0/1/2/2c/6 must reproduce MODE 0 bit for bit — 6 is a
+ * WHY THE PROBES ARE ADMITTED DIFFERENTLY. MODEs 0/1/2/2c/6/eng/2c4 must reproduce MODE 0 bit for bit — 6
+ * is a
  * probe's control, not a probe, and its addition tree is MODE 0's term for term — so a bit move there is a
  * defect. A probe that broke the dependency and still produced the right answer would not have broken it,
  * so `rec3` and
@@ -158,9 +167,9 @@ namespace {
 // other MODE is bit-diffed against; `ship` is optional and gives the census's static control row
 // (rec0_kernel censuses identical to rec_kernel) a device witness when someone wants one.
 enum Mode { M_SHIP = 0, M_REC0, M_REC1, M_REC2, M_REC2C, M_REC3, M_REC4, M_REC5, M_REC6, M_RECENG,
-            NMODES };
+            M_REC2C4, NMODES };
 static const char* kModeName[] = {"ship", "rec0", "rec1", "rec2", "rec2c",
-                                  "rec3", "rec4", "rec5", "rec6", "receng"};
+                                  "rec3", "rec4", "rec5", "rec6", "receng", "rec2c4"};
 
 /* The three dependency-break probes. Their VALUE is meaningless by design — a probe whose value was
  * still correct would still be waiting on the dependency — so they are never admitted against MODE 0's
@@ -171,7 +180,7 @@ static const char* kModeName[] = {"ship", "rec0", "rec1", "rec2", "rec2c",
 inline bool mode_splits_state(int m) { return m == M_REC3 || m == M_REC5; }
 inline bool mode_value_gated(int m) { return m == M_SHIP || m == M_REC0 || m == M_REC1 ||
                                            m == M_REC2 || m == M_REC2C || m == M_REC6 ||
-                                           m == M_RECENG; }
+                                           m == M_RECENG || m == M_REC2C4; }
 inline bool mode_band_gated(int m) { return m == M_REC4; }
 // The three dependency probes: value is not the gate, volume is.
 inline bool mode_is_probe(int m) { return m == M_REC3 || m == M_REC4 || m == M_REC5; }
@@ -217,7 +226,7 @@ static ModeSet modes_of(const std::string& spec) {
             if (tok == kModeName[i]) found = i;
         if (found < 0) {
             std::fprintf(stderr, "--modes: no mode \"%s\"; known:"
-                         " ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6,receng\n", tok.c_str());
+                         " ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6,receng,rec2c4\n", tok.c_str());
             std::exit(2);
         }
         ms.add(found);
@@ -257,6 +266,11 @@ void launch_mode(int mode, const float* q, const float* k, const float* v, const
         case M_RECENG:
             rec_unroll4_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH);
             break;
+        // MODE 2c4: the fused prologue on the SHIPPING unroll4 walks. Compile-only until this run
+        // admits it: `bench/performance-status.md` §18 makes the merged listing the gate in front of
+        // a port, and `receng`/`rec2c4` in one window is the first A/B that compares the merge against
+        // the spelling the engine actually runs.
+        case M_REC2C4: rec2c4_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;
         default:
             std::fprintf(stderr, "no kernel for mode %d\n", mode);
             std::exit(3);
@@ -1093,7 +1107,9 @@ int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
                             sanitize(c.label).c_str(), kModeName[m],
                             mode_is_probe(m) ? "dependency-break"
                                              : (m == M_REC6 ? "control-bill-matched"
-                                                           : "instruction-lever"),
+                                                            : (m == M_REC2C4
+                                                               ? "merged-fused-prologue-on-unroll4-walks"
+                                                               : "instruction-lever")),
                             best[M_REC0], best[m], r,
                             best[M_REC0] * 1000.0 / c.tokens,
                             mode_is_probe(m) ? dependency_band(r) : falsifier_band(r),
@@ -1179,6 +1195,8 @@ int main(int argc, char** argv) {
                          "  rec0); receng is `engine/gdn_rec_unroll4_kernels.h::rec_unroll4_kernel`, the\n"
                          "  ENGINE's port of recx_shape_kernel, gated by bit-identity against rec0 for\n"
                          "  the same reason rec6 is — it is the witness that the port moved no bits;\n"
+                         "  rec2c4 is MODE 2c's fused prologue on those unroll4 walks (§18/D46's merged\n"
+                         "  form), also bit-identity-gated, and is compared against receng, not rec0;\n"
                          "  rec3/rec4/rec5 are meaningless\n"
                          "  by design, admitted on VOLUME, and a --burst runs that volume check itself and\n"
                          "  refuses to time unless it passes. --pool N indexes N independent state slots per token (the\n"

@@ -1,0 +1,55 @@
+listing   tmp/gdn_isa_merged/isa_tu_merged-hip-amdgcn-amd-amdhsa-gfx1151.s
+assert    kernels parsed = 13 (must be > 0) -> conv_kernel, gates_kernel, rec0_kernel, rec1_kernel, rec2_kernel, rec2c4_kernel, rec2c_kernel, rec_kernel, rec_unroll4_kernel, recx_both_kernel, recx_indep_kernel, recx_shape_kernel, recx_unchain_kernel
+assert    every named kernel present: rec_unroll4_kernel, rec2c_kernel, rec2c4_kernel
+
+== the bill, slots per token-step per wavefront (64 wavefronts per launch)
+kernel                  prologue   loopA   loopB   TOTAL   vs first
+rec_unroll4_kernel           326     352     728    1406    +0.00%
+rec2c_kernel                 292     384     816    1492    +6.12%
+rec2c4_kernel                294     352     728    1374    -2.28%
+
+== 1. did the unroll survive? state-accesses per trip x trips, per walk
+kernel                           loopA           loopB   (unrolled bodies/trip in brackets)
+rec_unroll4_kernel            16x8 [4]        16x8 [4]
+rec2c_kernel                  16x8 [4]        8x16 [2]
+rec2c4_kernel                 16x8 [4]        16x8 [4]
+
+== 2. did the fused prologue survive? barrier/permute fingerprint of the prologue
+kernel                 barrier.sync xlane.permute permute groups
+rec_unroll4_kernel               11            20              5
+rec2c_kernel                      5            20              3
+rec2c4_kernel                     5            20              3
+
+== 3. category diff rec_unroll4_kernel -> rec2c4_kernel
+  xlane.exec-guard             129     122      -7
+  xlane.lds-round-trip           9       3      -6
+  barrier.sync                  11       5      -6
+  barrier.invalidate            11       5      -6
+  norm.lane-id                   6       1      -5
+  valu.mov                      24      20      -4
+  encode.bookkeeping           397     394      -3
+  xlane.addr-math                9       6      -3
+  salu.mov                       9       7      -2
+  loop.salu                     59      57      -2
+  norm.expf                     18      17      -1
+  state.mul                     82      81      -1
+  barrier.drain                  1       0      -1
+  xlane.range-select             7       8      +1
+  vmem.clause                   40      41      +1
+  salu.branch                    2       3      +1
+  dual.other                     1       2      +1
+  addr.math                     49      51      +2
+  unclassified                  23      28      +5
+  (unchanged: norm.rsqrt, norm.warp-count, salu.exit, salu.kernarg, salu.offload, state.coef-lds-load, state.fma, state.load, state.store, xlane.add, xlane.lane-id, xlane.permute)
+
+== 4. resources (compile pass on prototype/gdn_rec_isa/isa_tu_merged.cpp)
+kernel                                     VGPRs               VGPRs Spill                TotalSGPRs               SGPRs Spill    LDS Size [bytes/block]  ScratchSize [bytes/lane]    Occupancy [waves/SIMD]
+rec_unroll4_kernel                            59                         0                        25                         0                      1152                         0                        16
+rec2c_kernel                                  33                         0                        24                         0                      1280                         0                        16
+rec2c4_kernel                                 59                         0                        24                         0                      1280                         0                        16
+
+== VERDICT (--expect merged)
+  unroll kept  : True  (rec_unroll4_kernel loopB (16, 8) vs rec2c4_kernel (16, 8))
+  prologue kept: True  (barrier.sync 11 -> 5, permute groups 5 -> 3)
+  bill         : 1406 -> 1374 (-32 slots, -2.276%)
+  RESULT: both halves survived; the bill moved down. Continue to a paired burst.

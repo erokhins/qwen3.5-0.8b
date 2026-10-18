@@ -572,3 +572,113 @@ both "run the volume check" and "volume-only mode", so the documented `--volume 
 parse matches nothing still prints PASS). Fixed: `--volume` alone is the no-timing pass, `--volume --burst`
 checks then times, and the burst now prints `BURST-LINES printed=N want=cases×reps×modes` and **fails** if the
 matrix was not fully timed.
+
+## 11. The merged-form census (D46's gate, compile-only, 2026-10-18): the merge keeps both halves
+
+**Why this section exists.** §18's screen ran `rec2c` (fused prologue, PRE-unroll4 walks) against `rec0`
+(also pre-unroll4) and returned a median 1.0268 against D25's 1.02 kill line — a comparison of two spellings
+the engine no longer runs, since D33 made `engine/gdn_rec_unroll4_kernels.h` the default. The fused prologue
+has never existed merged with the unroll4 walks, and the failure mode a burst cannot see is exactly that
+merge: the walks hold four state values plus addressing live per trip, the fused prologue holds both partial
+reduction chains live at once, and if the pair did not fit in VGPRs the compiler would hand back the unroll
+and produce a kernel that is fused *and slower* — in a binary no burst had ever run. D46 named this listing,
+read compile-only, as the gate in front of a port. It has been read. **Both halves survived.**
+
+**What was built.** `rec2c4_kernel` in `gdn_rec_isa_kernels.h` (MODE 2c4: MODE 2c's prologue + the shipping
+walks), `isa_tu_merged.cpp` (a compile-only TU holding `rec_kernel`, `rec0_kernel`, `rec_unroll4_kernel`,
+`recx_shape_kernel`, `rec2c_kernel` and `rec2c4_kernel` in ONE listing, so the diff is intra-TU and intra-
+compiler-invocation), `merged_census.py` (the three-way table below, with parse assertions and an
+`--expect merged` verdict), and the recorded outputs `merged_census.output.txt` and
+`isa_census.merged.output.txt`. `rec2c4` is also MODE `rec2c4` of the harness, bit-identity-gated like every
+spelling MODE, so the A/B partner is `receng` — the spelling the engine runs — and not `rec0`.
+
+**The transcription is checked, not asserted.** `rec2c4_kernel`'s walk tail is code-identical (comments
+stripped) to `engine/gdn_rec_unroll4_kernels.h::rec_unroll4_kernel`'s — 22 lines, both `#pragma unroll 4`
+lines — and its prologue is code-identical to `rec2c_kernel`'s. That is the §13 `q̃` rule applied: bit-identity
+is owed to the shipped source text, and a CPU mirror of the merge could never see an association change, so
+the check is textual (`tmp/gcc/check_rec2c4_transcription.py`, exit 0 on this listing).
+
+**The volume is the same kernel, on the CPU side too.** `traffic_census.py --volume-check` over the merged
+listing admits it on the bytes, not the bill — 256 state loads, 128 step loads, 261 loads, 129 stores,
+2.000 MiB read and 1.000 MiB written per launch, `VOLUME_SAME_AS_rec_kernel`, `volume_differing=0 verdict=OK`
+over all five forms. Its bill column reads −149 slots (−9.8 %) against the pre-unroll4 `rec_kernel`, which is
+the sum of the two levers and is NOT the number this merge is worth; the number it is worth is the −32 against
+the shipping form, in the table above.
+
+**Controls, before any delta.** In the merged TU: `rec_kernel` vs `rec0_kernel` IDENTICAL at 1,523 slots, and
+the engine TU's `rec_kernel` vs this TU's IDENTICAL at 1,523. The cross-TU control extends to the shipping
+spelling: the engine TU's `rec_unroll4_kernel` bills the same 326/352/728 = 1,406 as this TU's, with the same
+walk shapes, the same 59 VGPRs and the same 1,152 B of LDS, so nothing below is an artifact of the TU or of
+the flags (`build.sh -I. -Iengine` versus `-I.`).
+
+**The three-way bill** (`merged_census.output.txt`; slots per token-step per wavefront, 64 wavefronts/launch):
+
+| form | prologue | loop A | loop B | **total** | loop B shape | `s_barrier` | permute groups | VGPRs | spill | LDS |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `rec_unroll4_kernel` — **shipped** (D33) | 326 | 352 | 728 | **1,406** | 16 acc × 8 trips [4 bodies] | 11 | 5 | 59 | 0 | 1,152 B |
+| `rec2c_kernel` — fused prologue, rolled walks (the §18 form) | 292 | 384 | 816 | **1,492** | 8 acc × 16 trips [2 bodies] | 5 | 3 | 33 | 0 | 1,280 B |
+| `rec2c4_kernel` — **the merge** | 294 | 352 | 728 | **1,374** | 16 acc × 8 trips [4 bodies] | 5 | 3 | 59 | 0 | 1,280 B |
+
+Reading the two questions separately, which is the whole point of the census:
+
+* **the unroll survived.** Loop B is 16 state accesses per trip × 8 trips at 91 slots/trip in the merged form
+  and in the shipped one — the same 728 slots. The rolled fallback, which is what `rec2c_kernel` and the
+  pre-unroll4 `rec_kernel` show, is 8 × 16. Loop A matches too (44 × 8 = 352). Register pressure did not bite
+  because it never had to: the merged kernel needs **59 VGPRs, the same 59 the shipped unroll4 already
+  needed**, with `vgpr_spill = 0` in both and the same occupancy report (16 waves/SIMD). The prologue's live
+  ranges retire before the walk's begin, so the allocator's peak is the walk's and the merge added 0 to it.
+  The only resource the merge spends is **LDS, +128 B** (the second reduction array `redq[32]`), and LDS does
+  not bind at `<<<16,128>>>` on this part.
+* **the prologue survived.** 5 `s_barrier` against the shipped 11, and 3 permute-then-barrier groups against
+  5 — the fused pair's fingerprint, kept. All 20 cross-lane permutes are still there (they are the reduction's
+  real work), and the category diff is exactly the barrier bookkeeping and nothing else: barrier.sync −6,
+  barrier.invalidate −6, barrier.drain −1, xlane.exec-guard −7, xlane.lds-round-trip −6, norm.lane-id −5.
+  **Every state-walk category is unchanged** — `state.fma` 377, `state.load` 261, `state.store` 129,
+  `state.coef-lds-load` 96, `xlane.permute` 20 — which is the witness that the merge did not touch the
+  recurrence while folding the prologue in.
+
+**The bill, and what it is worth.** 1,406 → **1,374 slots/token-step = −32 = −2.276 %** (89,984 → 87,936 per
+launch). At the *measured* elasticity on this axis (D25: −2.0 % slots → −1.6 % time, i.e. ~0.8) that is
+**−1.82 % of family time**; against §8's family row (430.69 ms) and §16's wave ruler (921.56 ms) that is
+**≈ −7.8 ms = −0.85 % of a 4096-lane wave**, about **8× `MIN_PCT_OF_WAVE`** (0.1 %,
+`prototype/gemm_algo_sweep/deep_pins.py:80`), so it is above the refuse bar. Two honest qualifications on the
+number, in opposite directions: (a) as a *launch-level ratio* the same arithmetic predicts ~1.0185, which sits
+**under** D25's 1.02 kill line, so if the kill line is applied at launch level the burst must decide it and
+the census cannot — and note the §18 median 1.0268 does not transfer, because it was taken against a slower
+base; (b) on this kernel the one spelling-class change already collected has beaten its elasticity prediction
+by ~2.4× (−7.7 % slots predicted 6.1 %, delivered 1.153×, §10/§8), so 1.0185 is closer to a floor than a
+ceiling. Neither is a measurement, and no timing was taken for this section: **the census says the merged
+form is fused, unrolled, cheaper by 32 slots, and pays nothing for it in registers.**
+
+**What this section does NOT claim.** No device run of any kind was made for it, so `rec2c4`'s bit-identity is
+still an inherited claim from MODE 2c and has not been admitted: the harness gate for it is
+`--modes receng,rec2c4` (which also runs `rec0`, the reference), and its `RESULT … gate=bit-identity-vs-rec0
+ndiff_o_vs0=0 ndiff_state_vs0=0` lines are the admission. The paired A/B, with a build-time ISA canary
+because the launch bill cannot see this change at all, is `prototype/gdn_rec_isa/run_ab_rec2c4_merged.sh` (written, not
+run).
+
+**Commands (compile-only; no device, no lock).** Every one runs from the repo root, and the two compiles
+run with `--save-temps` in the scratch dir because `--save-temps` names its intermediates after the source
+stem in the CWD, not after `-o`.
+
+```bash
+REPO="$PWD"
+mkdir -p tmp/gdn_isa_merged && cd tmp/gdn_isa_merged
+hipcc -O3 --offload-arch=gfx1151 -I"$REPO" -I"$REPO/prototype/gdn_rec_isa" --save-temps -c \
+    "$REPO/prototype/gdn_rec_isa/isa_tu_merged.cpp" -o isa_tu_merged.o
+hipcc -x hip -O3 --offload-arch=gfx1151 -I"$REPO" -I"$REPO/engine" --save-temps -c \
+    "$REPO/engine/kernels_gdn.cpp" -o kernels_gdn.o        # the cross-TU control listing
+cd "$REPO"
+prototype/gdn_rec_isa/merged_census.py tmp/gdn_isa_merged/isa_tu_merged-hip-amdgcn-amd-amdhsa-gfx1151.s \
+    rec_unroll4_kernel,rec2c_kernel,rec2c4_kernel --expect merged \
+    --resource-tu prototype/gdn_rec_isa/isa_tu_merged.cpp --include . --include engine \
+    --include prototype/gdn_rec_isa
+prototype/gdn_rec_isa/isa_census.py --asm tmp/gdn_isa_merged/isa_tu_merged-hip-amdgcn-amd-amdhsa-gfx1151.s \
+    --engine-asm tmp/gdn_isa_merged/kernels_gdn-hip-amdgcn-amd-amdhsa-gfx1151.s \
+    --kernels rec_kernel,rec0_kernel,rec_unroll4_kernel,recx_shape_kernel,rec2c_kernel,rec2c4_kernel
+```
+
+`merged_census.py` asserts before it prints anything: the number of kernels parsed from the listing must be
+non-zero, every named kernel must be present, and no censused kernel may bill 0 slots or show a prologue with
+no cross-lane permute. That is the `gdn_collapse/run.py` rule (a check whose input list can be empty cannot
+fail) applied to this census, whose first ancestor once parsed zero kernels and reported silence as a result.

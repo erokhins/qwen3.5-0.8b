@@ -30,6 +30,11 @@
  *                     one pre-pass per token for all 18 layers, so the state walk's launch contains no
  *                     reduction and no barrier at all. This is the geometry lever, and it costs one
  *                     extra launch per token.
+ *  2c4 `rec2c4_kernel` MODE 2c's fused prologue MERGED with the shipping unroll4 walks
+ *                     (`engine/gdn_rec_unroll4_kernels.h`). It exists to be CENSUSED, not to be timed:
+ *                     `bench/performance-status.md` §18 / D46 make a compile-only census of this exact
+ *                     listing the gate in front of any `rec2c` port, because a merge that loses the
+ *                     unroll to register pressure is invisible to a burst of the two unmerged forms.
  *
  * The three DEPENDENCY-BREAK probes at the bottom of this file (`recx_indep`, `recx_unchain`,
  * `recx_both`) are not MODEs in this sense. They are numerically meaningless by design, they are
@@ -339,6 +344,81 @@ __global__ void rec2c_kernel(const float* __restrict__ q, const float* __restric
         s += ks[i] * dv;
         Sh[i * D + j] = s;
         acc += qs[i] * s;
+    }
+    o[h * D + j] = acc;
+}
+
+/* ---- MODE 2c4: MODE 2c's fused prologue MERGED with the SHIPPING unroll4 walks -------------------
+ *
+ * WHY THIS KERNEL EXISTS, AND WHY IT IS NEVER LAUNCHED. `rec2c`'s burst screen (`bench/performance-status.md`
+ * §18: median 1.0268 against D25's 1.02 kill line, one case below it) compared the fused prologue against
+ * a PRE-unroll4 base, while the shipped kernel is `engine/gdn_rec_unroll4_kernels.h::rec_unroll4_kernel`
+ * (D33). The merge has therefore never existed, and its failure mode is silent: the unroll-4 walks hold
+ * four state values plus their addressing live per trip, the fused prologue holds both partial reduction
+ * chains live at once, and if the two together exceed what the allocator will keep in VGPRs the compiler
+ * gives the unroll back — a kernel that is fused and slower, in a binary no burst has ever run. D46 names
+ * this listing, censused compile-only, as the gate in front of any port for exactly that reason.
+ *
+ * WHAT IS TRANSCRIBED FROM WHERE, because bit-identity is owed to the shipped SOURCE TEXT, not to the
+ * algebra (`prototype/gdn_collapse/results.md` §2: a hoisted scalar constant moved 93,522 of 131,072 `o`
+ * elements and a CPU mirror could not see it):
+ *   * prologue  — MODE 2c's, character for character (`block_sum_pair_comp` + the two `redk`/`redq`
+ *                 arrays + the two remaining barriers);
+ *   * both state walks — `engine/gdn_rec_unroll4_kernels.h::rec_unroll4_kernel`, character for character
+ *                 including `#pragma unroll 4` on both loops and the order of every multiply inside
+ *                 every add. That pragma is a measured constraint there, not style: without it LLVM fully
+ *                 unrolls loop A and the two forms are no longer the same listing shape.
+ * Nothing else moved. Diff this body against those two sources before believing a delta here; a CPU
+ * mirror of the merge cannot see an association change, because two sides that share a formula agree.
+ *
+ * ADMITTED BY BIT-IDENTITY, like MODE 2c: same 5+5 shuffle steps per value in the same order, same
+ * reduction association, same state walk terms. If the device ever says it is NOT bit-identical to
+ * `rec0`, that is LLVM re-associating under a spelling change (the D25 `q̃` class) and a finding, not
+ * something to route around. Censused here and, if the census keeps both halves, in the harness as a
+ * MODE before it is ever offered to `engine/`. */
+__global__ void rec2c4_kernel(const float* __restrict__ q, const float* __restrict__ k,
+                              const float* __restrict__ v, const float* __restrict__ g,
+                              const float* __restrict__ beta, float* __restrict__ S,
+                              float* __restrict__ o, int nheads) {
+    int h = blockIdx.x;
+    int j = threadIdx.x;
+    __shared__ float ks[D], qs[D], redk[32], redq[32];
+
+    float kq = k[h * D + j], qq = q[h * D + j];
+    float sk, sq;
+    block_sum_pair_comp(kq * kq, qq * qq, redk, redq, &sk, &sq);
+    float kn = kq * rsqrtf(sk + 1e-6f);
+    float qn = qq * rsqrtf(sq + 1e-6f) * Q_SCALE;
+    __syncthreads();
+    ks[j] = kn;
+    qs[j] = qn;
+    __syncthreads();
+
+    float gam = expf(g[h]), bet = beta[h];
+    float* Sh = S + (size_t)h * D * D;
+
+    // ---- from here to the end: `rec_unroll4_kernel`'s body, verbatim (see the note above) ---------
+    float r = 0.f;
+#pragma unroll 4                      // keep the loop: without the pragma LLVM fully unrolls this one
+    for (int i = 0; i < D; i += 4) {  // side and the two forms stop being bill-matched (see the header)
+        r += Sh[(i + 0) * D + j] * ks[i + 0];
+        r += Sh[(i + 1) * D + j] * ks[i + 1];
+        r += Sh[(i + 2) * D + j] * ks[i + 2];
+        r += Sh[(i + 3) * D + j] * ks[i + 3];
+    }
+    float dv = bet * (v[h * D + j] - gam * r);
+
+    float acc = 0.f;
+#pragma unroll 4
+    for (int i = 0; i < D; i += 4) {
+        float s0 = gam * Sh[(i + 0) * D + j]; s0 += ks[i + 0] * dv; Sh[(i + 0) * D + j] = s0;
+        acc += qs[i + 0] * s0;
+        float s1 = gam * Sh[(i + 1) * D + j]; s1 += ks[i + 1] * dv; Sh[(i + 1) * D + j] = s1;
+        acc += qs[i + 1] * s1;
+        float s2 = gam * Sh[(i + 2) * D + j]; s2 += ks[i + 2] * dv; Sh[(i + 2) * D + j] = s2;
+        acc += qs[i + 2] * s2;
+        float s3 = gam * Sh[(i + 3) * D + j]; s3 += ks[i + 3] * dv; Sh[(i + 3) * D + j] = s3;
+        acc += qs[i + 3] * s3;
     }
     o[h * D + j] = acc;
 }

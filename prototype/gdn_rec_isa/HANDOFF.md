@@ -255,6 +255,16 @@ whether the 512-byte-stride LDS coefficient read (64 distinct banks × 16 B) act
 
 ## What is *not* built, and the decisions sitting with the main agent
 
+0. **The merged form exists now, and the census says it keeps both halves** (2026-10-18). See `results.md`
+   §11: `rec2c4_kernel` (MODE `rec2c4`) is MODE 2c's fused prologue merged with the shipping unroll4 walks,
+   censused compile-only at 1,374 slots/token-step against the shipped `rec_unroll4_kernel`'s 1,406
+   (−2.276 %), with loop B still at 16 state-accesses × 8 trips and `s_barrier` still down to 5, at the
+   same 59 VGPRs and zero spill. Tooling: `isa_tu_merged.cpp` (one listing for all six forms),
+   `merged_census.py` (the three-way table, `--expect merged` as a build-time canary),
+   `merged_census.output.txt` / `isa_census.merged.output.txt` (the recorded runs), and
+   `run_ab_rec2c4_merged.sh` (the paired A/B with the ISA canary inside the window — **written, never
+   run**; no device command in §11 was executed).
+
 1. ~~**The harness.**~~ **Built** — `gdn_rec_isa.hip.cpp` + `build.sh`, protocol in §3. It compiles and
    both CPU selftests pass; **no device run has been made with it**, so the admission gate and the burst
    are still unrun, and D23's null therefore still rests on the pricing until §3.2 and §3.4 are executed.
