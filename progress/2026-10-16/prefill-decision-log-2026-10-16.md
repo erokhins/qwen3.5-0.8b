@@ -1935,3 +1935,53 @@ require the re-tile to be traffic-bound — already disproved once, and the burd
   `attn_m16.hip.cpp` carries the harness `main()` and cannot be linked into `kernel_occupancy_probe.cpp`
   for a driver-authority reading. The register-cap claim is a static reading, and this repo has already
   been bitten once by a metadata-derived occupancy (D58's `m16_bf16rt`: predicted 1 block/CU, driver 3).
+
+## D60. The pointer-increment follow-up is closed on the census, and the "+156 slots/token" it was priced from never existed
+
+D55's queue line carried "pointer-increment address spelling (−156 slots, bit-neutral follow-up)". That
+number is the flat ISA-census delta between `rec_fused_kernel` and `rec_loop_kernel`, and it is an
+**accounting artifact**: a flat per-kernel slot count divides by nothing, so it bills the loop kernel's
+**203 once-per-launch slots** (kernarg loads, the `xlshl.exec`-guard chain, the `tokens<=0` path) at ×1
+per token. Split properly — `prototype/gdn_rec_isa/token_bill.py`, which uses LLVM's own loop annotations
+so the flat totals stay comparable to `isa_census.py` — and the same listing says:
+
+| kernel | flat slots/token-step | **true per-token** | address arithmetic |
+|---|---|---|---|
+| `rec_fused_kernel` (one token per launch) | 1,374 | 1,374 | 96 (7.0 %) |
+| `rec_loop_kernel` (`--gdn-loop`) | 1,530 (**+156**) | **1,327 (−47)** | **93 (6.1 %, −3)** |
+
+I re-derived this on a listing built by hand from `engine/kernels_gdn.cpp` at `211eb95`, independently of
+the worker's run: same 1,374 / 1,530 / 1,327 / 93, `must-not-catch = 0`. So two claims collapse:
+
+- **The loop did not add instruction cost at all** — it removed 47 slots/token while its wall-time win
+  came from submission count (§24's 73,728 → 144 launches). The "+156" was the loop's prologue being
+  charged once per token.
+- **Address arithmetic is 93 slots/token, not ~156**, and its delta between the two forms is **−3**. Two
+  thirds of it (80 slots) is state-walk addressing already strength-reduced and identical in every form.
+  The ceiling for anything the spelling could remove is therefore **6.1 % of the instruction bill**, not
+  10 % of the wave.
+
+**The MODE, and why it was not measured.** `recptr_kernel` (six row pointers hoisted before the loop and
+advanced at the bottom of each iteration) was written, gated for transcription (`check_recptr_transcription.py`:
+7 must-catch mutations all caught, a cosmetic step reorder must-not-catch does not fire — its own selftest),
+and censused: **flat 1,526, per-token 1,336 (+9, the wrong way)**, VGPR 75 → 69, SGPR 40 → 44, LDS and
+spill unchanged, residency unchanged. At §24's elasticity, −4 slots/token is **≈0.17 pp of the wave**; the
+measured +9 is a small loss. **No device window was spent on it.** That is a deliberate call, not an
+oversight: 0.17 pp is below this box's resolution for a dispatch-bound row (best-of-N spreads of 5–10 % in
+`bench/performance-status.md` §6), so a burst could only produce a number that cannot be interpreted —
+which is the same reason D30's null was re-taken rather than trusted.
+
+**A category error of mine, recorded where it can be seen.** My brief told this worker "the census already
+prints a per-token line (`cast=… other=… total=…`); the shipped looped form reads `cast=97 other=20
+total=406`". That triple is **`LaunchCounts::describe()`'s launch-plan bill — launch records per decode
+step, classified cast/non-cast** — which is exactly the right canary for a *launch-count* change (§13's
+1.7′ A/B used it correctly and still does), and is **not** an instruction census and cannot be reconciled
+with one. Sizing an instruction prize from it is a category error, and it is the reason the item was
+over-priced by 4×. Two instruments, one name: **launch-plan bill** (records/decode-step) vs **ISA slot
+census** (slots/token-step). Quote which one a number came from.
+
+**Where the loop's real surplus lives, if anyone revisits**: not in operand addressing — in the **82-slot
+per-launch `xlshl.exec`-guard chain** (which a span of 512 amortises to 0.16 slots/token today, so it is
+already cheap) and the **80 slots of state-walk addressing** inside the walks. Both are structural, and
+neither is bit-neutral to touch. Item closed; `recptr` stays in the prototype harness as the negative
+witness, unadopted and unmeasured, with its transcription checker intact.
