@@ -1679,3 +1679,29 @@ counts. Two decisions follow, and the first deliberately does **not** re-open 1.
   bit-identical to the per-token form (that would mean the loop crossed an association boundary, which the §19
   `q̃` lesson says is possible via compiler contraction), or a paired wave A/B in which the `gdn_rec` family row
   does not move when the launch count does. Both are one prototype run and one A/B.
+
+## D54 — D53 screens at 1.58–1.64×, bit-identically; port it as `--gdn-loop`, knob first (2026-10-17)
+
+- **Result (§23):** one launch per body beats 128 per-token launches by **1.5834–1.6363** (whole-body span) and
+  **1.4713–1.5553** at span 32, **8/8 cases at 7/7 pairs**, with device admission bit-identical at spans
+  0/1/3/16. Per-token cost 5.4–5.7 µs → **3.4–3.5 µs**. If it holds in situ, `gdn_rec` ≈ 428 → ~270 ms, about
+  **17 % of the wave** — the largest single lever this project has measured, and it comes from the axis the
+  llama.cpp comparison exposed (§22), not from anything on the old queue.
+- **Decision (mine, recorded): port it behind `--gdn-loop N`, default `1`.** Same order as D32→D33→D50: knob
+  first, paired in-situ A/B on the `gdn_rec` family row decides, and the headline is re-taken in a separate
+  clean window before it moves. A one-row body **must** keep the per-token path whatever the flag says, which is
+  what makes decode unchanged by construction rather than by measurement (§6 item 3 of the handoff).
+- **Two sub-decisions taken inside that.** (a) The **addressing variant** (increment six row pointers instead of
+  recomputing `t*CH`, worth −156 slots) was **not** prototyped before this window — the screen already returned
+  1.58–1.64× with the naive addressing, and guessing a mitigation before measuring the thing it mitigates is the
+  pattern this project keeps paying for. It stays available as the named follow-up if the in-situ ratio lands
+  under the screen's. (b) **Span policy:** `--gdn-loop` accepts an explicit N but the engine will pin it to the
+  body size, because span-invariance is *proven* (§3's mirror) while partial spans serve a preemption policy we
+  do not have. Free knob today, honest default, no invented requirement.
+- **What is still owed before this is a headline:** the paired in-situ A/B at 4096 **and** 1024 lanes (the 1024
+  shape has 2 bodies, not 8, so a win at 4096 with a loss at 1024 would be a body-count effect and must be
+  reported that way), decode confirmed flat, gate section (j) extended to the looped side, and a clean-window
+  ruler re-take. `plan_match` is explicitly not the canary — the counted `family=gdn_rec launches=` drop (~512×)
+  and a byte-compare of every prefill logits row are.
+- **Queue effect:** 2.6 (attention tile) stays second — §22 gives it ≥5× at equal launch counts — but D53/D54 is
+  first by a wide margin, and class 5 / 3.3 wait behind both.
