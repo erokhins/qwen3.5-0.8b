@@ -954,3 +954,46 @@ the correct one for attributing a delta, it favoured `fused` 3/3 at the width th
 the honest statement is "the family row got ~3–6 % cheaper depending on which comparison you trust, and the
 end-to-end number is the same 4,440 ± 20 tok/s it has been all session". Prefill stays **4,444 tok/s** as the
 quoted headline until a ruler re-take in a clean window places it lower.
+
+## 21. llama.cpp prefills this model **1.7–2.3× faster than we do** — measured in one hold (2026-10-17)
+
+D48 run for real. `llama.cpp` @ `797de63`, built here `GGML_HIP=ON` / `gfx1151` only, model
+`models/gguf/Qwen3.5-0.8B.f16.gguf` (f16, **unquantised**, 752.4 M params, arch read at load as
+`qwen35 0.8B F16`, ROCm backend, all 24 layers offloaded). Every number below is from **one lock hold**, with
+our own `--time-waves` re-taken in that same window, per §16's rule. `-b 2048` pinned so `-ub` is the only
+thing moving; `kMaxWaveRows = 512` means **`-ub 512` is the matched row**.
+
+| `-ub` | `-fa` | `-t` | pp512 | pp1024 | pp4096 | llama/ours at 4096 |
+|---|---|---|---|---|---|---|
+| 128 | on | 32 | 4,427 | 4,165 | 3,707 | **0.84×** |
+| **512** | on | 32 | 9,627 | 9,487 | 8,290 | **1.87×** |
+| 512 | off | 32 | 9,331 | 9,569 | 8,999 | **2.03×** |
+| 2048 | on | 32 | 9,637 | 8,230 | 7,624 | **1.72×** |
+| 512 | on | **4** | 9,678 | 10,054 | **10,273** | **2.32×** |
+
+Ours, same window: **pp512 91.99 ms = 5,566 tok/s · pp1024 185.40 ms = 5,523 · pp4096 924.62 ms = 4,430**.
+The user's estimate was ~9k and the prediction was right: llama.cpp does **8,290–10,273 tok/s** at 4096 tokens
+against our 4,430.
+
+Three things the table says beyond the headline:
+
+- **Shape of the curve, not just height.** Ours loses 20 % from 512 to 4096 tokens (5,566 → 4,430); llama.cpp
+  loses 14 % (9,627 → 8,290) and *gains* with `-t 4`. So a per-token-cost term of ours grows with context where
+  theirs barely does — which points at the per-token serial scan and the quadratic attention term, not at the
+  GEMMs, exactly as D47's roof arithmetic predicted.
+- **`-ub` is their lever and it is enormous.** At `-ub 128` llama.cpp falls to 3,707 tok/s and is **slower than
+  us** at 4096 tokens (0.84×). Any "they are faster" claim without its batch setting is meaningless, and ours at
+  `-ub 512` is not their best case.
+- **`-t 4` beating `-t 32` (10,273 vs 8,290, +24 %) is unexplained and is recorded as such.** Four CPU threads
+  on a 32-thread box being the fastest setting smells like oversubscription hurting them, and it is the kind of
+  row that must not be quietly dropped because it flatters the comparison.
+
+**Ceiling cross-check (D47).** 10,273 tok/s × 1.0947 GFLOP/token = **11.25 TFLOP/s demanded = 48 %** of the
+measured 23.3 TFLOP/s mix roof. We are at **4.85 TFLOP/s = 21 %**. So llama.cpp neither exceeds the roof nor
+contradicts the ~21,000 tok/s bound — it *corroborates* it, and it demonstrates that well over 2× our current
+rate is attainable on this silicon at this model by something other than GEMM work.
+
+**Not comparable, stated rather than glossed.** llama-bench feeds synthetic token ids, we feed `ids4096.txt`;
+both compute prompt-only (`-n 0` / `--steps 0`) and last-token logits only; llama.cpp's number includes its own
+scheduler and graph build per batch and excludes load, as does ours; and their `-ub` is a tunable policy where
+our 512 is a compile-time ceiling (`kMaxWaveRows`, raisable only with the lane-ceiling work of D45).
