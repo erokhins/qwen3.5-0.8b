@@ -534,10 +534,14 @@ __device__ __host__ inline int tile_blocks_for_row(const CoreArgs& a, int qrow) 
 }
 __device__ __host__ inline int tile_split_of(int lanes_last) { return split_for_lanes(lanes_last); }
 __device__ __host__ inline int tile_rtiles_of(int nrows) { return (nrows + ATTN_TILE_M - 1) / ATTN_TILE_M; }
-// How many query rows one WMMA-form block carries: the WMMA M dimension. Declared here rather than in
+// How many query rows one WMMA-form block carries. Declared here rather than in
 // `engine/attn_fattn_kernels.h` because `fattn_rtiles_of` below needs it and the kernel header needs it,
 // and the two must be the same number — the kernel static_asserts against this one.
-#define FATTN_ROWS_PER_BLOCK 16
+// It is NOT the WMMA M dimension: the M dimension is 16 rows and stays 16, and a block now carries
+// FATTN_WARPS_PER_BLOCK of those row-blocks (Bet 2, `tmp/gcc/fattn_residency.md` §5), each with its own Q
+// stage and all of them sharing one K/V stage. The launcher's grid counts BLOCKS, so it counts this number.
+#define FATTN_WARPS_PER_BLOCK 3
+#define FATTN_ROWS_PER_BLOCK (FATTN_WARPS_PER_BLOCK * 16)
 
 // Which query rows the WMMA form (`engine/attn_fattn_kernels.h`) owns, as ONE predicate shared by both
 // sides of the split. It lives here, beside `blocks_for_row`, rather than in either kernel's header, so the
@@ -549,9 +553,11 @@ __device__ __host__ inline int tile_rtiles_of(int nrows) { return (nrows + ATTN_
 __device__ __host__ inline int fattn_covers(const CoreArgs& a, int qrow) {
     return a.fattn_cover != 0 && qrow < nrows_of(a) && blocks_for_row(a, qrow) > 1 ? 1 : 0;
 }
-// The WMMA form's row-block rule: FATTN_MROWS = 16 query rows per block (the WMMA M dimension), which is
+// The WMMA form's row-block rule: FATTN_ROWS_PER_BLOCK query rows per block, which is
 // deliberately NOT `tile_rtiles_of` — that one is 1 row per block because a per-row lane cut gives two
-// rows no shared window, while 16 rows of ONE KV group share the lane range their union spans.
+// rows no shared window, while a row-block's rows of ONE KV group share the lane range their union spans.
+// The union is why the extent cannot grow for free: at three row-blocks per block it spans 48 rows, and the
+// round loop pays for the union, not for any one row.
 __device__ __host__ inline int fattn_rtiles_of(int nrows) { return (nrows + FATTN_ROWS_PER_BLOCK - 1) / FATTN_ROWS_PER_BLOCK; }
 // This form's `part` is the SHIPPED form's layout, slot for slot: [row][head][lane block][2 + DH] F32,
 // indexed by the full head so that the two KV groups of a row never share a slot.

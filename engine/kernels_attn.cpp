@@ -156,9 +156,10 @@ void fattn_echo(int rows, int split, int lvalid, int nrows) {
     }
     char buf[400];
     std::snprintf(buf, sizeof(buf),
-                  "ATTN_FATTN form=fattn16 q=global vgpr=%d lds=%d scratch=%d vtiles=%d wf_per_cu=%d"
+                  "ATTN_FATTN form=fattn16 q=stage warps=%d vgpr=%d lds=%d scratch=%d vtiles=%d wf_per_cu=%d"
                   " wave_rows=%d split=%d fattn_rows=%d/%d fallback_rows=%d"
                   " covered_rows_pct=%.1f covered_work_pct=%.1f%s",
+                  FATTN_WARPS,
                   have_attrs ? at.numRegs : -1,
                   have_attrs ? (int)(at.sharedSizeBytes) : -1,
                   have_attrs ? (int)(at.localSizeBytes) : -1,
@@ -438,11 +439,12 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                             ". Pass --attn-fattn 0 for the shipped form.");
                     }
                     // ONE EXTRA LAUNCH, and a different grid from the VALU wave's on purpose: this form's
-                    // block is ONE WARP covering 16 query rows of ONE head, so the head moves into
-                    // `blockIdx.x` (where the shipped wave puts the KV group) and the row-block extent is
-                    // `fattn_rtiles_of` = ceil(rows/16) instead of `tile_rtiles_of` = rows. Same total warp
-                    // count — 8 heads x rows/16 blocks x 1 warp = rows x 8 warps either way — and the shape
-                    // is what the spill gate decided (`engine/attn_fattn_kernels.h`, Q placement).
+                    // block is FATTN_WARPS warps covering FATTN_ROWS_PER_BLOCK query rows of ONE head (16 rows
+                    // per warp, one shared K/V stage), so the head moves into `blockIdx.x` (where the shipped
+                    // wave puts the KV group) and the row extent is `fattn_rtiles_of` = ceil(rows/16) instead
+                    // of `tile_rtiles_of` = rows. Same total warp count — 8 heads x rows/16 blocks x 1 warp =
+                    // rows x 8 warps either way — and the shape is what the spill gate decided
+                    // (`engine/attn_fattn_kernels.h`, Q placement).
                     // A wave whose rows are ALL one-pass still launches it and every block returns at its
                     // first ballot: an inert launch is a cheap, visible cost, a silently-skipped one is not.
                     attn_fattn_wave<<<dim3(N_Q, split, fattn_rtiles_of(rows)), FATTN_THREADS>>>(core);

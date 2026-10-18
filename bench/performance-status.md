@@ -1525,3 +1525,36 @@ and each time the signature was "whole rows non-finite", which is a missing/alia
 "interleave is the wall" and "spill traffic is the wall". Fixing the multi-warp coordination is the next
 experiments' gate, and no timing of a non-finite form is permitted (the burst refuses `SPILL`, and admission
 section (i) now refuses non-finite — both by design, and both earned).
+
+## §33. The discriminator: spill-free at 6 wf/CU BEATS spilled at 8 — the round is now 1.985× over frozen (2026-10-18)
+
+Bet 2's multi-warp NaN was a one-loop defect: the patch filled each warp's own Q stage with the shared-buffer
+stride (`for (qr = w; qr < 16; qr += nw)`), so warp *w* staged slots *w, w+3, …* of a stage its score leg reads
+in full — ~2/3 of every warp's Q read unwritten, `live` true so nothing masked it, and the NaN path ran out
+through `attn_combine`. Correct loop: stage every slot of one's own stage once. Note why the earlier bisect
+missed it: at `WARPS=1` the strided loop **is** the correct loop, so the probe that "proved the per-warp Q
+re-stage correct" was structurally blind to the only thing that differed at `WARPS>1`.
+
+Discriminator, three sides interleaved in one lock hold, `sleep 10` before every run, medians of 3, each side's
+`wf_per_cu` read from its own banner:
+
+| side | residency | spill | `attn` family | wave total |
+|---|---|---|---|---|
+| frozen | 20 wf/CU (VALU wave) | 0 | 263.12 ms | 869.13 ms |
+| Bet 1 (staged→un-staged Q) | **8 wf/CU** | **50 regs / 72 B** | 161.31 ms | 751.69 ms |
+| **Bet 2 (3 warps/block)** | **6 wf/CU** | **0 / 0** | **132.57 ms** | **715.69 ms** |
+
+So **spill traffic was real, and it was worth more than the interleave it bought**: fewer resident wavefronts
+with no scratch at all beat more resident wavefronts with 50 spilled registers, by **1.217×** on the family.
+Cumulative: **1.985× on the `attn` family** and **+21.4 % on the whole wave** (869.13 → 715.69 ms) in this
+window — against D62's 1.5× bar, which the staged form missed and both widened forms clear. One bet2 rep printed
+a 1408 ms total (the same intermittent interference seen in §31); its `attn` figure was normal and the median
+rejects it. Correctness: `wide1024f --scope full` **PASSES** on the Bet-2 build with the default on — 512
+streaming rows, 0 outside either cap, 0 non-finite, boundary row 512 cos deficit 2.8301e-05, identical to Bet 1.
+
+**Known-red gate on this commit:** `fattn_ship_census.py` now **crashes** on the geometry evaluator
+(`cannot evaluate 'FATTN_WARPS'`) because its expression model does not know the new warp count. That is a model
+gap on the census's side, not a finding about the kernel — but it is a red gate, recorded as such, and the fix is
+to teach `geometry()` about `FATTN_WARPS` and re-derive per-warp traffic from the source, not to bypass it.
+Next lever, now that spill is separated: **push residency further inside a zero-spill geometry** — the live
+question is whether anything at 8+ wf/CU exists that does not pay for it in scratch.
