@@ -860,3 +860,30 @@ like a mismatch, and the mismatch was mine — `md5sum dir/logits*.bin | md5sum`
 md5sum's output, so two different `--out` directories hash differently no matter what the tensors contain.
 Element-level comparison is the only honest form of this check; an aggregate hash over a glob of two different
 directories is not a comparison at all.
+
+## 18. `rec2c` burst screen: 1.0268 against a 1.02 kill line, which is not a verdict (2026-10-17)
+
+D42 class 4 named one thing worth measuring out of the two `gdn_rec` closures: `rec2c`, the fused-pair
+prologue with compiler-lowered shuffles, bit-identical (`ndiff = 0`), above the refuse bar on paper
+(predicted −0.93 % of wave) and never adjudicated in situ. Screened on the existing harness, one lock hold,
+blocking, `--volume --burst 40 --reps 7`, four cases:
+
+| case | `rec0` med ms/seq | `rec2c` med | ratio | pairs favouring `rec2c` |
+|---|---|---|---|---|
+| t128-carried-d0.002 | 0.8408 | 0.8152 | 1.0314 | 6/7 |
+| t128-carried-d0.4 | 0.8411 | 0.8228 | 1.0222 | 5/7 |
+| t128-zeros-d0.002 | 0.8317 | 0.8256 | **1.0074** | 4/7 |
+| t128-zeros-d0.4 | 0.8493 | 0.8083 | 1.0507 | 5/7 |
+
+**Median of case-medians 1.0268; best case 1.0507; worst case 1.0074.** An earlier 5-rep window read
+1.0208 best-of and the harness itself called that case `INCONCLUSIVE`, so the honest summary is: the fused
+prologue is *probably* a small win, and one of four cases sits under the kill line with the pair-count
+coin-flipping there. That is not an admission, and no engine change follows from it yet.
+
+The reason it cannot be adjudicated from this screen at all: the harness compares `rec0` against `rec2c`,
+both pre-`unroll4` spellings, while the shipped kernel is the D33 unroll4 form. The fused prologue has never
+existed **merged with** the unroll4 walks, and a merge can silently give the unroll back through register
+pressure — which is precisely the class of thing a burst cannot see because the merged kernel is not in the
+binary the burst ran. The gate in front of any port is a compile-only census of the merged listing, not another
+burst window. Recorded here so the 1.0268 is not later quoted as a win: it is a screen of a kernel the engine
+does not run.

@@ -1402,3 +1402,26 @@ that fix cannot cover. Recorded here because a retraction that lives only in a c
   dependency at realised occupancy rather than instruction slots, per the Route A lesson — and both re-pricings
   must be doable on recorded numbers with no build, because `gdn_rec` is 47.34 % of the wave and a wrong price
   there has already cost this project one 9.8× miss.
+
+## D46 — D42 class 4: both `gdn_rec` closures stand, but neither for the reason recorded (2026-10-17)
+
+- **Verdict.** 1.1 (instruction surgery) and 1.2 (chunked scan, P9) both stay closed. The audit's value is in
+  the *reasons*: D23 closed 1.1 on a roof ratio computed against the wrong machine (it presumed one SIMD per
+  wavefront; there are 64 wavefronts for 80 SIMDs on ≤16 busy CUs, so the floor is 2,812 cycles and the family
+  sits at 16 %, not 10 %), and then closed on the **floor** of its own band while its top of band — ~66 ms —
+  was later realised almost exactly (−65.86 ms) by loop spelling, a lever the census did not contain. So the
+  census was not conservative, it was wrong in a direction that already cost time.
+- **Measured elasticity of the axis is ~0.8** (D25's MODE probes), not ~0: on the axis that removes work, slots
+  *do* translate. That is the correction, and it is why the residual named sub-slice had to be screened at all
+  (§18) instead of being dismissed by the old ratio.
+- **1.2's "measured loss" measured an implementation, not chunking** — a thread-mapping defect — but the
+  re-price still cannot resurrect it: nothing in the recorded numbers supports a differently-shaped chunking
+  reaching the bar, so it stays closed on new grounds rather than the old 5.9×.
+- **The one live thread** is `rec2c` (§18): screen median 1.0268 vs a 1.02 kill line, one case below the line,
+  and decisively — it is fused-prologue-vs-pre-unroll4, a kernel the engine no longer runs. It is **not
+  admitted and not ported**; the gate in front of it is a compile-only census of the merged
+  fused-prologue-plus-unroll4 listing, because the failure mode (the merge quietly returns the unroll through
+  register pressure) is invisible to any burst run against a binary that lacks it.
+- **What class 4 bought overall:** two closures made durable (resting on measured elasticity and a failed
+  hand-schedule rather than on a roof ratio), one mispriced claim retired, and the queue cleared to class 5
+  without a re-open that would have burned a device budget on a kernel shape nobody had built.
