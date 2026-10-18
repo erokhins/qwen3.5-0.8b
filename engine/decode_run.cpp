@@ -150,7 +150,7 @@ struct Options {
     engine::kernels::GdnScan gdn_scan = engine::kernels::GdnScan::kSeq;
     bool gdn_scan_given = false;
     // Which SPELLING of the sequential recurrence's state walks `gdn_rec` submits (`--gdn-spell`,
-    // `kernels.h::GdnRecSpell`). `unroll4` — the shipped default since the in-situ A/B (D33):
+    // `kernels.h::GdnRecSpell`). `unroll4` — the shipping spelling from D33 until D51:
     // `engine/gdn_rec_unroll4_kernels.h` is bit-identical to the shipped kernel and measured 1.153x on
     // the family row at 4096 lanes in the wave's own interleaving, not just at launch level. `ship` is
     // kept as a first-class value so the claim stays A/B-able in one binary — the AGENTS.md rule that a
@@ -158,11 +158,14 @@ struct Options {
     // every fixture and byte-compares them, so "bit-identical" is re-proved per gate rather than
     // inherited from the handoff. Echoed on the NUMERICS line like every other knob here, because a
     // timing log that cannot say which spelling produced its family row is not evidence.
-    // `fused` (D50) is a KNOB, not a default: the fused norm prologue on the unroll4 walks, and its
-    // paired in-situ A/B on the `gdn_rec` family row is what decides whether the default moves.
-    engine::kernels::GdnRecSpell gdn_spell = engine::kernels::GdnRecSpell::kUnroll4;
+    // `fused` (D50) is the DEFAULT since D51: the fused norm prologue on the unroll4 walks, worth
+    // 1.0645 on the `gdn_rec` family row at 4096 lanes (3/3 paired reps, worst rep 1.0200) and
+    // −2.96 % of wall in the same window, and bit-identical through the shipping launch path
+    // (gate section (j), re-run per fixture). It is flat at 1024 lanes (0.9909, 1/3 reps) and flat
+    // on decode (1.0025, 2/3 reps), both inside the documented spread; `bench` §20 holds the rows.
+    engine::kernels::GdnRecSpell gdn_spell = engine::kernels::GdnRecSpell::kFused;
     // Whether the flag was actually given, as distinct from the default above. The collapse-refusal
-    // predicate below needs this: with `unroll4` as the default, `--gdn-scan collapse` alone would
+    // predicate below needs this: with a non-`ship` default, `--gdn-scan collapse` alone would
     // otherwise walk into a refusal the user never asked for.
     bool gdn_spell_given = false;
     // The chunk size. Only 64 is accepted, and the refusal prints the measured reason rather than

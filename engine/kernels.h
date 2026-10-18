@@ -277,9 +277,10 @@ void gdn_gates(const uint16_t* a_raw, const uint16_t* b_raw, const float* a_log,
 //   kShip      `prototype/gdn_decode/gdn_decode_kernels.h::rec_kernel`. The pre-D33 shipped form, kept
 //              as a first-class A/B side so the claim below stays testable from one binary, and
 //              `gdn_rec()`'s optional-argument default. What a run actually submits comes from
-//              `decode_run --gdn-spell`, whose default is `kUnroll4`.
+//              `decode_run --gdn-spell`, whose default is `kFused` since D51.
 //   kUnroll4   `engine/gdn_rec_unroll4_kernels.h::rec_unroll4_kernel` — same operations, same order,
-//              same values, `#pragma unroll 4` on both state walks. THE SHIPPING DEFAULT since D33:
+//              same values, `#pragma unroll 4` on both state walks. THE SHIPPING DEFAULT from D33 to
+//              D51:
 //              worth 1.149–1.158x at launch level on the harness (`prototype/gdn_rec_isa/results.md`
 //              §10, D32) at −7.7 % slots and 1.153x on the family row at 4096 lanes in the wave's own
 //              interleaving, which is ~2x what D25's measured elasticity predicts, i.e. the prize is
@@ -288,9 +289,10 @@ void gdn_gates(const uint16_t* a_raw, const uint16_t* b_raw, const float* a_log,
 //              prologue FUSED into one pass over shared memory (two `red[]` arrays, 3 barriers instead
 //              of the two-call form's 8). −32 of 1,406 slots/token-step at UNCHANGED registers (59
 //              VGPRs, zero spill) and +128 B of LDS; bit-identical by claim, measured bit-identical in
-//              4/4 harness cases, and re-proved per fixture by `engine/gate.py` section (j). A KNOB,
-//              not the default: D50 ships it as a knob and lets the paired in-situ A/B on the
-//              `gdn_rec` family row decide whether the default moves (the D32 → D33 order).
+//              4/4 harness cases, and re-proved per fixture by `engine/gate.py` section (j). **THE
+//              DEFAULT since D51**: D50 shipped it as a knob and the paired in-situ A/B on the
+//              `gdn_rec` family row read 1.0645 at 4096 lanes (3/3 reps, worst rep 1.0200), flat at
+//              1024 lanes and flat on decode — `bench/performance-status.md` §20.
 // All three are inert under `--gdn-scan collapse`, which launches a different kernel; `parse_args`
 // refuses that combination rather than letting a timing run price one kernel twice and call the second
 // price the spelling's win.
