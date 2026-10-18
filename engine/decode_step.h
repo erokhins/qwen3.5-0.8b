@@ -91,7 +91,7 @@ struct DecodeScratch {
     // moves under it. The default is 0: the WMMA form has been written and its two map checkers are green,
     // but the form itself has not met the device (`prototype/attn_wmma/`), and a form that has not met the
     // device does not become the engine's default by having been written.
-    int attn_fattn = 0;
+    int attn_fattn = 1;   // default since the form met the device: 1.3955x attn at 4096 lanes, wide1024f green both ways, covered rows inside the floors in force
     // Which §04.4 scan a GDN body runs (P9, `kernels.h:GdnScan`). Same riding reason as the three
     // above, and it too is overridden per body — a ONE-ROW body is `gdn_rec` whatever this says,
     // because decode's bits are pinned through the sequential recurrence and a chunked scan of one

@@ -7057,7 +7057,7 @@ def main() -> int:
                          " `decode_run.cpp`'s own move in one commit, for the same reason"
                          " `--attn-tile`'s defaults do (`engine/gate.py`'s echo check fails a binary"
                          " that does not carry the field).")
-    ap.add_argument("--attn-fattn", choices=("0", "1"), default="0",
+    ap.add_argument("--attn-fattn", choices=("0", "1"), default="1",
                     help="which FORM owns a wave body's STREAMING rows, passed straight to `decode_run"
                          " --attn-fattn` (`prototype/attn_wmma/fattn_score_handover.md` §5a,"
                          " `engine/attn_fattn_kernels.h`): `1` launches the WMMA wave beside"
@@ -7065,9 +7065,9 @@ def main() -> int:
                          " and the VALU wave keeping the one-pass rows — the split is ONE predicate"
                          " (`fattn_covers`) called from both kernels, and the launcher echoes"
                          " `ATTN_FATTN ... fattn_rows=n/N` so the covered share of the family is a"
-                         " printed number rather than an assumption. `0`, the default, is the shipped"
-                         " path with one extra branch that is false for every row: a form that has not"
-                         " met the device does not become the engine's default by having been written,"
+                         " printed number rather than an assumption. `1`, the default since the form met"
+                         " the device: wide1024f PASS on both sides with 512 streaming rows inside the"
+                         " floors already in force (worst 1-cos 1.99e-04 vs 2.0e-3 cap, meanrel 3.39% vs"
                          " and the two fragment-map checkers (`check_fattn_map.py`, `check_fattn_cb.py`)"
                          " being green is a precondition for admission, not admission. Wave-only like"
                          " the two above, so no decode bit moves under it, and asserted against the"
