@@ -997,3 +997,41 @@ rate is attainable on this silicon at this model by something other than GEMM wo
 both compute prompt-only (`-n 0` / `--steps 0`) and last-token logits only; llama.cpp's number includes its own
 scheduler and graph build per batch and excludes load, as does ours; and their `-ub` is a tunable policy where
 our 512 is a compile-time ceiling (`kMaxWaveRows`, raisable only with the lane-ceiling work of D45).
+
+## 22. Where the 1.87× actually is — per-kernel trace of both engines at 4096 tokens (2026-10-17)
+
+`rocprofv3 --kernel-trace --memory-copy-trace` on both engines in one hold (`tmp/gcc/run_d52_trace.sh`).
+Traces inflate, and they inflate **in proportion to launch count**, which is the exact axis under study — so the
+absolute traced ms are used as **upper bounds for llama.cpp and structural evidence only**, and our own family
+ms come untraced from `--time-waves`. Pass counts inferred from arithmetic that agrees on both sides
+(18 GDN layers × 8 chunks of 512 = 144; 6 attn layers × 8 = 48): llama.cpp's trace holds warmup + timed
+(÷2), ours holds three passes (÷3).
+
+| | **llama.cpp** | **ours** | |
+|---|---|---|---|
+| launches per token | **1.93** | **18.76** | 9.7× |
+| GDN recurrence launches / layer / 4096 tok | **8** (512 tokens per launch) | **4,096** (one token per launch) | **512×** |
+| attention launches / pass | 48 | 48 | **identical** |
+| GEMM launches / pass | 1,464 | 1,200 | comparable |
+| GDN family time | **≤ 47.4 ms** | **428.2 ms** | we are **≥ 9.0× slower** |
+| attention family time | **≤ 52.5 ms** | **263.2 ms** | we are **≥ 5.0× slower** |
+| GEMM time | ~176 ms (traced/2) | ~154 ms (untraced §20) | comparable — both near the roof, as D47 said |
+
+Two mechanisms, and they are *different* in kind:
+
+- **GDN is a launch-structure gap, not a math gap.** llama.cpp runs `gated_delta_net_cuda<128,…>` **once per
+  512-token chunk per layer** and walks the tokens *inside* the kernel. We relaunch per token — 73,728 launches
+  for a 4096-token prompt, each carrying a 1.72 µs submission (≈**127 ms**, 13.8 % of the wave) plus its own
+  prologue and drain. Looping N tokens inside one launch changes no arithmetic and no address: the recurrence is
+  already sequential, so the same expression tree runs in the same order and the result is **bit-identical by
+  construction** (the same reasoning D33 accepted for `#pragma unroll 4`). This is **not** P9's chunked
+  reformulation — it keeps the scan, it removes the relaunching.
+- **Attention is a kernel-shape gap at identical launch counts.** Same 48 launches, ≥5× the time. Theirs is
+  `flash_attn_ext_f16<256, 256, 16, 4, …>` — a 256×256-tiled flash kernel; ours is `attn_slim_wave` at
+  `MAXSC = 512` lanes per block. That is queue item **2.6 with external evidence attached**, and it is now the
+  second-largest item on the board: 263 ms against ≤52 ms.
+
+**Explicitly not claimed:** that llama.cpp's traced times equal its untraced times (they are upper bounds, which
+makes both ≥ ratios conservative); that their `-t 4` setting was used here (it was the matched `-t 32` row); and
+any per-family *rate* comparison for GEMMs — D47 already put both engines near the same roof, and the trace
+agrees, which is what makes the two rows above worth acting on.
