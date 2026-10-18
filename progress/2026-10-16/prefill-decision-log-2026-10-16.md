@@ -1813,3 +1813,81 @@ day before and which was wrong in its headline number.
   survives, the row did not. And `prototype/attn_valu_slim`'s "occupancy unchanged at 16 waves/SIMD" cited a
   clang remark that prints 16 for every kernel; the supported figure is **5 blocks / 20 wavefronts per CU
   (62.5 %)**, from KFD LDS 64 KiB, which is also the first LDS-per-CU number this repo ever recorded.
+
+## D58. The M = 16 feeder falsifier clears, the census's occupancy claim does not, and 2.6 turns on a tax measurement rather than a probe
+
+**Question.** D57 funded item 2.6's *gate* but not the route: re-tile the score half at `M >= 16` and put
+the dot and fold on `v_wmma_f32_16x16x16_bf16`, fund it only if the feeder plus fold-return plus store
+stays inside ~19 static slots per `(row, lane, head)` touch. `>= 30` and D30's funded-no stands.
+
+**What the census says** (worker `b1a13913`, `prototype/attn_wmma/m16_census.output.txt`, compile-only;
+its calibrations re-derives the three published figures — 45 shipped pass-1 slots, 116 pass-1 static,
+13.5 feeder slots per tile — and passes, so the slot currency is the shipped one):
+
+| spelling | slots/touch | what it costs |
+|---|---|---|
+| `m16_bf16gq` — Q from global, K staged, **rolled** K-step loop | **1.98** | 30 VGPR, 11,264 B LDS |
+| `m16_roll` — Q+K staged, rolled | 2.10 | 19,456 B LDS |
+| `m16_bf16rt` — staged, unrolled | 1.73 | 19,456 B LDS |
+| **the same M = 16 geometry with the shipped VALU dot + fold, no WMMA** | **59.86** | — |
+| shipped `attn_slim_wave`, pass-1 leg | **45** | 47 VGPR, 12,288 B LDS |
+
+Two findings, and the second is the one that changes the argument:
+
+1. **The feeder is not the wall** — `<= 19` clears by an order of magnitude: feed 0.82 + fold/return 0.90
+   per touch against a 45-slot leg it replaces.
+2. **The M = 16 re-tile is a debit the matrix form has to pay for.** The control — same geometry, shipped
+   VALU, no WMMA — is **59.86**, *worse* than the shipped 45, because at M = 16 no per-touch parallelism
+   is left to exploit. So "tile it and the matrix comes for free" is false, and the +5–12 % D57 booked is
+   a net of a real cost, not a gross win.
+3. D57's assumed **18-slot per-touch residue does not survive** the tile: at M = 16 the WMMA loop runs 16
+   iterations per **256** touches, so an 18/touch residue would bill ~4,600 slots against a measured
+   round of 507. The residue is ~0.2–0.4/touch of rolled-loop bookkeeping. That makes the score-half win
+   bigger than D57 booked, and it is the reason this is a *measurement* question now, not a probe question.
+
+**Where the census was wrong, and the device corrected it.** Its blocks/CU column was a host-side policy
+over `.s` metadata, and its verdict rested on it — `m16_bf16rt` at 235 VGPR was booked as **1 block/CU**.
+I ran the real query (`tools/kernel_occupancy_probe.cpp` now carries the five m16 rows; the two-TU link
+the worker built but was not permitted to exec), under the lock, `util` recorded, canary asserted in the
+same window (`prototype/attn_wmma/evidence/occupancy-m16.txt`):
+
+| kernel | census predicted | **driver says** |
+|---|---|---|
+| `m16_bf16gq` | 5 blocks / 20 wf | **5 blocks / 20 wf = shipped parity** |
+| `m16_roll` | 3 / 12 | 3 / 12 |
+| `m16_bf16rt` | **1 / 4** | **3 / 12** |
+| shipped `attn_slim_wave` | 5 / 20 | 5 / 20 |
+
+So the parity-preserving spelling is also the cheapest one (global-A, rolled) — no trade-off between the
+two currencies, which is the best possible outcome for a gate. But the static prediction was 3× wrong on
+one variant, which is the same class of error as `attn_valu_slim`'s LDS booking (D44) and the reason this
+repo treats a metadata-derived occupancy as a prediction: the canary is not decorative, and the driver's
+number is the one to quote.
+
+**The whole-kernel bill re-prices the prize, and it is smaller than the gate implies.** W2 established the
+whole-kernel figure on device: `attn_slim_wave` is **89.9 warp-inst per touch**, not 45 — 45 was the
+pass-1 *leg*. Replacing that leg with a 1.98-slot WMMA leg removes ~48 % of the kernel's VALU, and at the
+measured slot→time elasticity of `slots^0.39–0.44` (D21/D22) that is **−24 % of `attn`**, i.e. ~13 % of
+`attn` wall is the *optimistic bound* before any geometry tax, ~4.6 % of the wave, ~+4.8 % prefill. D30's
+kill line for a re-tile is "> ~15 % of `attn`". **The score half alone lands on the line, not above it.**
+And clearing it requires both halves: pass 2 (`P·V`) is the other ~50 % of the bill, and a block holding
+both halves needs 16 f32 accumulator fragments over `DH = 256` = **128 VGPR/lane against today's 47** —
+which is a block redesign, not a spelling change, and is also where the bit-identity forfeit lands (`P`
+must become bf16, so a new band and a gate section come with it).
+
+**Decision.**
+- **The feeder falsifier's answer is recorded: the feeder does NOT block.** Anyone re-opening 2.6 must
+  argue past the two debits (the re-tile costs +15 slots/touch on VALU; pass 2 needs 128 VGPR/lane),
+  not past "the feeder is too expensive", which is now disproved.
+- **2.6 stays funded-no at the score-half level** — ~13 % of `attn` at the optimistic elasticity bound,
+  against a 15 % bar, *before* the geometry tax. Not closed on taste: on a number, against a line the
+  repo set itself.
+- **The deciding unknown is now the geometry tax at M = 16, and it is a device measurement, not a
+  probe**: `prototype/attn_m2` measured the M = 2 tax at **+7 %** on device and modelled **+15–29 %** at
+  the funded ruler. Re-tile at M = 16 **with the shipped VALU dot, no WMMA**, measure the tax, and the
+  arithmetic closes in one direction or the other: a tax near the measured +7 % funds the WMMA port;
+  a tax near the modelled +29 % kills it without any further analysis.
+- **R6 stays closed as predicted** — `attn_prep` 3.7 % + `attn_combine` 1.2 % = 4.9 % of family wall
+  against a 7.5–15 % threshold. (Its census's "36.3 slots/touch-equivalent" for `attn_prep` is *not*
+  comparable to slim's 89.9: the two kernels normalise on different touch counts. The time shares are the
+  usable figures.)
