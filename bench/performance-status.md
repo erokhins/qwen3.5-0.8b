@@ -1035,3 +1035,43 @@ Two mechanisms, and they are *different* in kind:
 makes both ≥ ratios conservative); that their `-t 4` setting was used here (it was the matched `-t 32` row); and
 any per-family *rate* comparison for GEMMs — D47 already put both engines near the same roof, and the trace
 agrees, which is what makes the two rows above worth acting on.
+
+## 23. The D53 screen: one launch per body beats 128 launches per token by **1.58–1.64×**, bit-identically (2026-10-17)
+
+`recloop` = the shipping `rec_fused_kernel` body, token index inside the kernel, same grid `<<<16,128>>>`, same
+operands, same state buffer. Correctness ran first, on CPU and then on device, and all of it cleared:
+
+* **Addressing** — `--selftest-loop`: host mirror of the looped mapping vs the per-token mirror, **39,444,480
+  elements bit-compared** across spans {1, 2, 3, whole}, `bad=0`, `clean_mismatch=0`, and five injected loop
+  defects (token index pinned, `o` stride halved, state restarted per token, `beta` pinned, `g` pinned) each
+  caught **exactly** where their geometry predicts, with `wrong_catch=0` and `defects_unreachable=0`.
+* **Arithmetic as text** — `check_recloop_transcription.py`: 33 core lines identical across `recloop`,
+  `rec2c4` and the engine's `rec_fused_kernel`, including the `#pragma unroll 4` lines; its own `--selftest`
+  catches all four mutations (hoisted `Q_SCALE`, reordered serial adds, dropped pragma, dropped store).
+* **On device** — admission at spans **0, 1, 3, 16**: **4/4 cases bit-identical** every time
+  (`ndiff_o_vs0=0 ndiff_state_vs0=0`, reruns clean), plus `VOLUME_OK` at spans 0 and 3 with the per-token-step
+  byte account unchanged. So the §19 reassociation risk did not materialise: looping the token index moved no value.
+
+The screen (`--modes rec2c4,recloop`, same binary, alternating inside every rep, build-time canaries on the
+census bill and the resource pass — 75 VGPR / 40 SGPR / **0 spill**, occupancy unchanged at 16 waves/SIMD):
+
+| span | case | per-token ms/seq | looped ms/seq | ratio |
+|---|---|---|---|---|
+| whole body (1 launch vs 128) | carried-d0.002 | 0.7342 | 0.4487 | **1.6363** |
+| | carried-d0.4 | 0.6970 | 0.4402 | **1.5834** |
+| | zeros-d0.002 | 0.6986 | 0.4387 | **1.5924** |
+| | zeros-d0.4 | 0.6993 | 0.4383 | **1.5955** |
+| 32 tokens/launch (4 launches) | four cases | 0.6955–0.7326 | 0.4608–0.4850 | **1.4713–1.5553** |
+
+**All eight cases, 7/7 pairs each.** Per-token cost falls from 5.43–5.74 µs to **3.43–3.51 µs**, i.e. if the wave
+behaves the same way, `gdn_rec` goes from 428 ms toward ~270 ms — **~17 % of the wave** — which is well outside
+anything this file has recorded as a single-kernel win.
+
+Two cautions that the ratio does not dissolve. First, this is a **128-token harness shape**: the real call will
+walk 512 tokens in one launch, and the census says the loop's own addressing costs **+11.4 % slots** (1,374 →
+1,530 — `salu.mov` 7→82, `loop.salu` 57→79, from recomputing `t*CH` per iteration), a cost the screen here
+overwhelms but which may read differently at 512 iterations. Second, §10 is the standing precedent that a burst
+winner can be an in-situ loser, so the claim is due from the paired **family row**, not from this table. Per the
+screen's own bands (`>1.10` → port and adjudicate in situ), the port is authorised; the addressing-spelling
+variant was deliberately **not** prototyped first, because the screen already answers the question it would have
+answered, at a ratio far above the band.
