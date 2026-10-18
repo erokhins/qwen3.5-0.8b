@@ -89,33 +89,35 @@ def half_loop_tiles(text, env):
 
 
 SHARED_TYPES = {"__half": 2, "float": 4, "hip_bfloat16": 2, "char": 1, "unsigned": 4, "int": 4}
+# One `__shared__` declaration, as the census reads it: type, name, raw dimension expression. The byte sum
+# below and the Q-source classifier in `geometry` both go through this one pattern, so the classifier cannot
+# believe in a stage the byte sum did not price — an uncounted stage is traffic hiding from the census.
+SHARED_DECL = re.compile(r"__shared__\s+(?:__align__\(\d+\)\s+)?([A-Za-z_]\w*)\s+(\w+)\[([^\]]+)\]")
 
 
-def shared_bytes(body, env):
-    """The LDS one block declares, summed from its own `__shared__` declarations.
+def shared_decl_names(body):
+    """The names of the arrays this body declares `__shared__`.
 
-    Wavefronts per CU are what the two unpriced suspects are about, and on this part LDS per block is what sets
-    them, so a census that hard-coded 16384 could not witness a geometry change: it would fail the very variant
-    it was written to justify (and `compare` used to do exactly that). An unparseable declaration is a hard
-    failure — guessing an element width here is guessing the residency.
+    `geometry` asks one question of them: is the score leg's Q operand handed one of these names, or a pointer
+    from somewhere else? A list, because a block may declare one Q stage per warp; an operand that names none
+    of them is not arriving through LDS at all.
     """
-    total = 0
-    for m in re.finditer(r"__shared__\s+(?:__align__\(\d+\)\s+)?([A-Za-z_]\w*)\s+(\w+)\[([^\]]+)\]", body):
-        typ, name, dims = m.group(1), m.group(2), m.group(3)
-        if typ not in SHARED_TYPES:
-            raise AssertionError("`%s %s[%s]`: no width for type %r. Add it to SHARED_TYPES with its size; do "
-                                 "not assume 2" % (typ, name, dims, typ))
-        n = 1
-        for tok in dims.split("*"):
-            n *= eval_expr(tok, env)
-        total += SHARED_TYPES[typ] * n
-    if total == 0:
-        raise AssertionError("no `__shared__` declaration in the kernel body: this census cannot price "
-                             "residency without knowing what a block declares")
-    return total
+    return [m.group(2) for m in SHARED_DECL.finditer(body)]
 
 
-SHARED_TYPES = {"__half": 2, "float": 4, "hip_bfloat16": 2, "char": 1, "unsigned": 4, "int": 4}
+def func_body(src, name):
+    """The text of one function definition, signature to closing brace, by its own name.
+
+    The census uses it to price an operand loader by what the loader DOES (how many wide loads it issues)
+    instead of by a byte count typed next to the call site. Definitions only: the `[^;{]*` between the
+    argument list and the brace rejects a call, which is closed by a `;`.
+    """
+    m = re.search(r"\b%s\s*\([^)]*\)[^;{]*\{" % re.escape(name), src)
+    if not m:
+        raise AssertionError("no definition of `%s` found: the census names a function the source does not "
+                             "define. Re-read the source; do not assume its body" % name)
+    end = src.index("\n}\n", m.start())
+    return src[m.start():end]
 
 
 def shared_bytes(body, env):
@@ -128,7 +130,7 @@ def shared_bytes(body, env):
     anything.
     """
     total, seen = 0, []
-    for m in re.finditer(r"__shared__\s+(?:__align__\(\d+\)\s+)?([A-Za-z_]\w*)\s+(\w+)\[([^\]]+)\]", body):
+    for m in SHARED_DECL.finditer(body):
         typ, name, dims = m.group(1), m.group(2), m.group(3)
         if typ not in SHARED_TYPES:
             raise AssertionError("`%s %s[%s]`: no width for type %r. Add it to SHARED_TYPES with its size; do "
@@ -216,6 +218,42 @@ def geometry(text=None, op=None):
     # `fattn_stage_row` (whose line starts with `void`) and the prose that names it are both excluded.
     g["stage_row_sites"] = len(re.findall(r"^\s*fattn_stage_row\(", body, re.M))
     g["global_stage_fills"] = g["stage_row_sites"] + 1
+    # THE Q OPERAND'S SOURCE — the one geometric fact about this form that is not a loop bound, and the reason
+    # this census was left red by the Q un-staging (bench/performance-status.md §31). The two spellings move two
+    # traffic classes in OPPOSITE directions:
+    #   staged (placement (B)) — `fattn_load_tile(&s_q[...])`: the operand's bytes are LDS reads, and a
+    #                            `fattn_stage_row` fills the stage once per launch (16 B global + 16 B LDS).
+    #   global (Bet 1)         — `fattn_load_q_tile(qrow + 16*t)`: the same bytes are GLOBAL reads, one tile per
+    #                            rolled score site, and the stage plus its fill are gone.
+    # The model asks the source one question rather than being told one: does the operand's own argument name an
+    # array the body declared `__shared__`? A banner (`q=global`) and a comment can both lie; the call site that
+    # produces the operand cannot, and the byte cost comes out of the loader function that call site names.
+    # K is deliberately NOT classified: this form's score leg has exactly one staged operand by construction and
+    # un-staging K would make the stage pointless rather than cheaper, so if that ever happens the listing moves
+    # out from under this model and the census goes red, which is the correct answer to an unpriced change.
+    mq = re.search(r"const fattn_ARegs second\s*=\s*(\w+)\(([^;]*?)\)\s*;", body)
+    assert mq, ("no `const fattn_ARegs second = <loader>(...)` in the score leg: this census classifies the Q "
+                "operand by its own call site and the source no longer spells one. Re-read the source; do not "
+                "type the answer here")
+    g["q_producer"] = mq.group(1)
+    g["q_stage"] = next((nm for nm in shared_decl_names(body)
+                         if re.search(r"\b%s\b" % nm, mq.group(2))), "")
+    g["q_from_global"] = 0 if g["q_stage"] else 1
+    if g["q_from_global"]:
+        # Two `uint4` derefs in the loader = 32 B of global per tile, read off the loader rather than asserted.
+        g["q_tile_B"] = 16 * len(re.findall(r"reinterpret_cast<const\s+uint4\s*\*",
+                                            func_body(src, g["q_producer"])))
+        assert g["q_tile_B"], ("`%s` issues no wide load, so this census has the wrong loader or the Q operand "
+                               "is built some other way. Read the source again; do not type 32 here"
+                               % g["q_producer"])
+    else:
+        # A staged operand needs a writer: an LDS operand nothing fills is a slot of scratch, which is §29's NaN
+        # one layer down. This is the check that makes `q_stage` a claim and not a name match.
+        assert g["q_stage"] and re.search(r"fattn_stage_row\(\s*&%s\[" % g["q_stage"], src), (
+            "the model says Q is staged but the operand names no stage it declared (`%s`), or the stage it names "
+            "has no writer: an LDS operand with no writer is uninitialised memory, not a placement"
+            % (g["q_stage"] or "<none>"))
+        g["q_tile_B"] = 0
     # THE PARTIAL HEADER: the (m, l) pair, two F32 per covered row. It is the only global write that is not
     # the publish loop's, and the second version of the epilogue got the publish shape wrong beside it.
     g["part_header_floats"] = 2
@@ -240,9 +278,11 @@ def derive(g):
     come from, which is the guard against "fixing" a red census by editing the number to match.
     """
     score_sites = 1 if g["score_rolled"] else g["KTILES"]
-    # One operand tile is 16 halves = 32 B. The score leg has two operands per site; the P*V leg has one,
-    # because the P operand lives in registers — which is the whole point of the C->B exchange.
-    operand_bytes = (score_sites * 2 + g["VTILES"]) * 16 * 2
+    # One operand tile is 16 halves = 32 B. The score leg always reads its K operand from the stage; it reads
+    # its Q operand from the stage only if the source declares a Q stage (`q_from_global`, read off the
+    # operand's own call site in `geometry`). The P*V leg has one staged operand each, because the P operand
+    # lives in registers — which is the whole point of the C->B exchange.
+    operand_bytes = (score_sites * (2 - g["q_from_global"]) + g["VTILES"]) * 16 * 2
     # THE PUBLISH SIDE — the term the pre-NaN-fix model did not have at all. Per half the stage holds
     # FATTN_MROWS x FATTN_TROW floats; every one of them is read back, exactly once, in blocks of
     # FATTN_TBLK floats and written to the partial slot, so the stage read and the partial write are the same
@@ -263,7 +303,8 @@ def derive(g):
         "lds_B": g["lds_declared_B"],
         # one v_wmma site in the rolled score loop, one per tile in the unrolled P*V loop
         "v_wmma": score_sites + g["VTILES"],
-        # LDS READS: the WMMA operand tiles plus the epilogue's publish of the transpose stage.
+        # LDS READS: the WMMA operand tiles that arrive through LDS (K always; Q only where it is staged) plus
+        # the epilogue's publish of the transpose stage.
         "lds_read_B": operand_bytes + publish_bytes,
         # LDS WRITES: the Q and K stage fills (one uint4 per `fattn_stage_row` call), the transposed V fill
         # (one 16-bit store per dim of its loop), and the transpose stage (one F32 per C-tile register per
@@ -272,8 +313,9 @@ def derive(g):
                         + g["v_narrow_stores"] * 2
                         + g["transpose_halves"] * g["stage_tiles_per_half"]
                         * g["stage_write_per_tile"] * 4),
-        # GLOBAL READS: the stage fills, one uint4 per lane per trip of each fill loop.
-        "global_read_B": g["global_stage_fills"] * 16,
+        # GLOBAL READS: the stage fills, one uint4 per lane per trip of each fill loop, plus the Q operand's own
+        # wide loads when the score leg builds that operand from global instead of reading it from a stage.
+        "global_read_B": g["global_stage_fills"] * 16 + score_sites * g["q_tile_B"],
         # GLOBAL WRITES: the publish loop's bytes into `part`, plus the (m, l) header the epilogue writes
         # beside it. This is the term the broken epilogue got wrong in a way no bound-style assert could see:
         # it wrote 16 of every row's 256 dims, so 240 dims per row of the partial slot were never written.
@@ -386,6 +428,41 @@ def note_blocks(asm_text):
     return blocks
 
 
+def q_staged_text(src):
+    """The shipping header with Q staged again — the source mutation that flips Bet 1 back to placement (B).
+
+    Three edits, which are Bet 1's patch read backwards (`git show HEAD~1:engine/attn_fattn_kernels.h`): declare
+    `s_q`, fill it, and hand the score leg a pointer into it. `--selftest` needs this as a REAL text, not as a
+    flag, because the census's Q-source claim is only a claim if something can disagree with it: the same listing
+    judged under this header must move two traffic classes in opposite directions, and if the flip could not be
+    spelled any more the case would silently disappear from the selftest. Raises if a needle is gone, and the
+    selftest reports that as an escape rather than a pass.
+    """
+    steps = [
+        ("    __shared__ __align__(16) __half s_kv[FATTN_MLANES * DH];",
+         "    __shared__ __align__(16) __half s_q[FATTN_MROWS * DH];\n"
+         "    __shared__ __align__(16) __half s_kv[FATTN_MLANES * DH];"),
+        ("    const int qrs = fattn_ab_row(lane) < qrmax ? fattn_ab_row(lane) : qrmax - 1;\n"
+         "    const hip_bfloat16* qrow = a.qrope + (size_t)ROW_H * (rt * FATTN_MROWS + qrs) "
+         "+ (size_t)head0 * DH;",
+         "    for (int qr = 0; qr < FATTN_MROWS; ++qr) {\n"
+         "        const int qrs = qr < qrmax ? qr : qrmax - 1;\n"
+         "        fattn_stage_row(&s_q[fattn_q_addr(qrs, 0)],\n"
+         "                        a.qrope + (size_t)ROW_H * (rt * FATTN_MROWS + qrs) + (size_t)head0 * DH, lane);\n"
+         "    }\n"
+         "    __syncthreads();                            // barrier 1: Q published (once per launch)"),
+        ("const fattn_ARegs second = fattn_load_q_tile(qrow + 16 * t);",
+         "const fattn_ARegs second = fattn_load_tile(&s_q[fattn_q_addr(fattn_ab_row(lane), 16 * t)]);"),
+    ]
+    for needle, repl in steps:
+        if needle not in src:
+            raise AssertionError("the Q-staged flip can no longer be spelled: %r is not in the header, so "
+                                 "--selftest cannot flip the Q operand's source. Fix the flip; do not delete "
+                                 "the case" % needle[:60])
+        src = src.replace(needle, repl, 1)
+    return src
+
+
 def selftest(asm_text):
     """Inject-and-must-fail over BOTH sides of the census; returns the list of escapes (empty = teeth).
 
@@ -402,15 +479,26 @@ def selftest(asm_text):
         return ["selftest needs exactly one attn_fattn_wave body to mutate, found %d" % len(bodies)]
     body = bodies[0]
     escapes = []
+    src = open(HEADER).read()
+    op = open("prototype/attn_decode/attn_decode_kernels.h").read()
+    try:
+        staged_src = q_staged_text(src)
+    except AssertionError as exc:
+        staged_src = None
+        escapes.append(str(exc))
 
-    def red_after(mutated_body):
-        _, fails, _ = compare(g, clean_note, count_body(mutated_body), ack_spill="selftest")
-        return fails
+    def red_after(mutated_body, geo=None):
+        """The failures a mutation ADDS. A mutation that goes red only because the base was already red proves
+        nothing, so the baseline is subtracted here once rather than at each call site."""
+        _, fails, _ = compare(geo or g, clean_note, count_body(mutated_body), ack_spill="selftest")
+        return [f for f in fails if f not in red_after.base]
 
-    base_fails = red_after(body)
+    red_after.base = []
+    base_fails = compare(g, clean_note, count_body(body), ack_spill="selftest")[1]
     if base_fails:
         return ["the unmodified listing does not pass on its own, so an injection test on top of it proves "
                 "nothing: " + " | ".join(base_fails)]
+    red_after.base = base_fails
 
     def drop(text, mnemonic, count=1):
         return re.sub(r"^(\s+)" + mnemonic + r"(\s|$)", r"\1v_noop\2", text, count=count, flags=re.M)
@@ -429,14 +517,6 @@ def selftest(asm_text):
          inject(body, "global_load_b128 v[1:4], v13"), "global_read_B"),
         ("one extra global_store_b128 (a global write the loops do not account for)",
          inject(body, "global_store_b128 v[1:4], v13"), "global_write_B"),
-        ("one global_store_b128 MISSING (part of the row's publish disappeared)",
-         drop(body, "global_store_b128"), "global_write_B"),
-        ("one ds_store_b16 MISSING (the transposed V publish loses a dim)",
-         drop(body, "ds_store_b16"), "lds_write_B"),
-        ("one ds_store_b32 MISSING (the transpose stage loses one C-tile register)",
-         drop(body, "ds_store_b32"), "lds_write_B"),
-        ("one ds_store_b128 MISSING (a stage fill lost its wide write)",
-         drop(body, "ds_store_b128"), "lds_write_B"),
         ("one ds_bpermute_b32 MISSING (D-4: half a denominator per row)",
          drop(body, "ds_bpermute_b32"), "cross_lane"),
         ("one v_wmma MISSING (a tile of the round went away)",
@@ -448,6 +528,21 @@ def selftest(asm_text):
         ("an access mnemonic this census does not model (ds_read_b128) appeared",
          inject(body, "ds_read_b128 v[1:4], v3"), "unclassified"),
     ]
+    # DERIVED, not hand-listed: one "one access of this class disappeared" case per access mnemonic the listing
+    # actually contains, in each of the four traffic classes. A hand-listed mnemonic can simply stop being
+    # emitted — the transpose stage's F32 writes have come out as `ds_store_b32` and as `ds_store_2addr_b32`
+    # from two builds of near-identical source, and the (m, l) header as `global_store_b64` beside
+    # `global_store_b128` for the publish — and an injection aimed at a mnemonic with zero sites cannot fail.
+    # That is the empty-must-catch trap AGENTS.md records for `partalias` and `mixed_bw`, one level down: the
+    # must-catch set has to be read off the build, not from a list of what an earlier build did.
+    for classes, key, what in ((LDS_READ_BYTES, "lds_read_B", "LDS read"),
+                               (LDS_WRITE_BYTES, "lds_write_B", "LDS write"),
+                               (GLOBAL_READ_BYTES, "global_read_B", "global read"),
+                               (GLOBAL_WRITE_BYTES, "global_write_B", "global write")):
+        for mnemonic in sorted(classes):
+            if n(body, mnemonic):
+                CASES.append(("one %s MISSING (a %d-B %s the loops no longer perform)"
+                              % (mnemonic, classes[mnemonic], what), drop(body, mnemonic), key))
     for name, mutated, key in CASES:
         extra = [f for f in red_after(mutated) if f not in base_fails]
         if not extra:
@@ -460,6 +555,21 @@ def selftest(asm_text):
         elif key not in joined:
             escapes.append("the census noticed %s but blamed the wrong class: %s" % (name, joined[:140]))
 
+    # ---- 1b. THE Q-SOURCE CROSS-CHECK: judge this listing (Q read from global, because that is what the
+    # shipping header spells) against the model the staged header would derive. The model then believes Q is
+    # staged while the code reads it from global, which is exactly the state §31 left the census in, reproduced
+    # rather than remembered — and the two classes must disagree in OPPOSITE directions (LDS short by the Q
+    # tile, global long by it) with the census naming both. A Q-source claim a listing cannot falsify is a
+    # comment, not a check.
+    if staged_src is not None:
+        cross = red_after(body, geometry(staged_src, op))
+        joined = " ".join(cross)
+        for k, how in (("lds_read_B", "short by"), ("global_read_B", "long by")):
+            if k not in joined:
+                escapes.append("judging a global-Q listing against a staged-Q model did not blame %s, which the "
+                               "model must be %s exactly the Q operand tile: %s"
+                               % (k, how, joined[:160]))
+
     # ---- 2. THE CONTROL: a benign injection must NOT change the verdict. A check that fails for any reason
     # adjudicates nothing, which is the same defect as one that can never fail.
     if red_after(inject(body, "v_add_f32 v0, v0, v0")):
@@ -467,46 +577,56 @@ def selftest(asm_text):
                        "adjudicate anything")
 
     # ---- 3. THE MODEL SIDE: each expectation must move when the quantity it claims to come from moves.
-    src = open(HEADER).read()
-    op = open("prototype/attn_decode/attn_decode_kernels.h").read()
     base = derive(g)
+    # Each case carries the text it perturbs: two of them need the Q-STAGED spelling, because on the shipped
+    # one-stage body deleting the only declaration makes `geometry` raise (a live dependency, but not the one
+    # the case claims to test) and there is no Q fill to duplicate.
+    K_FILL = "            fattn_stage_row(&s_kv[fattn_kv_addr(slot, 0)],"
     MUTATIONS = [
-        ("the halves loop bound", "for (int half = 0; half < 2; ++half)",
+        ("the halves loop bound", src, "for (int half = 0; half < 2; ++half)",
          "for (int half = 0; half < 1; ++half)", ("lds_read_B", "lds_write_B", "global_write_B")),
-        ("the publish loop's block count", "#define FATTN_PBLK 8", "#define FATTN_PBLK 6",
+        ("the publish loop's block count", src, "#define FATTN_PBLK 8", "#define FATTN_PBLK 6",
          ("lds_read_B",)),
-        ("the publish block's width", "#define FATTN_TBLK 8", "#define FATTN_TBLK 4", ("lds_read_B",)),
-        ("the C-tile register count the stage write loops over", "for (int l = 0; l < 8; ++l)",
+        ("the publish block's width", src, "#define FATTN_TBLK 8", "#define FATTN_TBLK 4", ("lds_read_B",)),
+        ("the C-tile register count the stage write loops over", src, "for (int l = 0; l < 8; ++l)",
          "for (int l = 0; l < 4; ++l)", ("lds_write_B",)),
-        ("the transposed V fill's per-dim loop",
+        ("the transposed V fill's per-dim loop", src,
          "for (int t = 0; t < 8; ++t) {\n                s_kv[fattn_v_addr",
          "for (int t = 0; t < 4; ++t) {\n                s_kv[fattn_v_addr", ("lds_write_B",)),
-        ("a stage declaration disappearing", "    __shared__ __align__(16) __half s_q[FATTN_MROWS * DH];",
-         "", ("lds_B",)),
-        ("a third stage fill appearing",
-         "        fattn_stage_row(&s_q[fattn_q_addr(qrs, 0)],",
-         "        fattn_stage_row(&s_q[fattn_q_addr(qrs, 0)], a.k, lane);\n"
-         "        fattn_stage_row(&s_q[fattn_q_addr(qrs, 0)],",
+        ("a stage declaration disappearing", staged_src,
+         "    __shared__ __align__(16) __half s_q[FATTN_MROWS * DH];", "", ("lds_B",)),
+        ("a third stage fill appearing", src, K_FILL,
+         K_FILL + "\n                            a.kcache, lane);\n" + K_FILL,
          ("lds_write_B", "global_read_B")),
-        ("the score leg's roll pragma", "#pragma unroll 1", "#pragma unroll 16",
+        ("the score leg's roll pragma", src, "#pragma unroll 1", "#pragma unroll 16",
          ("v_wmma", "lds_read_B")),
-        ("threads per block", "#define FATTN_THREADS 32", "#define FATTN_THREADS 64", ("s_barrier",)),
+        ("threads per block", src, "#define FATTN_THREADS 32", "#define FATTN_THREADS 64", ("s_barrier",)),
     ]
-    for what, needle, repl, keys in MUTATIONS:
-        if needle not in src:
+    for what, text, needle, repl, keys in MUTATIONS:
+        if text is None:
+            continue                     # already reported: the text this case needs could not be built
+        if needle not in text:
             escapes.append("selftest cannot perturb %s: %r is no longer in %s. Fix the selftest; do not "
                            "delete the case" % (what, needle, HEADER))
             continue
+        # Each case is judged against the derivation of the text it perturbs, not against the shipped
+        # derivation: the Q-staged cases start 8 KiB and one operand tile away from the shipped tree, and
+        # comparing across that gap makes a real move look like no move (deleting `s_q` from the staged body
+        # lands exactly on the shipped figure and would have read as `lds_B` ignoring its own input).
         try:
-            moved = derive(geometry(src.replace(needle, repl, 1), op))
+            text_base = derive(geometry(text, op))
+        except AssertionError:
+            text_base = base
+        try:
+            moved = derive(geometry(text.replace(needle, repl, 1), op))
         except AssertionError:
             continue          # the census noticed the inconsistency itself, which is a live dependency
-        if moved == base:
+        if moved == text_base:
             escapes.append("the derived expectation did not move at all when %s changed, so it is a constant "
                            "wearing a formula" % what)
             continue
         for k in keys:
-            if k in moved and moved[k] == base[k]:
+            if k in moved and moved[k] == text_base[k]:
                 escapes.append("deriving %s ignored a change to %s" % (k, what))
     try:
         moved = derive(geometry(src, op.replace("#define DH 256", "#define DH 128", 1)))
@@ -514,6 +634,40 @@ def selftest(asm_text):
         moved = dict(base, v_wmma=-1)   # the census noticed the inconsistency itself; that counts as moved
     if moved["v_wmma"] == base["v_wmma"]:
         escapes.append("deriving v_wmma ignored DH, so KTILES/VTILES were not read from the op header")
+
+    # ---- 3b. THE Q OPERAND'S SOURCE, BOTH WAYS ROUND. Staging Q adds a stage (LDS declared, LDS read by the
+    # score leg, LDS written by its fill) and REMOVES global traffic (the operand stops being re-read every
+    # round), so the four terms must move in these directions and any one of them standing still means the model
+    # is not reading the operand's source at all. Directions rather than deltas on purpose: a delta would be a
+    # byte count typed in here, which is the thing this selftest exists to refuse.
+    if staged_src is not None:
+        st = derive(geometry(staged_src, op))
+        for k, up in (("lds_B", True), ("lds_read_B", True), ("lds_write_B", True), ("global_read_B", False)):
+            delta = st[k] - base[k]
+            if delta == 0:
+                escapes.append("staging Q did not move %s at all, so the model is not reading the Q operand's "
+                               "source from the source text" % k)
+            elif (delta > 0) != up:
+                escapes.append("staging Q moved %s the wrong way (%+d): a Q stage costs LDS and saves global "
+                               "re-reads, it cannot do the reverse" % (k, delta))
+        # The other direction, from the staged side: flip ONLY the operand's loader, leaving the stage and its
+        # fill in place. `lds_read_B` must fall and `global_read_B` must rise; if the classifier keys on anything
+        # other than the operand (the presence of a declaration, say) one of the two goes still.
+        un = staged_src.replace(
+            "const fattn_ARegs second = fattn_load_tile(&s_q[fattn_q_addr(fattn_ab_row(lane), 16 * t)]);",
+            "const fattn_ARegs second = fattn_load_q_tile(a.qrope + (size_t)ROW_H * (rt * FATTN_MROWS "
+            "+ fattn_ab_row(lane)) + (size_t)head0 * DH + 16 * t);", 1)
+        if un == staged_src:
+            escapes.append("selftest cannot flip the staged Q operand back to global: the score leg's operand "
+                           "line is no longer the one this case edits. Fix the case; do not delete it")
+        else:
+            mv = derive(geometry(un, op))
+            for k, up in (("lds_read_B", False), ("global_read_B", True)):
+                if mv[k] == st[k]:
+                    escapes.append("reading the Q operand from global while a Q stage is declared did not move "
+                                   "%s, so the classification does not come from the operand's own call site" % k)
+                elif (mv[k] > st[k]) != up:
+                    escapes.append("un-staging Q moved %s the wrong way against the staged model" % k)
     return escapes
 
 
@@ -529,14 +683,17 @@ COMPARE_KEYS = ("v_wmma", "lds_read_B", "lds_write_B", "global_read_B", "global_
 # gets ``fixed'' by editing the number; a line that names the defect it catches gets fixed in the source.
 WHY = {
     "v_wmma": "the tile count is a property of KTILES/VTILES and the roll/unroll pragmas, not of taste",
-    "lds_read_B": "the bytes this form reads through LDS are the WMMA operand tiles plus the publish of the "
-                  "transpose stage. More than that means a staged object is being re-read from somewhere "
-                  "(the 20.5 traffic error); less means a publish loop that stopped covering the stage it is "
+    "lds_read_B": "the bytes this form reads through LDS are the LDS-resident WMMA operand tiles (K always, Q "
+                  "only where the source stages it) plus the publish of the transpose stage. More than that "
+                  "means a staged object is being re-read from somewhere (the 20.5 traffic error); less means a "
+                  "publish loop that stopped covering the stage it is "
                   "publishing, which is the defect that made every covered row of a wide wave NaN "
                   "(bench/performance-status.md 29's correction)",
     "lds_write_B": "the Q and K stage fills, the transposed V fill and the F32 transpose stage: three loops, "
                    "each with a shape this census reads out of the source",
-    "global_read_B": "one uint4 per lane per stage fill. A new one means a staged object started being read "
+    "global_read_B": "one uint4 per lane per stage fill, plus the Q operand's own wide loads when the score leg "
+                     "builds it from global (Bet 1) rather than reading it from a stage (placement B). A new "
+                     "one that is neither means a staged object started being read "
                      "from global, which is the 20.5 error in its original form",
     "global_write_B": "the publish loop's bytes into `part` plus the (m, l) header. The broken epilogue "
                       "wrote 16 of every row's 256 dims here and left the merge reading scratch, and no "
@@ -640,6 +797,11 @@ def main():
              g["publish_blocks"], g["publish_block_floats"], g["stage_write_per_tile"],
              g["v_narrow_stores"], g["global_stage_fills"],
              "rolled" if g["score_rolled"] else "unrolled", "yes" if g["launch_bounds"] else "NO"))
+    # THE CLASSIFIER'S ANSWER, printed rather than assumed. Two spellings of the Q operand produce the same
+    # v_wmma count and the same publish, so without this line a reader cannot tell which source the model
+    # believes it read, and a wrong belief looks like a two-sided traffic error in the kernel.
+    print("q operand: %s (%s)" % ("staged in `%s`" % g["q_stage"] if not g["q_from_global"] else "from global",
+                                  g["q_producer"]))
     print("derived from those loops: " + "  ".join("%s=%d" % (k, exp_of(g)[k])
                                                    for k in COMPARE_KEYS + ("s_wait_lgkmcnt0",)))
     print("note block: " + "  ".join("%s=%s" % (k, n[k]) for k in NOTE_KEYS))
@@ -671,8 +833,8 @@ def main():
         for f in fails:
             print("  - " + f)
         return 1
-    if spill and ack:
-        print("\nSPILL ACKNOWLEDGED, FOR MEASUREMENT ONLY — operator-supplied reason: " + ack)
+    if spill and (a.ack_spill or "").strip():
+        print("\nSPILL ACKNOWLEDGED, FOR MEASUREMENT ONLY — operator-supplied reason: " + a.ack_spill)
         for f in spill:
             print("  - " + f)
         print("  -> this placement may be TIMED in this window. It is still NOT cleared to become the")
