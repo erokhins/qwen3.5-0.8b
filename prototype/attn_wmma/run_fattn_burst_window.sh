@@ -126,6 +126,11 @@ GOT_VGPR=$(field "$OUT/canaryB_1.log" vgpr)
 GOT_LDS=$(field "$OUT/canaryB_1.log" lds)
 GOT_ROWS=$(field "$OUT/canaryB_1.log" fattn_rows)
 GOT_VTILES=$(field "$OUT/canaryB_1.log" vtiles)
+GOT_WF=$(field "$OUT/canaryB_1.log" wf_per_cu)
+# `wf_per_cu` is in the banner precisely so this line exists: at one warp per block the LDS budget admits
+# 4 blocks/CU = 4 WAVEFRONTS/CU, and §28's "occupancy did not matter" evidence was taken at 12->20. A burst
+# whose annotation does not carry the wavefront count is a burst that will be read against the wrong machine.
+case "$GOT_WF" in (''|*[!0-9]*) fail "banner carries no wf_per_cu; the covered rows cannot be annotated with the occupancy they actually got";; *) echo "  note: covered rows run at wf_per_cu=$GOT_WF wavefronts/CU (§28's null was shown at 12-20)";; esac
 [ "$GOT_FORM" = "fattn16" ] || fail "banner says form=$GOT_FORM, expected attn_fattn_wave's own name"
 [ "$GOT_VTILES" = "16" ] || fail "banner vtiles=$GOT_VTILES, the form's accumulator chain is 16 wide by static_assert"
 [ "$GOT_VGPR" = "$EXP_VGPR" ] || fail "banner vgpr=$GOT_VGPR, listing says $EXP_VGPR: this binary was built from a different copy of the form. That is exactly the stale-'new'-side failure the canary exists for."
@@ -136,7 +141,7 @@ case "$GOT_ROWS" in
     */*) [ "${GOT_ROWS%/*}" -gt 0 ] || fail "banner fattn_rows=$GOT_ROWS: zero rows routed to the WMMA form on a 4,096-lane wave, every row of which streams. A banner printed while nothing is covered is a banner that cannot fail."; ;;
     *) fail "banner fattn_rows=$GOT_ROWS is not n/N: cannot tell coverage from decoration"; ;;
 esac
-echo "CANARY B OK (form=$GOT_FORM vgpr=$GOT_VGPR lds=$GOT_LDS vtiles=$GOT_VTILES fattn_rows=$GOT_ROWS, listing agrees)"
+echo "CANARY B OK (form=$GOT_FORM vgpr=$GOT_VGPR lds=$GOT_LDS vtiles=$GOT_VTILES wf=$GOT_WF fattn_rows=$GOT_ROWS, listing agrees)"
 
 # ---------------------------------------------------------------------------------------------
 echo
