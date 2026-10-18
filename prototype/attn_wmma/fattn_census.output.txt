@@ -1,3 +1,10 @@
+**** RETIRED FOR THE SHIPPING PATH (2026-10-18) ****
+# This is the PROBE's census: `wmma_fattn_score.cpp` has no head axis, no epilogue transpose, no
+# deferred rowsum combine, and its output goes to a dead store, so neither the 9.719 slots/touch
+# below nor its `--selftest-lds 16384` describes a kernel the engine can route. Read
+# prototype/attn_wmma/fattn_ship_results.md for the numbers of the kernel that ships, and run
+# prototype/attn_wmma/fattn_ship_census.py to reproduce them. The rest of this file is unchanged,
+# because it is the record of what the probe measured, and that record is still true of the probe.
 listing          /home/erokhins/erokhins_projects/qwen3.5-0.8b/tmp/attn_wmma_fattn/wmma_fattn_score-hip-amdgcn-amd-amdhsa-gfx1151.s
 geometry         DH=256 MROWS=16 MLANES=16 NWARPS=4 THREADS=128 KTILES=16 VTILES=16
 denominator      256 touches per warp-round (16 Q rows x 16 KV lanes x one head)

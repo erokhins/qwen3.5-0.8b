@@ -1,3 +1,5 @@
+**⚠ THIS ENTIRE FILE DESCRIBES THE PROBE, NOT THE SHIPPING KERNEL.** `prototype/attn_wmma/wmma_fattn_score.cpp` has no head axis, no epilogue transpose and no deferred rowsum combine, and its output goes to a dead store. Every register, LDS, slots/touch and occupancy number below is a fact about that body. The kernel the engine launches is `engine/attn_fattn_kernels.h`'s `attn_fattn_wave`; its numbers are `prototype/attn_wmma/fattn_ship_results.md` and its instrument is `fattn_ship_census.py`. Quoting across this mark is the failure `AGENTS.md` names in D17. (Appended 2026-10-18.)
+
 # `m16_fattn_score` — what was built, what it costs on paper, and the device commands handed over unrun
 
 Built for **D62** (`progress/2026-10-16/prefill-decision-log-2026-10-16.md`), whose funded probe is
@@ -93,6 +95,12 @@ warp-round = 256 touches, the same denominator `m16_census.py:98` uses.
 
 ## 2. Claim (i) — occupancy: **PASSES at exactly the bar (4 blocks/CU), and only by driver authority**
 
+**RED ON THE SHIPPING PATH, and it was red the moment the port was committed.** At `d7057c4` the launched
+kernel measured `192 VGPR / 242 spilled / 332 B scratch`; the shipped placement reaches
+`256 / 49 / 72 B` and still fails the spill gate. The 16 wavefronts/CU in the record below is also not
+this form's number: the shipped geometry is one warp per block, so 4 blocks/CU = **4 wavefronts/CU**,
+below the 12→20 range in which §28 showed occupancy did not matter. See `fattn_ship_results.md` §0–§1.
+
 ```
 m16_fattn_score   193 VGPR (gran 200), 18 SGPR, LDS 16,384 B, vgpr_spill 0, private_segment 0
 driver            4 blocks/CU, 16 wavefronts/CU of the 32 the part allows
@@ -101,7 +109,7 @@ canary            65,536-B stub -> 1, 0-B stub -> 16, 12,288-B stub -> 5 (the re
 
 Four things the main agent should not miss here:
 
-- **The LDS budget has zero slack.** Q(8 KiB) + K(8 KiB) = 16,384 B and 65,536/16,384 = 4 exactly. V is
+- **The LDS budget has zero slack.** **[Probe arithmetic: one warp's Q is 8 KiB per WARP, not per block,** and the probe has no head axis to discover that with. The shipped form reaches 16,384 B by a different route — one warp per block, V aliased over K — and `fattn_ship_results.md` §2 is the geometry correction.**] Q(8 KiB) + K(8 KiB) = 16,384 B and 65,536/16,384 = 4 exactly. V is
   **aliased over the K stage** (the `nstages == 0` aliasing llama.cpp does at `fattn-mma-f16.cuh:1252`),
   with a `__syncthreads()` between the last K reader and the first V writer; V is stored in a second
   layout (`v_addr(d, kv)`, dim-major with the 16 KV halves contiguous) because the P·V A operand needs the
@@ -144,6 +152,11 @@ MAC/lane/clk), `m16_census.output.txt:91`); that is anatomy §3.1's currency, in
 | `m16_fattn_empty` (staging + 3 barriers + sink) | 1.535 | 1.672 | 1.672 | 1.672 | 4 |
 | `m16_fattn_scoreleg` (+ score tile, fold, exp, P) | 4.207 | 4.891 | 6.828 | 7.078 | 4 |
 | **`m16_fattn_score`** (the form) | **4.855** | 5.844 | **9.719** | 10.219 | 4 |
+
+**[RETIRED FOR THE SHIPPING PATH.]** 9.719 is the probe body's census: no head axis, no epilogue transpose,
+no deferred rowsum combine, output to a dead store. `fattn_census.output.txt` carries the same banner. The
+shipped kernel's instruction skeleton is `fattn_ship_results.md` §4 (17 `v_wmma` sites, 20 cross-lane sites,
+0 `s_barrier`), and no slots/touch figure has been taken at that placement.
 
 Leg differences, which is where the interesting part is:
 
@@ -235,10 +248,10 @@ The port, as one commit:
    The alternative is register-resident Q (8 live VGPRs per K-step on top of the 128 accumulator registers)
    with V un-aliased, which is 24 KiB of LDS and 2 blocks/CU. Whoever ports it should re-census at the
    placement it actually ships rather than assume 9.72 carries over.
-3. The barrier count moves from 2 to 3 per round (Q+K published / K consumed / V published). At 4 blocks/CU
+3. The barrier count moves from 2 to 3 per round (Q+K published / K consumed / V published). **[PRICED 2026-10-18, and the answer is zero: at one wavefront per block the shipping listing contains no `s_barrier` at all — LLVM reduces `__syncthreads()` to the `s_waitcnt lgkmcnt(0)` sites a single wavefront needs (39 of them). Aliasing V over K is therefore free of sync cost at this geometry, and`fattn_ship_census.py` now derives that expectation from `FATTN_THREADS` instead of leaving it open.]** At 4 blocks/CU
    the cost is 4 block-wide arrivals and 4 LDS round trips per round instead of 3. Unpriced by any census.
 4. A one-line init banner, which is what makes the burst canary work (below):
-   `ATTN_FATTN form=m16_fattn_score vgpr=193 lds=16384 vtiles=16` printed once when the path is active.
+   `ATTN_FATTN form=fattn16 vgpr=… lds=16384 scratch=0 vtiles=16 wf_per_cu=…  # scratch=0 and the wf count are now part of the canary: `run_fattn_burst_window.sh` refuses a millisecond figure for a listing that spills, and today's listing spills 49 VGPRs (`fattn_ship_results.md` §6)` printed once when the path is active.
    And a per-run echo line `attn_fattn=<0|1>` beside the existing `attn_touch=<0|1>`, so every timed log
    names its own side (`run_fattn_burst_window.sh` refuses a log that does not).
 
@@ -283,7 +296,7 @@ checks, all read in the same window that produces the number, all aborting the s
 1. **Flag liveness.** `--attn-fattn 1` must be accepted and `--attn-fattn 7` must be refused. A binary
    whose flag is inert, or absent, aborts before timing — exactly `run_attn_attrib_window.sh`'s CANARY 0.
 2. **Form banner, with fields.** `new` must print
-   `ATTN_FATTN form=m16_fattn_score vgpr=193 lds=16384 vtiles=16` and `base` must print nothing like it.
+   `ATTN_FATTN form=fattn16 vgpr=… lds=16384 scratch=0 vtiles=16 wf_per_cu=…  # scratch=0 and the wf count are now part of the canary: `run_fattn_burst_window.sh` refuses a millisecond figure for a listing that spills, and today's listing spills 49 VGPRs (`fattn_ship_results.md` §6)` and `base` must print nothing like it.
    The `vgpr=`/`lds=` fields are read back against the listing's note block by the script, so a binary
    built from an *older* copy of the form — the D30 1.7′ failure, a pre-change binary timed as `new` — is
    caught by the field values, not by hoping `cmp` on the binary means something (it cannot:
@@ -323,7 +336,7 @@ window can take them alongside the burst rather than discover them after it.
 
 ## 6. Verdict, in the words the task asked for
 
-Neither claim failed. Claim (i) passes at **exactly** 4 blocks/CU, with zero LDS slack, and only under the
+**[Both verdicts below are the probe's. On the shipping path claim (i) failed on arrival — see §2's banner and `fattn_ship_results.md` §0.]** Neither claim failed. Claim (i) passes at **exactly** 4 blocks/CU, with zero LDS slack, and only under the
 driver's reading of the register file — which is the instrument anatomy §4.2 names ("per the occupancy
 probe"), and its canary reproduces the recorded shipped row. Claim (ii) passes at **9.719** pipe-weighted slots/touch against a
 budget of 20, of which 4.00 is the matrix itself and 5.72 is everything else — the bet anatomy §4.2 funded was
