@@ -1585,3 +1585,24 @@ proven we can hit, and an expression that hand-rolls the same arithmetic inherit
   box** (the engine serving this session busy-polls the iGPU — 100 % while doing nothing but serving tokens),
   so it is a sanity check that the process touched the device, never a contention gate; CPU % and VRAM are the
   columns to read. It exits 1 if it collected zero samples, so a dead sampler cannot present as a clean run.
+
+## D50 — `rec2c` re-opens and clears its gate: the merged fused+unroll4 form is exact and screens above the kill line (2026-10-17)
+
+- **D46's gate passed on the listing**: the merge kept both halves (1,374 vs 1,406 slots, 59 VGPRs unchanged,
+  loop B 16×8 unchanged, all state-walk categories identical), so the silent-failure branch — *fused but slower
+  because the merge handed the unroll back* — is disproved before any device time was spent. That ordering was
+  the point of gating on a census.
+- **And it is exact**: first device run of the merged kernel, `ndiff = 0` on both `o` and the state across all
+  four cases, with the volume account unchanged. Bit-identity is now *measured*, not inherited from two
+  transcriptions.
+- **Burst median 1.0415** (mean 1.0343, worst case 0.9908 at 4/7 pairs) against a 1.02 kill line and a census
+  prediction of ~1.018. So the axis is still giving back more than its instruction delta, consistent with D25's
+  −2.0 %-probe returning 1.0159 and with the unroll4 change beating its price by 2.4×.
+- **Decision (mine, recorded here, not waited on): port it as a knob, do not flip a default.** New spelling
+  behind `--gdn-spell fused`, `kUnroll4` stays the shipping default, gate section (j) becomes a three-way
+  byte-compare, then a paired in-situ A/B inside one lock hold decides the default. This is the D32 → D33 order
+  repeated deliberately: a knob ships as a knob first, and the family row — not a harness ratio — is the
+  instrument.
+- **Cost of being wrong is bounded and known**: if the in-situ A/B is flat or negative, `rec2c` closes for good
+  with a clean audit trail — census exact, bit-identity measured, screen positive, in-situ null — and the ~0.85 %
+  prediction goes down as a measured null rather than as an unpriced idea.
