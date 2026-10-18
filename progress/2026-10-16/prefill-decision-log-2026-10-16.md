@@ -2086,3 +2086,33 @@ before any ship: a section-(j)-style spelling A/B, a floor probe sized for the b
 exactly 0) and the reordered dot (cancellation band, judged by witnesses + cos/meanrel, never by max-ULP),
 and a must-catch set **derived** from the tile geometry — including the injection today's butterfly form
 structurally cannot see, one lane-half of the C→B parity exchange.
+
+## D63. The zero-spill precondition is re-scoped to a reported cost — the only evidence on this kernel class says spilling is survivable
+
+The port shipped a placement that still spills (**256 VGPR / 49 spill / 72 B scratch / 16,384 B LDS / 4
+blocks/CU**), against the rule I set two days ago: *no device minute until spill is zero*. That rule is now
+re-scoped, and the honest reason is that it was never measured.
+
+- It was my invention, adopted as hygiene, with no datum behind it on this box or this kernel class.
+- The only measured fact we own about spill cost on **exactly this shape** is llama.cpp's traced kernel:
+  **358 spilled VGPRs, 900 B/thread scratch, 8 wavefronts/CU — and ≥5× faster than us.** Our best placement
+  spills **7× less** than the winning posture. A gate that forbids what the champion does is not a safety
+  check, it is a guess with a stern tone.
+- Spill is only bad insofar as scratch traffic lands on the dependent chain §28 identified as the mechanism.
+  **The wall claim is the instrument that can adjudicate that**; a static spill count cannot.
+
+So: spill becomes a **reported, annotated cost**, not a precondition. Unchanged and stricter than before: the
+flag stays **default 0** in all three places, `fattn_ship_census.py` still **exits non-zero on any spill** so no
+log may call this form gated, the burst **refuses a `SPILL` side silently** and now prints `wf_per_cu`. What
+changes is that a burst may be taken with the spill annotated, and the default may only flip on a measured
+≥1.5× win on the `attn` family at 4096 lanes.
+
+**Three measured findings recorded with it, because each retires a claim I made.** (1)
+`__launch_bounds__` is worth **191 spilled VGPRs** — without it LLVM budgets 192 registers/thread — so every
+register figure in this effort must name the declaration it was compiled under, including mine. (2) The spill
+is the **accumulator's live range**, not Q's: register-Q spilled *worse* (115 / 724 B) and `#pragma unroll 8`
+trades 49 spills for 544 B of scratch. (3) At one wavefront per block the listing emits **no `s_barrier` at
+all**, so the barrier cost I flagged as "unpriced" is priced at zero at this geometry — and the same geometry
+means **4 wavefronts/CU**, which is *five times below* the 12–20 band §28 actually measured. That is stated in
+the burst's own canary rather than smoothed over, and it is the strongest remaining reason to expect (iii) to
+fail. If it does fail, the matrix class and the round shape are both exonerated and **2.6 closes on evidence**.
