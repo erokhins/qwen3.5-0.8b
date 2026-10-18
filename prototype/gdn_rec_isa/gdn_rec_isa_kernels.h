@@ -35,6 +35,14 @@
  *                     `bench/performance-status.md` §18 / D46 make a compile-only census of this exact
  *                     listing the gate in front of any `rec2c` port, because a merge that loses the
  *                     unroll to register pressure is invisible to a burst of the two unmerged forms.
+ *  loop `recloop_kernel` the SHIPPING form (MODE 2c4, which is `engine/gdn_rec_fused_kernels.h`)
+ *                     with the TOKEN index moved inside the kernel: one launch walks `tokens` tokens
+ *                     instead of one. This is D53's item — launch structure, not math. The per-token
+ *                     body is verbatim `rec2c4_kernel`'s (see its own header), the grid is the same
+ *                     `<<<NH, D>>>`, the state is the same global buffer at the same addresses, and the
+ *                     only thing that moves is how many token-steps one submission carries. Admitted
+ *                     by bit-identity like every spelling MODE; its A/B partner is `rec2c4`, the
+ *                     spelling the engine runs, and NOT `rec0`.
  *
  * The three DEPENDENCY-BREAK probes at the bottom of this file (`recx_indep`, `recx_unchain`,
  * `recx_both`) are not MODEs in this sense. They are numerically meaningless by design, they are
@@ -421,6 +429,123 @@ __global__ void rec2c4_kernel(const float* __restrict__ q, const float* __restri
         acc += qs[i + 3] * s3;
     }
     o[h * D + j] = acc;
+}
+
+/* ---- MODE loop: the shipped form, with the TOKEN index inside the launch (D53) -------------------
+ *
+ * THE ITEM. `bench/performance-status.md` §22 counts 73,728 `rec_*` launches for a 4096-token prompt
+ * (18 GDN layers x 4,096 tokens) at ~5.8 µs each against a measured 1.72 µs empty-launch floor
+ * (§11, `tools/submission_probe.cpp`), and §11 established the premise that makes a launch-count item
+ * legal at all: submissions are NOT absorbed by a busy stream, which is why deleting 4,080 `copy`
+ * launches moved 1.38 % of a wave. The external existence proof walks 512 tokens inside one launch.
+ * This MODE is the same shape with our arithmetic: one submission per (layer, span) instead of per
+ * (layer, token).
+ *
+ * WHY THE ARITHMETIC CANNOT MOVE, AND HOW THAT IS CHECKED. The recurrence is already sequential —
+ * token t reads the state token t-1 wrote — so running steps t and t+1 in one block instead of in two
+ * launches changed the schedule, not the values. That claim is enforced three ways, not asserted:
+ *
+ *   1. the body below is `rec2c4_kernel`'s text VERBATIM (identical down to the `#pragma unroll 4`
+ *      lines and the order of every multiply). The operand pointers are re-declared per iteration in
+ *      the inner scope so that not one arithmetic line had to be rewritten to add `t`; the only new
+ *      lines are the `for`, the six pointer declarations that name this token's row, and the closing
+ *      braces. `check_recloop_transcription.py` strips the wrapper and diffs the body against the
+ *      shipping kernel, and it carries its own must-catch mutation so the checker cannot pass vacuously;
+ *   2. the CPU witness in `gdn_rec_isa.hip.cpp --selftest-loop` compares the looped ADDRESS mapping
+ *      against the per-token mapping element for element, at several span sizes, with defects injected
+ *      (t pinned, `o` row stride wrong, state restarted per token, `Q_SCALE` hoisted, `g|beta` stride
+ *      wrong) whose must-catch sets are DERIVED from each case's geometry (token count, decay sum,
+ *      starting state) rather than hand-listed;
+ *   3. the device admission is bit-identity against `rec0` on `o` AND final state, which is the only
+ *      gate that can see a compiler-side re-association — the §19 `q̃` class, which no host mirror and
+ *      no textual diff can see, because two spellings that share a formula agree.
+ *
+ * WHAT IS *NOT* DONE HERE, deliberately: no LDS-resident state (that is Route A,
+ * `engine/gdn_collapse_kernels.h`, which re-spells the thread mapping, does 4x redundant work per
+ * token and changed the association — `prototype/gdn_collapse/results.md` §5 prices what that cost),
+ * no grid change, no block size change, no state staging, no prefetch. This MODE isolates ONE axis:
+ * submissions per token-step. If it wins, the launch structure was the cost; if it is flat, D53 is
+ * falsified in situ and the family is what `prototype/gdn_collapse/results.md` §5 said it is.
+ *
+ * THE SHARED-LDS REUSE QUESTION, argued because the loop makes it live. `block_sum_pair_comp` ends
+ * with `*out_a = red_a[0]` and NO trailing barrier — sound per launch only because nothing writes
+ * `red_a` again before the launch ends, which is exactly what its comment claims ("the arrays are not
+ * reused until the next launch"). Inside a token loop they ARE reused, so the claim needs the real
+ * reason instead: the per-iteration write to `red_a`/`red_b` happens in the next iteration's
+ * `block_sum_pair_comp`, which every thread reaches only after passing the `__syncthreads()` that
+ * sits between the `red[0]` READ of iteration t (line `*out_a = red_a[0]`) and iteration t+1's write;
+ * `ks`/`qs` are covered by the pair of barriers that already bracket their write. All threads run the
+ * same trip count (`tokens` is uniform, nothing diverges it), so every barrier is hit by every thread
+ * the same number of times. No barrier was added, and if one is ever needed the witness is the
+ * harness's own `rerun_ndiff_*` columns (`--repeat 2` bit-compares two runs of the same MODE): a
+ * missing barrier is a RACE and a race disagrees with itself before it disagrees with MODE 0.
+ *
+ * THE STRIDES ARE DERIVED, NOT PASSED. `CH` (6144) and `NH*D` (2048) are the same constants the
+ * per-token call sites use to walk `sc.g_u` / `sc.g_o` (`engine/decode_step.cpp`'s
+ * `sc.g_u + t*kQkvRows`, `sc.g_o + t*kValueDim`), and the static_asserts below make the equality a
+ * compile error instead of a comment. Passing row strides as arguments would let a wrong stride be
+ * expressible, and a wrong stride here is a silent numerics change, not a crash.
+ */
+static_assert(CH == 3 * NH * D, "recloop's q|k|v row stride is CH; must be 3*NH*D = the engine's kQkvRows");
+static_assert(NH * D == 2048, "recloop's o row stride is NH*D; must be the engine's kValueDim");
+
+__global__ void recloop_kernel(const float* __restrict__ qtile, const float* __restrict__ ktile,
+                               const float* __restrict__ vtile, const float* __restrict__ gtile,
+                               const float* __restrict__ betatile, float* __restrict__ S,
+                               float* __restrict__ otile, int nheads, int tokens) {
+    int h = blockIdx.x;
+    int j = threadIdx.x;
+    __shared__ float ks[D], qs[D], redk[32], redq[32];
+
+    for (int t = 0; t < tokens; ++t) {
+        // This token's rows, named so that every line below is `rec2c4_kernel`'s verbatim. `qtile`/`ktile`/
+        // `vtile` are the three 2048-wide slices of a [n][6144] tile, so a token step is `+CH`; `g`/`beta`
+        // are [n][16]; `o` is [n][2048]. Same buffers, same addresses the per-token launches were given.
+        const float* __restrict__ q = qtile + (size_t)t * CH;
+        const float* __restrict__ k = ktile + (size_t)t * CH;
+        const float* __restrict__ v = vtile + (size_t)t * CH;
+        const float* __restrict__ g = gtile + (size_t)t * NH;
+        const float* __restrict__ beta = betatile + (size_t)t * NH;
+        float* __restrict__ o = otile + (size_t)t * (NH * D);
+
+        float kq = k[h * D + j], qq = q[h * D + j];
+        float sk, sq;
+        block_sum_pair_comp(kq * kq, qq * qq, redk, redq, &sk, &sq);
+        float kn = kq * rsqrtf(sk + 1e-6f);
+        float qn = qq * rsqrtf(sq + 1e-6f) * Q_SCALE;
+        __syncthreads();
+        ks[j] = kn;
+        qs[j] = qn;
+        __syncthreads();
+
+        float gam = expf(g[h]), bet = beta[h];
+        float* Sh = S + (size_t)h * D * D;
+
+        // ---- from here to `o[h * D + j] = acc;`: `rec_unroll4_kernel`'s body, verbatim (see the note) --
+        float r = 0.f;
+#pragma unroll 4                      // keep the loop: without the pragma LLVM fully unrolls this one
+        for (int i = 0; i < D; i += 4) {  // side and the two forms stop being bill-matched (see the header)
+            r += Sh[(i + 0) * D + j] * ks[i + 0];
+            r += Sh[(i + 1) * D + j] * ks[i + 1];
+            r += Sh[(i + 2) * D + j] * ks[i + 2];
+            r += Sh[(i + 3) * D + j] * ks[i + 3];
+        }
+        float dv = bet * (v[h * D + j] - gam * r);
+
+        float acc = 0.f;
+#pragma unroll 4
+        for (int i = 0; i < D; i += 4) {
+            float s0 = gam * Sh[(i + 0) * D + j]; s0 += ks[i + 0] * dv; Sh[(i + 0) * D + j] = s0;
+            acc += qs[i + 0] * s0;
+            float s1 = gam * Sh[(i + 1) * D + j]; s1 += ks[i + 1] * dv; Sh[(i + 1) * D + j] = s1;
+            acc += qs[i + 1] * s1;
+            float s2 = gam * Sh[(i + 2) * D + j]; s2 += ks[i + 2] * dv; Sh[(i + 2) * D + j] = s2;
+            acc += qs[i + 2] * s2;
+            float s3 = gam * Sh[(i + 3) * D + j]; s3 += ks[i + 3] * dv; Sh[(i + 3) * D + j] = s3;
+            acc += qs[i + 3] * s3;
+        }
+        o[h * D + j] = acc;
+    }
 }
 
 /* ============================ THE DEPENDENCY-BREAK PROBES (D30 queue item 1.3) ================== */

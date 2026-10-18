@@ -29,6 +29,24 @@
  *                            bit-identity like every spelling MODE, and its A/B partner is `receng`, the
  *                            spelling the engine runs — NOT `rec0`, which is the pre-unroll4 form §18
  *                            wrongly screened against.
+ *   recloop `recloop_kernel` — D53's item: the shipping spelling with the TOKEN index moved INSIDE the
+ *                            kernel, so ONE submission walks `--loop N` token-steps (N=0 means the whole
+ *                            sequence). Same grid `<<<NH,D>>>`, same operands, same state buffer, same
+ *                            per-token arithmetic verbatim (checked by `check_recloop_transcription.py`),
+ *                            so the one axis is submissions per token-step. Admitted by bit-identity
+ *                            against `rec0`, and its burst partner is `rec2c4` — the per-token form the
+ *                            engine runs. The burst reports ms per LAUNCH and per SEQUENCE, because for
+ *                            this MODE the two come apart by `--loop`.
+ *   recloop `recloop_kernel` — D53's item: the shipping spelling with the TOKEN index inside the
+ *                            kernel, so one submission walks `--loop N` token-steps instead of one.
+ *                            Same grid, same operands, same state buffer, same per-token arithmetic
+ *                            (verbatim, checked by `check_recloop_transcription.py`); the only thing
+ *                            that moves is launches per token-step. Admitted by bit-identity against
+ *                            `rec0` like every spelling MODE, and its burst partner is `rec2c4`, the
+ *                            per-token form the engine actually runs. `--loop 0` (the default) walks
+ *                            the whole sequence in one launch; `--loop 16` walks 16 per launch, which
+ *                            is the same arithmetic in a smaller chunk — the span must not matter, and
+ *                            `--selftest-loop` asserts that on CPU before anything is launched.
  *
  * WHY THE PROBES ARE ADMITTED DIFFERENTLY. MODEs 0/1/2/2c/6/eng/2c4 must reproduce MODE 0 bit for bit — 6
  * is a
@@ -115,6 +133,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -143,6 +162,13 @@ constexpr int kValueDim = kNH * kD;         // 2048: one token's row of `o`
 constexpr int kQkvRows = 3 * kValueDim;     // 6144: one token's q|k|v row, the engine's layout
 constexpr int kStateElems = kNH * kD * kD;  // 262144: one layer's state
 constexpr int kWave = 32;
+// `recloop_kernel` derives its row strides from CH and NH*D; the fixture derives its tile layout from
+// kQkvRows/kValueDim. If those two spellings of "one token's row" ever disagree, the looped MODE would
+// be reading a different layout from the per-token MODEs while both agreed with themselves, so the
+// equality is a compile error here rather than a comment (`engine/weights_contract.py`'s lesson: state
+// the rank, put the collapsing contract at the use site).
+static_assert(CH == kQkvRows, "recloop's q|k|v row stride (CH) must equal the fixture's kQkvRows");
+static_assert(NH * D == kValueDim, "recloop's o row stride (NH*D) must equal the fixture's kValueDim");
 // A value no MODE can produce from these operands. If it survives in `o` nothing wrote there; if it
 // survives in a guard band nothing outside the buffer wrote there.
 constexpr float kSentinel = -1.2345e37f;
@@ -167,9 +193,9 @@ namespace {
 // other MODE is bit-diffed against; `ship` is optional and gives the census's static control row
 // (rec0_kernel censuses identical to rec_kernel) a device witness when someone wants one.
 enum Mode { M_SHIP = 0, M_REC0, M_REC1, M_REC2, M_REC2C, M_REC3, M_REC4, M_REC5, M_REC6, M_RECENG,
-            M_REC2C4, NMODES };
+            M_REC2C4, M_RECLOOP, NMODES };
 static const char* kModeName[] = {"ship", "rec0", "rec1", "rec2", "rec2c",
-                                  "rec3", "rec4", "rec5", "rec6", "receng", "rec2c4"};
+                                  "rec3", "rec4", "rec5", "rec6", "receng", "rec2c4", "recloop"};
 
 /* The three dependency-break probes. Their VALUE is meaningless by design — a probe whose value was
  * still correct would still be waiting on the dependency — so they are never admitted against MODE 0's
@@ -180,10 +206,29 @@ static const char* kModeName[] = {"ship", "rec0", "rec1", "rec2", "rec2c",
 inline bool mode_splits_state(int m) { return m == M_REC3 || m == M_REC5; }
 inline bool mode_value_gated(int m) { return m == M_SHIP || m == M_REC0 || m == M_REC1 ||
                                            m == M_REC2 || m == M_REC2C || m == M_REC6 ||
-                                           m == M_RECENG || m == M_REC2C4; }
+                                           m == M_RECENG || m == M_REC2C4 || m == M_RECLOOP; }
 inline bool mode_band_gated(int m) { return m == M_REC4; }
 // The three dependency probes: value is not the gate, volume is.
 inline bool mode_is_probe(int m) { return m == M_REC3 || m == M_REC4 || m == M_REC5; }
+// The ONE axis `recloop` moves: token-steps per submission. Every other MODE — including the probes,
+// which move addresses and dependency chains but not this — walks exactly one token per launch.
+inline bool mode_loops_tokens(int m) { return m == M_RECLOOP; }
+
+// Token-steps one launch of `mode` carries. `g_loop` is `--loop N` (0 = the whole sequence in one
+// launch); a MODE that does not loop always returns 1 whatever the flag says, so `--loop` cannot
+// silently re-shape a MODE that is not the looped one.
+static int g_loop = 0;
+inline int span_of(int mode, int tokens) {
+    if (!mode_loops_tokens(mode)) return 1;
+    return (g_loop > 0 && g_loop < tokens) ? g_loop : tokens;
+}
+// How many launches one `tokens`-long sequence costs a MODE. The burst divides by this, not by the
+// token count, because for the looped MODE the two are no longer the same number — and a
+// ms-per-launch figure taken on the wrong denominator is the whole point of the item.
+inline long launches_of(int mode, int tokens) {
+    const int s = span_of(mode, tokens);
+    return s <= 0 ? tokens : (tokens + s - 1) / s;
+}
 
 struct ModeSet {
     int m[NMODES] = {0, 0, 0, 0, 0};
@@ -226,7 +271,8 @@ static ModeSet modes_of(const std::string& spec) {
             if (tok == kModeName[i]) found = i;
         if (found < 0) {
             std::fprintf(stderr, "--modes: no mode \"%s\"; known:"
-                         " ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6,receng,rec2c4\n", tok.c_str());
+                         " ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6,receng,rec2c4,recloop\n",
+                         tok.c_str());
             std::exit(2);
         }
         ms.add(found);
@@ -245,10 +291,18 @@ static ModeSet modes_of(const std::string& spec) {
  * (`engine/kernels_gdn.cpp:40` launches `rec_kernel<<<NH, D>>>`) and are identical for every MODE by
  * construction, which is what keeps the A/B single-variable. */
 void launch_mode(int mode, const float* q, const float* k, const float* v, const float* g,
-                 const float* beta, float* S_in, float* S_out, float* o) {
+                 const float* beta, float* S_in, float* S_out, float* o, int tokens) {
     if (!mode_splits_state(mode) && S_in != S_out) {
         std::fprintf(stderr, "mode %s is not a split-state MODE but was given distinct state buffers\n",
                      kModeName[mode]);
+        std::exit(3);
+    }
+    // A MODE that walks one token per launch must not be handed a span, and the looped MODE must not
+    // be handed 1 by accident: this is the one field the looped item is defined by, so it is asserted
+    // at the launch site rather than trusted to the caller (`run_sequence` is its only caller).
+    if (!mode_loops_tokens(mode) && tokens != 1) {
+        std::fprintf(stderr, "mode %s is not a looping MODE but was given tokens=%d\n",
+                     kModeName[mode], tokens);
         std::exit(3);
     }
     switch (mode) {
@@ -271,6 +325,11 @@ void launch_mode(int mode, const float* q, const float* k, const float* v, const
         // a port, and `receng`/`rec2c4` in one window is the first A/B that compares the merge against
         // the spelling the engine actually runs.
         case M_REC2C4: rec2c4_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;
+        // D53: the shipping spelling with the token index inside the launch. Same grid `<<<NH, D>>>`,
+        // same state buffer, same `o` base; `tokens` is how many token-steps this one submission walks.
+        case M_RECLOOP:
+            recloop_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH, tokens);
+            break;
         default:
             std::fprintf(stderr, "no kernel for mode %d\n", mode);
             std::exit(3);
@@ -643,6 +702,225 @@ int selftest_mirror() {
     return bad ? 1 : 0;
 }
 
+// ---- the CPU-only loop selftest (D53) -------------------------------------------------------------
+/* WHAT THIS ADJUDICATES, AND WHAT IT CANNOT — read this before trusting the line it prints.
+ *
+ * The claim under test is "walking N tokens inside one launch produces the same bits as launching
+ * once per token". That claim has two halves and they need different instruments:
+ *
+ *   ADDRESSING. Which byte of `q|k|v`, `g`, `beta`, `o` and the state does token t read and write, and
+ *     does the state survive from token t to token t+1. THAT is what this selftest adjudicates: it
+ *     runs a host mirror of `recloop_kernel`'s index arithmetic against the host mirror of the
+ *     per-token launch mapping, element for element, at several span sizes, and any mapping error — a
+ *     row stride, a head base, an `o` row, a lost carry — moves bytes here exactly as it would on
+ *     device.
+ *   ASSOCIATION. Whether the looped kernel's float tree is the shipped one. This selftest CANNOT see
+ *     it: both mirrors call the same per-token arithmetic, and two sides that share a formula agree
+ *     (`prototype/gdn_collapse/results.md` §2, the `q̃` row, is that exact trap and it is quoted in
+ *     `engine/gdn_rec_fused_kernels.h`). The association claim is witnessed two other ways:
+ *     `check_recloop_transcription.py` diffs the looped body against the shipping kernel line for
+ *     line (and carries a mutation so IT cannot pass vacuously), and the device gate diffs the
+ *     compiled bits against `rec0`, which is the only instrument that can see a compiler-side
+ *     re-association or an FMA contraction.
+ *
+ * MUST-CATCH, DERIVED. Each injected defect names the geometric fact that makes it observable, and the
+ * case list is checked against that fact per case: a defect that is predicted invisible on a case must
+ * come back uncaught there, and a defect that no case in the list can catch is a defect nobody is
+ * testing (that failure is `bad`, not a skipped row). The hand-listed version of this table rotted
+ * twice in this repo (`prototype/attn_tile_model.py`, `prototype/mlp_gemv`), so the predicates below
+ * are computed from the case's own draw — token count, the spread of the drawn `g`/`beta`, whether the
+ * starting state is zero — not from its label.
+ */
+enum LoopDefect {
+    LD_NONE = 0,
+    LD_T_PIN0,         // token index pinned to row 0: a batched body that forgot `t` (the same defect
+                       // `gates_kernel`'s GG_ROW_ZERO is). Observable iff tokens > 1.
+    LD_OROW_HALF,      // `o` written at half the row stride: token rows collide. Observable iff > 1.
+    LD_STATE_RESTART,  // the state is zeroed at each token: the loop lost its carry. Observable iff
+                       // some token READS a state a restart would not leave: tokens > 1, or a non-zero
+                       // starting state on the only token.
+    LD_GBETA_PIN0,     // `beta` read from row 0 every token. Observable iff the drawn betas differ.
+    LD_G_PIN0,         // `g` (the log-decay the state is scaled by) read from row 0 every token.
+                       // Observable iff the drawn g values differ.
+    N_LD
+};
+static const char* kLoopDefectName[] = {"none", "t_pinned_to_row0", "o_row_stride_half",
+                                        "state_restarted_per_token", "beta_pinned_to_row0",
+                                        "g_pinned_to_row0"};
+
+// `recloop_kernel`'s address mapping, spelled the way the kernel spells it: `+t*CH` on the three
+// q|k|v slices, `+t*NH` on g|beta, `+t*(NH*D)` on `o`, and ONE state buffer shared across the span.
+// The per-token arithmetic is the SAME `cpu_token_step` the per-token mirror uses, on purpose — see
+// the header above for why that makes this an addressing witness and not an arithmetic one.
+void cpu_loop_span(const std::vector<float>& u, const std::vector<float>& g,
+                   const std::vector<float>& beta, float* S, float* o, int t0, int ntok, int defect) {
+    for (int t = 0; t < ntok; ++t) {
+        const int tt = (defect == LD_T_PIN0) ? 0 : t0 + t;
+        if (defect == LD_STATE_RESTART)
+            std::fill(S, S + kStateElems, 0.f);
+        const size_t gix = (defect == LD_G_PIN0) ? 0u : (size_t)tt * kNH;
+        const size_t bix = (defect == LD_GBETA_PIN0) ? 0u : (size_t)tt * kNH;
+        const size_t ooff = (defect == LD_OROW_HALF) ? 0u : (size_t)t * kValueDim;
+        cpu_token_step(u.data() + (size_t)tt * kQkvRows,
+                       u.data() + (size_t)tt * kQkvRows + kValueDim,
+                       u.data() + (size_t)tt * kQkvRows + 2 * kValueDim,
+                       g.data() + gix, beta.data() + bix, S, o + (size_t)t0 * kValueDim + ooff);
+    }
+}
+
+struct LoopCase {
+    std::string label;
+    int tokens;
+    float decay;
+    bool zero_state;
+    unsigned seed;
+    bool flat_gates;      // draw g and beta constant: the two pin-to-row-0 defects MUST NOT be caught
+    // Derived facts about the DRAW (not the label), used to build each defect's must-catch set. Both
+    // spreads are across TOKEN ROWS (row t vs row 0), which is the axis a pinned row index can move.
+    double g_spread = 0.0, beta_spread = 0.0;
+};
+
+void loop_case_draw(LoopCase& c, std::vector<float>& u, std::vector<float>& g,
+                    std::vector<float>& beta, std::vector<float>& s0) {
+    std::mt19937 rng(c.seed);
+    std::normal_distribution<float> nrm(0.f, 0.5f);
+    u.assign((size_t)c.tokens * kQkvRows, 0.f);
+    g.assign((size_t)c.tokens * kNH, 0.f);
+    beta.assign((size_t)c.tokens * kNH, 0.f);
+    s0.assign(kStateElems, 0.f);
+    for (auto& x : u) x = nrm(rng);
+    for (auto& x : g) x = c.flat_gates ? -0.25f : -std::exp(nrm(rng)) * c.decay;
+    for (auto& x : beta) x = c.flat_gates ? 0.5f : 1.f / (1.f + std::exp(-nrm(rng)));
+    if (!c.zero_state) for (auto& x : s0) x = 0.25f * nrm(rng);
+    // The spread that matters for a PIN-TO-ROW-0 defect is across TOKEN ROWS, not across the 16 heads of
+    // one row: pinning the row index can only change a value that differs between rows. Getting this
+    // wrong is not hypothetical — the first version of this line compared every drawn value against the
+    // first, predicted that a one-token case must catch the pin, and was refused by its own predicate
+    // (`missed_catch=2`). A must-catch set derived from the wrong axis fails loudly if it is derived at
+    // all, which is the whole argument for deriving it.
+    for (int t = 1; t < c.tokens; ++t) {
+        for (int h = 0; h < kNH; ++h) {
+            c.g_spread = std::max(c.g_spread, std::fabs((double)g[(size_t)t * kNH + h] - g[h]));
+            c.beta_spread = std::max(c.beta_spread,
+                                     std::fabs((double)beta[(size_t)t * kNH + h] - beta[h]));
+        }
+    }
+}
+
+// The must-catch predicate: derived from the case's geometry and draw, per defect.
+bool loop_defect_must_fire(int defect, const LoopCase& c) {
+    switch (defect) {
+        case LD_T_PIN0:        return c.tokens > 1;
+        case LD_OROW_HALF:     return c.tokens > 1;
+        case LD_STATE_RESTART: return c.tokens > 1 || !c.zero_state;
+        case LD_GBETA_PIN0:    return c.beta_spread > 0.0;
+        case LD_G_PIN0:        return c.g_spread > 0.0;
+        default:               return false;   // LD_NONE is not a defect
+    }
+}
+
+int selftest_loop() {
+    // The case list is small on purpose (tokens <= 12): what is under test is the MAPPING, and a long
+    // sequence adds cost without adding a new mapping. What it must contain, and does, is at least one
+    // one-token case (so the "cannot fire" side of two defects is actually exercised), a carried-state
+    // case at a near-zero decay (so the state carry is observable), and a flat-gates case (so the two
+    // pin-to-row-0 defects have a case where they must come back clean).
+    std::vector<LoopCase> cases = {
+        {"t1-zeros-flat",      1, 0.4f,   true,  31u, true },
+        {"t1-carried-d0.4",    1, 0.4f,   false, 32u, false},
+        {"t2-zeros-d0.4",      2, 0.4f,   true,  33u, false},
+        {"t2-carried-d0.002",  2, 0.002f, false, 34u, false},
+        {"t8-carried-d0.4",    8, 0.4f,   false, 35u, false},
+        {"t8-zeros-flat",      8, 0.4f,   true,  36u, true },
+        {"t12-carried-d0.002", 12, 0.002f, false, 37u, false},
+        {"t12-carried-d0.4",   12, 0.4f,   false, 38u, false},
+    };
+    // The spans a launch may be given. The engine's `--gdn-loop` will be an operator knob, so the span
+    // must be arithmetically irrelevant: every span, including a ragged last chunk (3 into 12), has to
+    // reproduce the per-token form bit for bit.
+    const int kSpans[] = {1, 2, 3, 12};
+
+    long elems_compared = 0, span_runs = 0, defect_runs = 0;
+    int bad = 0, clean_mismatch = 0, wrong_catch = 0, missed_catch = 0;
+    int defect_must[N_LD] = {0}, defect_caught[N_LD] = {0}, defect_must_not[N_LD] = {0};
+
+    for (auto& c : cases) {
+        std::vector<float> u, g, beta, s0;
+        loop_case_draw(c, u, g, beta, s0);
+
+        // The reference: the per-token mapping, i.e. `run_sequence`'s shape on the host.
+        std::vector<float> ref_s = s0, ref_o((size_t)c.tokens * kValueDim, 0.f);
+        for (int t = 0; t < c.tokens; ++t) {
+            cpu_token_step(u.data() + (size_t)t * kQkvRows,
+                           u.data() + (size_t)t * kQkvRows + kValueDim,
+                           u.data() + (size_t)t * kQkvRows + 2 * kValueDim,
+                           g.data() + (size_t)t * kNH, beta.data() + (size_t)t * kNH,
+                           ref_s.data(), ref_o.data() + (size_t)t * kValueDim);
+        }
+
+        // (1) every span must reproduce the reference exactly.
+        for (int sp : kSpans) {
+            std::vector<float> s = s0, o((size_t)c.tokens * kValueDim, 0.f);
+            for (int t0 = 0; t0 < c.tokens; t0 += sp) {
+                const int n = (sp < c.tokens - t0) ? sp : (c.tokens - t0);
+                cpu_loop_span(u, g, beta, s.data(), o.data(), t0, n, LD_NONE);
+            }
+            const long d_o = bit_diff(o, ref_o), d_s = bit_diff(s, ref_s);
+            elems_compared += 2 * ((long)c.tokens * kValueDim + kStateElems);
+            ++span_runs;
+            if (d_o != 0 || d_s != 0) {
+                ++clean_mismatch; ++bad;
+                std::printf("LOOP MISMATCH case=%s span=%d ndiff_o=%ld ndiff_state=%ld"
+                            " — the looped mapping is not the per-token mapping\n",
+                            c.label.c_str(), sp, d_o, d_s);
+            }
+        }
+
+        // (2) every injected defect must move bytes EXACTLY where its geometry says it can.
+        for (int d = 1; d < N_LD; ++d) {
+            std::vector<float> s = s0, o((size_t)c.tokens * kValueDim, 0.f);
+            cpu_loop_span(u, g, beta, s.data(), o.data(), 0, c.tokens, d);
+            const bool caught = bit_diff(o, ref_o) != 0 || bit_diff(s, ref_s) != 0;
+            const bool must = loop_defect_must_fire(d, c);
+            elems_compared += 2 * ((long)c.tokens * kValueDim + kStateElems);
+            ++defect_runs;
+            if (must) ++defect_must[d]; else ++defect_must_not[d];
+            if (caught) ++defect_caught[d];
+            if (must && !caught) { ++missed_catch; ++bad; }
+            if (!must && caught) { ++wrong_catch; ++bad; }
+        }
+    }
+
+    // A comparison list that is empty cannot fail, so its size is asserted, not assumed — and the
+    // expected size is DERIVED from the case list, so a case list that shrank is caught too.
+    long want_span_runs = 0, want_defect_runs = 0;
+    for (const auto& c : cases) { want_span_runs += 4; want_defect_runs += (N_LD - 1); }
+    if (span_runs != want_span_runs || span_runs == 0) { ++bad; }
+    if (defect_runs != want_defect_runs || defect_runs == 0) { ++bad; }
+    // Every defect must have at least one case that can catch it; a defect no case can see is not a
+    // control, it is decoration (`tools/mixed_bw`, `prototype/attn_tile_model`, one layer over).
+    int defects_unreachable = 0;
+    for (int d = 1; d < N_LD; ++d) if (defect_must[d] == 0) ++defects_unreachable;
+    if (defects_unreachable) ++bad;
+
+    std::printf("SELFTEST loop cases=%zu span_runs=%ld want_span_runs=%ld defect_runs=%ld"
+                " want_defect_runs=%ld elems_compared=%ld bad=%d ok=%d"
+                " clean_mismatch=%d missed_catch=%d wrong_catch=%d defects_unreachable=%d"
+                " claim=recloop_kernel's row/state/o mapping reproduces the per-token mapping exactly"
+                " at every span, and each loop defect moves bytes exactly where its geometry says it"
+                " must (NOT a claim about float association, which this mirror shares with itself by"
+                " construction and only the device bit-identity gate can see)\n",
+                cases.size(), span_runs, want_span_runs, defect_runs, want_defect_runs,
+                elems_compared, bad, bad ? 0 : 1, clean_mismatch, missed_catch, wrong_catch,
+                defects_unreachable);
+    for (int d = 1; d < N_LD; ++d) {
+        std::printf("  must-catch %s: cases-that-must-catch=%d caught=%d"
+                    " cases-that-must-NOT-catch=%d\n",
+                    kLoopDefectName[d], defect_must[d], defect_caught[d], defect_must_not[d]);
+    }
+    return bad ? 1 : 0;
+}
+
 // ---- a case, its fixture, and the two paths over it -----------------------------------------------
 struct Case {
     std::string label;
@@ -744,18 +1022,22 @@ void state_restore(const Fixture& f, int mode) {
     }
 }
 
-// One token-step per token, which is the engine's shape: `rec_kernel` is launched once per
-// (token, GDN layer), so a sequence of T tokens is T launches and the unit the census bills.
+// One token-step per launch for every MODE except `recloop`, which walks `span_of` tokens per launch —
+// which is the engine's shape either way (`engine/decode_step.cpp`'s `for (t = 0; t < n; ++t)
+// gdn_rec(...)` becomes one call for the looped form, over the same [n][6144] tile).
 // A split probe indexes slot t%pool on BOTH sides, so the slot token t+1 reads is not the slot token t
 // wrote: no launch in the sequence waits for its predecessor's store.
 void run_sequence(const Fixture& f, int mode, int tokens) {
     const size_t slots = mode_splits_state(mode) ? (size_t)f.pool : 1u;
-    for (int t = 0; t < tokens; ++t) {
-        const size_t slot = slots ? ((size_t)t % slots) : 0u;
-        const float* row = f.du + (size_t)t * kQkvRows;
-        launch_mode(mode, row, row + kValueDim, row + 2 * kValueDim, f.dg + (size_t)t * kNH,
-                    f.db + (size_t)t * kNH, f.sr[mode] + slot * (size_t)kStateElems,
-                    f.st[mode] + slot * (size_t)kStateElems, f.so[mode] + (size_t)t * kValueDim);
+    const int span = span_of(mode, tokens);          // 1 for every MODE that is not `recloop`
+    for (int base = 0; base < tokens; base += span) {
+        const int n = (span < tokens - base) ? span : (tokens - base);
+        const size_t slot = slots ? ((size_t)base % slots) : 0u;
+        const float* row = f.du + (size_t)base * kQkvRows;
+        launch_mode(mode, row, row + kValueDim, row + 2 * kValueDim, f.dg + (size_t)base * kNH,
+                    f.db + (size_t)base * kNH, f.sr[mode] + slot * (size_t)kStateElems,
+                    f.st[mode] + slot * (size_t)kStateElems,
+                    f.so[mode] + (size_t)base * kValueDim, n);
     }
 }
 
@@ -800,6 +1082,22 @@ static const char* dependency_band(double r) {
     return "INCONCLUSIVE-between-the-two-bands-take-the-counters";
 }
 
+/* The `recloop` band, separate for the same reason `dependency_band` is separate: `falsifier_band` reads
+ * an instruction lever (>1.10 refutes the latency reading, <1.02 kills the instruction route), and here
+ * the axis is submissions per token-step, so the same numbers mean something else. `r` is
+ * per-token-form ms over looped-form ms for the same token span.
+ *   >1.10  the launch axis is worth real time at the smallest geometry the harness can build, which is
+ *          what licenses the engine port and the in-situ A/B;
+ *   <1.02  either the floor is absorbed at this geometry or the loop's own addressing ate it — the
+ *          addressing-spelling variant (§10's rec6 lesson) is the next lever, not the port;
+ *   between  the harness cannot separate them and only the in-situ family row decides (D51's instrument).
+ */
+static const char* launch_structure_band(double r) {
+    if (r > 1.10) return "LAUNCH_STRUCTURE_WORTH-it-at-harness_geometry-port_it_and_A_B_in_situ";
+    if (r < 1.02) return "LAUNCH_STRUCTURE_WORTH_NOTHING-here-floor_absorbed_or_addressing_ate_it";
+    return "PARTIAL-at-harness_geometry-the_in_situ_gdn_rec_family_row_decides";
+}
+
 // ---- the VOLUME self-check ---------------------------------------------------------------------
 /* WHY THIS EXISTS AND WHAT IT IS NOT. The dependency probes are meaningless by design, so the only
  * thing that may be compared between them and MODE 0 is WORK VOLUME. If a probe quietly wrote less, or
@@ -824,7 +1122,9 @@ static const char* dependency_band(double r) {
  *
  *   THE PER-LAUNCH ACCOUNT is re-derived on the host from the same constants the launch is built from
  *     (the `tools/mixed_bw` `plan_bounds` rule: never let the kernel certify its own geometry), and a
- *     MODE whose account differs from MODE 0's fails here even if the device agrees with it.
+ *     MODE whose account differs from MODE 0's PER TOKEN-STEP fails here even if the device agrees
+ *     with it. Per launch is the wrong denominator for a MODE that walks several tokens per submission
+ *     (`recloop`), which is exactly why the account carries a span and the check divides it out.
  */
 struct LaunchAccount {
     long long state_read_elems = 0;      // state elements read per launch
@@ -838,13 +1138,18 @@ struct LaunchAccount {
  * pass over exactly one layer's state per launch — for the split probes the write pass lands in a
  * different buffer, which changes addresses, not bytes. The pass count is a property of the source
  * (`rec0_kernel`'s two `for (i = 0; i < D; ++i)` walks) and `traffic_census.py --volume-check` is what
- * proves the compiled listing really issues 2+1 passes at 4 B per access, per token-step. */
-LaunchAccount launch_account(int mode) {
+ * proves the compiled listing really issues 2+1 passes at 4 B per access, per token-step.
+ *
+ * `span` is the number of token-steps one launch carries (1 for everything except `recloop`), so the
+ * account is per LAUNCH and the invariant the check below applies is per TOKEN-STEP: `recloop` is
+ * allowed to move submissions and is not allowed to move a byte of traffic per token.
+ */
+LaunchAccount launch_account(int mode, int span) {
     LaunchAccount a;
-    a.state_read_elems = 2LL * kStateElems;
-    a.state_write_elems = 1LL * kStateElems;
-    a.operand_read_elems = 3LL * kValueDim + 2LL * kNH;
-    a.operand_write_elems = kValueDim;
+    a.state_read_elems = 2LL * span * kStateElems;
+    a.state_write_elems = 1LL * span * kStateElems;
+    a.operand_read_elems = 1LL * span * (3LL * kValueDim + 2LL * kNH);
+    a.operand_write_elems = 1LL * span * kValueDim;
     (void)mode;
     return a;
 }
@@ -878,7 +1183,7 @@ int volume_check(const ModeSet& ms, int pool) {
     fixture_build(f);
     fixture_build_modes(f, ms);
 
-    const LaunchAccount want_account = launch_account(M_REC0);
+    const LaunchAccount want_account = launch_account(M_REC0, 1);   // MODE 0: one token-step per launch
     int failed = 0;
     for (int i = 0; i < ms.n; ++i) {
         const int m = ms.m[i];
@@ -912,22 +1217,31 @@ int volume_check(const ModeSet& ms, int pool) {
             readside_untouched = diff;
         }
         const long long unwritten_o = count_sentinel_dev(f.so[m], (size_t)c.tokens * kValueDim);
-        const LaunchAccount a = launch_account(m);
-        const bool same_account = a.state_read_elems == want_account.state_read_elems &&
-            a.state_write_elems == want_account.state_write_elems &&
-            a.operand_read_elems == want_account.operand_read_elems &&
-            a.operand_write_elems == want_account.operand_write_elems;
+        const int tok_span = span_of(m, c.tokens);          // token-steps per launch (1 unless recloop)
+        const LaunchAccount a = launch_account(m, tok_span);
+        // The invariant is per TOKEN-STEP, not per launch: `recloop` is defined by moving submissions,
+        // and a form that moved submissions by doing less work per token would pass a per-launch compare
+        // against itself while cheating the A/B. So: per launch, its account must be exactly `span` x
+        // MODE 0's; per token-step, it must be MODE 0's to the element.
+        const bool same_account = a.state_read_elems == (long long)tok_span * want_account.state_read_elems &&
+            a.state_write_elems == (long long)tok_span * want_account.state_write_elems &&
+            a.operand_read_elems == (long long)tok_span * want_account.operand_read_elems &&
+            a.operand_write_elems == (long long)tok_span * want_account.operand_write_elems;
         const bool ok = same_account && unwritten == 0 && guard_w == 0 && guard_r == 0 &&
             unwritten_o == 0 && (readside_untouched == 0 || (!mode_splits_state(m) && readside_untouched == -1));
         if (!ok) ++failed;
-        std::printf("VOLUME mode=%s launches=%d pool=%d split=%d state_read_elems=%lld"
+        std::printf("VOLUME mode=%s launches=%lld tokens=%d span=%d pool=%d split=%d state_read_elems=%lld"
                     " state_write_elems=%lld operand_read_elems=%lld operand_write_elems=%lld"
                     " bytes_read_per_launch=%lld bytes_written_per_launch=%lld"
+                    " bytes_read_per_token_step=%lld bytes_written_per_token_step=%lld"
                     " dev_unwritten_state_elems=%lld dev_unwritten_o=%lld guard=%d"
-                    " readside_bits_differing_vs_seeded=%lld account_same_as_rec0=%d verdict=%s\n",
-                    kModeName[m], c.tokens, f.pool, mode_splits_state(m) ? 1 : 0,
+                    " readside_bits_differing_vs_seeded=%lld account_same_per_token_step_as_rec0=%d"
+                    " verdict=%s\n",
+                    kModeName[m], (long long)launches_of(m, c.tokens), c.tokens, tok_span, f.pool,
+                    mode_splits_state(m) ? 1 : 0,
                     a.state_read_elems, a.state_write_elems, a.operand_read_elems,
                     a.operand_write_elems, account_bytes(a, true), account_bytes(a, false),
+                    account_bytes(a, true) / tok_span, account_bytes(a, false) / tok_span,
                     unwritten, (long long)unwritten_o, guard_w + guard_r, readside_untouched,
                     same_account ? 1 : 0, ok ? "VOLUME_OK" : "VOLUME_MISMATCH");
     }
@@ -1086,9 +1400,15 @@ int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
                     const double ms_seq =
                         std::chrono::duration<double, std::milli>(t1 - t0).count() / burst;
                     if (ms_seq < best[m]) best[m] = ms_seq;
-                    std::printf("BURST case=%s rep=%d mode=%s ms_per_sequence=%.4f ms_per_launch=%.5f\n",
+                    // `launches`, not `tokens`: the looped MODE is the first MODE in this harness for
+                    // which the two differ, and a ms/launch figure divided by the token count would
+                    // report the loop's saving as a rate it does not have.
+                    const long n_launch = launches_of(m, c.tokens);
+                    std::printf("BURST case=%s rep=%d mode=%s ms_per_sequence=%.4f ms_per_launch=%.5f"
+                                " launches=%ld tokens=%d span=%d\n",
                                 sanitize(c.label).c_str(), r, kModeName[m], ms_seq,
-                                ms_seq / (double)c.tokens);
+                                ms_seq / (double)n_launch, n_launch, c.tokens,
+                                span_of(m, c.tokens));
                     ++g_burst_lines;
                 }
             }
@@ -1109,10 +1429,14 @@ int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
                                              : (m == M_REC6 ? "control-bill-matched"
                                                             : (m == M_REC2C4
                                                                ? "merged-fused-prologue-on-unroll4-walks"
-                                                               : "instruction-lever")),
+                                                               : (m == M_RECLOOP
+                                                                  ? "token-loop-launch-structure-D53"
+                                                                  : "instruction-lever"))),
                             best[M_REC0], best[m], r,
                             best[M_REC0] * 1000.0 / c.tokens,
-                            mode_is_probe(m) ? dependency_band(r) : falsifier_band(r),
+                            mode_is_probe(m) ? dependency_band(r)
+                                             : (m == M_RECLOOP ? launch_structure_band(r)
+                                                               : falsifier_band(r)),
                             "traffic_census.py --volume-check: a probe that is cheaper in slots owes"
                             " part of its win to D25's ~0.8 slot elasticity, not to the dependency");
             }
@@ -1141,7 +1465,7 @@ int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
 
 int main(int argc, char** argv) {
     std::string modespec, outdir, statename = "zeros";
-    int tokens = 128, repeat = 2, burst = 0, reps = 5, matrix = 1, pool = 1;
+    int tokens = 128, repeat = 2, burst = 0, reps = 5, matrix = 1, pool = 1, loop = 0;
     bool volume_only = false;
     unsigned seed = 7u;
     float decay = 0.4f;
@@ -1175,16 +1499,19 @@ int main(int argc, char** argv) {
             reps = std::atoi(next().c_str());
         } else if (a == "--out") outdir = next();
         else if (a == "--pool") pool = std::atoi(next().c_str());
+        else if (a == "--loop") loop = std::atoi(next().c_str());
         else if (a == "--volume") volume_only = true;
         else if (a == "--matrix") matrix = 1;
         else if (a == "--selftest-lane") return selftest_lane();
         else if (a == "--selftest-mirror") return selftest_mirror();
+        else if (a == "--selftest-loop") return selftest_loop();
         else {
             std::fprintf(stderr,
-                         "usage: gdn_rec_isa [--modes ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6,receng]"
+                         "usage: gdn_rec_isa [--modes ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6,receng,recloop]"
                          " [--tokens T --state zeros|random --decay D --seed S] [--repeat N]\n"
                          "                 [--volume [--pool N]] [--burst N --reps R [--pool N]]"
-                         " [--out DIR] [--selftest-lane] [--selftest-mirror]\n"
+                         " [--loop N] [--out DIR] [--selftest-lane] [--selftest-mirror]"
+                         " [--selftest-loop]\n"
                          "  --volume alone = the volume self-check and nothing else (no timing exists in"
                          "  that mode); with --burst it is the same single check followed by timing.\n"
                          "  default: the four spelling MODEs (rec0 is always the reference) over the\n"
@@ -1202,7 +1529,15 @@ int main(int argc, char** argv) {
                          "  refuses to time unless it passes. --pool N indexes N independent state slots per token (the\n"
                          "  literal indexed-per-token form); N=1 keeps the working set smallest, which\n"
                          "  is the comparable choice — see gdn_rec_isa_kernels.h. --selftest-lane and\n"
-                         "  --selftest-mirror are CPU-only and touch no device.\n");
+                         "  --selftest-mirror are CPU-only and touch no device.\n"
+                         "  recloop is D53's item: the SHIPPING spelling (`rec2c4`, i.e. "
+                         "`engine/gdn_rec_fused_kernels.h`) with the token index moved INSIDE the "
+                         "kernel, so one submission walks --loop N token-steps instead of one. Same "
+                         "grid, same operands, same state; bit-identity-gated against rec0 like every "
+                         "spelling MODE, and its burst partner is rec2c4, not rec0. --loop 0 (default) "
+                         "means the whole sequence in one launch; the span is an operand, not a "
+                         "numerics choice, so --selftest-loop requires EVERY span to reproduce the "
+                         "per-token form exactly. --selftest-loop is CPU-only and touches no device.\n");
             return 2;
         }
     }
@@ -1210,6 +1545,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "--pool must be >= 1\n");
         return 2;
     }
+    if (loop < 0) {
+        std::fprintf(stderr, "--loop must be >= 0 (0 = the whole sequence in one launch, N = N"
+                             " token-steps per launch)\n");
+        return 2;
+    }
+    g_loop = loop;   // read by span_of()/launches_of(); a non-looping MODE ignores it (see span_of)
     if (repeat < 1) {
         std::fprintf(stderr, "--repeat must be >= 1 (2 is the default: a racy permute must disagree with itself)\n");
         return 2;
@@ -1239,8 +1580,9 @@ int main(int argc, char** argv) {
     }
 
     std::printf("plan modes=%s | reference=rec0 | cases=%zu | tokens(matrix)=%d | repeat=%d | pool=%d"
+                " | loop=%d"
                 " | grid %dx%d, wave%d, %d wavefronts/token-step | state %d floats (1 layer)\n",
-                ms.names().c_str(), cases.size(), tokens, repeat, pool, kNH, kD, kWave,
+                ms.names().c_str(), cases.size(), tokens, repeat, pool, g_loop, kNH, kD, kWave,
                 kNH * (kD / kWave), kStateElems);
 
     // The volume self-check runs BEFORE anything is timed, and a burst that cannot show it passing is
