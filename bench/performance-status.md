@@ -887,3 +887,35 @@ pressure — which is precisely the class of thing a burst cannot see because th
 binary the burst ran. The gate in front of any port is a compile-only census of the merged listing, not another
 burst window. Recorded here so the 1.0268 is not later quoted as a win: it is a screen of a kernel the engine
 does not run.
+
+## 19. `rec2c4` — the merged fused-prologue-on-unroll4 form, screened against the shipping spelling (2026-10-17)
+
+D46's gate was a compile-only census; it passed (§`prototype/gdn_rec_isa/results.md` 11: merged form bills
+**1,374** slots/token-step against shipping **1,406**, same 59 VGPRs, zero spill, loop B unchanged at 16×8).
+Then the correctness gates ran on device and are green: `--selftest-lane cases=80660 bad=0`, `--selftest-mirror
+cases=524304 bad=0`, volume `VOLUME_OK` for all three MODEs with identical byte accounts, and admission
+**bit-identical** — `ndiff_o_vs0=0 ndiff_state_vs0=0` on all four cases. So the merged kernel is exact, which was
+the open question in §18.
+
+The burst, `--modes receng,rec2c4 --volume --burst 40 --reps 7`, both sides in **one binary alternating inside
+every rep**, canary read at build time (`CANARY OK`, both bills pinned) before any launch:
+
+| case | `receng` med ms/seq | `rec2c4` med | `receng/rec2c4` | pairs favouring `rec2c4` |
+|---|---|---|---|---|
+| t128-carried-d0.002 | 0.7100 | 0.7166 | **0.9908** | 4/7 |
+| t128-carried-d0.4 | 0.7369 | 0.6930 | 1.0633 | 6/7 |
+| t128-zeros-d0.002 | 0.7339 | 0.7012 | 1.0466 | 7/7 |
+| t128-zeros-d0.4 | 0.7368 | 0.7110 | 1.0363 | 5/7 |
+
+**Median of case-medians 1.0415, mean 1.0343, worst case 0.9908.** Three of four cases clear D25's 1.02 kill
+line and the median clears it by more than the census predicted (1.018–1.019 from −32 slots at elasticity 0.8),
+which is the §10 direction — on this kernel a spelling change has previously returned ~2.4× its instruction delta.
+The spread is honest: `t128-carried-d0.002` is *adverse*, at 0.9908 with 4/7 pairs, so this is a small win with
+one case going the wrong way, not a uniform one.
+
+**What this does not decide.** A burst on a 128-token synthetic sequence is a screen, not the verdict: the claim
+being priced is −0.85 % of a 4096-lane wave's `gdn_rec` family, and that is an in-situ number from
+`decode_run --time-waves`, not a harness ratio. §18's warning still stands against anyone tempted to quote
+1.0415 as the win — the instrument here is `receng` vs `rec2c4` inside one harness binary at `t=128`. The next
+step is the engine port behind `--gdn-spell fused`, default unchanged, and a paired in-situ A/B inside one lock
+hold; the family row decides.
