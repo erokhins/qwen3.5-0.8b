@@ -49,8 +49,8 @@ line is enough.
 | 2 | same header `:180` `split_for_lanes()` | `ceil(lanes / MAXSC)`, `__device__ __host__`, one spelling | untouched; reads MAXSC only, never the cap |
 | 3 | `engine/kernels_attn.cpp:65` `constexpr int kAttnMaxSplit` | **the only second-factor constant in the tree** | **8 → 9** |
 | 4 | `engine/kernels_attn.cpp:69` `split_for()` | engine's spelling of #2 | untouched; cap-free |
-| 5 | `engine/kernels_attn.cpp:99` `attn_part_floats()` `= rows*N_Q*kAttnMaxSplit*(DH+2)` | the `part` allocation, derived from the cap | numbers in its comment restated (38,043,648 B) |
-| 6 | `engine/kernels_attn.cpp:145` `if (split > kAttnMaxSplit) throw` | the refuse-to-truncate check | message tail corrected: one constant moves both halves |
+| 5 | `engine/kernels_attn.cpp:178` `attn_part_floats()` `= rows*N_Q*kAttnMaxSplit*(DH+2)` | the `part` allocation, derived from the cap | numbers in its comment restated (38,043,648 B) |
+| 6 | `engine/kernels_attn.cpp:232` `if (split > kAttnMaxSplit) throw` | the refuse-to-truncate check | message tail corrected: one constant moves both halves |
 | 7 | `engine/decode_step.cpp:288` `sc.a_part = alloc<float>(kernels::attn_part_floats(wave_rows))` | where the scratch is actually allocated | follows #5 automatically, no edit |
 | 8 | `engine/decode_step.h:174` `float* a_part; // [wave_rows][8][kAttnMaxSplit][258]` | shape comment — names the **symbol**, and its `8` is `N_Q` not the split | no edit needed (checked: it cannot go stale) |
 | 9 | `engine/gate.py:396-436` `lane_geometry()` / `lane_ceiling()` / `lane_ceiling_note()` | the gate's ceiling: greps `#define MAXSC (\d+)` from #1 and `constexpr int kAttnMaxSplit\s*=\s*(\d+)` from #3 | **no literal exists here**, so nothing moved with the constant — see §4.3 for the ±1 re-proof |
@@ -118,7 +118,7 @@ float* pp = a.part + (((size_t)row  * N_Q + head) * a.split + blockIdx.y) * (DH 
 const float* p = a.part + (((size_t)qrow * N_Q + head) * a.split) * (DH + 2);
     …  p[(size_t)s * (DH + 2) + 0 / 1 / 2 + d]   for s in [0, s_row),  s_row = blocks_for_row(a, qrow)
 
-// the allocation — engine/kernels_attn.cpp:99
+// the allocation — engine/kernels_attn.cpp:178
 return static_cast<size_t>(rows) * N_Q * kAttnMaxSplit * (DH + 2);
 
 // the CPU mirror's own, used as the third authority — prototype/attn_tile_model.py:376
@@ -131,7 +131,7 @@ reader's base is that expression at `block = 0` and its per-block stride is `(DH
 exactly the blocks the grid can write (`blockIdx.y < split`, `s_row == split` for a streaming row).
 **No line above contains `kAttnMaxSplit`,** and that is the whole reason the raise is bit-identity-safe:
 buffer containment follows from `split <= kAttnMaxSplit`, which is enforced by the throw at
-`kernels_attn.cpp:145`, not by the address.
+`kernels_attn.cpp:181`, not by the address.
 
 `attn_combine` still has one merge and does not branch on `tile_kernel` (§20.1's fix), and this commit
 adds no branch and no second layout.
