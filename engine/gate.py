@@ -6856,7 +6856,7 @@ def main() -> int:
                          " printed number rather than an assumption. `0`, the default, is the shipped"
                          " path with one extra branch that is false for every row: a form that has not"
                          " met the device does not become the engine's default by having been written,"
-                         " and the two fragment-map checkers (`check_fattn_map.py`, `check_fattn_cb.py")"
+                         " and the two fragment-map checkers (`check_fattn_map.py`, `check_fattn_cb.py`)"
                          " being green is a precondition for admission, not admission. Wave-only like"
                          " the two above, so no decode bit moves under it, and asserted against the"
                          " run's own NUMERICS echo for the same reason: a log that cannot say which"

@@ -1372,3 +1372,45 @@ combined and neither geometry was ever timed at the engine's own size:
 2. nobody has timed a tile whose **score comes from a matrix op**, which is the term that removes the
    dependent fold — D58 censused it at **1.98 slots/touch** and §27 measured the tile with the VALU fold
    still in it. Two halves of one question, measured in two runs that never met.
+
+## §29. The WMMA attention round, measured on the engine path: 1.3665× of the `attn` family at 4096 lanes — under the 1.5× bar, and everything the bar was not designed to see
+
+Device window, main agent, blocking, zero subagents, one `gpu_lock` hold (`util` 6 %–92 % seen across it, and the
+paired sides were taken inside one hold as §13 requires). `prototype/attn_wmma/run_fattn_burst_window.sh`,
+`--attn-fattn 0` vs `1` paired best-of-3, canaries green in the same breath as the `ms`:
+**CANARY A** the knob exists and refuses garbage; **CANARY B** banner `form=fattn16 vgpr=256 lds=16384
+vtiles=16 wf=4 fattn_rows=512/512` **agreeing with the engine listing's own note block** (the stale-`new`-side
+guard); **CANARY C** a covered row's logits differ byte-wise between the sides (so neither side is a stale copy);
+**CANARY D** every dump byte-identical at 64 lanes (route (A)'s inertness asserted, not trusted).
+
+| width | `attn` family, shipped | `attn` family, WMMA round | ratio |
+|---|---|---|---|
+| T=1024 | 17.4761 ms (12 launches) | 14.6424 ms | **1.1935×** |
+| T=4096 | 262.3243 ms (48 launches) | 191.9748 ms | **1.3665×** |
+
+Covered share printed with both rows: **512/512 = 100 % of rows in the widest wave** — so unlike route (A) at
+short context, this is not a partial-coverage ratio diluted by uncovered work. Against D62's bar the claim
+**FAILS** (1.3665 < 1.5), and it is recorded as a failure, not as a near-miss to be re-quoted.
+
+What the bar was not designed to see, and what therefore has to be said out loud: `attn` is 34.0–34.9 % of the
+wave, so −26.8 % of the family is roughly **−9 % of prefill** (5,364 → ~5,900 tok/s if the flag were defaulted
+on), which is larger than any single item shipped since the GDN launch batching. The bar was set at 1.5× because
+the funding argument (D62) priced the round body at 3.29–7.16 slots/touch against our measured 89.9, and a
+~1.37× realised says the **round shape is right and something around it is costing more than the census saw** —
+the two named candidates are both things the census could not price: **4 wavefronts/CU** (five times below the
+12–20 band §28 measured as irrelevant, so this is untested territory, printed as `wf_per_cu=4` for exactly that
+reason) and **49 spilled VGPRs / 72 B scratch** acknowledged under D63.
+
+Two things this window also had to fix before it could measure anything, both on the shipping path and both found
+by gates rather than by inspection: `gate.py` carried an **unterminated string literal** at line 6859 that the C++
+build cannot see, so every `gate.py` invocation was a `SyntaxError`; and the launcher's plan guard read
+`c.fused` — the **one-row** core args, whose `fused` field the wave launcher never writes — so `--attn-fattn 1`
+threw "fused plan" on every wave. The guard now sits directly above the launch and reads `core`, the struct the
+launch dereferences; and a wave with **no streaming rows allocates no partials at all**, so the form is skipped
+and says so (`ATTN_FATTN_SKIP rows=0/N`) instead of dereferencing a null `part`. With those, `dec8` at
+`--attn-fattn 1` passes the full engine gate, and admission **section 1 is green on dec8/dec64f/dec300f on both
+flag values**. Section 2 (the covered-row band) is still blocked: `prototype/attn_decode/floor_probe.py` parses
+every dump directory name as an integer and dies on `wave000-031`, so the cos/meanrel band for streaming rows is
+still a borrowed number, and **adoption cannot be proposed until that is fixed**. The WMMA latency legs never
+ran at all — `wmma_latency` core-dumps on its first leg, and its own row-count check reported 0-of-15 as the red
+result it is, so the f16-accumulator question is still unanswered.

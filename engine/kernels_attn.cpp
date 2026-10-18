@@ -317,7 +317,16 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     // form. The coverage split itself — WMMA gets the rows §07.3 already streams, the VALU wave keeps the
     // one-pass rows — is `fattn_covers`'s, called from both kernels, so the two sides cannot disagree
     // about who owns a row and no partial slot is ever dropped or double-written.
-    const bool wave_fattn = a.wave_fattn != 0 && rows > 1 && a.wave_tile != 0;
+    const bool wave_fattn = a.wave_fattn != 0 && rows > 1 && a.wave_tile != 0 && split >= 2;
+    if (a.wave_fattn != 0 && rows > 1 && split < 2) {
+        // Route (A)'s inert case, and it is structural rather than a choice: a one-pass wave allocates
+        // NO streaming partials (`split == 1`), so the form has nowhere to write. Skipping it and saying
+        // so is the inertness the split promised; launching it would dereference a null `part`, and
+        // refusing would make the flag fatal on every short wave instead of inert on it.
+        std::printf("ATTN_FATTN_SKIP rows=0/%d: a one-pass wave (lanes <= MAXSC %d) allocates no "
+                    "streaming partials, so the WMMA form owns nothing and is not launched\n",
+                    rows, MAXSC);
+    }
     if (a.wave_fattn != 0 && rows > 1 && a.wave_tile == 0) {
         throw std::runtime_error(
             "attn_decode_layer: --attn-fattn 1 requires --attn-tile 1. The WMMA form replaces the TILED "
@@ -325,11 +334,11 @@ void attn_decode_layer(const AttnLayerArgs& a) {
             "there is nothing here for it to replace, so refusing is the only honest answer.");
     }
     if (wave_fattn) {
-        std::string why;
-        if (!fattn_plan_ok(c, &why)) {
-            throw std::runtime_error("attn_decode_layer: the WMMA wave form is unavailable: " + why +
-                                     ". Pass --attn-fattn 0 for the shipped form.");
-        }
+        // NOTE: the plan guard that used to sit here read `c.fused`, which is the ONE-ROW core args — a
+        // struct whose `fused` field the wave launcher never writes (`core.fused = wave_fused` is set
+        // below). So it refused every fattn run as "fused plan" no matter which plan was real, and a
+        // one-pass wave that should have been inert exited 1 instead. A guard may only read the struct
+        // the launch uses; it now sits directly above the launch, on `core`, where every field is final.
         if (!a.wave_touch) {
             throw std::runtime_error(
                 "attn_decode_layer: --attn-fattn 1 requires --attn-touch 1. The row split lives inside "
@@ -419,6 +428,15 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                 core.fattn_cover = wave_fattn ? 1 : 0;
                 attn_slim_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
                 if (wave_fattn) {
+                    // The plan guard, in the one place it can be honest: `core` is complete here, so this
+                    // reads the arguments this launch will actually dereference. An error, never a fallback
+                    // — a form that silently does not run would price the shipped kernel and report it as WMMA.
+                    std::string fwhy;
+                    if (!fattn_plan_ok(core, &fwhy)) {
+                        throw std::runtime_error(
+                            "attn_decode_layer: the WMMA wave form is unavailable: " + fwhy +
+                            ". Pass --attn-fattn 0 for the shipped form.");
+                    }
                     // ONE EXTRA LAUNCH, and a different grid from the VALU wave's on purpose: this form's
                     // block is ONE WARP covering 16 query rows of ONE head, so the head moves into
                     // `blockIdx.x` (where the shipped wave puts the KV group) and the row-block extent is
