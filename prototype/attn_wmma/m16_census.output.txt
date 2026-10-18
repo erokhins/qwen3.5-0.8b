@@ -1,0 +1,168 @@
+# m16 census of wmma_m16_probe-hip-amdgcn-amd-amdhsa-gfx1151.s
+# denominator: 256 (row, lane, head) touches per warp per stage round (16 x 16).
+# slot rule: imported from prototype/attn_score_dot2/isa_census.py tally() — one line = one
+#   slot, a v_dual packet is one slot, s_waitcnt/s_nop/s_delay_alu are ENCODE-ONLY (shown in
+#   the WAIT column and reported both ways in the verdict line).
+
+## 1. Per-kernel census, and what each block can actually be resident as
+# slots = STATIC issue slots (a rolled body counted once); rounds = slots actually issued per
+#   stage round after the back-edge expansion below. blk/CU and wf/CU come from LDS and VGPR
+#   per the policy calibrated on the shipped kernel's recorded row, asserted at the top of this
+#   section: 47 VGPR / 12288 B gives 5 blocks and 20 wf/CU.
+kernel          slots  rounds  r/touch  instr lane-mv  MMA  ldsL  ldsS  VGPR   LDS B  blk/CU  wf/CU          binds
+m16_empty          95      95     0.37    116       0    0     2     8    11   16384       4     16            LDS
+m16_none          306     306     1.20    365     128   16    35     9   202   16512       1      4           VGPR
+m16_f32row        319     319     1.25    380     144   16    36    12   235   20480       1      4           VGPR
+m16_bf16rt        537     537     2.10    658     144   16    38    13   235   19456       1      4           VGPR
+m16_bf16wide      538     538     2.10    653     144   16    38    13   252   33792       1      4       LDS+VGPR
+m16_roll          377     632     2.47    476      24    1     8    13    28   19456       3     12            LDS
+m16_bf16gq        347     602     2.35    440      24    1     6     9    30   11264       5     20            LDS
+m16_bf16frag      405     405     1.58    505       0   16    68     9    95   18432       2      8           VGPR
+m16_scalar       8197   16257    63.50  10951     640    0   140   136    25   18432       3     12            LDS
+m16_scalar_ob    7781   15418    60.23  10572     640    0   140   136   152   18432       1      4           VGPR
+
+## 1b. How each rounds figure was derived (a rolled body must be expanded; see the header)
+  m16_empty      no score fingerprint at all (the empty baseline): static == round
+  m16_none       fully unrolled (16 v_wmma in line): static == round
+  m16_f32row     fully unrolled (16 v_wmma in line): static == round
+  m16_bf16rt     fully unrolled (16 v_wmma in line): static == round
+  m16_bf16wide   fully unrolled (16 v_wmma in line): static == round
+  m16_roll       K-step region .LBB5_19 [218,267] (1 back edges): 1 v_wmma in the static code, 17 slots -> expanded x16 (K_STEPS 16 / 1)
+  m16_bf16gq     K-step region .LBB7_10 [143,188] (1 back edges): 1 v_wmma in the static code, 17 slots -> expanded x16 (K_STEPS 16 / 1)
+  m16_bf16frag   fully unrolled (16 v_wmma in line): static == round
+  m16_scalar     touch region .LBB9_21 [245,23079] (128 back edges): 128 publish stores in the static code = that code covers 128 of 256 touches -> expanded x2
+  m16_scalar_ob  touch region .LBB8_21 [247,22190] (128 back edges): 128 publish stores in the static code = that code covers 128 of 256 touches -> expanded x2
+
+## 2. Legs — each is a difference of two ROUND-slot censuses, divided by the touch denominator
+leg        slots slots/touch instr/touch   composition
+FEED         211        0.82        0.97   SHUFFLE.lane-movement=128  WAIT.encode-only=38  LDS.load_b128=32  VALU=25  MMA.wmma=16  SALU=3
+DRAIN        231        0.90        1.14   VALU=76  SALU=62  WAIT.encode-only=62  CVT.bf16-widen-or-addr=50  CVT.bf16-widen=20  SHUFFLE.lane-movement=16
+STRIDE         1        0.00       -0.02   VALU=2  CVT.bf16-widen=1
+ROLL         537        2.10        1.41   VALU=103  WAIT.encode-only=78  SALU=70  CVT.bf16-widen-or-addr=50  SHUFFLE.lane-movement=24  CVT.bf16-widen=20
+GQ           507        1.98        1.27   VALU=101  WAIT.encode-only=72  SALU=53  CVT.bf16-widen-or-addr=48  SHUFFLE.lane-movement=24  CVT.bf16-widen=20
+FLOOR        310        1.21        1.52   VALU=96  WAIT.encode-only=79  SALU=64  LDS.load_b128=64  CVT.bf16-widen-or-addr=44  CVT.bf16-widen=20
+CONTROL    16162       63.13       42.32   WAIT.encode-only=2733  VALU=2720  SALU=1939  CVT.bf16-widen-or-addr=1368  CVT.bf16-widen=800  SHUFFLE.lane-movement=640
+CTRL_OB    15323       59.86       40.84   VALU=2841  WAIT.encode-only=2770  SALU=1943  CVT.bf16-widen-or-addr=1363  SHUFFLE.lane-movement=640  VALU.dual-packet=376
+
+## 3. The gate: slots per (row, lane, head) touch on the WMMA path
+  FEED  (16 K-step tiles, A/B loads, lane movement, MMA)   =   0.82 slots/touch (0.97 in the instr currency prototype/attn_wmma/results.md §3 used)
+  DRAIN (f32 D tile -> shipped BF16 round -> s_sc)         =   0.90 slots/touch (1.14 instr)
+  ALL-IN  (FEED + DRAIN + the shared stage round, /touches)=   2.10 slots/touch incl. staging and both barriers
+
+  CONTROL, both spellings (same 16x16 geometry, shipped VALU dot+fold, no WMMA):
+    m16_scalar        63.13 slots/touch — shipped publish shape (only lane 0 stores); 5.00 lane-movement ops/touch, the shipped fold shape
+    m16_scalar_ob     59.86 slots/touch — every lane's folded value stored; 5.00 lane-movement ops/touch, the shipped fold shape
+  -> CONTROL IN THE VERDICT: 59.86 slots/touch (the observable spelling, and the smaller of the two).
+     Against the shipped M = 1 touch of 45, that is the RE-TILE TAX ALONE: +14.86 slots/touch
+     on the VALU path, before any instruction class changes. It is the number `prototype/attn_m2`
+     measured on device (7-10 % slower at short widths, 16-32 blocks) and it is the debit the
+     WMMA credit has to clear.
+
+  VERDICT LINE. A WMMA pass-1 touch is FEED + DRAIN: the score round and store are inside DRAIN,
+  and at M = 16 there is no per-touch loop left to bill — the loop is 16 K-steps per 256 touches.
+  The two ways to price the residue are printed because D57's own bottom-up assumed it survives:
+    residue = 45 - (dot 16 + fold 11) = 18, as D57 priced it                19.73 slots/touch -> BETWEEN THE LINES
+    residue = 0, measured: no per-touch loop survives the tile (m16_bf16rt - m16_empty)   1.73 slots/touch -> FUNDABLE
+  (gate lines: <= 19 fund, >= 30 dead; in between is an answer too)
+
+## 3c. The same verdict per variant, because a slot figure from a block that cannot be resident
+#       is a fact about the compiler, not about the kernel (gdn_collapse §4-§5: priced 11.4 ms
+#       from its own instruction census, measured 112.04 ms at ~1.6 working wavefronts per CU).
+#       occ = wavefronts/CU the variant's VGPR and LDS allow, against the shipped 20 (62.5 %).
+  variant        slots/touch  wf/CU blk/CU  VGPR   LDS B  gate on slots  note
+  m16_none              0.82      4      1   202   16512        <=19 ok  16 wf/CU below shipped (20 %): bound by VGPR
+  m16_f32row            0.88      4      1   235   20480        <=19 ok  16 wf/CU below shipped (20 %): bound by VGPR
+  m16_bf16rt            1.73      4      1   235   19456        <=19 ok  16 wf/CU below shipped (20 %): bound by VGPR
+  m16_bf16wide          1.73      4      1   252   33792        <=19 ok  16 wf/CU below shipped (20 %): bound by LDS+VGPR
+  m16_roll              2.10     12      3    28   19456        <=19 ok  8 wf/CU below shipped (60 %): bound by LDS
+  m16_bf16gq            1.98     20      5    30   11264        <=19 ok  holds shipped occupancy
+  m16_bf16frag          1.21      8      2    95   18432        <=19 ok  12 wf/CU below shipped (40 %): bound by VGPR; map-ASSUMED, a bound not a spelling
+  m16_scalar           63.13     12      3    25   18432      >=30 dead  the CONTROL: no WMMA in it, so it prices the geometry, not the class
+  m16_scalar_ob        59.86      4      1   152   18432      >=30 dead  the CONTROL: no WMMA in it, so it prices the geometry, not the class
+
+## 4. Stride probe, the roll leg, and the map-assumed floor (bounds, not shippable spellings)
+  STRIDE  +0.00 slots/touch for a shipped 512-wide score row vs a 16-wide one
+  ROLL    2.10 slots/touch with the K loop ROLLED, against 1.73 unrolled (FEED+DRAIN): rolling costs +0.37 slots/touch of per-K-step control and buys the VGPR
+  GQ      1.98 slots/touch with A from GLOBAL (engine row stride 2048) and no Q LDS stage — see §4c
+  FLOOR   1.21 slots/touch with hand-fed raw WMMA and a direct fragment drain;
+          legal only if the hardware fragment map is the assumed one (issue_rate_probe §5.1).
+
+## 4b. The matrix pipe, which is not an issue slot
+  one v_wmma_f32_16x16x16 (wave32) = 128 MACs/lane = 32 clk at the WMMA roof, 36.0 clk at the measured sustained 3.552 MAC/lane/clk
+  so the SCORE tile's pipe time is 16 x 36.0 = 577 clk per warp per round = 2.25 clk/touch — i.e. the matrix pipe, not the
+  feed, is the floor: 2.25 clk/touch replaces 45 issue slots/touch, and the feed+drain (1.73) can be hidden behind it only if other wavefronts
+  are resident to issue while the pipe is busy — which is an OCCUPANCY question, §4c.
+  The pipe is per-SIMD and 4 warps share a block across 2 SIMDs, so a
+  block resident alone on a CU puts ~2 of its 4 warps per SIMD: enough to overlap one warp's WMMA
+  with another's feed only if the block count is not itself driven to 1 by VGPR or LDS. That is
+  the term §1's wf/CU column carries, and it is why the verdict is printed per variant in §3c.
+
+## 4c. LDS and VGPR per block, against the §26 binding (5 blocks/CU at 12,288 B)
+  policy: blocks/CU = min(65536/LDS, (min(16, 512/round8(VGPR)) x 2 SIMD) / 4 warps, 32-wf cap); calibrated on the shipped row (47 VGPR / 12288 B -> 5 blocks / 20 wf/CU), which this run asserts.
+  variant         VGPR  spill   LDS B  blk/CU  wf/CU          binds  vs shipped 20 wf
+  m16_empty         11      0   16384       4     16            LDS               -4
+  m16_none         202      0   16512       1      4           VGPR              -16
+  m16_f32row       235      0   20480       1      4           VGPR              -16
+  m16_bf16rt       235      0   19456       1      4           VGPR              -16
+  m16_bf16wide     252      0   33792       1      4       LDS+VGPR              -16
+  m16_roll          28      0   19456       3     12            LDS               -8
+  m16_bf16gq        30      0   11264       5     20            LDS               +0
+  m16_bf16frag      95      0   18432       2      8           VGPR              -12
+  m16_scalar        25      0   18432       3     12            LDS               -8
+  m16_scalar_ob    152      0   18432       1      4           VGPR              -16
+  shipped attn_slim_wave: 47 VGPR / 12,288 B -> 5 blocks/CU = 20 wavefronts/CU (62.5 % of the 32 the part allows), from prototype/attn_wmma/evidence/occupancy.txt.
+
+## 4d. The traffic a global-A spelling buys and costs, as arithmetic on the probe's own geometry
+  A read from global: 1 global load(s) in the rolled K-step body, so A is re-read EVERY K-step,
+  not once per round: 16 x 512 B = 8192 B per warp per round = 32 B/touch.
+  K read from global: 8192 B per block per round, shared by 4 warps x 256 touches = 8 B/touch — against the shipped 4096 B for 32 touches = 128 B/touch.
+  -> the tile cuts global K traffic 16x (one sub-block feeds MROWS rows instead of one), and buys it with 32 B/touch of A re-reads.
+  Whether those re-reads are cheap is an L2 question, not a slot question: the 16 rows are 4 KiB
+  apart (GQ_LDM = ROW_H), so each 16 B lane load lands in a different line and the lines fill out
+  only across the round's 16 K-steps. This compile-only census cannot settle it; it is the first
+  thing the device pass must, and §5's answer depends on it.
+
+## 5. The resource-conditioned answer, derived rather than asserted
+  variants holding >= 4 blocks/CU: m16_bf16gq (1.98 slots/touch, 20 wf/CU)
+  -> the WMMA spellings that hold >= 4 blocks/CU: m16_bf16gq; cheapest is m16_bf16gq at 1.98 slots/touch, 5 blocks / 20 wf/CU (30 VGPR, 11264 B), bound by LDS.
+     Its VGPR is low ONLY because the K loop is rolled (§1b): the same tile unrolled is 235 VGPR at 1 block(s)/CU. Register pressure, not the feeder, is what the M = 16 tile
+     costs, and that is the same wall D30 §2 priced for the PV leg's accumulators: the score leg alone,
+     unrolled, already spends more than half the 512-register SIMD budget before PV is mentioned.
+  the PV N-split, witnessed by the score leg: 16 f32 accumulators over DH = 256 is 128 VGPR/lane (D30 §2).
+     This probe's SCORE leg alone needs 235 VGPR unrolled and 28 rolled. A block that holds both legs unrolled cannot
+     exist under the 512-register budget, so the N-split is a precondition of any port, not an optimisation.
+  LDS at or under the shipped 12288 B: m16_bf16gq (11264 B, 30 VGPR, 1.98 slots/touch)
+  — that set is the answer to 'is the low-LDS spelling also the low-VGPR one', read rather than argued.
+
+## 6. The cost side, from measured rows only — a model with named inputs, not a measurement
+  inputs, every one measured somewhere else in this tree:
+    whole-kernel bill        89.9 warp-inst/touch  (bench/performance-status.md §26 W2, counter-calibrated)
+    shipped pass-1 window    45 slots/touch     (prototype/attn_valu_slim/results.md §2; --calib re-reads it)
+    slot->time elasticity    time ∝ slots^0.39–0.44      (D21/D22; the exponent prototype/attn_m2/results.md §8.4 also used)
+    attn / wave              264.71 ms / 763.49 ms   (bench/performance-status.md §25 and §26; attn = 34.7 % of the wave)
+    matrix headroom          ~36 µs of matrix work per wave against 257 ms of attn (D34): the
+                             matrix PIPE is never the constraint here; only the geometry tax can be
+  the occupiable spelling is m16_bf16gq: the score leg goes 45 -> 1.98 issue slots/touch plus 2.25
+  clk/touch of matrix pipe, so the whole-kernel bill is 89.9 -> 46.9 (slots only) or 49.1
+  if the matrix pipe is charged as an issue-equivalent (the conservative reading).
+  elasticity transfer: attn x 0.751..0.790, i.e. -24.9 % to -21.0 % BEFORE any geometry tax
+  geometry tax measured at this class by m2 at short widths (x1.07): attn -19.7 % to -15.5 %  ->  wave -6.8 % to -5.4 % of its time  ->  prefill +5.7 % to +7.3 % tok/s
+  geometry tax priced by m2 at the funded ruler (x1.29): attn -3.1 % to +1.9 %  ->  wave -1.1 % to +0.7 % of its time  ->  prefill -0.7 % to +1.1 % tok/s
+  D30's kill line is that the route must beat `attn` by more than ~15 %. Read this way the band
+  STRADDLES it: it clears on m2's measured tax and fails on m2's priced one. The gate question
+  (slots per touch) answers decisively; the funding question turns on a geometry tax that is a
+  device number, and this compile-only census does not answer it. What would is the device pass
+  handed over beside this census (paired A/B, one lock hold, behavioural canary first), and the
+  two things it must settle are the A-from-global traffic and the tile-local score staging's effect
+  on pass 2 — neither of which is a slot question.
+
+## 7. Calibration — the two figures already in the ledger, re-measured here
+  feeder: (wm_score_k256 358 - wm_score_tile 155) / 15 = 13.53 instr/tile vs ledger 13.5 -> CALIBRATED
+  the same figure in the SLOT currency the 45 is in (waits excluded): 11.33 slots/tile
+  same leg inside this probe: FEED x 16 touch-equivalents per tile = 13.19 slots/tile (15.56 instr/tile vs ledger 13.5)
+  engine: attn_tile_wave8CoreArgs slots/touch = 116 vs ledger 116 -> CALIBRATED
+  engine: attn_slim_wave8CoreArgs slots/touch = 45 vs ledger 45 -> CALIBRATED
+  NOTE: prototype/attn_wmma/region_census.py --calib is a DIFFERENT instrument (a whole-
+  kernel line-table roll-up) and still aborts at 125.5 against the same 45. This census does
+  not use it and does not re-green it; see prototype/attn_wmma/results.md §7.
+
