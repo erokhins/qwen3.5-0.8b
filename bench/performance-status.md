@@ -1011,7 +1011,7 @@ ms come untraced from `--time-waves`. Pass counts inferred from arithmetic that 
 |---|---|---|---|
 | launches per token | **1.93** | **18.76** | 9.7× |
 | GDN recurrence launches / layer / 4096 tok | **8** (512 tokens per launch) | **4,096** (one token per launch) | **512×** |
-| attention launches / pass | 48 | 48 | **identical** |
+| attention launches / pass | 138 counted | 96 counted | **not identical** — this row read "48 \| 48 \| identical", which was inferred from `6 × 8`; §26 counts both from traces |
 | GEMM launches / pass | 1,464 | 1,200 | comparable |
 | GDN family time | **≤ 47.4 ms** | **428.2 ms** | we are **≥ 9.0× slower** |
 | attention family time | **≤ 52.5 ms** | **263.2 ms** | we are **≥ 5.0× slower** |
@@ -1169,3 +1169,80 @@ decode pair (median 0.9999) predicted — a one-row body takes the per-token pat
 the two remaining mechanisms were launch count (GDN — now done) and the attention tile (still open: 48 launches
 both sides, our 263 ms against their ≤52 ms). That is now the only ≥1.5× row left in the attribution table,
 which is why it is item 2.6 and next.
+
+## 26. Attention attributed: no matrix instruction anywhere in the engine, and the gap is **4.6×**, not 14× (2026-10-18)
+
+Item 2.6 (attention, the last family with a ≥1.5× row from the llama.cpp comparison) was attributed before
+any kernel was written, and the attribution corrected the item's own size twice. Census artifacts:
+`prototype/attn_wmma/evidence/`, window script `prototype/attn_wmma/run_attn_attrib_window.sh`.
+
+**Instruction class — counted out of GPU code carved from the shipping binary.** `tools/carve_codeobjects.py`
+extracts the nine code objects from `decode_run`'s `.hip_fatbin` (the canary requires each object to name
+`gfx1151` in its *own* ELF flags, because the "0 of the readable 55" census once scanned the wrong
+population), and `tools/kernel_isa_census.py` refuses to run if a requested kernel is missing or empty.
+Result across **all 40 kernels of the engine's own objects: 0 matrix instructions, 0 dot-class**. The shipping
+`attn_slim_wave` is 1,983 instructions with 130 f32-FMA-class and no `v_mfma_*`/`v_wmma_*` at all. Every matmul
+that reaches the matrix unit on this box reaches it through hipBLASLt, whose tuned kernels sit in containers
+`llvm-objdump` cannot read — so D56's "the GEMMs run at 97–102 % of roof" is partly a statement about *who
+wrote the kernel*, and 3.3 (hand WMMA GEMM) means writing from scratch to approach a rate the library already
+sustains.
+
+**The ceiling was the wrong one, so D56's 14× is retracted (see D57).** 22.3 TFLOP/s is a *matrix* rate; this
+kernel can only occupy a scalar rung. Against the box's measured sustained `v_fma_f32` rate of **7.30 TFLOP/s**
+(`prototype/issue_rate_probe`), attention's 1.59 TFLOP/s is **4.6× low**, not 14×. Two things fall out of the
+ladder 1.59 → 7.30 (scalar) → 23.28 (`dot2_bf16`) → 52.63 (WMMA): llama.cpp's **≥7.9 TFLOP/s is above the best
+scalar rate this machine has ever sustained**, so parity is a matrix-class question no matter what our own
+disassembly says; and it is only 15 % of the WMMA rate, so the class is not exotic — the obstacle is
+amortization.
+
+**Occupancy — the first real LDS number for this box.** KFD `lds_size_in_kb 64`, `simd_per_cu 2`,
+`simd_count 80`; `tools/kernel_occupancy_probe.cpp` (host-side, launches nothing, with a positive control that
+caught LLVM deleting an unused LDS object) gives `attn_slim_wave` **5 blocks/CU = 20 of a possible 32
+wavefronts = 62.5 %**, LDS and VGPR binding at the same point (12,288 B and 47→48 VGPR). Headroom is therefore
+**1.6×, and only if LDS ≤ 8,192 B *and* VGPR ≤ 32 both hold**. Related ledger defect, since it was cited as
+evidence: clang's `-Rpass-analysis=kernel-resource-usage` prints `Occupancy [waves/SIMD]: 16` for *every*
+kernel in a TU regardless of resources — it is the machine maximum and cannot fail, so the
+`attn_valu_slim` "Lever 0" claim that leaned on it is unsupported (the supported version is the sentence
+before it).
+
+### The device window (`run_attn_attrib_window.sh`, one hold, canary per leg)
+
+**W1 — the shipped touch pair, measured in situ rather than borrowed from a harness.** `--attn-touch 0`
+(frozen `attn_tile_wave`) against `--attn-touch 1` (shipping `attn_slim_wave`): **1,024/1,024 prefill logits
+rows byte-identical**, `launches=` **identical** both sides (48 at 4,096, 12 at 1,024 — the pair changes the
+body, not the submission), and `attn` family **403.06 → 264.71 ms at 4,096 lanes (1.5227×)** and
+**27.07 → 17.27 ms at 1,024 (1.5672×)**, best-of-3 inside the hold. That is the §20 slim lever finally priced
+against the ruler width instead of a probe.
+
+**W2 — a denominator collision settled, and it settled the favourable way.** Two numbers 1.2 % apart had been
+used interchangeably as *the* per-touch figure: 116 (static pass-1 slots) and 114.6 (measured whole-kernel VALU
+per touch). The counter leg calibrates first: the `--attn-touch 0` side reproduces the published
+`attn_tile_wave` figure at **2,790.5 M against 2,888 M recorded = −3.4 %**, inside the ±5 % band, so the
+counter is believed. It then reads `attn_slim_wave` at **2,265.7 M VALU per pass = 89.9 per touch**, which is
+**model A (whole-kernel) by a factor of 3.2** over model B (pass-1-only). Pass 1 is therefore the *high* branch,
+≈61 % of the kernel's VALU — every remedy priced in D56's range keeps its upper end. Same run, first-ever
+per-kernel split of the family: `attn_prep` 62.1 M and `attn_combine` 21.0 M per pass against the core's
+2,265.7 M, i.e. **90 of 138 dispatches and 3.4 % of the family's VALU instructions**, so the un-censused
+satellites are not where the time is (instructions are not wall, but the bound is one-sided).
+
+**W4 — a ledger row corrected from inference to count.** §22's "attention launches / pass 48 vs 48, identical"
+was arithmetic (`6 layers × 8`), not a measurement. Counting dispatch instances, deduped by `Dispatch_Id`:
+**ours 414 traced = 138 per pass** (48 `attn_prep` + 48 `attn_slim_wave` + 42 `attn_combine`; pass count
+derived from `attn_prep` against its 48 known sites), and **llama.cpp 96 `flash_attn_ext_f16` instances**,
+which is 48 per pass over the two prompt passes that run made — so the row was right about *their* count and
+wrong about ours: we submit **138 to their 48**, because our attention is three kernels and theirs is one fused
+kernel. Submission cost of the difference is ~0.15 ms of a 763.49 ms wave, so the *conclusion* "not a
+launch-count item" stands; the *row* did not, and §22 now carries the counted numbers.
+
+**W3 and W5.** Realized occupancy was **not** established: the leg prints its calibration rules and refuses the
+already-retracted `SQ_WAVE_CYCLES/SQ_BUSY_CYCLES` ratio, and it did not produce a number that satisfies them,
+so the 20-of-32 figure stays a static cap rather than a measurement. W5 is a refutation, not a measurement:
+4,609 lanes is **refused by name** (`kAttnMaxSplit = 9`) while 4,096 runs, so raising that ceiling cannot move
+the ruler width at all — it is a long-context enabler and leaves this queue.
+
+**Where the item stands after this.** `attn` is ~265 ms of 763.49 ms and it is a **mix-and-stall** problem
+(5.6 issue slots per useful MAC × ~60 % of its own code's ceiling at 62.5 % occupancy), whose parity target
+sits above the scalar roof: the matrix class subsumes ~27 of a touch's 45 pass-1 slots, a **2.4× cut of pass 1**,
+not a 5× cut of `attn`. Priced honestly that is **+5 % to +12 % of the wave**, contingent on a compile-only
+falsifier (an M = 16 feeder census at ≤19 slots/touch) that costs a day and no device time. Full adjudication
+in D57, including the retraction of D56's rate framing.

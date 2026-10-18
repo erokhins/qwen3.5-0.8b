@@ -1,0 +1,10 @@
+agent 0  AMD Radeon 8060S Graphics  gcnArch=gfx1151
+  CU (HIP view, halved vs rocminfo)   20
+  sharedMemPerBlock                   65536 B
+  sharedMemPerBlockOptin              65536 B
+  sharedMemPerMultiprocessor          65536 B
+  regsPerBlock                        196608
+  regsPerMultiprocessor               196608
+  maxThreadsPerBlock                  1024
+  maxThreadsPerMultiProcessor         2048
+  warpSize                            32

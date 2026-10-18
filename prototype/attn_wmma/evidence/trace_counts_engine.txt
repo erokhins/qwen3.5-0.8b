@@ -1,0 +1,11 @@
+dispatches in file: 230530  (assumed 3 identical passes -> n/a per pass)
+canary: the file must contain at least one attention kernel, or this read is the wrong file
+CANARY PASS: 3 attention-family kernel names present
+
+kernel                                            count   per pass | wg   LDS    VGPR SGPR | grid X,Y,Z
+attn_prep(CoreArgs)                                 144       48.0 | 256  2560   32    128  | 2560,512,1
+attn_slim_wave(CoreArgs)                            144       48.0 | 128  12288  48    128  | 256,8,512
+attn_combine(CoreArgs)                              126       42.0 | 256  0      16    128  | 2048,512,1
+attention-family total                              414      138.0
+
+compare with §22's inferred 48 per pass; the engine's own counted site (launchstats::attn) is a different quantity from the kernels submitted.

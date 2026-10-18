@@ -1,0 +1,19 @@
+device                 AMD Radeon 8060S Graphics
+  HIP multiProcessorCount (halved, do NOT use for roofs)  20
+  HIP sharedMemPerMultiprocessor                          65536 B
+  KFD lds_size_in_kb per CU (sysfs, static)               64
+  KFD simd_per_cu / max_waves_per_simd / simd_count        2 / 16 / 80
+
+kernel                                           thread   blk/CU      wf/CU wf/CU of max 32
+attn_slim_wave (SHIPPED wave body, --attn-touch 1) 128           5         20        62.50 %
+attn_tile_wave (--attn-touch 0, frozen witness)  128           5         20        62.50 %
+attn_core    (one-row / --attn-tile 0)           512           1         16        50.00 %
+attn_prep                                        256           8         64        200.0 %
+attn_combine                                     256           8         64        200.0 %
+control: 0-LDS stub                              128          16         64        200.0 %
+control: 65536-B LDS stub (must be 1)            128           1          4        12.50 %
+
+CANARY
+PASS: the query distinguishes a 64 KiB stub (1 block) from a 0-LDS stub (16) from attn_slim_wave (5 blocks = 20 wavefronts/CU)
+
+Reading: attn_slim_wave is 20 wavefronts/CU of the 32 the part allows (62.5 %), and the two caps are independent: LDS 12,288 B/block allows 5 blocks, and 47 VGPR (granularity 8) allows 10 waves/SIMD.
