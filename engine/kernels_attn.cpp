@@ -90,15 +90,27 @@ hip_bfloat16* bf16(const uint16_t* p) {
     return reinterpret_cast<hip_bfloat16*>(const_cast<uint16_t*>(p));
 }
 
-// The covered-share echo, printed once per DISTINCT wave geometry rather than once per attention layer.
+// The form banner AND the covered-share / fallback echo, printed once per DISTINCT wave geometry rather
+// than once per attention layer.
+//
 // WHY IT EXISTS AT ALL: under `--attn-fattn 1` only the streaming rows move to the WMMA form, so any family
 // speedup has to be divided by the covered share before it is believed — a 1.5x family result on 70 %
 // coverage is a ~2x result on covered rows, and those are different claims. A log that cannot say what
-// fraction it covered adjudicates neither. WHY ONCE PER GEOMETRY: the same body calls this from all 48
-// attention layers with the same numbers, and 48 identical lines per body would be noise that a reader
-// skims past, which is worse than one line. A geometry change (a later body with deeper lanes) prints
+// fraction it covered adjudicates neither. THE FALLBACK IS PRINTED, NOT IMPLIED: `fallback_rows=N-n` is its
+// own field, because "rows that fell back must be visible in the log" is not satisfied by a reader having to
+// subtract two numbers and then notice the subtraction matters. WHY ONCE PER GEOMETRY: the same body calls
+// this from all 48 attention layers with the same numbers, and 48 identical lines per body would be noise a
+// reader skims past, which is worse than one line. A geometry change (a later body with deeper lanes) prints
 // again, so the burst window sees every number it needs. `decode_run`'s NUMERICS line carries the flag;
 // this line carries the denominator.
+//
+// TWO DENOMINATORS, because rows are not the work. `covered_rows_pct` is the row share; `covered_work_pct`
+// weights each row by `lanes_of(a, row)`, which is what the `attn` family's time is proportional to per row
+// (one pass over the row's lanes, both forms). The ms share of the family is the second one, not the first:
+// under (A) the covered rows are the LONG ones, so the work share is always the larger of the two and quoting
+// the row share would understate coverage — at 4,096 lanes the row share is ~87 % and the work share is
+// ~99 %, and a burst that divides by the wrong one is wrong by 1.14x. Both are printed so the reader cannot
+// pick the flattering one by accident.
 void fattn_echo(int rows, int split, int lvalid, int nrows) {
     static std::string last;
     // THE FORM'S OWN COSTS, read from the loaded code object rather than from a comment. `hipFuncGetAttributes`
@@ -107,9 +119,19 @@ void fattn_echo(int rows, int split, int lvalid, int nrows) {
     // (AGENTS.md, "the counters and census traps"), and a banner whose fields cannot disagree with the build
     // is a banner that cannot catch a stale build. This is the D30 1.7' lesson applied one level over: the
     // canary must be a field the change is REQUIRED to move, read in the same window as the number.
+    // `scratch=` is the private bytes per thread and `wf_per_cu=` the driver's own blocks/CU answer times the
+    // block's warp count — the two fields that make a spilled or occupancy-starved build visible in the log,
+    // which is the difference between the shipped form and the one that arrived (`.vgpr_spill_count 242`,
+    // `.private_segment_fixed_size 332` in `engine/attn_fattn_kernels.h`'s note).
     hipFuncAttributes at{};
     const bool have_attrs =
         hipFuncGetAttributes(&at, reinterpret_cast<const void*>(attn_fattn_wave)) == hipSuccess;
+    int blocks_per_cu = -1;
+    if (hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_cu,
+                                                    reinterpret_cast<const void*>(attn_fattn_wave),
+                                                    FATTN_THREADS, 0) != hipSuccess) {
+        blocks_per_cu = -1;
+    }
     CoreArgs k{};
     k.nrows = nrows;
     k.split = split;
@@ -120,17 +142,31 @@ void fattn_echo(int rows, int split, int lvalid, int nrows) {
     // every row would look like a streaming row and this would print a 100 % covered share on a wave of
     // short rows — a printed number that cannot be wrong is not an instrument.
     k.full = 1;
-    k.cap = 1 << 30;                       // never the binding limit here; `lanes_of` caps at the cache
+    k.fattn_cover = 1;                    // this is the "if the form is on, how much would it own" query
+    k.cap = 1 << 30;                      // never the binding limit here; `lanes_of` caps at the cache
     int covered = 0;
-    for (int r = 0; r < rows; ++r) covered += fattn_covers(k, r);
-    char buf[320];
+    long work_all = 0, work_cov = 0;
+    for (int r = 0; r < rows; ++r) {
+        const long lanes = lanes_of(k, r);
+        work_all += lanes;
+        if (fattn_covers(k, r)) {
+            ++covered;
+            work_cov += lanes;
+        }
+    }
+    char buf[400];
     std::snprintf(buf, sizeof(buf),
-                  "ATTN_FATTN form=fattn16 vgpr=%d lds=%d vtiles=%d wave_rows=%d fattn_rows=%d/%d"
-                  " covered_pct=%.1f split=%d%s",
+                  "ATTN_FATTN form=fattn16 q=stage vgpr=%d lds=%d scratch=%d vtiles=%d wf_per_cu=%d"
+                  " wave_rows=%d split=%d fattn_rows=%d/%d fallback_rows=%d"
+                  " covered_rows_pct=%.1f covered_work_pct=%.1f%s",
                   have_attrs ? at.numRegs : -1,
-                  have_attrs ? (int)(at.sharedSizeBytes) : -1, FATTN_VTILES,
-                  rows, covered, rows, rows ? 100.0 * covered / rows : 0.0, split,
-                  have_attrs && (at.localSizeBytes > 0) ? " SPILL" : "");
+                  have_attrs ? (int)(at.sharedSizeBytes) : -1,
+                  have_attrs ? (int)(at.localSizeBytes) : -1,
+                  FATTN_VTILES, blocks_per_cu * (FATTN_THREADS / 32),
+                  rows, split, covered, rows, rows - covered,
+                  rows ? 100.0 * covered / rows : 0.0,
+                  work_all ? 100.0 * (double)work_cov / (double)work_all : 0.0,
+                  (have_attrs && at.localSizeBytes > 0) ? " SPILL" : "");
     const std::string line(buf);
     if (line == last) return;
     last = line;
@@ -383,12 +419,15 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                 core.fattn_cover = wave_fattn ? 1 : 0;
                 attn_slim_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
                 if (wave_fattn) {
-                    // One extra launch, and it is worth naming what it buys: the WMMA form's grid is
-                    // 1/16th the row blocks of the VALU wave because one block carries 16 query rows, so
-                    // the added launch is cheap next to the work it removes. A wave whose rows are ALL
-                    // one-pass still launches it, and every block of it returns at its first ballot — an
-                    // inert launch is a cheap, visible cost; a silently-skipped one is not.
-                    attn_fattn_wave<<<dim3(N_KV, split, fattn_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
+                    // ONE EXTRA LAUNCH, and a different grid from the VALU wave's on purpose: this form's
+                    // block is ONE WARP covering 16 query rows of ONE head, so the head moves into
+                    // `blockIdx.x` (where the shipped wave puts the KV group) and the row-block extent is
+                    // `fattn_rtiles_of` = ceil(rows/16) instead of `tile_rtiles_of` = rows. Same total warp
+                    // count — 8 heads x rows/16 blocks x 1 warp = rows x 8 warps either way — and the shape
+                    // is what the spill gate decided (`engine/attn_fattn_kernels.h`, Q placement).
+                    // A wave whose rows are ALL one-pass still launches it and every block returns at its
+                    // first ballot: an inert launch is a cheap, visible cost, a silently-skipped one is not.
+                    attn_fattn_wave<<<dim3(N_Q, split, fattn_rtiles_of(rows)), FATTN_THREADS>>>(core);
                     fattn_echo(rows, split, c.lvalid, c.nrows);
                 }
             } else {
