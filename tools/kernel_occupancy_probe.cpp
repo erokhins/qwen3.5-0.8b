@@ -26,6 +26,19 @@
 #include "prototype/attn_decode/attn_decode_kernels.h"
 #include "engine/attn_slim_kernels.h"
 
+// The M = 16 WMMA probe variants, linked in from `prototype/attn_wmma/wmma_m16_probe.cpp`, which has
+// no `main()` by design precisely so it can be linked into this TU. The query needs only the function
+// symbols: `hipOccupancyMaxActiveBlocksPerMultiprocessor` reads the code object's `.vgpr_count` and
+// `.group_segment_fixed_size`, which the compiler fixed at compile time — nothing here launches.
+// They are asked about because D57's item-2.6 gate turned on whether a 16-row tile can hold its slot
+// win AND stay resident; a slot count from a 1-block/CU kernel is not the same currency as the shipped
+// 45 (`prototype/gdn_collapse/results.md` §4–§5 is that lesson).
+extern "C" __global__ void m16_empty(const hip_bfloat16 *, const hip_bfloat16 *, float *);
+extern "C" __global__ void m16_bf16rt(const hip_bfloat16 *, const hip_bfloat16 *, float *);
+extern "C" __global__ void m16_roll(const hip_bfloat16 *, const hip_bfloat16 *, float *);
+extern "C" __global__ void m16_bf16gq(const hip_bfloat16 *, const hip_bfloat16 *, float *);
+extern "C" __global__ void m16_scalar_ob(const hip_bfloat16 *, const hip_bfloat16 *, float *);
+
 // A stub with the whole LDS budget, as the probe's own positive control. It must WRITE the array
 // before reading it: the first version read uninitialised shared memory and LLVM deleted the whole
 // LDS object, so the control returned 16 blocks/CU and the canary correctly refused the result —
@@ -64,6 +77,11 @@ int main() {
 
     struct Row { const char *name; const void *k; int threads; };
     const Row rows[] = {
+        {"m16_bf16gq   (WMMA, global-A, rolled)", (const void *)m16_bf16gq, 128},
+        {"m16_roll     (WMMA, staged, rolled)", (const void *)m16_roll, 128},
+        {"m16_bf16rt   (WMMA, staged, UNROLLED)", (const void *)m16_bf16rt, 128},
+        {"m16_empty    (WMMA-deleted baseline)", (const void *)m16_empty, 128},
+        {"m16_scalar_ob (M=16 VALU control, DCE-proof)", (const void *)m16_scalar_ob, 128},
         {"attn_slim_wave (SHIPPED wave body, --attn-touch 1)", (const void *)attn_slim_wave,
          ATTN_TILE_THREADS},
         {"attn_tile_wave (--attn-touch 0, frozen witness)", (const void *)attn_tile_wave,
