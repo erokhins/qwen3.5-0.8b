@@ -1,0 +1,72 @@
+# gpu_lock status: HELD: 2026-10-18T10:46:27Z	m16grp2	pid=660378  util: gpu use: 89%
+# burst=40 reps=5 new=prototype/attn_m2/attn_m16_grp2 (form m16) base=shipslim in the same rep
+# plans (re)written host-only, no device touched by this step:
+#   PLAN wave64-at-4096 /tmp/attn_m16_gate/plan-wave64-at-4096.txt 8 1 burst 
+#   PLAN wave64-at-2048 /tmp/attn_m16_gate/plan-wave64-at-2048.txt 5 1 burst 
+#   PLAN wave64-at-1024 /tmp/attn_m16_gate/plan-wave64-at-1024.txt 3 1 burst 
+#   PLAN wave16-at-4096 /tmp/attn_m16_gate/plan-wave16-at-4096.txt 8 1 burst 
+#   PLAN span16-4096 /tmp/attn_m16_gate/plan-span16-4096.txt 8 1 burst 
+#   PLAN span16-1024 /tmp/attn_m16_gate/plan-span16-1024.txt 3 1 burst 
+#   PLAN pair-at-maxsc /tmp/attn_m16_gate/plan-pair-at-maxsc.txt 2 0 burst 
+#   PLAN short-64 /tmp/attn_m16_gate/plan-short-64.txt 1 0 burst 
+
+### wave64-at-4096  split=8  full=1 shipping one-pass rule
+RESULT case=wave64-at-4096 rows=64 lanes=4032-4095 split=8 full=1 forms=ship,shipslim,m16 widest_round=15 empty_groups=0 ndiff_aout_m16=0 ndiff_gated_m16=0 ndiff_aout_shipslim=0 ndiff_gated_shipslim=0 bytesdemanded_ship=532611072 bytesdemanded_m16=295598080 ratio=0.5550 blocks_ship=1024 blocks_m16=512
+RESULT mode=ab cases=1 rows=64 neg=none full=1 forms=ship,shipslim,m16 cases_with_any_difference=0 claim=bit-identity-per-row-on-the-per-row-lane-order
+RESULT case=wave64-at-4096 burst=40 reps=5 forms=ship,shipslim,m16 best_ship_ms=2.3837 best_shipslim_ms=1.5853 best_m16_ms=3.1135 no_timing_taken=0
+SPEEDUP a=ship b=shipslim best_a_ms=2.3837 best_b_ms=1.5853 speedup_a_over_b=0.6651
+SPEEDUP a=ship b=m16 best_a_ms=2.3837 best_b_ms=3.1135 speedup_a_over_b=1.3061
+SPEEDUP a=shipslim b=m16 best_a_ms=1.5853 best_b_ms=3.1135 speedup_a_over_b=1.9640
+
+### wave64-at-2048  split=5  full=1 shipping one-pass rule
+RESULT case=wave64-at-2048 rows=64 lanes=2044-2107 split=5 full=1 forms=ship,shipslim,m16 widest_round=12 empty_groups=0 ndiff_aout_m16=0 ndiff_gated_m16=0 ndiff_aout_shipslim=0 ndiff_gated_shipslim=0 bytesdemanded_ship=272039936 bytesdemanded_m16=142475264 ratio=0.5237 blocks_ship=640 blocks_m16=320
+RESULT mode=ab cases=1 rows=64 neg=none full=1 forms=ship,shipslim,m16 cases_with_any_difference=0 claim=bit-identity-per-row-on-the-per-row-lane-order
+RESULT case=wave64-at-2048 burst=40 reps=5 forms=ship,shipslim,m16 best_ship_ms=1.2972 best_shipslim_ms=0.8503 best_m16_ms=2.6101 no_timing_taken=0
+SPEEDUP a=ship b=shipslim best_a_ms=1.2972 best_b_ms=0.8503 speedup_a_over_b=0.6555
+SPEEDUP a=ship b=m16 best_a_ms=1.2972 best_b_ms=2.6101 speedup_a_over_b=2.0121
+SPEEDUP a=shipslim b=m16 best_a_ms=0.8503 best_b_ms=2.6101 speedup_a_over_b=3.0695
+
+### wave64-at-1024  split=3  full=1 shipping one-pass rule
+RESULT case=wave64-at-1024 rows=64 lanes=1020-1083 split=3 full=1 forms=ship,shipslim,m16 widest_round=10 empty_groups=0 ndiff_aout_m16=0 ndiff_gated_m16=0 ndiff_aout_shipslim=0 ndiff_gated_shipslim=0 bytesdemanded_ship=137822208 bytesdemanded_m16=71923712 ratio=0.5219 blocks_ship=384 blocks_m16=192
+RESULT mode=ab cases=1 rows=64 neg=none full=1 forms=ship,shipslim,m16 cases_with_any_difference=0 claim=bit-identity-per-row-on-the-per-row-lane-order
+RESULT case=wave64-at-1024 burst=40 reps=5 forms=ship,shipslim,m16 best_ship_ms=0.5554 best_shipslim_ms=0.3601 best_m16_ms=2.0459 no_timing_taken=0
+SPEEDUP a=ship b=shipslim best_a_ms=0.5554 best_b_ms=0.3601 speedup_a_over_b=0.6483
+SPEEDUP a=ship b=m16 best_a_ms=0.5554 best_b_ms=2.0459 speedup_a_over_b=3.6834
+SPEEDUP a=shipslim b=m16 best_a_ms=0.3601 best_b_ms=2.0459 speedup_a_over_b=5.6814
+
+### wave16-at-4096  split=8  full=1 shipping one-pass rule
+RESULT case=wave16-at-4096 rows=16 lanes=4080-4095 split=8 full=1 forms=ship,shipslim,m16 widest_round=15 empty_groups=0 ndiff_aout_m16=0 ndiff_gated_m16=0 ndiff_aout_shipslim=0 ndiff_gated_shipslim=0 bytesdemanded_ship=133939200 bytesdemanded_m16=74315776 ratio=0.5548 blocks_ship=256 blocks_m16=128
+RESULT mode=ab cases=1 rows=16 neg=none full=1 forms=ship,shipslim,m16 cases_with_any_difference=0 claim=bit-identity-per-row-on-the-per-row-lane-order
+RESULT case=wave16-at-4096 burst=40 reps=5 forms=ship,shipslim,m16 best_ship_ms=0.7155 best_shipslim_ms=0.4467 best_m16_ms=3.0546 no_timing_taken=0
+SPEEDUP a=ship b=shipslim best_a_ms=0.7155 best_b_ms=0.4467 speedup_a_over_b=0.6244
+SPEEDUP a=ship b=m16 best_a_ms=0.7155 best_b_ms=3.0546 speedup_a_over_b=4.2693
+SPEEDUP a=shipslim b=m16 best_a_ms=0.4467 best_b_ms=3.0546 speedup_a_over_b=6.8375
+
+### span16-4096  split=8  full=1 shipping one-pass rule
+RESULT case=span16-4096 rows=16 lanes=4080-4095 split=8 full=1 forms=ship,shipslim,m16 widest_round=15 empty_groups=0 ndiff_aout_m16=0 ndiff_gated_m16=0 ndiff_aout_shipslim=0 ndiff_gated_shipslim=0 bytesdemanded_ship=133939200 bytesdemanded_m16=74315776 ratio=0.5548 blocks_ship=256 blocks_m16=128
+RESULT mode=ab cases=1 rows=16 neg=none full=1 forms=ship,shipslim,m16 cases_with_any_difference=0 claim=bit-identity-per-row-on-the-per-row-lane-order
+RESULT case=span16-4096 burst=40 reps=5 forms=ship,shipslim,m16 best_ship_ms=0.7145 best_shipslim_ms=0.4498 best_m16_ms=3.0468 no_timing_taken=0
+SPEEDUP a=ship b=shipslim best_a_ms=0.7145 best_b_ms=0.4498 speedup_a_over_b=0.6296
+SPEEDUP a=ship b=m16 best_a_ms=0.7145 best_b_ms=3.0468 speedup_a_over_b=4.2641
+SPEEDUP a=shipslim b=m16 best_a_ms=0.4498 best_b_ms=3.0468 speedup_a_over_b=6.7730
+
+### span16-1024  split=3  full=1 shipping one-pass rule
+RESULT case=span16-1024 rows=16 lanes=1020-1035 split=3 full=1 forms=ship,shipslim,m16 widest_round=10 empty_groups=0 ndiff_aout_m16=0 ndiff_gated_m16=0 ndiff_aout_shipslim=0 ndiff_gated_shipslim=0 bytesdemanded_ship=33669120 bytesdemanded_m16=17635328 ratio=0.5238 blocks_ship=96 blocks_m16=48
+RESULT mode=ab cases=1 rows=16 neg=none full=1 forms=ship,shipslim,m16 cases_with_any_difference=0 claim=bit-identity-per-row-on-the-per-row-lane-order
+RESULT case=span16-1024 burst=40 reps=5 forms=ship,shipslim,m16 best_ship_ms=0.1931 best_shipslim_ms=0.1448 best_m16_ms=2.0028 no_timing_taken=0
+SPEEDUP a=ship b=shipslim best_a_ms=0.1931 best_b_ms=0.1448 speedup_a_over_b=0.7498
+SPEEDUP a=ship b=m16 best_a_ms=0.1931 best_b_ms=2.0028 speedup_a_over_b=10.3697
+SPEEDUP a=shipslim b=m16 best_a_ms=0.1448 best_b_ms=2.0028 speedup_a_over_b=13.8306
+
+### pair-at-maxsc  split=2  full=0 STREAMING FORCED — not the shipping short-row route
+RESULT case=pair-at-maxsc rows=4 lanes=511-514 split=2 full=0 forms=ship,shipslim,m16 widest_round=8 empty_groups=12 ndiff_aout_m16=0 ndiff_gated_m16=0 ndiff_aout_shipslim=0 ndiff_gated_shipslim=0 bytesdemanded_ship=4198400 bytesdemanded_m16=2101248 ratio=0.5005 blocks_ship=16 blocks_m16=32
+RESULT mode=ab cases=1 rows=4 neg=none full=0 forms=ship,shipslim,m16 cases_with_any_difference=0 claim=bit-identity-per-row-on-the-per-row-lane-order
+RESULT case=pair-at-maxsc burst=40 reps=5 forms=ship,shipslim,m16 best_ship_ms=0.1322 best_shipslim_ms=0.0978 best_m16_ms=0.3628 no_timing_taken=0
+SPEEDUP a=ship b=shipslim best_a_ms=0.1322 best_b_ms=0.0978 speedup_a_over_b=0.7398
+SPEEDUP a=ship b=m16 best_a_ms=0.1322 best_b_ms=0.3628 speedup_a_over_b=2.7437
+SPEEDUP a=shipslim b=m16 best_a_ms=0.0978 best_b_ms=0.3628 speedup_a_over_b=3.7086
+
+### short-64  split=1  full=0 STREAMING FORCED — not the shipping short-row route
+RESULT case=short-64 rows=64 lanes=64-127 split=1 full=0 forms=ship,shipslim,m16 widest_round=8 empty_groups=0 ndiff_aout_m16=131072 ndiff_gated_m16=131072
+RESULT mode=ab cases=1 rows=64 neg=none full=0 forms=ship,shipslim,m16 cases_with_any_difference=1 claim=bit-identity-per-row-on-the-per-row-lane-order
+NO-TIMING: admission is red (1 case(s) differ), so no millisecond figure is printed for this run

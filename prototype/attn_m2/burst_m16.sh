@@ -34,7 +34,10 @@ cd "$(dirname "$0")/../.."
 BURST=${BURST:-40}
 REPS=${REPS:-5}
 ALSO_M2=${ALSO_M2:-0}
-BIN=prototype/attn_m2/attn_m16
+BIN=${BIN:-prototype/attn_m2/attn_m16}   # override to point at a differently-built GRP, e.g.
+#   BIN=prototype/attn_m2/attn_m16_grp2 bash prototype/attn_m2/burst_m16.sh
+# It was hardwired before §28, which is how the shipped-parity-occupancy shape (GRP=2) sat built-and-untimed
+# while a tax was attributed to the occupancy of the shape that WAS timed.
 [ -x "$BIN" ] || bash prototype/attn_m2/build_m16.sh
 
 echo "# gpu_lock status: $(tools/gpu_lock.sh status 2>&1 || true)  util: $(tools/gpu_lock.sh util 2>&1 || true)"
