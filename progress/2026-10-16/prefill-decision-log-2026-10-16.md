@@ -2031,3 +2031,58 @@ obviously affordable; the difference is intra-round structure, not register capa
 - **Do not state a device's limits while a rival engine is demonstrating otherwise on it.** "This box's
   register file refuses it" was checkable against a kernel we had already traced, and failed. A claimed
   hardware ceiling should name the measurement that would falsify it *and* the rival that would embarrass it.
+
+## D62. Item 2.6 funded at round scope: their fold is one op per row and ours is a five-step butterfly per score
+
+D61 re-opened 2.6 as unmeasured; `progress/2026-10-18/llama-fattn-anatomy.md` (worker `a313bd01`) is the
+read-the-rival step the user ordered first, and it settles what the lever is. **Funded.**
+
+**What the rival actually runs**, census'd from the traced instantiation's own code object with the
+`gfx1151`-in-ELF-flags canary: `v_wmma_f32_16x16x16_f16` × 192 + `v_wmma_f16_16x16x16_f16` × 192, **zero
+`v_mfma`, zero `v_dot`** — so the class question D58 could only assume is now witnessed, and so is the
+fragment map (`mma.cuh:183-215`). Their round is **3.29 warp-inst/touch raw, 7.16 with a WMMA billed at
+its 32-clk pipe time**, against our measured **89.9**.
+
+**The four separable reasons, only one of which is the matrix pipe** — and this is what my D59 closure got
+backwards:
+
+1. both 256-dim dots retire on tensor pipes (0.125 WMMA/score vs 16 VALU slots);
+2. **the fold is 1 cross-lane op per row per round** (`ds_bpermute` × 111 total, reconciled source↔ISA as
+   16 for the f32-C→half2-B exchange + 1 for the fold) **against our 5-step butterfly per score**;
+3. **10 independent accumulator chains per warp** give the round its own ILP instead of borrowing it from
+   occupancy;
+4. one rescale per 64 KV rows instead of per live pair.
+
+**They run at 8 wavefronts/CU against our 20, with 358 spilled VGPRs, and are still 5× faster.** That is
+the external witness to §28's internal one. Occupancy was never the axis; the dependent chain is.
+
+**Two repo beliefs retired on evidence.** (a) **LDS binds, not the register file**: the "512 lane-slots per
+SIMD" in `kernel_occupancy_probe.cpp` is hard-coded arithmetic, the driver returns 5 blocks/CU for
+`attn_slim_wave`, and `MaxRegistersPerMultiprocessor = 196,608` ⇒ ≈307 lane-regs/thread at our shape, so
+**D30's "16 accumulators = 128 VGPR/lane is a wall" was never a wall at 128 threads** — D58's `m16_bf16gq`
+was already LDS-bound at 30 VGPR. (b) The 5× is **not** the matrix roof: they run ~8.8 TFLOP/s, ~17 % of
+the 52.63 this box sustains, and are mix-and-stall-limited too, just from a better shape.
+
+**Scope, stated because it is wider than D57's bar.** D57 priced replacing the **dot** (+5–12 %). The
+anatomy says replacing the **round** is what buys the 5×: through this repo's own measured elasticity
+(α = 0.44 from the 116→45 datum) their round implies **+30 % of prefill**, capped at +39 % by their
+observed ratio. That is a scope change, not a re-estimate, and it re-admits the address-aliasing risk
+§20.1 of `prototype/attn_decode/results.md` records — the fund authorises the **round**, and the guard is
+the falsifiable claim below, not a band.
+
+**The fund, as §4.2 sized it.** One new form, `m16_fattn_score`, changing the M = 16 probe's round in
+exactly three ways and nothing else: matrix score tile on the **transcribed** map; fold = 1 cross-lane op
+per row per tile; ≥ 8 independent P·V accumulator chains. **Accumulators f32 first** — their half2 O is an
+escape from a 256-VGPR ceiling that §3.4 shows does not bind us — so step 1 needs **no numerics decision**
+beyond the 16-bit operands the standing rule already permits. Falsifiable claim, three parts: **(i)**
+≥ 4 blocks/CU by the occupancy probe, **(ii)** ≤ 20 pipe-weighted slots/touch by census (D57's ≤ 19 bar),
+both CPU-only, and **(iii)** on the wall at 4096 lanes, **cut the `attn` family by ≥ 1.5×** — the number
+D57 already paid for a 2.4× instruction cut. If (i)+(ii) hold and (iii) fails, the matrix class and the
+round shape are both exonerated and 2.6 closes on evidence, not on budget. Taken in the same window: a
+**WMMA dependent-chain latency leg** in `prototype/issue_rate_probe` (currency B has a rate but no
+latency), and the **512-row × 4096-lane fixture** — as the harness that admits and times, not as the
+instrument that decides, since D61 showed the tile's wall is row-flat. Gate work in §4.4 is mandatory
+before any ship: a section-(j)-style spelling A/B, a floor probe sized for the bf16→f16 conversion (floor
+exactly 0) and the reordered dot (cancellation band, judged by witnesses + cos/meanrel, never by max-ULP),
+and a must-catch set **derived** from the tile geometry — including the injection today's butterfly form
+structurally cannot see, one lane-half of the C→B parity exchange.
