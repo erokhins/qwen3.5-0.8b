@@ -1461,3 +1461,33 @@ queue item.
   artefact — if only the last row needed logits, 0.509 of 1.603 GFLOP/token, **32 % of the arithmetic**, would
   vanish, which makes it the largest single lever this census has found and squarely a design question, not an
   optimisation.
+
+### D47 amendment — the per-row `lm_head` assumption was wrong, and the correction is worth more than the original
+
+`prefill.cpp:85/91` prices `finish_token` for **every row only in `--prefill-logits all` mode**; the shipping
+default `kLast` prices row `n−1` alone, and the family table proves it: `lm_head launches=1` for a whole
+4096-token prefill, 2.197 ms. So the timed-path count is **1.0947 GFLOP/token**, not 1.603 — and the engine
+demands **4.87 TFLOP/s**, i.e. **20.9–21.9 %** of the measured mix roof rather than 32 %. The 2.197 ms single
+launch is itself a clean number: 485 MiB read in 2.197 ms = **232 GB/s**, i.e. `lm_head` is at the bandwidth
+ceiling exactly and has nothing left to give.
+
+Correcting that unblocked the actually useful result, which is per-family rather than aggregate:
+
+| family group | ms | FLOP | achieved | vs mix roof 22.3–23.3 |
+|---|---|---|---|---|
+| `proj` + `mlp_gateup` + `mlp_down` | 179.24 | 4.072 TFLOP | **22.72 TFLOP/s** | **97–102 %** |
+| `attn` | 263.20 | 0.412 TFLOP | 1.57 TFLOP/s | 6.7 % |
+| `gdn_rec` | 442.55 | no matmul | — | not a matrix question |
+
+**The GEMM path is already at the achievable matrix roof** — 97–102 % of the rate `prefill-Wclean` measured for
+this exact wave mix, which means every GEMM-side item on this project (algo pins, workspace, hand-WMMA) is
+competing for a prize that the roof says is ~0, and the ledger's habit of pricing those items at 1–2 % of wave
+should be read against that. `attn` sits at 6.7 % of the roof, but it is a streaming small-M shape rather than
+a GEMM, so the roof is the wrong yardstick there too. And `gdn_rec`, at 48.1 % of wall, is not a matrix
+question at all.
+
+So the answer to "what ceiling can we not break" splits in two: **prefill ~21,000 tok/s** if every non-matmul
+cost vanished (and ~34,400 at the single-shape peak), with the hard part being that 80.8 % of the wave is not
+matmul; **decode ~153 tok/s** from bytes (6.5 ms of weights per token at 237 GB/s), **106 tok/s** at the
+realistic 164 GB/s plateau, against today's 71.3 — so decode is at **47 % of the hard bound and 67 % of the
+realistic one**, and that is the tightest wall this project has.
