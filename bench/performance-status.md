@@ -1440,3 +1440,36 @@ about validity — a form that computes garbage passes it. And three gate checks
 forward `--attn-fattn`, so the "identical conditioning" comparison silently ran the frozen form; and section (j)'s
 "1025.1 MB bit-identical" was vacuous over non-finite data. Every one of those is the same trap in a new coat: a
 check whose predicate cannot be false for the failure it is aimed at.
+
+## §30. The WMMA streaming form ships: 1.3955× of `attn`, 1.1407× of the wave, no new band needed (2026-10-18)
+
+The NaN is gone and the form is the engine's default (`--attn-fattn 1`, `decode_step.h` and `gate.py` moved in
+one commit). What was measured, all of it main-agent, blocking, zero subagents, each pair inside a single
+`gpu_lock` hold:
+
+| instrument | frozen (`attn-fattn 0`) | WMMA default | ratio |
+|---|---|---|---|
+| `attn` family, 4096 lanes | 263.3832 ms (48 launches) | 188.7432 ms | **1.3955×** |
+| `attn` family, 1024 lanes | 17.4584 ms (12 launches) | 14.4516 ms | 1.2081× |
+| whole wave, 4096 lanes, best-of-5 medians | 856.435 ms | **750.824 ms** | **1.1407× (+14.1 %)** |
+
+Claim (iii)'s 1.5× bar is still **not met** and is recorded as failed — but the user adopted the win on the
+grounds that a diluted whole-family ratio of ~1.37–1.40 is worth ~14 % of prefill and the numerics came in
+**inside the bands already in force**, so no band was widened: `wide1024f` PASSes the full gate on **both** flag
+values, with 512 streaming rows judged 0 outside the cos cap, 0 outside the meanrel cap, 0 non-finite, 0 argmax
+moved, worst 1−cos 1.99e-04 against the 2.0e-3 cap and meanrel 3.39 % against 5 %, and rows 0..511 bit-identical
+between forms. Boundary row 512 (first streaming row): cos deficit 2.8301e-05.
+
+**Honest caveat on the absolute headline.** My frozen side reads **856 ms** where §25's ledger median is
+**763.49 ms** — this window ran ~12 % hotter than the one that booked the old headline, so the two sides of
+*this* table are only quotable as a **ratio**. By ratio the clean-window expectation is ~669 ms (**≈6,100
+tok/s**); by this window's own absolute median it is 750.8 ms (**5,455 tok/s**). The canonical headline re-take
+in a clean window is owed before the banner number is rewritten, and §25's 5,364 stands until then.
+
+Also on the record from this window: `prototype/attn_wmma/fattn_ship_census.py`'s derived-geometry canary now
+**fails** on `ds_load_b128 sites 68 > derived 39 + 2`, because the NaN fix publishes all 256 dims per row where
+the model expected the broken epilogue's traffic. That is the census being right to be suspicious and its model
+being stale, in that order — the expectation must be **re-derived from the new source's staging loops**, never
+raised to meet the listing. Until that is done the census is a red gate and the form's per-touch instruction
+figure is stale. The remaining gap to 1.5× still has two unpriced candidates, both scheduling rather than
+arithmetic: **4 wavefronts/CU** (five times below the 12–20 band §28 measured) and **49 spilled VGPRs**.
