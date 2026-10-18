@@ -1317,3 +1317,58 @@ the wall (§22), the kernel is not traffic-bound (D57), and the geometry that a 
 measured and each one fails; there is no untested lever left to fund. 3.3 and 2.4 stay closed as before.
 The wave's attention share (34.0–34.9 %, `attn` 264.71 ms of 763.49 ms at 4096 lanes) stays where it is,
 and the engine headline is unchanged by this section: **prefill 5,364 tok/s, decode 71.3**.
+
+## 28. §27's conclusion is overturned by the missing side of its own experiment: the tax is neither registers nor traffic (2026-10-18)
+
+§27 booked the M = 16 re-tile at **+112 % at best** and attributed the cost to register pressure
+(**134 VGPR → 3 blocks/CU**). The harness could already answer that — `attn_m16_grp2` is the same source
+built `-DATTN_M16_GRP=2` (**96 VGPR, 10,496 B → 5 blocks/CU, shipped parity**) — and §27 timed only the
+`GRP=4` binary. So the attribution was made against the one shape the census had already called
+unoccupiable, and that number was then used to close item 2.6.
+
+Retaken in a fresh hold (`m16grp2`, lock held, `burst_m16.sh` with `BIN` pointed at the parity build,
+admission inside the same run — `ndiff_aout_m16 = 0` on every case timed, `short-64` still red and still
+refused). Log: `prototype/attn_m2/evidence_burst_grp2.txt`; tabulated by `tmp/gcc/tab_m16_grp.py`.
+
+| fixture | shipped ms | **GRP4** m16 (3 blk/CU, traffic 0.28–0.30) | **GRP2** m16 (**5 blk/CU parity**, traffic 0.50–0.55) | GRP2/GRP4 |
+|---|---|---|---|---|
+| 64 @ 4096 | 1.4659 | 3.1055 (2.12×) | 3.1135 (2.12×) | 1.003 |
+| 64 @ 2048 | 0.7664 | 2.5117 (3.28×) | 2.6101 (3.41×) | 1.039 |
+| 64 @ 1024 | 0.3494 | 2.1102 (6.04×) | 2.0459 (5.86×) | 0.970 |
+| 16 @ 4096 | 0.4418 | 3.0593 (6.92×) | 3.0546 (6.91×) | 0.998 |
+| 16 @ 1024 | 0.1437 | 2.0479 (14.25×) | 2.0028 (13.94×) | 0.978 |
+| 4 @ 512 (streaming) | 0.0988 | 0.3819 (3.87×) | 0.3628 (3.67×) | 0.950 |
+
+**Going from 3 to 5 blocks/CU, while giving up half the traffic advantage, changes the time by at most
+5 %.** So the mechanism §27 named is not the mechanism, and neither is traffic:
+
+- **Registers: refuted.** A 66 % occupancy increase buys nothing, so this kernel was never occupancy-limited.
+- **Traffic: refuted.** GRP2 demands ~1.8× the bytes of GRP4 and costs the same — D57's "demanded bytes are
+  not DRAM bytes" appearing a third time from a different direction.
+- **What the numbers actually say: serial-round latency at low interleave.** The m16 wall tracks **lanes and
+  only lanes** (4096 → ~3.05 ms, 2048 → ~2.6, 1024 → ~2.05, 512 → ~0.36) and is **flat in rows**: 64 rows
+  @ 4096 and 16 rows @ 4096 cost the same 3.05–3.11 ms, while the shipped form's cost spans 15× across the
+  same set. Halving traffic, halving live pairs, and going from 128 to 512 blocks all fail to move it. That
+  is the `gdn_collapse` signature read from the other side: price a serial kernel in **cycles-per-dependency
+  at its realised interleave**, because a tile makes each block *longer* at the same time as it makes each
+  block *fewer* — the shipped form is cheap precisely because it is short and volume hides its latency
+  behind 20 wavefronts/CU.
+
+**What that does and does not license.** It does **not** rehabilitate the re-tile on these fixtures, where it
+is 2.1× to 14× slower and the mechanism is now understood rather than guessed. It **does** remove the two
+claims that made the closure read as a law — "the register file refuses it" and "+112 % in its cheapest
+form" — and one was flatly false: **llama.cpp runs a 256×256-tiled attention kernel on this same silicon**
+at ≤52.5 ms for the family where we spend 264.71 ms, so the machine demonstrably holds tiles far bigger
+than 16×16. The difference between the two designs is not register capacity but **what is inside a round**:
+theirs pipelines matrix ops with independent accumulators; ours walks a dependent dot → 5-step butterfly
+fold → rescale chain per live pair, 16 of them per warp.
+
+**Item 2.6 re-opens as unmeasured**, with a specific instrument, because the two censuses have never been
+combined and neither geometry was ever timed at the engine's own size:
+
+1. the engine's wave is **512 rows**, which would issue 8× the blocks of the largest fixture here (where 16
+   rows put just 128 blocks on a 40-CU part, leaving the latency nowhere to hide); a **512-row × 4096-lane
+   fixture** in this harness is the first measurement that could be read as a tax;
+2. nobody has timed a tile whose **score comes from a matrix op**, which is the term that removes the
+   dependent fold — D58 censused it at **1.98 slots/touch** and §27 measured the tile with the VALU fold
+   still in it. Two halves of one question, measured in two runs that never met.

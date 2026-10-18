@@ -1892,7 +1892,7 @@ must become bf16, so a new band and a gate section come with it).
   comparable to slim's 89.9: the two kernels normalise on different touch counts. The time shares are the
   usable figures.)
 
-## D59. Item 2.6 is closed on measurement: every ingredient of the WMMA re-tile has now been tested, and each one fails
+## D59. Item 2.6 is closed on measurement **[CONCLUSION OVERTURNED BY D61: the +112 % was timed on the one shape the census had already called unoccupiable, and the register attribution is refuted in §28 — the item is re-opened as unmeasured]**: every ingredient of the WMMA re-tile has now been tested, and each one fails
 
 D58 left one unknown: the geometry tax of a 16-row re-tile, as a device number. It is measured, in
 `bench/performance-status.md` §27, paired inside one rep against the kernel the engine ships (`ndiff=0`
@@ -1985,3 +1985,49 @@ per-launch `xlshl.exec`-guard chain** (which a span of 512 amortises to 0.16 slo
 already cheap) and the **80 slots of state-walk addressing** inside the walks. Both are structural, and
 neither is bit-neutral to touch. Item closed; `recptr` stays in the prototype harness as the negative
 witness, unadopted and unmeasured, with its transcription checker intact.
+
+## D61. D59's closure of item 2.6 is overturned: the missing side of its own experiment refutes both of its load-bearing claims
+
+Prompted by the user's objection — *"that is suspicious — we know this is possible, we have llama.cpp
+implementation that does that"* — which was correct, and correct in a way that turned out not to require any
+new analysis of llama.cpp at all, only the second half of our own experiment.
+
+**What was wrong.** §27 timed `GRP=4` (134 VGPR → **3 blocks/CU**) and attributed the tax to register
+pressure, then used +112 % to close the item. But `attn_m16_grp2` was already built from the same source at
+`-DATTN_M16_GRP=2`: **96 VGPR, 10,496 B → 5 blocks/CU, shipped parity**. It had never been timed. It now
+has been, in its own hold with admission in the same run (`bench/performance-status.md` §28, log
+`prototype/attn_m2/evidence_burst_grp2.txt`):
+
+- **Registers: refuted.** 3 → 5 blocks/CU (**+66 % wavefronts**) moves the time by **≤5 %** in every
+  fixture. The kernel was never occupancy-limited, so the register file is not refusing anything.
+- **Traffic: refuted.** GRP2 demands ~1.8× the bytes GRP4 does (ratio 0.50–0.55 vs 0.28–0.30) and costs the
+  same — §26/D57's "demanded bytes are not DRAM bytes" for the third time from a third direction.
+- **The actual mechanism, and it is not a tax in the sense D59 used.** The m16 wall **tracks lanes and
+  ignores rows**: 64 rows @ 4096 and 16 rows @ 4096 cost the same 3.11 vs 3.05 ms, and 128 blocks vs 512
+  blocks cost the same, while the shipped form's cost spans 15× across the same fixtures. Making each block
+  *longer* while making them *fewer* is what `gdn_collapse` priced in cycles-per-dependency: a round walks a
+  dependent dot → 5-step butterfly fold → rescale chain per live pair, 16 live pairs per warp, with nothing
+  to interleave against. The shipped form is cheap because it is short and hides that latency behind 20
+  wavefronts/CU.
+
+**What survives of D59.** The millisecond figures are real measurements of the prototype on those fixtures,
+and the re-tile is genuinely slower there. What does not survive is either explanation, and therefore neither
+does the closure: **item 2.6 is re-opened as unmeasured.** The machine is not the obstacle and this decision
+should be read as removing a false ceiling, not installing a real one — llama.cpp runs a 256×256-tiled
+attention kernel on this same silicon (≤52.5 ms for the family where we spend 264.71 ms), so tiles are
+obviously affordable; the difference is intra-round structure, not register capacity.
+
+**The instrument that would actually decide it** — two halves that have never been in one measurement:
+1. a **512-row × 4096-lane fixture** (the engine's real wave). The largest fixture here is 64 rows, and at 16
+   rows the tile issued 128 blocks on a 40-CU part, so there was nothing to hide latency behind;
+2. a tile whose **score comes from a matrix op**, which is precisely the term that deletes the dependent
+   fold. D58 censused that form at **1.98 slots/touch**, §27 measured a tile with the VALU fold still in it,
+   and the two runs never met.
+
+**Process rules taken from this, both cheap and both violated here.**
+- **When a harness can build two shapes, time both before attributing a mechanism.** The unbuilt half of an
+  experiment is invisible to a confident explanation: `burst_m16.sh` hardwired `BIN`, so the parity build sat
+  on disk while its occupancy was being blamed for a cost it does not have. Now `BIN=${BIN:-…}`.
+- **Do not state a device's limits while a rival engine is demonstrating otherwise on it.** "This box's
+  register file refuses it" was checkable against a kernel we had already traced, and failed. A claimed
+  hardware ceiling should name the measurement that would falsify it *and* the rival that would embarrass it.
