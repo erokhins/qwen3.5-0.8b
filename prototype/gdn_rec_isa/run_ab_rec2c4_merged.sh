@@ -69,7 +69,10 @@ echo "== volume witness (no timing): the merged form must touch MODE 0's bytes, 
 # MODEs rather than a bare grep is the point: a MODE that never ran must not read as a pass.
 n_vol=$(grep -c "^VOLUME mode=" "$OUT/volume.log")
 [ "$n_vol" -eq 3 ] || fail "expected 3 VOLUME lines (rec0, receng, rec2c4), got $n_vol"
-[ "$(grep -c 'VOLUME_OK' "$OUT/volume.log")" -eq 3 ] || fail "not all three MODEs VOLUME_OK"
+n_ok=$(grep -c '^VOLUME mode=.*verdict=VOLUME_OK' "$OUT/volume.log")
+[ "$n_ok" -eq 3 ] || fail "expected 3 per-MODE verdict=VOLUME_OK lines, got $n_ok"
+grep -q '^RESULT mode=volume-only failures=0 verdict=VOLUME_OK' "$OUT/volume.log" \
+  || fail "volume RESULT line absent or not failures=0"
 grep "VOLUME summary" "$OUT/volume.log" | grep -q "ok=1" || fail "volume summary not ok"
 
 echo
