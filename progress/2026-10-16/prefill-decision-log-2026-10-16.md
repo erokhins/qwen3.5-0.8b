@@ -1606,3 +1606,28 @@ proven we can hit, and an expression that hand-rolls the same arithmetic inherit
 - **Cost of being wrong is bounded and known**: if the in-situ A/B is flat or negative, `rec2c` closes for good
   with a clean audit trail — census exact, bit-identity measured, screen positive, in-situ null — and the ~0.85 %
   prediction goes down as a measured null rather than as an unpriced idea.
+
+## D51 — `fused` becomes the shipping default, and the headline is reported as unchanged (2026-10-17)
+
+- **Decision (mine, recorded not waited for): move the default to `--gdn-spell fused`.** The instrument that
+  decides was run as D50 promised: paired, both sides inside one lock hold, alternating every rep, canaries read
+  in the same window (engine-TU ISA canary with both bills pinned; every side echoing its own spelling; unknown
+  spelling refused so an inert flag cannot masquerade as a side). **4096 lanes: family ratio 1.0645, 3/3 reps,
+  worst rep exactly 1.0200.** Decode flat (1.0025, 2/3). 1024 lanes flat-to-adverse (0.9909, 1/3). Bit-identity
+  re-proved per fixture through the shipping launch path, 239 gate checks 0 failures.
+- **But the headline did not move, and it is reported that way.** Ruler re-taken on the new default: median
+  **923.36 ms = 4,436 tok/s** vs §17’s **921.56 ms = 4,444**. The paired window’s `unroll4` side was ~2.8 %
+  slower than the historical median, so the paired −2.96 % of wall is real *as an attribution* and false *as a
+  headline*. Cross-window the family row is −2.6 %, not −6.5 %. **Prefill stays quoted at 4,444 tok/s** until a
+  clean-window ruler places it elsewhere; decode stays 71.3.
+- **Cost of the flip, named**: gate section (j) now runs 3 device runs per fixture instead of 2 (+50 % of that
+  section). If that becomes the thing that makes people skip the gate, the remedy is a narrower fixture for (j),
+  never a dropped side.
+- **Follow-ups this task surfaced and did not silently absorb.** (F1) **18 line-citations rotted** by the port —
+  nine in files the port touched (`engine/kernels_gdn.cpp:40,32` etc.), and the worker proved they were already
+  semantically wrong at HEAD (`:40` claims a `rec_kernel` launch that lived at `:64`). Remedy owed: re-point
+  them at the **symbol** (`kernels_gdn.cpp::gdn_rec`), which is rot-proof, rather than at new line numbers.
+  (F5) `DecodeScratch::gdn_spell` still struct-defaults to `kShip` while `decode_run` defaults to `fused` — inert
+  today because the only caller always assigns, and worth a one-line change if a second scratch consumer ever
+  appears. (F2/F3) The gate’s three-way compare needed a *new* denominator check and an argparse extension — the
+  outline as written would have let a missing side pass and refused the very spelling it was added for.
