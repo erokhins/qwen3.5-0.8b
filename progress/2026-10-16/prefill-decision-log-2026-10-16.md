@@ -1766,3 +1766,50 @@ occupancy or instruction class with a falsifier per D49. **The falsifier that wo
 if the shipping kernel already issues matrix instructions and the 1.59 TFLOP/s is what the tile shape can
 sustain at 40 % lane coverage, then the fix is occupancy/tiling, not WMMA, and 3.3 (hand WMMA GEMM) stays
 closed under D47's roof prior instead of reopening.
+
+## D57 — attention attributed and re-priced: **4.6× against the right roof**, 2.4 stays no, 2.6 re-opens at +5–12 % of the wave (2026-10-17)
+
+§26 is the evidence; this is the adjudication, and it starts with a correction to **D56**, which I wrote the
+day before and which was wrong in its headline number.
+
+- **D56's "fourteen times below the rate the machine sustains elsewhere" is retracted.** 1.59 TFLOP/s was
+  compared against the 22.3 TFLOP/s *mix roof*, which is a matrix rate, while `tools/kernel_isa_census.py`
+  shows the shipping `attn_slim_wave` issues **no matrix and no dot-class instruction at all** — nor does any of
+  the **40 kernels** in the engine's own code objects. Against the measured sustained scalar `v_fma_f32` rate
+  (**7.30 TFLOP/s**) the gap is **4.6×**. The size of the prize did not change; the premise that priced it did,
+  and this project has now been bitten twice by comparing a kernel against a ceiling its instruction class
+  cannot occupy.
+- **Corollary that cuts the other way and is the reason 2.6 stays open:** llama.cpp's **≥7.9 TFLOP/s is above
+  the best scalar rate this box has ever measured**, so parity cannot be reached on any VALU path. The
+  comparison is real evidence about the *class* — and only about the class: the matrix instruction subsumes
+  ~27 of a touch's 45 pass-1 slots, a **2.4× cut of pass 1**, not a 5× cut of `attn`.
+- **2.4 (WMMA score inside the current geometry): funded no, and now for a structural reason.** `ATTN_TILE_M ==
+  1` is `static_assert`ed, so a 16×16 WMMA operand cannot be expressed without re-tiling; and granting the
+  warp-fold term D30 excluded (the 11 slots/touch that a matrix tile genuinely absorbs) still lands inside the
+  kill band after the measured geometry tax. D56 did not change `attn`'s 260 ms — only its share and the rate
+  framing — so none of D30's inputs moved.
+- **3.3 (hand WMMA GEMM): stays closed under D47, strengthened.** The census proves the engine's own objects
+  contain no matrix instruction, so 3.3 is not "use the instruction we already emit elsewhere"; it is writing a
+  GEMM from scratch to approach a rate hipBLASLt demonstrably sustains at 97–102 % of roof.
+- **2.6 (re-tiled attention at M ≥ 16): re-opened, priced at +5 % to +12 % of the wave, gated on a compile-only
+  falsifier.** Bottom-up: dot (16 slots) + fold (11) replaced by a measured-13.5-slots-per-tile feed takes a
+  pass-1 touch 45 → ≈19 slots. Whether that is real depends on fragment redistribution inside the *engine's*
+  block, which no probe has ever measured — so the gate is **`wmma_feeder_probe` extended with an M = 16
+  score+fold+store variant, censused: ≤ 19 slots/touch → fund it; ≥ 30 → D30's verdict stands.** No device
+  time is needed to answer it, and bit-identity is forfeited on this route (PV's P operand must become bf16),
+  so a floor probe and section (j) history come with it if it is funded.
+- **The denominator collision §2.4.2 settled favourably.** W2's calibrated counter read `attn_slim_wave` at
+  **2,265.7 M VALU/pass** against model A's 2,207 M (whole-kernel) and model B's 705 M (pass-1 only) — model A
+  by 3.2× — so **pass 1 is ~61 % of the kernel's VALU** and every remedy above keeps its upper price. One
+  instrument lesson came free: the leg's own parser declared "no rows, uncalibrated" on a counter set that had
+  collected correctly, because it summed without deduping by `(Dispatch_Id, Counter_Name)` and did not know
+  `--time-waves` replays the wave three times. That trap is in `AGENTS.md`.
+- **New item, from the same census: R6.** `attn_prep` + `attn_combine` are **90 of the family's 138 dispatches**
+  and had never been censused; the counter says **3.4 % of the family's VALU**, which is small, but instructions
+  are not wall and their launch/staging shape is unmeasured. Filed as cheap-to-check, not funded.
+- **Ledger corrections made in place:** §22's "attention launches / pass 48 vs 48, identical" was inference
+  (`6 × 8`) — counted, it is **ours 138 per pass against their 48**, because our attention is three kernels and
+  theirs one fused kernel; the *conclusion* (not a launch-count item, 0.15 ms of submission difference)
+  survives, the row did not. And `prototype/attn_valu_slim`'s "occupancy unchanged at 16 waves/SIMD" cited a
+  clang remark that prints 16 for every kernel; the supported figure is **5 blocks / 20 wavefronts per CU
+  (62.5 %)**, from KFD LDS 64 KiB, which is also the first LDS-per-CU number this repo ever recorded.
