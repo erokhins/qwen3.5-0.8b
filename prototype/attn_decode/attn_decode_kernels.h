@@ -161,6 +161,16 @@ struct CoreArgs {
     // 1 is `attn_tile_wave`, the G x M tiled form. `attn_combine` reads it too, because the two forms
     // lay their split partials out differently and a merge that guessed would read garbage.
     int tile_kernel;
+    // Which query rows a launch's WMMA form (`attn_fattn_wave`) owns, as opposed to the VALU tiled wave
+    // (`attn_slim_wave`). 0 (what a zero-initialised struct gives, so every pre-fattn caller and every
+    // one-row decode step) means "no WMMA form in this launch", and then `attn_slim_wave` handles EVERY
+    // row exactly as it did before this field existed — that is the bit-inert default. 1 means the two
+    // kernels split the rows: the WMMA kernel takes the rows it covers (`blocks_for_row > 1`, i.e. the
+    // streaming rows) and `attn_slim_wave` early-outs on those and keeps the one-pass rows. The split is
+    // computed by ONE predicate (`fattn_covers`) called from both sides, so no row can be dropped or
+    // double-written, and `engine/kernels_attn.cpp` echoes the covered count rather than routing silently
+    // — a route that changes quietly under a flag is the `--attn-tile` trap in a different hat.
+    int fattn_cover;
 };
 
 // The op's own row layouts (P8, §06.3). A wave hands these kernels one buffer per stage with one row
@@ -186,7 +196,11 @@ __device__ __host__ inline int nrows_of(const CoreArgs& a) { return a.nrows > 0 
 // The lanes query row `qrow` may attend to: §06.3's causal mask for THAT row (the wave's rows advance
 // in position order), plus the two ways an engine gets the mask wrong, kept as injections.
 //
-__device__ __forceinline__ int lanes_of(const CoreArgs& a, int qrow) {
+// HOST-CALLABLE since the WMMA form has to price its own row split on the host too
+// (`engine/kernels_attn.cpp`'s covered-share echo). A host paraphrase of a device rule is the
+// two-spellings-of-one-rule failure, so the function itself is callable from both sides instead; it is pure
+// integer field arithmetic and needed no change to make that true.
+__device__ __host__ inline int lanes_of(const CoreArgs& a, int qrow) {
     if (a.neg == NEG_READPAST) return a.cap;
     if (a.neg == NEG_DROPCUR) return a.pos + qrow;
     return a.lvalid + qrow;
@@ -203,7 +217,7 @@ __device__ __forceinline__ int lanes_of(const CoreArgs& a, int qrow) {
 //
 // That is also what makes one wave able to mix one-pass rows under the staging with split rows above
 // it: the decision is per row, and the grid is deep enough for the row that needs the most.
-__device__ __forceinline__ int blocks_for_row(const CoreArgs& a, int qrow) {
+__device__ __host__ inline int blocks_for_row(const CoreArgs& a, int qrow) {
     if (a.full && lanes_of(a, qrow) <= MAXSC) return 1;
     return a.split > 0 ? a.split : 1;
 }
@@ -520,6 +534,25 @@ __device__ __host__ inline int tile_blocks_for_row(const CoreArgs& a, int qrow) 
 }
 __device__ __host__ inline int tile_split_of(int lanes_last) { return split_for_lanes(lanes_last); }
 __device__ __host__ inline int tile_rtiles_of(int nrows) { return (nrows + ATTN_TILE_M - 1) / ATTN_TILE_M; }
+// How many query rows one WMMA-form block carries: the WMMA M dimension. Declared here rather than in
+// `engine/attn_fattn_kernels.h` because `fattn_rtiles_of` below needs it and the kernel header needs it,
+// and the two must be the same number — the kernel static_asserts against this one.
+#define FATTN_ROWS_PER_BLOCK 16
+
+// Which query rows the WMMA form (`engine/attn_fattn_kernels.h`) owns, as ONE predicate shared by both
+// sides of the split. It lives here, beside `blocks_for_row`, rather than in either kernel's header, so the
+// VALU wave's early-out and the WMMA kernel's coverage test cannot drift into two rules — a row that both
+// kernels own writes its partial twice, and a row neither owns leaves `attn_combine` reading an
+// uninitialised slot, and neither failure is visible in the arithmetic of the kernel that got it wrong.
+// The rule is §07.3's own streaming condition: a row the one-pass form can serve stays there, because its
+// bits are pinned and a WMMA round is streaming by construction.
+__device__ __host__ inline int fattn_covers(const CoreArgs& a, int qrow) {
+    return a.fattn_cover != 0 && qrow < nrows_of(a) && blocks_for_row(a, qrow) > 1 ? 1 : 0;
+}
+// The WMMA form's row-block rule: FATTN_MROWS = 16 query rows per block (the WMMA M dimension), which is
+// deliberately NOT `tile_rtiles_of` — that one is 1 row per block because a per-row lane cut gives two
+// rows no shared window, while 16 rows of ONE KV group share the lane range their union spans.
+__device__ __host__ inline int fattn_rtiles_of(int nrows) { return (nrows + FATTN_ROWS_PER_BLOCK - 1) / FATTN_ROWS_PER_BLOCK; }
 // This form's `part` is the SHIPPED form's layout, slot for slot: [row][head][lane block][2 + DH] F32,
 // indexed by the full head so that the two KV groups of a row never share a slot.
 __device__ __host__ inline int tile_part_floats(int nrows, int lanes_last) {

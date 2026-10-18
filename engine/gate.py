@@ -5039,6 +5039,11 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
                # The touch SPELLING, for the identical reason: a width A/B whose two sides ran different
                # inner spellings of the same form measures two things at once.
                "--attn-touch", args.attn_touch,
+               # The FORM that owns the streaming rows (`--attn-fattn`), for the identical reason: a width
+               # A/B whose two sides ran different attention forms measures two things at once, and under
+               # `--attn-fattn 1` the covered share of the family is part of what any ratio means — the
+               # launcher's `ATTN_FATTN ... fattn_rows=n/N` line is what makes that a printed number.
+               "--attn-fattn", args.attn_fattn,
                # The GDN scan too, for the identical reason: the two sides of a width A/B must differ
                # in width and nothing else. And its SPELLING for the same reason again — section (j)
                # is the only place the two spellings are allowed to differ, and it differs them alone.
@@ -5162,6 +5167,7 @@ def run_gdn_spell_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay
                "--prefill-logits", PREFILL_LOGITS_ALL,
                "--gemm", GEMM_ROUTE, "--gemm-pins", GEMM_PINS,
                "--attn-tile", args.attn_tile, "--attn-touch", args.attn_touch,
+               "--attn-fattn", args.attn_fattn,
                "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk),
                # THE ONE DIFFERENCE. Named explicitly on both sides rather than left to the binary's
                # default on one of them: a side that got its spelling from a default is a side whose
@@ -6839,6 +6845,23 @@ def main() -> int:
                          " `decode_run.cpp`'s own move in one commit, for the same reason"
                          " `--attn-tile`'s defaults do (`engine/gate.py`'s echo check fails a binary"
                          " that does not carry the field).")
+    ap.add_argument("--attn-fattn", choices=("0", "1"), default="0",
+                    help="which FORM owns a wave body's STREAMING rows, passed straight to `decode_run"
+                         " --attn-fattn` (`prototype/attn_wmma/fattn_score_handover.md` §5a,"
+                         " `engine/attn_fattn_kernels.h`): `1` launches the WMMA wave beside"
+                         " `attn_slim_wave`, with the WMMA kernel taking the rows §07.3 already streams"
+                         " and the VALU wave keeping the one-pass rows — the split is ONE predicate"
+                         " (`fattn_covers`) called from both kernels, and the launcher echoes"
+                         " `ATTN_FATTN ... fattn_rows=n/N` so the covered share of the family is a"
+                         " printed number rather than an assumption. `0`, the default, is the shipped"
+                         " path with one extra branch that is false for every row: a form that has not"
+                         " met the device does not become the engine's default by having been written,"
+                         " and the two fragment-map checkers (`check_fattn_map.py`, `check_fattn_cb.py")"
+                         " being green is a precondition for admission, not admission. Wave-only like"
+                         " the two above, so no decode bit moves under it, and asserted against the"
+                         " run's own NUMERICS echo for the same reason: a log that cannot say which"
+                         " form made its bits adjudicates neither side. This default and"
+                         " `decode_run.cpp`'s own move in one commit.")
     ap.add_argument("--gdn-scan", choices=("seq", "collapse"), default="seq",
                     help="which §04.4 scan a GDN body runs, passed straight to `decode_run"
                          " --gdn-scan` (P9, §04.7, route A is progress/2026-10-14/p9-phase1-2026-10-14.md D-12):"
@@ -7166,6 +7189,10 @@ def main() -> int:
            # claimed bit-identical, so a log that cannot say which one ran cannot witness that claim
            # either way.
            "--attn-touch", args.attn_touch,
+           # The FORM, named and asserted like the two above: `--attn-fattn 1` changes which kernel writes
+           # a streaming row's partial, so a judged run that cannot say which form ran cannot be compared
+           # against a pinned dump at all.
+           "--attn-fattn", args.attn_fattn,
            # The GDN scan, named on every run and asserted below: P9's matrix is this flag twice over
            # the ten fixtures, and a judged run that cannot say which scan produced its rows is
            # evidence about neither.
@@ -7328,6 +7355,17 @@ def main() -> int:
                " claim about either spelling can be made from this log" if echoed_touch is None else
                f"NUMERICS echoed attn_touch={echoed_touch}, this gate was run with --attn-touch"
                f" {args.attn_touch}"))
+        # The FORM that owns the streaming rows, read off the same line for the same reason
+        # (`--attn-fattn`, `engine/attn_fattn_kernels.h`). Under `1` a streaming row's partial comes from a
+        # different kernel, so a log that cannot say which form ran cannot be compared against a pinned
+        # dump at all — and a binary that predates the field would echo nothing, which is its own failure.
+        echoed_fattn = run.get("numerics", {}).get("attn_fattn")
+        check(str(echoed_fattn) == str(args.attn_fattn),
+              "the run ran the attention form this gate is judging it under",
+              ("its NUMERICS line carried no `attn_fattn=` — the binary predates --attn-fattn, so no"
+               " claim about either form can be made from this log" if echoed_fattn is None else
+               f"NUMERICS echoed attn_fattn={echoed_fattn}, this gate was run with --attn-fattn"
+               f" {args.attn_fattn}"))
         # The GDN scan, read off the same line for the same reason (P9). This is also the check that
         # catches a silent fall back: a `--gdn-scan chunk` run whose launcher decided to run `seq`
         # after all would echo `seq` here and fail, rather than pricing the shipped form twice.

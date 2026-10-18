@@ -32,7 +32,9 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <stdexcept>
+#include <string>
 
 #include "prototype/attn_decode/attn_decode_kernels.h"
 // The engine's copy of the tiled wave body with the two per-touch instruction levers applied
@@ -40,6 +42,7 @@
 // header's `attn_tile_body` and uses its vocabulary; both kernels are compiled either way, so the switch
 // below selects a LAUNCH and never a build.
 #include "engine/attn_slim_kernels.h"
+#include "engine/attn_fattn_kernels.h"
 
 namespace engine::kernels {
 namespace {
@@ -85,6 +88,54 @@ int warp_width() {
 // no device to re-gate is the worse price for const-correctness here.
 hip_bfloat16* bf16(const uint16_t* p) {
     return reinterpret_cast<hip_bfloat16*>(const_cast<uint16_t*>(p));
+}
+
+// The covered-share echo, printed once per DISTINCT wave geometry rather than once per attention layer.
+// WHY IT EXISTS AT ALL: under `--attn-fattn 1` only the streaming rows move to the WMMA form, so any family
+// speedup has to be divided by the covered share before it is believed — a 1.5x family result on 70 %
+// coverage is a ~2x result on covered rows, and those are different claims. A log that cannot say what
+// fraction it covered adjudicates neither. WHY ONCE PER GEOMETRY: the same body calls this from all 48
+// attention layers with the same numbers, and 48 identical lines per body would be noise that a reader
+// skims past, which is worse than one line. A geometry change (a later body with deeper lanes) prints
+// again, so the burst window sees every number it needs. `decode_run`'s NUMERICS line carries the flag;
+// this line carries the denominator.
+void fattn_echo(int rows, int split, int lvalid, int nrows) {
+    static std::string last;
+    // THE FORM'S OWN COSTS, read from the loaded code object rather than from a comment. `hipFuncGetAttributes`
+    // is authoritative here and the compiler's `-Rpass-analysis=kernel-resource-usage` note is not: that note
+    // prints a constant `Occupancy [waves/SIMD]: 16` for every kernel in the TU whatever the LDS
+    // (AGENTS.md, "the counters and census traps"), and a banner whose fields cannot disagree with the build
+    // is a banner that cannot catch a stale build. This is the D30 1.7' lesson applied one level over: the
+    // canary must be a field the change is REQUIRED to move, read in the same window as the number.
+    hipFuncAttributes at{};
+    const bool have_attrs =
+        hipFuncGetAttributes(&at, reinterpret_cast<const void*>(attn_fattn_wave)) == hipSuccess;
+    CoreArgs k{};
+    k.nrows = nrows;
+    k.split = split;
+    k.lvalid = lvalid;
+    // THE SAME PLAN THE CORE IS LAUNCHED UNDER, and this line is the one place that could lie about the
+    // covered share, so it is spelled out: `full = 1` is what `attn_decode_layer` sets above (`c.full = 1`),
+    // and `blocks_for_row` only applies §07.3's one-pass rule when `full` is set. Left at the zero-init 0,
+    // every row would look like a streaming row and this would print a 100 % covered share on a wave of
+    // short rows — a printed number that cannot be wrong is not an instrument.
+    k.full = 1;
+    k.cap = 1 << 30;                       // never the binding limit here; `lanes_of` caps at the cache
+    int covered = 0;
+    for (int r = 0; r < rows; ++r) covered += fattn_covers(k, r);
+    char buf[320];
+    std::snprintf(buf, sizeof(buf),
+                  "ATTN_FATTN form=fattn16 vgpr=%d lds=%d vtiles=%d wave_rows=%d fattn_rows=%d/%d"
+                  " covered_pct=%.1f split=%d%s",
+                  have_attrs ? at.numRegs : -1,
+                  have_attrs ? (int)(at.sharedSizeBytes) : -1, FATTN_VTILES,
+                  rows, covered, rows, rows ? 100.0 * covered / rows : 0.0, split,
+                  have_attrs && (at.localSizeBytes > 0) ? " SPILL" : "");
+    const std::string line(buf);
+    if (line == last) return;
+    last = line;
+    std::printf("%s\n", line.c_str());
+    std::fflush(stdout);
 }
 }  // namespace
 
@@ -224,6 +275,33 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                                      std::string(why) + ". Pass wave_tile=0 for the shipped form.");
         }
     }
+    // WHICH FORM OWNS THE STREAMING ROWS (`--attn-fattn`, `AttnLayerArgs::wave_fattn`). Like `wave_tile`
+    // this is wave-only, and like it, a refusal is an ERROR and never a fallback: silently running
+    // `attn_slim_wave` under `--attn-fattn 1` would price the shipped form twice and report it as the WMMA
+    // form. The coverage split itself — WMMA gets the rows §07.3 already streams, the VALU wave keeps the
+    // one-pass rows — is `fattn_covers`'s, called from both kernels, so the two sides cannot disagree
+    // about who owns a row and no partial slot is ever dropped or double-written.
+    const bool wave_fattn = a.wave_fattn != 0 && rows > 1 && a.wave_tile != 0;
+    if (a.wave_fattn != 0 && rows > 1 && a.wave_tile == 0) {
+        throw std::runtime_error(
+            "attn_decode_layer: --attn-fattn 1 requires --attn-tile 1. The WMMA form replaces the TILED "
+            "wave's streaming rows; under wave_tile=0 the per-(row,head) attn_core owns the whole wave and "
+            "there is nothing here for it to replace, so refusing is the only honest answer.");
+    }
+    if (wave_fattn) {
+        std::string why;
+        if (!fattn_plan_ok(c, &why)) {
+            throw std::runtime_error("attn_decode_layer: the WMMA wave form is unavailable: " + why +
+                                     ". Pass --attn-fattn 0 for the shipped form.");
+        }
+        if (!a.wave_touch) {
+            throw std::runtime_error(
+                "attn_decode_layer: --attn-fattn 1 requires --attn-touch 1. The row split lives inside "
+                "attn_slim_wave's early-out; the frozen attn_tile_wave spelling carries no such test, so "
+                "under --attn-touch 0 both kernels would write the same streaming row's partial. Refusing "
+                "is the only answer that cannot double-write a slot.");
+        }
+    }
     // One cache lane per warp, capped by the block's warp count — `attn_decode.hip.cpp:226`
     // (`tile = std::min(TILE, nw)`), where nw is THREADS/warpSize. On this wave32 part that is 8.
     c.tile = std::min(TILE, THREADS / warp_width());
@@ -299,7 +377,20 @@ void attn_decode_layer(const AttnLayerArgs& a) {
             // can move under it. It cannot degrade into the other side either — the two kernels are both
             // the tiled form, so there is nothing here for a fallback to fall back to.
             if (a.wave_touch) {
+                // Under `--attn-fattn 1` this kernel keeps ONLY the one-pass rows: `fattn_cover` is the
+                // shared split flag and the early-out lives inside the body, before any barrier, so the
+                // covered rows are genuinely this launch's business and not a partial write it abandons.
+                core.fattn_cover = wave_fattn ? 1 : 0;
                 attn_slim_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
+                if (wave_fattn) {
+                    // One extra launch, and it is worth naming what it buys: the WMMA form's grid is
+                    // 1/16th the row blocks of the VALU wave because one block carries 16 query rows, so
+                    // the added launch is cheap next to the work it removes. A wave whose rows are ALL
+                    // one-pass still launches it, and every block of it returns at its first ballot — an
+                    // inert launch is a cheap, visible cost; a silently-skipped one is not.
+                    attn_fattn_wave<<<dim3(N_KV, split, fattn_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
+                    fattn_echo(rows, split, c.lvalid, c.nrows);
+                }
             } else {
                 attn_tile_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
             }

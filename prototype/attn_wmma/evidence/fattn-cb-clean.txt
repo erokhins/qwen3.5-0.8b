@@ -1,0 +1,9 @@
+== check_fattn_cb — the C->B get_half2 relabelling, one launch per build
+CLEAN PROBE
+  pass clean: parsed 5120 of 5120 records  [lanes=32]
+  pass clean: every output cell was written (n_out=4096, unwritten=0)  [n_out=4096 want=4096]
+  pass clean: stage matrix score=PASS operand=PASS out=PASS  [got score=PASS operand=PASS out=PASS  (the claim)]
+  note: only the clean probe ran. --selftest runs the seven defect builds and requires
+        the derived stage matrix; a clean probe with no controls is an assertion.
+
+PASS: check_fattn_cb — 3/3 checks; correctness only, no timing taken

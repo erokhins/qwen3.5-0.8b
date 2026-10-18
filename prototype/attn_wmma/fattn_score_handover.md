@@ -35,9 +35,50 @@ form's staging writes LDS, which that file's source-text assertions forbid in it
 
 | §4.2 change | how it is built | the witness |
 |---|---|---|
-| (1) score tile `v_wmma_f32_16x16x16_f16`, **transcribed** map | `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32` with `short[16]` A/B and `float[8]` C; C read as row `lane&15`, columns `2l + lane>>4` | listing emits `v_wmma_f32_16x16x16_f16 v[1:8], v[15:22], v[23:30], v[1:8]`; `sizeof(CRegs)==32`, `sizeof(ARegs)==32` static_asserts; the `get_half2` round-trip below is the cross-check that the C map and the A/B map were read correctly |
+| (1) score tile `v_wmma_f32_16x16x16_f16`, **transcribed** map — **REFUTED AS TRANSCRIBED, see CORRECTION directly below this table** | `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32` with `short[16]` A/B and `float[8]` C; C read as row `lane&15`, columns `2l + lane>>4` | listing emits `v_wmma_f32_16x16x16_f16 v[1:8], v[15:22], v[23:30], v[1:8]`; `sizeof(CRegs)==32`, `sizeof(ARegs)==32` static_asserts; ~~the `get_half2` round-trip below is the cross-check that the C map and the A/B map were read correctly~~ — it is not: it checks output *shape*, not which cell a lane holds, which is the thing that turned out wrong |
 | (2) fold = 1 cross-lane op per row per tile | serial local max over the lane's 8 values, then **one** `__shfl_xor_sync(mask, m, 16)`; the rowsum is a register accumulate with its combine outside the round | exactly **10** lane-movement ops per warp-round in the listing: 9 in the round (1 + 8 exchanges) + 1 deferred rowsum |
 | (3) ≥ 8 independent **f32** P·V chains | 16 accumulator tiles over DH = 256, fully unrolled, P converted by the transcribed `get_half2` | `MMA.wmma` = 32 per round = 16 score + 16 P·V; `private_segment_fixed_size = 0` |
+
+### CORRECTION, 2026-10-18: the score-map row above is transposed, and the `get_half2` cross-check could not catch it
+
+**The claim in row (1) — lane `t` holds C row `t&15` at columns `2l + t>>4` — is false for the operand
+order this form stages.** It was transcribed from `fattn-mma-f16.cuh` plus `mma.cuh:183-215` and never put
+on device. It now has been: `prototype/attn_wmma/fattn_map_probe.cpp` stores each lane's 8 C values and its
+lane id from one launch, over four coordinate-encoding patterns, and
+`prototype/attn_wmma/check_fattn_map.py` asserts the law (26 checks, plus a `--selftest` that injects three
+wrong maps and requires all three to be caught). The measured law, with both operands staged row-major and
+the 16-half run along `k`, is:
+
+> lane `t`, register `l` holds `sum_k FIRST[row = 2l + t/16][k] * SECOND[row = t%16][k]`
+
+i.e. the **first** operand's row index lands in the C tile's **column** and the **second** operand's lands
+in the **row** — the transpose of what was transcribed. Three patterns agree independently: P1 (cell-id
+operands), P3 (weights exchanged), P4 (the port's own transposed-`V` / `P*V` spellings). Raw dumps:
+`prototype/attn_wmma/evidence/dump-as-transcribed.txt` and `dump-swapped-operands.txt`; write-up:
+`prototype/attn_wmma/fattn_map_results.md`.
+
+**What that means for the form as written.** `wmma_fattn_score.cpp`'s score leg would have produced
+`S[kv][q]` where the fold reads `S[q][kv]`, so every online `(m, l, acc)` fold runs down the wrong axis —
+silently, and past a census that passes with room to spare, because none of the three checks the handover
+booked (occupancy 4 blocks/CU, 9.72-of-20 slots/touch, `private_segment = 0`) can see a transposed index.
+The remedy is to exchange the operand slots (score leg `wmma(K_tile, Q_tile, acc)`, P·V leg
+`wmma(P_operand, Vt_tile, acc)`), which makes the transcribed drain true as written.
+
+**Why the booked cross-check passed and proved nothing.** Row (1) cited the `get_half2` round-trip as
+witnessing "the C map and the A/B map". It compares register-block *shapes* — 8 f32 out, 16 f16 in, 32
+bytes each — and two transposed layouts have identical shapes. That is the recorded failure class again: a
+check whose independent quantity is not the one under test (compare AGENTS.md's "a check whose reference
+side is derived from the thing under test cannot adjudicate it"). Shape agreement is not a layout witness.
+
+**Still not witnessed, and it must be before any numerics claim:** the C→B relabelling itself — that lane
+`t`'s 8 f32 accumulator registers, re-read as 16 f16 halves by `get_half2`, land in the B-operand slots the
+next `v_wmma` expects. The map probe fixes where a C value *is*, not what it becomes as an operand. See
+`prototype/attn_wmma/fattn_cb_probe.cpp` and `check_fattn_cb.py`.
+
+**Two numbers in this file are NOT affected** and are not retracted by this correction: claim (i), 4
+blocks/CU, and claim (ii), 9.72 of a 20 pipe-weighted budget. Both are addressing-blind. Both were
+re-measured after the operand swap anyway, because the swap moves which buffer is A and which is B — see
+`prototype/attn_wmma/fattn_map_results.md` §"Re-census after the swap".
 
 The roll/unroll choice on (3) is a finding: with `#pragma unroll 1` the accumulator array is indexed by
 the loop variable and LLVM moves all 128 accumulator registers into **scratch**

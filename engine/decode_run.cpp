@@ -140,6 +140,14 @@ struct Options {
     // moves), echoed on the NUMERICS line because a log that cannot say which spelling produced its bits
     // adjudicates neither side. Parse-or-throw like every other A/B flag here.
     int attn_touch = 1;
+    // Which FORM owns a wave body's STREAMING rows (`--attn-fattn`, Phase: the WMMA port).
+    // `prototype/attn_wmma/fattn_score_handover.md` §5a is the contract this flag reaches; the coverage
+    // rule and why it is what it is are written at the top of `engine/attn_fattn_kernels.h`. The default
+    // is 0: the two fragment-map checkers are green on device, the form itself has not been admitted, and
+    // a form that has not met the device does not become the engine's default by having been written.
+    // Parse-or-throw like `--attn-tile`, and echoed on the NUMERICS line for the same reason: a log that
+    // cannot say which form produced its bits adjudicates neither side.
+    int attn_fattn = 0;
     // Which §04.4 scan a GDN body runs (P9, §04.7; route A is D-12). `seq` is the shipped recurrence —
     // one launch per token per layer, the form every decode pin is pinned through — and `collapse` is
     // the same recurrence held resident, one launch per layer per BODY. `chunk` is refused at
@@ -287,6 +295,15 @@ Options parse_args(int argc, char** argv) {
                                          " default twice and report it as the slim form");
             }
             o.attn_touch = v == "1";
+        } else if (a == "--attn-fattn") {
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--attn-fattn takes 0 (the shipped VALU tiled wave owns every "
+                                         "row) or 1 (the WMMA wave owns the streaming rows); got '" + v +
+                                         "'. Refusing rather than guessing, because this names which"
+                                         " form produced the bits in this log");
+            }
+            o.attn_fattn = v == "1";
         } else if (a == "--gdn-scan") {
             o.gdn_scan = engine::kernels::parse_gdn_scan(next());
             o.gdn_scan_given = true;
@@ -661,6 +678,17 @@ void print_usage(FILE* out) {
                  " clamp. Wave-only, like --attn-tile: a one-row body is the fused single-row form under"
                  " either setting, so no decode bit moves, and BOTH spellings are compiled into the binary"
                  " whatever this says, so a paired timing is one window rather than two builds\n"
+                 "  --attn-fattn 0|1  which FORM owns a WAVE body's STREAMING rows "
+                 "(prototype/attn_wmma/fattn_score_handover.md §5a, engine/attn_fattn_kernels.h). `1` "
+                 "launches `attn_fattn_wave` beside `attn_slim_wave`: the WMMA kernel takes the rows §07.3 "
+                 "already streams (one 16x16x16 tile per 16 query rows x 16 KV lanes, so the wave's score "
+                 "dot becomes one matrix instruction per 16 dims instead of 16 FMAs per touch) and the VALU "
+                 "wave keeps the one-pass rows — the split is `fattn_covers`, one predicate both kernels "
+                 "call, and the launcher echoes `fattn_rows=n/N` so a covered share is never assumed. `0`, "
+                 "the default, is the shipped path untouched: the WMMA form has had its fragment maps "
+                 "measured but not its numerics admitted. Wave-only, like the two above; the launcher "
+                 "REFUSES (fused plan, null `part`, `--attn-tile 0`, `--attn-touch 0`) rather than "
+                 "silently running the shipped form and reporting it as the WMMA one\n"
                  "  --gdn-spell ship|unroll4|fused  which SPELLING of the sequential recurrence's state"
                  " walks a `gdn_rec` launch runs (`engine/gdn_rec_unroll4_kernels.h`, "
                  "prototype/gdn_rec_isa/results.md §10, decision D32). `unroll4` is the SHIPPED"
@@ -1314,11 +1342,11 @@ int main(int argc, char** argv) {
         // the library it is linked against, not about the run — and read by `gate.py`'s
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
         std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d"
-                    " attn_touch=%d gdn_scan=%s gdn_chunk=%d gdn_spell=%s gdn_loop=%d\n",
+                    " attn_touch=%d attn_fattn=%d gdn_scan=%s gdn_chunk=%d gdn_spell=%s gdn_loop=%d\n",
                     engine::kMaxWaveRows, o.wave_rows,
                     engine::kernels::wave_gemm_name(o.wave_gemm),
                     engine::kernels::gemm_route_version().c_str(), o.attn_tile,
-                    o.attn_touch,
+                    o.attn_touch, o.attn_fattn,
                     engine::kernels::gdn_scan_name(o.gdn_scan), o.gdn_chunk,
                     // Truthful, not decorative. `collapse` submits `gdn_rc::rec_collapse_kernel`, which
                     // never reads this flag, so an echo naming a spelling here would report a kernel that
@@ -1348,6 +1376,7 @@ int main(int argc, char** argv) {
         sc.wave_gemm = o.wave_gemm;
         sc.attn_tile = o.attn_tile;
         sc.attn_touch = o.attn_touch;
+        sc.attn_fattn = o.attn_fattn;
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;
         sc.gdn_spell = o.gdn_spell;
