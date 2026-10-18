@@ -1414,3 +1414,29 @@ every dump directory name as an integer and dies on `wave000-031`, so the cos/me
 still a borrowed number, and **adoption cannot be proposed until that is fixed**. The WMMA latency legs never
 ran at all — `wmma_latency` core-dumps on its first leg, and its own row-count check reported 0-of-15 as the red
 result it is, so the f16-accumulator question is still unanswered.
+
+### §29 correction, same day: the 1.3665× was measured on a form whose covered rows are ALL NaN, and CANARY C was green *because* of that
+
+[CORRECTION IN PLACE — see the section above before quoting anything from it.]
+
+The acceptance review (`tmp/gcc/fattn_band_analysis.md`, worker `80316334`) found that every row the WMMA form
+owns (rows 512..1023 of `wide1024f`) is entirely non-finite: direct dump census `nan = 248320/248320` per row,
+the engine's own echo goes `prefill 511 ... top 29.66` then `prefill 512 ... sampled 0 top nan`, and the fault
+trace puts the first NaN in the output of the first full-attention layer (`layer_types = [L,L,L,F]x6`, kv row 0
+finite, kv rows 1-5 and GDN state rows 3.. NaN). The 560 gate failures decompose exactly as 20 token-id +
+24 logits + 512 per-row + 4 state-invariant, and the control is unambiguous: **with the flag off, zero NaN, rows
+0..511 bit-identical to the flag-on side, max 1-cos 1.969e-04, max meanrel 3.390e-02** — so every failing class
+belongs to this form and none is pre-existing. Decision room is not the excuse: min top1-top2 gap 3.875 (31 BF16
+ULP) at row 519, median 11.3125, **0 of 512 rows under the thin-room line**. NaN is not band-able, so the
+question the user funded (is the precision cost small?) cannot be asked yet, and the flip and the merge are off
+the table until the NaN is gone.
+
+Two things about my own instrumentation, because they are the reason this survived as long as it did.
+**CANARY C was green *because* of the NaN**: it asserted the two sides differ bit-wise so a stale side could not
+pass, and a NaN row differs from a finite row beautifully. A difference witness proves non-staleness and nothing
+about validity — a form that computes garbage passes it. And three gate checks could not see it either:
+`gate.py:3409,3414` judge rows against caps with `>`, and `nan > cap` is False, so section (i) printed
+**PASS, "1024 rows judged ... inside the floors", over 512 NaN rows**; the b2 side at `gate.py:8196` does not
+forward `--attn-fattn`, so the "identical conditioning" comparison silently ran the frozen form; and section (j)'s
+"1025.1 MB bit-identical" was vacuous over non-finite data. Every one of those is the same trap in a new coat: a
+check whose predicate cannot be false for the failure it is aimed at.

@@ -2116,3 +2116,20 @@ all**, so the barrier cost I flagged as "unpriced" is priced at zero at this geo
 means **4 wavefronts/CU**, which is *five times below* the 12–20 band §28 actually measured. That is stated in
 the burst's own canary rather than smoothed over, and it is the strongest remaining reason to expect (iii) to
 fail. If it does fail, the matrix class and the round shape are both exonerated and **2.6 closes on evidence**.
+
+## D64. The accepted win is withdrawn before shipping: the WMMA form's covered rows are NaN, and the gate could not say so
+
+Measured (worker `80316334`, `tmp/gcc/fattn_band_analysis.md`): rows 512..1023 of `wide1024f` are
+`nan = 248320/248320` with the flag on and clean with it off (0 NaN, 0 argmax flips, rows 0..511 bit-identical
+between sides). Decision log: **do not flip the default, do not merge.** Claim (iii)'s 1.3665× stands as a
+*measurement of a kernel that does not compute the right answer*, which is not a number the ledger may carry as
+a win; §29 carries the correction in place.
+
+Why it got through my own burst: canary C was a *difference* witness (anti-stale-binary), and NaN differs from
+finite, so it passed **because** of the defect. Difference-from-reference is not the same test as finite-and-
+inside-a-band, and from now on any timing window whose canaries are all difference-based is documented as
+unverified-for-validity rather than green. Three gate checks were also blind — two compare with `>` so a
+non-finite passes a cap silently, one drops the flag on the b2 side, one calls non-finite equality "bit-identical"
+— and all three are being fixed to fail loudly, because a check that cannot be false for its target failure is
+decoration. Next: localise and fix the NaN, re-run admission section 2, then re-time claim (iii) and only then
+re-open the flip decision.
