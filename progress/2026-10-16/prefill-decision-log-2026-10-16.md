@@ -1656,3 +1656,26 @@ proven we can hit, and an expression that hand-rolls the same arithmetic inherit
   candidates, both already visible in our own family table: `gdn_rec` at 46–48 % of the wave (their GDN path
   hides its per-token cost far better) and `attn` at 263 ms / 6.7 % of the matrix roof with quadratic growth.
   The `-t 4 > -t 32` anomaly is recorded as unexplained, not dropped.
+
+## D53 — what the trace licenses: batch the GDN *launch*, which is not the thing P9 was (2026-10-17)
+
+§22 says the GDN gap is 512× in launch count and ≥9× in time, and that attention is ≥5× at **equal** launch
+counts. Two decisions follow, and the first deliberately does **not** re-open 1.2:
+
+- **New item, ahead of everything: one launch per N tokens for `gdn_rec`, recurrence unchanged.** Today the
+  engine submits 73,728 kernels for a 4096-token prompt (18 layers × 4,096 tokens); the external existence
+  proof walks 512 tokens inside a single launch. Looping the token index *inside* the kernel removes 4,095 of
+  every 4,096 launches per layer — and because each token's arithmetic is the same expression tree in the same
+  order, and addresses do not move (same grid `<<<16,128>>>`, same operands), the output is **bit-identical by
+  construction**, so no band is requested and no gate is asked to move. The prize is bounded below by the
+  submission floor alone: 73,728 × 1.72 µs ≈ **127 ms ≈ 13.8 % of the wave**, before any saving on the
+  per-launch prologue/drain that §19's fused prologue just made cheaper per launch and therefore relatively less
+  painful. **This is distinct from 1.2/P9**, which reformulated the recurrence into chunked matmul math, changed
+  the association, and measured 13.8× worse for reasons D46 attributed to a thread-mapping defect.
+- **Attention (item 2.6) is promoted by evidence, not by taste**: same launch count as an outside kernel that is
+  ≥5× faster, which retires "it is launch overhead" as an explanation for that row and leaves tile shape and
+  occupancy as the surviving candidates.
+- **What would falsify the GDN item cheaply:** a prototype MODE that loops N tokens per launch and is *not*
+  bit-identical to the per-token form (that would mean the loop crossed an association boundary, which the §19
+  `q̃` lesson says is possible via compiler contraction), or a paired wave A/B in which the `gdn_rec` family row
+  does not move when the launch count does. Both are one prototype run and one A/B.
