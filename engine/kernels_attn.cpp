@@ -156,7 +156,7 @@ void fattn_echo(int rows, int split, int lvalid, int nrows) {
     }
     char buf[400];
     std::snprintf(buf, sizeof(buf),
-                  "ATTN_FATTN form=fattn16 q=stage vgpr=%d lds=%d scratch=%d vtiles=%d wf_per_cu=%d"
+                  "ATTN_FATTN form=fattn16 q=global vgpr=%d lds=%d scratch=%d vtiles=%d wf_per_cu=%d"
                   " wave_rows=%d split=%d fattn_rows=%d/%d fallback_rows=%d"
                   " covered_rows_pct=%.1f covered_work_pct=%.1f%s",
                   have_attrs ? at.numRegs : -1,

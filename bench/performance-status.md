@@ -1473,3 +1473,34 @@ being stale, in that order — the expectation must be **re-derived from the new
 raised to meet the listing. Until that is done the census is a red gate and the form's per-touch instruction
 figure is stale. The remaining gap to 1.5× still has two unpriced candidates, both scheduling rather than
 arithmetic: **4 wavefronts/CU** (five times below the 12–20 band §28 measured) and **49 spilled VGPRs**.
+
+## §31. Bet 1: un-staging Q doubles residency and takes the `attn` family to 1.647× — the bar is cleared, and residency was real (2026-10-18)
+
+`tmp/gcc/fattn_unstage_q.patch` applied: the block stops staging Q, `group_segment_fixed_size` goes 16,384 →
+**8,192 B**, and the driver's answer goes **4 → 8 wavefronts/CU** (read from each side's own `wf_per_cu` banner,
+not asserted). Costs measured at compile time: **+2 spilled VGPRs, +4 B scratch**, −32 B of LDS reads, +16 B of
+global reads for a tile that is now L1/L2-resident. Timing: three sides interleaved in one lock hold, `sleep 10`
+before every run, 4096 lanes:
+
+| side | `attn` family median | wave total median |
+|---|---|---|
+| frozen (`--attn-fattn 0`) | 264.58 ms | 872.14 ms |
+| staged Q (the merged form, 4 wf/CU) | 192.85 ms | 760.05 ms |
+| **Bet 1, 8 wf/CU** | **160.65 ms** | **735.51 ms** |
+
+So residency was **not** the free variable §28 made it look like: doubling it from 4 to 8 wavefronts cut the
+`attn` family a further **1.20×**, which puts the whole change at **1.647× over frozen** — past D62's 1.5× bar,
+which the staged form missed at 1.3955×. Wave total moves 872.14 → 735.51 ms, **+18.6 % prefill** at today's
+sustained clock (~2.45 GHz), i.e. **5,569 tok/s** measured in this window against the same window's frozen
+4,696. One bet1 rep printed a 1615 ms total (an outside interference, visible and rejected by the median of 3);
+its `attn` figure was normal, so the stage-level numbers stand while the total is taken from the median.
+
+Correctness: `wide1024f --scope full` **PASSES** on the Bet-1 build with the default ON, and the three boundary
+rows report the same cos deficits as the staged form (511: 3.7518e-05, 512: 2.8301e-05, 1023: 2.7208e-05).
+**Known-red gate on this commit:** `fattn_ship_census.py` now refuses the listing
+(`lds_read_B 1056 vs derived 1088`, `global_read_B 64 vs derived 32`) — correctly, because Q moved from an LDS
+stage to a global read and the model still derives the Q operand's source from the old spelling. The fix is to
+teach `derive()` to read that source from the source text; the constant may not be raised to match the listing.
+Bet 2 (3 warps/block sharing one K/V stage, 6 wf/CU at zero spill) is now the test of whether 8 is still too
+few: if 6 wf/CU with no spill at all beats 8 wf/CU with 50 spilled, the two suspects are separable and spill is
+the cheaper of the two.

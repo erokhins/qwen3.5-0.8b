@@ -191,8 +191,9 @@ __device__ __forceinline__ int fattn_v_addr(int d, int kv) { return d * FATTN_ML
 #define FATTN_TROW (DH / 2)                       // floats per query row of the transpose stage
 static_assert(FATTN_MLANES * DH * 2 == 8192 && FATTN_MROWS * FATTN_TROW * 4 == 8192,
               "the aliased K/V stage is the P*V operand AND the output transpose staging, at exactly 8 KiB");
-static_assert(FATTN_MROWS * DH * 2 + FATTN_MLANES * DH * 2 == 16384,
-              "Q stage + aliased K/V stage is exactly 16 KiB, which is the 4-blocks/CU boundary");
+static_assert(FATTN_MLANES * DH * 2 == 8192,
+              "with Q read from global, the aliased K/V stage is the block's entire LDS: 8 KiB, which on this "
+              "part is the 8-blocks/CU boundary. The census reads this off the declarations, not from here.");
 // HOW THE PARTIAL IS PUBLISHED: `part` wants the row's DH dims in blocks of FATTN_TBLK, the transpose stages
 // half of DH at a time, and FATTN_PBLK is the blocks one lane publishes per half. The assert is the
 // COVERAGE claim — every dim of every staged row is written exactly once per half — and it is the guard that
@@ -276,6 +277,29 @@ __device__ __forceinline__ void fattn_stage_row(__half* dst, const hip_bfloat16*
 #pragma unroll
     for (int t = 0; t < 8; ++t) o.h[t] = __float2half_rn(fattn_bf(s[t]));
     *reinterpret_cast<uint4*>(dst + lane * 8) = o.o;
+}
+
+// THE Q OPERAND, read straight from global: the same 16 halves `fattn_load_tile` returns from a stage, built
+// here from the two uint4s of the row's 16 BF16 dims. The conversion is the same
+// `__float2half_rn(fattn_bf(x))` `fattn_stage_row` applies, moved from once-per-launch to once-per-round, so
+// the operand VALUES are identical and no numerics band can move.
+//
+// WHY: Q's stage is 16 rows x DH x 2 B = 8192 B, and per-warp Q data is 8 KiB whatever the layout (file header,
+// placement (B)), so the only lever on it is to stop staging it at all. That takes a block to 8192 B of LDS,
+// which on this part is 8 blocks/CU instead of 4 — twice the wavefronts the banner has been printing as
+// `wf_per_cu=4`. The price is one Q tile re-read per round instead of per launch, which is what
+// `prototype/attn_wmma/fattn_ship_census.py`'s `global_read_B` term exists to price.
+__device__ __forceinline__ fattn_ARegs fattn_load_q_tile(const hip_bfloat16* p) {
+    const uint4 lo = *reinterpret_cast<const uint4*>(p);
+    const uint4 hi = *reinterpret_cast<const uint4*>(p + 8);
+    const hip_bfloat16* s0 = reinterpret_cast<const hip_bfloat16*>(&lo);
+    const hip_bfloat16* s1 = reinterpret_cast<const hip_bfloat16*>(&hi);
+    fattn_ARegs r;
+#pragma unroll
+    for (int e = 0; e < 8; ++e) r[e] = (short)__half_as_ushort(__float2half_rn(fattn_bf(s0[e])));
+#pragma unroll
+    for (int e = 0; e < 8; ++e) r[8 + e] = (short)__half_as_ushort(__float2half_rn(fattn_bf(s1[e])));
+    return r;
 }
 
 // One row's slice of this launch. Every quantity here is per ROW, and a row belongs to exactly one row-slot
@@ -403,7 +427,9 @@ __device__ __forceinline__ int fattn_warp_max(int v) {
 }
 
 __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
-    __shared__ __align__(16) __half s_q[FATTN_MROWS * DH];     // [row][dim]: the score leg's SECOND operand
+    // NO Q STAGE. The score leg's SECOND operand comes from global per round by `fattn_load_q_tile`, which
+    // costs a re-read and buys 8192 B of LDS: 8 blocks/CU = 8 wavefronts instead of 4, on the driver's own
+    // occupancy answer. Everything else about the placement is the shipped one.
     __shared__ __align__(16) __half s_kv[FATTN_MLANES * DH];   // K [lane][dim] for the score leg, then V
                                                                // [dim][lane] for P*V — ALIASED, one barrier
                                                                // between the two users — then the F32 O
@@ -436,18 +462,15 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
     const unsigned row_mask = (unsigned)__ballot_sync(FULL_MASK, me.covered ? 1 : 0);
     if (!row_mask) return;                     // block-uniform, and before any barrier
 
-    // ---- Q, staged once for the whole launch: 16 rows x DH, BF16 in global -> F16 here, the conversion
-    // paid once per element (which is also where the shipped form pays its own, in `attn_prep`).
-    // The clamp is not cosmetic: a row block at the end of a wave can be partly out of range, and reading
-    // `ROW_H * row` for a row past `nrows` reads past the staged Q buffer. A clamped row's cells are masked
-    // below, so the bytes it cost are never used for anything.
+    // ---- Q is not staged, but its clamp is the shipped one and is still not cosmetic: a row block at the end
+    // of a wave can be partly out of range, and reading `ROW_H * row` for a row past `nrows` reads past the Q
+    // rows this launch owns. The staged fill clamped its row slot identically; what differs is that a partly
+    // out-of-range block now re-reads a clamped row where the staged form left the stage slot unwritten. The
+    // cells are masked out below either way (`live`), so no output value changes, and the clamped read is the
+    // safer of the two because it never reads an unwritten stage slot.
     const int qrmax = nrows_of(a) - rt * FATTN_MROWS;             // >= 1: the row block has one row at least
-    for (int qr = w; qr < FATTN_MROWS; qr += nw) {
-        const int qrs = qr < qrmax ? qr : qrmax - 1;
-        fattn_stage_row(&s_q[fattn_q_addr(qrs, 0)],
-                        a.qrope + (size_t)ROW_H * (rt * FATTN_MROWS + qrs) + (size_t)head0 * DH, lane);
-    }
-    __syncthreads();                                             // barrier 1: Q published (once per launch)
+    const int qrs = fattn_ab_row(lane) < qrmax ? fattn_ab_row(lane) : qrmax - 1;
+    const hip_bfloat16* qrow = a.qrope + (size_t)ROW_H * (rt * FATTN_MROWS + qrs) + (size_t)head0 * DH;
 
     // The round range: the union of the covered rows' slices. The 16 rows of a block differ in lane count
     // by at most FATTN_MROWS - 1 and share `s_row`, so their `span`s differ by a little and their `blo`s
@@ -493,7 +516,7 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
 #pragma unroll 1
         for (int t = 0; t < FATTN_KTILES; ++t) {
             const fattn_ARegs first = fattn_load_tile(&s_kv[fattn_kv_addr(fattn_ab_row(lane), 16 * t)]);
-            const fattn_ARegs second = fattn_load_tile(&s_q[fattn_q_addr(fattn_ab_row(lane), 16 * t)]);
+            const fattn_ARegs second = fattn_load_q_tile(qrow + 16 * t);
             acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(first, second, acc);
         }
 
