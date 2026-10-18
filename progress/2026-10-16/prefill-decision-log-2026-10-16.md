@@ -1891,3 +1891,47 @@ must become bf16, so a new band and a gate section come with it).
   against a 7.5–15 % threshold. (Its census's "36.3 slots/touch-equivalent" for `attn_prep` is *not*
   comparable to slim's 89.9: the two kernels normalise on different touch counts. The time shares are the
   usable figures.)
+
+## D59. Item 2.6 is closed on measurement: every ingredient of the WMMA re-tile has now been tested, and each one fails
+
+D58 left one unknown: the geometry tax of a 16-row re-tile, as a device number. It is measured, in
+`bench/performance-status.md` §27, paired inside one rep against the kernel the engine ships (`ndiff=0`
+on both sides), 40 launches × 5 reps, blocking, zero subagents, admission green first (40/40).
+
+**The re-tile demands 0.28–0.30 of the bytes and runs 2.1× to 14.3× slower** in every fixture the harness
+builds — best case **+112 %** at the widest grid, worst **+1,326 %**. Not a marginal result to be argued
+down: three independent reasons, all measured rather than modelled.
+
+1. **The traffic win buys nothing here.** D57's instruction cut made `attn` **1.521× faster with the byte
+   census unchanged** — the kernel is not traffic-bound at these widths, and a re-tile's only lever is
+   demanded bytes.
+2. **The cost is registers, and it is coupled to the win.** Full-body VALU re-tile: **134 VGPR / 12,800 B**
+   vs shipped **47 / 12,288** → LDS allows 5 blocks/CU, registers allow **3** (12 wavefronts against 20).
+   `GRP=8` is refused by the accumulator `static_assert`; `GRP=2` restores parity only by giving up the
+   re-use. Re-use and occupancy are one decision in this spell, not two.
+3. **The WMMA block would pay more, not less.** D58's 30-VGPR `m16_bf16gq` is a score-tile probe with no
+   softmax/rescale state and no `P·V`. The real block must also hold the `P·V` fragments over `DH = 256`,
+   **128 VGPR/lane on its own** — so 134 VGPR is an *under*-estimate of the WMMA block's bill, and the
+   cheapest form of the geometry already costs +112 % against a route whose entire prize was −15 % to
+   −17 % of `attn`.
+
+**Decision: 2.6 closed, not deferred.** D57 re-opened it on the argument that the feeder might be the wall;
+D58 disproved that; this disproves the geometry. With §22 (launch count, equal launches and ≥5× slower) and
+D46/D30 (tiled GEMM kill band) the route has no untested ingredient left, so there is nothing to fund and
+no band to negotiate. Re-open condition, so this is falsifiable rather than a veto: a **512-row** fixture
+(the engine's real wave; this harness stops at 64) showing the geometry tax below **~1.15×**, which would
+require the re-tile to be traffic-bound — already disproved once, and the burden is on anyone re-filing.
+
+**Corrections carried in the same commit, so the record is not left with the optimistic half.**
+- D57's "+5–12 % of `attn`" was priced on a *pass-1-only* 45-slot leg against a whole-kernel bill of
+  **89.9 warp-inst/touch** measured in §26 W2; against the whole kernel the score half was worth
+  **−15 % to −17 % at the measured elasticity**, and that was already the ceiling before any tax.
+- The worker's report stated bit-identity "everywhere" and did not mention **`short-64`**
+  (`64 rows @ lanes 64–127`, `split=1`, `full=0`), which returns `ndiff_aout_m16 = 131072` — every element
+  differs. `burst_m16.sh` printed `NO-TIMING: admission is red` and refused to time it, so no contaminated
+  number entered §27; the closure above does not rest on that case. Unresolved and on the M = 16 form;
+  `ndiff == nrows × 2048` exactly reads as a changed work split at `split=1`, not a wrong value.
+- Occupancy for `attn_m16` is quoted from the compiler's own resource remarks (VGPR/LDS), because
+  `attn_m16.hip.cpp` carries the harness `main()` and cannot be linked into `kernel_occupancy_probe.cpp`
+  for a driver-authority reading. The register-cap claim is a static reading, and this repo has already
+  been bitten once by a metadata-derived occupancy (D58's `m16_bf16rt`: predicted 1 block/CU, driver 3).
