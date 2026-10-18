@@ -234,21 +234,36 @@ def main() -> int:
     tabs = sorted(WORK.glob("out*/*/rope_cs.bin")) if (WORK := Path("/tmp/attn_decode")).exists() \
         else []
     if tabs:
-        ent = flip = cases_bad = 0
+        ent = flip = cases_bad = parsed = skipped = 0
         for t in tabs:
+            nm = t.parent.name
+            pos = nm.replace("prefill", "").replace("decode", "").split(".")[0]
+            if not pos.isdigit():
+                # Named and counted, not silently ignored. The fattn admission writes WAVE-style dump
+                # dirs (`wave000-031`) into the same tree, and this line used to die on them with
+                # `ValueError: invalid literal for int()`; skipping them silently would be worse, because
+                # a filter that swallows the whole population leaves this floor judging nothing.
+                skipped += 1
+                continue
             got = R.read_bf16(t, 2 * R.ROT)
-            p = int(t.parent.name.replace("prefill", "").replace("decode", "").split(".")[0])
-            if t.parent.name.startswith("decode"):
+            p = int(pos)
+            if nm.startswith("decode"):
                 p += 17          # dec8's decode steps start after a 17-token prefill
+            parsed += 1
             cos, sin = R.rope_cs(torch.tensor([p]), None)
             want = torch.cat([cos.to(torch.bfloat16), sin.to(torch.bfloat16)]).reshape(-1)
             f = int((got != want).sum())
             ent += 2 * R.ROT
             flip += f
             cases_bad += 1 if f else 0
+        if not parsed:
+            raise SystemExit("F3b: %d rope_cs.bin found and NONE names a position (all %d looked like "
+                             "wave-style dirs) - the population this floor measures is not here, so it "
+                             "cannot be judged either way." % (len(tabs), skipped))
         print("\nF3b the device's own rope table vs torch's, read back from %d cases run.py wrote:"
               " %d of %d entries differ (%.4f%%), in %d of %d positions sampled"
-              % (len(tabs), flip, ent, 100.0 * flip / ent, cases_bad, len(tabs)))
+              "  [of %d dirs, %d parsed as positions, %d named-not-pinned (wave-style) and skipped]"
+              % (parsed, flip, ent, 100.0 * flip / ent, cases_bad, parsed, len(tabs), parsed, skipped))
         print("    every flip is 1 ULP of BF16 and lands on a value the rope multiply then rounds"
               " again; end to end it moved 1 element of 2048 in q_rope at one position.")
         floors["F3b device rope table"] = 1e-4
