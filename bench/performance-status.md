@@ -1111,3 +1111,61 @@ window is an attribution, and the headline comes from its own clean-window re-ta
 harness flagged is still on the books — the loop bills **+156 slots/token-step** (1,530 vs 1,374) from recomputing
 `t*CH` — and it was paid here and still came out 1.63×, which is what makes the address-spelling variant
 (increment six row pointers instead) a follow-up rather than a prerequisite.
+
+## 25. The looped launch ships: ruler **763.49 ms = 5,364 tok/s**, and §1's banner re-taken (2026-10-17)
+
+Default moved `--gdn-loop 1 → 512` on §24's evidence (engine option, `DecodeScratch`, `WaveShape` and
+`gate.py`'s default in one commit, per the `--attn-tile` rule that a gate and a binary must not disagree).
+`wide520f` then passed the whole gate with the looped form on every pinned path: **370 checks, 0 failures**,
+with the new echo assertion reading `gdn_loop=512` on the main run and section (j) still a real A/B (its
+spelling sides are pinned to span 1 because `ship`/`unroll4` have no looped body).
+
+**The ruler** — `ids4096.txt`, `--steps 0 --time-waves --gemm lt --gemm-pins all --gdn-loop 512`, three reps,
+one hold, blocking, zero subagents: **763.49 / 762.24 / 781.95 ms → median 763.49 ms**, against §16's
+921.56 ms. **4,444 → 5,364 tok/s, +20.7 %** — the largest single move in this ledger, and the family row that
+earned it is §24's (`gdn_rec` 449.07 → 266.03 ms). `gdn_rec` is now 34.9–36.5 % of the serialized wave against
+46.4 % before; `attn` is now the largest single family at 34.0–34.9 %.
+
+**Short widths, because a win that only exists at 4,096 lanes would be a different kind of result.** Paired
+inside one hold, same binary, alternating per reps, claim = the `gdn_rec` family row, wall `TOTAL` reported
+separately (medians of 3):
+
+| lanes | `gdn_rec` span 1 → 512 | family ratio | counted launches | wall span 1 → 512 | wall move |
+|---|---|---|---|---|---|
+| 64 | 6.674 → 4.241 ms | **1.574×** | 1,152 → 18 | 21.30 → 18.75 ms | **+12.0 %** |
+| 256 | 27.602 → 16.828 ms | **1.640×** | 4,608 → 18 | 49.54 → 39.14 ms | **+21.0 %** |
+| 1024 | 109.400 → 67.007 ms | **1.633×** | 18,432 → 36 | 185.798 → 144.649 ms | **+22.2 %** |
+
+So the lever is elastic at every width the engine serves, and the 64-lane row — where §1's old banner seemed to
+show a 15 % *regression* — is flat-to-better in a paired window. That apparent regression was window noise and
+this section says so with the pair beside it.
+
+**A null worth recording, because it was nearly a false refutation.** The first version of this short-width A/B
+generated ids space-separated; `--ids` takes **comma**-separated ids, so `parse_ids` read exactly one token and
+both sides priced a one-token wave — 12.99 vs 12.93 ms at every "width", which reads as "the loop does nothing
+below 1,024 lanes" and would have closed the wrong conclusion. Two guards came out of it: the instrument now
+prints `launches=` next to the family `ms` (18 launches at 64 lanes is the loop; 1,152 is not), and any sweep
+whose `tokens=` field disagrees with the width it names is a broken sweep, not a result. The script is
+`tmp/gcc/run_smallwidth_ab.sh` with the trap in its header comment.
+
+**§1's banner** — re-taken same day, same window order as its own commands, because it had gone stale by three
+shipped items (`--attn-tile 1`, the conv coalesced read, and now the loop):
+
+| prompt lanes | ms, best of 3 | all runs | spread | prompt tok/s | was (§1, 2026-10-16) |
+|---|---|---|---|---|---|
+| 64 | 104.7 | 104.9 / 104.7 / 115.9 | 10.72 % | 611.2 | 702.9 |
+| 256 | **122.8** | 124.6 / 124.6 / 122.8 | 1.49 % | **2,084.6** | 1,828.5 |
+| 1024 | **228.3** | 229.9 / 232.0 / 228.3 | 1.64 % | **4,486.2** | 3,443.1 |
+| 3072 | **615.8** | 623.2 / 618.3 / 615.8 | 1.20 % | **4,988.5** | 3,385.8 |
+
+Decode is **where it was**: 128 lanes 11.480 ms = 87.1 tok/s, 512 → 78.3, 1024 → 82.5, 2048 → 80.1 (§1's rows
+were 90.6 / 80.6 / 80.6 / 80.8), i.e. every row inside its own historical spread, which is what §24's flat
+decode pair (median 0.9999) predicted — a one-row body takes the per-token path whatever the flag says. The
+64-lane prefill row still reads below the paired number (611 vs the 12-lane-scale paired ruler) and carries a
+10.72 % spread: §6's dispatch bimodality, unchanged.
+
+**What this does to the comparison instrument.** At matched `-ub 512` llama.cpp read 8,290 tok/s against our
+4,430 (§21/§22, ratio 1.87×). At today's 5,364 the same llama.cpp number is **1.55×**, and the §22 census said
+the two remaining mechanisms were launch count (GDN — now done) and the attention tile (still open: 48 launches
+both sides, our 263 ms against their ≤52 ms). That is now the only ≥1.5× row left in the attribution table,
+which is why it is item 2.6 and next.
