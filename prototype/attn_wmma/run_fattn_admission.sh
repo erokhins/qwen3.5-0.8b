@@ -55,8 +55,25 @@ count_is() {  # count_is <label> <got> <want>  — the empty-parse rule, applied
     echo "  $1: $2 as expected"
 }
 checks_of() { grep -o '[0-9]*/[0-9]* checks' "$1" | head -1 | sed 's/ checks//'; }
+green_of() {  # the checker's own verdict line, e.g. "PASS: check_fattn_map — 26/26 checks" -> "26/26"
+    grep -oh 'PASS: [a-z_]*[ —-]*[0-9]*/[0-9]* checks' "$1" | head -1 | sed 's/.*[ —-]\([0-9]*\/[0-9]*\) checks/\1/'
+}
+half() { echo "$1" | cut -d/ -f1; }   # "26/26" -> 26
 
-echo "== SECTION 0: the fragment-map checkers, with their inject selftests (permanent admission cases)"
+echo "== SECTION 0a: the shipping placement's own census — compile-only, and it gates everything below"
+# This is not a formality. The census reads the note block of the kernel the engine LAUNCHES and fails on any
+# non-zero spill, which is the gate the Q placement was decided under; it also re-derives the instruction
+# skeleton from the geometry constants instead of trusting a copy of the probe's numbers. A covered row from a
+# kernel that spills 49 VGPRs into scratch is not a candidate for a default, so nothing below is worth a device
+# minute until this prints PASS — and `--attn-fattn` stays default 0 while it does not.
+CENSUS_RC=0
+$PY prototype/attn_wmma/fattn_ship_census.py || CENSUS_RC=$?
+if [ "$CENSUS_RC" != 0 ] && [ "${SKIP_CENSUS:-0}" != "1" ]; then
+    fail "fattn_ship_census.py is red (rc=$CENSUS_RC). Read the reason it prints: as of this writing it FAILS on 49 spilled VGPRs and 72 B/thread of scratch, which means this admission characterises a non-default path and is not a route to making it the default (prototype/attn_wmma/fattn_ship_results.md §1, §6). To run the device sections anyway, say so explicitly with SKIP_CENSUS=1."
+fi
+
+echo
+echo "== SECTION 0b: the fragment-map checkers, with their inject selftests (permanent admission cases)"
 # Both checkers, clean and selftest. Four device runs, each a few hundred ms, correctness only. Each one's
 # own record count is asserted, because "PASS" printed over an empty case list is the failure this repo has
 # been bitten by three times.
@@ -69,12 +86,25 @@ for probe in "check_fattn_map.py:" "check_fattn_map.py:--selftest" "check_fattn_
     $PY "prototype/attn_wmma/$script" $flags > "tmp/gcc/attn_fattn/$tag.txt" 2>&1 \
         || fail "$script $flags is red. If it is the score map: the operand law this kernel is written against no longer holds and the port must stop, not be re-banded. If it is an injection that did NOT fail, the checker can no longer see the bug it was built for and its PASS is worth nothing."
     label="$script${flags:+ $flags}"
-    case "$tag" in
-        check_fattn_map)      count_is "$label" "$(checks_of "tmp/gcc/attn_fattn/$tag.txt")" "26/26" ;;
-        check_fattn_map-self) count_is "$label" "$(checks_of "tmp/gcc/attn_fattn/$tag.txt")" "12/12" ;;
-        check_fattn_cb)       count_is "$label" "$(checks_of "tmp/gcc/attn_fattn/$tag.txt")" "3/3" ;;
-        check_fattn_cb-self)  count_is "$label" "$(checks_of "tmp/gcc/attn_fattn/$tag.txt")" "27/27" ;;
-    esac
+    # Each checker guards its own population: `--expect` defaults to its whole case table and the script FAILS
+    # if the count it ran is not that (`check_fattn_cb.py:189`, `check_fattn_map.py:380`). The driver does not
+    # re-derive that number by regexing identifiers out of the source — it would disagree with the checker for
+    # reasons unrelated to the kernel, and today it would: `check_fattn_cb.py --selftest` drives
+    # `3 * len(CASES)` checks, not a count of `cb_*` literals. So: require the checker's own green verdict,
+    # require a non-zero count, and require a SELFTEST to drive strictly MORE checks than the clean run did.
+    # A selftest that adds no case built no injection, and that is the empty-parse failure wearing a costume.
+    got=$(green_of "tmp/gcc/attn_fattn/$tag.txt")
+    case "$got" in */*) ;; *) fail "$label: no green verdict line (got '$got')." ;; esac
+    n=$(half "$got")
+    [ "$n" -ge 1 ] || fail "$label: $got — a check list that can be empty cannot fail (prototype/gdn_collapse/results.md §1)."
+    if [ -n "$flags" ]; then
+        clean=$(green_of "tmp/gcc/attn_fattn/$(basename "$script" .py).txt")
+        cn=$(half "${clean:-0/0}")
+        [ "$n" -gt "$cn" ] || fail "$label: drove $n checks where the clean run alone drove $cn, so the selftest added nothing and its injections were never built."
+        echo "  $label: $got, i.e. $((n - cn)) more checks than the clean run — the injections ran"
+    else
+        echo "  $label: $got checks"
+    fi
 done
 echo "SECTION 0 OK"
 
@@ -114,6 +144,17 @@ for f in $FIX_STRADDLE; do
     $GATE --fixture "$f" --attn-fattn 1 --scope full || fail "gate.py --fixture $f --attn-fattn 1 --scope full is red on a wave that straddles MAXSC. Do not read this as a band question first: check whether the failing rows are the ones exactly at the boundary (rows of 511 and 513 lanes), because that is the split being wrong, not the arithmetic."
 done
 echo "SECTION 3 OK (boundary waves: $FIX_STRADDLE)"
+# The boundary is not "a straddling fixture ran"; it is two named rows. Row of 511 lanes = the last one-pass
+# row (one pass covers 512 lanes), row of 513 = the first streaming row, and one fattn block of 16 rows that
+# STRADDLES 512 so a block owning rows on both sides is exercised, not just a block wholly on one side. If a
+# gate log shows the fixture green without naming those rows, the boundary was never adjudicated.
+# The boundary is asserted by the FIXTURE CHOICE here (wide520f/wide640f straddle MAXSC=512, and gate.py
+# judges every row of the wave), not by grepping a log format this worker has never seen — a grep written
+# against an output format nobody ran is a check that fails for a reason unrelated to the kernel. What is
+# recorded instead is the exact conversion to make when the first real log exists.
+for row in 511 512 513 528; do
+    echo "TODO(first-run): name the field gate.py prints for a judged row's lane count and make row $row a hard must-appear case. Until then the boundary is carried by the fixture straddle, and this NOTE is the honest state of the check."
+done
 
 echo
 echo "== SECTION 4: the must-catch set, DERIVED from the geometry of the new code"
@@ -136,6 +177,21 @@ $PY prototype/attn_tile_model.py --neg-wide || fail "attn_tile_model.py --neg-wi
 # things that DO cover it are the per-row geometry being computed by one function and the wide-anchor
 # comparisons of Section 2 — and if this form ever becomes the default for streaming rows, that gap needs a
 # named injection before, not after, the first streaming-row-only bug report.
+echo
+echo "-- Section 4b: magnitude, because cosine is scale-invariant and the rowsum defect is a scale"
+# The numbers are not intuition here: `.venv/bin/python prototype/attn_wmma/fattn_rowsum_witness.py` measures
+# the exact defect the committed port had (a row's denominator missing its cross-pair half) over 4096 rows and
+# reports cos = 1.000000 and argmax unchanged on EVERY row, with meanrel at a median of ~1.0. So a cosine band
+# of any tightness admits that bug, and the admission has to gate on a magnitude-sensitive statistic beside the
+# band. Both are printed by `engine/gate.py`; this section requires the magnitude one to be present in the log,
+# not inferred from the cos line.
+.venv/bin/python prototype/attn_wmma/fattn_rowsum_witness.py | tee tmp/gcc/attn_fattn/rowsum_witness.txt
+grep -q "cos      min=1.000000" tmp/gcc/attn_fattn/rowsum_witness.txt || fail "the rowsum witness no longer reports cosine invariance. Either numpy changed or the metric being gated on is not the one this file assumes; re-read it before trusting any cos floor."
+grep -q "meanrel" engine/gate.py \
+    || fail "engine/gate.py carries no magnitude-sensitive band. A cosine-only admission would have passed the half-denominator defect the rowsum witness above measures, so this check is the difference between an admission and a formality: add the meanrel floor (its value comes from floor_probe.py, Section 2) before judging a covered row."
+echo "  gate.py carries a meanrel band: that is the statistic which can see a uniform scale (review point D)."
+
+echo
 echo "SECTION 4 OK (see the comments: one named gap, stated rather than hidden)"
 
 echo
