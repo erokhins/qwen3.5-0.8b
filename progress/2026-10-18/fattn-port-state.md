@@ -151,3 +151,27 @@ end-of-turn token literally (refer to id 248046). `bench/performance-status.md` 
 **stale binary**; a paired A/B against a stale build reads as a clean null. A check whose input list can be
 empty cannot fail; a must-catch set must be **derived**, not hand-listed. Do not chain a python stdin heredoc
 (`analysis.unsupported-heredoc`) — write the script to a file.
+
+## 9. State after the second port worker (branch tip `0dca934`) — the window is next
+
+Branch `wip-fattn-port` now: `60725fe` engine route (A) + one-warp blocks + ship census · `3dcf434` probe-vs-port
+divergence marked in place · `74875d9` admission + WMMA latency leg written-not-run · `0dca934` cite re-points
+(`citation_rot_check` = **0 rotted**). `engine/build.sh` = **0**. Nothing device-run: no admission, no burst.
+
+- **Claim (i) is RED and stays red**: best placement 256 VGPR / **49 spill** / 72 B scratch / 16,384 B LDS /
+  4 blocks/CU. `fattn_ship_census.py` is section 0a of admission and exits non-zero on any spill. D63 re-scoped
+  zero-spill from precondition to reported cost; the flag is default **0** and only a measured ≥1.5× win flips it.
+- **Placement that ships**: one warp per block (16 rows × 1 head, head into grid.x) — correct-by-construction.
+- **Geometry caveat that must travel with any number**: 4 wf/CU, five times below §28's measured 12–20 band.
+  `wf_per_cu` is printed for exactly this reason.
+- **Rowsum defect witnessed**: half denominator ⇒ cos 1.000000, argmax unchanged on all 4096 rows, meanrel
+  median 0.956. Admission gates on **meanrel**; cos and argmax are both blind to it (`fattn_rowsum_witness.py`).
+
+**Next window (main agent, blocking, zero subagents, one `gpu_lock` hold), in this order:**
+1. `prototype/issue_rate_probe/run_wmma_latency_window.sh` — f32-C vs f16-C, ILP 1/2/4/8. Answers the f16 question.
+2. `bash prototype/attn_wmma/run_fattn_admission.sh` — refuses on the ship census, so expect it to stop at 0a
+   unless the spill refusal is annotated as accepted-for-this-window; that annotation is my call to make and say.
+3. `bash prototype/attn_wmma/run_fattn_burst_window.sh` — claim (iii): ≥1.5× cut of `attn` at 4096 lanes,
+   paired best-of-3, canary (banner + `attn_fattn=` + `wf_per_cu`) asserted before any `ms` is read.
+4. Optional same hold: `SQ_LDS_BANK_CONFLICT` on the transposed V store; realised occupancy by counter
+   (`SQ_WAVE_CYCLES/SQ_BUSY_CYCLES`, max **32 wf/CU**).
