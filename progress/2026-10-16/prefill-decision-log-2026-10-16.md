@@ -1705,3 +1705,31 @@ counts. Two decisions follow, and the first deliberately does **not** re-open 1.
   and a byte-compare of every prefill logits row are.
 - **Queue effect:** 2.6 (attention tile) stays second — §22 gives it ≥5× at equal launch counts — but D53/D54 is
   first by a wide margin, and class 5 / 3.3 wait behind both.
+
+## D55 — the looped launch is the default; prefill is **5,364 tok/s**; attention is the last ≥1.5× row (2026-10-17)
+
+- **Shipped:** `--gdn-loop 512` (D54's knob, §24's family row 1.60–1.69 with 1,024/1,024 prefill logits rows
+  byte-identical, gate 370/0 on `wide520f` with the looped form on every pinned path). Ruler **921.56 → 763.49 ms
+  = 4,444 → 5,364 tok/s (+20.7 %)**, §1's banner re-taken in the same window, short widths paired at
+  1.574/1.640/1.633 family ratio. This is the first item this project shipped that was found by *comparison
+  against an external engine* rather than by the internal queue — the D52/D53 chain (llama.cpp launch census →
+  512× GDN launch gap → walk the token index in-kernel) is what produced it, and it is worth 17–22 % of the wave
+  where the internal queue's best open item was priced at a few percent.
+- **Consequence for queue order, decided and recorded:** **2.6 attention tile is next and is the only ≥1.5× row
+  left standing.** §22 counted both engines at 48 attention launches, so this is not a launch-count item —
+  ours is 263 ms of the wave against their ≤52 ms at the same launch structure, and after §25 `attn` is the
+  largest family in the wave (34.0–34.9 %). The §25 wall number also re-prices everything downstream: 1.0947
+  GFLOP/token against 763.49 ms demands **1.43 TFLOP/s**, i.e. the engine now sits at ~30 % of the mix roof
+  against D47's 21 %, so the remaining non-matmul time is concentrated in two families, not spread thin.
+- **Method rules that paid for themselves this round, recorded because they were load-bearing:** (a) *a paired
+  window, always, for a short-prompt row* — §1's 64-lane row looked like a 15 % regression across windows and
+  was flat-to-better inside one hold; (b) *a sweep must print the count it claims* — the first short-width A/B
+  fed space-separated ids to a comma-separated parser, priced a one-token wave at every width, and read as
+  "the loop does nothing below 1,024 lanes"; `launches=` beside the family `ms` is now part of that instrument;
+  (c) *the default flip changes refusal order* — a looped default made `--gdn-spell unroll4` alone an
+  unrunnable pair, so that refusal now tests the effective span rather than `--given`, or the kernel would
+  throw after a 1.55 GB load.
+- **Not done, explicitly still open:** the pointer-increment address spelling (−156 slots, bit-neutral, now a
+  follow-up rather than a prerequisite); D42 class 5 (2.2 M=2 tiling, 2.4 WMMA under "demanded bytes ≠ DRAM
+  bytes"); class 3 re-adjudication via `wide4096f`; 3.3 hand WMMA GEMM, which carries D47's "GEMMs are at the
+  roof" prior and is now cheap to falsify against a 763 ms wall; and the 18 rotted line-cites from D51 F1.
