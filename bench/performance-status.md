@@ -919,3 +919,38 @@ being priced is −0.85 % of a 4096-lane wave's `gdn_rec` family, and that is an
 1.0415 as the win — the instrument here is `receng` vs `rec2c4` inside one harness binary at `t=128`. The next
 step is the engine port behind `--gdn-spell fused`, default unchanged, and a paired in-situ A/B inside one lock
 hold; the family row decides.
+
+## 20. `--gdn-spell fused` — paired in-situ A/B, and why the headline did not move (2026-10-17)
+
+The engine port (§19's merged form) was measured with both sides **inside one lock hold, alternating every rep**,
+canaries read in the same breath as the numbers (`CANARY 1 OK` on the engine TU with both bills pinned;
+`gdn_spell=fused` echoed by **every** side's own log; `plan_match=1 launchstats_match=1` on every pass; an
+unknown spelling refused, which is what proves the flag is not inert).
+
+**The `gdn_rec` family row is the claim. Medians of 3:**
+
+| width | `unroll4` ms | `fused` ms | paired median ratio | reps favouring `fused` | verdict vs 1.02 |
+|---|---|---|---|---|---|
+| **4096 lanes** | 455.83 | 428.22 | **1.0645** (reps 1.0200 / 1.0725 / 1.0645) | **3/3** | **clears** |
+| 1024 lanes | 108.87 | 109.20 | 0.9909 (reps 0.9640 / 1.0252 / 0.9909) | 1/3 | does not clear |
+| decode, ms/token | 12.7302 | 12.6237 | **1.0025** (1.0147 / 0.9950 / 1.0025) | 2/3 | flat |
+
+Decode used the ledger's own instrument (`ids2048.txt`, `--steps 64` vs `--steps 192`, marginal = Δms ÷ 128),
+both step counts inside the same hold; 12.62 ms/token is 79.2 tok/s at 2112 lanes and 12.73 is 78.6 — the two
+sides are inside the spread this file documents for that instrument (1.5–4.3 %), so decode is **unchanged**, not
+"slightly better".
+
+**And the ruler did not move.** Re-taken with `fused` as the default, same box, zero subagents, 3 reps:
+**919.17 / 923.36 / 925.22 ms → median 923.36 ms = 4,436 tok/s**, against §17's 921.56 ms = **4,444 tok/s**.
+So the headline is **unchanged**, and it would be dishonest to quote the paired −2.96 % of wall (947.52 → 919.49
+ms inside that one window) as a new headline. The reconciliation is the window, exactly as AGENTS warns: the
+`unroll4` side of the paired window ran ~2.8 % *slower* than the historical ruler median, and today's `fused`
+number (919–925) is about what this box reads at 4096 lanes in any window. Cross-window on the family row the
+change is **442.55 → 430.89 ms = −2.6 %**, not the −6.5 % the paired window showed.
+
+**What that means for the decision (D51).** The change is kept and the default moved: the paired instrument is
+the correct one for attributing a delta, it favoured `fused` 3/3 at the width that carries the headline, and
+−2.6 % cross-window still clears the refuse bar by ~26×. But **no headline improvement is claimed today** —
+the honest statement is "the family row got ~3–6 % cheaper depending on which comparison you trust, and the
+end-to-end number is the same 4,440 ± 20 tok/s it has been all session". Prefill stays **4,444 tok/s** as the
+quoted headline until a ruler re-take in a clean window places it lower.
