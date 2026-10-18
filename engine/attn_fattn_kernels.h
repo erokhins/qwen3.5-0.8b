@@ -96,16 +96,18 @@
  *   * The per-round rescale of the accumulator: 16 tiles x 8 F32 = 128 F32 multiplies per lane per round.
  *     The prototype had ONE round and therefore priced none of it.
  *   * The O transpose in the epilogue: the accumulator's columns are parity-split across the half-warps
- *     (dim = 16t + 2l + t/16), while `part` wants 8 CONTIGUOUS dims per lane (`part[2 + lane*8 + u]`,
- *     lane 0..31). Staged through the dead V stage in two halves of DH; exactly 16 lanes per half own the
- *     dims that half staged, which is the thing the first version of this function got wrong by 8 KiB in
- *     the wrong direction (it indexed a 128-float stage row with `lane*8 + u`, lane <= 31, and wrote
- *     `part` up to `pp[385]` on a 258-float slot — i.e. it trampled the next (row, head) partial).
- *     `fattn_transpose_out` is the only spelling of that address, and its bounds are pinned by the two
- *     `static_assert`s in `attn_fattn_body` (widest transpose-stage write, widest `part` write). A compile-time
- *     bound is the right instrument when every operand of the index is a constant; what it cannot show is that
- *     no OTHER bytes are touched, and that witness is admission Section 1 — a one-pass row sharing a wave with
- *     a covered row must come back bit-identical to `--attn-fattn 0`.
+ *     (dim = 16t + 2l + t/16) and a lane holds ONE row of them, while `part` wants that row's whole DH in
+ *     blocks of FATTN_TBLK. Staged through the dead V stage in two halves of DH; per half, 16 rows x 128
+ *     floats are published by 32 lanes x 8 blocks x 8 dims, which is the thing the first two versions got
+ *     wrong — the first by 8 KiB in the wrong direction (a 128-float stage row indexed with `lane*8 + u`,
+ *     lane <= 31, writing `part` up to `pp[385]` on a 258-float slot, i.e. trampling the next (row, head)
+ *     partial), the second by publishing only 16 of every row's 256 dims and leaving the merge to read
+ *     scratch, which is the NaN of §29 of `bench/performance-status.md`. `fattn_transpose_out` is the only
+ *     spelling of those addresses, pinned by three `static_assert`s beside them: the widest stage write, the
+ *     widest `part` write, and — the one the second version defeated — the COVERAGE of the publish loop.
+ *     A bound says where the last index is; only a coverage assert says every index was reached, and the
+ *     witness beyond the compile is admission Section 1: a one-pass row sharing a wave with a covered row
+ *     must come back bit-identical to `--attn-fattn 0`.
  *   * The rowsum's cross-lane combine. A row's 16 columns live in the lane PAIR (t, t^16), so the max
  *     needs one `shfl_xor(16)` and the rowsum needs one too — deferred outside the round, which is legal
  *     because `rescale` is identical across the pair. `fattn_score_handover.md` §1 counts 10 lane-movement
@@ -191,18 +193,29 @@ static_assert(FATTN_MLANES * DH * 2 == 8192 && FATTN_MROWS * FATTN_TROW * 4 == 8
               "the aliased K/V stage is the P*V operand AND the output transpose staging, at exactly 8 KiB");
 static_assert(FATTN_MROWS * DH * 2 + FATTN_MLANES * DH * 2 == 16384,
               "Q stage + aliased K/V stage is exactly 16 KiB, which is the 4-blocks/CU boundary");
+// HOW THE PARTIAL IS PUBLISHED: `part` wants the row's DH dims in blocks of FATTN_TBLK, the transpose stages
+// half of DH at a time, and FATTN_PBLK is the blocks one lane publishes per half. The assert is the
+// COVERAGE claim — every dim of every staged row is written exactly once per half — and it is the guard that
+// retires the defect described on `fattn_transpose_out`: a publish loop that covers 16 of every row's 256
+// dims satisfies every bound-style assert in this file and still merges scratch.
+#define FATTN_TBLK 8
+#define FATTN_PBLK 8
+static_assert(FATTN_MROWS * FATTN_TROW == FATTN_THREADS * FATTN_PBLK * FATTN_TBLK,
+              "the publish loop writes every staged float exactly once per half: rows x dims-per-half "
+              "must equal lanes x blocks x block-width");
 // THE INDEX BOUNDS OF THE EPILOGUE TRANSPOSE, as compile-time facts. Every index into the transpose
 // stage and into the partial slot is closed-form in lane, u, t, l and half, so the two bounds
 // the first version of `fattn_transpose_out` violated are asserted here rather than watched for at
 // run time: the widest stage write is exactly the stage's last float, and the widest `part`
 // write is exactly the shipped slot's last float. A poison-band harness would need a debug
 // flag the engine does not have; these cannot be skipped by a code path, which is what retires the
-// out-of-range class for good.
+// out-of-range class for good. Coverage — that every index BELOW the bound is reached — is the
+// `FATTN_PBLK` assert above, and it is the one the second version of the epilogue needed.
 static_assert((FATTN_MROWS - 1) * FATTN_TROW + (16 * (FATTN_VTILES / 2 - 1) + 15) + 1
                   == FATTN_MROWS * FATTN_TROW,
               "the widest transpose stage write is the last float of the staging area");
-static_assert(2 + 31 * 8 + 7 + 1 == DH + 2,
-              "the widest partial write, part[2 + lane*8 + u] at lane 31 and u 7, is the last float");
+static_assert(2 + (DH - FATTN_TBLK) + (FATTN_TBLK - 1) + 1 == DH + 2,
+              "the widest partial write, the last block of the last dim, is the slot's last float");
 
 __device__ __forceinline__ float fattn_bf(hip_bfloat16 b) { return float(b); }
 __device__ __forceinline__ hip_bfloat16 fattn_fb(float f) { return hip_bfloat16(f); }
@@ -298,26 +311,52 @@ __device__ __forceinline__ FattnRow fattn_row_of(const CoreArgs a, int rt, int l
     return r;
 }
 
-// The accumulator transpose, THE only spelling of this address (§20.1). The P*V tiles hold columns
-// PARITY-SPLIT across the half-warps (dim = 16t + 2l + lane/16), while `part` wants 8 CONTIGUOUS dims per
-// lane — `pp[2 + lane*8 + u]`, lane 0..31, which is what `attn_slim_body`'s epilogue writes and what
-// `attn_combine` reads, and it is not negotiable without editing the merge. So the output is staged in F32
-// through the DEAD V stage, half of DH at a time: 16 rows x (DH/2) floats = 8192 B = exactly that stage.
-// A separate output array would have been 8 KiB ON TOP of the stages, i.e. 2 blocks/CU.
+// THE PARTIAL SLOT, one spelling, shared by the (m, l) publish and by the transpose below. It is the
+// shipped expression verbatim — `attn_slim_body`'s epilogue and `attn_combine`'s reader, keyed by the FULL
+// head and striding by the LAUNCH's split (§20.1: two self-consistent layouts joined by a branch is §19's
+// aliasing bug), so `attn_combine` needs no branch for this form.
+__device__ __forceinline__ float* fattn_part_slot(const CoreArgs& a, int row, int head) {
+    return a.part + (((size_t)row * N_Q + head) * a.split + blockIdx.y) * (DH + 2);
+}
+
+// The accumulator transpose, THE only spelling of these addresses (§20.1). The P*V tiles hold columns
+// PARITY-SPLIT across the half-warps (dim = 16t + 2l + lane/16) of ONE ROW — lane t holds row t%16 only —
+// while `part` wants the row's 256 dims at `[2 + d]`, which is what `attn_slim_body`'s epilogue writes and
+// what `attn_combine` reads, and that is not negotiable without editing the merge. So the output is staged
+// in F32 through the DEAD V stage, half of DH at a time: 16 rows x (DH/2) floats = 8192 B = exactly that
+// stage. A separate output array would have been 8 KiB ON TOP of the stages, i.e. 2 blocks/CU.
 //
-// WHICH LANES READ BACK WHICH HALF is the whole content of this function, and the first version had it
-// wrong in both directions: it indexed the stage with `lane*8 + u` for lane <= 31 in a 128-float row (so
-// lanes 16..31 read the NEXT query row's staging) and it wrote `pp[2 + half*128 + lane*8 + u]`, up to
-// `pp[385]` on a `DH + 2 = 258`-float slot, i.e. out of the partial buffer and into the following
-// (row, head) slot's numbers. The rule, once: the half that is staged is read back by the 16 lanes whose
-// dims belong to it (`lane >> 4 == half`), at stage index `(lane & 15)*8 + u`, landing at
-// `pp[2 + lane*8 + u]` — so every destination index is in [2, 258) and every stage index in [0, 128).
-// The witness that the neighbours survive this is the pair named in the file header: the `static_assert`s on
-// the two address expressions, and admission Section 1's bit-identity of a one-pass row while a covered row
-// shares its wave. The first version of this function broke both, by 8 KiB and by a 128-float row.
-__device__ __forceinline__ void fattn_transpose_out(__half* stage_as_f32, const FattnO& out, float* pp,
-                                                    int lane) {
+// WHO PUBLISHES WHAT is the whole content of this function, and three versions of it have now been wrong:
+//   1. it indexed the stage with `lane*8 + u` for lane <= 31 in a 128-float row (lanes 16..31 read the NEXT
+//      query row's staging) and wrote `pp[2 + half*128 + lane*8 + u]`, up to `pp[385]` on a 258-float slot
+//      — out of the partial buffer, into the following (row, head) slot's numbers.
+//   2. it kept the shipped `pp[2 + lane*8 + u]` verbatim. That expression is written for a warp that owns
+//      ONE row, where 32 lanes x 8 dims = that row's 256 dims. Here one warp owns SIXTEEN rows, and only
+//      the two lanes holding row r (lane r and lane r^16) are entitled to r's slot, so the 32 lanes' 8-dim
+//      blocks landed as 8 dims of one half plus 8 of the other in each of 16 slots: 16 dims published per
+//      row, 240 never written. `attn_combine` merged whatever the scratch held there, and `finish_head`'s
+//      `acc / l` over an unwritten slot is how every covered row came out NaN (§29 of
+//      `bench/performance-status.md`). The bound-style `static_assert`s could not see it, because the defect
+//      was in the SET of indices touched, not in their maximum — hence the coverage assert on `FATTN_PBLK`,
+//      which fails if a publish loop stops covering the stage.
+//   3. the (m, l) header, published by `lane == 0` alone: legal for a one-row warp, one row of sixteen here.
+//
+// THE RULE, once. Per half the stage holds 16 rows x FATTN_TROW floats = 2048 floats, and 32 lanes each
+// publish FATTN_PBLK blocks of FATTN_TBLK — asserted to be exactly the stage, so coverage is a fact and not
+// a reading. Lane L publishes row-slot L/2, blocks 8*(L&1) .. +7 of it, so exactly one lane owns each
+// (row, 8-dim block) pair and every destination index is in [2, 2+DH). A row whose bit is not in `row_mask`
+// — uncovered, or past `nrows` — publishes NOTHING, which is what makes `attn_slim_wave`'s write of that
+// slot the only one; the STAGING still runs for those rows, because the barriers around it are block-wide
+// and cannot be taken by some lanes only. `row_mask` is the ballot of `me.covered`, whose bit r is row-slot r
+// (lane r and lane r^16 hold the same row and agree), so the publish set IS the coverage predicate rather
+// than a range reasoned about next to it.
+__device__ __forceinline__ void fattn_transpose_out(__half* stage_as_f32, const FattnO& out,
+                                                    const CoreArgs& a, int rt, int head0,
+                                                    unsigned row_mask, int lane) {
     float* stage = reinterpret_cast<float*>(stage_as_f32);
+    const int srow = lane >> 1;                          // the row-slot this lane publishes
+    const int sblk = (lane & 1) * FATTN_PBLK;            // its first 8-dim block within that row
+    const bool mine = ((row_mask >> srow) & 1u) != 0u;   // the ballot, per row-slot
 #pragma unroll
     for (int half = 0; half < 2; ++half) {
         __syncthreads();                     // the previous half's reads (and the last P*V read of V) are done
@@ -330,12 +369,20 @@ __device__ __forceinline__ void fattn_transpose_out(__half* stage_as_f32, const 
             }
         }
         __syncthreads();
-        if (pp != nullptr && (lane >> 4) == half) {   // lanes 0-15 own dims 0-127, 16-31 own 128-255.
+        if (mine) {        // NO barrier below this line inside the loop, so a guarded store cannot diverge one
+            float* pp = fattn_part_slot(a, rt * FATTN_MROWS + srow, head0);
 #pragma unroll
-            for (int u = 0; u < 8; ++u) {            // `pp == nullptr` is an uncovered row: the STAGING
-                pp[2 + lane * 8 + u] =               // still runs, because the barriers around it are
-                    stage[fattn_c_row(lane) * FATTN_TROW + (lane & 15) * 8 + u];   // block-wide and cannot
-            }                                        // be taken by some lanes only.
+            for (int k = 0; k < FATTN_PBLK; ++k) {
+                const int sbase = (sblk + k) * FATTN_TBLK;   // [0, FATTN_TROW) by the coverage assert
+                const int dbase = half * FATTN_TROW + sbase; // the dim this block carries, in [0, DH)
+#pragma unroll
+                for (int u = 0; u < FATTN_TBLK; ++u) {
+                    // The stage row is `srow`, the row-slot this lane PUBLISHES — not `fattn_c_row(lane)`,
+                    // the row-slot this lane ACCUMULATED. Those coincide only for lane < 16, and the
+                    // published block of a row is written by two lanes (2*srow and 2*srow+1).
+                    pp[2 + dbase + u] = stage[srow * FATTN_TROW + sbase + u];
+                }
+            }
         }
     }
     __syncthreads();                         // the next launch's stage write must not race the last read
@@ -380,8 +427,14 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
     // decision — which is what makes the barriers inside the round legal. Divergence WITHIN the warp (a row
     // block that straddles MAXSC, or whose tail runs off `nrows`) is handled by never returning after this
     // point and guarding stores instead.
+    //
+    // THE BALLOT IS ALSO THE PUBLISH SET. Bit r of it is lane r's answer, and lane r and lane r^16 hold the
+    // SAME wave row (`fattn_c_row(lane) = lane & 15`) and compute the same answer, so the low 16 bits are
+    // exactly "which of this block's sixteen row-slots does this launch own" — the set `attn_combine`
+    // depends on, taken from the one coverage predicate rather than re-derived beside it.
     const FattnRow me = fattn_row_of(a, rt, lane);
-    if (!__ballot_sync(FULL_MASK, me.covered ? 1 : 0)) return;    // block-uniform, and before any barrier
+    const unsigned row_mask = (unsigned)__ballot_sync(FULL_MASK, me.covered ? 1 : 0);
+    if (!row_mask) return;                     // block-uniform, and before any barrier
 
     // ---- Q, staged once for the whole launch: 16 rows x DH, BF16 in global -> F16 here, the conversion
     // paid once per element (which is also where the shipped form pays its own, in `attn_prep`).
@@ -428,7 +481,15 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
         // `check_fattn_cb.py`'s cb_score_slot_swap are the required-fail controls for that regression.
         // ROLLED, as the probe's D58 finding prefers (one accumulator, so the roll costs nothing and the
         // register count stays where the LDS-driven occupancy story wants it).
-        fattn_CRegs acc;
+        // INITIALISED, and not for style: `__builtin_amdgcn_wmma_*` takes the running accumulator as a
+        // live IN operand, so the FIRST tile of the roll reads whatever the previous dispatch left in those
+        // VGPRs. The prototype this file was ported from says `CRegs acc{}` for exactly this reason
+        // (`prototype/attn_wmma/wmma_fattn_score.cpp`'s `score_leg`); the port dropped the braces and read
+        // an undefined register block into the first `v_wmma`. One NaN cell anywhere in a row's 16-column P
+        // tile makes every output dim of that row NaN, because the P·V tile sums over all 16 KV lanes —
+        // which is the whole-row, whole-coverage NaN signature recorded in §29 of
+        // `bench/performance-status.md` and decision D64.
+        fattn_CRegs acc{};
 #pragma unroll 1
         for (int t = 0; t < FATTN_KTILES; ++t) {
             const fattn_ARegs first = fattn_load_tile(&s_kv[fattn_kv_addr(fattn_ab_row(lane), 16 * t)]);
@@ -530,17 +591,21 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
     // measured witness: against a pinned row it reads cos 1.000000, meanrel 1.000, argmax unchanged.
     l += __shfl_xor_sync(FULL_MASK, l, 16, warpSize);
 
-    // ---- epilogue: the SHIPPED partial slot expression, verbatim, keyed by the full head, so
-    // `attn_combine` needs no branch for this form (§20.1). An uncovered row writes NOTHING here, which is
-    // what makes `attn_slim_wave`'s write of that same slot the only one — and it is a guarded store, not a
-    // `return`, because the transpose below carries block-wide barriers.
-    const bool publish = me.covered;
-    float* pp = a.part + (((size_t)me.row * N_Q + head0) * a.split + blockIdx.y) * (DH + 2);
-    if (publish && lane == 0) {
+    // ---- epilogue: the SHIPPED partial slot expression, verbatim (`fattn_part_slot`), keyed by the full
+    // head, so `attn_combine` needs no branch for this form (§20.1). An uncovered row writes NOTHING here,
+    // which is what makes `attn_slim_wave`'s write of that same slot the only one — and it is a guarded
+    // store, not a `return`, because the transpose below carries block-wide barriers.
+    //
+    // (m, l) IS PAIR-UNIFORM — `rm` took its `shfl_xor(16)` in the round and `l` took the deferred one
+    // above — so either lane of a row's pair may publish it, and exactly one must. `lane == 0` published one
+    // row-slot of the block's sixteen and left fifteen headers to whatever the scratch held; `lane < 16`
+    // names each row-slot exactly once, because lane r's `me.row` is rt*16 + r.
+    if (me.covered && lane < FATTN_MROWS) {
+        float* pp = fattn_part_slot(a, me.row, head0);
         pp[0] = m;
         pp[1] = l;
     }
-    fattn_transpose_out(s_kv, out, publish ? pp : nullptr, lane);
+    fattn_transpose_out(s_kv, out, a, rt, head0, row_mask, lane);
 }
 
 // The staged plan only. In `fused = 0`, `attn_prep` has already written every row's §05.7 append into the
