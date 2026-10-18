@@ -1256,3 +1256,64 @@ R6 closes on the one-sided bound the instruction census suggested, and the item 
 run above the stage clock's 264.71 ms for the same family (the inflation §22 already names, proportional to
 launch count), so quote the **ratio**, not the 279 ms. One kernel is the whole problem, which is what makes
 D57's compile-only feeder gate the right next instrument rather than a second sweep of the family.
+
+## 27. The M = 16 geometry tax, measured (D58's deciding number), and why it prices item 2.6 out
+
+Harness `prototype/attn_m2/attn_m16.hip.cpp` (worker `a15fd29e`), burst `burst_m16.sh`, window
+`m16tax`, **run blocking with zero subagents**, `util` read 92 % before the gate and discounted. Admission
+first (`gate_m16.py device` → **PASS 40/40**, 1.3 s wall, no timing). Every pair below is `shipslim`
+(`attn_slim1_wave`, the kernel the engine ships, re-compiled in the same TU, `ndiff_aout_shipslim=0`)
+against `m16` (the 16-row re-tile, shipped VALU spell, no WMMA), **launched alternately inside one rep**,
+40 launches × 5 reps, best-of — so it is one ruler, not two windows. Log: `tmp/gcc/m16tax_burst.txt`.
+
+| fixture (rows @ lanes) | `shipslim` best ms | `m16` best ms | **tax** | traffic ratio m16/ship | blocks ship→m16 |
+|---|---|---|---|---|---|
+| 64 @ 4096 (widest grid this harness builds) | 1.4659 | 3.1055 | **+112 %** | 0.30 | 1,024 → 256 |
+| 64 @ 2048 | 0.7664 | 2.5117 | +228 % | — | — |
+| 64 @ 1024 | 0.3494 | 2.1102 | +504 % | — | — |
+| 16 @ 4096 | 0.4433 | 3.0593 | +590 % | 0.30 | 256 → 64 |
+| 16 @ 1024 | 0.1437 | 2.0479 | +1,326 % | 0.28 | 96 → 24 |
+| 4 @ 512 (`full=0`, streaming forced) | 0.0988 | 0.3819 | +287 % | 0.27 | 16 → 16 |
+
+**The re-tile demands 0.28–0.30 of the bytes and is 2.1× to 14.3× slower, at bit-identical output, in
+every fixture this harness can build.** Two things make that a verdict rather than a bad day:
+
+- **The traffic win is worth nothing here, and that is already measured.** D57's instruction-cut falsifier
+  made `attn` **1.521× faster with the byte census unchanged**, which is the proof that this kernel is not
+  traffic-bound at these widths. A re-tile whose only lever is demanded bytes is pulling on a rope that is
+  not attached to anything.
+- **The cost is registers, and the probe kernels understated it.** The full-body VALU re-tile needs
+  **134 VGPR / 12,800 B** against the shipped **47 / 12,288** — LDS still allows 5 blocks/CU but the
+  register file caps it at **3 (12 wavefronts against 20, −40 %)**. The 16-row live set is 4 `acc[8]` per
+  warp; `GRP=8` is refused by the accumulator `static_assert`, and `GRP=2` restores parity only by buying
+  the same 8 touches/lane-row the shipped M = 2 already gets, i.e. **no re-use at all**. So re-use and
+  occupancy are *coupled* in this spell: you may have one.
+
+**Why this prices the WMMA route and is not a proxy for it.** D58's `m16_bf16gq` at **30 VGPR** is not a
+counterevidence: it is a score-tile probe that carries no softmax/rescale state and no `P·V`. A block that
+does the whole attention body at M = 16 must hold the score fragments **plus** the `P·V` fragments over
+`DH = 256` (**128 VGPR/lane on its own**, D30 §2), so the real WMMA block's register bill is *above* this
+re-tile's 134, not below it. **The measured tax is therefore an under-estimate of what a WMMA M = 16 block
+would pay**, and the cheapest form of the geometry is already +112 % at its best fixture against a route
+whose whole prize was −15 % to −17 % of `attn`.
+
+**Two things this does NOT establish, stated so nobody has to rediscover them.**
+1. The engine's real wave is **512 rows** and this harness tops out at 64, so the tax *at shipping
+   geometry* is not measured — only bounded by the trend (16 rows → 6.92×, 64 rows @ 4096 → 2.12×, which
+   is grid starvation: `blocks_m16` falls 4× and the part has 40 CUs to fill). Re-open condition, cheaply
+   stated: a 512-row fixture showing the tax below ~1.15×, which requires the re-tile to be traffic-bound,
+   which D57 already disproved.
+2. `burst_m16.sh` includes **`short-64`** (`64 rows @ lanes 64–127`, `split=1`, `full=0`), which came back
+   **`ndiff_aout_m16 = 131072` — every element differs** — and the harness correctly printed
+   **`NO-TIMING: admission is red`** and refused a millisecond figure. The worker's report claimed bit-
+   identity at spans 0/1/3/16 (true, and the device gate is 40/40) and did not mention this case. Signature
+   matters: `ndiff == nrows × 2048` exactly is a whole-tensor difference, which reads as a changed work
+   split at `split=1` rather than a wrong value — but it is unresolved, it is on the M = 16 form, and
+   item 2.6's closure does not depend on it.
+
+**Decision.** Item **2.6 is closed**, not deferred: the feeder is cheap (D58), the launch count was never
+the wall (§22), the kernel is not traffic-bound (D57), and the geometry that a matrix tile requires costs
+**+112 % at best** in registers and occupancy (this section). Every ingredient of the route has now been
+measured and each one fails; there is no untested lever left to fund. 3.3 and 2.4 stay closed as before.
+The wave's attention share (34.0–34.9 %, `attn` 264.71 ms of 763.49 ms at 4096 lanes) stays where it is,
+and the engine headline is unchanged by this section: **prefill 5,364 tok/s, decode 71.3**.
