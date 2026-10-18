@@ -1631,3 +1631,28 @@ proven we can hit, and an expression that hand-rolls the same arithmetic inherit
   today because the only caller always assigns, and worth a one-line change if a second scratch consumer ever
   appears. (F2/F3) The gate’s three-way compare needed a *new* denominator check and an argparse extension — the
   outline as written would have let a missing side pass and refused the very spelling it was added for.
+
+## D52 — the comparison came back: llama.cpp is 1.7–2.3× faster at prefill, and two of my premises were wrong (2026-10-17)
+
+- **The gap is real and large** (§21): 8,290–10,273 tok/s vs our 4,430 at 4096 tokens, same lock hold, same
+  width class, unquantised f16. The user predicted ~9k; the measured matched row is 1.87× and their best swept
+  row is 2.32×.
+- **My premise about *how* they do it was wrong, and it is retracted.** D48 recorded that llama.cpp has no fused
+  GDN kernel and expresses the prompt path as generic ops with a triangular term. In **this** build the node
+  census prints `GATED_DELT → ROCm0` (324 nodes) and **no `TRI`/`SOLVE_TRI` node exists in the `qwen35` graph at
+  all**; `SSM_CONV` is on the GPU too, and the only CPU node is the embedding `GET_ROWS`. The upstream issue text
+  and my own path-mistaken grep were describing an absent backend, not this one. So the gap is **not** "they
+  chunk GDN as GEMMs and we hand-roll a scan" — at least part of it is "their fused GDN kernel runs faster than
+  our serial scan", which is a different investigation with a different remedy.
+- **What that does to item 1.2 (chunked scan): nothing yet, and that is the discipline.** An external
+  implementation being faster is not evidence for *chunking*; it is evidence that *something* in our
+  non-matmul 80 % is ~2× off. Attribution comes first: per-kernel shares for both engines at 4096 lanes
+  (`rocprofv3 --kernel-trace`, S1's §6.2 card), then each ≥1.5× family row gets its mechanism named —
+  traffic / launch count / occupancy / fusion — with a falsifier, per D49. Re-opening 1.2 on "llama.cpp is fast"
+  would be exactly the D42 failure mode this audit was created to stop, one layer over.
+- **The ceiling is intact and now externally corroborated**: their best demands 48 % of the measured mix roof,
+  we demand 21 %. The ~21,000 tok/s bound from D47 still holds, and 2× our rate is no longer hypothetical.
+- **Decision: prefill investigation is now the head of the queue**, ahead of class 5, 2.6 and 3.3. Two named
+  candidates, both already visible in our own family table: `gdn_rec` at 46–48 % of the wave (their GDN path
+  hides its per-token cost far better) and `attn` at 263 ms / 6.7 % of the matrix roof with quadratic growth.
+  The `-t 4 > -t 32` anomaly is recorded as unexplained, not dropped.
