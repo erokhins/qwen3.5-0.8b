@@ -85,6 +85,13 @@ struct DecodeScratch {
     // re-proves it on the engine path against the pinned dumps at BOTH values, which is the device pass
     // `engine/HANDOFF-attn-touch.md` hands over. `--attn-touch 0` is the frozen side of that A/B.
     int attn_touch = 1;
+    // Which attention FORM owns a wave body's STREAMING rows (`--attn-fattn`,
+    // `kernels.h:AttnLayerArgs::wave_fattn`). Same riding reason as the two above, and the same override
+    // for a one-row body — decode runs the fused single-row form whatever this says, so no decode bit
+    // moves under it. The default is 0: the WMMA form has been written and its two map checkers are green,
+    // but the form itself has not met the device (`prototype/attn_wmma/`), and a form that has not met the
+    // device does not become the engine's default by having been written.
+    int attn_fattn = 0;
     // Which §04.4 scan a GDN body runs (P9, `kernels.h:GdnScan`). Same riding reason as the three
     // above, and it too is overridden per body — a ONE-ROW body is `gdn_rec` whatever this says,
     // because decode's bits are pinned through the sequential recurrence and a chunked scan of one

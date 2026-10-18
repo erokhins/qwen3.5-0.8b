@@ -498,6 +498,18 @@ struct AttnLayerArgs {
     // itself when `wave_tile`'s default was set; `engine/gate.py` asserts the run's own NUMERICS echo
     // equals the flag it was given, so a binary cannot quietly be judged by the other side.
     int wave_touch = 1;
+    // Which attention FORM owns the STREAMING rows of a wave body (`--attn-fattn`). 0, the default, is
+    // `attn_slim_wave` for every row, which is the shipped path and stays untouched. 1 hands the rows the
+    // WMMA form covers — exactly the rows §07.3 already streams, `blocks_for_row > 1` — to
+    // `engine/attn_fattn_kernels.h`, and leaves every one-pass row on `attn_slim_wave`. That coverage rule
+    // is a decision, not a side effect, and it is written out at the top of that file: a row the one-pass
+    // form serves is pinned bit-for-bit against the dumps, and a WMMA round is streaming by construction,
+    // so routing a pinned row through it would move bits no band has ever been priced for. Wave-only,
+    // like the two above: a one-row body is `attn_core` whatever this says, so no decode bit moves under
+    // it. DEFAULT 0 because the form has not been admitted on device yet (`prototype/attn_wmma/`);
+    // `engine/gate.py` asserts this echo equals the flag it was given, so a binary cannot be judged by the
+    // other side.
+    int wave_fattn = 0;
 };
 void attn_decode_layer(const AttnLayerArgs& a);
 

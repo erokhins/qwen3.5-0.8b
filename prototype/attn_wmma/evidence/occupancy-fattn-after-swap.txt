@@ -1,0 +1,22 @@
+device                          AMD Radeon 8060S Graphics
+  hip multiProcessorCount       20  (halved on this SKU; KFD says 40 CUs)
+  hip sharedMemPerMultiprocessor 65536 B
+  hip MaxRegistersPerMultiprocessor 196608 lane-VGPRs
+  hip MaxThreadsPerMultiprocessor   2048
+  hip MaxThreadsPerBlock          1024
+  sharedMemPerBlock               65536 B
+
+No kernel is launched and no timing is taken: this is a driver query only.
+
+kernel                     thread      vgpr     lds B    blk/CU   wf/CU
+control: 0-B LDS stub        128         0         0        16      64   
+control: 12288-B stub        128        47     12288         5      20   
+control: 65536-B stub        128         0     65536         1       4   < 4 blocks/CU: claim (i) fails
+m16_fattn_empty              128        21     16384         4      16   
+m16_fattn_scoreleg           128        31     16384         4      16   
+m16_fattn_score              128       193     16384         4      16   
+
+CANARY
+PASS: 65,536-B stub returns 1 (got 1)
+PASS: 0-B stub returns 16 (got 16)
+PASS: 12,288-B stub returns 5, the recorded attn_slim_wave row (got 5)

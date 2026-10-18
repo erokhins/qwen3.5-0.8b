@@ -50,6 +50,15 @@
 //      __shfl_xor_sync(mask, own, 16), then make_half2(tmp[0], tmp[1]). Applied to the C map above
 //      this is exactly "collect the partner half of row t%16", and its output shape is exactly the A/B
 //      operand shape, which is the cross-check that the two transcriptions agree.
+// CORRECTION, 2026-10-18, in place: the C map above is TRANSPOSED for this file's original operand
+// order, and the shape cross-check named in the last line above could not catch it — two transposed
+// layouts have identical register shapes. The measured law is in `score_leg` below and in
+// `prototype/attn_wmma/fattn_map_results.md`; the transcription is kept verbatim above because deleting
+// it would hide how the error was made, and because the A/B operand half of it (16 contiguous halves of
+// row t%16, k-run contiguous) IS confirmed by the same probe. What remains un-witnessed by that probe —
+// the get_half2 C->B relabelling itself — is now witnessed separately and executably by
+// `prototype/attn_wmma/fattn_cb_probe.cpp` + `check_fattn_cb.py`, which composes score -> P -> P*V on
+// encodable inputs and fails on five injections in this exact function.
 // CONSEQUENCES FOR THE STAGING, all derived from the map above and not from taste:
 //   - score A operand Q[i=q][k=d]: lane t needs Q[t%16][d0..d0+15]  -> s_q row-major, 2x ds_b128.
 //   - score B operand K[k=d][j=kv]: lane t needs K[t%16][d0..d0+15]  -> s_k row-major, 2x ds_b128.
@@ -221,10 +230,18 @@ __device__ __forceinline__ CRegs score_leg(const __half* s_q, const __half* s_kv
     CRegs acc{};
 #pragma unroll 1
     for (int d0 = 0; d0 < DH; d0 += 16) {
-        // A = Q row (lane&15), B = K row (lane&15): both operand maps are "16 contiguous halves of
-        // row lane%16" (mma.cuh:552,560), which is why both read the same shaped address.
-        const ARegs a = load_tile(&s_q[q_addr(ab_row(lane), d0)]);
-        const ARegs b = load_tile(&s_kv[k_addr(ab_row(lane), d0)]);
+        // CORRECTED 2026-10-18 — the operand SLOTS, and nothing else about this loop moved. The measured
+        // C law (`prototype/attn_map_probe.cpp`, `check_fattn_map.py`, written up in
+        // `prototype/attn_wmma/fattn_map_results.md`) is
+        //     lane t, register l  =  sum_k FIRST[row = 2l + t/16][k] * SECOND[row = t%16][k]
+        // so the SECOND operand's row index is the C tile's ROW. Q's rows are the score's rows, so Q
+        // belongs in the SECOND slot; the file's original transcription put it first and the drain then
+        // read `S[t%16][2l + t/16]`, i.e. the transpose, which folds every row down the wrong axis.
+        // Both operands are still "16 contiguous halves of row t%16 with the k-run contiguous", which is
+        // why `q_addr`/`k_addr` and the whole staging path are unchanged: a transposed score was never
+        // fixable in the addresses, only in which register block is which operand.
+        const ARegs a = load_tile(&s_kv[k_addr(ab_row(lane), d0)]);   // FIRST:  rows are KV lanes
+        const ARegs b = load_tile(&s_q[q_addr(ab_row(lane), d0)]);    // SECOND: rows are Q rows -> C rows
         acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, acc);
     }
     return acc;
@@ -286,6 +303,12 @@ __device__ __forceinline__ void pv_leg(CRegs out[VTILES], const ARegs p, const _
 #pragma unroll
     for (int t = 0; t < VTILES; ++t) {
         // A = V^T tile: row d = 16t + (lane&15), the 16 KV halves contiguous in the transposed stage.
+        // The measured C law CONFIRMS this leg's slot assignment rather than leaving it to the
+        // transcription: SECOND operand's row index is the C row, and here the SECOND operand is P whose
+        // rows are Q rows = the output rows, so output[q][d] lands with row q = t%16 and columns
+        // d = 2l + t/16 — the same drain the score tile now uses. The score leg needed the swap because
+        // its SECOND operand was the wrong one; this one was already right, for a reason worth naming
+        // since it is the only place the original transcription's transpose happened to cancel.
         const ARegs a = load_tile(&s_kv[v_addr(16 * t + ab_row(lane), 0)]);
         out[t] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, p, out[t]);
     }

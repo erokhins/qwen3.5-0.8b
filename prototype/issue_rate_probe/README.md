@@ -122,3 +122,64 @@ do not repeat across windows. Quote a pair measured in one window, never two run
 `irp_lds_tile` is unbilled: LLVM stages `global → LDS` inside the trip loop and peels the read side
 into a separate loop that adds constants, so the only billable loop measures staging while the row
 would claim it measures LDS reads. See `HANDOFF.md` for the attempts and what a fix would need.
+
+## WMMA latency legs (`wmma_latency.cpp`) — written, not run
+
+Everything above this section is a **rate**: one WMMA at a time, four independent chains, 32 wavefronts
+per CU, best-of-N. The census that prices `m16_fattn_score` does not spend a rate — it spends
+`WMMA_CLK = 32 clocks` per instruction, derived from the class roof (4096 MAC / (32 lanes x 4 MAC per
+lane per clock)). **Nobody had measured the latency of a dependent WMMA on this part**, and every WMMA
+kernel in the tree is a dependent chain: the score tile feeds the fold feeds the P*V tile. The GDN route
+is the recorded cost of pricing a serial kernel by issue-slot arithmetic — priced 11.4 ms, measured
+112.04 ms, 9.8x (`prototype/gdn_collapse/results.md` §4-§5 of that file).
+
+| file | role |
+|---|---|
+| `wmma_latency.cpp` | nine legs: `wl_f32_i{1,2,4,8}`, `wl_f16_i{1,2,4,8}`, and `wl_empty_i1` (the same loop with one FADD where the WMMA was — every WMMA row is read as row minus this one) |
+| `build_wmma_latency.sh` | compile-only. Refuses the build unless the listing carries both `v_wmma_f32_16x16x16_f16` and `v_wmma_f16_16x16x16_f16`, and unless `wl_empty_i1` is empty of matrix instructions |
+| `run_wmma_latency_window.sh` | the main-agent device window. Lock held, zero subagents, blocking. Refuses to call the window good if fewer than 18 rows printed |
+
+Three things about the design are not the shape of the other legs here, and each is there for a recorded
+reason:
+
+- **The bill is a slope, never a division.** Each leg is timed at `--iters-lo` and `--iters-hi` and the
+  clocks-per-instruction figure comes from the difference, which cancels dispatch (~2-6 us and bimodal per
+  §6 of `bench/performance-status.md`), the fragment loads, the store and first touch. The cancelled
+  residue prints as `fixed_us_per_launch` instead of being assumed small. This is the sibling of the flat
+  ISA census that billed once-per-launch addressing overhead once per token (decision D60 in
+  `progress/2026-10-16/prefill-decision-log-2026-10-16.md`: flat +156 slots/token, true per-token -47).
+- **The witness is calibrated, not closed-form.** One launch at `iters = 1` is read back to get a
+  single WMMA's contribution per lane, and the timed runs must be exactly `iters` x that. The number of
+  accumulator slots a lane owns is printed (`elems_per_lane`) rather than assumed — this is the same class
+  of assumption that `prototype/attn_wmma/fattn_map_results.md` found transcribed wrong, and the row above
+  ("no shipping WMMA kernel may claim a fragment layout from this probe") is why it stays derived here.
+- **Both accumulator widths, one window.** Whether the engine would use `v_wmma_f16_16x16x16_f16` is a rate
+  question and it had never been emitted here. Two facts are already checkable without a device. First, the
+  F16 accumulator saves no registers: rocwmma's gfx11 path declares `AccRegF32x8` for `f16 x f16 -> f16`
+  (`/opt/rocm/core-10.0/include/rocwmma/internal/wmma_impl.hpp:320-360`), and this build emits
+  `v_wmma_f16_16x16x16_f16 v[1:8], v[9:16], v[17:24], v[1:8]` — an 8-VGPR D block, the same width the F32
+  form takes, with `C == D` in the chain. The `.amdhsa` metadata agrees: `wl_f16_i{1,2,4,8}` cost
+  vgpr = 34 / 33 / 51 / 92 against `wl_f32_i{1,2,4,8}` at 25 / 33 / 49 / 81, so it is register-neutral at
+  best and slightly worse at worst. Its fourth builtin argument is the D `op_sel` (`LOW = bits[15:0]`,
+  `HIGH = bits[31:16]`, rocwmma's `WmmaCtrlFlags`), which is where its actual economy lives: P can stay
+  16-bit through the fold instead of being widened to F32 and re-narrowed by `p_to_operand`. What it costs
+  is 10 mantissa bits per accumulate instead of 24. The rate is what is missing.
+
+One correction to make before the numbers arrive: the census already carries a measured sensitivity,
+`WMMA_CLK_MEASURED = 36` (`prototype/attn_wmma/fattn_census.py:99-100`) against the 32-clock class roof.
+That 36 is the **sustained** rate converted (3.552 MAC/lane/clk from the throughput leg), not a dependent
+chain, so it bounds none of what these legs measure — a chain that cannot overlap its own D write with its
+own C read is a different quantity. Do not read the ILP=1 row as a confirmation or refutation of the 36.
+
+Run it (main agent):
+
+```bash
+bash prototype/issue_rate_probe/build_wmma_latency.sh     # compile-only, touches no device
+tools/gpu_lock.sh acquire wmma-latency && tools/gpu_lock.sh util
+bash prototype/issue_rate_probe/run_wmma_latency_window.sh
+tools/gpu_lock.sh release
+```
+
+Cross-check built into the window: `wl_f32_i4` at 32 wavefronts/CU must land near the existing
+52.63 TFLOP/s row of §1 of `prototype/issue_rate_probe/results.md`. If it does not, this tool and that row are not measuring the same
+instruction stream and none of its numbers are comparable to the ledger.

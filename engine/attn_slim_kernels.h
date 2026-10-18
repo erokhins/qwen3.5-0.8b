@@ -173,6 +173,14 @@ __device__ __forceinline__ void attn_slim_body(const CoreArgs a) {
     const int tile = (a.tile > 0 && a.tile <= TILE) ? a.tile : TILE;   // bounded by `float e[TILE]`
     const int nd = (a.neg == NEG_DIMHALF) ? 4 : 8;      // of the 8 BF16 a lane owns
     if (row >= nrows || blockIdx.y >= s_row || ns <= 0) return;        // before any barrier: uniform
+    // THE OTHER FORM OWNS THIS ROW (`--attn-fattn`). Under `fattn_cover` the WMMA wave takes the streaming
+    // rows and this kernel keeps the one-pass ones, so the early-out is exactly the inverse of that form's
+    // coverage test — and it is the SAME predicate (`fattn_covers`), not a second spelling of it, because a
+    // row owned twice double-writes its partial and a row owned by neither leaves `attn_combine` merging an
+    // uninitialised slot, and neither failure is visible from inside the kernel that got it wrong. With
+    // `fattn_cover = 0`, which is what every shipped path and every one-row decode step passes, this test is
+    // false for every row and the kernel is bit-for-bit what it was before the field existed.
+    if (fattn_covers(a, row)) return;
     const int h = w % ATTN_TILE_G;                      // warp w owns query head h of the group
     const int head = ATTN_TILE_G * kv_write + h;
 

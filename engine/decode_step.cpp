@@ -697,6 +697,11 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // `--attn-tile` because the A/Bs are independent — `--attn-tile 0` must keep pricing the
             // per-(row,head) `attn_core` exactly as it did before this flag existed.
             a.wave_touch = sc.attn_touch;
+            // And which FORM owns this body's streaming rows (`--attn-fattn`,
+            // `kernels.h:AttnLayerArgs::wave_fattn`). Same riding reason; a one-row body never consults it
+            // because the fused single-row form runs whatever it says, which is the property that keeps a
+            // decode step bit-identical under the flag.
+            a.wave_fattn = sc.attn_fattn;
             stageclock::note(stageclock::kAttn);
             kernels::attn_decode_layer(a);
             // One widening over the whole [n][2048] tile, for the same reason P5 packed the casts

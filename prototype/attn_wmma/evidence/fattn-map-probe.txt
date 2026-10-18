@@ -1,0 +1,56 @@
+# check_fattn_map.py output, 2026-10-18, device gate, correctness only, no timing taken.
+# command: python3 prototype/attn_wmma/check_fattn_map.py
+one launch: /home/erokhins/erokhins_projects/qwen3.5-0.8b/tmp/attn_wmma_map/fattn_map_probe --swap=0 (dump kept at tmp/attn_wmma_map/dump-as-transcribed.txt) — first operand slot = the pattern's q/dim operand, as the header reads it
+  ok   [as-transcribed] lane ids: each lane stored its own id
+  note [as-transcribed] derived movement of the transcription's claim, out of 256 cells: parity-swap=256, transposed=240, contig8-per-halfrow=224, flat-run=254, adjacent-lane-swap=256
+  ok   [as-transcribed] P1 cell-id (16q+kv) [q row x kv lane]: all 256 cells match 'transposed'
+  ok   [as-transcribed] P1 cell-id (16q+kv) [q row x kv lane]: exactly one candidate map fits, and it is 'transposed'
+  ok   [as-transcribed] P1 cell-id (16q+kv) [q row x kv lane]: no candidate other than the reference is invisible to this pattern
+  ok   [as-transcribed] P1 cell-id (16q+kv) [q row x kv lane]: the transcribed 'claimed-rdna3' map does NOT fit this order (240 of 256 cells disagree)
+  ok   [as-transcribed] P2 coverage (256(q+1)(kv+1)) [q row x kv lane]: all 256 cells match 'transposed'
+  note [as-transcribed] P2 coverage (256(q+1)(kv+1)) [q row x kv lane]: NOT ADJUDICABLE for orientation by design — symmetric by construction: witnesses that all 256 dims contribute exactly once across the 16 K-steps and that the accumulator carries, and CANNOT adjudicate orientation
+  ok   [as-transcribed] P3 weights exchanged (16kv+q) [q row x kv lane]: all 256 cells match 'transposed'
+  ok   [as-transcribed] P3 weights exchanged (16kv+q) [q row x kv lane]: exactly one candidate map fits, and it is 'transposed'
+  ok   [as-transcribed] P3 weights exchanged (16kv+q) [q row x kv lane]: no candidate other than the reference is invisible to this pattern
+  ok   [as-transcribed] P3 weights exchanged (16kv+q) [q row x kv lane]: the transcribed 'claimed-rdna3' map does NOT fit this order (240 of 256 cells disagree)
+  ok   [as-transcribed] P4 port spellings (d + 16q) [head_dim x q row]: all 256 cells match 'transposed'
+  ok   [as-transcribed] P4 port spellings (d + 16q) [head_dim x q row]: exactly one candidate map fits, and it is 'transposed'
+  ok   [as-transcribed] P4 port spellings (d + 16q) [head_dim x q row]: no candidate other than the reference is invisible to this pattern
+  ok   [as-transcribed] P4 port spellings (d + 16q) [head_dim x q row]: the transcribed 'claimed-rdna3' map does NOT fit this order (240 of 256 cells disagree)
+one launch: /home/erokhins/erokhins_projects/qwen3.5-0.8b/tmp/attn_wmma_map/fattn_map_probe --swap=1 (dump kept at tmp/attn_wmma_map/dump-swapped-operands.txt) — the two operand slots exchanged: the transcribed drain then holds
+  ok   [swapped-operands] lane ids: each lane stored its own id
+  note [swapped-operands] derived movement of the transcription's claim, out of 256 cells: parity-swap=256, transposed=240, contig8-per-halfrow=224, flat-run=254, adjacent-lane-swap=256
+  ok   [swapped-operands] P1 cell-id (16q+kv) [q row x kv lane]: all 256 cells match 'claimed-rdna3'
+  ok   [swapped-operands] P1 cell-id (16q+kv) [q row x kv lane]: exactly one candidate map fits, and it is 'claimed-rdna3'
+  ok   [swapped-operands] P1 cell-id (16q+kv) [q row x kv lane]: no candidate other than the reference is invisible to this pattern
+  ok   [swapped-operands] P2 coverage (256(q+1)(kv+1)) [q row x kv lane]: all 256 cells match 'claimed-rdna3'
+  note [swapped-operands] P2 coverage (256(q+1)(kv+1)) [q row x kv lane]: NOT ADJUDICABLE for orientation by design — symmetric by construction: witnesses that all 256 dims contribute exactly once across the 16 K-steps and that the accumulator carries, and CANNOT adjudicate orientation
+  ok   [swapped-operands] P3 weights exchanged (16kv+q) [q row x kv lane]: all 256 cells match 'claimed-rdna3'
+  ok   [swapped-operands] P3 weights exchanged (16kv+q) [q row x kv lane]: exactly one candidate map fits, and it is 'claimed-rdna3'
+  ok   [swapped-operands] P3 weights exchanged (16kv+q) [q row x kv lane]: no candidate other than the reference is invisible to this pattern
+  ok   [swapped-operands] P4 port spellings (d + 16q) [head_dim x q row]: all 256 cells match 'claimed-rdna3'
+  ok   [swapped-operands] P4 port spellings (d + 16q) [head_dim x q row]: exactly one candidate map fits, and it is 'claimed-rdna3'
+  ok   [swapped-operands] P4 port spellings (d + 16q) [head_dim x q row]: no candidate other than the reference is invisible to this pattern
+  ok   the two operand orders disagree with each other, so the answer is about the operand slots and not about the fixture
+
+PASS: check_fattn_map — 26/26 checks; driver wall 0 s (process bookkeeping); no timing taken
+rc=0
+
+# --- and the injection selftest ---
+# command: python3 prototype/attn_wmma/check_fattn_map.py --selftest
+  ok   selftest: a table built from the claimed map PASSES the claimed comparison
+  ok   selftest: a table built from the WRONG map 'parity-swap' FAILS the claimed comparison (256 of 256 cells move) and is classified as 'parity-swap'
+  ok   selftest: a table built from the WRONG map 'transposed' FAILS the claimed comparison (240 of 256 cells move) and is classified as 'transposed'
+  ok   selftest: a table built from the WRONG map 'contig8-per-halfrow' FAILS the claimed comparison (224 of 256 cells move) and is classified as 'contig8-per-halfrow'
+  ok   selftest: a table built from the WRONG map 'flat-run' FAILS the claimed comparison (254 of 256 cells move) and is classified as 'flat-run'
+  ok   selftest: a table built from the WRONG map 'adjacent-lane-swap' FAILS the claimed comparison (256 of 256 cells move) and is classified as 'adjacent-lane-swap'
+  ok   anti-vacuity: the symmetric pattern §5d suggested (C = 256*q*kv) cannot see a transpose at all, which is why the shipped probe encodes coordinates instead
+  ok   and the coordinate-encoding pattern does see it (movement 240)
+  ok   selftest: the recorded answer 'transposed' is one the classifier can name
+  ok   injection lane-half-swap (lane t's values land in lane t^16's slots (the half-warp swap)) is caught: 256 cells disagree with the claimed map and it is NOT classified as 'claimed-rdna3'
+  ok   injection reg-reverse (the 8 register slots are written reversed) is caught: 256 cells disagree with the claimed map and it is NOT classified as 'claimed-rdna3'
+  ok   injection lane-rot (every value lands one lane up) is caught: 256 cells disagree with the claimed map and it is NOT classified as 'claimed-rdna3'
+
+PASS: check_fattn_map — 12/12 checks; driver wall 0 s (process bookkeeping); no timing taken
+rc=0
+total driver wall ms: 626
