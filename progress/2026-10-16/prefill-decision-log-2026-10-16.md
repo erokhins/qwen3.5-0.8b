@@ -1734,7 +1734,7 @@ counts. Two decisions follow, and the first deliberately does **not** re-open 1.
   bytes"); class 3 re-adjudication via `wide4096f`; 3.3 hand WMMA GEMM, which carries D47's "GEMMs are at the
   roof" prior and is now cheap to falsify against a 763 ms wall; and the 18 rotted line-cites from D51 F1.
 
-## D56 — attention is 9 % of the FLOPs and 34 % of the wall: **1.57 TFLOP/s, 7 % of the mix roof** (2026-10-17)
+## D56 — attention is 9 % of the FLOPs and 34 % of the wall: **1.57 TFLOP/s, 7 % of the mix roof** (2026-10-17) — **rate framing retracted by D57: the roof must be the scalar one, so the gap is 4.6× not 14×**
 
 Priced with `tools/prefill_ceiling_bound.py` (D47's instrument) against §25's wall, because item 2.6 was
 promoted on an external comparison and an external comparison does not tell you the size of the prize:
