@@ -1846,6 +1846,22 @@ def metrics(got: np.ndarray, ref: np.ndarray) -> dict:
     }
 
 
+def outside_floor(value: float, cap: float) -> bool:
+    """Is `value` OUTSIDE a `<= cap` floor? Written `not (value <= cap)`, never `value > cap`.
+
+    The two spellings differ on exactly one input, and it is the input a broken kernel produces: every
+    comparison with NaN is False, so `nan > cap` is False and a NaN statistic counted as INSIDE the
+    floor. Section (i) was written that way, and §3 of progress/2026-10-18/fattn-port-state.md records
+    that its wide1024f `--attn-fattn 1` PASS — "every one of the 1024 pinned prefill rows was judged
+    and is inside the floors" — was issued over a dump in which every streaming row was NaN: one
+    poisoned element makes both `cos` and `meanrel` NaN, so all 512 covered rows read as inside.
+    This is the predicate rather than a side check on purpose: a non-finite row is not inside a floor,
+    it is outside the domain the floors are defined on, so the floor check is the thing that must say
+    so. `tmp/gcc/fattn_gate_teeth.py` is the witness that the poisoned-row cases change colour here.
+    """
+    return not (value <= cap)
+
+
 def top2(v: np.ndarray) -> tuple[int, float, float]:
     """(argmax id, its value, the gap to the runner-up) for one logits row, lowest id winning a tie.
 
@@ -3369,6 +3385,10 @@ def prefill_row_checks(work: Path, vocab: int, rows_pin, asked: str,
           + (CASCADE_RULE if route_is_library() else
              "the room rule, which is not armed on the hand route: an argmax that moved there is a"
              " defect, because bit-identity is the claim on that route"))
+    print("  a row with a non-finite element in it is OUTSIDE every floor by construction, not inside"
+          " one whose cap it happened to clear: every comparison with NaN is False, so the caps are"
+          " written `not (value <= cap)` and such a row is named as non-finite, by row and by element"
+          " count. The same census (g) runs on the state; nothing here may call NaN a numerics verdict.")
     if n_rows > staging:
         print(f"  geometry: MAXSC {staging} lanes is the one-pass/streaming boundary, so rows"
               f" 0..{staging - 1} are one-pass and rows {staging}..{n_rows - 1} are the streaming"
@@ -3398,23 +3418,41 @@ def prefill_row_checks(work: Path, vocab: int, rows_pin, asked: str,
             continue
         ref = np.asarray(widen_pin(np.asarray(rows_pin[i])), dtype=np.float32).reshape(-1)
         m = metrics(eng, ref)
+        # Finiteness of the ENGINE's row, read off the row itself rather than inferred from the two
+        # statistics it feeds: one NaN element makes `cos` and `meanrel` both NaN, and a NaN cannot say
+        # how many elements were bad or where. Counted here so the FAIL line can name it.
+        n_bad = int(np.count_nonzero(~np.isfinite(eng)))
         region = "one-pass" if i + 1 <= staging else "streaming"
-        r = regions.setdefault(region, dict(n=0, identical=0, over_cos=0, over_rel=0, moved=0))
+        r = regions.setdefault(region, dict(n=0, identical=0, over_cos=0, over_rel=0, nonfinite=0,
+                                            moved=0))
         r["n"] += 1
+        if n_bad:
+            r["nonfinite"] += 1
         if m["ndiff"] == 0:
             r["identical"] += 1
         deficit = 1.0 - m["cos"]
         if i in (staging - 1, staging, n_rows - 1):
             at_row[i] = deficit
-        if deficit > cos_cap:
+        # `outside_floor`, not `>`: with `deficit > cos_cap` a NaN row compared False on both caps and was
+        # counted INSIDE the floors, which is how §17's successor shipped a green verdict over an all-NaN
+        # streaming block. A non-finite row is not inside a floor, it is outside the domain the floors are
+        # defined on, so this predicate — not a side check — is what has to refuse it.
+        nf_why = (f"NON-FINITE in {n_bad}/{eng.size} elements: cos and meanrel are undefined there, so"
+                  " no floor admits the row (it is outside the domain the floors are on), and its argmax"
+                  " is a NaN index rather than a token")
+        if outside_floor(deficit, cos_cap):
             r["over_cos"] += 1
-            outside.append(f"row {i} ({region}): cos deficit {deficit:.4e} > {cos_cap:.4e}"
-                           f" (cos {m['cos']:.8f}), meanrel {m['meanrel']:.4%},"
-                           f" ndiff {m['ndiff']}/{ref.size}, maxabs {m['maxabs']:.4g}")
-        if m["meanrel"] > rel_cap:
+            outside.append(f"row {i} ({region}): "
+                           + (nf_why if n_bad else
+                              f"cos deficit {deficit:.4e} > {cos_cap:.4e}"
+                              f" (cos {m['cos']:.8f}), meanrel {m['meanrel']:.4%},"
+                              f" ndiff {m['ndiff']}/{ref.size}, maxabs {m['maxabs']:.4g}"))
+        if outside_floor(m["meanrel"], rel_cap):
             r["over_rel"] += 1
-            outside.append(f"row {i} ({region}): meanrel {m['meanrel']:.4%} > {rel_cap:.4%}"
-                           f" (cos deficit {deficit:.4e}), ndiff {m['ndiff']}/{ref.size}")
+            outside.append(f"row {i} ({region}): "
+                           + (nf_why if n_bad else
+                              f"meanrel {m['meanrel']:.4%} > {rel_cap:.4%}"
+                              f" (cos deficit {deficit:.4e}), ndiff {m['ndiff']}/{ref.size}"))
         if deficit > worst_cos[0]:
             worst_cos = (deficit, i)
         if m["meanrel"] > worst_rel[0]:
@@ -3444,19 +3482,25 @@ def prefill_row_checks(work: Path, vocab: int, rows_pin, asked: str,
                     tied_rows.append(line)
                 check(ok, f"row {i}: the engine's argmax moved against a TIED pinned row", line)
             else:
-                ok = room_is_thin(pin_ulp)      # the REFERENCE reading; `flip_admissible` is for pairings with no reference
+                # A non-finite row cannot have its argmax adjudicated at all: `np.argmax` returns the
+                # index of the first NaN, so `eng_id` is an address in the dump, not a token, and its
+                # "room" is whatever sits next to the NaN. Not admissible as a thin-room flip — the thin
+                # rule forgives a coin toss between two real candidates, and this is not one.
+                ok = room_is_thin(pin_ulp) and not n_bad
                 row_ulp = pin_ulp
                 line = (f"row {i} ({region}): pin top1 {pin_id} ({pin_val:.6g}) over its runner-up by"
                         f" {pin_room:.6g} = {pin_ulp:.3g} ULP vs engine {eng_id} ({eng_val:.6g})"
                         f" over its own runner-up by {eng_room:.6g}"
-                        + (f" — ADMITTED as a thin-room flip: the reference's own room is"
-                           f" {row_ulp:.4g} BF16 ULP, under"
-                           f" {CASCADE_BAND['flip_room_max_ulp']:.2f}, which is the class §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured"
-                           if ok else
-                           f" — RED: neither side had under"
-                           f" {CASCADE_BAND['flip_room_max_ulp']:.2f} BF16 ULP of"
-                           " room, so no band in force covers this flip. Stop and report; this"
-                           " section does not widen one"))
+                        + (f" — RED: the engine's row is {nf_why}, so this is not a flip to admit"
+                           if n_bad else
+                           (f" — ADMITTED as a thin-room flip: the reference's own room is"
+                            f" {row_ulp:.4g} BF16 ULP, under"
+                            f" {CASCADE_BAND['flip_room_max_ulp']:.2f}, which is the class §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md measured"
+                            if ok else
+                            f" — RED: neither side had under"
+                            f" {CASCADE_BAND['flip_room_max_ulp']:.2f} BF16 ULP of"
+                            " room, so no band in force covers this flip. Stop and report; this"
+                            " section does not widen one")))
                 if ok:
                     rooms.append(f"prefill row {i}: {pin_id} -> {eng_id}"
                                  f" (room {row_ulp:.4g} BF16 ULP)")
@@ -3486,7 +3530,7 @@ def prefill_row_checks(work: Path, vocab: int, rows_pin, asked: str,
             continue
         print(f"  {name:9s} rows: {r['n']:5d} judged, bit-identical {r['identical']:5d},"
               f" outside the cos cap {r['over_cos']:4d}, outside the meanrel cap {r['over_rel']:4d},"
-              f" argmax moved {r['moved']:4d}")
+              f" non-finite {r['nonfinite']:4d}, argmax moved {r['moved']:4d}")
     for i in sorted(at_row):
         which = {staging - 1: "last one-pass row", staging: "first streaming row",
                  n_rows - 1: "last row of the prompt (the one §15 disputes)"}[i]
@@ -3505,8 +3549,9 @@ def prefill_row_checks(work: Path, vocab: int, rows_pin, asked: str,
           f"every one of the {n_rows} pinned prefill rows was judged and is inside the floors named"
           " above",
           ("; ".join(outside[:6]) + (f" … ({len(outside)} lines in all)" if len(outside) > 6 else "")
-           if outside else f"{total} rows judged: worst cos deficit {worst_cos[0]:.4e} at row"
-           f" {worst_cos[1]}, worst meanrel {worst_rel[0]:.4%} at row {worst_rel[1]}"))
+           if outside else f"{total} rows judged, all finite: worst cos deficit"
+           f" {worst_cos[0]:.4e} at row {worst_cos[1]}, worst meanrel {worst_rel[0]:.4%} at row"
+           f" {worst_rel[1]}"))
     if pooled["n"] and pooled["na"] and pooled["nb"] and pooled["sar"]:
         pcos = pooled["dot"] / (pooled["na"] ** 0.5 * pooled["nb"] ** 0.5)
         prel = pooled["sad"] / pooled["sar"]
@@ -3574,6 +3619,68 @@ def selftest_room_readings(fixture: str, step: int | None) -> list[str]:
         " engine's own near-tie would admit. If they agree, one pairing has been folded into the other"
         " and the distinction §3f of prototype/gemm_algo_sweep/results.md exists for is gone"))
     return [] if ok else [f"the two room readings must split at step {step}: {detail}"]
+
+
+def selftest_form_flags() -> list[str]:
+    """The teeth of `missing_form_flags` — the predicate that stops a side run from silently judging the
+    engine's default attention form. In process, no engine, no fixture: the predicate reads an argv, so
+    `args` here is the three attributes it actually touches.
+
+    Must-catch, DERIVED from the flag list rather than hand-listed (the rule this tree learned from
+    `mlp_gemv` and `mixed_bw`: a hand-listed negative set rots the moment the list changes): for each of
+    `ATTN_FORM_FLAGS`, once dropped and once carrying the other value — 2 × 3 = 6 cases. Must-not-catch:
+    the complete argv at BOTH settings of every flag, and an argv whose unrelated flags carry values that
+    merely look like flags. A predicate that fired on those would be catching everything, which is the
+    negative that measures nothing.
+    """
+    bad: list[str] = []
+    import argparse
+    on = argparse.Namespace(attn_tile="1", attn_touch="1", attn_fattn="1")
+    off = argparse.Namespace(attn_tile="0", attn_touch="0", attn_fattn="0")
+
+    def argv(args, *, drop: str = "", wrong: str = "", extra: tuple[str, ...] = ()) -> list[str]:
+        cmd = ["decode_run", "--out", "/tmp/x"]
+        for flag in ATTN_FORM_FLAGS:
+            if flag == drop:
+                continue
+            cmd += [flag, "0" if flag == wrong else str(getattr(args, flag.lstrip("-").replace("-", "_")))]
+        return cmd + list(extra)
+
+    # must-not-catch: the complete argv at both settings, and one with unrelated flags around it.
+    for args, what in ((on, "all three forms on"), (off, "all three forms off")):
+        clean = argv(args)
+        noise = argv(args, extra=("--replay", "1,2,3", "--steps", "3"))
+        for cmd, label in ((clean, what), (noise, what + ", with unrelated flags after")):
+            got = missing_form_flags(cmd, args)
+            ok = not got
+            print(f"  [{'PASS' if ok else 'FAIL'}] a complete argv is clean ({label})"
+                  + ("" if ok else f" — it named: {got}"))
+            if not ok:
+                bad.append(f"form-flag predicate names a complete argv ({label})")
+    # must-catch: each flag dropped, and each flag carrying the other value.
+    for flag in ATTN_FORM_FLAGS:
+        for how in ("drop", "wrong"):
+            cmd = argv(on, **{how: flag})
+            got = missing_form_flags(cmd, on)
+            ok = len(got) == 1 and flag in got[0]
+            what = f"{flag} {'is missing' if how == 'drop' else 'carries the other value'}"
+            print(f"  [{'PASS' if ok else 'FAIL'}] {what} — named" if ok else
+                  f"  [FAIL] {what} — expected exactly one failure naming {flag}, got {got}")
+            if not ok:
+                bad.append(f"form-flag predicate missed {flag} {how}")
+    # A flag that appears twice is a lie about which form ran, whichever value the parser keeps.
+    dup = argv(on) + ["--attn-fattn", "0"]
+    got = missing_form_flags(dup, on)
+    ok = len(got) == 1 and "appears 2 times" in got[0]
+    print(f"  [{'PASS' if ok else 'FAIL'}] a duplicated form flag is refused rather than resolved"
+          + ("" if ok else f" — got {got}"))
+    if not ok:
+        bad.append("form-flag predicate resolved a duplicated flag instead of refusing it")
+    # And the flag list itself: a fourth form flag added to the engine without being added here would make
+    # this whole predicate quietly incomplete, which is the empty-parse failure one level over.
+    print(f"  [info] flags covered: {', '.join(ATTN_FORM_FLAGS)} — a new form flag in `decode_run` has"
+          " to join this tuple or no side run is checked for it")
+    return bad
 
 
 def selftest_prefill_rows() -> list[str]:
@@ -3662,6 +3769,41 @@ def selftest_prefill_rows() -> list[str]:
     loud[0] = 200.0                       # argmax untouched, whole-vector shape destroyed
     run_case("REDs a row outside the cos/meanrel floors", [wide, wide], [wide.copy(), loud],
              want_fail=True, needle="cos deficit")
+
+    # ---- the NaN witness: a non-finite row is a defect, not a row whose caps could not be evaluated --
+    # Both spellings of poison, because they reach the predicates differently: a NaN makes `cos` and
+    # `meanrel` NaN (so the caps are the thing that must refuse it), and an infinity makes them a large
+    # FINITE number that the caps catch on magnitude — the ±inf case is here to show the section names
+    # non-finiteness either way instead of reporting an infinity as a big error. The must-not-catch half
+    # is the bit-identical case above, which now forbids the word NON-FINITE: a predicate that fires on
+    # every row catches nothing, which is the `mlp_gemv`/`mixed_bw` rule applied to a new check.
+    for name, poison_at, poison_to in (("NaN", 3, float("nan")), ("infinity", 5, float("inf"))):
+        poisoned = wide.copy()
+        poisoned[poison_at] = poison_to
+        # The needle is the CAPS' line, not just any line that mentions the poison: the argmax rule also
+        # refuses a non-finite row, and a needle both lines could print would pass with the caps still
+        # blind. `rows judged, all finite` is what only the PASS detail prints, so forbidding it is what
+        # proves the aggregate verdict itself went red rather than merely being joined by a red line.
+        run_case(f"REDs a row holding a {name}", [wide, wide], [wide.copy(), poisoned],
+                 want_fail=True, needle=f"row 1 (one-pass): NON-FINITE in 1/8",
+                 forbid=("rows judged, all finite",))
+    run_case("does not call a finite row non-finite", [wide, wide], [wide.copy(), wide.copy()],
+             want_fail=False, forbid=("NON-FINITE",))
+    # The predicate on its own, so a regression in it cannot hide behind section (i)'s prints, and the
+    # pre-fix spelling written out as the fact it is: `nan > cap` is False, so the old `>` form could
+    # only ever read an all-NaN block as inside the floors. `tmp/gcc/fattn_gate_teeth.py` re-runs this
+    # against section (i) itself, both spellings, and requires the colour to change. Any positive cap
+    # will do — the predicate is cap-agnostic, which is why this is a predicate and not a band. A
+    # signed -inf is deliberately NOT in the list: `-inf <= cap` is true and the floor means it, since a
+    # row holding -inf reaches these caps as +inf in `meanrel` (which takes an absolute value) or as NaN
+    # in `cos`, and both are refused — the infinity case above is that assertion.
+    fp_cap = 2.0e-3
+    for value, want in ((float("nan"), True), (float("inf"), True), (1e-9, False), (fp_cap, False),
+                        (fp_cap * 1.001, True)):
+        if outside_floor(value, fp_cap) != want:
+            bad.append(f"outside_floor({value!r}, cap) != {want}")
+    if (float("nan") > fp_cap) or not outside_floor(float("nan"), fp_cap):
+        bad.append("outside_floor no longer distinguishes NaN from a value inside the cap")
 
     # ---- the §17 witness: a coverage gap fails, and issues no numerics verdict ------------------
     run_case("reports a row the engine never dumped", [wide, wide], [wide.copy(), None],
@@ -3917,6 +4059,42 @@ def cmd_flag(cmd: list, flag: str) -> str | None:
     """
     i = cmd.index(flag) if flag in cmd else -1
     return cmd[i + 1] if 0 <= i + 1 < len(cmd) else None
+
+
+# The engine switches that choose a FORM rather than a value, and that every engine side this gate runs
+# therefore has to carry. `--gemm`/`--gemm-pins` are route flags with their own provenance checks; these
+# three choose which kernel owns a wave body's rows, and a side run that drops one does not fail — it
+# silently judges the engine's default.
+ATTN_FORM_FLAGS = ("--attn-tile", "--attn-touch", "--attn-fattn")
+
+
+def missing_form_flags(cmd: list, args) -> list[str]:
+    """Which `ATTN_FORM_FLAGS` `cmd` does not carry with the value this gate was invoked with.
+
+    Why this is a check and not a code-review note: section (b2) built its own argv rather than reusing the
+    main run's, and it forwarded `--attn-tile` and `--attn-touch` but not `--attn-fattn`. Under
+    `--attn-fattn 1` the free-running side judged the WMMA form and the teacher-forced side judged the
+    frozen VALU form, so the section whose entire claim is that the two runs differ in NOTHING but the fed
+    tokens was comparing two different forms — and the failure mode is silence, because a dropped flag
+    takes the engine's default, which is a legal value. The printed `$ ...` line was the only other place
+    a reader could see it, and it names only the two flags that were there.
+
+    Asserted on the argv rather than on a variable, per §17's rule (`cmd_flag`'s docstring): a requirement
+    that lives in an argv has to be checked against the argv that is about to run.
+    """
+    want = {"--attn-tile": args.attn_tile, "--attn-touch": args.attn_touch,
+            "--attn-fattn": args.attn_fattn}
+    bad = []
+    for flag in ATTN_FORM_FLAGS:
+        # A duplicated flag is refused rather than resolved: `cmd_flag` reads the first, the engine's parser
+        # keeps the last, and an argv that disagrees with itself about which form ran cannot certify either.
+        if cmd.count(flag) > 1:
+            bad.append(f"{flag} appears {cmd.count(flag)} times, so which value the engine took is the"
+                       " parser's business and this check cannot certify it")
+        elif cmd_flag(cmd, flag) != str(want[flag]):
+            bad.append(f"{flag} carries {cmd_flag(cmd, flag)!r}, this gate was invoked with"
+                       f" {str(want[flag])!r}")
+    return bad
 
 
 # ---- (h) the batched-path proof (P4b) -----------------------------------------------------------
@@ -4548,11 +4726,22 @@ def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: d
 
 def compare_dump_dirs(a: Path, b: Path) -> tuple:
     """Compare every `logits*.bin` in two run directories, byte for byte (the `cmp` of P2's
-    byte-identity proof, done in the gate so it is permanent). Returns (files, bytes, differing)."""
+    byte-identity proof, done in the gate so it is permanent). Returns
+    (files, bytes, differing, nonfinite).
+
+    `nonfinite` names the files whose F32 payload is not finite on at least one side (files whose size
+    is not a multiple of 4 are left out of that census rather than guessed at). It exists because a
+    byte-identity claim over NaN is a claim about nothing: NaN != NaN as a value but compares equal as
+    bytes, so two runs that both produced NaN in the same slots are "bit-identical" — the equality then
+    reports where the poison landed, not whether the two things compared agree. That is the hole the
+    all-NaN `--attn-fattn 1` corpus opened in every bit-identity section at once, so every caller of this
+    helper must treat a non-empty `nonfinite` as a failed claim, not as a note.
+    """
     names_a = sorted(p.name for p in a.glob("logits*.bin"))
     names_b = sorted(p.name for p in b.glob("logits*.bin"))
     total = 0
     differing = [] if names_a == names_b else ["the file sets differ"]
+    nonfinite: list[str] = []
     for name in names_a:
         pa, pb = a / name, b / name
         if not pb.exists():
@@ -4562,7 +4751,11 @@ def compare_dump_dirs(a: Path, b: Path) -> tuple:
         total += len(ba)
         if ba != bb or len(ba) != len(bb):
             differing.append(name)
-    return len(names_a), total, differing
+        if len(ba) % 4 == 0 and len(bb) % 4 == 0:
+            va, vb = np.frombuffer(ba, dtype="<f4"), np.frombuffer(bb, dtype="<f4")
+            if not (bool(np.isfinite(va).all()) and bool(np.isfinite(vb).all())):
+                nonfinite.append(name)
+    return len(names_a), total, differing, nonfinite
 
 
 def corpus_drift(a_dir: Path, b_dir: Path) -> dict | None:
@@ -4931,10 +5124,14 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
                   "both sides sample the same token ids",
                   f"{len(keys(batched))} prefill rows + generation steps compared"
                   + (" — 0 lines, which is a broken run, not a match" if not keys(batched) else ""))
-            nfiles, nbytes, differing = compare_dump_dirs(batched["dir"], perrow["dir"])
-            check(not differing and nfiles > 0, "both sides write bit-identical logits",
+            nfiles, nbytes, differing, nonfinite = compare_dump_dirs(batched["dir"], perrow["dir"])
+            check(not differing and nfiles > 0 and not nonfinite,
+                  "both sides write bit-identical logits",
                   f"{nfiles} files, {nbytes} bytes compared, {len(differing)} differing"
-                  + (f": {differing[:5]}" if differing else ""))
+                  + (f": {differing[:5]}" if differing else "")
+                  + (f" — and {len(nonfinite)} of those files are NOT FINITE on one or both sides"
+                     f" ({nonfinite[:5]}), so the byte equality below is the NaN agreeing with itself"
+                     " and proves nothing about either side" if nonfinite else ""))
 
     # ---- P6: the conv window CARRIED across wave boundaries (§2.4's end condition, A-04's `T > 1`).
     # This is the check the wide run cannot make for itself: at `--wave-rows 512` a shipped fixture is
@@ -4976,12 +5173,16 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
                             " attention form." if SCOPE == "form" else ""))
         else:
             with defer(WAVE_CARRY_REASON, on=SCOPE == "form"):
-                nk, nb, diff = compare_dump_dirs(batched["dir"], carry["dir"])
-                check(not diff and nk > 0,
+                nk, nb, diff, nonfin = compare_dump_dirs(batched["dir"], carry["dir"])
+                check(not diff and nk > 0 and not nonfin,
                       f"the {len(sizes)}-wave side writes bit-identical logits to the one-wave side"
                       " — the carried conv window is exact (A-04's T>1 end condition)",
                       f"{nk} files, {nb} bytes compared, {len(diff)} differing"
                       + (f": {diff[:5]}" if diff else "")
+                      + (f" — and {len(nonfin)} of those files are NOT FINITE on one or both sides"
+                         f" ({nonfin[:5]}): the two sides agree because the NaNs sit in the same"
+                         " slots, which is a statement about the poison's address, not about the"
+                         " carried window" if nonfin else "")
                       + ". A difference here is the window, not rounding: both sides read the same weights in"
                         " the same order and every other family is already proven bit-identical above")
             notes.append(f"conv window carried across {len(sizes) - 1} interior wave boundary(ies) at"
@@ -5301,7 +5502,7 @@ def gdn_spell_checks(sides: dict, *, stand_in: bool, loop_span: int | None) -> N
         if ref is None or side is None:
             continue        # the rc check above already failed this gate; do not report it twice
         compared += 1
-        n_files, n_bytes, differing = compare_dump_dirs(ref["dir"], side["dir"])
+        n_files, n_bytes, differing, nonfinite = compare_dump_dirs(ref["dir"], side["dir"])
         # A comparison over an empty corpus cannot fail, which is the `gdn_collapse/run.py` class of
         # defect this tree has now hit four times. So the denominator is asserted before the verdict.
         check(n_files > 0,
@@ -5311,13 +5512,22 @@ def gdn_spell_checks(sides: dict, *, stand_in: bool, loop_span: int | None) -> N
               if n_files else
               "no `logitsN.bin` on either side — with nothing dumped, \"no differing file\" would be an"
               " absence of evidence rather than a proof of identity, so there is no verdict here")
-        check(not differing, claim,
+        # A byte-identity claim over a corpus that is not finite is a claim about the poison, not about
+        # the two spellings: NaN is unequal to NaN as a value but equal to NaN as bytes, so `differing`
+        # can be empty while the whole corpus is NaN — the equality then reports where the NaN landed.
+        # Finiteness is part of what this claim asserts, not a note beside it.
+        check(not differing and not nonfinite, claim,
               f"{len(differing)} of {n_files} dumped logits rows ({n_bytes / 1e6:.1f} MB compared) "
-              f"differ: {differing[:6]}" if differing else "")
-        if not differing and not stand_in:
+              f"differ: {differing[:6]}" if differing else
+              (f"{len(nonfinite)} of {n_files} dumped rows are NOT FINITE on one or both sides"
+               f" ({nonfinite[:6]}): the bytes agree because the NaN agrees, so nothing below this line"
+               " adjudicates the spelling. The corpus is broken; do not read identity here" if nonfinite
+               else ""))
+        if not differing and not nonfinite and not stand_in:
             notes.append(f"gdn-spell A/B: {n_files} logits rows, {n_bytes / 1e6:.1f} MB, "
                          f"bit-identical between `{ref_name}` and `{side_name}` — that side "
-                         "moved no bits on this fixture")
+                         "moved no bits on this fixture, and every compared element is finite on both"
+                         " sides, so the identity is about the bits and not about shared NaNs")
     # And the denominator of the comparisons themselves: `gdn_spell_pairs` says how many the shape
     # owes, so a run that produced fewer must not read as "every comparison passed".
     expected_pairs = len(gdn_spell_pairs(loop_span))
@@ -6515,6 +6725,8 @@ def selftest(fixture: str = "dec8") -> int:
     section("(i) the prefill-row section's own negatives — synthetic rows, in process")
     row_bad = selftest_prefill_rows()
     bad += row_bad
+    section("(i2) a side run's argv must carry every attention-form flag — in process, no engine")
+    bad += selftest_form_flags()
     # The band history has to bite here too, and bite before anything runs: an unrecorded edit to `BAND`
     # must stop the gate, not merely look suspicious in review. The injection is the real thing — a
     # scratch tree whose engine/gate.py carries a looser flat floor, sitting beside the shipped ledger —
@@ -8194,6 +8406,10 @@ def teacher_forced_checks(args, man: dict, prompt_ids: list, dec_logits: list, g
                "--prefill-logits", args.prefill_logits,
                "--gemm", GEMM_ROUTE, "--gemm-pins", GEMM_PINS,
                "--attn-tile", args.attn_tile, "--attn-touch", args.attn_touch,
+               # Forwarded with the other two form flags, and asserted on the argv below: this section's
+               # whole claim is that the two runs differ in nothing but the fed tokens, and a form flag
+               # left out here takes the engine's default instead — a silent second form.
+               "--attn-fattn", args.attn_fattn,
                "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk),
                "--gdn-spell", args.gdn_spell,
                "--gdn-loop", str(args.gdn_loop),
@@ -8204,6 +8420,14 @@ def teacher_forced_checks(args, man: dict, prompt_ids: list, dec_logits: list, g
                # run's claim, already gated in section (g).
                "--replay", fed_list]
         print("  $ " + " ".join(cmd))
+        dropped = missing_form_flags(cmd, args)
+        check(not dropped,
+              "the teacher-forced side's argv carries every attention-form flag this gate was invoked"
+              " with — the claim below is that these two runs differ in NOTHING but the fed tokens, and"
+              " a form flag left out here does not fail: it takes the engine's default and quietly makes"
+              " this a comparison of two different forms",
+              f"{len(dropped)} of {len(ATTN_FORM_FLAGS)} form flags are not as asked: "
+              + "; ".join(dropped))
         proc = subprocess.run(cmd, capture_output=True, text=True)
         stdout, rc = proc.stdout, proc.returncode
         for line in proc.stdout.splitlines():
@@ -8235,6 +8459,21 @@ def teacher_forced_checks(args, man: dict, prompt_ids: list, dec_logits: list, g
           " fed itself is section (a)/(b)'s question, not this one")
     if mode != "replay":
         return
+    if not args.dry_run:
+        # The same provenance rule the main run applies to itself, applied to this side and read in the
+        # same breath as the measurement (the stale-binary lesson: an argv assertion proves what was
+        # ASKED for, the echo proves what RAN, and a check inside the binary under test is blind to a
+        # stale binary). A dropped or misrouted flag here would otherwise show up as a numerics verdict
+        # about a form nobody asked for.
+        for flag, field, want in (("--attn-tile", "attn_tile", args.attn_tile),
+                                  ("--attn-touch", "attn_touch", args.attn_touch),
+                                  ("--attn-fattn", "attn_fattn", args.attn_fattn)):
+            got = tf.get("numerics", {}).get(field)
+            check(str(got) == str(want),
+                  f"the teacher-forced side's NUMERICS line says it ran {field}={want}",
+                  (f"its NUMERICS line carried no `{field}=`, so this log cannot say which form ran and"
+                   " nothing compared here is a like-for-like comparison" if got is None else
+                   f"NUMERICS echoed {field}={got} while this gate was invoked with {flag} {want}"))
     tf_fed = [int(s["input"]) for s in tf_steps]
     if not check(tf_fed == greedy[:-1],
                  "every token this run was fed is the reference's own — the identical conditioning"
