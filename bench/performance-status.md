@@ -20,10 +20,9 @@ decided it. This file is the measurement record those routes' citations point at
 with zero subagents active, each window inside one `tools/gpu_lock.sh` hold (`util` recorded at
 acquire and release, then discounted — §6). Commands, lock tags and util pairs:
 `progress/bench/evidence/ledger-2026-10-16/commands-and-provenance.md`; the filtered raw rows behind
-§2 and §3: `progress/bench/evidence/ledger-2026-10-16/stage-wave.txt`. Binary:
-`engine/build/decode_run` rebuilt from HEAD after `6fd6e61` (which flipped `--attn-tile` to 1).
-Shipped defaults on every row unless stated: `--gemm library`, `--attn-tile 1`, `--mlp-map auto`,
-`--gdn-scan seq`, `kRowsPerBlock = 32`.
+§2 and §3: `progress/bench/evidence/ledger-2026-10-16/stage-wave.txt`. Binary: `engine/build/decode_run`
+at HEAD. Shipped defaults on §1's rows unless stated: `--gemm lt`, `--gemm-pins all`, `--attn-tile 1`,
+`--mlp-map auto`, `--gdn-scan seq`, `--gdn-spell fused`, `--gdn-loop 512`, `kRowsPerBlock = 32`.
 
 **What today's re-take changed** against the previous era's ledger (2026-10-14, progress/2026-10-16/performance-status-2026-10-16.md:1073-1149):
 cold weight-restore moved from 454.4 ms best / 77 % spread to **335.8 ms best / 9.2 % spread**; the
@@ -40,20 +39,20 @@ probe re-took at **239.3 GB/s** — 1 % above the 237 GB/s this ledger has used 
 
 **Decode — marginal cost of one generated token** (`tools/context_sweep.py --lanes 128,512,1024,2048
 --steps 32 --runs 3`; differential by construction: two runs differing only in `--steps`, so the
-prompt wave cancels). `was` is the 2026-10-14 headline on the same ruler (progress/2026-10-16/performance-status-2026-10-16.md:1106-1107).
+prompt wave cancels). `was` is the 2026-10-16 banner on the same ruler, re-taken in §25's window;
+the 2026-10-14 row behind that sits at (progress/2026-10-16/performance-status-2026-10-16.md:1106-1107).
 
 | lanes at last step | marginal ms/token, best of 3 | all three runs | spread | tok/s | was |
 |---|---|---|---|---|---|
-| 128 | **11.035** | 11.526 / 11.988 / 11.035 | 8.64 % | 90.6 | 11.155 / 89.6 |
-| 512 | **12.408** | 12.525 / 12.475 / 12.408 | 0.95 % | 80.6 | 12.538 / 79.8 |
-| 1024 | **12.407** | 12.415 / 12.407 / 12.635 | 1.84 % | 80.6 | 12.625 / 79.2 |
-| 2048 | **12.382** | 16.490 / 12.382 / 13.378 | 33.17 % | 80.8 | 12.839 / 77.9 |
+| 128 | **11.480** | 11.699 / 11.588 / 11.480 | 1.90 % | 87.1 | 11.035 / 90.6 |
+| 512 | **12.764** | 12.858 / 12.764 / 13.030 | 2.08 % | 78.3 | 12.408 / 80.6 |
+| 1024 | **12.128** | 12.433 / 12.128 / 12.632 | 4.16 % | 82.5 | 12.407 / 80.6 |
+| 2048 | **12.487** | 13.186 / 12.487 / 12.849 | 5.60 % | 80.1 | 12.382 / 80.8 |
 
-Medians, because the 128 and 2048 rows each carry one outlier run: 128 → 11.526; 512 → 12.475;
-1024 → 12.415; 2048 → 13.378. The curve is **flat from 512 to 2048 lanes and climbs only past 2k**,
+Medians, because the spreads above are 1.9–5.6 % and one run per row can sit at either end: 128 →
+11.588; 512 → 12.858; 1024 → 12.433; 2048 → 12.849. The curve is **flat from 512 to 2048 lanes and climbs only past 2k**,
 which is what P7's split-K path was for; the 2.301 µs-per-lane slope of 2026-10-12 was dominated by
-fixed launch cost and did not extrapolate
-(progress/2026-10-16/performance-status-2026-10-16.md:537-540).
+fixed launch cost and did not extrapolate (progress/2026-10-16/performance-status-2026-10-16.md:537-540).
 
 **4032 lanes** — quoted from the stage-clock burst, never from `context_sweep.py`, which is unusable
 at that width (§6): median of 3 **14.028 ms = 71.3 tok/s** (14.0280 / 13.8788 / 14.0995,
@@ -61,21 +60,22 @@ at that width (§6): median of 3 **14.028 ms = 71.3 tok/s** (14.0280 / 13.8788 /
 on the same burst ruler (progress/2026-10-16/performance-status-2026-10-16.md:878), so −3.2 %.
 
 **Prefill / TTFT** (`tools/prefill_sweep.py --lanes 64,256,1024,3072 --runs 3`; `ms_total` with
-`--steps 1` — prompt wave plus one priced step, weight load excluded). `was` is the 2026-10-14
-reading of the same sweep (progress/2026-10-16/performance-status-2026-10-16.md:1098-1100; the 256-lane row of that day's sweep, 1,893 tok/s, is
+`--steps 1` — prompt wave plus one priced step, weight load excluded). `was` is the 2026-10-16
+banner, re-taken in §25's window; the 2026-10-14 reading of the same sweep sits at
+progress/2026-10-16/performance-status-2026-10-16.md:1098-1100; the 256-lane row of that day's sweep, 1,893 tok/s, is
 the figure recorded in `AGENTS.md`'s ruler-window trap row).
 
 | prompt lanes | ms to first sampled token, best of 3 | all three runs | spread | prompt tok/s | was |
 |---|---|---|---|---|---|
-| 64 | **91.1** | 92.1 / 92.7 / 91.1 | 1.76 % | 702.9 | 708.4 |
-| 256 | **140.0** | 143.0 / 140.0 / 142.4 | 2.17 % | 1,828.5 | 1,893 |
-| 1024 | **297.4** | 345.3 / 310.1 / 297.4 | 16.09 % | 3,443.1 | 3,326 |
-| 3072 | **907.3** | 914.4 / 918.0 / 907.3 | 1.18 % | 3,385.8 | 3,320.9 |
+| 64 | **104.7** | 104.9 / 104.7 / 115.9 | 10.72 % | 611.2 | 91.1 / 702.9 |
+| 256 | **122.8** | 124.6 / 124.6 / 122.8 | 1.49 % | 2,084.6 | 140.0 / 1,828.5 |
+| 1024 | **228.3** | 229.9 / 232.0 / 228.3 | 1.64 % | 4,486.2 | 297.4 / 3,443.1 |
+| 3072 | **615.8** | 623.2 / 618.3 / 615.8 | 1.20 % | 4,988.5 | 907.3 / 3,385.8 |
 
-The 1024 row carries a 16.09 % spread (median 310.1 ms) and is dispatch-bound at that length; the
-3072 row, 1.18 % spread, is the one that should carry any claim about long-prompt throughput. The
-64- and 256-lane rows continue to read *below* the paired A/B figures taken for the same builds in
-one window (2,096.3 tok/s at 256 on the paired ruler), which is §6's bimodality, not a regression.
+The 1024 row, 1.64 % spread, no longer carries the 16.09 % spread the 2026-10-16 take did, and the
+3072 row at 1.20 % is still the one that should carry any claim about long-prompt throughput. The
+64-lane row still reads *below* the paired A/B figures taken for the same builds in one window
+(2,096.3 tok/s at 256 on the paired ruler), which is §6's bimodality, not a regression.
 
 **Cold start** (`tools/cold_restore.sh --runs 5` → `engine/build/loader_test --no-verify`): text
 weights made resident in a fresh process, device pool empty, host page cache warm — **best 335.8 ms,
