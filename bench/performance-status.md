@@ -1246,3 +1246,13 @@ sits above the scalar roof: the matrix class subsumes ~27 of a touch's 45 pass-1
 not a 5× cut of `attn`. Priced honestly that is **+5 % to +12 % of the wave**, contingent on a compile-only
 falsifier (an M = 16 feeder census at ≤19 slots/touch) that costs a day and no device time. Full adjudication
 in D57, including the retraction of D56's rate framing.
+
+**Addendum, same window — R6's wall split, answered from the trace already collected (no new device run).**
+`prototype/attn_wmma/r6_wall_split.py` sums per-kernel durations out of the W4 engine trace (deduped by
+`Dispatch_Id`, pass count derived from `attn_prep` against its 48 known sites). Against a family total of
+279.38 ms/pass as the profiler sees it: **`attn_slim_wave` 270.77 ms (96.9 %), `attn_combine` 4.86 ms (1.7 %),
+`attn_prep` 3.74 ms (1.3 %)**. So the 90 satellite dispatches §26 counted are **3.0 % of the family's wall** —
+R6 closes on the one-sided bound the instruction census suggested, and the item does not exist. Traced durations
+run above the stage clock's 264.71 ms for the same family (the inflation §22 already names, proportional to
+launch count), so quote the **ratio**, not the 279 ms. One kernel is the whole problem, which is what makes
+D57's compile-only feeder gate the right next instrument rather than a second sweep of the family.
