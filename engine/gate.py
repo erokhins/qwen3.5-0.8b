@@ -5131,8 +5131,12 @@ def run_gdn_spell_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay
     being told to hope, because a silently missing side is a missing verdict (`attn_tile_model.py`'s
     derived-must-catch rule, one level up).
     """
-    # The span the three per-token sides carry. At the default (`args.gdn_loop == 1`) that is the run's
-    # own value, which keeps these command lines byte-stable against the logs taken before `--gdn-loop`
+    # The span the three per-token sides carry. Section (j) is a matrix of SPELLINGS at a per-token
+    # body plus one looped side, so its spelling sides are pinned to 1 whenever the gate was asked for
+    # a span > 1 — including now, when 512 is the default: `ship` and `unroll4` have no looped body,
+    # and `decode_run` refuses the pair at parse rather than after a 1.55 GB load. When the gate was
+    # run at span 1 the sides carry the run's own value, which keeps these command lines byte-stable
+    # against the logs taken before `--gdn-loop` existed and the A/B was spellings only.
     # existed and threads the flag like every other builder here. When a caller runs the WHOLE gate
     # looped, section (j) still judges the identity MATRIX — each spelling at a per-token body, plus the
     # one looped side — because `ship` and `unroll4` have no looped body at all (`gdn_rec_span` refuses
@@ -6876,24 +6880,28 @@ def main() -> int:
                          " against its echo. 64 is the value Phase 0's budget selected; 16 is"
                          " measured and rejected (per-row 1-cos 3.388e-4 > the 3.2e-4 ceiling), so"
                          " the refusal text matters more than the number")
-    ap.add_argument("--gdn-loop", type=int, default=1,
+    ap.add_argument("--gdn-loop", type=int, default=512,
                     help="how many token-steps ONE `gdn_rec` launch carries, passed to `decode_run"
-                         " --gdn-loop` and asserted against its NUMERICS echo (D53/D54, "
-                         "engine/gdn_rec_loop_kernels.h). `1`, the default, is the shipped"
-                         " one-launch-per-token form: the loop screens 1.58–1.64x on the harness"
-                         " (bench/performance-status.md §23) and D54 ships it as a KNOB first, so the"
-                         " value that runs by default is the one that always ran. `512` is one launch"
-                         " per layer per body (73,728 launches became 144 at 4,096 lanes) and is owed"
-                         " BIT identity, not a band, exactly like the spellings:"
+                         " --gdn-loop` and asserted against its NUMERICS echo (D32 → D50's knob-then-"
+                         "default order, engine/gdn_rec_loop_kernels.h). `512`, the default since §24,"
+                         " is one launch per layer per body (73,728 launches became 144 at 4,096"
+                         " lanes) and is what ships: §24's paired in-situ A/B read the `gdn_rec` family"
+                         " row at 1.60-1.69x with 1,024/1,024 prefill logits rows byte-identical and"
+                         " decode flat. `1` is the pre-D54 one-launch-per-token form and is the A/B's"
+                         " other side; every number in this repo before §24 was taken with it. The"
+                         " other side; every number in this repo before §24 was taken with it. The"
+                         " claim is BIT identity, not a band, exactly like the spellings:"
                          " `engine/gate.py` section (j) runs a looped side and byte-compares it. A"
                          " span below the body size means what it says (ceil(rows/span) launches,"
                          " span-invariance proved on CPU), and a ONE-ROW body takes the per-token loop"
                          " whatever this says, so no decode bit moves under it. Refused alongside"
                          " --gdn-scan collapse (which already batches per body) and alongside a"
                          " non-`fused` --gdn-spell (only the fused body has a looped transcription) —"
-                         " and note that under"
+                         " and under"
                          " collapse section (j)'s looped side cannot exist, so the loop claim is"
-                         " reported as not adjudicated rather than as passed")
+                         " reported as not adjudicated rather than as passed. The value is echoed on"
+                         " NUMERICS because a log that cannot name the launch shape that produced it"
+                         " cannot be re-adjudicated at all")
     ap.add_argument("--break-pins", type=int, default=-1, metavar="N",
                     help="with --dry-run: echo N as the in-force pin count instead of the one this"
                          " gate's own --gemm-pins spec implies. That is the bug the check exists to"

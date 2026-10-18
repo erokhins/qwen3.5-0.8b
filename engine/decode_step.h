@@ -106,10 +106,12 @@ struct DecodeScratch {
     // decode bit can move under it. The default is 1, the shipped one-launch-per-token form: D54
     // ships the loop as a knob first (D32 → D50's order again), because its 1.58–1.64x is a harness
     // screen (`bench/performance-status.md` §23) and the paired in-situ A/B on the `gdn_rec` family
-    // row is what decides whether the default moves. Inert under `kCollapse`, which already submits
+    // row is what decides whether the default moves — it moved in §24 (1.63× family row, 1,024/1,024
+    // prefill logits rows byte-identical), so this mirrors `decode_run`'s option default and the two
+    // must move in one commit. Inert under `kCollapse`, which already submits
     // one launch per body, and `decode_run` refuses the pair rather than price route A twice under
     // this flag's name.
-    int gdn_loop = 1;
+    int gdn_loop = 512;
     // The chunk size in tokens, echoed so a run states which chunk it claimed. Only 64 is accepted
     // (`kernels.h:kGdnChunkTokens`); the refusal text carries the measured reason.
     int gdn_chunk = kernels::kGdnChunkTokens;

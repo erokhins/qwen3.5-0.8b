@@ -168,19 +168,19 @@ struct Options {
     // predicate below needs this: with a non-`ship` default, `--gdn-scan collapse` alone would
     // otherwise walk into a refusal the user never asked for.
     bool gdn_spell_given = false;
-    // How many token-steps ONE `gdn_rec` launch carries (`--gdn-loop`, D53/D54,
-    // `engine/gdn_rec_loop_kernels.h`). `1` — the default, and every run before D54 — is the shipped
-    // one-launch-per-token form; `512` is one launch per (layer, body) at the scratch's full width,
-    // which is the axis the item is on (73,728 launches became 144 for a 4,096-token prompt). The
-    // screen read 1.58–1.64x on the harness and bit-identity at spans 0/1/3/16
-    // (`bench/performance-status.md` §23), and D54 shipped it as a KNOB FIRST in D32 → D50's order:
-    // the paired in-situ A/B on the `gdn_rec` family row decides whether this default moves, so the
-    // value that ships is not the one that screened. A span below the body size means what it says
+    // How many token-steps ONE `gdn_rec` launch carries (`--gdn-loop`, D32 → D50's knob-then-default
+    // order, `engine/gdn_rec_loop_kernels.h`). `512` — the default since §24 — is one launch per
+    // (layer, body) at the scratch's full width, the axis the item is on (73,728 launches became 144
+    // for a 4,096-token prompt); `1` is the old one-launch-per-token form and stays selectable, because
+    // it is the A/B's other side and the form every pre-D54 number in this repo was taken with.
+    // What moved the default was not the harness screen (§23, 1.58–1.64x, bit-identity at spans
+    // 0/1/3/16) but the paired in-situ family row (§24: `gdn_rec` 449.07 → 266.03 ms at 4,096 lanes,
+    // 1024/1024 prefill logits rows byte-identical, decode flat at median 0.9999). A span below the body size means what it says
     // (ceil(rows/span) launches) because span-invariance is proved; a one-row body takes the
     // per-token path whatever this says (`resolve_gdn_loop`), which is what makes decode unchanged by
     // construction. Echoed on the NUMERICS line like every other knob here, because a timing log that
     // cannot say which launch shape produced its family row is not evidence.
-    int gdn_loop = 1;
+    int gdn_loop = 512;
     // Whether the flag was named, as distinct from the default: the collapse refusal below must fire on
     // a run that asked for a span while running route A, not on one that never mentioned either.
     bool gdn_loop_given = false;
@@ -307,13 +307,14 @@ Options parse_args(int argc, char** argv) {
                 if (used != v.size()) throw std::invalid_argument(v);
             } catch (const std::exception&) {
                 throw std::runtime_error("--gdn-loop takes a token count >= 1 (1 = the shipped"
-                                         " one-launch-per-token form, the default; 512 = one launch"
-                                         " per layer per body at the full scratch width); got '" + v
+                                         " one-launch-per-token form (the pre-D54 shape, kept as the"
+                                         " A/B's other side); 512 = one launch per layer per body at"
+                                         " the full scratch width, the default); got '" + v
                                          + "'");
             }
             if (n < 1) {
                 throw std::runtime_error("--gdn-loop " + std::to_string(n) + " names no span: 1 is"
-                                         " the per-token loop and is the default. Refusing rather"
+                                         " the per-token loop, 512 the default. Refusing rather"
                                          " than treating a non-positive span as either");
             }
             o.gdn_loop = n;
@@ -381,27 +382,36 @@ Options parse_args(int argc, char** argv) {
         // The same class of misreport as the pair above, one knob over: route A already submits ONE
         // launch per layer per body, so a `--gdn-loop` span named alongside it is inert, and a log
         // echoing `gdn-loop=512` while running route A would price one kernel twice and call the
-        // second price the loop's win. Refused, not echoed with a caveat. Asked on `_given` rather
-        // than on the value so that a bare `--gdn-scan collapse` run — whose span is the default 1,
-        // i.e. already the per-token shape — stays legal, exactly as `--gdn-spell`'s refusal does.
+        // second price the loop's win. Refused, not echoed with a caveat. Asked on `_given` and NOT on
+        // the value — unlike the spelling pair below — because route A never reaches `gdn_rec_span` at
+        // all, so a bare `--gdn-scan collapse` run is carrying a span that is inert rather than wrong,
+        // and refusing it would refuse a command that never asked for a span. Since the default moved
+        // to 512 that run's echoed `gdn_loop=` must be read as inert-by-route, which is what this note
+        // is for; the NUMERICS line also echoes `gdn_scan=collapse`, and the two together say it.
         throw std::runtime_error("--gdn-loop " + std::to_string(o.gdn_loop) +
                                  " sets the span of the SEQUENTIAL recurrence's launch and is inert"
                                  " under --gdn-scan collapse, which already submits one launch per"
                                  " layer per body. Use --gdn-scan seq (the default) for this A/B");
     }
-    if (o.gdn_loop_given && o.gdn_loop > 1 &&
-        o.gdn_spell != engine::kernels::GdnRecSpell::kFused) {
+    if (o.gdn_loop > 1 && o.gdn_spell != engine::kernels::GdnRecSpell::kFused) {
         // The same class of pair, and this one is refused at parse rather than at the launch even
         // though `gdn_rec_span` also refuses it structurally: a span walks a LOOPED body, only the
         // `fused` body has one, and a run that loaded 1.55 GB of weights before finding that out
         // wastes a device window to say something parse_args already knows (`kernels_gdn.cpp`).
-        throw std::runtime_error(std::string("--gdn-loop ") + std::to_string(o.gdn_loop) +
+        // The test is on the EFFECTIVE span, not on `_given`, and that matters now that 512 is the
+        // default: `--gdn-spell unroll4` alone used to be legal (span defaulted to 1) and now pairs a
+        // non-looped spelling with a looped default, so honouring `_given` here would move the refusal
+        // into the kernel after the model load and would print the remedy as a stack trace. Hence the
+        // two openings below — one for a span the caller named, one for the default doing it.
+        throw std::runtime_error(std::string(o.gdn_loop_given
+                                                 ? ("--gdn-loop " + std::to_string(o.gdn_loop))
+                                                 : "the default --gdn-loop 512") +
                                  " submits the looped body (engine/gdn_rec_loop_kernels.h) and"
                                  " only the `fused` spelling has one; --gdn-spell " +
                                  engine::kernels::gdn_rec_spell_name(o.gdn_spell) +
                                  " has no looped transcription and no bit-identity admission for a"
                                  " multi-token span. Use --gdn-spell fused (the default) or"
-                                 " --gdn-loop 1");
+                                 " --gdn-loop 1 (the pre-D54 one-launch-per-token form)");
     }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the

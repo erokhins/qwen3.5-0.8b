@@ -216,7 +216,11 @@ struct WaveShape {
     // run. NOT a canary — it is a derivation the binary checks against itself, so a stale binary
     // agrees with itself; the behavioural canary for this knob is the counted `launches=` on the
     // `gdn_rec` row (`AGENTS.md`: a paired A/B against a stale binary reads as a clean null).
-    int gdn_loop_span = 1;
+    // Mirrors `decode_run`'s option default (512 since §24); there is exactly one construction site
+    // for this struct and it assigns the field, so the default here is documentation of the shipping
+    // shape rather than a live value — which is precisely why it must not be allowed to read as the
+    // old one.
+    int gdn_loop_span = 512;
     // Which GEMM the pass ran, as the ROUTE the run asked for rather than as a per-body resolution: the
     // plan needs it because `submit_wave_body` guards the F32 widenings whose only reader is a hand
     // kernel, so a library body and a hand body owe DIFFERENT `cast` counts. It is the requested route
