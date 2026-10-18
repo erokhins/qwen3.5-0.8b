@@ -1733,3 +1733,36 @@ counts. Two decisions follow, and the first deliberately does **not** re-open 1.
   follow-up rather than a prerequisite); D42 class 5 (2.2 M=2 tiling, 2.4 WMMA under "demanded bytes ≠ DRAM
   bytes"); class 3 re-adjudication via `wide4096f`; 3.3 hand WMMA GEMM, which carries D47's "GEMMs are at the
   roof" prior and is now cheap to falsify against a 763 ms wall; and the 18 rotted line-cites from D51 F1.
+
+## D56 — attention is 9 % of the FLOPs and 34 % of the wall: **1.57 TFLOP/s, 7 % of the mix roof** (2026-10-17)
+
+Priced with `tools/prefill_ceiling_bound.py` (D47's instrument) against §25's wall, because item 2.6 was
+promoted on an external comparison and an external comparison does not tell you the size of the prize:
+
+- spec FLOPs, full attention at 4,096 ctx: **0.1007 GFLOP/token × 4,096 = 412.5 GFLOP** of the wave's
+  4,483 GFLOP — **9.2 % of the arithmetic**;
+- measured time: `attn` is **34.0–34.9 %** of the serialized wave (§25's ruler rows), i.e. **≈260 ms** of
+  763.49 ms;
+- rate: 412.5 GFLOP / 0.260 s = **1.59 TFLOP/s = 7.1 % of the 22.3 TFLOP/s mix roof**. The GEMM families
+  (D47) run at **97–102 % of that same roof**, so this is not "the machine is slow here", it is one family
+  running **fourteen times** below the rate the machine demonstrably sustains elsewhere in the same wave;
+- the external instrument corroborates the size: llama.cpp's whole attention block at the same width was
+  **≤52.5 ms** (§22), which is **7.9 TFLOP/s ≈ 35 % of roof** — i.e. the parity target is a 5× on this
+  family, and it is reachable by *efficiency*, not by a different algorithm.
+
+**Why the prize is worth re-opening a route D42 closed.** At the roof this family could not exceed ~19 ms, so
+the honest band is what a hand-tiled WMMA kernel can actually reach: llama parity (52.5 ms) takes the wave to
+**≈556 ms = 7,370 tok/s**; a more cautious 20 % of roof (92 ms) still takes it to **≈595 ms = 6,884 tok/s**.
+Both are larger than everything else on the queue combined, which is the whole reason 2.4 (WMMA attention)
+gets re-opened despite its earlier "funded no" — that verdict was priced when `gdn_rec` was the big family and
+when the queue believed attention was bandwidth-bound, and §25 changed both beliefs at once.
+
+**Division, and what would falsify it.** Worker brief is the D53 attribution pattern, not a greenfield kernel:
+name the shipping kernel and its instruction mix (does `attn_core`/`attn_tile_wave` issue *any* matrix
+instruction, or is `1.59 TFLOP/s` an FMA-path rate? `tools/isa_probe.sh` answers this on the shipping object,
+which is exactly how the GEMM census got corrected in D47's second bullet); isolate the same arithmetic at our
+own geometry (512-row waves, 6 layers, the head geometry in `engine/kernels.h`); attribute the gap to traffic,
+occupancy or instruction class with a falsifier per D49. **The falsifier that would kill this item quickly**:
+if the shipping kernel already issues matrix instructions and the 1.59 TFLOP/s is what the tile shape can
+sustain at 40 % lane coverage, then the fix is occupancy/tiling, not WMMA, and 3.3 (hand WMMA GEMM) stays
+closed under D47's roof prior instead of reopening.
