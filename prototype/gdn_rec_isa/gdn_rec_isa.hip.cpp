@@ -37,9 +37,16 @@
  *                            against `rec0`, and its burst partner is `rec2c4` — the per-token form the
  *                            engine runs. The burst reports ms per LAUNCH and per SEQUENCE, because for
  *                            this MODE the two come apart by `--loop`.
- *   recloop `recloop_kernel` — D53's item: the shipping spelling with the TOKEN index inside the
- *                            kernel, so one submission walks `--loop N` token-steps instead of one.
- *                            Same grid, same operands, same state buffer, same per-token arithmetic
+ *   recptr  `recptr_kernel` — the address-spelling probe on top of `recloop`: the SAME loop over tokens,
+ *                            but the six row pointers (`q`,`k`,`v`,`g`,`beta`,`o`) are pre-offset once
+ *                            before the loop and advanced by their strides at the bottom of each
+ *                            iteration, instead of being re-materialised from `(size_t)t * STRIDE` every
+ *                            token. Nothing else moved: `check_recptr_transcription.py` diffs the two
+ *                            bodies and requires every non-address line to be character-identical, and
+ *                            it derives the six strides from `recloop_kernel`'s own declarations rather
+ *                            than listing them. Admitted by bit-identity against `rec0` like every other
+ *                            spelling MODE, because the claim is that the addresses are the same.
+ *
  *                            (verbatim, checked by `check_recloop_transcription.py`); the only thing
  *                            that moves is launches per token-step. Admitted by bit-identity against
  *                            `rec0` like every spelling MODE, and its burst partner is `rec2c4`, the
@@ -193,9 +200,10 @@ namespace {
 // other MODE is bit-diffed against; `ship` is optional and gives the census's static control row
 // (rec0_kernel censuses identical to rec_kernel) a device witness when someone wants one.
 enum Mode { M_SHIP = 0, M_REC0, M_REC1, M_REC2, M_REC2C, M_REC3, M_REC4, M_REC5, M_REC6, M_RECENG,
-            M_REC2C4, M_RECLOOP, NMODES };
+            M_REC2C4, M_RECLOOP, M_RECPTR, NMODES };
 static const char* kModeName[] = {"ship", "rec0", "rec1", "rec2", "rec2c",
-                                  "rec3", "rec4", "rec5", "rec6", "receng", "rec2c4", "recloop"};
+                                  "rec3", "rec4", "rec5", "rec6", "receng", "rec2c4", "recloop",
+                                  "recptr"};
 
 /* The three dependency-break probes. Their VALUE is meaningless by design — a probe whose value was
  * still correct would still be waiting on the dependency — so they are never admitted against MODE 0's
@@ -206,13 +214,16 @@ static const char* kModeName[] = {"ship", "rec0", "rec1", "rec2", "rec2c",
 inline bool mode_splits_state(int m) { return m == M_REC3 || m == M_REC5; }
 inline bool mode_value_gated(int m) { return m == M_SHIP || m == M_REC0 || m == M_REC1 ||
                                            m == M_REC2 || m == M_REC2C || m == M_REC6 ||
-                                           m == M_RECENG || m == M_REC2C4 || m == M_RECLOOP; }
+                                           m == M_RECENG || m == M_REC2C4 || m == M_RECLOOP ||
+                                           m == M_RECPTR; }
 inline bool mode_band_gated(int m) { return m == M_REC4; }
 // The three dependency probes: value is not the gate, volume is.
 inline bool mode_is_probe(int m) { return m == M_REC3 || m == M_REC4 || m == M_REC5; }
 // The ONE axis `recloop` moves: token-steps per submission. Every other MODE — including the probes,
 // which move addresses and dependency chains but not this — walks exactly one token per launch.
-inline bool mode_loops_tokens(int m) { return m == M_RECLOOP; }
+// `recptr` loops for the same reason `recloop` does: it is `recloop` with a different ADDRESS SPELLING
+// and the same geometry, so the two must be comparable at equal span.
+inline bool mode_loops_tokens(int m) { return m == M_RECLOOP || m == M_RECPTR; }
 
 // Token-steps one launch of `mode` carries. `g_loop` is `--loop N` (0 = the whole sequence in one
 // launch); a MODE that does not loop always returns 1 whatever the flag says, so `--loop` cannot
@@ -271,7 +282,7 @@ static ModeSet modes_of(const std::string& spec) {
             if (tok == kModeName[i]) found = i;
         if (found < 0) {
             std::fprintf(stderr, "--modes: no mode \"%s\"; known:"
-                         " ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6,receng,rec2c4,recloop\n",
+                         " ship,rec0,rec1,rec2,rec2c,rec3,rec4,rec5,rec6,receng,rec2c4,recloop,recptr\n",
                          tok.c_str());
             std::exit(2);
         }
@@ -329,6 +340,11 @@ void launch_mode(int mode, const float* q, const float* k, const float* v, const
         // same state buffer, same `o` base; `tokens` is how many token-steps this one submission walks.
         case M_RECLOOP:
             recloop_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH, tokens);
+            break;
+        // The address-spelling probe: `recloop_kernel`'s arithmetic with the row pointers advanced by
+        // their strides instead of re-materialised from `t`. Same launch plan, same span argument.
+        case M_RECPTR:
+            recptr_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH, tokens);
             break;
         default:
             std::fprintf(stderr, "no kernel for mode %d\n", mode);
@@ -1429,14 +1445,19 @@ int run_case(const Case& c, const ModeSet& ms, int repeat, int burst, int reps,
                                              : (m == M_REC6 ? "control-bill-matched"
                                                             : (m == M_REC2C4
                                                                ? "merged-fused-prologue-on-unroll4-walks"
-                                                               : (m == M_RECLOOP
-                                                                  ? "token-loop-launch-structure-D53"
-                                                                  : "instruction-lever"))),
+                                                               : (m == M_RECPTR
+                                                                  ? "address-spelling-inside-token-loop"
+                                                                  : (m == M_RECLOOP
+                                                                     ? "token-loop-launch-structure-D53"
+                                                                     : "instruction-lever")))),
                             best[M_REC0], best[m], r,
                             best[M_REC0] * 1000.0 / c.tokens,
+                            // Either looped MODE moves submissions per launch, so either one needs the
+                            // per-LAUNCH band: `falsifier_band` speaks per token-step and would judge a MODE
+                            // whose launch count differs from rec0's in the wrong currency.
                             mode_is_probe(m) ? dependency_band(r)
-                                             : (m == M_RECLOOP ? launch_structure_band(r)
-                                                               : falsifier_band(r)),
+                                             : (mode_loops_tokens(m) ? launch_structure_band(r)
+                                                                     : falsifier_band(r)),
                             "traffic_census.py --volume-check: a probe that is cheaper in slots owes"
                             " part of its win to D25's ~0.8 slot elasticity, not to the dependency");
             }

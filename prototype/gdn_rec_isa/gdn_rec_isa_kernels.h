@@ -548,6 +548,124 @@ __global__ void recloop_kernel(const float* __restrict__ qtile, const float* __r
     }
 }
 
+/* ---- MODE recptr: `recloop` with this token's rows CARRIED AS POINTERS (the D55 follow-up) --------
+ *
+ * THE ITEM, AND ITS PRICE TAG. `bench/performance-status.md` §24 closed the token-loop port with the
+ * loop's own cost still on the books — "the loop bills +156 slots/token-step (1,530 vs 1,374) from
+ * recomputing `t*CH`" — and named the addressing-spelling variant as the follow-up: carry six row
+ * pointers and step them, instead of rebuilding each row address from the token index every iteration.
+ * That follow-up is this MODE. It is INTENTIONALLY THE ONLY THING THAT MOVED: the arithmetic core from
+ * `float kq = ` through `o[h * D + j] = acc;` is `recloop_kernel`'s, character for character, so any
+ * slot delta and any bit difference is attributable to the addressing and to nothing else. The rule
+ * this obeys is `prototype/gdn_collapse/results.md` §2, quoted in `engine/gdn_rec_fused_kernels.h`: a
+ * hoisted scalar constant is a different number, and a CPU mirror is blind to it, so the recurrence is
+ * transcribed and never "improved".
+ *
+ * WHAT CHANGED, PRECISELY. The shipped loop declares the six operand pointers INSIDE the token loop as
+ * `q = qtile + (size_t)t * CH` (and `+ t*NH` for `g`/`beta`, `+ t*(NH*D)` for `o`). Per token step the
+ * listing pays for that with `s_mul_hi_u32` + `s_mul_i32` + `s_lshl_b64` (the `t*CH` byte offset, and
+ * `s_mul_i32`/`s_mul_hi_u32` are not free: 6144 is not a power of two) plus a `v_add_co_u32` /
+ * `v_add_co_ci_u32_e64` pair at each use site. This MODE instead starts the six pointers at row 0
+ * OUTSIDE the loop and advances each by the SAME constant stride at the end of the body, which is one
+ * `s_add_u32`/`s_addc_u32` pair per pointer per token — or nothing at all, if the register allocator
+ * keeps a uniform pointer in an SGPR pair and lets the loads use it as their scalar base.
+ *
+ * WHY THE ADDRESSES ARE THE SAME NUMBERS. Iteration *t* of the shipped form addresses
+ * `base + t*STRIDE + (h*D + j)*4`; iteration *t* of this form addresses `base + t*STRIDE + (h*D + j)*4`
+ * too, because the increment is the same constant the product multiplied out and the induction starts
+ * at the same row 0. Integer-only, so no value can move — which is asserted, not argued:
+ * `check_recptr_transcription.py` diffs the arithmetic core against the shipped copies, mechanically
+ * derives each stride from the shipped declaration (`qtile + (size_t)t * CH` -> `CH`) and requires
+ * this MODE's increment to name the same expression, requires all six pointers to be incremented and
+ * to be incremented AFTER the body (an increment before it would shift every row by one token, which
+ * is a numerics bug and not a spelling), and carries seven must-catch mutations plus one must-not-catch
+ * so it cannot pass vacuously. The device gate is the same one every spelling MODE here uses: bit-identity
+ * against `rec0` on `o` AND on the final state, at every span (`--modes rec0,recloop,recptr --loop N`).
+ *
+ * WHAT IS DELIBERATELY NOT HERE. No LDS-resident state, no grid or block change, no prefetch, no
+ * reassociation, no change to the trip count or to `#pragma unroll 4`, and no hoisting of `Sh`, the
+ * state base — the compiler already computes that above the loop (`s_add_u32`/`s_addc_u32` on the
+ * kernarg base sit in the entry blocks), so hand-hoisting it would add a textual difference that buys
+ * nothing and would have to be excused by the checker. This MODE moves the six OPERAND row pointers and
+ * nothing else, so its census delta is the price of that one decision.
+ *
+ * THE CENSUS DECIDES WHETHER IT EARNS A DEVICE WINDOW. `token_bill.py` bills the per-token straight
+ * line separately from the per-launch blocks, and the address-arithmetic subset is reported beside it;
+ * the run of record is `prototype/gdn_rec_isa/token_bill.output.txt`. `rec2c4`/`recloop` remain the
+ * A/B pair the engine cares about; `recptr` only becomes interesting if its per-token bill is below
+ * `recloop`'s by enough to matter, and it stays compile-only until it is. It is NOT: the reading is
+ * -4 slots flat / +9 per token, and `RESULTS_addr.md` in this directory carries the verdict.
+ */
+__global__ void recptr_kernel(const float* __restrict__ qtile, const float* __restrict__ ktile,
+                              const float* __restrict__ vtile, const float* __restrict__ gtile,
+                              const float* __restrict__ betatile, float* __restrict__ S,
+                              float* __restrict__ otile, int nheads, int tokens) {
+    int h = blockIdx.x;
+    int j = threadIdx.x;
+    __shared__ float ks[D], qs[D], redk[32], redq[32];
+
+    // This token's rows, named so that every line inside the loop is `recloop_kernel`'s verbatim. The
+    // shipped looped form computes them per iteration (`qtile + (size_t)t * CH`, `gtile + (size_t)t * NH`,
+    // `otile + (size_t)t * (NH * D)`); this form starts them at row 0 and advances them by those SAME
+    // derived strides below, which is the only difference between the two kernels.
+    const float* __restrict__ q = qtile;
+    const float* __restrict__ k = ktile;
+    const float* __restrict__ v = vtile;
+    const float* __restrict__ g = gtile;
+    const float* __restrict__ beta = betatile;
+    float* __restrict__ o = otile;
+
+    for (int t = 0; t < tokens; ++t) {
+        float kq = k[h * D + j], qq = q[h * D + j];
+        float sk, sq;
+        block_sum_pair_comp(kq * kq, qq * qq, redk, redq, &sk, &sq);
+        float kn = kq * rsqrtf(sk + 1e-6f);
+        float qn = qq * rsqrtf(sq + 1e-6f) * Q_SCALE;
+        __syncthreads();
+        ks[j] = kn;
+        qs[j] = qn;
+        __syncthreads();
+
+        float gam = expf(g[h]), bet = beta[h];
+        float* Sh = S + (size_t)h * D * D;
+
+        // ---- from here to `o[h * D + j] = acc;`: `rec_unroll4_kernel`'s body, verbatim (see the note) --
+        float r = 0.f;
+#pragma unroll 4                      // keep the loop: without the pragma LLVM fully unrolls this one
+        for (int i = 0; i < D; i += 4) {  // side and the two forms stop being bill-matched (see the header)
+            r += Sh[(i + 0) * D + j] * ks[i + 0];
+            r += Sh[(i + 1) * D + j] * ks[i + 1];
+            r += Sh[(i + 2) * D + j] * ks[i + 2];
+            r += Sh[(i + 3) * D + j] * ks[i + 3];
+        }
+        float dv = bet * (v[h * D + j] - gam * r);
+
+        float acc = 0.f;
+#pragma unroll 4
+        for (int i = 0; i < D; i += 4) {
+            float s0 = gam * Sh[(i + 0) * D + j]; s0 += ks[i + 0] * dv; Sh[(i + 0) * D + j] = s0;
+            acc += qs[i + 0] * s0;
+            float s1 = gam * Sh[(i + 1) * D + j]; s1 += ks[i + 1] * dv; Sh[(i + 1) * D + j] = s1;
+            acc += qs[i + 1] * s1;
+            float s2 = gam * Sh[(i + 2) * D + j]; s2 += ks[i + 2] * dv; Sh[(i + 2) * D + j] = s2;
+            acc += qs[i + 2] * s2;
+            float s3 = gam * Sh[(i + 3) * D + j]; s3 += ks[i + 3] * dv; Sh[(i + 3) * D + j] = s3;
+            acc += qs[i + 3] * s3;
+        }
+        o[h * D + j] = acc;
+
+        // One token step forward, for each of the six rows. `check_recptr_transcription.py` derives
+        // these three stride expressions from the shipped declarations and compares them, so a wrong
+        // stride here is a caught defect, not a silent numerics change.
+        q += CH;
+        k += CH;
+        v += CH;
+        g += NH;
+        beta += NH;
+        o += NH * D;
+    }
+}
+
 /* ============================ THE DEPENDENCY-BREAK PROBES (D30 queue item 1.3) ================== */
 /*
  * WHY THESE EXIST, AND WHAT THEY ARE NOT. `results.md` §4 read `gdn_rec` as latency-bound on the
