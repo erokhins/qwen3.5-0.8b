@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Paired in-situ A/B for the D53 engine port: `gdn_rec` with N token-steps inside ONE launch against the
-# shipping one-launch-per-token form. WRITTEN AND NEVER RUN — the engine port it names does not exist
-# yet (the outline is in tmp/gcc/HANDOFF_gdn_looplaunch.md, §6), and this script refuses to time anything
-# until the binary proves the flag is live.
+# shipping one-launch-per-token form. WRITTEN BEFORE THE PORT AND NEVER RUN; re-read against the port as
+# landed and the field names corrected in three places (the `gran=` of the wave TOTAL line, the looped
+# side's log name, and the decode timing field names). It still refuses to time anything until the
+# binary proves the flag is live.
 #
 # THE CLAIM IS THE `gdn_rec` FAMILY ROW, not the wall and not a harness ratio (§19/D51: the family row
 # is the instrument, and a paired window's ratio is an attribution, not a headline).
@@ -13,7 +14,7 @@
 #      an unknown value must be REFUSED. A binary without the flag exits non-zero on `--gdn-loop 512`,
 #      and that is the abort.
 #   2. BEHAVIOURAL COUNT, NOT A DERIVED BILL. The looped side's *counted* stage-clock row must read
-#      ~18 x bodies and the base side's 18 x tokens — `WAVE gran=kernel family=gdn_rec launches=` is the
+#      ~18 x bodies and the base side's 18 x tokens — `WAVE gran=stage family=gdn_rec launches=` is the
 #      counter at the call site, so a stale binary prints the old number and is caught across the two
 #      sides. It is NOT `plan_launches`/`plan_match`, which is a derivation the binary checks against
 #      itself and therefore cannot see its own staleness. Both sides must still end `plan_match=1`, which
@@ -22,9 +23,11 @@
 #      with `--prefill-logits all` and byte-compared (`cmp`), before a single timing. If the looped side
 #      moved one byte the script aborts and says so; a numerics band is not consulted, because the claim
 #      is that no value moved (D53: "if the loop changes a value, the item is wrong, not the tolerance").
-#   4. DECODE MUST NOT MOVE. A one-row body must keep the per-token form by the `resolve` rule, exactly as
-#      `--attn-tile`/`--gemm` give a one-row body the shipped bits; the decode pair is timed and must be
-#      flat, and its `gdn_rec` count must be identical on both sides.
+#   4. DECODE MUST NOT MOVE. A one-row body must keep the per-token form by the `resolve_gdn_loop` rule,
+#      exactly as `--attn-tile`/`--gemm` give a one-row body the shipped bits. That is a construction,
+#      not a measurement, and it is NOT counted here (a step clock folds the recurrence into the coarse
+#      `gdn` row, so no `family=gdn_rec` row exists for a decode step); what this script times is the
+#      decode wall on both sides, which must be flat.
 #
 # Run blocking, zero subagents, both sides inside ONE `gpu_lock` hold, alternating every rep (§20's
 # shape). Nothing here has been run; no number in this file is a measurement.
@@ -58,6 +61,13 @@ echo "== CANARY 1: the flag is live on this binary (a pre-port build aborts here
 "$NEW_BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --gdn-loop notanumber >/dev/null 2>&1 \
     && fail "--gdn-loop accepted a non-number: the flag is inert, not parsed. Refusing to time."
 echo "CANARY 1 OK — --gdn-loop is parsed and refused when wrong"
+# And the pair refusal, because an inert combination that masquerades is the failure this knob's whole
+# discipline exists to prevent: route A already submits one launch per (layer, body).
+"$NEW_BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --gdn-scan collapse --gdn-loop 512 \
+    >/dev/null 2>&1 \
+    && fail "--gdn-loop 512 was accepted alongside --gdn-scan collapse: one of the two is inert "\
+            "and the log would not say which. The port must REFUSE the pair (outline 6.4)"
+echo "CANARY 1b OK — --gdn-loop >1 with --gdn-scan collapse is refused"
 
 echo
 echo "== CANARY 2: the counted submission site moves (behavioural, not the plan bill)"
@@ -65,20 +75,31 @@ W=4096
 run_side base "$W" pre >/dev/null || fail "pre run, per-token side"
 run_side looped "$W" pre >/dev/null || fail "pre run, looped side"
 LB="$OUT/run_base_${W}_pre.log"
-LL="$OUT/run_loop_${W}_pre.log"
+LL="$OUT/run_looped_${W}_pre.log"
 for L in "$LB" "$LL"; do
+    [ -f "$L" ] || fail "$L does not exist — run_side names its side 'looped', not 'loop'"
     grep -q "gdn_loop=" "$L" || fail "$L did not echo gdn_loop= - which side is it?"
-    grep "gran=wave TOTAL" "$L" | grep -q "plan_match=1" \
-        || fail "$L: plan_match=0. The port must also teach wave_plan_bill the looped shape (outline 6.4)"
+    # The wave clock's `gran=` is `stage` (the burst pass carries no clock, `engine/stage_clock.h`),
+    # so grepping a `gran=wave TOTAL` line would grep nothing and `grep -q` would abort the script for
+    # a reason that has nothing to do with the port. `plan_match` is asserted as the port's own
+    # obligation and NOT used as the canary, for the reason in the header.
+    grep "gran=stage TOTAL" "$L" | grep -q "plan_match=1" \
+        || fail "$L: no plan_match=1 on its gran=stage TOTAL line. The port must also teach wave_"\
+                "plan_bill the looped shape (outline 6.4) - or the flag is inert"
 done
-rec_count() { grep -E 'family=gdn_rec ' "$1" | head -1 | grep -oE 'launches=[0-9]+' | cut -d= -f2; }
+# `launches=` with a LEADING SPACE on purpose: the same line also carries `plan_launches=`, and a
+# bare `launches=[0-9]+` matches inside that too, which would hand the comparison below two values
+# and read as garbage. Same lesson as `grep RESULT, not ms` — a parser that silently matches more
+# than it means is worse than one that fails.
+rec_count() { grep -E 'family=gdn_rec ' "$1" | head -1 | grep -oE ' launches=[0-9]+' \
+                 | head -1 | cut -d= -f2; }
 base_n=$(rec_count "$LB"); loop_n=$(rec_count "$LL")
 echo "counted gdn_rec launches: base=$base_n  looped=$loop_n  (want 18x4096=73728 vs 18x8=144 at $W lanes)"
 echo "   base:   $(grep -E 'family=gdn_rec ' "$LB" | head -1)"
 echo "   looped: $(grep -E 'family=gdn_rec ' "$LL" | head -1)"
-[ "${base_n:-0}" -gt $((10 * ${loop_n:-1})) ] || fail "the looped side did not cut the counted launch"
-    " count by 10x - the flag moved nothing, so every timing below would be a clean null about a stale"
-    " binary (AGENTS: assert a behavioural canary inside the window)"
+[ "${base_n:-0}" -gt $((10 * ${loop_n:-1})) ] || fail "the looped side did not cut the counted "\
+    "launch count by 10x - the flag moved nothing, so every timing below would be a clean null about "\
+    "a stale binary (AGENTS: assert a behavioural canary inside the window)"
 echo "CANARY 2 OK - counted submissions fell $base_n -> $loop_n"
 
 echo
@@ -127,12 +148,23 @@ done
 
 echo
 echo "== decode must be untouched: a one-row body keeps the per-token form by rule, so time it"
+# What this section CAN and CANNOT witness, stated because the second half is easy to assume. The rule
+# is a construction, not a measurement: `resolve_gdn_loop` sends a ONE-ROW body to the per-token loop
+# whatever `--gdn-loop` says, so decode submits the same launches on both sides by construction. It is
+# NOT counted here — `family=gdn_rec` rows exist only on the wave clock, and a STEP clock folds the
+# recurrence into the coarse `gdn` row (`stage_clock.h:coarse_stage`), so there is no decode-side
+# `launches=` to diff. What is printed is the decode wall on both sides, which must be flat to noise.
 for rep in 1 2 3; do
     for span in 1 "$LOOP_SPAN"; do
         "$NEW_BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 192 --wave-rows 1 \
             --gemm lt --gemm-pins all --gdn-loop "$span" --out "$OUT/o_dec_${span}_$rep" \
             > "$OUT/dec_${span}_$rep.log" 2>&1 || fail "decode run span=$span rep=$rep"
-        echo "decode span=$span rep=$rep: $(grep -oE 'ms_per_token=[0-9.]+|total_ms=[0-9.]+' \
+        grep -q "gdn_loop=$span" "$OUT/dec_${span}_$rep.log" \
+            || fail "decode run span=$span did not echo gdn_loop=$span"
+        # `RESULT` spells the two decode fields `ms_total` and `ms_per_step` (`decode_run.cpp`); an
+        # earlier draft grepped `ms_per_token`/`total_ms`, which match nothing and printed an empty
+        # line — a blank that looked like a cheap decode rather than a parse that never happened.
+        echo "decode span=$span rep=$rep: $(grep -oE 'ms_per_step=[0-9.]+|ms_total=[0-9.]+' \
             "$OUT/dec_${span}_$rep.log" | head -2 | tr '\n' ' ')"
     done
 done

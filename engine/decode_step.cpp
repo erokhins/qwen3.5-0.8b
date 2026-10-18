@@ -721,6 +721,12 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // launches where the sequential form issues 18,432 (§06.4 says count them, and the wave
             // report's `gdn_chunk` row does). The scan is still serial; what got chunked is the
             // intra-chunk work and the state traffic, not the dependency.
+            //
+            // `gdn_span` is resolved once here rather than inside the last branch, because that branch
+            // is the only reader and `resolve_gdn_loop` is a pure function of (flag, rows) — asking it
+            // on a collapse body arms nothing, and having the number named once is what lets the two
+            // sequential branches below read as the two spans they are.
+            const int gdn_span = kernels::resolve_gdn_loop(sc.gdn_loop, n);
             if (kernels::resolve_gdn_scan(sc.gdn_scan, n) == kernels::GdnScan::kCollapse) {
                 // Route A (D-12): the sequential recurrence, resident. ONE launch per layer per body,
                 // and the SAME arithmetic per step — see `engine/gdn_collapse_kernels.h` for why that is
@@ -748,6 +754,43 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 stageclock::note(stageclock::kGdnChunk);   // one SITE, two launches (prep then carry),
                                                            // counted like the attention site is
                 kernels::gdn_chunk_prefill(c);
+            } else if (gdn_span > 1) {
+                // The sequential form, walked N token-steps per launch (`--gdn-loop`, D53/D54).
+                // `resolve_gdn_loop` is the whole rule and it is shaped like `resolve_gdn_scan`'s on
+                // purpose: a ONE-ROW body takes the per-token loop below whatever the flag says, so a
+                // decode step is the shipped launch sequence BY CONSTRUCTION and not because a
+                // measurement said it was flat. Everything here is a choice about SUBMISSIONS and
+                // nothing else: `engine/gdn_rec_loop_kernels.h` is `rec_fused_kernel`'s body with the
+                // token index moved inside it, admitted bit-identical at spans 0/1/3/16
+                // (`bench/performance-status.md` §23), and `engine/gate.py` section (j) re-proves the
+                // claim per fixture through this site.
+                //
+                // One launch per `span` token-steps. With `span >= n` — the shipping intent,
+                // `--gdn-loop` at or above the body size — this is exactly ONE call per (layer, body),
+                // which is the axis the item is on: 18 x 4,096 launches became 18 x 8 at 4,096 lanes.
+                // A span below the body size means what it says (ceil(n/span) launches, the last one
+                // short) because span-invariance is proved
+                // (`prototype/gdn_rec_isa/gdn_rec_isa.hip.cpp --selftest-loop`), and it is the named
+                // fallback if a 512-iteration launch behaves badly in situ.
+                //
+                // The tile BASE plus a row count is handed over rather than row t: `g_u`/`g_g`/
+                // `g_beta`/`g_o` are the same body tiles the collapse branch above is fed, and the
+                // kernel walks the row strides itself, so both forms touch identical addresses.
+                for (int t = 0; t < n; t += gdn_span) {
+                    const int rows = gdn_span < n - t ? gdn_span : n - t;   // the ragged tail
+                    stageclock::note(stageclock::kGdnRec);                  // one site, one launch
+                    kernels::gdn_rec_span(sc.g_u + (size_t)t * kQkvRows,
+                                          sc.g_g + (size_t)t * kNumValueHeads,
+                                          sc.g_beta + (size_t)t * kNumValueHeads,
+                                          st.gdn_state_layer(layer),
+                                          sc.g_o + (size_t)t * kValueDim,
+                                          rows,
+                                          // The SPELLING, like the per-token call below. Only
+                                          // `fused` has a looped body and `gdn_rec_span` refuses
+                                          // anything else, rather than running a kernel this flag
+                                          // did not name under another one's timing.
+                                          sc.gdn_spell);
+                }
             } else {
                 for (int t = 0; t < n; ++t) {
                     // §04.4's recurrence. q, k, v are the three 2048-wide slices of row t of the conv's

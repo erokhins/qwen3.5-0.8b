@@ -204,6 +204,19 @@ struct WaveShape {
     // A one-row body routes to `gdn_rec` by `resolve_gdn_scan`'s rule and costs one launch either way,
     // which is why the bill below needs no single-row special case.
     bool gdn_resident = false;
+    // How many token-steps one `gdn_rec` launch carried (`decode_run --gdn-loop`, D53/D54,
+    // `engine/gdn_rec_loop_kernels.h`), as the RUN ASKED for it rather than as a per-body answer.
+    // `1` — the default, and every run before D54 — is the per-token bill this file has always
+    // derived; anything larger bills `ceil(body rows / span)` launches for a body instead of one per
+    // row. Same reason the two rows above carry the RESOLVED form: `gdn_rec` and the looped form bill
+    // differently, and the split is derivable here from `tokens`/`bodies`/`wave_rows` (a one-row body
+    // is the per-token form by `resolve_gdn_loop`'s rule and costs exactly one launch either way, so
+    // the derivation needs no exception). Ignored under `gdn_resident`: route A submits one launch per
+    // body whatever this says, and `decode_run` refuses the pair rather than echo a span that did not
+    // run. NOT a canary — it is a derivation the binary checks against itself, so a stale binary
+    // agrees with itself; the behavioural canary for this knob is the counted `launches=` on the
+    // `gdn_rec` row (`AGENTS.md`: a paired A/B against a stale binary reads as a clean null).
+    int gdn_loop_span = 1;
     // Which GEMM the pass ran, as the ROUTE the run asked for rather than as a per-body resolution: the
     // plan needs it because `submit_wave_body` guards the F32 widenings whose only reader is a hand
     // kernel, so a library body and a hand body owe DIFFERENT `cast` counts. It is the requested route

@@ -311,6 +311,42 @@ const char* gdn_rec_spell_name(GdnRecSpell s);
 void gdn_rec(const float* q, const float* k, const float* v, const float* g, const float* beta,
              float* S, float* o, GdnRecSpell spell = GdnRecSpell::kShip);
 
+// ---- D53/D54: N token-steps of the same recurrence inside ONE launch (`decode_run --gdn-loop`) ----
+//
+// One GDN layer, one launch, `tokens` CONSECUTIVE token-steps. `rec_loop_kernel`
+// (`engine/gdn_rec_loop_kernels.h`) is `rec_fused_kernel`'s body with the token index moved inside
+// it, so a span of `n` replaces `n` per-token launches and nothing else: same grid `<<<NH, D>>>`,
+// same thread map, same state buffer at the same addresses, same per-token expression trees in the
+// same order. Admitted by BIT-identity, not by a band — spans 0/1/3/16 came back
+// `ndiff_o_vs0=0 ndiff_state_vs0=0` on the harness (`bench/performance-status.md` §23) — and
+// `engine/gate.py` section (j) re-proves the claim through this launch path per fixture.
+//
+// `u`/`g`/`beta`/`o` are the whole BODY tiles, the same ones `gdn_rec_collapse` is fed, and the
+// kernel walks their row strides itself (`CH` for the q|k|v tile, `NH*D` for `o`; asserted against
+// the engine's own names in `kernels_gdn.cpp`, so a wrong stride is a compile error rather than a
+// silent numerics change). Deliberately no default for `spell`, unlike `gdn_rec()`: only one
+// spelling of the looped body has been transcribed and admitted, and a side that got its spelling
+// from a default is a side the log cannot prove. `gdn_rec_span` therefore REFUSES a non-`kFused`
+// spelling for `tokens > 1` rather than silently running a different body under a flag that claims
+// to name the looped one.
+void gdn_rec_span(const float* u, const float* g, const float* beta, float* S, float* o,
+                  int tokens, GdnRecSpell spell);
+
+// How many token-steps one `gdn_rec` launch carries, resolved where the body's row count is known
+// (`decode_run --gdn-loop` sets `want`). `1` means "the per-token loop, verbatim" and is the shipped
+// default (D54: knob first); anything larger walks that many token-steps per launch, and a span
+// wider than the body IS the body, so `--gdn-loop 512` is one launch per (layer, body) at every
+// width including a prompt's ragged final body. A span below the body size is allowed and means
+// what it says — ceil(rows/span) launches, one per span — because span-invariance is proved
+// (`prototype/gdn_rec_isa/gdn_rec_isa.hip.cpp --selftest-loop`, 39.4 M elements bit-compared across
+// spans) and a smaller span is the named fallback if a 512-iteration launch behaves badly in situ.
+//
+// The one-row rule lives here, shaped like `resolve_gdn_scan`'s and for the identical reason: a
+// ONE-ROW body takes the per-token path whatever the flag says, so a decode step is the shipped bits
+// BY CONSTRUCTION and not by measurement. Every decode pin is pinned through the per-token launch,
+// and no decode bit should have to depend on the loop's bit-identity holding.
+int resolve_gdn_loop(int want, int rows);
+
 // One GDN layer, one BODY, route A: `kNumValueHeads * (d_v / 32)` blocks = 64, and the state stays
 // in LDS for the whole body. `u`/`g`/`beta`/`o` are the same tiles `gdn_rec` is fed one row at a
 // time, so the two forms read and write identical addresses; `rows` is the body's row count.

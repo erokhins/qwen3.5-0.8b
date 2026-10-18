@@ -5043,7 +5043,12 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
                # in width and nothing else. And its SPELLING for the same reason again — section (j)
                # is the only place the two spellings are allowed to differ, and it differs them alone.
                "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk),
-               "--gdn-spell", args.gdn_spell]
+               "--gdn-spell", args.gdn_spell,
+               # The recurrence's launch SPAN, for the identical reason: a width A/B whose two sides
+               # silently ran different submission shapes for the recurrence compares two things at
+               # once. Named as `1` by default, so this line is byte-stable against the logs taken
+               # before `--gdn-loop` existed.
+               "--gdn-loop", str(args.gdn_loop)]
         if replay:
             cmd += ["--replay", ",".join(str(t) for t in greedy[:-1])]
         print("  $ " + " ".join(cmd))
@@ -5083,17 +5088,35 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
 # `engine/gdn_rec_unroll4_kernels.h`, `rec2c4` is the same source the engine's fused header is
 # transcribed from), and the two witnesses are complementary: this one runs the shipping launch path
 # on pinned prompts, that one reads the state buffer itself.
-# Cost: one device run per spelling per fixture (three today), at the scratch's full wave width.
+# Cost: one device run per spelling per fixture (three today) plus the one looped side below (four),
+# at the scratch's full wave width.
 GDN_SPELLS = ("ship", "unroll4", "fused")
 
 # The reference every other side is byte-compared against: the spelling the pins themselves were
 # pinned through, and the one the engine shipped before any spelling knob existed.
 GDN_SPELL_REFERENCE = "ship"
 
+# The FOURTH side, and the one thing it differs by: `--gdn-loop` (D54,
+# `engine/gdn_rec_loop_kernels.h`) walks N token-steps inside ONE launch, and its admission is the
+# same kind — BIT identity, not a band. It runs `fused` and ONLY `fused`, because
+# `engine/kernels_gdn.cpp::gdn_rec_span` refuses any other spelling for a span > 1: there is exactly
+# one looped transcription, and a side that silently ran a different body under the loop's name would
+# price one kernel twice and call the second price the loop's win.
+#
+# The span is a shape constant, not a knob this section varies: 512 is `kMaxWaveRows`, and section (j)
+# never passes `--wave-rows`, so the scratch is at the ceiling and one span covers a whole body —
+# exactly ONE launch per (layer, body), which is the shape the port ships or kills. A span wider than
+# a body is that body (`resolve_gdn_loop` clamps by taking ceil(rows/span) = 1), so the number here
+# cannot over-reach even if the ceiling moved; what it cannot do is silently mean something else.
+GDN_LOOP_SPAN = 512
+GDN_LOOP_SPELL = "fused"
+GDN_LOOP_SIDE = f"loop{GDN_LOOP_SPAN}"
+
 
 def run_gdn_spell_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: bool,
-                     work: Path) -> dict:
-    """Run this fixture once per `--gdn-spell` value, at the scratch's full wave width.
+                     work: Path, loop_span: int | None) -> dict:
+    """Run this fixture once per `--gdn-spell` value, plus the looped side if `loop_span` is not None,
+    at the scratch's full wave width.
 
     Every flag is identical on both sides except the spelling — same route, same pin set, same
     attention form and touch, same scan — because an A/B whose two sides differ in two things
@@ -5101,9 +5124,32 @@ def run_gdn_spell_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay
     same reason section (h) uses it: at §06.5's default there would be one row per side to compare
     instead of the whole wave, and comparing one row when the recurrence ran thousands is not a
     comparison. This is a device path; `gdn_spell_stand_in` is its dry-run counterpart.
+
+    `loop_span` is None exactly when the looped side cannot run at all — under `--gdn-scan collapse`
+    route A already submits one launch per (layer, body) and `decode_run` refuses the pair rather
+    than echo a span that did not run. The caller passes what the SHAPE allows rather than the checks
+    being told to hope, because a silently missing side is a missing verdict (`attn_tile_model.py`'s
+    derived-must-catch rule, one level up).
     """
-    def side(spell: str) -> dict:
-        out_dir = work / f"ab_spell_{spell}"
+    # The span the three per-token sides carry. At the default (`args.gdn_loop == 1`) that is the run's
+    # own value, which keeps these command lines byte-stable against the logs taken before `--gdn-loop`
+    # existed and threads the flag like every other builder here. When a caller runs the WHOLE gate
+    # looped, section (j) still judges the identity MATRIX — each spelling at a per-token body, plus the
+    # one looped side — because `ship` and `unroll4` have no looped body at all (`gdn_rec_span` refuses
+    # them), so "every side at 512" is not a matrix this section can run at all. Pinning the per-token
+    # sides is the honest reading of what the section claims, and the note says so rather than leaving
+    # it to the reader.
+    base_loop = 1 if args.gdn_loop > 1 else args.gdn_loop
+    if args.gdn_loop > 1:
+        notes.append(f"gdn-spell A/B: the gate was run at --gdn-loop {args.gdn_loop}, but section (j)"
+                     " is a matrix of spellings at a per-token body plus ONE looped side, so its"
+                     " spelling sides ran at --gdn-loop 1 (the looped body exists only for `fused`)."
+                     " The loop claim it adjudicates is the looped side vs `fused`, not a verdict on"
+                     " what the run's own default shape is")
+
+    def side(spell: str, name: str | None = None, loop: int | None = None) -> dict:
+        name = name or spell
+        out_dir = work / f"ab_spell_{name}"
         out_dir.mkdir(parents=True, exist_ok=True)
         for stale in out_dir.glob("logits*.bin"):
             stale.unlink()      # the diff must judge this run, not the last one's leftovers
@@ -5116,19 +5162,28 @@ def run_gdn_spell_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay
                # THE ONE DIFFERENCE. Named explicitly on both sides rather than left to the binary's
                # default on one of them: a side that got its spelling from a default is a side whose
                # spelling the log cannot prove.
-               "--gdn-spell", spell]
+               "--gdn-spell", spell,
+               # Same rule one knob over: the span is named on every side, and the looped side is the
+               # only one that names a span > 1. `args.gdn_loop` (1 by default) keeps the three
+               # spelling sides byte-stable against the logs taken before `--gdn-loop` existed.
+               "--gdn-loop", str(loop if loop is not None else base_loop)]
         if replay:
             cmd += ["--replay", ",".join(str(t) for t in greedy[:-1])]
         print("  $ " + " ".join(cmd))
         proc = subprocess.run(cmd, capture_output=True, text=True)
-        check(proc.returncode == 0, f"the {spell} gdn-spell A/B run exits 0",
+        check(proc.returncode == 0, f"the {name} gdn-spell A/B run exits 0",
               f"rc={proc.returncode}" + (" " + proc.stderr.strip()[-300:] if proc.stderr.strip() else ""))
         return {"dir": out_dir, "run": parse_run(proc.stdout)}
 
-    return {s: side(s) for s in GDN_SPELLS}
+    sides = {s: side(s) for s in GDN_SPELLS}
+    if loop_span:
+        # The looped side holds the SPELLING fixed at `fused` and moves the span alone, so its diff
+        # against the `fused` side below is the one whose verdict is "the loop moved nothing".
+        sides[GDN_LOOP_SIDE] = side(GDN_LOOP_SPELL, name=GDN_LOOP_SIDE, loop=loop_span)
+    return sides
 
 
-def gdn_spell_stand_in(work: Path) -> dict:
+def gdn_spell_stand_in(work: Path, loop_span: int | None) -> dict:
     """Dry-run counterpart: replays the pins into EVERY side so the comparison machinery below runs on
     real bytes without a device. NOT A RESULT — `--dry-run` says so on its own face, and the stand-in
     copying one corpus to every side is exactly what the real run must prove is not cheating: the pins
@@ -5142,33 +5197,97 @@ def gdn_spell_stand_in(work: Path) -> dict:
         for src in sorted(work.glob("logits*.bin")):
             shutil.copyfile(src, d / src.name)
         out[spell] = {"dir": d, "run": {"numerics": {"gdn_spell": spell}}}
+    if loop_span:
+        d = work / f"ab_spell_{GDN_LOOP_SIDE}"
+        d.mkdir(parents=True, exist_ok=True)
+        for stale in d.glob("logits*.bin"):
+            stale.unlink()
+        for src in sorted(work.glob("logits*.bin")):
+            shutil.copyfile(src, d / src.name)
+        out[GDN_LOOP_SIDE] = {"dir": d, "run": {"numerics": {"gdn_spell": GDN_LOOP_SPELL,
+                                                            "gdn_loop": str(loop_span)}}}
     return out
 
 
-def gdn_spell_checks(sides: dict, *, stand_in: bool) -> None:
-    """Every side must say which spelling it ran, and every side must have written `ship`'s bytes.
+def gdn_spell_pairs(loop_span: int | None) -> list[tuple[str, str, str]]:
+    """The (side, reference, claim) list this section owes, DERIVED from the sides the shape allows.
+
+    Derived, not hand-listed, for the standing reason (`prototype/attn_tile_model.py`,
+    `mlp_gemv`, `mixed_bw`): a comparison list typed from memory rots the day a side is added or a
+    route makes one unreachable, and the failure mode is a green section over a comparison nobody ran.
+    Two loop comparisons, both load-bearing and neither a duplicate of the other:
+
+      * looped vs `ship` — the section's own shape: every side against the one reference the pins
+        were pinned through, so a regression in one link cannot read as a pass in the next;
+      * looped vs `fused` at the run's own span — the pair that holds the SPELLING fixed, i.e. the
+        only one whose verdict is specifically "walking N tokens inside one launch moved no bytes",
+        as opposed to "some combination of a different body and a different span moved nothing".
+    """
+    pairs = [(s, GDN_SPELL_REFERENCE,
+              f"the `{s}` gdn_rec spelling writes BIT-identical logits to `{GDN_SPELL_REFERENCE}` "
+              f"(D32: engine/gdn_rec_unroll4_kernels.h vs prototype/gdn_decode's rec_kernel; D50: "
+              f"engine/gdn_rec_fused_kernels.h, the fused prologue on those walks; §04.4)")
+             for s in GDN_SPELLS if s != GDN_SPELL_REFERENCE]
+    if loop_span:
+        pairs.append((GDN_LOOP_SIDE, GDN_SPELL_REFERENCE,
+                      f"the `--gdn-loop {loop_span}` side writes BIT-identical logits to "
+                      f"`{GDN_SPELL_REFERENCE}` (D54: engine/gdn_rec_loop_kernels.h is "
+                      f"`rec_fused_kernel`'s body with the token index inside the launch, so "
+                      f"submissions moved and no value did; §23)"))
+        pairs.append((GDN_LOOP_SIDE, GDN_LOOP_SPELL,
+                      f"the `--gdn-loop {loop_span}` side writes BIT-identical logits to the SAME "
+                      f"`{GDN_LOOP_SPELL}` spelling at the run's own span — the pair that holds the "
+                      f"body fixed, so this is the row that attributes the result to the launch shape "
+                      f"rather than to the spelling (D54, §23)"))
+    return pairs
+
+
+def gdn_spell_checks(sides: dict, *, stand_in: bool, loop_span: int | None) -> None:
+    """Every side must say which spelling and span it ran, and every side must have written the bytes
+    its reference wrote.
 
     `stand_in` marks a `--dry-run`: there the corpora are the same pinned bytes copied N times, so the
     identity rows CANNOT fail, and it says so out loud rather than printing a PASS that means nothing.
     The dry run exercises the comparison and the echo plumbing; only a real run adjudicates the port.
     Same `stand_in` discipline as `batched_proof_checks` and `gemm_pin_checks`.
+
+    `loop_span` is None when the looped side cannot exist for this run's scan (route A batches per
+    body already); that is reported as NOT ADJUDICATED, never as a pass — a check that was skipped
+    has to look different from a check that passed.
     """
-    for spell in GDN_SPELLS:
-        side = sides.get(spell)
+    want_sides = list(GDN_SPELLS) + ([GDN_LOOP_SIDE] if loop_span else [])
+    for name in want_sides:
+        side = sides.get(name)
         if side is None:            # a side that failed to run already failed its own rc check
             continue
+        want_spell = GDN_LOOP_SPELL if name == GDN_LOOP_SIDE else name
         echoed = side["run"].get("numerics", {}).get("gdn_spell")
-        check(str(echoed) == spell,
-              f"the `--gdn-spell {spell}` side ran the spelling it was given",
+        check(str(echoed) == want_spell,
+              f"the `{name}` side ran the spelling it was given",
               ("its NUMERICS line carried no `gdn_spell=` — the binary predates --gdn-spell, so no "
                "claim about either spelling can be made from this log" if echoed is None else
-               f"NUMERICS echoed gdn_spell={echoed}, this side was run with --gdn-spell {spell}"))
-    ref = sides.get(GDN_SPELL_REFERENCE)
+               f"NUMERICS echoed gdn_spell={echoed}, this side was run with --gdn-spell {want_spell}"))
+        if name == GDN_LOOP_SIDE:
+            # And the span, for the same reason and with a sharper edge: the loop is the claim, so a
+            # looped side that quietly took the default 1 would byte-compare the per-token form
+            # against itself and certify nothing. A pre-port binary carries no `gdn_loop=` at all and
+            # fails here rather than passing as a post-port one (the `--attn-touch` rule).
+            echoed_loop = side["run"].get("numerics", {}).get("gdn_loop")
+            check(str(echoed_loop) == str(loop_span),
+                  f"the `{name}` side ran the span it was given",
+                  ("its NUMERICS line carried no `gdn_loop=` — the binary predates --gdn-loop, so the "
+                   "looped launch is not in it and there is no verdict about the port"
+                   if echoed_loop is None else
+                   f"NUMERICS echoed gdn_loop={echoed_loop}, this side was run with --gdn-loop"
+                   f" {loop_span}"))
+    if loop_span is None:
+        notes.append("gdn-spell A/B: the looped side is NOT reachable under this run's scan "
+                     "(--gdn-scan collapse already submits one launch per layer per body, and "
+                     "decode_run refuses the pair), so D54's loop claim is NOT adjudicated by this "
+                     "gate run — re-run at --gdn-scan seq for it")
     compared = 0
-    for spell in GDN_SPELLS:
-        if spell == GDN_SPELL_REFERENCE:
-            continue
-        side = sides.get(spell)
+    for side_name, ref_name, claim in gdn_spell_pairs(loop_span):
+        ref, side = sides.get(ref_name), sides.get(side_name)
         if ref is None or side is None:
             continue        # the rc check above already failed this gate; do not report it twice
         compared += 1
@@ -5176,27 +5295,26 @@ def gdn_spell_checks(sides: dict, *, stand_in: bool) -> None:
         # A comparison over an empty corpus cannot fail, which is the `gdn_collapse/run.py` class of
         # defect this tree has now hit four times. So the denominator is asserted before the verdict.
         check(n_files > 0,
-              f"both the `{GDN_SPELL_REFERENCE}` and the `{spell}` gdn-spell sides wrote a logits "
+              f"both the `{ref_name}` and the `{side_name}` gdn-spell sides wrote a logits "
               "corpus to compare",
               f"{n_files} `logitsN.bin` per side, {n_bytes / 1e6:.1f} MB compared"
               if n_files else
               "no `logitsN.bin` on either side — with nothing dumped, \"no differing file\" would be an"
               " absence of evidence rather than a proof of identity, so there is no verdict here")
-        check(not differing,
-              f"the `{spell}` gdn_rec spelling writes BIT-identical logits to `{GDN_SPELL_REFERENCE}` "
-              f"(D32: engine/gdn_rec_unroll4_kernels.h vs prototype/gdn_decode's rec_kernel; D50: "
-              f"engine/gdn_rec_fused_kernels.h, the fused prologue on those walks; §04.4)",
+        check(not differing, claim,
               f"{len(differing)} of {n_files} dumped logits rows ({n_bytes / 1e6:.1f} MB compared) "
               f"differ: {differing[:6]}" if differing else "")
         if not differing and not stand_in:
             notes.append(f"gdn-spell A/B: {n_files} logits rows, {n_bytes / 1e6:.1f} MB, "
-                         f"bit-identical between `{GDN_SPELL_REFERENCE}` and `{spell}` — that spelling "
+                         f"bit-identical between `{ref_name}` and `{side_name}` — that side "
                          "moved no bits on this fixture")
-    # And the denominator of the comparisons themselves: `GDN_SPELLS` is a three-tuple today, so a run
-    # that only produced two sides must not read as "every comparison passed".
-    check(compared == len(GDN_SPELLS) - 1,
-          f"every non-`{GDN_SPELL_REFERENCE}` gdn-spell side was byte-compared against it",
-          f"{compared} of {len(GDN_SPELLS) - 1} expected comparisons ran over the sides this gate "
+    # And the denominator of the comparisons themselves: `gdn_spell_pairs` says how many the shape
+    # owes, so a run that produced fewer must not read as "every comparison passed".
+    expected_pairs = len(gdn_spell_pairs(loop_span))
+    check(compared == expected_pairs,
+          f"every gdn-spell side was byte-compared against its reference ({expected_pairs}"
+          f"{' with the looped side' if loop_span else ', no looped side this scan'} owed)",
+          f"{compared} of {expected_pairs} expected comparisons ran over the sides this gate "
           f"produced ({', '.join(sorted(sides))}) — a missing side is an absence of a verdict, not a "
           "pass")
     if stand_in:
@@ -6758,6 +6876,24 @@ def main() -> int:
                          " against its echo. 64 is the value Phase 0's budget selected; 16 is"
                          " measured and rejected (per-row 1-cos 3.388e-4 > the 3.2e-4 ceiling), so"
                          " the refusal text matters more than the number")
+    ap.add_argument("--gdn-loop", type=int, default=1,
+                    help="how many token-steps ONE `gdn_rec` launch carries, passed to `decode_run"
+                         " --gdn-loop` and asserted against its NUMERICS echo (D53/D54, "
+                         "engine/gdn_rec_loop_kernels.h). `1`, the default, is the shipped"
+                         " one-launch-per-token form: the loop screens 1.58–1.64x on the harness"
+                         " (bench/performance-status.md §23) and D54 ships it as a KNOB first, so the"
+                         " value that runs by default is the one that always ran. `512` is one launch"
+                         " per layer per body (73,728 launches became 144 at 4,096 lanes) and is owed"
+                         " BIT identity, not a band, exactly like the spellings:"
+                         " `engine/gate.py` section (j) runs a looped side and byte-compares it. A"
+                         " span below the body size means what it says (ceil(rows/span) launches,"
+                         " span-invariance proved on CPU), and a ONE-ROW body takes the per-token loop"
+                         " whatever this says, so no decode bit moves under it. Refused alongside"
+                         " --gdn-scan collapse (which already batches per body) and alongside a"
+                         " non-`fused` --gdn-spell (only the fused body has a looped transcription) —"
+                         " and note that under"
+                         " collapse section (j)'s looped side cannot exist, so the loop claim is"
+                         " reported as not adjudicated rather than as passed")
     ap.add_argument("--break-pins", type=int, default=-1, metavar="N",
                     help="with --dry-run: echo N as the in-force pin count instead of the one this"
                          " gate's own --gemm-pins spec implies. That is the bug the check exists to"
@@ -7030,7 +7166,13 @@ def main() -> int:
            # bit-identical, so a log that cannot say which one ran cannot witness that claim in either
            # direction — and section (j) is the A/B this line makes attributable to a spelling rather
            # than to whichever default the binary happened to carry.
-           "--gdn-spell", args.gdn_spell]
+           "--gdn-spell", args.gdn_spell,
+           # The recurrence's launch SPAN (`--gdn-loop`, D54), named and asserted like the five above.
+           # It is claimed bit-identical to the per-token form at every span, so a log that cannot say
+           # which shape produced its rows witnesses neither side — and a run that took the span from
+           # the binary's default instead of from this line could be a looped run judged as a
+           # per-token one, which is exactly the stale-binary null this file keeps refusing.
+           "--gdn-loop", str(args.gdn_loop)]
     if args.state_fp:
         # On by default: a fixture that carries fingerprint pins cannot judge G5's state half without
         # them, and a section that silently did not run is the gap P1 was written to close (§2.6). The
@@ -7205,6 +7347,20 @@ def main() -> int:
                " claim about either spelling can be made from this log" if echoed_spell is None else
                f"NUMERICS echoed gdn_spell={echoed_spell}, this gate was run with --gdn-spell"
                f" {args.gdn_spell}"))
+        # The recurrence's launch SPAN (`--gdn-loop`, D54), read off the same line for the same reason.
+        # Mandatory, not optional: a pre-port binary carries no `gdn_loop=` at all, so silence here is
+        # exactly the case the row must catch — otherwise a binary that ignores the flag would pass as
+        # one that ran the loop, and every byte-compare below would be a per-token form compared with
+        # itself. (`plan_match` is NOT the canary: it is derived inside the binary and a stale build
+        # agrees with itself.)
+        echoed_loop = run.get("numerics", {}).get("gdn_loop")
+        check(str(echoed_loop) == str(args.gdn_loop),
+              "the run ran the gdn_rec launch span this gate is judging it under",
+              ("its NUMERICS line carried no `gdn_loop=` — the binary predates --gdn-loop, so no"
+               " claim about either launch shape can be made from this log" if echoed_loop is None
+               else
+               f"NUMERICS echoed gdn_loop={echoed_loop}, this gate was run with --gdn-loop"
+               f" {args.gdn_loop}"))
     check(bool(run["steps"]), "one STEP line per token", f"{len(run['steps'])} lines")
     if not run["steps"]:
         notes.append("no STEP lines at all: decode_run printed nothing the gate could parse — read"
@@ -7737,11 +7893,20 @@ def main() -> int:
     # (j) the `gdn_rec` spelling A/B, and it runs here rather than next to section (b) because it is a
     # RUN-vs-RUN comparison like (h), not a run-vs-pin one. Every spelling of the recurrence is in this
     # binary whatever the flags say, so the sides are launches of one build and the claim under
-    # test — D32's and D50's bit-identity — is checked rather than assumed.
-    section("(j) the gdn_rec spellings — bit-identical, all run in this gate (§04.4, D32, D50)")
-    spell_sides = (gdn_spell_stand_in(work) if args.dry_run else
-                   run_gdn_spell_ab(args, prompt_ids, n_decode, greedy, ab_replay, work))
-    gdn_spell_checks(spell_sides, stand_in=args.dry_run)
+    # test — D32's and D50's bit-identity — is checked rather than assumed. The `--gdn-loop` side (D54)
+    # is a launch SHAPE rather than a spelling, and it is admitted the same way — by bytes, not by a
+    # band — so it joins this set instead of becoming a fifth section; the pair that holds the spelling
+    # fixed (`loop512` vs `fused`) is what attributes the result to the span.
+    section("(j) the gdn_rec spellings and the token-loop launch — bit-identical, all run in this gate"
+            " (§04.4, D32, D50, D54)")
+    # Whether the looped side CAN run is a fact about the scan, not a wish: under `collapse` route A
+    # already submits one launch per (layer, body) and `decode_run` refuses the pair, so the side does
+    # not exist for that shape and the loop claim goes unadjudicated, named as such below rather than
+    # quietly missing. Derived from the shape, never hand-listed (`attn_tile_model.py`'s rule).
+    loop_span = None if args.gdn_scan == "collapse" else GDN_LOOP_SPAN
+    spell_sides = (gdn_spell_stand_in(work, loop_span) if args.dry_run else
+                   run_gdn_spell_ab(args, prompt_ids, n_decode, greedy, ab_replay, work, loop_span))
+    gdn_spell_checks(spell_sides, stand_in=args.dry_run, loop_span=loop_span)
     # The deferred half, written where the two forms' dumps already are. `--scope form` produces one of
     # these per run, so the question "did the wave carry fail identically on both forms?" is a diff of
     # two small files rather than a reading of two long logs — which is how a carry failure stays a
@@ -7985,6 +8150,7 @@ def teacher_forced_checks(args, man: dict, prompt_ids: list, dec_logits: list, g
                "--attn-tile", args.attn_tile, "--attn-touch", args.attn_touch,
                "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk),
                "--gdn-spell", args.gdn_spell,
+               "--gdn-loop", str(args.gdn_loop),
                # THE ONE DIFFERENCE FROM THE MAIN RUN, and it is the whole section: the fed token at step
                # j is the reference's own, so the engine's sample is never fed back and every row is
                # comparable with the pin that was computed on that same token. `--state-fp` is deliberately

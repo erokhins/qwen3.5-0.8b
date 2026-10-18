@@ -13,8 +13,14 @@ this file: extract the per-token core of three kernels and require it identical.
 WHAT IS COMPARED. The "core" of a kernel is the code from its first `float kq = ` line through its
 `o[h * D + j] = acc;` line — i.e. everything after the shared-memory declaration and before the
 closing brace. `recloop_kernel`'s core is expected to be identical to:
-  * `rec2c4_kernel`'s core, in this directory's `gdn_rec_isa_kernels.h` (the harness copy), and
-  * `rec_fused_kernel`'s core, in `engine/gdn_rec_fused_kernels.h` (the shipping copy).
+  * `rec2c4_kernel`'s core, in this directory's `gdn_rec_isa_kernels.h` (the harness copy),
+  * `rec_fused_kernel`'s core, in `engine/gdn_rec_fused_kernels.h` (the shipping copy), and
+  * `rec_loop_kernel`'s core, in `engine/gdn_rec_loop_kernels.h` (the PORTED copy, D54's `--gdn-loop`:
+    the same loop, in the engine tree, submitted by `engine/kernels_gdn.cpp::gdn_rec_span`). It is a
+    fourth kernel rather than a shared `#define` precisely because a header shared between the
+    prototype and the engine would let one side's edit be the other side's silent change; being two
+    copies, only this checker can say they agree, so the pair is compared against everything else
+    rather than only against its own parent.
 Lines are compared with whitespace collapsed, because the looped body is indented four spaces deeper
 and indentation is not arithmetic. Comments are stripped, since a comment cannot move a value — but
 the `#pragma unroll 4` lines ARE compared: they survived the §18/D46 merge for a measured reason and a
@@ -43,6 +49,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS_KERNELS = ROOT / "prototype/gdn_rec_isa/gdn_rec_isa_kernels.h"
 ENGINE_KERNELS = ROOT / "engine/gdn_rec_fused_kernels.h"
+ENGINE_LOOP_KERNELS = ROOT / "engine/gdn_rec_loop_kernels.h"
 
 MIN_CORE_LINES = 30          # the shipped body is ~40 code lines; a short extraction is a parse failure
 
@@ -157,7 +164,7 @@ MUTATIONS = {
 }
 
 
-def selftest(looped: list[str]) -> int:
+def selftest(looped: list[str], label: str = "recloop_kernel") -> int:
     """Every mutation must be reported as a mismatch against the looped core's own source."""
     bad = 0
     caught = 0
@@ -175,9 +182,9 @@ def selftest(looped: list[str]) -> int:
             bad += 1
         print(f"MUST-CATCH {name:16} {'CAUGHT' if ok else 'MISSED  '} ({len(looped)} vs"
               f" {len(mutated)} lines)  {why}")
-    print(f"SELFTEST transcription mutations={len(MUTATIONS)} caught={caught} bad={bad}"
-          f" ok={0 if bad else 1} claim=the line-by-line comparison below can see a hoisted constant,"
-          " a reordered add, a dropped pragma and a dropped store")
+    print(f"SELFTEST transcription target={label} mutations={len(MUTATIONS)} caught={caught}"
+          f" bad={bad} ok={0 if bad else 1} claim=the line-by-line comparison below can see a hoisted"
+          " constant, a reordered add, a dropped pragma and a dropped store")
     return 1 if bad else 0
 
 
@@ -189,12 +196,17 @@ def main() -> int:
     looped = core_lines(kernel_body(HARNESS_KERNELS, "recloop_kernel"))
     harness_ref = core_lines(kernel_body(HARNESS_KERNELS, "rec2c4_kernel"))
     engine_ref = core_lines(kernel_body(ENGINE_KERNELS, "rec_fused_kernel"))
+    engine_loop = core_lines(kernel_body(ENGINE_LOOP_KERNELS, "rec_loop_kernel"))
 
     if args.selftest:
-        return selftest(looped)
+        # Both looped copies, not just the harness one: the mutations have to be visible in the file
+        # the engine actually submits, or a defect in the ported kernel is proven invisible.
+        rc = selftest(looped)
+        rc |= selftest(engine_loop, label="engine/gdn_rec_loop_kernels.h::rec_loop_kernel")
+        return rc
 
     for name, core in (("recloop_kernel", looped), ("rec2c4_kernel", harness_ref),
-                       ("rec_fused_kernel", engine_ref)):
+                       ("rec_fused_kernel", engine_ref), ("rec_loop_kernel", engine_loop)):
         if len(core) < MIN_CORE_LINES:
             raise SystemExit(f"{name}: only {len(core)} core lines extracted (<{MIN_CORE_LINES})"
                              " — refusing to certify an empty comparison")
@@ -202,21 +214,31 @@ def main() -> int:
     problems = diff(looped, harness_ref, "recloop_kernel", "rec2c4_kernel")
     problems += diff(looped, engine_ref, "recloop_kernel", "rec_fused_kernel")
     problems += diff(harness_ref, engine_ref, "rec2c4_kernel", "rec_fused_kernel")
+    # The ported kernel against all three: its parent (`rec_fused_kernel`, the engine's per-token
+    # spelling), and the harness loop it was transcribed from. Each is a separate diff so a reader
+    # sees WHICH pairing moved rather than reading one merged list.
+    problems += diff(engine_loop, engine_ref, "rec_loop_kernel", "rec_fused_kernel")
+    problems += diff(engine_loop, looped, "rec_loop_kernel", "recloop_kernel")
+    problems += diff(engine_loop, harness_ref, "rec_loop_kernel", "rec2c4_kernel")
     print(f"TRANSCRIPTION recloop_core={len(looped)} rec2c4_core={len(harness_ref)}"
-          f" rec_fused_core={len(engine_ref)} lines_compared={len(looped) * 3}"
-          f" (must be >= {MIN_CORE_LINES * 3})")
+          f" rec_fused_core={len(engine_ref)} rec_loop_core={len(engine_loop)}"
+          f" lines_compared={len(looped) + len(engine_loop) + len(harness_ref) + len(engine_ref)}"
+          f" (must be >= {MIN_CORE_LINES * 4})")
     if problems:
         print("TRANSCRIPTION FAIL — the looped body is not the shipping body:")
         for p in problems:
             print("  " + p)
         print("  The §19 rule: bit-identity is owed to the shipped SOURCE TEXT, not to the algebra."
               " Re-transcribe the loop body from `rec2c4_kernel` (harness) / `rec_fused_kernel`"
-              " (engine) instead of editing the arithmetic here.")
+              " (engine) instead of editing the arithmetic here — and fix BOTH looped copies, since"
+              " one of them is what the engine submits.")
         return 1
-    print("TRANSCRIPTION OK — the per-token core of `recloop_kernel`, `rec2c4_kernel` and"
-          " `engine/gdn_rec_fused_kernels.h::rec_fused_kernel` is identical: same `#pragma unroll 4`"
+    print("TRANSCRIPTION OK — the per-token core of `recloop_kernel`, `rec2c4_kernel`,"
+          " `engine/gdn_rec_fused_kernels.h::rec_fused_kernel` and"
+          " `engine/gdn_rec_loop_kernels.h::rec_loop_kernel` is identical: same `#pragma unroll 4`"
           " lines, same order of every multiply, same stores. What this does NOT prove is that the"
-          " COMPILER kept them identical: that is the device bit-identity gate (`--modes rec0,recloop`),"
+          " COMPILER kept them identical: that is the device bit-identity gate (`--modes rec0,recloop`,"
+          " and for the ported copy `engine/gate.py` section (j)'s byte-compare of the looped side),"
           " and it is the reason this file is a pre-flight and not an admission.")
     return 0
 

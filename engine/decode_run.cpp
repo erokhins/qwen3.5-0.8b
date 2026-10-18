@@ -168,6 +168,22 @@ struct Options {
     // predicate below needs this: with a non-`ship` default, `--gdn-scan collapse` alone would
     // otherwise walk into a refusal the user never asked for.
     bool gdn_spell_given = false;
+    // How many token-steps ONE `gdn_rec` launch carries (`--gdn-loop`, D53/D54,
+    // `engine/gdn_rec_loop_kernels.h`). `1` — the default, and every run before D54 — is the shipped
+    // one-launch-per-token form; `512` is one launch per (layer, body) at the scratch's full width,
+    // which is the axis the item is on (73,728 launches became 144 for a 4,096-token prompt). The
+    // screen read 1.58–1.64x on the harness and bit-identity at spans 0/1/3/16
+    // (`bench/performance-status.md` §23), and D54 shipped it as a KNOB FIRST in D32 → D50's order:
+    // the paired in-situ A/B on the `gdn_rec` family row decides whether this default moves, so the
+    // value that ships is not the one that screened. A span below the body size means what it says
+    // (ceil(rows/span) launches) because span-invariance is proved; a one-row body takes the
+    // per-token path whatever this says (`resolve_gdn_loop`), which is what makes decode unchanged by
+    // construction. Echoed on the NUMERICS line like every other knob here, because a timing log that
+    // cannot say which launch shape produced its family row is not evidence.
+    int gdn_loop = 1;
+    // Whether the flag was named, as distinct from the default: the collapse refusal below must fire on
+    // a run that asked for a span while running route A, not on one that never mentioned either.
+    bool gdn_loop_given = false;
     // The chunk size. Only 64 is accepted, and the refusal prints the measured reason rather than
     // "unsupported": C=16 lost §2.3's per-row budget on the pinned dumps, which is the argument for
     // why 64 is the default at all.
@@ -278,6 +294,30 @@ Options parse_args(int argc, char** argv) {
             // Parses or throws, like `--gdn-scan`: this names which side of an A/B the run is.
             o.gdn_spell = engine::kernels::parse_gdn_rec_spell(next());
             o.gdn_spell_given = true;
+        } else if (a == "--gdn-loop") {
+            // Parsed or thrown, and the number is a SPAN, not a switch: like `--wave-rows` a silently
+            // clamped or silently defaulted value would make the A/B compare the wrong two runs, and a
+            // run whose log cannot say which launch shape produced its family row is not evidence
+            // about the loop.
+            const std::string v = next();
+            int n = 0;
+            try {
+                size_t used = 0;
+                n = std::stoi(v, &used);
+                if (used != v.size()) throw std::invalid_argument(v);
+            } catch (const std::exception&) {
+                throw std::runtime_error("--gdn-loop takes a token count >= 1 (1 = the shipped"
+                                         " one-launch-per-token form, the default; 512 = one launch"
+                                         " per layer per body at the full scratch width); got '" + v
+                                         + "'");
+            }
+            if (n < 1) {
+                throw std::runtime_error("--gdn-loop " + std::to_string(n) + " names no span: 1 is"
+                                         " the per-token loop and is the default. Refusing rather"
+                                         " than treating a non-positive span as either");
+            }
+            o.gdn_loop = n;
+            o.gdn_loop_given = true;
         } else if (a == "--gdn-chunk") {
             const std::string v = next();
             int n = 0;
@@ -335,6 +375,33 @@ Options parse_args(int argc, char** argv) {
                                  " selects the spelling of the sequential recurrence's state walks and"
                                  " is inert under --gdn-scan collapse, which launches a different"
                                  " kernel. Use --gdn-scan seq (the default) for this A/B");
+    }
+    if (o.gdn_loop_given && o.gdn_loop > 1 &&
+        o.gdn_scan == engine::kernels::GdnScan::kCollapse) {
+        // The same class of misreport as the pair above, one knob over: route A already submits ONE
+        // launch per layer per body, so a `--gdn-loop` span named alongside it is inert, and a log
+        // echoing `gdn-loop=512` while running route A would price one kernel twice and call the
+        // second price the loop's win. Refused, not echoed with a caveat. Asked on `_given` rather
+        // than on the value so that a bare `--gdn-scan collapse` run — whose span is the default 1,
+        // i.e. already the per-token shape — stays legal, exactly as `--gdn-spell`'s refusal does.
+        throw std::runtime_error("--gdn-loop " + std::to_string(o.gdn_loop) +
+                                 " sets the span of the SEQUENTIAL recurrence's launch and is inert"
+                                 " under --gdn-scan collapse, which already submits one launch per"
+                                 " layer per body. Use --gdn-scan seq (the default) for this A/B");
+    }
+    if (o.gdn_loop_given && o.gdn_loop > 1 &&
+        o.gdn_spell != engine::kernels::GdnRecSpell::kFused) {
+        // The same class of pair, and this one is refused at parse rather than at the launch even
+        // though `gdn_rec_span` also refuses it structurally: a span walks a LOOPED body, only the
+        // `fused` body has one, and a run that loaded 1.55 GB of weights before finding that out
+        // wastes a device window to say something parse_args already knows (`kernels_gdn.cpp`).
+        throw std::runtime_error(std::string("--gdn-loop ") + std::to_string(o.gdn_loop) +
+                                 " submits the looped body (engine/gdn_rec_loop_kernels.h) and"
+                                 " only the `fused` spelling has one; --gdn-spell " +
+                                 engine::kernels::gdn_rec_spell_name(o.gdn_spell) +
+                                 " has no looped transcription and no bit-identity admission for a"
+                                 " multi-token span. Use --gdn-spell fused (the default) or"
+                                 " --gdn-loop 1");
     }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
@@ -604,6 +671,25 @@ void print_usage(FILE* out) {
                  " while naming this flag alongside it is REFUSED rather than echoed with a spelling"
                  " that did not run. All spellings are compiled in either way, so a paired wave timing"
                  " is one window\n"
+                 "  --gdn-loop N  how many token-steps ONE `gdn_rec` launch carries (D53/D54, "
+                 "engine/gdn_rec_loop_kernels.h). `1`, the default, is the shipped one-launch-per-token"
+                 " form: 18 launches per token, 73,728 for a 4,096-token prompt, at the 1.72 us"
+                 " measured submission floor (§11). `512` walks a whole wave body inside one launch —"
+                 " 18 x bodies, i.e. 144 launches for the same prompt — with the SAME per-token"
+                 " arithmetic (the kernel is `rec_fused_kernel`'s body with the token index moved"
+                 " inside it, transcribed and checked by check_recloop_transcription.py in"
+                 " prototype/gdn_rec_isa), the same grid `<<<16,128>>>` and the same state"
+                 " addresses, so it is a launch-structure change and not a numerics one: spans"
+                 " 0/1/3/16 came back `ndiff_o_vs0=0 ndiff_state_vs0=0` (bench/performance-status.md"
+                 " §23). It is a KNOB, NOT a default — the loop bills +156 of 1,374 slots/token-step"
+                 " for recomputing its row addresses, and the paired in-situ A/B on the `gdn_rec`"
+                 " family row decides whether the default moves (D54, in D32 → D50's order). A span"
+                 " below the body size means what it says (ceil(rows/span) launches, span-invariance"
+                 " proved on CPU), and a ONE-ROW body takes the per-token loop whatever this says, so"
+                 " no decode bit moves under it. Inert under `--gdn-scan collapse`, which already"
+                 " submits one launch per body, and loopable only in the `fused` spelling, which is"
+                 " the one body that has been transcribed with the token index inside it: naming this"
+                 " flag alongside either of those is REFUSED rather than priced twice\n"
                  "  --gdn-scan seq|chunk  which §04.4 scan a GDN body runs (P9, §04.7,"
                  " progress/2026-10-14/p9-phase1-2026-10-14.md). `seq`, the default, is the shipped recurrence: ONE"
                  " launch per token per layer, 18,432 launches per 1024-token wave, and the form the"
@@ -1064,6 +1150,12 @@ WavePassResult wave_pass(const Options& o, const engine::WeightStore& store, eng
         // The single-row-body exception is derived from the shape inside `wave_plan_bill`, not here.
         shape.gdn_chunked = (o.gdn_scan == engine::kernels::GdnScan::kChunk);
         shape.gdn_resident = (o.gdn_scan == engine::kernels::GdnScan::kCollapse);
+        // How many token-steps one `gdn_rec` launch carried, so the plan bills the recurrence's
+        // SUBMISSIONS the way the body actually submitted them (per token at the default, per span
+        // once the loop is on). The span as asked for is enough: `wave_plan_bill` derives the body
+        // widths from `tokens`/`bodies`/`wave_rows` and therefore sees the ragged and one-row bodies
+        // for itself instead of trusting a caller to announce them.
+        shape.gdn_loop_span = o.gdn_loop;
         // Which GEMM a wide body ran, so the plan bills the cast row the way the body submitted it. Asked
         // at `kMaxWaveRows` rather than at a body width on purpose: the only width
         // `resolve_wave_gemm` overrides is `rows <= 1`, and `wave_plan_bill` derives that one-row body
@@ -1212,7 +1304,7 @@ int main(int argc, char** argv) {
         // the library it is linked against, not about the run — and read by `gate.py`'s
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
         std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d"
-                    " attn_touch=%d gdn_scan=%s gdn_chunk=%d gdn_spell=%s\n",
+                    " attn_touch=%d gdn_scan=%s gdn_chunk=%d gdn_spell=%s gdn_loop=%d\n",
                     engine::kMaxWaveRows, o.wave_rows,
                     engine::kernels::wave_gemm_name(o.wave_gemm),
                     engine::kernels::gemm_route_version().c_str(), o.attn_tile,
@@ -1225,7 +1317,15 @@ int main(int argc, char** argv) {
                     // `unroll4` must not turn a bare `--gdn-scan collapse` into an error.
                     o.gdn_scan == engine::kernels::GdnScan::kCollapse
                         ? "inert-under-collapse"
-                        : engine::kernels::gdn_rec_spell_name(o.gdn_spell));
+                        : engine::kernels::gdn_rec_spell_name(o.gdn_spell),
+                    // The span, as given. Under `collapse` the pair with a span >1 is refused above,
+                    // so this can only ever echo 1 there — the per-token shape, which is what the
+                    // `gdn_scan=collapse` field already says did not run at all. A looped side that
+                    // silently took its span from the default would echo 1 and be caught by the
+                    // counted `family=gdn_rec launches=` inside the same log (`plan_match` cannot
+                    // catch it: it is derived inside this binary and a stale build agrees with
+                    // itself — the `17p` retake lesson in AGENTS.md).
+                    o.gdn_loop);
         if (o.sizes_only) {
             std::printf("RESULT mode=sizes-only tensors=%zu check_weights=PASS\n", stats.n_loaded);
             std::fflush(stdout);
@@ -1241,6 +1341,7 @@ int main(int argc, char** argv) {
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;
         sc.gdn_spell = o.gdn_spell;
+        sc.gdn_loop = o.gdn_loop;
         if (engine::kernels::wave_gemm_is_library(o.wave_gemm, engine::kMaxWaveRows)) {
             // Pin filter first: it decides what `gemm_route_plan` below fetches and what the version
             // line counts, so setting it after the plan would print one route and run another.

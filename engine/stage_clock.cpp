@@ -63,6 +63,8 @@ std::array<int, kStageCount> plan_bill() {
 //
 //   glue  1 + 2 x 24 per body                                proj  5 x 18 + 4 x 6 per body
 //   gdn_conv / gdn_gates / gdn_gated_norm  1 x 18 per body   gdn_rec  1 x 18 PER TOKEN (a scan)
+//         ...unless the scan batches: `--gdn-scan collapse` is 18 x bodies and `--gdn-loop S` is
+//         18 x ceil(body rows / S). Both stay on the `gdn_rec` row (see the branches below).
 //   attn  6 per body (sites)                                 mlp_gateup / mlp_down  24 per body each
 //   cast  3 x 24 + 1 x 18 + 6 per body on the hand route, 1 x 18 on a library body,
 //         + 1 per priced row
@@ -114,6 +116,25 @@ WavePlanBill wave_plan_bill(const WaveShape& sh) {
         // be one row, and `resolve_gdn_scan` sends a one-row body through the per-token form — which for
         // one row is also exactly one launch, so the count is `G * bodies` with no exception to derive.
         p.subs[kGdnRec] = G * bodies;
+        p.subs[kGdnChunk] = 0;
+    } else if (sh.gdn_loop_span > 1) {
+        // The token-loop launch (D53/D54, `engine/gdn_rec_loop_kernels.h`): one launch per SPAN, not
+        // per token, on the SAME `gdn_rec` row — for route A's reason (the win line is written against
+        // that row) and a sharper one: the loop's whole claim is that the milliseconds did not move,
+        // only the submissions, so a row that moved them somewhere else would break the claim itself.
+        //
+        // Body widths are `wave_rows` except the last, and a span wider than a body is that body, so
+        // `--gdn-loop 512` reads `G * bodies` at every width. A one-row body needs no exception here:
+        // `resolve_gdn_loop` sends it to the per-token form, and ceil(1/span) is 1, so the derived
+        // count is what the dispatch does either way — and `--wave-rows 1` therefore bills exactly
+        // what the per-token form bills, which is the same no-decode-bit-moves property the launcher
+        // enforces, checked against the shape rather than asserted.
+        const long long last_body_rows =
+            sh.bodies > 0 ? sh.tokens - (sh.bodies - 1) * sh.wave_rows : 0;
+        const long long sp = sh.gdn_loop_span;
+        const long long full_bodies = sh.bodies > 0 ? bodies - 1 : 0;
+        p.subs[kGdnRec] = G * (full_bodies * ((sh.wave_rows + sp - 1) / sp) +
+                               (last_body_rows + sp - 1) / sp);
         p.subs[kGdnChunk] = 0;
     } else if (sh.gdn_chunked) {
         const long long last_body_rows =

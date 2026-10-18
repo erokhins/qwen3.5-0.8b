@@ -3,8 +3,10 @@
 #include "kernels.h"
 
 #include "engine/launch_stats.h"
+#include "engine/state.h"   // kQkvRows / kValueDim: the tile row strides the call site walks
 #include "engine/gdn_collapse_kernels.h"
 #include "engine/gdn_rec_fused_kernels.h"
+#include "engine/gdn_rec_loop_kernels.h"
 #include "engine/gdn_rec_unroll4_kernels.h"
 #include "prototype/gdn_chunk/gdn_chunk_kernels.h"
 #include "prototype/gdn_decode/gdn_decode_kernels.h"
@@ -70,6 +72,66 @@ void gdn_rec(const float* q, const float* k, const float* v, const float* g, con
     }
     // Not counted: this launcher has no token width (see `engine/launch_stats.h`), and a family
     // that can only ever report rows=1 would give section (h) a check that cannot fail.
+}
+
+// D53/D54: the same recurrence, `tokens` token-steps per submission (`--gdn-loop`). One launch
+// `<<<NH, D>>>` over the whole tile, which is the shape `gdn_rec_collapse` already submits — the two
+// batched forms therefore agree on which buffers they are handed, and the only difference between
+// them is that this one keeps the shipping per-token arithmetic verbatim (transcribed and checked,
+// see engine/gdn_rec_loop_kernels.h) while route A re-spells the thread mapping.
+//
+// Not counted in `launch_stats` for `gdn_rec`'s reason: the recurrence's launch count is the thing
+// under test, and it is already the `gdn_rec` row's `rows_total` (`engine/stage_clock.h`). The
+// stage-clock marker stays at the CALL SITE in `decode_step.cpp`, which is what makes the counted
+// `family=gdn_rec launches=` the behavioural canary for this flag — one note per launch, so the
+// counted row goes from `G x tokens` to `G x bodies` because the launches really did fall, not
+// because a bill line was edited.
+void gdn_rec_span(const float* u, const float* g, const float* beta, float* S, float* o,
+                  int tokens, GdnRecSpell spell) {
+    // The kernel walks `CH` per token-step on the q|k|v tile and `NH*D` on `o`; the call site walks
+    // `kQkvRows` and `kValueDim`. Those are the same numbers, and this is where the equality is
+    // worth making a compile error: a stride that only looked equal is a silent re-map of every
+    // operand after row 0, which is a numerics change with no value to catch it. `weights_contract.py`
+    // states the same rule for a shape claim: state the rank at the use site, never let the checker
+    // guess it.
+    static_assert(CH == kQkvRows, "rec_loop_kernel's q|k|v row stride (CH) must be the tile stride"
+                                  " the call site walks (kQkvRows)");
+    static_assert(NH * D == kValueDim, "rec_loop_kernel's o row stride (NH*D) must be the tile"
+                                       " stride the call site walks (kValueDim)");
+    if (tokens < 2) {
+        // Not a style rule. `resolve_gdn_loop` is the one place the one-row exception lives, and a
+        // caller that reached here with one row bypassed it — which would move every decode bit
+        // through a kernel the decode pins were not pinned through, silently. `gdn_chunk_prefill`
+        // refuses its own bypass for the same reason.
+        throw std::runtime_error("gdn_rec_span: tokens=" + std::to_string(tokens) + "; a one-row"
+                                 " body is `resolve_gdn_loop`'s to route to `gdn_rec`, and reaching"
+                                 " this launcher with <2 rows means a caller bypassed that rule."
+                                 " Decode bits depend on it.");
+    }
+    if (spell != GdnRecSpell::kFused) {
+        // The same discipline as `parse_gdn_rec_spell` and `parse_gdn_scan`: this flag names which
+        // side of an A/B the run is, so a launcher that quietly ran a different body than the one it
+        // was asked for would price one kernel twice and report the second price as the loop's win.
+        // Only the fused body has a looped transcription (`engine/gdn_rec_loop_kernels.h`) and only
+        // the fused form has device bit-identity admission at spans 0/1/3/16, so `ship`/`unroll4`
+        // under `--gdn-loop N>1` is refused rather than served by the shipping kernel.
+        throw std::runtime_error(std::string("gdn_rec_span: --gdn-spell ") + gdn_rec_spell_name(spell)
+                                 + " has no looped kernel and no bit-identity admission for a"
+                                 " multi-token span. --gdn-loop N>1 runs"
+                                 " engine/gdn_rec_loop_kernels.h, which is the `fused` body; use"
+                                 " --gdn-spell fused (the default) or --gdn-loop 1");
+    }
+    // `u` is the conv's [n][6144] tile and the three slices are row 0 of q, k and v; the kernel adds
+    // `CH` per token-step itself, exactly as the call site used to add it per launch.
+    rec_loop_kernel<<<NH, D>>>(u, u + kValueDim, u + 2 * kValueDim, g, beta, S, o, NH, tokens);
+}
+
+int resolve_gdn_loop(int want, int rows) {
+    // The one-row rule, stated once. `rows <= 1` covers both a decode step and `--wave-rows 1`, and
+    // `want <= 1` is the shipped default; either way the answer is the per-token loop, verbatim.
+    // A span wider than the body is left alone on purpose — `ceil(rows/span) == 1`, so the body is
+    // one launch and `--gdn-loop 512` means "one launch per (layer, body)" at every width.
+    return (rows <= 1 || want <= 1) ? 1 : want;
 }
 
 // `--gdn-spell`, and it parses or throws for the standing reason: the flag names which side of an A/B
