@@ -1,0 +1,320 @@
+token_bill.py -- the per-launch / per-token split and the address-arithmetic census. RUN OF RECORD.
+  (the citation in `gdn_rec_isa_kernels.h`'s `recptr` note names this file)
+
+Produced at 211eb95 on the Framework Desktop (gfx1151), hipcc from /opt/rocm/core-10.0.
+Compile-only: no launch, no timing, no ms. Each section's `--selftest` is included and reads `ok=1`.
+
+SECTION 1  the SHIPPING engine TU (`engine/kernels_gdn.cpp`), the two forms the engine can build:
+  command: .venv/bin/python prototype/gdn_rec_isa/token_bill.py \
+             --asm tmp/gcc/gdn_addr/kernels_gdn-hip-amdgcn-amd-amdhsa-gfx1151.s \
+             --kernels rec_fused_kernel,rec_loop_kernel --selftest --dump-addr
+  reading: flat 1374 -> 1530 (+156) is the §24 of `bench/performance-status.md` delta; per-token
+  1374 -> 1327 (-47) is what the loop actually costs per token once the 203 once-per-launch slots are
+  taken out; the address-arithmetic column moves -3, so the +156 contains none of it.
+
+SECTION 2  the harness TU (`SAVE_TEMPS=1 ./prototype/gdn_rec_isa/build.sh`), which carries the new MODE:
+  command: .venv/bin/python prototype/gdn_rec_isa/token_bill.py --asm tmp/gdn_isa/gdn_rec_isa.s \
+             --kernels rec2c4_kernel,recloop_kernel,recptr_kernel --selftest
+  reading: recptr is -4 flat / +9 per-token against recloop, and its address-arithmetic count is HIGHER
+  (+11), because six 64-bit pointer steps cost more slots than the multiply chain they replace.
+  The two looped forms' PER-TOKEN lines differ (1327 vs 1336); that difference is the behavioural canary
+  `run_screen_recptr.sh` asserts before any device window is spent, because a stale binary would print the
+  same bill on both sides and read as a clean null.
+
+==============================================================================================
+SECTION 1 - shipping engine TU (engine/kernels_gdn.cpp)
+==============================================================================================
+listing  tmp/gcc/gdn_addr/kernels_gdn-hip-amdgcn-amd-amdhsa-gfx1151.s
+unit     one token-step = one iteration of the token loop (or one launch, for a per-token kernel), per wavefront; grid 16x128 threads, wave32 -> 64 wavefronts
+
+===== rec_fused_kernel
+  walks                 : loopA x8 (16 state-accesses/trip), loopB x8 (16/trip)
+  token loop            : NONE — a per-token kernel, so every live block runs once per token and once per launch
+  per-LAUNCH straight   :   0 blocks,    0 slots   (nothing sits outside the token loop: flat == per-token)
+  per-TOKEN straight    :  59 blocks,  294 slots
+  walks per token       : loopA 44x8=352,  loopB 91x8=728
+  FLAT token-step bill  : 1374 slots/wavefront     <- comparable with isa_census.py and §24
+  PER-TOKEN bill        : 1374 slots/wavefront
+  ADDRESS ARITHMETIC    : 16 straight-line + 80 in walks = 96 slots = 7.0% of the per-token bill, 7.0% of the flat bill
+  category rollup       : per-launch | per-token-straight | per trip of the walks
+    xlane.exec-guard             0 |   122 |    0
+    xlane.add                    0 |    22 |    0
+    xlane.permute                0 |    20 |    0
+    addr.math                    0 |    19 |    4
+    norm.expf                    0 |    17 |    0
+    unclassified                 0 |    12 |    2
+    loop.salu                    0 |     9 |    6
+    state.mul                    0 |     9 |    9
+    xlane.range-select           0 |     8 |    0
+    salu.mov                     0 |     7 |    0
+    xlane.addr-math              0 |     6 |    0
+    barrier.sync                 0 |     5 |    0
+    barrier.invalidate           0 |     5 |    0
+    state.load                   0 |     5 |   32
+    valu.mov                     0 |     4 |    2
+    salu.kernarg                 0 |     3 |    0
+    salu.branch                  0 |     3 |    0
+    xlane.lds-round-trip         0 |     3 |    0
+    norm.rsqrt                   0 |     2 |    0
+    salu.offload                 0 |     2 |    0
+    dual.other                   0 |     2 |    0
+    norm.warp-count              0 |     2 |    0
+    salu.exit                    0 |     2 |    0
+    norm.lane-id                 0 |     1 |    0
+    vmem.clause                  0 |     1 |    5
+    state.store                  0 |     1 |   16
+    state.fma                    0 |     1 |   47
+    xlane.lane-id                0 |     1 |    0
+    state.coef-lds-load          0 |     0 |   12
+  address-arithmetic mnemonics, straight line (per token) / walks (per trip):
+    v_add_co_ci_u32_e64           5 /   2
+    v_add_co_u32                  3 /   2
+    s_add_i32                     0 /   4
+    s_addc_u32                    3 /   0
+    s_add_u32                     2 /   0
+    v_mov_b32_e32                 0 /   2
+    s_lshl_b64                    1 /   0
+    v_add_nc_u32_e32              1 /   0
+    v_add_nc_u32_e64              1 /   0
+  must-not-catch        : address-set lines with no address-class operation at all = 0
+===== rec_loop_kernel
+  walks                 : loopA x8 (16 state-accesses/trip), loopB x8 (16/trip)
+  token loop            : BB5_4
+  per-LAUNCH straight   :  80 blocks,  203 slots
+  per-TOKEN straight    :  33 blocks,  255 slots
+  walks per token       : loopA 44x8=352,  loopB 90x8=720
+  FLAT token-step bill  : 1530 slots/wavefront     <- comparable with isa_census.py and §24
+  PER-TOKEN bill        : 1327 slots/wavefront   (flat - 203 per-launch slots)
+  ADDRESS ARITHMETIC    : 13 straight-line + 80 in walks = 93 slots = 7.0% of the per-token bill, 6.1% of the flat bill
+  category rollup       : per-launch | per-token-straight | per trip of the walks
+    xlane.exec-guard            82 |    57 |    0
+    salu.mov                    40 |    42 |    0
+    loop.salu                    6 |    25 |    6
+    xlane.permute                0 |    20 |    0
+    xlane.add                    0 |    19 |    0
+    norm.expf                    1 |    16 |    0
+    unclassified                23 |    12 |    2
+    addr.math                   15 |     9 |    4
+    state.mul                    0 |     8 |   10
+    xlane.range-select           0 |     7 |    0
+    dual.other                   1 |     6 |    0
+    barrier.sync                 0 |     5 |    0
+    barrier.invalidate           0 |     5 |    0
+    state.load                   0 |     5 |   32
+    xlane.lds-round-trip         0 |     5 |    0
+    xlane.addr-math              2 |     4 |    0
+    norm.rsqrt                   0 |     2 |    0
+    salu.branch                 19 |     2 |    0
+    valu.mov                     0 |     2 |    2
+    salu.offload                 0 |     1 |    0
+    vmem.clause                  1 |     1 |    4
+    state.store                  0 |     1 |   16
+    state.fma                    0 |     1 |   46
+    norm.lane-id                 5 |     0 |    0
+    salu.kernarg                 4 |     0 |    0
+    norm.warp-count              2 |     0 |    0
+    xlane.lane-id                1 |     0 |    0
+    state.coef-lds-load          0 |     0 |   12
+    salu.exit                    1 |     0 |    0
+  address-arithmetic mnemonics, straight line (per token) / walks (per trip):
+    v_add_co_ci_u32_e64           4 /   2
+    s_add_i32                     1 /   4
+    v_add_co_u32                  2 /   2
+    s_add_u32                     2 /   0
+    s_addc_u32                    2 /   0
+    s_lshl_b64                    2 /   0
+    v_mov_b32_e32                 0 /   2
+  must-not-catch        : address-set lines with no address-class operation at all = 0
+===== DELTA against the first kernel named, per token-step per wavefront
+  rec_fused_kernel -> rec_loop_kernel: flat 1374 -> 1530 (+156), per-token 1374 -> 1327 (-47), address-arithmetic 96 -> 93 (-3)
+    s_add_i32                     0 ->    1
+    s_addc_u32                    3 ->    2
+    s_lshl_b64                    1 ->    2
+    v_add_co_ci_u32_e64           5 ->    4
+    v_add_co_u32                  3 ->    2
+    v_add_nc_u32_e32              1 ->    0
+    v_add_nc_u32_e64              1 ->    0
+
+===== SELFTEST on rec_loop_kernel: address slots as shipped = 93
+SELFTEST append_addr    OK 93 -> 94 (required >93)
+SELFTEST append_float   OK 93 -> 93 (required =93)
+SELFTEST attached       : 17 counted address lines write a register a memory operand reads as an address (required > 0)
+SELFTEST must-not-catch : 0 counted lines that are pure float work (required 0)
+SELFTEST ok=1
+
+============================================================================================== SECTION 2 - harness TU (prototype/gdn_rec_isa/gdn_rec_isa.hip.cpp, built with SAVE_TEMPS=1)
+
+==============================================================================================
+listing  tmp/gdn_isa/gdn_rec_isa.s
+unit     one token-step = one iteration of the token loop (or one launch, for a per-token kernel), per wavefront; grid 16x128 threads, wave32 -> 64 wavefronts
+
+===== rec2c4_kernel
+  walks                 : loopA x8 (16 state-accesses/trip), loopB x8 (16/trip)
+  token loop            : NONE — a per-token kernel, so every live block runs once per token and once per launch
+  per-LAUNCH straight   :   0 blocks,    0 slots   (nothing sits outside the token loop: flat == per-token)
+  per-TOKEN straight    :  59 blocks,  294 slots
+  walks per token       : loopA 44x8=352,  loopB 91x8=728
+  FLAT token-step bill  : 1374 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  PER-TOKEN bill        : 1374 slots/wavefront
+  ADDRESS ARITHMETIC    : 16 straight-line + 80 in walks = 96 slots = 7.0% of the per-token bill, 7.0% of the flat bill
+  category rollup       : per-launch | per-token-straight | per trip of the walks
+    xlane.exec-guard             0 |   122 |    0
+    xlane.add                    0 |    22 |    0
+    xlane.permute                0 |    20 |    0
+    addr.math                    0 |    19 |    4
+    norm.expf                    0 |    17 |    0
+    unclassified                 0 |    12 |    2
+    loop.salu                    0 |     9 |    6
+    state.mul                    0 |     9 |    9
+    xlane.range-select           0 |     8 |    0
+    salu.mov                     0 |     7 |    0
+    xlane.addr-math              0 |     6 |    0
+    state.load                   0 |     5 |   32
+    barrier.invalidate           0 |     5 |    0
+    barrier.sync                 0 |     5 |    0
+    valu.mov                     0 |     4 |    2
+    xlane.lds-round-trip         0 |     3 |    0
+    salu.kernarg                 0 |     3 |    0
+    salu.branch                  0 |     3 |    0
+    norm.rsqrt                   0 |     2 |    0
+    dual.other                   0 |     2 |    0
+    salu.offload                 0 |     2 |    0
+    salu.exit                    0 |     2 |    0
+    norm.warp-count              0 |     2 |    0
+    norm.lane-id                 0 |     1 |    0
+    xlane.lane-id                0 |     1 |    0
+    vmem.clause                  0 |     1 |    5
+    state.store                  0 |     1 |   16
+    state.fma                    0 |     1 |   47
+    state.coef-lds-load          0 |     0 |   12
+  address-arithmetic mnemonics, straight line (per token) / walks (per trip):
+    v_add_co_ci_u32_e64           5 /   2
+    v_add_co_u32                  3 /   2
+    s_add_i32                     0 /   4
+    s_addc_u32                    3 /   0
+    s_add_u32                     2 /   0
+    v_mov_b32_e32                 0 /   2
+    s_lshl_b64                    1 /   0
+    v_add_nc_u32_e32              1 /   0
+    v_add_nc_u32_e64              1 /   0
+  must-not-catch        : address-set lines with no address-class operation at all = 0
+===== recloop_kernel
+  walks                 : loopA x8 (16 state-accesses/trip), loopB x8 (16/trip)
+  token loop            : BB8_4
+  per-LAUNCH straight   :  80 blocks,  203 slots
+  per-TOKEN straight    :  33 blocks,  255 slots
+  walks per token       : loopA 44x8=352,  loopB 90x8=720
+  FLAT token-step bill  : 1530 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  PER-TOKEN bill        : 1327 slots/wavefront   (flat - 203 per-launch slots)
+  ADDRESS ARITHMETIC    : 13 straight-line + 80 in walks = 93 slots = 7.0% of the per-token bill, 6.1% of the flat bill
+  category rollup       : per-launch | per-token-straight | per trip of the walks
+    xlane.exec-guard            82 |    57 |    0
+    salu.mov                    40 |    42 |    0
+    loop.salu                    6 |    25 |    6
+    xlane.permute                0 |    20 |    0
+    xlane.add                    0 |    19 |    0
+    norm.expf                    1 |    16 |    0
+    unclassified                23 |    12 |    2
+    addr.math                   15 |     9 |    4
+    state.mul                    0 |     8 |   10
+    xlane.range-select           0 |     7 |    0
+    dual.other                   1 |     6 |    0
+    barrier.sync                 0 |     5 |    0
+    state.load                   0 |     5 |   32
+    barrier.invalidate           0 |     5 |    0
+    xlane.lds-round-trip         0 |     5 |    0
+    xlane.addr-math              2 |     4 |    0
+    norm.rsqrt                   0 |     2 |    0
+    valu.mov                     0 |     2 |    2
+    salu.branch                 19 |     2 |    0
+    salu.offload                 0 |     1 |    0
+    vmem.clause                  1 |     1 |    4
+    state.store                  0 |     1 |   16
+    state.fma                    0 |     1 |   46
+    xlane.lane-id                1 |     0 |    0
+    state.coef-lds-load          0 |     0 |   12
+    salu.kernarg                 4 |     0 |    0
+    salu.exit                    1 |     0 |    0
+    norm.warp-count              2 |     0 |    0
+    norm.lane-id                 5 |     0 |    0
+  address-arithmetic mnemonics, straight line (per token) / walks (per trip):
+    v_add_co_ci_u32_e64           4 /   2
+    s_add_i32                     1 /   4
+    v_add_co_u32                  2 /   2
+    s_add_u32                     2 /   0
+    s_addc_u32                    2 /   0
+    s_lshl_b64                    2 /   0
+    v_mov_b32_e32                 0 /   2
+  must-not-catch        : address-set lines with no address-class operation at all = 0
+===== recptr_kernel
+  walks                 : loopA x8 (16 state-accesses/trip), loopB x8 (16/trip)
+  token loop            : BB9_4
+  per-LAUNCH straight   :  80 blocks,  190 slots
+  per-TOKEN straight    :  33 blocks,  264 slots
+  walks per token       : loopA 44x8=352,  loopB 90x8=720
+  FLAT token-step bill  : 1526 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  PER-TOKEN bill        : 1336 slots/wavefront   (flat - 190 per-launch slots)
+  ADDRESS ARITHMETIC    : 24 straight-line + 80 in walks = 104 slots = 7.8% of the per-token bill, 6.8% of the flat bill
+  category rollup       : per-launch | per-token-straight | per trip of the walks
+    xlane.exec-guard            82 |    57 |    0
+    salu.mov                    39 |    42 |    0
+    loop.salu                    2 |    37 |    6
+    xlane.permute                0 |    20 |    0
+    xlane.add                    0 |    19 |    0
+    norm.expf                    1 |    17 |    0
+    addr.math                    7 |     9 |    4
+    xlane.addr-math              3 |     7 |    0
+    xlane.range-select           0 |     7 |    0
+    state.mul                    0 |     7 |   10
+    unclassified                23 |     7 |    2
+    barrier.sync                 0 |     5 |    0
+    state.load                   0 |     5 |   32
+    barrier.invalidate           0 |     5 |    0
+    xlane.lds-round-trip         0 |     5 |    0
+    dual.other                   1 |     4 |    0
+    valu.mov                     0 |     4 |    2
+    norm.rsqrt                   0 |     2 |    0
+    salu.branch                 19 |     2 |    0
+    salu.offload                 0 |     1 |    0
+    state.store                  0 |     1 |   16
+    state.fma                    0 |     1 |   46
+    xlane.lane-id                1 |     0 |    0
+    state.coef-lds-load          0 |     0 |   12
+    salu.kernarg                 4 |     0 |    0
+    vmem.clause                  1 |     0 |    4
+    salu.exit                    1 |     0 |    0
+    norm.warp-count              2 |     0 |    0
+    norm.lane-id                 4 |     0 |    0
+  address-arithmetic mnemonics, straight line (per token) / walks (per trip):
+    s_add_u32                     8 /   0
+    s_addc_u32                    8 /   0
+    v_add_co_ci_u32_e64           4 /   2
+    s_add_i32                     1 /   4
+    v_add_co_u32                  2 /   2
+    v_mov_b32_e32                 0 /   2
+    v_add_nc_u32_e32              1 /   0
+  must-not-catch        : address-set lines with no address-class operation at all = 0
+===== DELTA against the first kernel named, per token-step per wavefront
+  rec2c4_kernel -> recloop_kernel: flat 1374 -> 1530 (+156), per-token 1374 -> 1327 (-47), address-arithmetic 96 -> 93 (-3)
+    s_add_i32                     0 ->    1
+    s_addc_u32                    3 ->    2
+    s_lshl_b64                    1 ->    2
+    v_add_co_ci_u32_e64           5 ->    4
+    v_add_co_u32                  3 ->    2
+    v_add_nc_u32_e32              1 ->    0
+    v_add_nc_u32_e64              1 ->    0
+  rec2c4_kernel -> recptr_kernel: flat 1374 -> 1526 (+152), per-token 1374 -> 1336 (-38), address-arithmetic 96 -> 104 (+8)
+    s_add_i32                     0 ->    1
+    s_add_u32                     2 ->    8
+    s_addc_u32                    3 ->    8
+    s_lshl_b64                    1 ->    0
+    v_add_co_ci_u32_e64           5 ->    4
+    v_add_co_u32                  3 ->    2
+    v_add_nc_u32_e64              1 ->    0
+
+===== SELFTEST on recptr_kernel: address slots as shipped = 104
+SELFTEST append_addr    OK 104 -> 105 (required >104)
+SELFTEST append_float   OK 104 -> 104 (required =104)
+SELFTEST attached       : 17 counted address lines write a register a memory operand reads as an address (required > 0)
+SELFTEST must-not-catch : 0 counted lines that are pure float work (required 0)
+SELFTEST ok=1
