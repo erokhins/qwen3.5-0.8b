@@ -629,3 +629,103 @@ thing that would make it worth more is traffic that actually reaches DRAM, which
 produce and which the engine cannot probe above 4096 lanes without raising `kAttnMaxSplit` (blocked,
 D4/D5). The elasticity model behind the 1.15–1.29 estimate should be treated as biased pessimistic if
 anyone reuses it.
+
+## §9 The M = 16 geometry tax — re-tiled, bit-identical, and priced in registers (2026-10-18, worker; CPU + a 2 s correctness gate, no timing)
+
+Asked: re-tile the shipped `attn_slim1_wave` spell to **16 query rows per block**, keeping the shipped VALU
+dot and warp fold called rather than copied, no WMMA, and measure the geometry tax D58 could not price.
+**No millisecond figure appears in this section**: nothing was timed here, and the burst is handed over as
+`prototype/attn_m2/burst_m16.sh`. Everything below is arithmetic, compiler remarks, and a bit-diff.
+
+**The spelling chosen, in one sentence.** One block owns 16 query rows (grid.z) and one lane block (grid.y)
+and one KV group (grid.x) with `GQA` warps = one per query head as shipped, and it walks those 16 rows four
+at a time (`ATTN_M16_GRP = 4`, so 4 rows x 4 heads = 16 live `(row, head)` pairs) over a **rolled** K/V
+round loop with Q read from **global** per (row, head, round) — global-A, because staging a 16-row Q slice
+costs LDS the reuse does not pay for, and because D58's own driver census put `m16_bf16gq` at the shipped
+occupancy and `m16_stagedq` below it (`prototype/attn_wmma/m16_census.output.txt` §1).
+
+**Bit-identity: `ndiff = 0`, every row, every span.** `prototype/attn_m2/gate_m16.py device` (40 assertions,
+2.2 s wall, output in `tmp/gcc/m16_gate_device.output.txt`):
+
+| case | rows in the 16-row tile | lanes | split | ndiff_aout m16 vs shipslim | control: shipslim vs `attn_tile_wave` |
+|---|---|---|---|---|---|
+| `span00-pad` | 0 live (padded grid) + 1 | 1020 | 2 | **0** | 0 |
+| `span01-1024` | 1 | 1020 | 2 | **0** | 0 |
+| `span03-1024` | 3 | 1020–1022 | 2 | **0** | 0 |
+| `span16-1024` | 16 | 1020–1035 | 3 | **0** | 0 |
+| `span16-4096` | 16 | 4080–4095 | 8 | **0** | 0 |
+| `span01-4096` | 1 | 4095 | 8 | **0** | 0 |
+| `wave64-at-4096` | 64 rows in 4 tiles | 4032–4095 | 8 | **0** | 0 |
+
+The 0-row span is a padded grid (`--pad-tiles 1`), because no real wave leaves a row-tile empty and an
+unreachable route has no tests — including no test of the gate. The gate also requires the injection
+controls to be *non-inert*: `dimhalf` must keep the two forms in agreement **and** move `m16`'s own output
+away from its own clean run, and the same for `slotk` (`slotk` is an `attn_prep` cache injection, so it is
+form-neutral and agreement is the claim; scoring form-neutral injections form-vs-form is §3's defect 2).
+`check_m16_transcription.py` (23 checks, CPU-only) compares this file line-by-line against
+`prototype/attn_decode/attn_decode_kernels.h` — `split_for_lanes` is called not re-typed, `lanes_of` /
+`blocks_for_row` bodies are verbatim, and the per-chunk algebra (`mn`, `rescale`, `l*rescale+ls`,
+`acc[u] *= rescale` before the chunk's PV, `m = mn` last) and the partial-slot expression are compared
+after a 19-entry alias map, because a hoisted "equivalent" product tree is the failure bit-identity claims
+cannot see (the q̃ row of AGENTS.md, which is `prototype/gdn_collapse/results.md` §2).
+
+**Compiler census (the remarks, not a hope).** `bash prototype/attn_m2/build_m16.sh` prints, for
+`attn_m16_wave`:
+
+| build | VGPRs/lane | SGPRs | Scratch | LDS/B/block | blocks/CU by LDS | blocks/CU by VGPR (65,536-file ÷ VGPR×128 threads) | wavefronts/CU |
+|---|---|---|---|---|---|---|---|
+| shipped `attn_slim1_wave` (256 thr) | 47 | 54 | 0 | 12,288 | 5 | 5 | **20** |
+| `attn_m16` GRP=4 (128 thr) | **134** | 105 | 0 | 12,800 | 5 | **3** | **12** |
+| `attn_m16` GRP=2 (128 thr) | 96 | 79 | 0 | 10,496 | 6 | 5 | **20** |
+| `attn_m16` GRP=8 | static_assert fires: `M16_PAIRS * 8 <= 160` | | | | | | |
+
+So the honest statement of what a burst at the shipped shape would measure: **the M = 16 form as written is
+register-bound at ~3 blocks / 12 wavefronts per CU against the shipped form's LDS-bound 5 blocks / 20, so
+its time is an occupancy fact as much as a geometry fact, and D58's parity condition (5 blocks / 20
+wavefronts) is NOT met at GRP = 4.** The register/LDS coupling is exactly where the handoff guessed it
+would be: 16 rows × 4 heads live at once is 64 accumulators × 8 f32 = 128 f32/lane, which is not a kernel
+anyone can schedule; `GRP = 4` is 32 f32/lane of live accumulator and 134 VGPR; `GRP = 8` is refused at
+compile time by the budget assert; `GRP = 2` returns to register parity but stages the same 8-touch reuse
+the shipped M = 2 tile already gets, so it buys the launch-shape change and none of the traffic. The knob
+is `-DATTN_M16_GRP=2` / `GRP=2 bash build_m16.sh` for whoever wants the tax measured without the occupancy
+confound; that is a decision, not an implementation detail, so both are left buildable.
+
+**Traffic, as demanded bytes only (D9: demanded ÷ time is not a DRAM rate).** The census walks each form's
+own staging loops: `bytesdemanded_m16 / bytesdemanded_ship` = **0.2818** at `span16-1024`, **0.3049** at
+`span16-4096`, **0.3050** at `wave64-at-4096`, **0.2663** at the 4-row streaming case, and **1.0000** for a
+1-row wave (a 16-row tile with one row re-uses nothing). Blocks fall from 256 to 64 at `span16-4096` and
+1024 to 256 at `wave64-at-4096`. Whether any of it reaches DRAM is the open question §4 and §6 already
+answered once for M = 2 ("halving bytes-demanded and collecting nothing"), and it is the question the burst,
+not this section, has to answer.
+
+**This form streams, and refuses one-pass rows.** `attn_m16_ok` refuses any launch containing a row with
+`full && lanes <= MAXSC`, for two independent reasons: a one-pass row needs its whole slice's scores
+resident (16 live pairs × 512 lanes × 2 B per head is the entire 64 KiB LDS before K and V get a byte), and
+the shipped one-pass route is a *different bit tree* — weights normalised and BF16-rounded once, `l = 1`,
+`aout` written directly (§"pass 2" of `attn_tile_body` in
+`prototype/attn_decode/attn_decode_kernels.h`). Short rows can still be compared with `--full 0`, which
+forces both forms onto the streaming route, and `burst_m16.sh` labels those rows in words so nobody reads
+them as the shipping short-row route. The refusal is guarded, not asserted: `attn_m16 --geom-guard` walks
+25,920 geometries (lane census × split 1..8 × both `full` × 10 row counts) and fails on a round wider than
+`M16_L = TILE + 8 = 16`, on a phantom refusal, on a leak, on a wrong grid cover, or on a real-plan geometry
+whose verdict disagrees; it currently reports **worst round 15 of 16, phantom 0, leak 0, PASS**, host-only
+in ~0.5 s. If the launcher ever misses, the kernel poisons rather than streaming (`m16_panic`, and the same
+rule as §6: a refusal that never fires and a poison that never lands are both invisible unless something
+walks them).
+
+**Two harness bugs found while getting the table above, both worth the trap row.** (1) Launching the
+*reference* forms with `grid.z = 1` computes row 0 only, leaves the other rows' partials zero, and
+`attn_combine` then writes `0/0 = NaN` for them — so every row but the first differs by 1024 elements and
+it reads as a numerics failure in the form under test. The shipped wave form is one block per query row
+(`attn_m2.hip.cpp`'s `tgrid` says the shape); a diff against a reference that did not run is not a diff.
+(2) The bit-diff kernel's warp-shred array was sized for 4 warps while it launches with 8, so the block
+total came back as half the row: a diff kernel that under-counts makes a broken form look half-right, and
+`ndiff = 1024` of 2,048 looked like "half the heads are wrong", which was not the shape of the bug at all.
+
+**Handed over, deliberately not run here.**
+`bash prototype/attn_m2/burst_m16.sh` (main agent / user; it does not self-lock, prints `gpu_lock` state,
+times `shipslim` and `m16` inside one rep at the widths §8.4 of this file timed — wave64 at
+1024/2048/4096, wave16-at-4096, the
+two spans, plus two streaming-forced short rows) and, for the occupancy claim,
+`tools/kernel_occupancy_probe.cpp`, which is the driver's authority over the derived numbers in the table
+above (AGENTS.md: HIP reports this SKU's counts 2× off; clang's `waves/SIMD` remark is not a measurement).
