@@ -1533,3 +1533,55 @@ delta is real — what it does to D46's closure of 1.2.
 **Fallback**, if the arch is unsupported or the build will not fly on ROCm 10: price the same axis directly by
 prototyping the chunked (matmul-shaped) GDN prefill against the pinned pins. That is the real target anyway;
 llama.cpp is only the existence proof.
+
+### D48 addendum — is llama.cpp's formulation the same thing as our item 1.2? Yes, and the gap between our price and our measurement is the whole question
+
+Asked directly whether the llama.cpp difference is the chunked scan. It is the same reformulation, and the
+records say so: `progress/2026-10-16/ceiling-based-route-ranking-2026-10-16.md:285` describes P9 as “the
+delta-rule scan reformulated chunk-wise, which **is GEMM-shaped**”. Two things then have to be reconciled:
+
+- **Our bottom-up price of the chunked form: 63.6 ms** against a serial `gdn_rec` of **127.0 ms** at 1024 lanes
+  (`p9-route-a-2026-10-14.md`), i.e. ~2× on the family — which, scaled to the 4096-lane wave, is roughly the
+  8,500 tok/s the user expects.
+- **Our measurement: 1,953.7 ms wave vs 331.2 ms** (`p9-phase1c` §Q2), `gdn_rec` 127 → ~1,750 ms, i.e. **13.8×
+  worse**, which the same record attributes to a **thread-mapping defect** (the carry kernel's header claimed
+  `thread = (chunk row t, strip column j)`; what ran fed a different element-per-thread mapping) and to the
+  kernel **re-executing the priced arithmetic 13.5× over** (`p9-route-a`: “13.5× the priced arithmetic”).
+
+A ~30× disagreement between the price and the measurement of one idea, with the defect already named, means
+neither number is currently trustworthy about chunking. **The specific untested combination** is chunked GDN
+expressed as *library GEMM calls* — llama.cpp emits `ggml_mul_mat` + `ggml_tri` and therefore rides its tuned
+matmul path, whereas P9 hand-wrote the chunk arithmetic into a HIP scan kernel and never touched the tensor
+cores. On this box that distinction is worth naming precisely, because D47 measured our own GEMM families at
+**97–102 % of the achievable matrix roof**: an expression that lands there inherits a rate we have already
+proven we can hit, and an expression that hand-rolls the same arithmetic inherits our occupancy problem
+(2,048 independent chains in the recurrent form, `p9-route-a`).
+
+## D49 — decide-and-record instead of waiting for approval; D48 extended to a per-family timing comparison (user, 2026-10-17)
+
+- **Standing, reaffirmed by the user:** do not stop for approvals — use judgement, act, and **record the
+  decision** here. What still stops the session is only what is genuinely the user's: a numerics band wider than
+  an accepted one, a scope change, a destructive action, int8/int4 quantisation (out of authority per the
+  numeric-format rule), and queue reordering that drops funded work.
+- **D48 extended (was: measure prefill tok/s and find out why).** S2 now owes a **per-family timing table for
+  llama.cpp**, not one headline number: per-op timings from its own profiler (`--profile-ops` /
+  `llama_perf_context_print`) at 512 / 1024 / 4096 prompt tokens, mapped onto our `--time-waves` families
+  (`proj`, `mlp_*`, `attn`, `gdn_conv`, `gdn_rec`, gates/norm, `cast`, `copy`, `glue`, `lm_head`, `host_tail`),
+  with **`llama/ours` ratio per comparable row** and an explicit *not-comparable* column for things that cannot
+  be ratioed (its scheduler and graph-build overhead, `-ub` as a policy knob, model load, our engine having no
+  vision/MoE path in scope here).
+- **The mandatory part: every row where llama.cpp is ≥1.5× faster becomes an investigation item**, each with a
+  named method rather than a vibe: (a) read the source for that op's backend path and name the kernel or
+  library call; (b) isolate that one op at **our** geometry in both engines (same shapes, dtype, entropic
+  fill, one lock hold); (c) attribute the delta to exactly one of **traffic / launch count / occupancy /
+  fusion**, and give a falsifier for the attribution. This is the class-1 lesson applied to an outside
+  implementation: “their kernel is better” is not a finding, the mechanism is.
+- **Knob discipline, so a default cannot masquerade as a win:** sweep `-ub` ∈ {128, 256, 512, 1024, 2048},
+  `-fa` on/off, `-ngl 99` vs partial offload, `-t` ∈ {4, 8, all}, and record which setting produced any claim —
+  with our own numbers taken **in the same lock hold** where a ratio is being quoted (§16's ruler lesson: a
+  re-take in a different window is not an A/B).
+- **New tool, tested: `tools/prefill_sampler.sh TAG -- cmd…`** records `ts_s, cpu%, mem_avail, gpu_use, vram`
+  around a run on either engine. Honest limits, written into the tool: the **GPU-busy column saturates on this
+  box** (the engine serving this session busy-polls the iGPU — 100 % while doing nothing but serving tokens),
+  so it is a sanity check that the process touched the device, never a contention gate; CPU % and VRAM are the
+  columns to read. It exits 1 if it collected zero samples, so a dead sampler cannot present as a clean run.
