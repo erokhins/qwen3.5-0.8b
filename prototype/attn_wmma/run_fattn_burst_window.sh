@@ -77,7 +77,10 @@ EXP_PAIR=$(python3 - "$LIST" "$KERNEL_NAME" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
 for chunk in re.split(r"\n\s*- \.args:", text):
-    if not re.search(r"^\s*\.name:\s+" + sys.argv[2] + r"$", chunk, re.M):
+    # The listing carries the MANGLD name (`_ZN6engine7kernels15attn_fattn_waveE8CoreArgs`), so an exact
+    # `.name: attn_fattn_wave` never matched and the burst aborted on a kernel that was present and correct.
+    # Substring match, but still one kernel's own block: a chunk is one function's metadata.
+    if not re.search(r"^\s*\.name:\s+\S*" + re.escape(sys.argv[2]) + r"\S*$", chunk, re.M):
         continue
     vgpr = re.search(r"\.vgpr_count:\s+(\d+)", chunk)
     # The block's LDS can be reported as a dynamic segment or as `.uds_size` depending on the LLVM shape, so
@@ -135,8 +138,14 @@ case "$GOT_WF" in (''|*[!0-9]*) fail "banner carries no wf_per_cu; the covered r
 [ "$GOT_VTILES" = "16" ] || fail "banner vtiles=$GOT_VTILES, the form's accumulator chain is 16 wide by static_assert"
 [ "$GOT_VGPR" = "$EXP_VGPR" ] || fail "banner vgpr=$GOT_VGPR, listing says $EXP_VGPR: this binary was built from a different copy of the form. That is exactly the stale-'new'-side failure the canary exists for."
 [ "$GOT_LDS" = "$EXP_LDS" ] || fail "banner lds=$GOT_LDS, listing says $EXP_LDS: same failure as vgpr, stated separately so a one-field drift names itself"
-grep -q "SPILL" "$OUT/canaryB_1.log" \
-    && fail "the WMMA kernel spills to scratch: §1's failure mode (128 live accumulator registers with a rolled accumulator loop) is back and every number below would be about a kernel hitting scratch."
+if grep -q "SPILL" "$OUT/canaryB_1.log"; then
+    # D63: the operator may time a spilling placement — the only datum we own on spill cost for this exact
+    # shape is llama.cpp shipping 358 spilled VGPRs on it and winning >=5x. The ack arrives from the
+    # environment (never from a worker) and is echoed here, so the log says out loud that its `ms` carry
+    # scratch traffic. Refusal stays the default, and the engine flag stays default 0 either way.
+    [ -n "${FATTN_SPILL_ACK:-}" ] || fail "the WMMA kernel spills to scratch: §1's failure mode (128 live accumulator registers with a rolled accumulator loop) is back and every number below would be about a kernel hitting scratch. Set FATTN_SPILL_ACK=<reason> to time it anyway (D63)."
+    echo "  SPILL ACKNOWLEDGED (D63, reason: $FATTN_SPILL_ACK): every ms below carries scratch traffic."
+fi
 case "$GOT_ROWS" in
     */*) [ "${GOT_ROWS%/*}" -gt 0 ] || fail "banner fattn_rows=$GOT_ROWS: zero rows routed to the WMMA form on a 4,096-lane wave, every row of which streams. A banner printed while nothing is covered is a banner that cannot fail."; ;;
     *) fail "banner fattn_rows=$GOT_ROWS is not n/N: cannot tell coverage from decoration"; ;;

@@ -125,6 +125,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--asm", default="/tmp/fattn_census2/kernels_attn-hip-amdgcn-amd-amdhsa-gfx1151.s")
     ap.add_argument("--no-build", action="store_true")
+    ap.add_argument("--ack-spill", default="", metavar="REASON",
+                    help="D63: measure a spilling placement without clearing it. The spill findings are still "
+                         "printed and the placement is still NOT cleared to become the default; this only lets "
+                         "a diagnostic window be timed. Set by the operator, never by a worker.")
     a = ap.parse_args()
     if not a.no_build:
         subprocess.run(["bash", "tmp/gcc/fattn_census_build.sh", "/tmp/fattn_census2"], check=True,
@@ -151,9 +155,10 @@ def main():
         fails.append("no __launch_bounds__(FATTN_THREADS): without it LLVM budgets a thread 196,608/1024 = "
                      "192 VGPRs and spills the rest, so a spilling result would be about the declaration and "
                      "not the kernel")
+    spill = []
     for k, limit in (("vgpr_spill_count", 0), ("private_segment_fixed_size", 0)):
         if n[k] != limit:
-            fails.append("%s=%d, must be %d. That is the spill gate: scratch lands on the same dependent "
+            spill.append("%s=%d, must be %d. That is the spill gate: scratch lands on the same dependent "
                          "chain bench/performance-status.md 28 identifies as the mechanism, so --attn-fattn "
                          "stays default 0 until this is 0" % (k, n[k], limit))
     lds_wanted = (g["FATTN_MROWS"] * g["DH"] * 2) + (g["FATTN_MLANES"] * g["DH"] * 2)
@@ -197,11 +202,25 @@ def main():
     print("LDS-bound blocks per CU = %d (64 KiB / %d B), wavefronts/CU = %d at %d warp(s) per block"
           % (65536 // max(n["group_segment_fixed_size"], 1), n["group_segment_fixed_size"],
              65536 // max(n["group_segment_fixed_size"], 1), g["FATTN_THREADS"] // 32))
+    # D63: the spill finding is a REPORTED cost, not a precondition on measurement. Everything else in
+    # `fails` (launch bounds, LDS-vs-source, the derived instruction skeleton) stays a hard failure, because
+    # those are facts about the code, not bets about what the machine charges for them.
+    ack = (getattr(a, "ack_spill", "") or "").strip()
+    if spill and not ack:
+        fails.extend(spill)
     if fails:
         print("\nFAIL — the shipped placement is NOT cleared to become the default")
         for f in fails:
             print("  - " + f)
         return 1
+    if spill and ack:
+        print("\nSPILL ACKNOWLEDGED, FOR MEASUREMENT ONLY — operator-supplied reason: " + ack)
+        for f in spill:
+            print("  - " + f)
+        print("  -> this placement may be TIMED in this window. It is still NOT cleared to become the")
+        print("     default: only a measured >=1.5x cut of the attn family at 4096 lanes flips that (D63).")
+        print("     Every timing row taken after this line must carry the spill and the wavefronts/CU printed above.")
+        return 0
     print("\nPASS: spill-free, LDS matches the source, instruction skeleton matches its own geometry")
     return 0
 

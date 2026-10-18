@@ -40,7 +40,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 PY=${PY:-python3}
-GATE=engine/gate.py
+GATE="$PY engine/gate.py"   # gate.py is not executable; invoking it bare gives Permission denied, which
+                             # this script would otherwise read as "the shipped path itself is broken".
 # The fixtures. Named rather than globbed, and every one of them must exist: an admission that silently skips
 # a missing fixture is an admission over the fixtures that happened to be present.
 FIX_INERT=${FIX_INERT:-"dec8 dec64f dec300f"}     # all rows one-pass: must be byte-identical at both values
@@ -67,7 +68,15 @@ echo "== SECTION 0a: the shipping placement's own census — compile-only, and i
 # kernel that spills 49 VGPRs into scratch is not a candidate for a default, so nothing below is worth a device
 # minute until this prints PASS — and `--attn-fattn` stays default 0 while it does not.
 CENSUS_RC=0
-$PY prototype/attn_wmma/fattn_ship_census.py || CENSUS_RC=$?
+# D63: the operator (main agent) may acknowledge the spill to let a diagnostic window be TIMED. The ack
+# arrives only from this environment variable and is echoed verbatim into the log, so a window that spent
+# device minutes on a spilling placement says so in its own output. A worker cannot set it from here.
+ACK_ARGS=()
+if [ -n "${FATTN_SPILL_ACK:-}" ]; then
+    echo "NOTE: FATTN_SPILL_ACK is set — the census will annotate rather than refuse. Reason: $FATTN_SPILL_ACK"
+    ACK_ARGS=(--ack-spill "$FATTN_SPILL_ACK")
+fi
+$PY prototype/attn_wmma/fattn_ship_census.py "${ACK_ARGS[@]+"${ACK_ARGS[@]}"}" || CENSUS_RC=$?
 if [ "$CENSUS_RC" != 0 ] && [ "${SKIP_CENSUS:-0}" != "1" ]; then
     fail "fattn_ship_census.py is red (rc=$CENSUS_RC). Read the reason it prints: as of this writing it FAILS on 49 spilled VGPRs and 72 B/thread of scratch, which means this admission characterises a non-default path and is not a route to making it the default (prototype/attn_wmma/fattn_ship_results.md §1, §6). To run the device sections anyway, say so explicitly with SKIP_CENSUS=1."
 fi
@@ -98,10 +107,16 @@ for probe in "check_fattn_map.py:" "check_fattn_map.py:--selftest" "check_fattn_
     n=$(half "$got")
     [ "$n" -ge 1 ] || fail "$label: $got — a check list that can be empty cannot fail (prototype/gdn_collapse/results.md §1)."
     if [ -n "$flags" ]; then
-        clean=$(green_of "tmp/gcc/attn_fattn/$(basename "$script" .py).txt")
-        cn=$(half "${clean:-0/0}")
-        [ "$n" -gt "$cn" ] || fail "$label: drove $n checks where the clean run alone drove $cn, so the selftest added nothing and its injections were never built."
-        echo "  $label: $got, i.e. $((n - cn)) more checks than the clean run — the injections ran"
+        # The count comparison this driver used was a category error: a selftest's checks are INJECTIONS SHOWN
+        # CAUGHT, a different population from the clean run's map cells, so "> the clean run" was never the
+        # property worth guarding (check_fattn_map --selftest legitimately drives 12 injection checks against a
+        # clean run of 26 cells, and this aborted a green device window over it). The non-vacuous form: the log
+        # must name injections it injected and saw caught, that count must be non-zero, and it must sit inside
+        # the checker's own reported denominator so the injections are part of what was counted.
+        injc=$(grep -cE '^  (ok|pass).*(is caught|=FAIL)' "tmp/gcc/attn_fattn/$tag.txt" || true)
+        [ "${injc:-0}" -ge 1 ] || fail "$label: not one injection is shown caught — a selftest that injects nothing is the empty-parse failure wearing a costume."
+        [ "$injc" -le "$n" ] || fail "$label: $injc caught-injection lines but only $n checks ran — the injections are outside the counted population, so the count proves nothing."
+        echo "  $label: $got checks, $injc injections shown caught (clean run is a different population, not compared)"
     else
         echo "  $label: $got checks"
     fi
