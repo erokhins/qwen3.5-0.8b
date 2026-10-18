@@ -372,3 +372,33 @@ expected on both sides. In §13 that was the per-token bill line (`new` must pri
 Reference implementation: `tmp/gcc/run_ab_17p_retake.sh`. The general form is the same class as every other
 empty-parse failure logged in this file — a check whose input can silently fail to arrive must be shown to have
 arrived, in the window that produces the number.
+
+## Counter, occupancy and census traps from the attention attribution (2026-10-18)
+
+Appended at the end for the standing line-citation reason stated above (three prior sections did the same).
+
+- **A HIP capability query on this SKU reports against a halved SM count, so its numbers are 2× off the
+  architecture.** `hipGetDeviceProperties` gives `sharedMemPerMultiprocessor = 65536` *and*
+  `multiProcessorCount = 20` *and* `maxThreadsPerMultiProcessor = 2048` (= 64 wavefronts, against an
+  architectural max of 32). Read **LDS from KFD** (`/sys/devices/virtual/kfd/kfd/topology/nodes/1/properties`
+  → `lds_size_in_kb 64`, `simd_per_cu 2`, `simd_count 80`) and CU/SIMD counts from `rocminfo`, never from HIP.
+  Evidence: `tools/kernel_occupancy_probe.cpp`, `prototype/attn_wmma/evidence/{device_facts,occupancy}.txt`.
+- **clang's `-Rpass-analysis=kernel-resource-usage` line `Occupancy [waves/SIMD]: 16` is a constant, not a
+  measurement.** It prints 16 for every kernel in the TU regardless of LDS or VGPR — `attn_core` at 38,944 B
+  per block and `attn_combine` at 0 B alike. Any claim that rests on "occupancy unchanged at 16 waves/SIMD" is
+  resting on a check that cannot fail; the real bound is LDS-bound (`64 KiB / 12,288 B = 5` blocks/CU) and comes
+  from the probe above. `prototype/attn_valu_slim/results.md` §"Lever 0" is the claim this row retires.
+- **A `rocprofv3` pmc CSV row is per (Dispatch_Id, Counter_Name), and `--time-waves` replays the prompt wave
+  three times** (the run, the burst pass, the stage pass). A raw `sum(Counter_Value)` is therefore 3× a pass and
+  reads plausible while being wrong by exactly that factor; and matching on a bare kernel name fails, because
+  `Kernel_Name` carries the signature (`attn_slim_wave(CoreArgs)`). Both mistakes made a correctly-collected
+  counter set look like "no rows, counter uncalibrated". Correct: dedup by `(Dispatch_Id, Counter_Name)`, match
+  on the name prefix, and divide by a pass count **derived** from a kernel whose per-pass site count is known
+  (`attn_prep` = 48 sites at 4,096 lanes), as `prototype/attn_wmma/w2_reanalysis.py` does.
+- **A rate must be compared against the ceiling its own instruction class can occupy.** Judging a kernel that
+  issues only scalar `v_fma_f32` against a matrix-unit roof (22.3 TFLOP/s here) overstated one gap by 3× and
+  nearly funded a route on the wrong premise. The ladder in `bench/performance-status.md` §26 is the fix:
+  scalar `v_fma_f32` 7.30 → `v_dot2_f32_bf16` 23.28 → WMMA 52.63 TFLOP/s, measured in
+  `prototype/issue_rate_probe/results.md` §1. Also check **who wrote** the kernel you are comparing against:
+  the engine's own 40 kernels contain **zero** matrix or dot-class instructions, so every matrix rate in this
+  ledger belongs to hipBLASLt, whose tuned kernels are unreadable CCO containers.
