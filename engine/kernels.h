@@ -270,21 +270,31 @@ void gdn_conv(const uint16_t* raw, const float* win, const float* conv_weight, f
 void gdn_gates(const uint16_t* a_raw, const uint16_t* b_raw, const float* a_log,
                const float* dt_bias, float* g, float* beta, int tokens = 1);
 // Which SPELLING of the sequential recurrence's state walks a `gdn_rec` launch runs
-// (`decode_run --gdn-spell`). Both kernels are compiled into one binary so the A/B is one window
-// (`AGENTS.md`: a ruler re-taken in a different window is not an A/B), and the two are claimed
-// BIT-IDENTICAL rather than band-adjacent, which is what makes a knob here safe at all.
+// (`decode_run --gdn-spell`). All the spellings are compiled into one binary so an A/B is one window
+// (`AGENTS.md`: a ruler re-taken in a different window is not an A/B), and every pair among them is
+// claimed BIT-IDENTICAL rather than band-adjacent, which is what makes a knob here safe at all.
 //
-//   kShip      `prototype/gdn_decode/gdn_decode_kernels.h::rec_kernel`. THE DEFAULT and the shipped
-//              form: every decode and prefill pin is pinned through it, and the in-situ A/B that D32
-//              demands has not been read yet, so the default does not move on a burst number.
+//   kShip      `prototype/gdn_decode/gdn_decode_kernels.h::rec_kernel`. The pre-D33 shipped form, kept
+//              as a first-class A/B side so the claim below stays testable from one binary, and
+//              `gdn_rec()`'s optional-argument default. What a run actually submits comes from
+//              `decode_run --gdn-spell`, whose default is `kUnroll4`.
 //   kUnroll4   `engine/gdn_rec_unroll4_kernels.h::rec_unroll4_kernel` — same operations, same order,
-//              same values, `#pragma unroll 4` on both state walks. Worth 1.149–1.158x at launch
-//              level on the harness (`prototype/gdn_rec_isa/results.md` §10, D32) at −7.7 % slots,
-//              which is ~2x what D25's measured elasticity predicts, i.e. the prize is the loop
-//              schedule and not the instruction bill. It is inert under `--gdn-scan collapse`, which
-//              launches a different kernel; `parse_args` refuses that combination rather than letting
-//              a timing run price the shipped form twice and call it the re-spelled one.
-enum class GdnRecSpell { kShip, kUnroll4 };
+//              same values, `#pragma unroll 4` on both state walks. THE SHIPPING DEFAULT since D33:
+//              worth 1.149–1.158x at launch level on the harness (`prototype/gdn_rec_isa/results.md`
+//              §10, D32) at −7.7 % slots and 1.153x on the family row at 4096 lanes in the wave's own
+//              interleaving, which is ~2x what D25's measured elasticity predicts, i.e. the prize is
+//              the loop schedule and not the instruction bill.
+//   kFused     `engine/gdn_rec_fused_kernels.h::rec_fused_kernel` — the unroll4 walks with the q/k norm
+//              prologue FUSED into one pass over shared memory (two `red[]` arrays, 3 barriers instead
+//              of the two-call form's 8). −32 of 1,406 slots/token-step at UNCHANGED registers (59
+//              VGPRs, zero spill) and +128 B of LDS; bit-identical by claim, measured bit-identical in
+//              4/4 harness cases, and re-proved per fixture by `engine/gate.py` section (j). A KNOB,
+//              not the default: D50 ships it as a knob and lets the paired in-situ A/B on the
+//              `gdn_rec` family row decide whether the default moves (the D32 → D33 order).
+// All three are inert under `--gdn-scan collapse`, which launches a different kernel; `parse_args`
+// refuses that combination rather than letting a timing run price one kernel twice and call the second
+// price the spelling's win.
+enum class GdnRecSpell { kShip, kUnroll4, kFused };
 
 // Parse-or-throw, like `parse_gdn_scan`: this names which side of an A/B a run is, and a typo that
 // silently became the default would price the shipped spelling twice and report it as the other one.
@@ -293,7 +303,7 @@ const char* gdn_rec_spell_name(GdnRecSpell s);
 
 // One GDN layer: 16 blocks, thread j owns column j of S. `S` is the layer's [16][128][128] block.
 // Per TOKEN, and stays that way for the sequential form: the recurrence is a sequential scan
-// (§04.4), so unlike the three launchers above it has no token width. `spell` selects which of the two
+// (§04.4), so unlike the three launchers above it has no token width. `spell` selects which of the
 // compiled spellings is submitted; the grid, the thread count and every address are the same either
 // way, so the flag cannot move a byte of the access pattern (`kernels_gdn.cpp`).
 void gdn_rec(const float* q, const float* k, const float* v, const float* g, const float* beta,

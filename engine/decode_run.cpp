@@ -154,10 +154,12 @@ struct Options {
     // `engine/gdn_rec_unroll4_kernels.h` is bit-identical to the shipped kernel and measured 1.153x on
     // the family row at 4096 lanes in the wave's own interleaving, not just at launch level. `ship` is
     // kept as a first-class value so the claim stays A/B-able in one binary — the AGENTS.md rule that a
-    // ruler re-taken in another window is not an A/B — and `gate.py`'s section (j) runs BOTH sides on
+    // ruler re-taken in another window is not an A/B — and `gate.py`'s section (j) runs EVERY side on
     // every fixture and byte-compares them, so "bit-identical" is re-proved per gate rather than
     // inherited from the handoff. Echoed on the NUMERICS line like every other knob here, because a
     // timing log that cannot say which spelling produced its family row is not evidence.
+    // `fused` (D50) is a KNOB, not a default: the fused norm prologue on the unroll4 walks, and its
+    // paired in-situ A/B on the `gdn_rec` family row is what decides whether the default moves.
     engine::kernels::GdnRecSpell gdn_spell = engine::kernels::GdnRecSpell::kUnroll4;
     // Whether the flag was actually given, as distinct from the default above. The collapse-refusal
     // predicate below needs this: with `unroll4` as the default, `--gdn-scan collapse` alone would
@@ -322,7 +324,9 @@ Options parse_args(int argc, char** argv) {
         // `gdn_rc::rec_collapse_kernel` and never looks at the flag. A run that printed
         // `gdn_spell=unroll4` while running the collapse kernel would price the same kernel twice and
         // report the second price as the spelling's win, which is the failure this whole knob exists to
-        // avoid, so it is refused rather than echoed with a caveat.
+        // avoid, so it is refused rather than echoed with a caveat. Written as `!= kShip`, so every
+        // non-shipping spelling — `unroll4` and `fused` alike — inherits the refusal without this
+        // predicate having to be edited each time a spelling is added.
         throw std::runtime_error("--gdn-spell " + std::string(engine::kernels::gdn_rec_spell_name(
                                      o.gdn_spell)) +
                                  " selects the spelling of the sequential recurrence's state walks and"
@@ -513,7 +517,7 @@ void print_usage(FILE* out) {
                  " [--prefill-logits last|all] [--wave-rows N]"
                  " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
                  " [--gemm-pins all|none|<csv>] [--gemm-heur N] [--attn-touch 0|1]"
-                 " [--gdn-spell ship|unroll4]"
+                 " [--gdn-spell ship|unroll4|fused]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -577,19 +581,26 @@ void print_usage(FILE* out) {
                  " clamp. Wave-only, like --attn-tile: a one-row body is the fused single-row form under"
                  " either setting, so no decode bit moves, and BOTH spellings are compiled into the binary"
                  " whatever this says, so a paired timing is one window rather than two builds\n"
-                 "  --gdn-spell ship|unroll4  which SPELLING of the sequential recurrence's state walks"
-                 " a `gdn_rec` launch runs (`engine/gdn_rec_unroll4_kernels.h`, "
-                 "prototype/gdn_rec_isa/results.md §10, decision D32). `ship`, the default, is the"
-                 " shipped `rec_kernel` and the form every pin is pinned through. `unroll4` is the same"
-                 " operations in the same order with `#pragma unroll 4` on both walks — BIT-identical"
-                 " (zero elements of `o` and of the state moved in 4/4 harness cases), 7.7%% fewer"
-                 " slots, and 1.149-1.158x at launch level over a resident 1 MiB state; the in-situ A/B"
-                 " came back 1.153x on the family row at 4096 lanes (1.100x at 1024), so THIS IS THE"
-                 " SHIPPED DEFAULT and `ship` is kept as its A/B side. Inert under `--gdn-scan collapse`,"
-                 " which launches a different kernel: a bare `collapse` run is legal and echoes"
-                 " `gdn_spell=inert-under-collapse`, while naming this flag alongside it is REFUSED"
-                 " rather than echoed with a spelling that did not run. Both kernels are compiled in"
-                 " either way, so the paired wave timing is one window\n"
+                 "  --gdn-spell ship|unroll4|fused  which SPELLING of the sequential recurrence's state"
+                 " walks a `gdn_rec` launch runs (`engine/gdn_rec_unroll4_kernels.h`, "
+                 "prototype/gdn_rec_isa/results.md §10, decision D32). `unroll4` is the SHIPPED"
+                 " DEFAULT: the same operations in the same order with `#pragma unroll 4` on both walks"
+                 " — BIT-identical (zero elements of `o` and of the state moved in 4/4 harness cases),"
+                 " 7.7%% fewer slots, and 1.149-1.158x at launch level over a resident 1 MiB state; the"
+                 " in-situ A/B came back 1.153x on the family row at 4096 lanes (1.100x at 1024), so"
+                 " THIS IS THE SHIPPED DEFAULT and `ship` is kept as its A/B side. `ship` is the"
+                 " pre-D33 shipped `rec_kernel`, the form every pin was first pinned through. `fused`"
+                 " (D50) is the unroll4 walks with the q/k norm prologue FUSED into one pass over"
+                 " shared memory — 3 barriers instead of 8, −32 of 1,406 slots/token-step at UNCHANGED"
+                 " registers (59 VGPRs, zero spill) and +128 B of LDS (engine/gdn_rec_fused_kernels.h,"
+                 " prototype/gdn_rec_isa/results.md §11, bench/performance-status.md §19). It is"
+                 " BIT-identical too (ndiff 0 on `o` and on the state, 4/4 cases) and it is a KNOB,"
+                 " NOT a default: the paired in-situ A/B on the `gdn_rec` family row decides whether"
+                 " the default moves. Inert under `--gdn-scan collapse`, which launches a different"
+                 " kernel: a bare `collapse` run is legal and echoes `gdn_spell=inert-under-collapse`,"
+                 " while naming this flag alongside it is REFUSED rather than echoed with a spelling"
+                 " that did not run. All spellings are compiled in either way, so a paired wave timing"
+                 " is one window\n"
                  "  --gdn-scan seq|chunk  which §04.4 scan a GDN body runs (P9, §04.7,"
                  " progress/2026-10-14/p9-phase1-2026-10-14.md). `seq`, the default, is the shipped recurrence: ONE"
                  " launch per token per layer, 18,432 launches per 1024-token wave, and the form the"

@@ -4,6 +4,7 @@
 
 #include "engine/launch_stats.h"
 #include "engine/gdn_collapse_kernels.h"
+#include "engine/gdn_rec_fused_kernels.h"
 #include "engine/gdn_rec_unroll4_kernels.h"
 #include "prototype/gdn_chunk/gdn_chunk_kernels.h"
 #include "prototype/gdn_decode/gdn_decode_kernels.h"
@@ -54,12 +55,16 @@ void gdn_rec(const float* q, const float* k, const float* v, const float* g, con
     // never has two adjacent GDN layers to batch. `all` mode (18 layers, one launch) in the
     // prototype is a bandwidth-measurement shape, not a token shape.
     //
-    // Which SPELLING runs (`--gdn-spell`, `kernels.h::GdnRecSpell`). The two launches differ in the
+    // Which SPELLING runs (`--gdn-spell`, `kernels.h::GdnRecSpell`). The launches differ in the
     // called kernel and in nothing else — same `<<<NH, D>>>`, same operands, same state buffer, so the
     // flag cannot move an address and an A/B between them measures the schedule rather than the plan
-    // (the `attn_slim_kernels.h` / `--attn-touch` shape, one level down the tree).
+    // (the `attn_slim_kernels.h` / `--attn-touch` shape, one level down the tree). The third branch is
+    // the merged fused-prologue form (`engine/gdn_rec_fused_kernels.h`): same grid, same operands, and
+    // its own +128 B of static LDS is the whole resource delta, which does not bind at this geometry.
     if (spell == GdnRecSpell::kUnroll4) {
         rec_unroll4_kernel<<<NH, D>>>(q, k, v, g, beta, S, o, NH);
+    } else if (spell == GdnRecSpell::kFused) {
+        rec_fused_kernel<<<NH, D>>>(q, k, v, g, beta, S, o, NH);
     } else {
         rec_kernel<<<NH, D>>>(q, k, v, g, beta, S, o, NH);
     }
@@ -68,15 +73,19 @@ void gdn_rec(const float* q, const float* k, const float* v, const float* g, con
 }
 
 // `--gdn-spell`, and it parses or throws for the standing reason: the flag names which side of an A/B
-// the run is. `ship` is the default and stays the default until D30 item 1.9's in-situ A/B is read;
-// `unroll4` is the bit-identical re-spelling worth 1.149-1.158x at launch level and possibly nothing
-// in situ (`prototype/gdn_rec_isa/results.md` §10).
+// the run is. `unroll4` is the shipping default (D33); `ship` is kept so that claim stays A/B-able from
+// one binary; `fused` is D50's knob — the fused prologue on the unroll4 walks, bit-identical, and NOT a
+// default until its in-situ A/B is read (`prototype/gdn_rec_isa/results.md` §11,
+// `bench/performance-status.md` §19).
 GdnRecSpell parse_gdn_rec_spell(const std::string& name) {
     if (name == "ship") return GdnRecSpell::kShip;
     if (name == "unroll4") return GdnRecSpell::kUnroll4;
-    throw std::runtime_error("--gdn-spell takes `ship` (the shipped rec_kernel, the default) or "
+    if (name == "fused") return GdnRecSpell::kFused;
+    throw std::runtime_error("--gdn-spell takes `ship` (the pre-D33 `rec_kernel`, kept as an A/B side), "
                              "`unroll4` (engine/gdn_rec_unroll4_kernels.h, bit-identical, unroll-4 "
-                             "state walks); got '" + name + "'. Refusing rather than guessing, because "
+                             "state walks, THE DEFAULT) or `fused` (engine/gdn_rec_fused_kernels.h, "
+                             "bit-identical, the unroll4 walks with the q/k norm prologue fused); got "
+                             "'" + name + "'. Refusing rather than guessing, because "
                              "this flag names which side of an A/B the run is");
 }
 
@@ -84,6 +93,7 @@ const char* gdn_rec_spell_name(GdnRecSpell s) {
     switch (s) {
         case GdnRecSpell::kShip: return "ship";
         case GdnRecSpell::kUnroll4: return "unroll4";
+        case GdnRecSpell::kFused: return "fused";
     }
     return "invalid";
 }

@@ -5058,24 +5058,37 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
     return out
 
 
-# ---- (j) the two `gdn_rec` spellings, run against each other ------------------------------------
+# ---- (j) the `gdn_rec` spellings, all run against each other --------------------------------------
 #
-# WHY A SECTION AND NOT A HOPE. `engine/gdn_rec_unroll4_kernels.h` is claimed BIT-identical to the
-# shipped `rec_kernel` — that is its admission, not a band it gets to fail into (§10.1 has no room for
-# a recurrence change and D32 does not license one). A per-fixture green at `--gdn-spell unroll4` is
+# WHY A SECTION AND NOT A HOPE. `engine/gdn_rec_unroll4_kernels.h` and
+# `engine/gdn_rec_fused_kernels.h` are each claimed BIT-identical to the shipped `rec_kernel` — that is
+# their admission, not a band they get to fail into (§10.1 has no room for a recurrence change and
+# neither D32 nor D50 licenses one). A per-fixture green at `--gdn-spell unroll4` or `fused` is
 # NOT that proof: the pins are judged inside bands that would admit a re-associated dot, so "the gate
 # stayed green" cannot distinguish "identical" from "inside the allowance". The only question that
-# decides it is "do the two spellings write the same bytes?", and that needs both runs in one gate.
+# decides it is "do the spellings write the same bytes?", and that needs every run in one gate.
+#
+# WHY EVERY SIDE IS COMPARED AGAINST `ship` AND NOT PAIRWISE-CHAINED. `ship` is the form every pin in
+# this tree is pinned through, so it is the reference the claim is written against; a chain
+# (`unroll4` vs `ship`, then `fused` vs `unroll4`) would make a regression in one link read as a pass
+# in the next. One reference and N-1 comparisons is also the shape that survives a fourth spelling
+# being added: the loop grows, the claim does not change shape.
 #
 # WHAT THIS SECTION CAN SEE, stated honestly because it is not everything. It compares every byte the
 # engine dumps: the whole logits corpus at `--prefill-logits all`, which is `o` several reductions
 # downstream. It cannot see the state per element, because the engine dumps no state VALUES —
 # `--state-fp` prints §08.6 moment sums, which are order-invariant by design and therefore cannot
 # witness bit-identity of a buffer. The per-element `o`-and-state diff of the engine's own kernel is
-# `prototype/gdn_rec_isa/gdn_rec_isa --modes rec0,receng` (`receng` launches
-# `engine/gdn_rec_unroll4_kernels.h`), and the two witnesses are complementary: this one runs the
-# shipping launch path on pinned prompts, that one reads the state buffer itself.
-GDN_SPELLS = ("ship", "unroll4")
+# `prototype/gdn_rec_isa/gdn_rec_isa --modes receng,rec2c4` (`receng` launches
+# `engine/gdn_rec_unroll4_kernels.h`, `rec2c4` is the same source the engine's fused header is
+# transcribed from), and the two witnesses are complementary: this one runs the shipping launch path
+# on pinned prompts, that one reads the state buffer itself.
+# Cost: one device run per spelling per fixture (three today), at the scratch's full wave width.
+GDN_SPELLS = ("ship", "unroll4", "fused")
+
+# The reference every other side is byte-compared against: the spelling the pins themselves were
+# pinned through, and the one the engine shipped before any spelling knob existed.
+GDN_SPELL_REFERENCE = "ship"
 
 
 def run_gdn_spell_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: bool,
@@ -5116,10 +5129,10 @@ def run_gdn_spell_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay
 
 
 def gdn_spell_stand_in(work: Path) -> dict:
-    """Dry-run counterpart: replays the pins into BOTH sides so the comparison machinery below runs on
+    """Dry-run counterpart: replays the pins into EVERY side so the comparison machinery below runs on
     real bytes without a device. NOT A RESULT — `--dry-run` says so on its own face, and the stand-in
-    copying one corpus to both sides is exactly what the real run must prove is not cheating: the pins
-    are the same bits on both sides here by construction, and on a device only by admission."""
+    copying one corpus to every side is exactly what the real run must prove is not cheating: the pins
+    are the same bits on every side here by construction, and on a device only by admission."""
     out = {}
     for spell in GDN_SPELLS:
         d = work / f"ab_spell_{spell}"
@@ -5133,12 +5146,12 @@ def gdn_spell_stand_in(work: Path) -> dict:
 
 
 def gdn_spell_checks(sides: dict, *, stand_in: bool) -> None:
-    """Both sides must say which spelling they ran, and the two must have written the same bytes.
+    """Every side must say which spelling it ran, and every side must have written `ship`'s bytes.
 
-    `stand_in` marks a `--dry-run`: there the two corpora are the same pinned bytes copied twice, so
-    the identity row CANNOT fail, and it says so out loud rather than printing a PASS that means
-    nothing. The dry run exercises the comparison and the echo plumbing; only a real run adjudicates
-    the port. Same `stand_in` discipline as `batched_proof_checks` and `gemm_pin_checks`.
+    `stand_in` marks a `--dry-run`: there the corpora are the same pinned bytes copied N times, so the
+    identity rows CANNOT fail, and it says so out loud rather than printing a PASS that means nothing.
+    The dry run exercises the comparison and the echo plumbing; only a real run adjudicates the port.
+    Same `stand_in` discipline as `batched_proof_checks` and `gemm_pin_checks`.
     """
     for spell in GDN_SPELLS:
         side = sides.get(spell)
@@ -5150,29 +5163,46 @@ def gdn_spell_checks(sides: dict, *, stand_in: bool) -> None:
               ("its NUMERICS line carried no `gdn_spell=` — the binary predates --gdn-spell, so no "
                "claim about either spelling can be made from this log" if echoed is None else
                f"NUMERICS echoed gdn_spell={echoed}, this side was run with --gdn-spell {spell}"))
-    a, b = sides.get("ship"), sides.get("unroll4")
-    if a is None or b is None:
-        return
-    n_files, n_bytes, differing = compare_dump_dirs(a["dir"], b["dir"])
-    # A comparison over an empty corpus cannot fail, which is the `gdn_collapse/run.py` class of defect
-    # this tree has now hit four times. So the denominator is asserted before the verdict is read.
-    check(n_files > 0, "both gdn-spell sides wrote a logits corpus to compare",
-          f"{n_files} `logitsN.bin` per side, {n_bytes / 1e6:.1f} MB compared"
-          if n_files else
-          "no `logitsN.bin` on either side — with nothing dumped, \"no differing file\" would be an"
-          " absence of evidence rather than a proof of identity, so there is no verdict here")
-    check(not differing,
-          "the two gdn_rec spellings write BIT-identical logits "
-          "(engine/gdn_rec_unroll4_kernels.h vs prototype/gdn_decode's rec_kernel, §04.4, D32)",
-          f"{len(differing)} of {n_files} dumped logits rows ({n_bytes / 1e6:.1f} MB compared) "
-          f"differ: {differing[:6]}" if differing else "")
+    ref = sides.get(GDN_SPELL_REFERENCE)
+    compared = 0
+    for spell in GDN_SPELLS:
+        if spell == GDN_SPELL_REFERENCE:
+            continue
+        side = sides.get(spell)
+        if ref is None or side is None:
+            continue        # the rc check above already failed this gate; do not report it twice
+        compared += 1
+        n_files, n_bytes, differing = compare_dump_dirs(ref["dir"], side["dir"])
+        # A comparison over an empty corpus cannot fail, which is the `gdn_collapse/run.py` class of
+        # defect this tree has now hit four times. So the denominator is asserted before the verdict.
+        check(n_files > 0,
+              f"both the `{GDN_SPELL_REFERENCE}` and the `{spell}` gdn-spell sides wrote a logits "
+              "corpus to compare",
+              f"{n_files} `logitsN.bin` per side, {n_bytes / 1e6:.1f} MB compared"
+              if n_files else
+              "no `logitsN.bin` on either side — with nothing dumped, \"no differing file\" would be an"
+              " absence of evidence rather than a proof of identity, so there is no verdict here")
+        check(not differing,
+              f"the `{spell}` gdn_rec spelling writes BIT-identical logits to `{GDN_SPELL_REFERENCE}` "
+              f"(D32: engine/gdn_rec_unroll4_kernels.h vs prototype/gdn_decode's rec_kernel; D50: "
+              f"engine/gdn_rec_fused_kernels.h, the fused prologue on those walks; §04.4)",
+              f"{len(differing)} of {n_files} dumped logits rows ({n_bytes / 1e6:.1f} MB compared) "
+              f"differ: {differing[:6]}" if differing else "")
+        if not differing and not stand_in:
+            notes.append(f"gdn-spell A/B: {n_files} logits rows, {n_bytes / 1e6:.1f} MB, "
+                         f"bit-identical between `{GDN_SPELL_REFERENCE}` and `{spell}` — that spelling "
+                         "moved no bits on this fixture")
+    # And the denominator of the comparisons themselves: `GDN_SPELLS` is a three-tuple today, so a run
+    # that only produced two sides must not read as "every comparison passed".
+    check(compared == len(GDN_SPELLS) - 1,
+          f"every non-`{GDN_SPELL_REFERENCE}` gdn-spell side was byte-compared against it",
+          f"{compared} of {len(GDN_SPELLS) - 1} expected comparisons ran over the sides this gate "
+          f"produced ({', '.join(sorted(sides))}) — a missing side is an absence of a verdict, not a "
+          "pass")
     if stand_in:
-        notes.append("gdn-spell A/B ran on the DRY-RUN stand-in: both sides are the same pinned bytes "
-                     "replayed, so the identity row above is this file exercising its own comparison, "
+        notes.append("gdn-spell A/B ran on the DRY-RUN stand-in: every side is the same pinned bytes "
+                     "replayed, so the identity rows above are this file exercising its own comparison, "
                      "NOT a verdict about the port — only a real run (without --dry-run) can give one")
-    elif not differing:
-        notes.append(f"gdn-spell A/B: {n_files} logits rows, {n_bytes / 1e6:.1f} MB, bit-identical "
-                     "between `ship` and `unroll4` — the port moved no bits on this fixture")
 
 
 
@@ -6703,23 +6733,25 @@ def main() -> int:
                          " run that cannot say which scan it ran is evidence about neither, and a"
                          " silent fall back to `seq` would price the shipped form twice and report it"
                          " as the other one")
-    ap.add_argument("--gdn-spell", choices=("ship", "unroll4"), default="unroll4",
+    ap.add_argument("--gdn-spell", choices=("ship", "unroll4", "fused"), default="unroll4",
                     help="which SPELLING of the sequential recurrence's state walks a `gdn_rec` launch"
                          " runs, passed straight to `decode_run --gdn-spell`"
                          " (`engine/gdn_rec_unroll4_kernels.h`, `prototype/gdn_rec_isa/results.md` §10,"
-                         " D32). `ship` is the default and the shipped `rec_kernel` — the form every"
-                         " pin here is pinned through — and it stays the default until D30 item 1.9's"
-                         " in-situ A/B is read, because the 1.149-1.158x that motivated the port is a"
-                         " burst number and D28 is the precedent that a burst winner can be an in-situ"
-                         " loser. `unroll4` is the same operations in the same order with `#pragma"
+                         " D32). `unroll4` is the default — the shipping spelling since the in-situ A/B"
+                         " D33 read — and it is the same operations in the same order with `#pragma"
                          " unroll 4` on both walks: −117 of 1,523 slots, and owed BIT identity, not a"
-                         " band, which is what section (j) actually checks by running both sides and"
-                         " comparing every dumped byte rather than by watching this flag's own run go"
-                         " green (a banded check cannot tell 'identical' from 'inside the allowance')."
-                         " Named on every run and asserted against the run's own NUMERICS echo, and"
-                         " `--gdn-scan collapse` refuses the pair: that scan launches a different"
-                         " kernel, so a run that echoed `unroll4` while running it would price the"
-                         " shipped form twice and call the second price the win")
+                         " band. `ship` is the pre-D33 `rec_kernel`, kept as a first-class side so the"
+                         " claim stays A/B-able from one binary, and `fused` is D50's knob — the unroll4"
+                         " walks with the q/k norm prologue fused into one pass over shared memory"
+                         " (`engine/gdn_rec_fused_kernels.h`, −32 of 1,406 slots, also owed BIT"
+                         " identity), a knob and not a default until its own in-situ A/B is read."
+                         " Section (j) is what actually checks that identity, by running every side and"
+                         " comparing every dumped byte against `ship` rather than by watching this"
+                         " flag's own run go green (a banded check cannot tell 'identical' from 'inside"
+                         " the allowance'). Named on every run and asserted against the run's own"
+                         " NUMERICS echo, and `--gdn-scan collapse` refuses the pair: that scan"
+                         " launches a different kernel, so a run that echoed a spelling while running"
+                         " it would price one kernel twice and call the second price the win")
     ap.add_argument("--gdn-chunk", type=int, default=64,
                     help="the chunk size in tokens, passed to `decode_run --gdn-chunk` and asserted"
                          " against its echo. 64 is the value Phase 0's budget selected; 16 is"
@@ -7702,10 +7734,10 @@ def main() -> int:
     batched_proof_checks(sides, counts, len(prompt_ids), n_decode, wave_rows,
                          stand_in=args.dry_run)
     # (j) the `gdn_rec` spelling A/B, and it runs here rather than next to section (b) because it is a
-    # RUN-vs-RUN comparison like (h), not a run-vs-pin one. Both spellings of the recurrence are in this
-    # binary whatever the flags say, so the two sides are two launches of one build and the claim under
-    # test — D32's bit-identity — is checked rather than assumed.
-    section("(j) the two gdn_rec spellings — bit-identical, both run in this gate (§04.4, D32)")
+    # RUN-vs-RUN comparison like (h), not a run-vs-pin one. Every spelling of the recurrence is in this
+    # binary whatever the flags say, so the sides are launches of one build and the claim under
+    # test — D32's and D50's bit-identity — is checked rather than assumed.
+    section("(j) the gdn_rec spellings — bit-identical, all run in this gate (§04.4, D32, D50)")
     spell_sides = (gdn_spell_stand_in(work) if args.dry_run else
                    run_gdn_spell_ab(args, prompt_ids, n_decode, greedy, ab_replay, work))
     gdn_spell_checks(spell_sides, stand_in=args.dry_run)
