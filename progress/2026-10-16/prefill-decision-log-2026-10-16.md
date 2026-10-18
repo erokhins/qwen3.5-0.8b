@@ -1491,3 +1491,45 @@ cost vanished (and ~34,400 at the single-shape peak), with the hard part being t
 matmul; **decode ~153 tok/s** from bytes (6.5 ms of weights per token at 237 GB/s), **106 tok/s** at the
 realistic 164 GB/s plateau, against today's 71.3 — so decode is at **47 % of the hard bound and 67 % of the
 realistic one**, and that is the tightest wall this project has.
+
+## D48 — queue head: run llama.cpp on this model as a comparison instrument (user, 2026-10-17)
+
+The user's ask: measure llama.cpp prefill on `Qwen/Qwen3.5-0.8B` on this box, expecting it to be much faster
+(“like 9k”), and **find out why** — CPU/GPU usage during prefill, sources, and a profiling division comparable
+to our `--time-waves` table. Cloning into `engines/` is authorised. Priority: **head of queue**, ahead of
+class 5, 2.6 and 3.3, because it is an instrument rather than an optimisation.
+
+**Arithmetic before the measurement, so the measurement is aimed at something.**
+
+- 9,000 tok/s × 1.0947 GFLOP/token = **9.85 TFLOP/s demanded**, which is 44 % of the measured mix roof — and
+  our GEMM families already run at **97–102 %** of that roof (D47 amendment). So **no comparison can be won in
+  the matmuls**: any real gap lives in the 80.8 % of the wave that is not matmul.
+- The user's 9k is arithmetically the *same sentence* as “`gdn_rec` → 0”: that family is **442.55 ms of the
+  920.18 ms wave**, and deleting it gives 477.6 ms = **8,575 tok/s**. The comparison's target is therefore one
+  number, not a whole engine.
+- Why llama.cpp might have it: `GGML_OP_GATED_DELTA_NET` has **no fused chunked prefill kernel on CUDA** (open
+  issue ggml-org/llama.cpp#22967) and none on Metal (#20342); the Qwen3-Next GDN path was written with “only
+  existing ggml functions … so it can work on all backends”, i.e. the prompt path is expressed as generic
+  ops — which is a parallel, matmul-shaped formulation of the recurrence rather than our per-token serial one.
+  That is the same axis as **1.2 (chunked scan)**, which D46 left closed on the grounds that its 5.9× “measured
+  loss” was actually a thread-mapping defect. If llama.cpp is genuinely ~2× on this model, that closure has to
+  be re-opened with a named external implementation as evidence rather than a discredited price model.
+- Counter-evidence to hold alongside, so this is not a confirmation hunt: public Strix Halo llama.cpp reports
+  put prefill in the **hundreds** of prompt tok/s for Qwen3-class models on this hardware (one measures 216 vs
+  406 tok/s across a lazy-mode switch), so ~9k for a 0.8B is plausible-but-not-given. Either outcome is useful:
+  if llama.cpp is *slower*, our engine's number stands up against an outside implementation and the queue stays
+  as-is; if it is faster, the gap is now localised to one family with an external working example.
+
+**Stages.** *S1 (subagent, CPU-only)*: clone to `engines/llama.cpp`, read the tree for Qwen3.5/`qwen3_next`
+model support and the GDN op path (file + line for how prompt processing is formulated), find the ROCm/gfx1151
+build recipe and a bf16/f16 (not quantised) GGUF, and hand back exact build + bench commands plus the
+per-op profiling switch (`--profile-ops`) so S2 produces a table in our units. *S2 (main agent, device,
+blocking, zero subagents)*: build, run `llama-bench -pp 512,1024,4096` at documented `-b/-ub/-fa/-ngl/-t`,
+capture the per-op profile plus **CPU % and GPU busy during prefill** (`pidstat` + `rocm-smi`, with this repo's
+standing caveat that `rocm-smi` util is not a contention gate), and record conditions so the comparison cannot
+credit the GPU for CPU work. *S3 (verdict)*: which structural choice explains the delta, and — only if the
+delta is real — what it does to D46's closure of 1.2.
+
+**Fallback**, if the arch is unsupported or the build will not fly on ROCm 10: price the same axis directly by
+prototyping the chunked (matmul-shaped) GDN prefill against the pinned pins. That is the real target anyway;
+llama.cpp is only the existence proof.
