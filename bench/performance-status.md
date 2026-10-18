@@ -1075,3 +1075,39 @@ winner can be an in-situ loser, so the claim is due from the paired **family row
 screen's own bands (`>1.10` → port and adjudicate in situ), the port is authorised; the addressing-spelling
 variant was deliberately **not** prototyped first, because the screen already answers the question it would have
 answered, at a ratio far above the band.
+
+## 24. The ported token-loop launch in situ: `gdn_rec` **449 → 266 ms**, a **1.63× family row**, bit-identical (2026-10-17)
+
+Gate first, on the fixture the worker picked and for the reason it gave: `wide520f` is **520 prompt tokens = a
+full 512 body plus a ragged 8**, the two cases the tail logic and `wave_plan_bill`'s derivation exist for. With
+`--gdn-loop 512` section (j) runs a fourth side and **370 checks pass, 0 failures**, byte-comparing **524 logits
+rows / 520.5 MB** of the looped body against `ship`. Parse-level refusals all fire (`--gdn-loop nope`,
+`--gdn-loop 0`, and both inert pairs with `--gdn-scan collapse` and `--gdn-spell unroll4`), and the default side
+echoes `gdn_loop=1`.
+
+Then the paired in-situ A/B, medians of 3 reps per width, both sides inside one lock hold, alternating per rep:
+
+| shape | base `gdn_rec` | looped | ratio | counted launches |
+|---|---|---|---|---|
+| 4096 lanes, 3 timed reps | 437.60 / 452.19 / 449.07 | 273.47 / 267.68 / 266.03 | **1.6002 / 1.6893 / 1.6881** | 73,728 → **144** |
+| 1024 lanes, 3 reps | 108.55 / 115.07 / 109.34 | 68.51 / 66.59 / 67.16 | **1.5845 / 1.7281 / 1.6280** | 18,432 → **36** |
+
+**Every one of the seven pairs favours the looped form; median across all pairs 1.6280, min 1.5845.** The
+1024-lane worry recorded in §23 — two bodies instead of eight, a smaller share of a shorter wave — did not
+materialise: 1024 wins as hard as 4096, so the prize is not a body-count effect and does not need to be reported
+as one. Per-launch cost goes **5.94 µs → 1.90 ms per 512-token launch**, i.e. 3.70 µs/token against 5.94.
+
+Canaries, all asserted before any timing: the flag is live and refuses garbage (a pre-port binary aborts
+there); the **counted** `family=gdn_rec … launches=` falls **73,728 → 144** — behavioural, not the plan bill, per
+the `17p` lesson; and **1,024/1,024 prefill logits rows are byte-identical** between the two forms, which is the
+claim in its strongest form: no band was consulted because no value moved. Controls: `attn` issues **48 launches
+on both sides** (the untouched family), and decode is **flat — median ratio 0.9999** over three paired
+one-row-per-step reps, which is what the one-row-routes-to-per-token construction predicts and is now also a
+measurement rather than only an argument.
+
+**Attribution and its limits.** The family row drops ~183 ms of a ~923 ms wave, so the wall is due to fall by
+roughly a fifth — but this section deliberately does not print a wall number: D51's discipline says a paired
+window is an attribution, and the headline comes from its own clean-window re-take (§25). The known cost the
+harness flagged is still on the books — the loop bills **+156 slots/token-step** (1,530 vs 1,374) from recomputing
+`t*CH` — and it was paid here and still came out 1.63×, which is what makes the address-spelling variant
+(increment six row pointers instead) a follow-up rather than a prerequisite.
