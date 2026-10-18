@@ -54,7 +54,7 @@ line is enough.
 | 7 | `engine/decode_step.cpp:288` `sc.a_part = alloc<float>(kernels::attn_part_floats(wave_rows))` | where the scratch is actually allocated | follows #5 automatically, no edit |
 | 8 | `engine/decode_step.h:174` `float* a_part; // [wave_rows][8][kAttnMaxSplit][258]` | shape comment — names the **symbol**, and its `8` is `N_Q` not the split | no edit needed (checked: it cannot go stale) |
 | 9 | `engine/gate.py:396-436` `lane_geometry()` / `lane_ceiling()` / `lane_ceiling_note()` | the gate's ceiling: greps `#define MAXSC (\d+)` from #1 and `constexpr int kAttnMaxSplit\s*=\s*(\d+)` from #3 | **no literal exists here**, so nothing moved with the constant — see §4.3 for the ±1 re-proof |
-| 10 | `engine/gate.py:6425` (smoke) and `:6951` (fixture run) | `check(lanes <= lane_ceiling(), …)` | untouched; now adjudicates against 4608 |
+| 10 | `engine/gate.py:6635` (smoke) and `:6951` (fixture run) | `check(lanes <= lane_ceiling(), …)` | untouched; now adjudicates against 4608 |
 | 11 | `engine/decode_run.cpp:64` `kSessionDefaultCap = 4096` | a **slot** count (KV capacity), not the lane ceiling — but it equalled the old ceiling and its comment justified itself by "attention refuses long before 4096" | comment corrected (that claim is now false: 4608 > 4096). **Value left at 4096 — a decision for you, §6** |
 | 12 | `engine/prefill.cpp:50-57` | wave-split loop bound; comment says "the lane ceiling stops there … Raising the lane ceiling is P7's, not this file's" | untouched; no literal, still true (wave bound is `sc.wave_rows` = 512) |
 | 13 | `engine/kernels.h:400-410`, `:457-460` | `AttnLayerArgs::part` docs + `attn_part_floats` declaration; ceiling described as a product | untouched, no literal |

@@ -189,7 +189,7 @@ Engine side, from a real run: `LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast
 **Decision received and applied: the bill may move, and `engine/gate.py`'s expectation moves in the
 same commit as the engine** (supervisor, this run). So the tree is no longer in the "red by design"
 state this section originally described: `launch_plan()`'s cast row is now `4 * n_gdn + 4 * n_attn + 1`
-(`engine/gate.py:3524`), its docstring row spells the four surviving GDN-layer casts and why they
+(`engine/gate.py:3569`), its docstring row spells the four surviving GDN-layer casts and why they
 survive (their readers — `proj_gemv` with `PACK_X=false`, `mlp_gemv`, `lm_head_gemv` — still take
 `const float*`, unlike the conv and gates), and section (d) was refactored into
 `launch_plan_verdicts(want, got)` so the selftest and the section judge through ONE spelling instead of

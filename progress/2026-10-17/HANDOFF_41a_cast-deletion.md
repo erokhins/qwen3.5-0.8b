@@ -227,9 +227,9 @@ engine/decode_step.cpp:677  <- prototype/gdn_rec_isa/gdn_rec_isa_kernels.h:372 ;
 engine/decode_step.cpp:682  <- prototype/gdn_rec_isa/traffic_census.output.txt:10, :16
 engine/decode_step.cpp:687  <- prototype/gdn_rec_isa/gdn_rec_isa_kernels.h:372
 engine/decode_step.cpp:722  <- prototype/gemm_algo_sweep/README.md:90 ; gemm_algo_sweep.cpp:99
-engine/gate.py:3692         <- progress/2026-10-16/archive-review-2026-10-16.md:321 ; specification/ASSUMPTIONS.md:28
-engine/gate.py:4620         <- progress/2026-10-16/ledger-prune-2026-10-16.md:142
-engine/gate.py:5946         <- progress/2026-10-16/archive-review-2026-10-16.md:296
+engine/gate.py:3834         <- progress/2026-10-16/archive-review-2026-10-16.md:321 ; specification/ASSUMPTIONS.md:28
+engine/gate.py:4813         <- progress/2026-10-16/ledger-prune-2026-10-16.md:142
+engine/gate.py:6156         <- progress/2026-10-16/archive-review-2026-10-16.md:296
 ```
 
 Re-pointing is cheap in one direction only: `decode_step.cpp` grew by a net 39 lines (+66/−27),
