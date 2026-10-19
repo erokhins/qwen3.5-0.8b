@@ -6,9 +6,10 @@ built. §52 of `bench/performance-status.md` pre-gated it (stall census first, p
 VGPR per lane, not 64, so on the atom this engine ships R2 cannot be honoured at all**: the accumulator and Q
 together want the whole 256-VGPR budget, and clang satisfies that by re-issuing the Q loads — handing back the very
 traffic R2 exists to delete (`A10-RF-LADDER.md` §2, §6).
-The only shape that fits is llama's, which needs the f16-accumulating atom — a numerics-format decision, not a
-queue item. This file exists so the arithmetic behind that decision can be read, questioned and attacked instead
-of being re-derived from memory each time.
+The only shape that fits is llama's, which needs the f16-accumulating atom — and **its rate is now measured: it
+issues at the same rate as the f32 atom (`A10-RF-LADDER.md` §7), so the register saving is unopposed and the f16
+form is the funded path.** This file exists so the arithmetic behind that decision can be read, questioned and attacked
+instead of being re-derived from memory each time.
 
 Evidence it rests on: §51 (long-context phase attribution, warm convention) and §53 (L-c measured DISPLACED) of
 `bench/performance-status.md`; `A9-LONGCTX-CENSUS.md` (traffic, waste, levers, verdict); `A3-result.md` (the LDS
@@ -171,9 +172,13 @@ Four things follow, and three of them reprice the route.
    question. Two catches
    come with the f16 atom and neither is arithmetic: carrying the accumulator in f16 across 32,768 positions is a
    *format* change on the shipping path, admitted by the standing numeric-format rule **only if the gates stay
-   green** and never by assumption; and `prototype/issue_rate_probe/results.md` §1 measured **only**
-   `v_wmma_f32_16x16x16_f16` at 52.63 TFLOP/s, so the f16 form's rate on gfx1151 is unknown and may be worse. The
-   cheap probe that settles the rate is named in `A10-RF-LADDER.md` §4.
+   green** and never by assumption (authorised by the user 2026-10-19: numerics may move, gates are re-run, no
+   bit-identity claim); and the atom's rate **has now been measured** — `v_wmma_f16_16x16x16_f16` costs 32.6-36.7
+   clk/wmma/SIMD against the f32 atom's 32.4-35.9, i.e. the same instruction rate within ~4 %
+   (`A10-RF-LADDER.md` §7, `prototype/issue_rate_probe/results.md` §2b). What remains genuinely open about the
+   f16 accumulator is therefore *numerics at length*, not rate: the probe found an f16 accumulator stops adding
+   once the addend falls below half a ULP of the running value, so the per-round rescale is load-bearing
+   (`issue_rate_probe/results.md` §6).
 4. **A 64-position stage is a ~34 KiB stage, not a 64 KiB one, so R3's premise is half wrong.** With `nstages = 0` on
    this part (`:366` + `:372`; `cp_async_available` is false, which confirms R3's synchronous-staging assumption) the
    pointers collapse: `tile_K = Q_in_reg ? tile_Q : …` and `tile_V = nstages > 1 ? … : tile_K` (`:1251-1252`), so Q, K
