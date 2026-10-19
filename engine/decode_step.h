@@ -119,6 +119,15 @@ struct DecodeScratch {
     // one launch per body, and `decode_run` refuses the pair rather than price route A twice under
     // this flag's name.
     int gdn_loop = 512;
+    // Where the looped recurrence's per-token k/q L2-norms are computed (`--gdn-norm`, bet G1,
+    // `kernels.h:GdnNorm`). Same riding reason as the five above: it reaches the launch site inside the
+    // body loop. Same one-row override too — a ONE-ROW body takes the per-token kernels, which keep
+    // their own norm prologue, whatever this says, so no decode bit moves under it. The default is
+    // `kInline`, the shipped form: the hoist's slot saving is 9.2 % of the per-token bill
+    // (`prototype/gdn_walk/evidence-tokenbill-2026-10-19.txt`) against +2.4 GB of stage traffic per
+    // 4,096-lane pass, and BET.md §3's pre-registered lines on the `gdn_rec` family row are what decide
+    // whether the default moves. Inert under `kCollapse`, which submits a different kernel.
+    kernels::GdnNorm gdn_norm = kernels::GdnNorm::kInline;
     // The chunk size in tokens, echoed so a run states which chunk it claimed. Only 64 is accepted
     // (`kernels.h:kGdnChunkTokens`); the refusal text carries the measured reason.
     int gdn_chunk = kernels::kGdnChunkTokens;
@@ -171,6 +180,17 @@ struct DecodeScratch {
     uint16_t* g_kh = nullptr;       // [wave_rows][16][128] BF16  k~ * (Gamma_C / Gamma)
     uint16_t* g_intra = nullptr;    // [wave_rows][16][kGdnChunkTokens] BF16
     float* g_cdec = nullptr;        // [ceil(wave_rows/kGdnChunkTokens)][16] F32
+
+    // Bet G1's norm staging (`--gdn-norm hoist`, `engine/gdn_rec_hoist_kernels.h`): the normalised k and
+    // q rows and the two scalars the recurrence needs, written by the pre-pass and read by the looped
+    // walk, one row per token-step of the body and reused per layer in stream order. Body-scoped
+    // scratch like the six above, NOT §08.1 state. At the 512-row ceiling this is 4 MiB + 4 MiB + 64 KiB
+    // per request, which `AGENTS.md` is right about: memory capacity is not this model's constraint.
+    // Allocated unconditionally for the chunked staging's reason — a conditional allocation would be a
+    // path the default run cannot exercise.
+    float* g_kn = nullptr;          // [wave_rows][16][128] F32  k * rsqrtf(sum k^2 + eps)
+    float* g_qn = nullptr;          // [wave_rows][16][128] F32  q * rsqrtf(sum q^2 + eps) * Q_SCALE
+    float* g_gsc = nullptr;         // [wave_rows][2*16] F32     expf(g) for each head, then beta
 
     // Attention (§07.3). The three stage buffers are required, not optional — `kernels_attn.cpp`
     // says why (the cache append lives behind the same null check as one of them). From P8 they are

@@ -194,6 +194,19 @@ struct Options {
     // Whether the flag was named, as distinct from the default: the collapse refusal below must fire on
     // a run that asked for a span while running route A, not on one that never mentioned either.
     bool gdn_loop_given = false;
+    // Where the looped recurrence's per-token k/q norms are computed (`--gdn-norm`, bet G1,
+    // `engine/kernels.h:GdnNorm`). `inline` — the shipped `rec_loop_kernel`, which reduces the two rows
+    // inside the walk — is the default, and `hoist` is the A/B side: a pre-pass computes the norms and
+    // the walk reads them, so the walk carries no shared memory, no barrier and no cross-lane reduction
+    // (`engine/gdn_rec_hoist_kernels.h`, `prototype/gdn_walk/BET.md` §3). Claimed bit-identical, like
+    // every other knob on this recurrence, and `hoist` reaches the `--gdn-loop` span branch only: a
+    // per-token body (`--gdn-loop 1`) runs the per-token kernels, which keep their own prologue, so
+    // naming `hoist` there is REFUSED below rather than echoed as a form that did not run.
+    engine::kernels::GdnNorm gdn_norm = engine::kernels::GdnNorm::kInline;
+    // Whether the flag was named: route A never reaches the span branch at all, so a bare
+    // `--gdn-scan collapse` carries an inert `inline` rather than a wrong one, and only a named
+    // `--gdn-norm hoist` alongside collapse is the misreport worth refusing.
+    bool gdn_norm_given = false;
     // The chunk size. Only 64 is accepted, and the refusal prints the measured reason rather than
     // "unsupported": C=16 lost §2.3's per-row budget on the pinned dumps, which is the argument for
     // why 64 is the default at all.
@@ -353,6 +366,12 @@ Options parse_args(int argc, char** argv) {
             }
             o.gdn_loop = n;
             o.gdn_loop_given = true;
+        } else if (a == "--gdn-norm") {
+            // Parses or throws, like `--gdn-spell` and `--gdn-loop`: this names which side of an A/B the
+            // run is, and the two sides are claimed bit-identical, so a typo that silently became the
+            // default would price one form twice and report the second price as the hoist's win.
+            o.gdn_norm = engine::kernels::parse_gdn_norm(next());
+            o.gdn_norm_given = true;
         } else if (a == "--gdn-chunk") {
             const std::string v = next();
             int n = 0;
@@ -447,6 +466,28 @@ Options parse_args(int argc, char** argv) {
                                  " has no looped transcription and no bit-identity admission for a"
                                  " multi-token span. Use --gdn-spell fused (the default) or"
                                  " --gdn-loop 1 (the pre-D54 one-launch-per-token form)");
+    }
+    if (o.gdn_norm_given && o.gdn_norm == engine::kernels::GdnNorm::kHoist &&
+        o.gdn_scan == engine::kernels::GdnScan::kCollapse) {
+        // The third instance of the same misreport, for the third time refused rather than caveated:
+        // route A submits `gdn_rc::rec_collapse_kernel`, which computes its own norms inside its own
+        // body and never looks at this flag. A log echoing `gdn_norm=hoist` while running route A would
+        // price one kernel twice and call the second price the hoist's win.
+        throw std::runtime_error("--gdn-norm hoist moves the norms out of the SEQUENTIAL looped body"
+                                 " and is inert under --gdn-scan collapse, which launches a different"
+                                 " kernel that keeps its own prologue. Use --gdn-scan seq (the"
+                                 " default) for this A/B");
+    }
+    if (o.gdn_norm == engine::kernels::GdnNorm::kHoist && o.gdn_loop <= 1) {
+        // Asked on the EFFECTIVE span, like the spell/loop pair above: `--gdn-loop 1` runs the per-token
+        // kernels, whose prologue is what this flag moves, so there is nothing for the hoist to hoist.
+        // Refusing at parse is cheaper than loading 1.55 GB of weights to say it, and it is the same
+        // claim `--gdn-loop`'s own help makes about a non-looped spelling.
+        throw std::runtime_error("--gdn-norm hoist moves the norm prologue out of the LOOPED body"
+                                 " (engine/gdn_rec_hoist_kernels.h) and --gdn-loop " +
+                                 std::to_string(o.gdn_loop) + " submits the per-token kernels, which"
+                                 " keep their own prologue unchanged. Use --gdn-loop 512 (the default)"
+                                 " or --gdn-norm inline (the shipped form)");
     }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
@@ -632,7 +673,7 @@ void print_usage(FILE* out) {
                  " [--prefill-logits last|all] [--wave-rows N]"
                  " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
                  " [--gemm-pins all|none|<csv>] [--gemm-heur N] [--attn-touch 0|1]"
-                 " [--gdn-spell ship|unroll4|fused]"
+                 " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -727,6 +768,25 @@ void print_usage(FILE* out) {
                  " while naming this flag alongside it is REFUSED rather than echoed with a spelling"
                  " that did not run. All spellings are compiled in either way, so a paired wave timing"
                  " is one window\n"
+                 "  --gdn-norm inline|hoist  WHERE the looped recurrence's per-token k-row and q-row"
+                 " L2-normalisations are computed (bet G1, engine/gdn_rec_hoist_kernels.h,"
+                 " prototype/gdn_walk/BET.md §3). `inline`, the DEFAULT, is the shipped "
+                 " `rec_loop_kernel`: every token-step of every head block reduces its own k and q rows"
+                 " with `block_sum_pair_f32` before the state walk may start, which is 122 of 1,327"
+                 " slots/token-step (9.2 %% of the bill) and three `s_barrier`s on the chain between token t and"
+                 " token t+1. `hoist` submits TWO launches per span: a pre-pass of one block per"
+                 " (token-step, head) computes those two normalised rows plus `expf(g)` and `beta`, and"
+                 " the walk reads them, so its per-token step is read-the-operands, walk, write-o with"
+                 " no LDS, no barrier and no cross-lane reduction at all. The contract is BIT-IDENTICAL,"
+                 " not a band: the pre-pass calls the same reduction at the same `blockDim.x` and the"
+                 " walk's arithmetic text is unchanged (`prototype/gdn_walk/check_hoist_transcription.py"
+                 " checks the source and `walk_isa_diff.py` the compiled FP-op census). It costs 2.4 GB"
+                 " of stage traffic per 4,096-lane pass, which is why it is a KNOB and why BET.md §3's"
+                 " pre-registered lines on the `gdn_rec` family row decide whether the default moves."
+                 " Wave-only like --gdn-loop: a one-row body takes the per-token kernels with their own"
+                 " prologue, `--gdn-loop 1` is REFUSED with `hoist`, and so is `--gdn-scan collapse`,"
+                 " whose kernel keeps its own prologue. Both forms are compiled in either way, so a"
+                 " paired wave timing is one window.\n"
                  "  --gdn-loop N  how many token-steps ONE `gdn_rec` launch carries (D53/D54, "
                  "engine/gdn_rec_loop_kernels.h). `1`, the default, is the shipped one-launch-per-token"
                  " form: 18 launches per token, 73,728 for a 4,096-token prompt, at the 1.72 us"
@@ -1212,6 +1272,11 @@ WavePassResult wave_pass(const Options& o, const engine::WeightStore& store, eng
         // widths from `tokens`/`bodies`/`wave_rows` and therefore sees the ragged and one-row bodies
         // for itself instead of trusting a caller to announce them.
         shape.gdn_loop_span = o.gdn_loop;
+        // Whether the span's body was the hoisted pair rather than the single looped kernel, so the plan
+        // bills TWO `gdn_rec` launches per span where the shipped form bills one. Asked as the RUN ASKED
+        // for it, like the span above: `wave_plan_bill` derives the one-row bodies for itself, and a
+        // one-row body runs the per-token kernel with no pre-pass whatever this says.
+        shape.gdn_norm_hoisted = (o.gdn_norm == engine::kernels::GdnNorm::kHoist);
         // Which GEMM a wide body ran, so the plan bills the cast row the way the body submitted it. Asked
         // at `kMaxWaveRows` rather than at a body width on purpose: the only width
         // `resolve_wave_gemm` overrides is `rows <= 1`, and `wave_plan_bill` derives that one-row body
@@ -1360,7 +1425,8 @@ int main(int argc, char** argv) {
         // the library it is linked against, not about the run — and read by `gate.py`'s
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
         std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d"
-                    " attn_touch=%d attn_fattn=%d gdn_scan=%s gdn_chunk=%d gdn_spell=%s gdn_loop=%d\n",
+                    " attn_touch=%d attn_fattn=%d gdn_scan=%s gdn_chunk=%d gdn_spell=%s gdn_loop=%d"
+                    " gdn_norm=%s\n",
                     engine::kMaxWaveRows, o.wave_rows,
                     engine::kernels::wave_gemm_name(o.wave_gemm),
                     engine::kernels::gemm_route_version().c_str(), o.attn_tile,
@@ -1381,7 +1447,14 @@ int main(int argc, char** argv) {
                     // counted `family=gdn_rec launches=` inside the same log (`plan_match` cannot
                     // catch it: it is derived inside this binary and a stale build agrees with
                     // itself — the `17p` retake lesson in AGENTS.md).
-                    o.gdn_loop);
+                    o.gdn_loop,
+                    // Bet G1's form, echoed on the same line for the same reason: a `gdn_rec` family row
+                    // that cannot say which body produced it cannot be paired against another one. Under
+                    // `collapse` the field is inert — the collapse kernel keeps its own prologue — so it
+                    // says so rather than naming a form that did not run.
+                    o.gdn_scan == engine::kernels::GdnScan::kCollapse
+                        ? "inert-under-collapse"
+                        : engine::kernels::gdn_norm_name(o.gdn_norm));
         if (o.sizes_only) {
             std::printf("RESULT mode=sizes-only tensors=%zu check_weights=PASS\n", stats.n_loaded);
             std::fflush(stdout);
@@ -1399,6 +1472,7 @@ int main(int argc, char** argv) {
         sc.gdn_chunk = o.gdn_chunk;
         sc.gdn_spell = o.gdn_spell;
         sc.gdn_loop = o.gdn_loop;
+        sc.gdn_norm = o.gdn_norm;
         if (engine::kernels::wave_gemm_is_library(o.wave_gemm, engine::kMaxWaveRows)) {
             // Pin filter first: it decides what `gemm_route_plan` below fetches and what the version
             // line counts, so setting it after the plan would print one route and run another.

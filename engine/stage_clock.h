@@ -221,6 +221,16 @@ struct WaveShape {
     // shape rather than a live value — which is precisely why it must not be allowed to read as the
     // old one.
     int gdn_loop_span = 512;
+    // Bet G1 (`decode_run --gdn-norm hoist`): whether the looped body ran as the normed PAIR — a
+    // pre-pass launch beside every span — rather than as the single shipped looped kernel. The plan needs
+    // it for the same reason the span above does: `gdn_rec` bills launches, and a hoisted pass doubles
+    // them, so a plan that still billed one would report the second launch as a discrepancy instead of as
+    // what the run submitted. Billed on the SAME `gdn_rec` row for the reason the loop and route A are:
+    // the pre-pass's milliseconds and its DRAM are part of what the change costs, and moving them to
+    // another row would make the win line a lie. Inert under `gdn_resident`/`gdn_chunked` (different
+    // kernels) and for a ONE-ROW body, which runs the per-token kernel with its own prologue —
+    // `wave_plan_bill` derives that exception from the shape, as it derives the other two.
+    bool gdn_norm_hoisted = false;
     // Which GEMM the pass ran, as the ROUTE the run asked for rather than as a per-body resolution: the
     // plan needs it because `submit_wave_body` guards the F32 widenings whose only reader is a hand
     // kernel, so a library body and a hand body owe DIFFERENT `cast` counts. It is the requested route

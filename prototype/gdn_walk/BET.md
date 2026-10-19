@@ -170,3 +170,41 @@ fattn 42 / combine 42` at 4,096 lanes — i.e. which waves take the one-pass pat
 WMMA path — is not derived here. A1's brief must read that out of the launcher (`prototype/attn_decode/
 attn_decode_kernels.h` owns the row-block rule since Bet 2) before pricing anything about work split, because a
 bet on "the fattn kernel is slow per launch" is a different bet from "too many launches go through it".
+
+## 8. G1 measured (2026-10-19): **UNRESOLVED** — do not ship, and the line itself was the wrong ruler
+
+`--gdn-norm hoist` is implemented (`engine/gdn_rec_hoist_kernels.h`, default stays `inline`), it is
+**bit-identical on device** — `base == inline == hoist` on every prefill logit row *and* every `STATEFP`
+state fingerprint, which is the admission §3 demanded — and the A/B ran in one `gpu_lock` hold with canaries
+A (baseline rejects `--gdn-norm`) and B (each side echoes its form and submits 144 vs 288 planned launches).
+Medians of 3 at 4,096 lanes, logs in `progress/bench/evidence/g1ab-2026-10-19/`:
+
+| quantity | base | new `inline` | new `hoist` | hoist vs base |
+|---|---|---|---|---|
+| **`gdn_rec` (the pre-registered row)** | 266.60 | 264.21 | **250.84** | **−5.91 %** |
+| every other family, summed | — | — | — | **+6.06 ms** |
+| wave `wall_ms` | 626.75 | 623.45 | 612.87 | **−2.21 %** |
+| `RESULT ms_total` | 717.27 | 714.87 | 707.88 | −1.31 % |
+
+The inline-vs-base null is **−0.89 %**, so the shipped path did not move and the hoist number means what it
+says. The hoist side's own rep spread is 3.5 % (246.49 / 250.84 / 255.09), and it landed **0.84 ms above the
+250 ms live line** — a fifth of its own spread. §3 said in-between is *unresolved and not shipped*, and that is
+the verdict: **not shipped, default stays `inline`, no narration.** Two things come out of it that are worth
+more than the number.
+
+**The row was the wrong ruler, and this is the correction to carry into G2.** Hoisting removes work from
+`gdn_rec` and *puts traffic into the stage*, which is paid in `gdn_gated_norm` (+15.6 %) and `glue` (+8.8 %)
+— `+6.06 ms` outside the row that improved, against `−15.75 ms` inside it. So a pre-registered line on one
+family row **over-counts a change whose cost lands in its neighbours**, and the honest whole-change figure is
+**wave `wall_ms` −2.21 %**. G2's lines must therefore be written on *both* quantities before it is measured:
+a family row to catch "did the walk get cheaper" and `wall_ms` to catch "did the engine get faster". That is
+a methodology fix, not a moving of the goalposts — the ship/no-ship question was always the second question.
+
+**The barrier claim itself is not disproved, and the experiment says exactly how far it goes.** 3 barriers,
+18 shuffles and the LDS round-trip left the per-token chain (verified in the ISA: the hoisted walk issues **0
+barriers and 0 LDS ops** against 5 and 39) and the row got 5.9 % cheaper — which is in the 9.2 % slot-share
+slot the census predicted, not the multiple the latency story could have been read to promise. The traffic the
+hoist *adds* ate most of it, which is what BET.md §3's own traffic correction (the worker's, +32 KB/token/layer
+not +16) said would decide it. What this cannot see: whether a *cheaper walk* that does not add stage traffic —
+G2's geometry, one wavefront per block and no LDS at all — would keep the 5.9 % and drop the +6.06 ms. That is
+the question G2 is now funded to answer.

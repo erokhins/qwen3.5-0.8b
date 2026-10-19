@@ -270,6 +270,14 @@ DecodeScratch allocate_scratch(int wave_rows) {
     sc.g_cdec = alloc<float>(((size_t)wave_rows + kernels::kGdnChunkTokens - 1) /
                              kernels::kGdnChunkTokens * kNumValueHeads);
 
+    // Bet G1's norm staging (`--gdn-norm hoist`). Unconditional for the chunked staging's reason: a
+    // branch here would be a path the default run never exercises. The row strides are `kValueDim` and
+    // `2 * kNumValueHeads`, which are the strides the two kernels index (`NH * D` and `kGdnScalarRow`),
+    // and `gdn_rec_span_hoisted` static_asserts the pair.
+    sc.g_kn = alloc<float>(vdim);
+    sc.g_qn = alloc<float>(vdim);
+    sc.g_gsc = alloc<float>((size_t)wave_rows * 2 * kNumValueHeads);
+
     sc.a_q = alloc<uint16_t>(qprj);
     sc.a_k = alloc<uint16_t>(kprj);
     sc.a_v = alloc<uint16_t>(kprj);
@@ -338,6 +346,9 @@ void free_scratch(DecodeScratch& sc) {
     (void)hipFree(sc.g_kh);
     (void)hipFree(sc.g_intra);
     (void)hipFree(sc.g_cdec);
+    (void)hipFree(sc.g_kn);
+    (void)hipFree(sc.g_qn);
+    (void)hipFree(sc.g_gsc);
     (void)hipFree(sc.a_q);
     (void)hipFree(sc.a_k);
     (void)hipFree(sc.a_v);
@@ -782,8 +793,33 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 // The tile BASE plus a row count is handed over rather than row t: `g_u`/`g_g`/
                 // `g_beta`/`g_o` are the same body tiles the collapse branch above is fed, and the
                 // kernel walks the row strides itself, so both forms touch identical addresses.
+                // Bet G1's second shape: the same spans, but the per-token k/q norms are a pre-pass and
+                // the walk reads them (`--gdn-norm hoist`, `engine/gdn_rec_hoist_kernels.h`). It rides
+                // INSIDE the span loop rather than hoisting one pre-pass over the whole body on purpose:
+                // the pair stays adjacent in the stream, so the stage tiles are the freshest bytes the
+                // walk can be handed, and a span's stage tiles are one span wide rather than a body's.
+                // Two submissions per span, therefore, and the marker says 2 — `stage_clock.h` bills
+                // launches, and a family row that counted one launch where two fell is the row the win
+                // line is written on. It bills on the SAME `gdn_rec` row for route A's and the loop's
+                // reason: a change that moves milliseconds to another row has not moved them, and here
+                // the pre-pass's DRAM is part of what the change costs.
+                const bool norm_hoist = sc.gdn_norm == kernels::GdnNorm::kHoist;
                 for (int t = 0; t < n; t += gdn_span) {
                     const int rows = gdn_span < n - t ? gdn_span : n - t;   // the ragged tail
+                    if (norm_hoist) {
+                        stageclock::note(stageclock::kGdnRec, 2);           // one site, two launches
+                        kernels::GdnNormStage nst{};
+                        nst.kn = sc.g_kn + (size_t)t * kValueDim;
+                        nst.qn = sc.g_qn + (size_t)t * kValueDim;
+                        nst.gsc = sc.g_gsc + (size_t)t * 2 * kNumValueHeads;
+                        kernels::gdn_rec_span_hoisted(sc.g_u + (size_t)t * kQkvRows,
+                                                      sc.g_g + (size_t)t * kNumValueHeads,
+                                                      sc.g_beta + (size_t)t * kNumValueHeads,
+                                                      st.gdn_state_layer(layer),
+                                                      sc.g_o + (size_t)t * kValueDim,
+                                                      nst, rows, sc.gdn_spell);
+                        continue;
+                    }
                     stageclock::note(stageclock::kGdnRec);                  // one site, one launch
                     kernels::gdn_rec_span(sc.g_u + (size_t)t * kQkvRows,
                                           sc.g_g + (size_t)t * kNumValueHeads,

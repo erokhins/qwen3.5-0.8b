@@ -133,8 +133,28 @@ WavePlanBill wave_plan_bill(const WaveShape& sh) {
             sh.bodies > 0 ? sh.tokens - (sh.bodies - 1) * sh.wave_rows : 0;
         const long long sp = sh.gdn_loop_span;
         const long long full_bodies = sh.bodies > 0 ? bodies - 1 : 0;
-        p.subs[kGdnRec] = G * (full_bodies * ((sh.wave_rows + sp - 1) / sp) +
-                               (last_body_rows + sp - 1) / sp);
+        // One body's SPAN count at this span: `ceil(rows/span)`, with the one-row case resolved the way
+        // `resolve_gdn_loop` resolves it (a body of one row is the per-token form, which is also exactly
+        // one launch) so the derived bill needs no exception of its own.
+        const auto spans_of = [sp](long long rows) {
+            return rows <= 1 ? 1LL : (rows + sp - 1) / sp;
+        };
+        // Bet G1: `--gdn-norm hoist` submits a norm pre-pass BESIDE every span, so the row doubles —
+        // except beside a body of ONE row, which `resolve_gdn_loop` routes to the per-token kernel, whose
+        // own prologue is unchanged and which therefore has no pre-pass to bill (`--wave-rows 1` bills
+        // walks only, which is the same no-decode-bit-moves property the launcher enforces). A ONE-ROW
+        // SPAN of a wider body is not billed with an exception of its own because it cannot be launched:
+        // `gdn_rec_span`/`gdn_rec_span_hoisted` both refuse `tokens < 2`, so a body whose row count is
+        // 1 mod span aborts the run before any report exists (pre-existing at HEAD, reported in
+        // prototype/gdn_walk/G1-result.md §5). Modelling it here would be a branch no reachable run has.
+        const auto pre_passes_of = [sp](long long rows) {
+            return rows <= 1 ? 0LL : (rows + sp - 1) / sp;
+        };
+        p.subs[kGdnRec] =
+            G * (full_bodies * spans_of(sh.wave_rows) + spans_of(last_body_rows) +
+                 (sh.gdn_norm_hoisted
+                      ? full_bodies * pre_passes_of(sh.wave_rows) + pre_passes_of(last_body_rows)
+                      : 0));
         p.subs[kGdnChunk] = 0;
     } else if (sh.gdn_chunked) {
         const long long last_body_rows =

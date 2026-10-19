@@ -347,6 +347,50 @@ void gdn_rec_span(const float* u, const float* g, const float* beta, float* S, f
 // and no decode bit should have to depend on the loop's bit-identity holding.
 int resolve_gdn_loop(int want, int rows);
 
+// ---- bet G1: where the per-token k/q L2-norms are computed (`decode_run --gdn-norm`) -------------
+//
+// Two spellings of the SAME looped body, from one binary, so the A/B is one window:
+//
+//   kInline  `engine/gdn_rec_loop_kernels.h::rec_loop_kernel` — the shipped form. Each token-step
+//            reduces its own k and q rows with `block_sum_pair_f32` inside the walk.
+//   kHoist   `engine/gdn_rec_hoist_kernels.h` — a pre-pass computes those two rows' norms (and
+//            `expf(g)`, `beta`) once per (token-step, head), and the walk reads the normalised rows and
+//            the two scalars. The walk then has no shared memory, no barrier and no cross-lane reduction,
+//            which is the point: three barriers no longer sit between token t and token t+1
+//            (`prototype/gdn_walk/BET.md` §3).
+//
+// `kHoist` is claimed BIT-IDENTICAL to `kInline`, not band-adjacent, and the argument is that the
+// pre-pass calls the same reduction with the same `blockDim.x` and the walk's arithmetic text is
+// unchanged (`engine/gdn_rec_hoist_kernels.h`, `prototype/gdn_walk/check_hoist_transcription.py`).
+// Like `--gdn-spell` and `--gdn-loop`, this is a KNOB and `kInline` is the default; the paired in-situ
+// A/B on the `gdn_rec` family row decides whether the default moves.
+//
+// It reaches the `--gdn-loop` span branch only. A one-row body takes the per-token loop whatever this
+// says (`resolve_gdn_loop`), and `--gdn-scan collapse` submits a different kernel, so both are inert
+// for it — `parse_args` refuses the collapse pair rather than echoing a form that did not run.
+enum class GdnNorm { kInline, kHoist };
+
+// Parse-or-throw, for the standing reason: this names which side of an A/B the run is.
+GdnNorm parse_gdn_norm(const std::string& name);
+const char* gdn_norm_name(GdnNorm n);
+
+// The three stage tiles `gdn_norm_hoist_kernel` writes and `rec_loop_normed_kernel` reads, positioned
+// at one body's first row: `kn`/`qn` are [rows][NH*D] F32 normalised rows and `gsc` is
+// [rows][2*NH] F32 (`gam` then `beta`). They are scratch, not state — nothing survives the body.
+struct GdnNormStage {
+    float* kn = nullptr;
+    float* qn = nullptr;
+    float* gsc = nullptr;
+};
+
+// The hoisted pair: TWO launches for what `gdn_rec_span` does in one — the norm pre-pass over the
+// body's `tokens` rows, then the walk. Same tiles `gdn_rec_span` is fed, same state buffer, same
+// `otile`, and the two launches are adjacent in the stream so the stage tiles are read while they are
+// as fresh as they can be. Refuses `tokens < 2` for `gdn_rec_span`'s reason: a one-row body is
+// `resolve_gdn_loop`'s to route to the per-token kernels.
+void gdn_rec_span_hoisted(const float* u, const float* g, const float* beta, float* S, float* o,
+                          const GdnNormStage& stage, int tokens, GdnRecSpell spell);
+
 // One GDN layer, one BODY, route A: `kNumValueHeads * (d_v / 32)` blocks = 64, and the state stays
 // in LDS for the whole body. `u`/`g`/`beta`/`o` are the same tiles `gdn_rec` is fed one row at a
 // time, so the two forms read and write identical addresses; `rows` is the body's row count.

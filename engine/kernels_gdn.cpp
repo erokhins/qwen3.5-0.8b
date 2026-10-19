@@ -6,6 +6,7 @@
 #include "engine/state.h"   // kQkvRows / kValueDim: the tile row strides the call site walks
 #include "engine/gdn_collapse_kernels.h"
 #include "engine/gdn_rec_fused_kernels.h"
+#include "engine/gdn_rec_hoist_kernels.h"
 #include "engine/gdn_rec_loop_kernels.h"
 #include "engine/gdn_rec_unroll4_kernels.h"
 #include "prototype/gdn_chunk/gdn_chunk_kernels.h"
@@ -124,6 +125,73 @@ void gdn_rec_span(const float* u, const float* g, const float* beta, float* S, f
     // `u` is the conv's [n][6144] tile and the three slices are row 0 of q, k and v; the kernel adds
     // `CH` per token-step itself, exactly as the call site used to add it per launch.
     rec_loop_kernel<<<NH, D>>>(u, u + kValueDim, u + 2 * kValueDim, g, beta, S, o, NH, tokens);
+}
+
+// bet G1: the same span, TWO launches. The ordering is a dependency, not a preference — the walk reads
+// the stage tiles the pre-pass writes — and same-stream order is what orders them, exactly as
+// `attn_prep`/`attn_core` are ordered above (`kernels_attn.cpp`). Same-stream order is also why the two
+// launches are issued adjacently per SPAN rather than one pre-pass for a whole body: the stage tiles
+// stay as small as a span and the walk touches them while they are the freshest bytes on the chip.
+void gdn_rec_span_hoisted(const float* u, const float* g, const float* beta, float* S, float* o,
+                          const GdnNormStage& stage, int tokens, GdnRecSpell spell) {
+    // The same three refusals `gdn_rec_span` makes, for the same three reasons: a one-row body is
+    // `resolve_gdn_loop`'s to route, a non-`fused` spelling has no looped transcription to hoist a
+    // prologue out of, and a stage tile is not optional — a null one is a dropped launch that looks
+    // like a skipped stage rather than a crash.
+    if (tokens < 2) {
+        throw std::runtime_error("gdn_rec_span_hoisted: tokens=" + std::to_string(tokens) +
+                                 "; a one-row body is `resolve_gdn_loop`'s to route to the per-token"
+                                 " kernels, which keep their own norm prologue. Decode bits depend on"
+                                 " that routing.");
+    }
+    if (stage.kn == nullptr || stage.qn == nullptr || stage.gsc == nullptr) {
+        throw std::runtime_error("gdn_rec_span_hoisted: a stage tile is null. The norm pre-pass is not"
+                                 " optional under --gdn-norm hoist; the walk reads exactly what it"
+                                 " writes.");
+    }
+    if (spell != GdnRecSpell::kFused) {
+        throw std::runtime_error(std::string("gdn_rec_span_hoisted: --gdn-spell ") +
+                                 gdn_rec_spell_name(spell) + " has no looped body to hoist; the"
+                                 " hoisted walk is the `fused` body's ("
+                                 "engine/gdn_rec_hoist_kernels.h). Use --gdn-spell fused (the"
+                                 " default) or --gdn-loop 1");
+    }
+    static_assert(CH == kQkvRows, "the hoist pass's q|k row stride (CH) must be kQkvRows");
+    static_assert(NH * D == kValueDim, "the kn/qn stage row stride (NH*D) must be kValueDim");
+    static_assert(kGdnScalarRow == 2 * kNumValueHeads,
+                  "the scalar stage row is gam then beta for every value head");
+    // `<<<dim3(NH, tokens), D>>>`: one block per (head, token-step), 128 threads. The kernel reads
+    // `h = blockIdx.x` and the token-step from `blockIdx.y` — the same axis order the walk's grid uses,
+    // so a swap here is not a wrong-value bug you can spot in a logits diff, it is the pre-pass writing
+    // normalised rows for head 46 into a 16-head buffer. `block_sum_pair_f32`'s fold width is
+    // `blockDim.x >> 5` and the shipped prologue's fold is a 4-warp one, so `D` as the block width is
+    // part of the bit-identity argument, not a convenience.
+    gdn_norm_hoist_kernel<<<dim3(NH, tokens), D>>>(u, u + kValueDim, g, beta, stage.kn, stage.qn,
+                                                   stage.gsc, NH, tokens);
+    // The walk never sees q|k: `v` is still the conv tile's third slice, and the two normalised rows
+    // plus the scalar row are the stage tiles this launch just filled.
+    rec_loop_normed_kernel<<<NH, D>>>(u + 2 * kValueDim, stage.kn, stage.qn, stage.gsc, S, o,
+                                      NH, tokens);
+}
+
+// `--gdn-norm`, bet G1. Parses or throws, like every other knob that names a side of an A/B.
+GdnNorm parse_gdn_norm(const std::string& name) {
+    if (name == "inline") return GdnNorm::kInline;
+    if (name == "hoist") return GdnNorm::kHoist;
+    throw std::runtime_error("--gdn-norm takes `inline` (the shipped looped body, which reduces each"
+                             " token's k and q rows inside the walk — THE DEFAULT) or `hoist`"
+                             " (engine/gdn_rec_hoist_kernels.h: a pre-pass computes those norms and"
+                             " the walk reads them, so the walk carries no barrier). Refusing"
+                             " rather than guessing, because this flag names which side of an A/B the"
+                             " run is");
+}
+
+const char* gdn_norm_name(GdnNorm n) {
+    switch (n) {
+        case GdnNorm::kInline: return "inline";
+        case GdnNorm::kHoist: return "hoist";
+    }
+    return "invalid";
 }
 
 int resolve_gdn_loop(int want, int rows) {
