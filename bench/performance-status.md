@@ -1664,3 +1664,60 @@ One editorial note, because it is the reason this section is appended rather tha
 this file by line at **92, 618, 659 and 1184**, so §1's tables were rewritten with **same-line substitutions
 only** and the file's line count is byte-identical to before (1,621 both ways, and the four cited lines verified
 character-for-character). A banner that rots four archive citations to update itself would be a bad trade.
+
+## §37. Nothing else moved: HEAD vs `origin/master`, family by family, in one window (2026-10-19)
+
+The round that took `attn` from 263 to 132 ms is 28 commits deep, and a before/after on the **total** would
+hide the regression such a change actually risks: something *outside* the changed kernel — the one-pass
+`attn_slim_wave` rows, the split/combine launches, casts, or the launcher-side row-block rule that §34 shows
+was already half-committed once. So this compares **families**, paired inside one `tools/gpu_lock.sh` hold
+(`regress-origin`, main agent, blocking, zero subagents), baseline built in a scratch worktree, medians of 3,
+alternating sides per rep. Baseline = `origin/master` = `9303c13`, strictly 28 behind. Harness:
+`tools/regress_vs_origin.sh`; logs: `progress/bench/evidence/regress-2026-10-19/`.
+
+| family | 4096 base | 4096 HEAD | ratio | 1024 base | 1024 HEAD | ratio |
+|---|---|---|---|---|---|---|
+| `attn` | 265.198 | **132.849** | **1.996×** | 17.440 | **12.181** | **1.432×** |
+| `gdn_rec` | 275.998 | 266.236 | 1.037 | 69.018 | 69.140 | 0.998 |
+| `proj` | 95.724 | 94.516 | 1.013 | 24.281 | 23.191 | 1.047 |
+| `mlp_gateup` | 56.629 | 57.693 | 0.982 | 14.000 | 14.173 | 0.988 |
+| `mlp_down` | 26.736 | 27.382 | 0.976 | 6.876 | 6.813 | 1.009 |
+| `gdn_conv` | 16.156 | 16.681 | 0.969 | 3.961 | 3.985 | 0.994 |
+| `glue` | 15.946 | 15.198 | 1.049 | 3.833 | 3.753 | 1.021 |
+| `gdn_gated_norm` | 9.252 | 9.056 | 1.022 | 2.321 | 2.370 | 0.979 |
+| `gdn_gates`, `cast`, `copy`, `lm_head`, `host_tail` | — | — | all 0.95–1.05 | — | — | all 0.94–1.02 |
+| **wave `wall_ms`** | **770.248** | **628.451** | **1.226×** | 147.204 | 140.164 | 1.050× |
+| **`RESULT ms_total`** | **869.299** | **708.544** | **1.227×** | 240.290 | 237.185 | 1.013× |
+
+**Verdict: no regression, and the instrument's own noise floor is now measured.** Every family the round did
+not touch lands inside **±3.1 %** of the baseline — `mlp_gateup` −1.8 %, `mlp_down` −2.4 %, `gdn_conv` −3.1 %,
+`copy` −5.0 % on an absolute 0.09 ms — and none of those four files changed in the 28 commits. That is what
+sets the floor: **on this box, in a paired window, a sub-3 % move on a sub-30 ms row is not claimable as
+either a regression or a win**, which is a number this ledger had implied but never stated. What did move is
+the thing that was supposed to: `attn` **1.996×**, matching §33's 1.985× taken in a different window and a
+different harness, and the wave **1.226×** at 4,096 lanes against **1.050×** at 1,024 — the smaller number is
+not a weaker kernel, it is a smaller denominator, because at 1,024 lanes `attn` is 8.7 % of the wave where at
+4,096 it is 21.2 %.
+
+**Cross-window corroboration, which is the part worth trusting.** The HEAD side reads `RESULT` **708.544 ms**
+against §36's independently-taken **708.14 ms** (0.06 % apart), and the *baseline* side reads **869.299**
+against §33's frozen **869.13** (0.02 % apart). Two windows that share neither clock nor day agree to a
+twentieth of a percent on both sides, so the 1.227× is not a window artifact. At 4,096 lanes that is
+**5,781 tok/s** on this instrument against §36's 5,784.
+
+**Numerics, at the same cost as a footnote.** The baseline binary run through **its own** `gate.py` (HEAD's
+gate passes `--attn-fattn`, which the baseline cannot parse) prints **ENGINE GATE PASS** on both `wide520f`
+and `wide1024f`. That is not a claim about HEAD — §36 already re-admitted HEAD on `wide1024f` — it is the
+check that the fixtures are not HEAD-specific, i.e. that the baseline is a baseline and not a straw man.
+
+**Three canaries, and one of them earned its keep immediately.** A: the baseline must reject `--attn-fattn`
+and the shipping binary must accept it. B: the shipping log must echo `ATTN_FATTN`. C: the `attn` family must
+differ by more than 5 %, or the window is discarded rather than reported. **Canary B fired on the first run**
+and found a real harness bug: the fallback id list was joined with spaces while `--ids` is comma-separated, so
+the 1,024-lane runs were feeding the engine **one token** and would have reported a 1-lane wave as a width.
+That is the D30 lesson again — a stale or mis-fed side produces a *plausible* table, and only a check that a
+difference must exist catches it.
+
+**What this cannot see.** `--steps 0` means the decode path is not exercised here (that is §36's banner, which
+showed decode unchanged within spread); two fixtures are not the 18-fixture admission; and one width pair is
+not a sweep — a regression that appears only below 1,024 or above 4,096 lanes would walk straight past it.

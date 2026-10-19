@@ -45,8 +45,8 @@ OLDARGS="--steps 0 --time-waves --gemm lt --gemm-pins all --gdn-loop 512"   # no
 
 clk() { rocm-smi --showclocks 2>/dev/null | tr -d '\r' | grep -iE "sclk" | tr '\n' ' '; }
 fam() { grep -h "WAVE gran=stage family=$1 " "$2" | sed -E 's/.* ms=([0-9.]+).*/\1/' | tail -1; }
-tot() { grep -h "WAVE gran=stage TOTAL" "$2" | sed -E 's/.*wall_ms=([0-9.]+).*/\1/' | tail -1; }
-res() { grep -h "^RESULT" "$2" | sed -E 's/.*ms_total=([0-9.]+).*/\1/' | tail -1; }
+tot() { grep -h "WAVE gran=stage TOTAL" "$1" | sed -E 's/.*wall_ms=([0-9.]+).*/\1/' | tail -1; }
+res() { grep -h "^RESULT" "$1" | sed -E 's/.*ms_total=([0-9.]+).*/\1/' | tail -1; }
 median() { sort -g "$@" | awk '{a[NR]=$1} END{if(NR==0){print "NA";exit} print (NR%2)?a[(NR+1)/2]:(a[NR/2]+a[NR/2+1])/2}'; }
 fail() { echo "ABORT: $*" >&2; tools/gpu_lock.sh release "$TAG" >/dev/null 2>&1; exit 1; }
 
@@ -57,6 +57,7 @@ if [ ! -x "$BIN_OLD" ]; then
     ( cd "$BASEDIR" && bash engine/build.sh >/dev/null ) || fail "baseline build failed"
 fi
 
+if [ "${SUMMARIZE:-0}" != "1" ]; then
 # --- canary A, outside the timing hold: the two binaries must be distinguishable by their flags -------
 "$BIN_OLD" --attn-fattn 1 --model "$MODEL" --ids "1 2 3" --steps 0 >/dev/null 2>"$OUT/canaryA_old.err"
 grep -q "unknown argument --attn-fattn" "$OUT/canaryA_old.err" \
@@ -64,12 +65,16 @@ grep -q "unknown argument --attn-fattn" "$OUT/canaryA_old.err" \
 "$BIN_NEW" --attn-fattn 0 --model "$MODEL" --ids "1 2 3" --steps 0 --out "$OUT/canary_new" >/dev/null 2>&1 \
     || fail "canary A: the SHIPPING binary refused --attn-fattn. Is $BIN_NEW built at all?"
 echo "CANARY A ok: baseline rejects --attn-fattn, shipping binary accepts it"
+fi
 
+if [ "${SUMMARIZE:-0}" != "1" ]; then
 tools/gpu_lock.sh acquire "$TAG" || exit 1
 echo "WINDOW $TAG util@acquire=$(tools/gpu_lock.sh util | tail -1)"
 echo "CLK@start: $(clk)"
 for W in $WIDTHS; do
-  IDS_W=$( [ "$W" = "4096" ] && printf '%s' "$IDS" || seq 1 "$W" | tr '\n' ' ' )
+  # `--ids` is COMMA-separated (`parse_ids`), so a space-joined `seq` feeds the engine ONE token and the run
+  # measures a 1-lane wave. Canary B caught exactly this the first time the script was run.
+  IDS_W=$( [ "$W" = "4096" ] && printf '%s' "$IDS" || seq -s, 1 "$W" )
   for R in $(seq 1 "$REPS"); do
     sleep 5
     "$BIN_OLD" --model "$MODEL" --ids "$IDS_W" $OLDARGS --out "$OUT/o_${W}_$R" > "$OUT/o_${W}_$R.log" 2>&1 \
@@ -84,6 +89,7 @@ done
 echo "CLK@end: $(clk)"
 echo "util@release=$(tools/gpu_lock.sh util | tail -1)"
 tools/gpu_lock.sh release "$TAG"
+fi
 
 # --- summary: per-family medians, paired by width ------------------------------------------------------
 FAMS="glue proj mlp_gateup mlp_down gdn_conv gdn_gates gdn_rec gdn_gated_norm attn cast copy lm_head host_tail"
@@ -116,9 +122,9 @@ for W in $WIDTHS; do
 done
 echo "CANARY C ok: attn differs by > 5 % on every width measured"
 
-if [ "$RUN_NUMERICS" = "1" ]; then
+if [ "$RUN_NUMERICS" = "1" ] && [ "${TIMING_ONLY:-0}" != "1" ]; then
     echo "== numerics leg: the BASELINE binary through its OWN gate.py (HEAD's gate passes --attn-fattn, which it lacks) =="
-    [ -e "$BASEDIR/data" ] || ln -s "$REPO/data" "$BASEDIR/data"
+    for D in data models; do [ -e "$BASEDIR/$D" ] || ln -s "$REPO/$D" "$BASEDIR/$D"; done
     for FX in wide520f wide1024f; do
         echo "-- $FX (baseline) --"
         ( cd "$BASEDIR" && "$REPO/.venv/bin/python" engine/gate.py --fixture "$FX" ) 2>&1 | tail -3
