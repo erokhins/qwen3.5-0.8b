@@ -72,15 +72,31 @@ per CU = 256/thread, and no code object here reports more). Live set for one wav
 | P operands, staging temps, addressing | ≥ 20 | ≥ 20 |
 | **total** | **≥ 308 — over the ceiling by ≥ 52** | **≈ 244 — 12 registers of headroom for everything else** |
 
-**R1+R2 with the shipped `v_wmma_f32_16x16x16_f16` cannot be built.** That is not "tight", and it is not a
-scheduling problem a better compiler would solve: 128 + 128 already equals the ceiling before a single score,
-pointer or loop counter is allocated. The brief's own §4 point 2 ("M cannot grow: at 32 rows the accumulator
-alone wants 256 registers/lane") was the same observation one step earlier; the missing half was that Q-in-
-registers moves the same bound onto the operand side.
+That table is the sum of *simultaneous* liveness, and §6 shows the compiler does not actually allocate that way:
+it rematerialises a Q load before it will spend a register on it, which is the most important finding in this file
+and is why §2's headline had to be revised twice. Read with §6's measurements alongside:
 
-The f16 column is llama's shape, and it fits with 12 registers to spare — which is why the honest conclusion is
-not "the geometry is impossible" but **"the geometry and the accumulator format are one decision, not two"**, and
-the brief lists them as R2 and R8 with R8 downstream of everything.
+| quantity | f32 accumulator (our atom) | f16 accumulator (llama's RDNA3 atom) |
+|---|---|---|
+| P·V accumulator, 16 rows × 256 dims | 16 × 8 f32 tiles = **128** | 8 × `tile<16,16,half2>` = **64** |
+| Q fully resident, 16 rows × 256 dims (§1) | **128** | **128** |
+| a 64-position round's scores | 4 × 8 = **32** | **32** |
+| P operands, staging temps, addressing | ≥ 20 | ≥ 20 |
+| **naive sum, against 256** | **≥ 308 — over by ≥ 52** | **≈ 244 — 12 to spare** |
+| **measured, isolated probe (§6)** | **219 VGPR, 0 spill** | **155 VGPR, 0 spill** |
+
+What survives of the arithmetic, stated at the strength the evidence supports: **the accumulator width is worth
+exactly 64 VGPR per lane and nothing else in the shape can pay for it** (§6: 219 → 155 with Q, 177 → 113 without,
+identical residuals). On the shipped `v_wmma_f32_16x16x16_f16`, that 64 is the *entire* budget R2 needs and it is
+not available — so the compiler satisfies the ceiling by rematerialising precisely what R2 was supposed to delete. **R2 as written
+is unachievable on the f32 atom: the shape cannot both hold Q for the whole sweep and roll 128 VGPR of f32
+accumulator, and clang will hand back the Q re-read rather than overflow.** That is a source kill of the funded
+spelling, and it is a statement about the shape, not about clang being clever.
+
+The f16 column is llama's shape, and it fits with room (§6 measures 155 of 256 at full accumulator plus as much Q
+as clang chooses to keep), which makes the honest conclusion not "the geometry is impossible" but **"the geometry
+and the accumulator format are one decision, not two"** — and the brief lists them as R2 and R8 with R8 downstream
+of everything. §4 is unchanged; §6 is what changed the wording here.
 
 ## 3. What the variant table actually shows, and what it does not
 
@@ -125,9 +141,11 @@ Three things this table cannot say, stated because the temptation is there:
 
 ## 4. Verdict, and the two ways forward
 
-**Step 2 does not survive as written, so step 3 is not started.** No knob, no BET, no device window: the
-abort line (6.5 TFLOP/s at 32k) is not reachable by a build that cannot be built, and burning a paired window to
-discover arithmetic that clang will print for free is the mistake the step ordering exists to prevent.
+**Step 2 does not survive as written, so step 3 is not started.** No knob, no BET, no device window: on the atom
+the engine ships, R2 (Q resident for the whole sweep) cannot be honoured — the accumulator and Q together want the
+whole 256-VGPR budget, and clang satisfies that by re-issuing the Q loads, i.e. by handing back the traffic R2
+exists to delete (§2, §6). Burning a paired window to discover what clang will print for free is the mistake the
+step ordering exists to prevent.
 
 The rewrite survives only in a form that changes what was funded, and the choice is the user's, not mine:
 
@@ -138,9 +156,11 @@ The rewrite survives only in a form that changes what was funded, and the choice
    ~1,100× redundancy per layer — so §3's 9.6 → 64 MAC-per-LSU-byte story halves at best, and there is no reason
    to expect the 6.5 TFLOP/s line from it. Priced in registers: comfortable. Priced in promise: weak.
 2. **Take the f16-accumulating atom (`v_wmma_f16_16x16x16_f16`, llama's RDNA3 form) and build R1+R2+R3 whole.**
-   Live set ~244 of 256, i.e. it fits the way llama's fits — which is to say it also spills on purpose
-   (`A2-census.md:78`: 256 VGPR, 900 B/thread scratch, and 1.9× our rate regardless), so the brief's point 6
-   ("what are the spilled bytes on the critical path") is now the open question rather than the spill itself.
+   Isolated probe (§6): **155 VGPR, 0 spill** — not the ~244 the naive sum said, because the accumulator drops from
+   128 to 64 and clang spends the freed registers on whatever it likes. In a real kernel the scores, P, staging and
+   addressing will take some of that ~100 back, and llama's own traced shape spends them on purpose
+   (`A2-census.md:78`: 256 VGPR, 900 B/thread scratch, 1.9× our rate regardless), so the brief's point 6 ("what are
+   the spilled bytes on the critical path") is now the open question rather than the spill itself.
    The cost is that **R8 stops being downstream**: accumulating P·V in f16 across a 32,768-position sweep is a
    format change on the shipping path, and the atom's issue rate on gfx1151 has never been measured —
    `prototype/issue_rate_probe/results.md` §1 priced only the f32 form (52.63 TFLOP/s). Both are cheap to settle
@@ -148,9 +168,12 @@ The rewrite survives only in a form that changes what was funded, and the choice
    existing gates with no new band, and the probe answer could make the numerics moot by showing the atom is
    slower.
 
-Cheapest next step, in one line: run `prototype/issue_rate_probe` with an f16-accumulant kernel added to the
-existing harness, in a single `gpu_lock` hold, before either branch is funded — it is the only number in this
-file that can change the recommendation, and it costs minutes rather than a week.
+Cheapest next step, in one line: **the f16 legs already exist and have never been run.**
+`prototype/issue_rate_probe/wmma_latency.cpp` carries `wl_f16_i{1,2,4,8}` beside the f32 legs (and a `wl_empty_i1`
+loop-overhead baseline to subtract), `build_wmma_latency.sh` builds them, and no binary is on disk — so the rate
+question is `bash prototype/issue_rate_probe/build_wmma_latency.sh` plus one run in a `gpu_lock` hold of mine,
+not new code. It is the only number in this file that can change the recommendation, and it costs minutes rather
+than a week.
 
 ## 5. Reproducing this
 
@@ -158,6 +181,7 @@ file that can change the recommendation, and it costs minutes rather than a week
 bash prototype/attn_percost/a10_rf_ladder.sh /tmp/a10rf     # canary + variants + note blocks, ~10 s, no device
 hipcc -O3 --offload-arch=gfx1151 --save-temps -c prototype/attn_percost/a10_frag_cost.hip.cpp -o k.o
 hipcc -O3 --offload-arch=gfx1151 --save-temps -c prototype/attn_percost/a10_lb_probe.hip.cpp -o k.o
+hipcc -O3 --offload-arch=gfx1151 --save-temps -c prototype/attn_percost/a10_acc_width.hip.cpp -o k.o
 python3 prototype/attn_wmma/fattn_residency_read.py --asm <listing> --all
 ```
 
@@ -167,3 +191,45 @@ it would move A6's recorded evidence: `prototype/attn_percost/a6_rf_ladder.sh` n
 template calls `attn_fattn_body<false>` and G1 added a second template parameter, so every rung errors with
 `candidate template ignored: couldn't infer template argument 'kQUnstaged8'`. Anyone re-running A6's ladder needs
 `attn_fattn_body<false, false>` (base) and `<false, true>` (g1) in `a6_rf_ladder.py:40`.
+## 6. Addendum: a contradiction from inside this repo, and the compile that settles it
+
+`prototype/issue_rate_probe/wmma_latency.cpp:24-33` — written by an earlier session, before anything here — asserts
+in its header that **"The F16 accumulator does not save registers"**, citing rocwmma declaring
+`CRegsT = AccRegF32x8` for `f16 x f16 -> f16` and its own legs reading near-equal VGPR at equal ILP. §2's f16 column
+depends on the opposite. Both readings can be defended, because they answer different questions: the probe's legs
+hold the same *tile count* in each width (so equal per-tile cost says nothing about how much output a tile covers),
+and rocwmma's declaration is rocwmma's choice, not the instruction's. Since nothing in this tree had ever emitted
+the f16-accumulator form in a kernel, this was settled with a compile rather than with an argument:
+`a10_acc_width.hip.cpp`, four variants, same geometry, differing only in accumulator element type and tile count,
+accumulator held live across a `#pragma unroll 1` KV loop by construction.
+
+| variant | Q | accumulator | `.vgpr_count` | spill | scratch B/thread |
+|---|---|---|---|---|---|
+| `acc_f32` | resident (attempted) | 16 f32 tiles | **219** | 0 | 0 |
+| `acc_f16` | resident (attempted) | 8 f16 tiles | **155** | 0 | 0 |
+| `acc_f32_noq` | re-read per round | 16 f32 tiles | **177** | 0 | 0 |
+| `acc_f16_noq` | re-read per round | 8 f16 tiles | **113** | 0 | 0 |
+
+Three readings, in decreasing order of confidence:
+
+1. **The accumulator width is worth exactly 64 VGPR per lane.** 219 → 155 with Q, 177 → 113 without — 64 both times,
+   identical residuals, one variable. The emitted instruction says why: `v_wmma_f16_16x16x16_f16 v[97:104],
+   v[18:25], v[145:152], v[97:104] op_sel:[0,0,1]` — an 8-VGPR D block, `C == D`, covering **32 dims** per issue
+   because a `half2` register holds two of them, which is exactly llama's `tile<16,16,half2>` shape. So
+   `wmma_latency.cpp`'s header claim is **wrong for the case that matters** (fixed output coverage) and right for
+   the case it measured (fixed tile count); its note that the f16 form's economy is "on the DRAIN, not the
+   accumulator footprint" is the half that is true — no f32 widening on the drain *and* half the accumulator.
+2. **Q resident costs less than §1's 128 in isolation, because clang refuses to pay it.** Measured: 219 − 177 = 42,
+   and 155 − 113 = 42 again. 42 is not 128; it is what clang keeps live before deciding to re-issue the `__ldg`s,
+   which it can do freely here because `src` is `const` and nothing in the loop writes it. That is a legal
+   optimisation and the reason this probe cannot price R2 directly — **but it is also the finding**: rematerialising
+   a Q load *is* the traffic R2 exists to delete. On the f32 atom, where the arithmetic leaves no room, this is what
+   happens; on the f16 atom at 155 there is ~100 VGPR of room, and keeping all 16 tuples live is then a choice the
+   compiler can afford. An instrument that under-reports its own subject must say so, which is this paragraph.
+3. **What this does not settle.** No device run, so nothing about the f16 atom's *rate* (§4 still names it as the
+   number owed) and nothing about the numerics of an f16 accumulator across 32,768 positions. The fragments here
+   are noise; the geometry is real, the arithmetic is real, the values are not.
+
+Reproduce: `hipcc -O3 --offload-arch=gfx1151 --save-temps -c prototype/attn_percost/a10_acc_width.hip.cpp -o k.o`,
+then `fattn_residency_read.py --asm <listing> --all`. Nothing launched, no `gpu_lock` held, no timing taken.
+
