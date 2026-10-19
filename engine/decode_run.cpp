@@ -215,7 +215,7 @@ struct Options {
     // for the whole span (`engine/gdn_rec_reg16_kernels.h`, `prototype/gdn_walk/BET.md` §12). Echoed on the
     // NUMERICS line, and it reaches the span branch only: `--gdn-loop 1`, `--gdn-scan collapse` and
     // `--gdn-norm hoist` are each refused below rather than echoed as a shape that did not run.
-    engine::kernels::GdnGeom gdn_geom = engine::kernels::GdnGeom::kBlock;
+    engine::kernels::GdnGeom gdn_geom = engine::kernels::GdnGeom::kReg16;
     bool gdn_geom_given = false;
     // The chunk size. Only 64 is accepted, and the refusal prints the measured reason rather than
     // "unsupported": C=16 lost §2.3's per-row budget on the pinned dumps, which is the argument for
@@ -505,6 +505,23 @@ Options parse_args(int argc, char** argv) {
                                  " keep their own prologue unchanged. Use --gdn-loop 512 (the default)"
                                  " or --gdn-norm inline (the shipped form)");
     }
+    // A default must not manufacture a refusal. `reg16` is the shipping geometry now, but `--gdn-norm hoist`
+    // — a knob a caller may legitimately pass, because bet G1's form lives there — has no reg16 body: reg16's
+    // norms are registers, which is the whole point of the map. When the geometry was NEVER ASKED FOR and that
+    // knob WAS, the request is for a body only the pre-G4 map has, so the map follows the request and the echo
+    // says `block`: silently, but not falsely, which is the precedent the `--gdn-scan collapse` refusal above
+    // already sets ("that refusal now fires only when the flag was actually given, because a default of
+    // `unroll4` must not turn a bare `--gdn-scan collapse` into an error"). Name both and the explicit refusal
+    // below still fires — an asked-for pair that contradicts itself is a mistake to report, not a default to
+    // route around. Verified on device: default echoes `reg16`; `--gdn-loop 1` echoes
+    // `na-loop1-per-token-bodies`; `--gdn-norm hoist --gdn-loop 512` echoes `block` and runs G1's form;
+    // `--gdn-geom reg16 --gdn-norm hoist` refuses naming registers. (`--gdn-spell` needs no clause here:
+    // `--gdn-spell ship|unroll4` at `--gdn-loop > 1` is already refused by the guard above, geometry-free,
+    // because only the fused spelling has a looped body at all — checked on device, and a clause for it here
+    // would have been a branch that cannot be reached.)
+    if (!o.gdn_geom_given && o.gdn_norm_given && o.gdn_norm == engine::kernels::GdnNorm::kHoist) {
+        o.gdn_geom = engine::kernels::GdnGeom::kBlock;
+    }
     if (o.gdn_geom_given && o.gdn_geom != engine::kernels::GdnGeom::kBlock &&
         o.gdn_scan == engine::kernels::GdnScan::kCollapse) {
         // The fourth instance of the same misreport. Route A submits `gdn_rc::rec_collapse_kernel`, which
@@ -516,10 +533,18 @@ Options parse_args(int argc, char** argv) {
                                  " collapse, which launches a different kernel. Use --gdn-scan seq"
                                  " (the default) for this A/B");
     }
-    if (o.gdn_geom != engine::kernels::GdnGeom::kBlock && o.gdn_loop <= 1) {
+    if (o.gdn_geom_given && o.gdn_geom != engine::kernels::GdnGeom::kBlock && o.gdn_loop <= 1) {
         // `--gdn-loop 1` runs the per-token kernels, and neither re-spelled geometry is a per-token body.
         // Refused at parse, like the `--gdn-norm hoist` pair above, rather than loading 1.55 GB of weights
         // to say it.
+        //
+        // Keyed on `gdn_geom_given` deliberately, because `--gdn-geom` now DEFAULTS to `reg16` (bet G4,
+        // bench §44): a guard written as `geom != block` would turn the shipping default into a refusal at
+        // `--gdn-loop 1`, which is a legal and pinned route (the decode bits were pinned through the
+        // per-token bodies, and `resolve_gdn_loop` routes a one-row body there whatever the geometry says).
+        // An EXPLICIT `--gdn-geom reg16 --gdn-loop 1` is still refused, for the standing reason: a flag that
+        // names a form and gets another one prices one kernel twice and reports the second price as a win.
+        // An unasked default simply runs the per-token bodies, which is what it ran before this flag existed.
         throw std::runtime_error("--gdn-geom " + std::string(engine::kernels::gdn_geom_name(o.gdn_geom)) +
                                  " re-spells the LOOPED body (engine/gdn_rec_wf_kernels.h for wf4/wf2,"
                                  " engine/gdn_rec_reg16_kernels.h for reg16) and --gdn-loop " +
