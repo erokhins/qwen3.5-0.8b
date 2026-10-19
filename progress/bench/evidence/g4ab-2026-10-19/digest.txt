@@ -1,0 +1,48 @@
+Window g4-ab, 2026-10-19, main agent, blocking, zero subagents, one gpu_lock hold (TAG g4-ab).
+util@acquire 5%, util@release 61%. sclk 840 MHz (level 1) at start, 2185 MHz at end — recorded then
+discounted, because every microsecond of these totals is GPU execution (AGENTS.md).
+4,096 lanes, medians of 3, one timer family. Baseline /tmp/base-g4 = pre-G4 tree; new = G4 tree.
+
+VERDICT (BET.md §12, pre-registered before the code existed):
+  reg16  LIVE — gdn_rec 267.09 -> 89.22 ms (-66.6%, live <=170); wall_ms 628.89 -> 453.65 (-27.9%, <=540);
+         RESULT ms_total 712.065 -> 535.105 ms => 5,764 -> 7,655 prompt tok/s at 4,096 lanes.
+  Null: base 267.09 vs same binary at --gdn-geom block 262.88 = -1.6% (inside the +/-3% paired floor of §37).
+  Externality: +2.18 ms summed over every family other than gdn_rec — the §40 discipline, applied.
+  Spread: base 1.5%, block 0.7%, reg16 9.2% — reg16's spread is large in relative terms and irrelevant to a
+  verdict whose margin is -66.6%.
+
+Canaries, before any timing:
+  A  the pre-G4 baseline refuses the NAME reg16; the shipping binary accepts it.
+  B  every side echoes its form and submits launches=144 plan_launches=144 counts_match=1.
+  GEOMETRY IN-HOLD: geom_block.txt / geom_reg16.txt, read by the fixed tools/trace_phase_split.py --geom
+     (three axes + KFD): block = (128,1,1) x 16 blocks; reg16 = (32,4,1) x 128 blocks. This read was the
+     canary §43 made possible — the pre-fix tool would have printed "16 blocks" for both.
+  Numerics legs before the hold: base == block bit-for-bit; reg16 moves STATEFP (the map is live, not a flag
+     selecting nothing); g4_mirror.py green (map is a bijection).
+
+SAME-KIND TRACED COMPARISON (trace_block/ and trace_reg16/, both passes derived from attn_prep=48/pass):
+  rec_loop_kernel      276.99 ms/pass, 144 launches  (§38's llama side, traced, was 47.20 ms/pass)
+  rec_reg16_kernel      89.22 ms/pass, 144 launches
+  => GDN gap 5.87x -> 1.89x, stated between traced numbers on both sides, not traced against family-clock.
+
+ADMISSION at the new default (main agent, device, exclusive, separate holds):
+  engine/gate.py --fixture dec64f   -> ENGINE GATE PASS, 64/64 pinned ids (2 by tie policy), worst step cos
+                                       0.998307, drift ratio 0.59, geometry assertion PASS.
+  engine/gate.py --fixture wide520f -> ENGINE GATE PASS, 24/24 exactly, worst step cos 0.999851 (>MAXSC).
+  Decode paired A/B, 64 steps, 512-token prompt, 3 reps each: base 2.027/1.585/1.623 ms per step (median
+  1.623), new 1.659/1.578/1.584 (median 1.584) = -2.4%, inside the paired floor: decode unchanged.
+  tools/longctx_check.sh --widths 8192 at the new default -> VERDICT PASS (all five checks, prefix
+  consistency across wave and one-row routes); one rep ms_total=1249.944 against §39's 1541.69 median.
+  ONE REP, NOT A LADDER — §39's rows are stale and a re-take is owed.
+
+Independent main-agent verification, not inherited from the worker:
+  fresh compile of kernels_gdn.cpp: rec_reg16_kernel next_free_vgpr 76, group_segment 0,
+  private_segment 0 with private segment disabled; rec_loop_kernel 75 / 1280 / 0.
+  walk_isa_diff.py --g4 PASS: inside the token loop 9 global loads and exactly 1 global store (o), 16 state
+  loads and 16 state stores OUTSIDE it, 12 permutes, 0 barriers, 0 LDS, 0 scratch.
+
+The far-field witness: gate_g2's inherited "rms_rel <= 1.25 x shipped" read 1.250290 and is now informative,
+not binding — constant untouched, check still printed every span. Evidence: shipped's own rms_rel to the pins
+swings 27.8% between the same spans; sign flips with span; reg16 reads 0.694 at wave-rows 16; top contributors
+0.01% each with 61.6% of elements moved; 64-step free run 110/110 identical ids; and gate.py --fixture dec64f
+--gdn-geom reg16 matches all 64 pinned ids.

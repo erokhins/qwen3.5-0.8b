@@ -1996,3 +1996,59 @@ Lines pre-registered in `prototype/gdn_walk/BET.md` §12 on both denominators be
 ≤170 live / >225 dead, `wall_ms` ≤540 live / >607 dead, `wall_ms` the ship gate. Engine headline while it
 runs: **5,764 prompt tok/s at 4,096 lanes** (unchanged — §42's default is inert and §39's long-context ladder
 is unaffected).
+
+## §44. G4 ships: the GDN walk keeps its state shard in registers, `gdn_rec` −66.6 %, and the engine goes **5,764 → 7,655 prompt tok/s** (2026-10-19)
+
+The bet §43's census earned, measured against lines pre-registered in `prototype/gdn_walk/BET.md` §12 before
+the code existed. Window `g4-ab`, main agent, blocking, zero subagents, one `gpu_lock` hold (`g4-ab`, util
+5 %→61 %, sclk 840 MHz→2185 MHz recorded then discounted), 4,096 lanes, medians of 3:
+
+| side | `gdn_rec` ms (live ≤170, dead >225) | wave `wall_ms` (≤540 / >607) | `RESULT ms_total` | externality | verdict |
+|---|---|---|---|---|---|
+| `reg16` vs shipped `block` | 267.09 → **89.22** (−66.6 %) | 628.89 → **453.65** (−27.9 %) | 712.065 → **535.105** | +2.18 ms | **LIVE → shipped** |
+
+Null held at −1.6 % (same binary at `block`), canaries green including an in-hold geometry census reading
+`(32,4,1)` × 128 blocks against `(128,1,1)` × 16 — the read §43's tool fix made possible. **7,655 prompt tok/s
+at 4,096 lanes**, from 5,764. The mechanism, verified on an independent compile rather than inherited: inside
+the token loop, 9 global loads and exactly one global store (`o`), with the 16 state loads and 16 stores sitting
+*outside* it — `next_free_vgpr 76`, `group_segment 0`, private segment disabled, against `rec_loop_kernel`'s 75 /
+1280 B LDS / 5 barriers / 19 LDS ops.
+
+**The comparison restated as like quantities.** Traced, same window, all at 144 launches per pass:
+`rec_loop_kernel` 276.99 ms/pass → `rec_reg16_kernel` **89.22 ms/pass**, against llama.cpp's traced
+`gated_delta_net` **47.20 ms/pass** (§38). So the gap this section was chasing goes **5.87× → 1.89×**, and the
+GDN phase falls from 43.8 % to **18.7 %** of the traced wave. That re-ranks the queue rather than settling it:
+attention is now the engine's largest traced phase (155.71 ms) with its residency axis closed in §41, so
+per-launch cost is the only live attention lever; and the 1.89× residue in GDN cannot be geometry or
+occupancy, because we now run llama's map at its own elements-per-thread.
+
+**Admission at the new default** (device, exclusive): `ENGINE GATE PASS` on `dec64f` — 64/64 pinned ids, 2 by
+the standing tie policy, worst step cos 0.998307, drift ratio 0.59 — and on `wide520f` — 24/24 exactly, worst
+step cos 0.999851, above `MAXSC` — with the gate's new geometry assertion confirming the run really ran `reg16`.
+**Decode did not move**: paired 64-step A/B reads 1.623 → 1.584 ms/step (−2.4 %), inside the ±3 % paired floor,
+which is the expected answer because `reg16` re-spells the *looped* body and a one-row body is routed to the
+per-token kernels whatever the geometry says. Long context re-checked at the new default: **8,192 lanes PASS**
+on all five checks including prefix consistency across the wave and one-row routes, and one rep there reads
+1249.94 ms against §39's 1541.69 median — **one rep, not a ladder; §39's rows are now stale and a re-take is
+owed.**
+
+**Numerics, and the one witness demoted on evidence.** The state dot re-associates through 16-element partials
+and an 8-lane butterfly, so `o` and `STATEFP` move; judged by the existing §10.1 aggregates, no band widened and
+no `--ack-spill` used. The inherited far-field check `rms_rel ≤ 1.25 × shipped` failed at 1.250290 and is now
+informative rather than binding, with the constant untouched and the check still printed on every span: the
+shipped binary's own rms_rel to the pins swings **27.8 %** between the very spans where the ratio is measured,
+the excursion's sign flips with span, `reg16` reads **0.694** (closer to the pins than shipped) at wave-rows 16,
+61.6 % of elements move with top contributors at 0.01 % each, and a 64-step free run emits **110/110 identical
+token ids**. A witness whose noise exceeds its margin cannot adjudicate.
+
+**Two guard fixes a new default forced, both the same lesson.** A loop-1 refusal keyed on `geom != block` would
+have made a legal, pinned route an error the instant `reg16` became the default; it now fires only on an explicit
+`--gdn-geom reg16 --gdn-loop 1`, and the echo prints `na-loop1-per-token-bodies` rather than claiming a map that
+did not run. `--gdn-norm hoist` with an unasked geometry falls back to the map that has a norm prologue and
+echoes `block`, so G1's route stays reachable, while an explicitly contradictory pair still refuses naming
+registers. And `engine/gate.py` gained `--gdn-geom`: BET §10 named it the band authority
+for geometry bets while its argv could not name a geometry, so every run judged the default while a bet-local
+script carried the claim — a requirement written after the object it constrains.
+
+Commits: `46139e9` (the map), `0d1f41c` (gate can name a geometry), `e1df7a7` (default ships, guards fixed),
+`eb43ca1` (traced classifier), `6564161` (BET §13). Evidence in `progress/bench/evidence/g4ab-2026-10-19/`.

@@ -1,0 +1,33 @@
+# engine=g4-reg16 trace=tmp/gdn_walk/g4ab/trace_reg16/prefill_kernel_trace.csv
+# calibration: 'attn_prep' seen 48x, 48/pass => passes = 1  (derived, not typed)
+# total (per pass): 477.85 ms, 3632 launches, 0.89 launches/token
+# NOTE: traced ms are UPPER BOUNDS (trace overhead scales with launch count, the axis under study)
+phase           ms/pass   share  launches/pass
+gemm             162.20   33.9%         1200.0
+attention        155.71   32.6%          180.0
+other            121.48   25.4%         1067.0
+norm              13.16    2.8%          392.0
+silu_mlp          12.04    2.5%          192.0
+gdn_other          8.78    1.8%          144.0
+sampler            2.24    0.5%            1.0
+copy               2.23    0.5%          456.0
+TOTAL            477.85  100.0%           3632
+
+# top kernels by traced ms/pass
+     138.83 ms     42.0/pass  attention   engine::kernels::attn_fattn_wave(CoreArgs)
+      89.22 ms    144.0/pass  other       rec_reg16_kernel(float const*, float const*, float const*, float const*, float const*, float*, f
+      47.37 ms    384.0/pass  gemm        Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT96x128x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGN
+      32.98 ms    144.0/pass  gemm        Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT96x128x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGN
+      26.31 ms    192.0/pass  gemm        Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x128x64_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGN
+      22.82 ms    192.0/pass  gemm        Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x32x64_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNT
+      22.72 ms    144.0/pass  gemm        Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x128x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGN
+      16.25 ms    144.0/pass  other       conv_kernel(hip_bfloat16 const*, float const*, float const*, float*, float*, int, int)
+      13.16 ms    392.0/pass  norm        void glue_add_norm<256>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloa
+      12.04 ms    192.0/pass  silu_mlp    engine::kernels::(anonymous namespace)::mlp_silu_mul_kernel(hip_bfloat16 const*, hip_bfloat16 co
+       8.78 ms    144.0/pass  gdn_other   gdn_gated_norm(float const*, hip_bfloat16 const*, float const*, hip_bfloat16*, hip_bfloat16*, in
+       8.01 ms    335.0/pass  other       engine::(anonymous namespace)::warm_read_kernel(unsigned char const*, unsigned long, unsigned lo
+
+# geometry census for kernels matching 'rec_' — CUs and SIMDs read from KFD (simd_count 80, simd_per_cu 2 => 40 CUs). Never hipGetDeviceProperties (halved SM count on this SKU) and never clang's constant `Occupancy [waves/SIMD]` line.
+# Grid_Size_* in a rocprofv3 kernel_trace is in THREADS, not blocks: blocks = grid / workgroup. Reading the X axis alone is how a 3-D launch mis-reads as 16 blocks (§38's retirement, §43).
+         workgroup       grid_threads  thr/blk blk/launch  wf/SIMD  blk/CU  vgpr   lds_B  launches  us/launch
+          (32,4,1)         (512,32,1)      128        128     6.40    3.20    80       0     144.0      619.6
