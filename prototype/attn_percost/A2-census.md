@@ -219,9 +219,18 @@ instruction), C2 is 1.07×, C3 has no wall in it, C4/§4 is ~10–13 % of the ex
 **A3: buy the third resident block on the LDS axis — stage each warp's Q in 8-row half-tiles so `s_q` is
 3 × 4,096 = 12,288 B beside `s_kv`'s 8,192 B = 20,480 B/block ≤ 21,845 B, which is 3 blocks/CU = 9 wf/CU =
 4.5 wf/SIMD.** §41 closed this axis on exactly this number and named the price ("the epilogue down to
-≤ 21,845 B … not approved by anything in this ledger"); this is the request to fund it, and the half-tile
-spelling is the cheap way to reach that byte count without touching the epilogue's transpose or re-spilling Q
-into registers (V6's refuted variant). Why this and not the other live candidate: the round's extra LDS
+≤ 21,845 B … not approved by anything in this ledger"); this is the request to fund it. **[CORRECTED IN PLACE
+2026-10-19, A3-result.md §2: the sentence this clause carried — that the half-tile spelling reaches that byte
+count "without touching the epilogue's transpose or re-spilling Q into registers" — is false, and the byte
+count is not reachable that way at all. `engine/attn_fattn_kernels.h:710` and `:216` put the epilogue's F32
+transpose on the SAME per-warp buffer the Q stage occupies, and `:581` has the second WMMA operand consume all
+16 query rows x all 256 dims from that buffer every round, so 3 x 8,192 + 8,192 = 32,768 B is the floor of the
+shipped
+arithmetic and any 8-row scheme drags the epilogue with it (4 transpose passes, not 2). What remains of this
+paragraph — the elasticity, the 20,480 B target, the C6/C7 split — stands; what does not is the claim that the
+byte count was cheap. A3 is dead at the source: see `prototype/attn_percost/A3-result.md`.**
+
+Why this and not the other live candidate: the round's extra LDS
 re-reads are ~146 slots against a round body of ≥1,654 — the bet spends the resource the kernel is sitting
 idle on (8.8 % issue utilisation) to buy the resource it is short of (wavefronts per SIMD). And it is the only
 axis on this engine with a measured elasticity: §31's Bet 1 moved 4→8 wf/CU and the family went **1.647×**.
