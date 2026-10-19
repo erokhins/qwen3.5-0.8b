@@ -570,6 +570,14 @@ enum class FattnRoll { kSingle, kTwo };
 // provenance move — and `prototype/attn_percost/A6-G1-impl.md` is where that is proved on device.
 enum class FattnQStage { kStaged, kUnstaged8 };
 
+// `AttnLayerArgs::split_cap`'s OFF value, so the default is a named state and not a magic zero.
+// It is deliberately NOT spelled as a copy of `kAttnMaxSplit` (`engine/kernels_attn.cpp`, the lane-ceiling
+// constant): "uncapped" means the split is the lane geometry's own `split_for(lanes_last)` and nothing
+// else, so a cap of 0 cannot drift out of step with a future ceiling raise, and `tools/attn_ceiling_proof.py`
+// [A] — which accounts for every CODE use of `kAttnMaxSplit` in `engine/` — keeps its existing census.
+// Any value >= 2 is a real cap; a value above the ceiling is inert because `min` cannot bind there.
+constexpr int kAttnSplitCapOff = 0;
+
 struct AttnLayerArgs {
     const uint16_t *q_proj_out, *k_proj_out, *v_proj_out, *q_norm, *k_norm;
     uint16_t *k_cache, *v_cache;            // [2][cap][256], appended at `pos` in place
@@ -651,6 +659,31 @@ struct AttnLayerArgs {
     // geometry-independent), and the operand conversion is the same `bf16 -> f32 -> f16 RN`. Both kernels are in
     // the binary whatever this says, which is what makes the paired timing one window instead of two builds.
     FattnQStage fattn_qstage = FattnQStage::kStaged;
+
+    // How deep the split path may cut a wide query row (`--attn-split-cap`, bet A9-L-c). The lane geometry
+    // FORCES `split_for(lanes_last)` lane blocks (§07.3); this is an upper bound on that count, and the
+    // launch uses `min(split_for(lanes_last), split_cap)`. `kAttnSplitCapOff` (0) leaves the bound inert,
+    // which is the shipped behaviour and what every gate in this tree judges.
+    //
+    // WHY A CAP EXISTS: the split's partial round-trip is 105.5 GB written + 105.5 GB read back per pass at
+    // 32,768 lanes, and `attn_combine` was traced reading it at 208 GB/s = 88 % of this part's DRAM roof —
+    // the one item in `prototype/attn_percost/A9-LONGCTX-CENSUS.md` §2.3 whose rate is measured rather than
+    // modelled. Capping at 8 removes 77 % of that traffic and costs the widest body 2.13 % more serial
+    // depth (§4.2), because `ceil(64/8)` blocks of 4,096 lanes each still feeds the machine 5.87 block-waves.
+    //
+    // NOT bit-identical, and cannot be: fewer partials re-associates `attn_combine`'s merge, so this is
+    // judged by the existing §10.1 cos/meanrel bands exactly as A4-L1's two-accumulator roll was
+    // (`prototype/attn_percost/A4-BET.md`), never by a new band and never by loosening one.
+    //
+    // WHERE A CAP MAY BE ASKED FOR: a capped split makes a block's lane span `ceil(lanes/split)` BIGGER than
+    // `MAXSC`, which the WMMA wave handles (it stages `FATTN_MLANES` lanes a round and its round loop just
+    // runs longer, `engine/attn_fattn_kernels.h:475-479`, `:771`) and the two VALU tiled spellings do not
+    // (their score staging is `s_sc[ATTN_TILE_G][MAXSC]`, `engine/attn_slim_kernels.h:157`, indexed by the
+    // whole slice). So `attn_decode_layer` REFUSES a cap that binds under `--attn-fattn 0` instead of
+    // overrunning LDS; the refusal is host-side, costs no register and no LDS, and is the same shape as the
+    // `attn_m2` prototype's standing rule that a grid shallower than `split_for_lanes` is not launchable.
+    // The lane CEILING is priced on the UNCAPPED split, so a cap never widens `MAXSC × kAttnMaxSplit`.
+    int split_cap = kAttnSplitCapOff;
 };
 void attn_decode_layer(const AttnLayerArgs& a);
 

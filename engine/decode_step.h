@@ -106,6 +106,14 @@ struct DecodeScratch {
     // selectable and stays byte-identical to the pre-A6-G1 engine — which is why the default here carries no
     // numerics negotiation at all. Both sides are byte-compares, not bands.
     kernels::FattnQStage attn_fattn_qstage = kernels::FattnQStage::kUnstaged8;
+    // How deep the split path may cut a wide row (`--attn-split-cap`, bet A9-L-c;
+    // `kernels.h:AttnLayerArgs::split_cap`). Same riding reason as the five above — it has to reach the one
+    // call site in `submit_wave_body` — with one difference worth naming: unlike them it is NOT wave-only. A
+    // one-row body is the fused `attn_core` whatever it says, but that core has the same split-K streaming
+    // route, so a cap re-associates a long DECODE row's merge as well as a wave's (at cap 8 that starts at
+    // 4,608 lanes). `kAttnSplitCapOff` (0) is the default and is inert by construction: the split stays
+    // `split_for(lanes_last)`, so the shipped bits do not move.
+    int attn_split_cap = kernels::kAttnSplitCapOff;
     // Which §04.4 scan a GDN body runs (P9, `kernels.h:GdnScan`). Same riding reason as the three
     // above, and it too is overridden per body — a ONE-ROW body is `gdn_rec` whatever this says,
     // because decode's bits are pinned through the sequential recurrence and a chunked scan of one

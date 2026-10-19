@@ -85,6 +85,15 @@ constexpr int kAttnMaxSplit = 64;
 // than the staging width the split was derived from (`ceil(n / ceil(n/s)) <= s`).
 int split_for(int lanes) { return (lanes + MAXSC - 1) / MAXSC; }
 
+// L-c (`--attn-split-cap`, bet A9-L-c): the launch's split as an UPPER BOUND on the geometry's own.
+// `split_for` answers "how few lane blocks may this row be cut into without one block exceeding the
+// staging"; a cap asks for MORE lanes per block than that, which the row's slice arithmetic absorbs
+// (`span = ceil(nrow / s_row)` in every core, so the round loop just runs longer) and which therefore
+// needs no second rule — one expression, one authority, and the uncapped value is `split_for` verbatim.
+// `kAttnSplitCapOff` leaves it alone. A cap of 1 is NOT clamped here: it is refused by the caller below,
+// because a cap of 1 on a wide row is the one mis-normalisation §07.3 exists to make unreachable.
+int cap_split(int split, int cap) { return cap >= 2 ? std::min(split, cap) : split; }
+
 int warp_width() {
     static int w = [] {
         int v = 32;
@@ -199,6 +208,34 @@ void fattn_echo(int rows, int split, int lvalid, int nrows, const void* launched
     std::printf("%s\n", line.c_str());
     std::fflush(stdout);
 }
+
+// THE L-c CANARY (`--attn-split-cap`, bet A9-L-c), one line per DISTINCT launch geometry — `fattn_echo`'s
+// dedup rule and for the same reason: 48 attention layers call the launcher with identical numbers, and 48
+// identical lines is a line a reader skims past.
+//
+// WHY A SEPARATE LINE EXISTS WHEN `ATTN_FATTN` ALREADY PRINTS `split=`: a paired A/B on this box is owed a
+// behavioural canary, because `engine/build.sh` is not bit-reproducible and a byte-compare of two binaries
+// proves only that they are two builds (AGENTS.md, the 2026-10-17 stale-binary row — the first §13 A/B timed
+// a pre-change binary as its `new` side and reported a clean null while every in-binary self-check stayed
+// green, because a check compiled into the binary under test is blind to that one failure mode). So the
+// canary must be (a) a field the change is REQUIRED to move, (b) readable in the same breath as the number,
+// and (c) ABSENT from the pre-change binary, which is exactly what a new line prefix gives a harness: base
+// prints no `SPLITCAP` line at all, the new side prints one naming its cap, its effective split, and the
+// lane span that cap produced. `span=` is the field that makes the central risk of the bet checkable rather
+// than assumed: if a capped run prints `span > 512` and still produces sane logits, the cap widened a
+// block's slice instead of dropping lanes.
+void splitcap_echo(int rows, int lanes_last, int split_natural, int split_eff, int cap) {
+    static std::string last;
+    char buf[192];
+    std::snprintf(buf, sizeof(buf), "SPLITCAP split=%d cap=%d lanes=%d natural=%d rows=%d span=%d",
+                  split_eff, cap, lanes_last, split_natural, rows,
+                  (split_eff + lanes_last - 1) / split_eff);
+    const std::string line(buf);
+    if (line == last) return;
+    last = line;
+    std::printf("%s\n", line.c_str());
+    std::fflush(stdout);
+}
 }  // namespace
 
 std::size_t attn_part_floats(int rows) {    // `attn_core`'s own partial layout: one `(max, sum, acc[DH])` tuple per (query head, split
@@ -280,6 +317,31 @@ void attn_decode_layer(const AttnLayerArgs& a) {
         }
     }
 
+    // ---- L-c: the split the LAUNCH runs (`--attn-split-cap`, bet A9-L-c) -----------------------------
+    // TWO names, because two different questions are being asked of one number, and collapsing them is how a
+    // cap would quietly widen the lane ceiling. `split` above is the count the lane GEOMETRY forces, and the
+    // ceiling check is priced on it: a request of 40,000 lanes still refuses with `needs split=79` whatever
+    // the cap says, so `MAXSC × kAttnMaxSplit` remains the engine's lane ceiling and `engine/gate.py`'
+    // `lane_ceiling()` — which reads both factors out of these two files and asserts the run fits the product
+    // — keeps describing the refusal it is meant to describe. `split_eff` is what gets launched: a shallower
+    // cut of the SAME lane axis, never a deeper one, and never below 2 for a wide row (cap < 2 is refused
+    // outright, because the one-pass branch of `attn_core` cannot be handed more than `MAXSC` lanes and that
+    // branch is only unreachable while `split >= 2` — see the note above `split_lane`).
+    //
+    // NOTHING ELSE SIZES ON IT. The partial scratch is `attn_part_floats(rows)` = `rows*N_Q*kAttnMaxSplit*
+    // (DH+2)`, i.e. sized for the CAP of split rather than for this run's split, so a shallower split only
+    // leaves the tail of every row's slab unwritten — the slot expression strides by `a.split` and
+    // `blockIdx.y < split_eff`, both of which move together. The scratch bound therefore cannot be overrun by
+    // capping, only under-used, and that is why this knob costs no allocation, no LDS and no register.
+    if (a.split_cap == 1) {
+        throw std::runtime_error(
+            "attn_decode_layer: split_cap == 1 is not a shallower cut, it is a different route: with one"
+            " lane block a row wider than the staging is served by ONE block, which is the mis-normalisation"
+            " §07.3 exists to make unreachable (the one-pass softmax divides inside its own block and a"
+            " partial that has divided cannot be re-merged). Use split_cap = 0 (no cap) or >= 2;");
+    }
+    const int split_eff = cap_split(split, a.split_cap);
+
     CoreArgs c{};
     c.qg = bf16(a.q_proj_out);
     c.kg = bf16(a.k_proj_out);
@@ -307,7 +369,9 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     c.pos = a.pos;
     c.lvalid = a.lvalid;
     c.nrows = rows;
-    c.split = split;
+    c.split = split_eff;      // the CAPPED count: every grid below, `blocks_for_row` and `attn_combine`
+                              // read this one field, so writer and merge cannot disagree about how many
+                              // partials a row promises (L-c, `--attn-split-cap`)
     c.neg = NEG_NONE;
     c.full = 1;
     c.tile_kernel = 0;      // a zero-initialised struct is the shipped form; set per launch below
@@ -345,8 +409,8 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     // form. The coverage split itself — WMMA gets the rows §07.3 already streams, the VALU wave keeps the
     // one-pass rows — is `fattn_covers`'s, called from both kernels, so the two sides cannot disagree
     // about who owns a row and no partial slot is ever dropped or double-written.
-    const bool wave_fattn = a.wave_fattn != 0 && rows > 1 && a.wave_tile != 0 && split >= 2;
-    if (a.wave_fattn != 0 && rows > 1 && split < 2) {
+    const bool wave_fattn = a.wave_fattn != 0 && rows > 1 && a.wave_tile != 0 && split_eff >= 2;
+    if (a.wave_fattn != 0 && rows > 1 && split_eff < 2) {
         // Route (A)'s inert case, and it is structural rather than a choice: a one-pass wave allocates
         // NO streaming partials (`split == 1`), so the form has nowhere to write. Skipping it and saying
         // so is the inertness the split promised; launching it would dereference a null `part`, and
@@ -361,6 +425,37 @@ void attn_decode_layer(const AttnLayerArgs& a) {
             "wave's streaming rows; under wave_tile=0 the per-(row,head) attn_core owns the whole wave and "
             "there is nothing here for it to replace, so refusing is the only honest answer.");
     }
+    // THE CAP'S OWN REFUSAL (`--attn-split-cap`, bet A9-L-c) — an error, never a fallback, and never silent.
+    // A cap makes a block's lane slice WIDER: `span = ceil(lanes_last / split_eff)`, which is <= MAXSC exactly
+    // when the split is the geometry's own and > MAXSC whenever this cap binds. That is safe for the WMMA wave
+    // and unsafe for the two VALU tiled spellings, and the difference is a declared buffer, not a style point:
+    // `attn_fattn_wave` stages `FATTN_MLANES` = 16 lanes a round and its round loop runs from `lo_all` to
+    // `hi_all` (`engine/attn_fattn_kernels.h:771`), so a wider slice is more rounds and nothing else; but
+    // `attn_slim_wave` and `attn_tile_wave` stage a block's WHOLE slice as exact-BF16 scores in
+    // `__shared__ hip_bfloat16 s_sc[ATTN_TILE_G][MAXSC]` (`engine/attn_slim_kernels.h:157`, written at `:232`
+    // with `rr < ns == span`; same buffer in `attn_tile_body`) — so `span > MAXSC` is an LDS overrun whose
+    // device signature is a fault presented as a hang (AGENTS.md, the wave-only-path row). `attn_core` —
+    // `wave_tile=0`, and every one-row body — needs no guard: its streaming branch keeps a `tile`-sized
+    // window in `sc` (`prototype/attn_decode/attn_decode_kernels.h:355-360`) and its `s_row == 1` branch is
+    // only reachable at `lanes_of <= MAXSC`, so no branch there indexes `sc` by the span.
+    // This is also what `prototype/attn_m2` already refuses for the same geometry ("a `split` at least
+    // `split_for_lanes(lanes_last)`", `prototype/attn_m2/attn_m16.hip.cpp:1069-1075`), so the engine and that
+    // prototype now have the same rule instead of two authorities with different answers.
+    if (split_eff != split && rows > 1 && a.wave_tile != 0 && a.wave_fattn == 0) {
+        throw std::runtime_error("attn_decode_layer: --attn-split-cap " + std::to_string(a.split_cap) +
+                                 " binds here: widest row is " + std::to_string(lanes_last) +
+                                 " lanes, so a split of " + std::to_string(split_eff) + " gives each block " +
+                                 std::to_string((lanes_last + split_eff - 1) / split_eff) + " lanes"
+                                 " against a staging of MAXSC=" + std::to_string(MAXSC) +
+                                 ". The VALU tiled wave (`--attn-fattn 0`) stages a whole block slice in"
+                                 " `s_sc[ATTN_TILE_G][MAXSC]`, so a block wider than the staging is an LDS"
+                                 " overrun, not a slower run. The WMMA wave stages 16 lanes a round and"
+                                 " absorbs a wider slice as more rounds: run --attn-fattn 1 (the shipping"
+                                 " default) with a cap, or drop the cap.");
+    }
+    // The canary, printed only for a plan this launcher is actually about to submit (a refused run must not
+    // print a line claiming it ran). See `splitcap_echo` for why a change like this owes a canary at all.
+    splitcap_echo(rows, lanes_last, split, split_eff, a.split_cap);
     if (wave_fattn) {
         // NOTE: the plan guard that used to sit here read `c.fused`, which is the ONE-ROW core args — a
         // struct whose `fused` field the wave launcher never writes (`core.fused = wave_fused` is set
@@ -418,7 +513,7 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     // match. `attn_prep` is the staging kernel and does not read `fused`; `attn_combine` reads only
     // `part`/`aout`/`gout`/`qg`, all of which `c` carries.
     if (rows == 1) {
-        attn_core<<<dim3(N_Q, split), THREADS>>>(c);
+        attn_core<<<dim3(N_Q, split_eff), THREADS>>>(c);
     } else {
         attn_prep<<<dim3(N_Q + N_KV, rows), THREADS>>>(c);
         CoreArgs core = c;
@@ -454,7 +549,7 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                 // shared split flag and the early-out lives inside the body, before any barrier, so the
                 // covered rows are genuinely this launch's business and not a partial write it abandons.
                 core.fattn_cover = wave_fattn ? 1 : 0;
-                attn_slim_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
+                attn_slim_wave<<<dim3(N_KV, split_eff, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
                 if (wave_fattn) {
                     // The plan guard, in the one place it can be honest: `core` is complete here, so this
                     // reads the arguments this launch will actually dereference. An error, never a fallback
@@ -492,7 +587,7 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                     // banner cannot describe a kernel other than the one this launch submitted.
                     const bool roll_two = a.fattn_roll == FattnRoll::kTwo;
                     const bool q_unstaged = a.fattn_qstage == FattnQStage::kUnstaged8;
-                    const dim3 fattn_grid(N_Q, split, fattn_rtiles_of(rows));
+                    const dim3 fattn_grid(N_Q, split_eff, fattn_rtiles_of(rows));
                     const void* fattn_kernel = nullptr;
                     if (q_unstaged && roll_two) {
                         attn_fattn_wave_two_u8<<<fattn_grid, FATTN_THREADS>>>(core);
@@ -507,17 +602,17 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                         attn_fattn_wave<<<fattn_grid, FATTN_THREADS>>>(core);
                         fattn_kernel = reinterpret_cast<const void*>(attn_fattn_wave);
                     }
-                    fattn_echo(rows, split, c.lvalid, c.nrows, fattn_kernel,
+                    fattn_echo(rows, split_eff, c.lvalid, c.nrows, fattn_kernel,
                                fattn_roll_name(a.fattn_roll), fattn_qstage_name(a.fattn_qstage));
                 }
             } else {
-                attn_tile_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
+                attn_tile_wave<<<dim3(N_KV, split_eff, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
             }
         } else {
-            attn_core<<<dim3(N_Q, split, rows), THREADS>>>(core);
+            attn_core<<<dim3(N_Q, split_eff, rows), THREADS>>>(core);
         }
     }
-    if (split > 1) {
+    if (split_eff > 1) {
         // The merge: `(max,sum,acc)` per (row, lane block) → one row, then §05.6's gate. Same algebra
         // as the tile loop, same lifetime (A-17: it never leaves this launch). A row the staging fits
         // is skipped here — its single core block already finished it — which is what lets a wave carry

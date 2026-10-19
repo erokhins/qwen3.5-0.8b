@@ -176,6 +176,18 @@ struct Options {
     // Whether the knob was NAMED, for the identical reason as the one above: `stage` IS the default, so a guard
     // keyed on its value would manufacture a refusal for every bare run.
     bool attn_fattn_qstage_given = false;
+    // How deep the split path may cut a wide query row (`--attn-split-cap`, bet A9-L-c). Where the lane geometry
+    // forces `split_for(lanes_last)` lane blocks per wide row (§07.3), this is an UPPER bound on that count:
+    // the launch runs `min(split_for(lanes_last), N)`, so a block's lane slice gets WIDER and the split's
+    // partial round-trip — 105.5 GB written and 105.5 GB read back per pass at 32,768 lanes, read back at a
+    // traced 88 % of the DRAM roof (`prototype/attn_percost/A9-LONGCTX-CENSUS.md` §2.3) — gets smaller. The
+    // default `kAttnSplitCapOff` (0) is inert by construction, which is what makes the default side of the A/B
+    // a byte-compare rather than an argument. Like `--attn-fattn-roll` and `--attn-fattn-qstage` it is NOT
+    // bit-identical when it binds — fewer partials re-associate `attn_combine`'s merge — so the existing §10.1
+    // bands judge it, and unlike them it is not wave-only: a long decode row streams through the same route.
+    // Parsed or thrown, because it names which side of an A/B the run is and a silently-defaulted side would
+    // reproduce the uncapped run exactly, look green, and be priced as the cap's win.
+    int attn_split_cap = engine::kernels::kAttnSplitCapOff;
     // Which §04.4 scan a GDN body runs (P9, §04.7; route A is D-12). `seq` is the shipped recurrence —
     // one launch per token per layer, the form every decode pin is pinned through — and `collapse` is
     // the same recurrence held resident, one launch per layer per BODY. `chunk` is refused at
@@ -382,6 +394,36 @@ Options parse_args(int argc, char** argv) {
             // perfectly green, and be priced as the un-stage's residency win.
             o.attn_fattn_qstage = engine::kernels::parse_fattn_qstage(next());
             o.attn_fattn_qstage_given = true;
+        } else if (a == "--attn-split-cap") {
+            // Parsed AND validated here rather than clamped: a value that silently became the default would
+            // price the uncapped run twice and report the second price as the cap's win (the standing reason
+            // for parse-or-throw on every A/B flag in this file), and `1` is not a shallow cap but a different
+            // route — one lane block on a row wider than the staging is the mis-normalisation §07.3 exists to
+            // make unreachable, so the launcher's `split >= 2` precondition is stated as a refusal, not bent.
+            const std::string v = next();
+            int n = 0;
+            bool ok = false;
+            try {
+                size_t used = 0;
+                n = std::stoi(v, &used);
+                ok = used == v.size();
+            } catch (const std::exception&) {
+                ok = false;
+            }
+            if (!ok) {
+                throw std::runtime_error("--attn-split-cap takes a whole number of lane blocks (0 = no"
+                                         " cap, the default; 2 or more = a cap); got '" + v +
+                                         "'. Refusing rather than guessing, because this names which side"
+                                         " of bet A9-L-c produced the bits in this log");
+            }
+            if (n == 1 || n < 0) {
+                throw std::runtime_error("--attn-split-cap " + v + " is not a shallower cut: one lane block"
+                                         " on a row wider than the staging (MAXSC=512) normalises a weight"
+                                         " matrix inside a block that cannot see the whole row, which is the"
+                                         " defect §07.3 exists to make unreachable. Use 0 for no cap, or 2"
+                                         " or more");
+            }
+            o.attn_split_cap = n;
         } else if (a == "--gdn-scan") {
             o.gdn_scan = engine::kernels::parse_gdn_scan(next());
             o.gdn_scan_given = true;
@@ -810,6 +852,7 @@ void print_usage(FILE* out) {
                  " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
                  " [--gemm-pins all|none|<csv>] [--gemm-heur N] [--attn-touch 0|1]"
                  " [--attn-fattn-roll single|two] [--attn-fattn-qstage stage|unstaged8]"
+                 " [--attn-split-cap N]"
                  " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
                  " [--gdn-geom block|wf4|wf2|reg16]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
@@ -916,6 +959,24 @@ void print_usage(FILE* out) {
                  " same grid either way, all four roll×qstage combinations are real kernels in the binary, and"
                  " the launcher's ATTN_FATTN line reports `q=`/`lds=`/`wf_per_cu=`/`vgpr=` from the kernel that"
                  " actually ran. `--attn-fattn 0` REFUSES it, for the same reason as the roll\n"
+                 "  --attn-split-cap N  an UPPER BOUND on how many lane blocks a wide query row may be cut"
+                 " into (bet A9-L-c, prototype/attn_percost/A9-LONGCTX-CENSUS.md §4.2). The lane geometry"
+                 " forces `split = ceil(lanes/MAXSC)` blocks per wide row (§07.3); N caps that count, so a"
+                 " block's slice becomes `ceil(lanes/min(split,N))` lanes and the split's partial round-trip"
+                 " shrinks with it — 105.5 GB/pass of scratch written plus 105.5 GB read back at 32,768 lanes,"
+                 " and `attn_combine` was traced reading that at 88 %% of the DRAM roof, which is the one item"
+                 " in the census whose rate is measured (A9 §2.3). `0` (the DEFAULT) leaves the geometry's own"
+                 " split alone, i.e. today's bits; `1` is REFUSED because one lane block on a wide row is the"
+                 " mis-normalisation §07.3 exists to make unreachable; N above the engine's split ceiling is"
+                 " inert. NOT bit-identical and cannot be: fewer partials re-associates `attn_combine`'s merge,"
+                 " so the existing §10.1 cos/meanrel bands judge it and no band moves (the standing numeric-"
+                 " format rule). It binds on a long DECODE row as well as on a wave — the fused `attn_core`"
+                 " has the same streaming route — so at N=8 the first rows it moves start at 4,608 lanes. A"
+                 " binding cap is REFUSED under `--attn-fattn 0`: the VALU tiled wave stages a whole block"
+                 " slice in `s_sc[ATTN_TILE_G][MAXSC]`, so a slice wider than MAXSC is an LDS overrun, while"
+                 " the WMMA wave stages 16 lanes a round and absorbs a wider slice as more rounds. Every run"
+                 " prints `SPLITCAP split= cap= lanes= natural= rows= span=` once per distinct geometry — the"
+                 " behavioural canary an A/B reads to prove the binary carries the knob\n"
                  "  --gdn-spell ship|unroll4|fused  which SPELLING of the sequential recurrence's state"
                  " walks a `gdn_rec` launch runs (`engine/gdn_rec_unroll4_kernels.h`, "
                  "prototype/gdn_rec_isa/results.md §10, decision D32). `unroll4` is the SHIPPED"
@@ -1706,6 +1767,7 @@ int main(int argc, char** argv) {
         sc.attn_fattn = o.attn_fattn;
         sc.attn_fattn_roll = o.attn_fattn_roll;
         sc.attn_fattn_qstage = o.attn_fattn_qstage;
+        sc.attn_split_cap = o.attn_split_cap;
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;
         sc.gdn_spell = o.gdn_spell;
