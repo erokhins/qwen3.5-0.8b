@@ -2249,3 +2249,73 @@ host-side prompt feeding and per-prompt H2D copies; `--gemm lt` shape/algo work 
 `--gemm-pins all`; the first-touch page-warming cost recorded in `devices/strix-halo-unified-memory.md` (~35 GB/s
 on a first pass over fresh pages); and the ~2,083 syncs a 4,096-lane wave issues. Attributing it is the next funded
 item, because no kernel-level attention or GDN work can reach it.
+
+> **CORRECTED IN PLACE, same day — see §50.** The measurement above is right and the interpretation was not. Both
+> operands of this subtraction are the *same* `prefill_wave` call in the *same* process (`RESULT ms_total` is the
+> first pass; `--time-waves wall_ms` is a `st.reset()` + re-run of the identical wave), so this is a **cold-vs-warm
+> first-execution cost of ~90–110 ms**, not per-prompt host work outside the wave, and the bulk of it is hipBLASLt's
+> first execution per algo — with `--gemm hand` the gap at 512 lanes falls from +91.5 ms to +5.8 ms. The engine's
+> weight pages are already warmed inside `load_ms`, so none of the weight-first-touch candidate above can be the
+> cause. Read §50 before quoting any ratio from this section against another engine's rep-median.
+
+## §50. Correction to §49: that ~65–71 ms is **cold vs warm inside one process**, mostly hipBLASLt's first execution — and warm-vs-warm we are **faster** than llama.cpp at short context (2026-10-19)
+
+§49's subtraction was measured correctly (both operands came from one `--steps 0 --time-waves` invocation, lock
+TAG `fixedcost`) but **interpreted wrongly by me**: I called `RESULT ms_total − wall_ms` "per-prompt host cost
+outside the wave". It is not. `prototype/perprompt/A7-CANDIDATES.md` §0 read the source and the worker's reading
+is confirmed line by line: `ms_total` is the wall of the **first** `prefill_wave` (`engine/decode_run.cpp:1787-1795`,
+printed `:1990`), while `wall_ms` is printed by `wave_pass`, which calls `st.reset()` and runs **the same
+`prefill_wave` again** (`:1404-1421`), with `WAVEPARITY … logits_bitidentical=1` as the engine's own witness that
+the re-pass is identical work. Both operands are the same call in the same process, so the difference can only be
+**first-execution cost**. The two hypotheses §49 leaned on are also false as stated: the weight load is timed into
+a separate `load_ms` and never added (`:1588-1593`), and `WeightStore::load()` already performs a GPU warm read
+pass over every resident page inside `load_ms` (`engine/loader.cpp:626-644`), so weight first-touch is not inside
+`ms_total` at all.
+
+**Re-measured inside one process** (`prototype/perprompt/a7_host_split.sh`, `a7-hostsplit`, `util` 81 % at
+release, `sclk` 2572 MHz at end, medians of 3, `gap = cold − warm_burst`):
+
+| lanes | cold `ms_total` | warm `burst` | **gap** | gap with `--gemm hand` |
+|---|---|---|---|---|
+| 512 | 138.755 | 48.132 | **+91.5 ms** | **+5.8 ms** |
+| 1,024 | 188.874 | 90.815 | +98.1 ms | +30.9 ms |
+| 4,096 | 523.003 | 418.398 | **+109.9 ms** | **−72.5 ms** |
+| 16,384 | 2,775.064 | 2,675.212 | +102.2 ms | −119.2 ms |
+| 32,768 | 8,344.827 | 8,348.082 | −5.8 ms | −193.7 ms |
+
+Two readings survive, and the second is the actionable one. **(1)** The gap is flat in **ms** (~90–110) from 512 to
+16,384 and vanishes at 32,768, so it is a fixed one-time cost, not a percentage of the wave — which also means
+§49's flat 64.9–71.1 was the same quantity seen through a narrower window. **(2)** With the library GEMM disabled
+the gap collapses at short widths (512: +91.5 → +5.8 ms, i.e. 6 % of it) and goes negative beyond 4k, so **the
+bulk of the constant is hipBLASLt's first execution per algo**, not page first-touch (which `a7_scratch_bytes.py`
+bounds at 6.8–7.9 ms) and not kernel image loading (`a7_codeobj_census.py`: `.hip_fatbin` is 413,624 B embedded
+and registered before `main`, bounding that variant at ~0.012 ms). The negatives at ≥4k are the confound the leg
+warns about — the hand wave is far slower, so differences are the only honest reading there, not ratios.
+
+**What it does to the llama.cpp comparison.** Warm-vs-warm (ours on `warm_burst`, llama.cpp from §49's matched
+row; both engines' first-execution cost excluded):
+
+| lanes | ours warm tok/s | llama tok/s | llama/ours | §49's cold ratio |
+|---|---|---|---|---|
+| 512 | 10,637 | 7,378.72 | **0.69× — we are faster** | 2.08× |
+| 1,024 | 11,276 | 8,014.23 | **0.71× — we are faster** | 1.47× |
+| 4,096 | 9,790 | 10,259.19 | 1.05× | 1.29× |
+| 16,384 | 6,125 | 7,800.29 | 1.27× | 1.32× |
+| 32,768 | 3,924 | 5,475.38 | **1.40×** | 1.40× |
+
+So the engine is **ahead of llama.cpp warm at short context**, level at 4,096, and behind only as context grows —
+the opposite shape to §49, which was comparing our cold number against llama.cpp's rep-median. Whether
+llama-bench's own median excludes its first-execution cost is argued and not measured (with `-r 3` its rep 1
+carries it, so a median of 3 is warm-ish); that is a cheap check and is owed before this table is quoted as
+parity. The honest convention adopted here is **report both**: the cold number is the real first-request latency a
+server serves, the warm number is steady state, and no comparison across engines may mix them.
+
+**The funded consequence.** The engine already has a documented contract that warming belongs in `load_ms` and not
+in the timed region — loader phase 3 does exactly that for weight pages. The same contract applied to the GEMM
+algorithms (execute each algo once on a minimal body during load) should remove **~85–110 ms from `RESULT ms_total`
+at every width**, which is 3× on the short-context headline and ~20 % at 4,096, and it must be bit-identical
+because a warm-up body that touches run state would be a bug. Tracked as **A8** in `prototype/perprompt/`. What
+this still cannot see: GPU-side per-kernel durations (a `rocprofv3 --kernel-trace` pass with the pass-count
+discipline is a separate item), a finer split of first-touch pages from library warm-up than the F1 bound, and
+clock state, which is read and not controlled — `sclk` here sat at 2572 MHz with a flat gap at 32k, which is
+consistent with DVFS ramp being part of what the short waves pay first.
