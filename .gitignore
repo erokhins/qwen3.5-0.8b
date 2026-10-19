@@ -125,3 +125,9 @@ prototype/gdn_rec_isa/gdn_rec_isa
 # full (two components) — `prototype/**/gemm_algo_sweep` would match the directory and hide the sources
 prototype/gemm_algo_sweep/gemm_algo_sweep
 engines/llama.cpp/
+# --save-temps artifacts from a kernel-TU census compile (prototype/attn_wmma/fattn_census_build.sh
+# and A10's canary) land in the repo root; the 905 KB listings are regenerable, and the one slice that
+# is evidence is tracked under prototype/attn_percost/evidence/. Leading slash so this cannot match a
+# directory of the same name (see the trap row about ignore patterns matching op directories).
+/kernels_attn-hip-*
+/kernels_attn-host-*
