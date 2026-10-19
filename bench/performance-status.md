@@ -2356,12 +2356,22 @@ to hold as context grows). GDN's traced gap, which was the headline of §38, no 
 **The shape of it.** Per-token attention cost doubles with each doubling for both engines (ours 0.0927 → 0.1803
 ms/token from 16k to 32k; llama 0.0468 → 0.0944), so this is **a constant factor on the quadratic term, not a
 faster decay** — matching §50's `b`-ratio and ruling out "our attention degrades worse". Our absolute
-achievement is the revealing number: 3.3 TFLOP of causal attention per pass at 32k in 5.908 s is **0.56 TFLOP/s**,
-llama's is 1.07 TFLOP/s, and the WMMA roof measured in `prototype/issue_rate_probe/results.md` §1 is 52.63 — so
-**both** engines are 50–90× under the matrix roof at long context, and we are 1.9× under llama's utilisation. That
-kills the bandwidth-wall story for long context (a bandwidth-bound phase would not sit 94 % below the roof) and puts
+achievement is the revealing number: 26.389 TFLOP of causal attention per pass at 32k in 5.908 s is **4.47 TFLOP/s**,
+llama's is **8.53 TFLOP/s**, and the WMMA roof measured in `prototype/issue_rate_probe/results.md` §1 is 52.63 — so
+**both** engines are 6–12× under the matrix roof at long context, and we are 1.9× under llama's utilisation. That
+kills the bandwidth-wall story for long context (a bandwidth-bound phase would not sit ~90 % below the roof) and puts
 the remaining attention question exactly where A4 left it: what the round *does* per unit of K/V at 16-row M tiles,
 against llama's 256×256 geometry.
+
+> **CORRECTED IN PLACE, same day — `prototype/attn_percost/A9-LONGCTX-CENSUS.md` §1.** The first version of this
+> section published **0.56 TFLOP/s for us and 1.07 for llama**, which was **8× low**: the hand-built flop model
+> counted one head where the geometry has `N_Q = 8`. Corrected: MACs/pass = `12288·W(W+1)`, so 26.389 TFLOP per
+> pass at 32,768, and the rates are ours **4.09 / 4.34 / 4.47** against llama's **7.88 / 8.59 / 8.53** TFLOP/s at
+> 4,096 / 16,384 / 32,768 — 7.8–8.5 % of the WMMA roof against their 15.0–16.3 %. The ratio, the constant-factor
+> shape and the not-bandwidth-bound conclusion are all rate-scale-independent, so nothing in the paragraph above
+> changes; but "50–90× under the roof" was the wrong magnitude, and the corrected magnitude is what licenses A9 §5's
+> reading — at 8 % of a *matrix* roof, while a peer engine sits at 16 % of the same roof with **fewer** resident
+> wavefronts (8 vs our 9), the phase is limited by neither matrix throughput nor residency nor DRAM.
 
 **Parked, on instruction.** A8 (execute the GEMM algorithms once during `load_ms` to move the ~85–110 ms
 first-execution cost out of the timed window) is **parked**: it is a short-context and first-request win, and the
@@ -2373,3 +2383,57 @@ wasted-work accounting yet (padding to 16-row tiles, causal ragged tails, split-
 per-round 16-accumulator rescale). That census is the next item, and it must be done before anyone funds either a
 wider-M tile or the full llama-shaped rewrite — A5 §5 priced the rewrite at family −63 % and explicitly declined to
 fund it without this.
+
+## §52. A9 closes the long-context question: the gap is neither residency, nor bandwidth, nor matrix throughput — **L-c (cap the split) is funded, the rewrite is pre-gated and not funded** (2026-10-19)
+
+`prototype/attn_percost/A9-LONGCTX-CENSUS.md` is the evidence; this is the decision record. It begins with the
+correction above (§51's achieved rates were 8× low for want of the head axis) and then does what §51 named as the
+prerequisite: it prices the wasted work instead of theorising about it, and it converts nothing at 1:1 — the
+rescale and geometry items are charged at **A4-L1's measured 0.217 slot pass-through**, the discipline that lever
+earned by moving 7.7 % of the round's slots and 1.67 % of the family.
+
+**What is actually being wasted at 32,768 lanes.** Tile padding 2.94 %, round quantisation 1.25 %, causal-union
+overhang 4.01 %, per-launch/body overhead 1.07 % — and the rescale/running-max chain at 428,251 `v_mul`
+slots/token. Summed at measured conversion: **12–13 % of attention**, against the **47.6 % parity needs**. So the
+arithmetic answer to "find the waste and we will be level" is *no*.
+
+**The one genuinely-DRAM item, and it is ours.** The split path moves **105.46 GB/pass** of partial scratch
+round-trip at 32k (2,079 Σsplits → 1.06 M partial slots/layer × 1,032 B × 8 heads × 6 layers), and `attn_combine`
+is traced doing it at **208 GB/s = 88 % of the 237 GB/s roof** — a rate measured from traced bytes, not the
+demanded-bytes arithmetic D21 retired, which is why it is the only traffic-shaped claim this ledger will act on.
+
+**Decisions.**
+
+- **L-c — FUNDED.** Cap the split above a lane count. Zero registers, zero LDS, zero instructions per round;
+  `split_for` (`engine/kernels_attn.cpp:86`) and `blocks_for_row`
+  (`prototype/attn_decode/attn_decode_kernels.h:220-223`) are one rule in two spellings and move in one commit
+  (§34's two-header trap). At cap 8: round-trip **105.46 → 24.50 GB/pass (−81 GB)**, widest-body serial depth
+  **+2.13 %** — because `ceil(64/8) = 8` blocks per row is still 5.87 block-waves against 120 concurrent blocks,
+  so the machine stays fed; at 16,384 the cap costs 0.00 %. Predicted **−4.2 to −4.7 % of the 32k wave**
+  (−5.9 to −6.6 % of attention), falsified at <3 % in one paired window. Note this is **not** bit-identical: the
+  cap re-associates `attn_combine`'s merge, so it is judged by the existing gates per the standing numeric-format
+  rule, and if a gate goes red the question is whether the band can widen without losing a must-catch, not whether
+  to ship.
+- **L-b — DEAD, on declared LDS, without a device run.** 16→32 KV lanes per round halves the round count, but the
+  aliased K/V stage grows 20,480 → 28,672 B, forcing 3 blocks/CU → 2 and **9 → 6 wavefronts/CU**, which by this
+  engine's own §48 elasticity is **+28 % of family**. It is the residency lever run backwards; §48 bought −22 %
+  by going the other way.
+- **L-d — BUNDLED, not tested alone.** Batched rescale over 4 rounds (llama's `nbatch_fa = 64` against our 16) is
+  −1.26 % of family at measured conversion — under any ≥3 % line, so an solo A/B would measure noise.
+- **L-a — the named-but-not-chosen variant.** The only axis for more query rows per K/V stage is warp count, and
+  every traffic-halving spelling either loses wavefronts or pays +12.9 % issued work. The census' better candidate
+  is **`TRG` 8 → 4 → 12 wavefronts/CU with the geometry untouched**, which is a compile read and costs nothing to
+  price; it is queued ahead of anything that edits the round.
+- **The llama-shaped rewrite — NOT funded, and now pre-gated.** A9 §5's verdict is that no targeted lever closes
+  1.9×: best-case stack (L-c + residency) lands at **1.494×**, L-c alone at **1.784×**, against parity 1.000×. The
+  residual is **9.6 vs 31 MAC per LSU byte**, and the decisive observation is that llama achieves 1.9× our rate
+  with **fewer** resident wavefronts (8 against our 9) — so it is provably not residency, and after A3 (LDS floor),
+  A4-L1 (dependency), L-b (bandwidth) and G0/G1 (both residency) the same premise keeps failing from different
+  directions. Before any rewrite is funded: an `SQ_WAIT*` counter pass on the shipped kernel at 32k (which stall
+  class dominates), and a **pre-registered abort line — a prototype must clear 6.5 TFLOP/s to be worth a second
+  week of engineering**, written down before it is built so a number, not fatigue, ends it.
+
+**Honest bottom line.** After L-c we expect to remain ~1.5× behind llama.cpp at 32,768 lanes, with GEMM and GDN
+going our way. Closing the last factor is a scope decision about rewriting the attention geometry (~1.1k lines in
+this engine's terms), and it is the user's to make, not mine to spend days on. Cold/warm conventions from §50–§51
+still apply: every figure here is warm or trace-based, never a cold number against a peer's warm one.
