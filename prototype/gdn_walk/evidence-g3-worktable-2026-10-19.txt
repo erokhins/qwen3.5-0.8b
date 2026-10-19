@@ -1,0 +1,52 @@
+state: 262,144 elements = 1 MiB per layer; 18 GDN layers x 4096 tokens = 73,728 token-layers per pass
+issue roof = 80 SIMD x 2.894 GHz = 231.5 G wavefront-slots/s
+scalar v_fma_f32 roof = 7.3 TFLOP/s = 3.65 T MAC/s
+
+---- ours
+           wf = 64.00
+    slots_tok = 84,928.00
+       Gslots = 23.01
+    pct_issue = 9.94
+       TFLOPS = 0.57
+      pct_fma = 7.79
+       MB_tok = 3.18
+          GBs = 861.37
+   MB_tok_unique = 2.13
+   GBs_unique = 577.22
+---- llama
+           wf = 512.00
+    slots_tok = 109,056.00
+       Gslots = 170.35
+    pct_issue = 73.58
+       TFLOPS = 3.28
+      pct_fma = 44.87
+       MB_tok = 0.55
+          GBs = 863.94
+   MB_tok_unique = 0.04
+   GBs_unique = 57.78
+
+HEAD-TO-HEAD (per token per layer unless stated)
+                                  quantity              ours             llama  ratio
+                     threads participating             2,048            16,384  8.0x
+                                wavefronts                64               512  8.0x
+               wavefronts per SIMD (of 16)              0.80              6.40  8.0x
+                 state elements per thread               128                16  0.125x
+             slots per token per wavefront             1,327               213  0.161x
+               slots per token, whole grid            84,928           109,056  1.28x
+           global state accesses per token           786,432             1,024  0.0013x
+       bytes demanded at the LSU per token           3.18 MB            553 KB  0.174x
+     of which cannot come from L1 (unique)           2.13 MB             37 KB  0.0174x
+                  demanded GB/s at the LSU               861               864  
+          demanded GB/s, unique bytes only               577                58  
+     as % of the 918 GB/s cache roof (LSU)              94 %              94 %  
+  as % of the 918 GB/s cache roof (unique)              63 %             6.3 %  
+   as % of the 237 GB/s DRAM roof (unique)             244 %            24.4 %  
+                        achieved G slots/s              23.0             170.3  7.40x
+       as % of the 231.5 G-slot issue roof             9.9 %            73.6 %  
+             achieved TFLOP/s (scalar f32)              0.57              3.28  
+  as % of the 7.30 TFLOP/s scalar fma roof             7.8 %            44.9 %  
+                      traced ms/pass (S38)            272.07              47.2  5.76x
+
+our slots for the pass: 6.26 G -> at llama's 74 % issue efficiency = 36.8 ms (vs 272.07 ms now); at 50 % = 54.1 ms
+a llama-shaped grid (512 wf) carrying ~213 slots/token costs 8.04 G slots; at 74 % of roof = 46.9 ms; at 40 % = 86.8 ms; at 25 % = 138.9 ms
+state arithmetic floor: 21.2 ms at the 7.30 TFLOP/s roof

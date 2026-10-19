@@ -1,0 +1,53 @@
+# G3 ISA reads (2026-10-19), CPU-only. Carve + bill + census, both engines.
+
+## carve of llama's TU (the object that built libggml-hip.so used by §38)
+python3 tools/carve_codeobjects.py engines/llama.cpp/build-hip/ggml/src/ggml-hip/CMakeFiles/ggml-hip.dir/__/ggml-cuda/gated_delta_net.cu.o tmp/gcc/g3_isa --target gfx1151
+CANARY PASS: 1 code object(s), 32 kernel symbols, target id gfx1151 present in each
+
+## bill: the traced instantiation gated_delta_net_cuda<128,false,false,4>
+==== _Z20gated_delta_net_cudaILi128ELb0ELb0ELi4EEvPKfS1_S1_S1_S1_S1_PfS2_llllllllllll15HIP_vector_typeIjLj3EES4_fli
+     metadata: {'vgpr_count': 78, 'sgpr_count': 54, 'vgpr_spill_count': 0, 'sgpr_spill_count': 0, 'group_segment_fixed_size': 0, 'private_segment_fixed_size': 0, 'max_flat_workgroup_size': 128, 'wavefront_size': 32, 'kernarg_segment_size': 464}
+     424 instructions; classes: salu=212  vother=59  vmem_load=51  fma=44  vmem_store=17  fmul=15  xlane_logic=13  fadd=6  xlane_permute=6  exp=1
+     top mnemonics: s_waitcnt=52  global_load_b32=51  v_fmac_f32_e32=40  s_delay_alu=33  s_add_u32=20  s_addc_u32=20  s_mul_i32=18  global_store_b32=17  v_mul_f32_e32=15  s_lshl_b64=13  s_add_i32=11  s_mul_hi_u32=10  v_add_co_u32=9  v_add_co_ci_u32_e64=9
+     load/store widths: ds_bpermute_b32=6  global_load_b32=51  global_store_b32=17
+     loop 0x14524..0x1499c  span=1140 B  per-iteration ISA: {'total': 213, 'load': 35, 'fma': 44, 'lds': 6, 'exp': 1}
+
+## bill: our shipped walk, carved out of engine/build/decode_run
+  co_446464.co    346664 B  Machine:                           EM_AMDGPU | Flags:                             0x4a, gfx1151  FUNC syms=2
+CANARY PASS: 9 code object(s), 90 kernel symbols, target id gfx1151 present in each
+==== _Z15rec_loop_kernelPKfS0_S0_S0_S0_PfS1_ii
+     metadata: {'vgpr_count': 75, 'sgpr_count': 40, 'vgpr_spill_count': 0, 'sgpr_spill_count': 0, 'group_segment_fixed_size': 1280, 'private_segment_fixed_size': 0, 'max_flat_workgroup_size': 1024, 'wavefront_size': 32, 'kernarg_segment_size': 320}
+     835 instructions; classes: salu=576  vother=79  fma=46  vmem_load=37  lds=23  vmem_store=17  xlane_permute=16  fadd=13  fmul=10  xlane_logic=7  barrier=5  other=5  exp=1
+     top mnemonics: s_mov_b32=125  s_delay_alu=71  s_waitcnt=59  s_nop=54  v_fmac_f32_e32=45  s_branch=41  s_and_b32=40  global_load_b32=37  s_cmp_eq_u32=21  s_cbranch_vccnz=21  s_cbranch_scc0=21  s_cbranch_vccz=20  s_trap=20  s_xor_b32=19
+     load/store widths: ds_bpermute_b32=16  ds_load_2addr_b32=1  ds_load_b128=12  ds_load_b32=2  ds_store_2addr_b32=1  ds_store_2addr_stride64_b32=1  ds_store_b32=2  ds_swizzle_b32=4  global_load_b32=37  global_store_b32=17
+     loop 0xd060..0xd3f8  span=916 B  per-iteration ISA: {'total': 190, 'load': 2, 'lds': 22, 'barrier': 1}
+     loop 0xd060..0xd3d8  span=884 B  per-iteration ISA: {'total': 183, 'load': 2, 'lds': 21, 'barrier': 1}
+     loop 0xd060..0xd3b8  span=852 B  per-iteration ISA: {'total': 176, 'load': 2, 'lds': 20, 'barrier': 1}
+     loop 0xd060..0xd398  span=820 B  per-iteration ISA: {'total': 169, 'load': 2, 'lds': 19, 'barrier': 1}
+     loop 0xd060..0xd378  span=788 B  per-iteration ISA: {'total': 162, 'load': 2, 'lds': 18, 'barrier': 1}
+
+## tools/kernel_isa_census.py on llama's object (matrix/dot check)
+CANARY PASS
+
+## 1. instruction-class census (static, whole kernel body — includes cold/preamble code)
+kernel                              insns MATRIX   DOT  FMA32    LDS   VMEM   SMEM   SALU
+void gated_delta_net_cuda<64, true    432      0     0     37      6     43      0    200
+void gated_delta_net_cuda<128, tru    629      0     0     77      6     83      0    231
+void gated_delta_net_cuda<16, true    325      0     0     20      4     23      0    178
+void gated_delta_net_cuda<32, true    332      0     0     19      6     23      0    180
+void gated_delta_net_cuda<64, true    421      0     0     39      6     43      0    192
+void gated_delta_net_cuda<128, tru    649      0     0     75      6     83      0    253
+void gated_delta_net_cuda<16, fals    289      0     0     15      4     20      0    182
+void gated_delta_net_cuda<32, fals    299      0     0     15      6     20      0    183
+void gated_delta_net_cuda<64, fals    343      0     0     26      6     36      0    194
+void gated_delta_net_cuda<128, fal    429      0     0     44      6     68      0    217
+void gated_delta_net_cuda<16, fals    275      0     0     14      4     20      0    170
+void gated_delta_net_cuda<32, fals    283      0     0     15      6     20      0    173
+void gated_delta_net_cuda<64, fals    328      0     0     25      6     36      0    185
+void gated_delta_net_cuda<128, fal    424      0     0     47      6     68      0    212
+
+## 2. every matrix / dot-class mnemonic actually present, per kernel (0 rows means none)
+  none. No v_wmma_*, v_mfma_*, v_dot*, v_dp4a*, v_pk_fma_*, v_fma_mix_f32 anywhere in these kernels.
+
+## 3. what the FMA path is actually built from (the class that carries the work)
+  void gated_delta_net_cuda<16, true, true, 4>(float const*, float const*, float const*, float const*, float const*, float const*, float*, float*, long, long, long, long, long, long, long, long, long, long, long, long, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, float, long, int) s_delay_alu=26  s_waitcnt=22  s_mul_i32=20  s_add_u32=20  s_addc_u32=20  global_load_b32=18  s_lshl_b64=16  s_add_i32=14  s_mul_hi_u32=11  v_add_co_u32=11  v_add_co_ci_u32_e64=11  v_fmac_f32_e32=11  v_cndmask_b32_e32=9  v_add_f32_e32=7
