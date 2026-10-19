@@ -55,7 +55,7 @@ def kfd_topology():
 # Phase classification, first match wins. Ordered: specific kernels before their families.
 PHASES = [
     ("attention",   r"flash_attn|attn_fattn|attn_slim|attn_tile|attn_core|attn_combine|attn_prep|fmha"),
-    ("gdn_recur",   r"gated_delta_net|delta_net|gdn_rec|rec_kernel|rec_fused|rec_loop"),
+    ("gdn_recur",   r"gated_delta_net|delta_net|gdn_rec|rec_kernel|rec_fused|rec_loop|rec_reg16|rec_normed|rec_wf"),
     ("gdn_other",   r"gdn_conv|gdn_gates|gated_norm|conv1d|causal_conv"),
     ("gemm",        r"gemm|wa_dot|scaled_dot|hgemm|Cijk|comgr|sgemm|k_wmma|matmul|dot_main|dot_large"),
     ("norm",        r"rms_norm|layer_norm|norm_f|_norm"),
