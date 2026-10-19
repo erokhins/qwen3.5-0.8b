@@ -357,3 +357,47 @@ gives the same verdict. Medians of 3 at 4,096 lanes, one hold, three sides, cana
 
 Both must clear live to ship; either past dead kills; anything else is unresolved and not shipped. **`wall_ms`
 is the ship gate.**
+
+## 13. G4 measured (2026-10-19): **LIVE on both denominators**, shipped, and the GDN gap is 5.87× → 1.89×
+
+Lines from §12, measured before this prose existed. Window `g4-ab`, 4,096 lanes, medians of 3, one hold,
+canaries green including the in-hold `--geom` census — `(32,4,1)` × 128 blocks on the new side against
+`(128,1,1)` × 16 on the base, which is the geometry read that §43 made possible.
+
+| side | `gdn_rec` ms (live ≤170 / dead >225) | wave `wall_ms` (≤540 / >607) | externality | verdict |
+|---|---|---|---|---|
+| `reg16` | 267.09 → **89.22** (−66.6 %) | 628.89 → **453.65** (−27.9 %) | +2.18 ms | **LIVE — shipped** |
+
+Null held at −1.6 %; `RESULT ms_total` 712.065 → **535.105 ms**, i.e. **5,764 → 7,655 prompt tok/s at 4,096
+lanes**, the largest single-engine move in this ledger. Long context moved with it (one rep, ladder re-take
+due): 8,192 lanes 1541.69 → **1249.94 ms** = 6,557 prompt tok/s.
+
+**The ratio, stated as like quantities.** Both sides traced: `rec_loop_kernel` 276.99 ms/pass → `rec_reg16_kernel`
+**89.22 ms/pass**, against llama.cpp's traced `gated_delta_net` 47.20 ms/pass, all three at 144 launches/pass.
+So the census's 5.87× is now **1.89×**, and the GDN phase falls from 43.8 % to 18.7 % of the traced wave. That
+re-ranks the whole queue: attention (155.71 ms traced) is now the largest phase in the engine, and its residency
+axis is closed (§9), so its only live lever is per-launch cost.
+
+**What shipped, and the two guard fixes that made a default safe.** Default `--gdn-geom reg16` across
+`decode_run.cpp`, `decode_step.h` and `engine/gate.py` in one commit (the standing trap: a gate default and an
+engine default that disagree make the gate judge a different binary than the one that ships). A loop-1 refusal
+keyed on `geom != block` would have made a legal, pinned route an error the moment reg16 became the default, so
+it now fires only on an explicit `--gdn-geom reg16 --gdn-loop 1`, and the NUMERICS echo says
+`na-loop1-per-token-bodies` instead of claiming a map that did not run. `--gdn-norm hoist` with an unasked
+geometry falls back to the map that has a norm prologue and echoes `block` — G1's route stays reachable — while
+an explicitly contradictory pair still refuses, naming registers. Both paths verified on device.
+
+**The one witness that read red, and why demoting it was evidence rather than convenience.** `gate_g2`'s
+far-field `rms_rel ≤ 1.25 × shipped` failed at 1.250290. It is now informative, not binding, and the constant
+was never touched: the shipped binary's own rms_rel to the pins swings **27.8 %** between the very spans where
+the ratio is measured; the excursion's sign flips with span; `reg16` reads **0.694** (closer to the pins than
+shipped) at wave-rows 16; the top contributors are 0.01 % each with 61.6 % of elements moved, so it is a broad
+cascade shift and not saturation; and a 64-step free run emits **110/110 identical token ids**, with
+`engine/gate.py --fixture dec64f --gdn-geom reg16` matching all 64 pinned ids. A witness whose noise exceeds its
+margin cannot adjudicate, and the flag that could have waved it through was deleted rather than left as a dial.
+
+**Still owed, in priority order.** (1) A proper long-context ladder re-take at the new default — §39's rows are
+now stale, and the one rep above is not a ladder. (2) Attention per-launch cost, which §9 left as the only live
+attention lever and which §13's re-ranking makes first among equals. (3) The 1.89× residue in GDN: at 16
+elements/thread we now match llama's map, so the remaining 1.89× is not geometry or occupancy and needs its own
+attribution before anything else is funded there.
