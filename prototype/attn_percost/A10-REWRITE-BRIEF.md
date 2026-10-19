@@ -3,7 +3,9 @@
 **Status: the funded main line (§54), with R1+R2 source-killed on step 2 — see `A10-RF-LADDER.md`.** Nothing here is
 built. §52 of `bench/performance-status.md` pre-gated it (stall census first, prototype must clear **6.5 TFLOP/s**),
 §54 made it the main line, and A10 step 2's compile-only register ladder then found that **Q in registers costs 128
-VGPR per lane, not 64, so R1+R2 overflows the 256-VGPR per-thread ceiling by ≥ 52 on the atom this engine ships**.
+VGPR per lane, not 64, so on the atom this engine ships R2 cannot be honoured at all**: the accumulator and Q
+together want the whole 256-VGPR budget, and clang satisfies that by re-issuing the Q loads — handing back the very
+traffic R2 exists to delete (`A10-RF-LADDER.md` §2, §6).
 The only shape that fits is llama's, which needs the f16-accumulating atom — a numerics-format decision, not a
 queue item. This file exists so the arithmetic behind that decision can be read, questioned and attacked instead
 of being re-derived from memory each time.
@@ -156,12 +158,17 @@ Four things follow, and three of them reprice the route.
    | Q resident (item 2) | 128 | 128 |
    | a 64-position round's scores | 32 | 32 |
    | P operands, staging temps, addressing | ≥ 20 | ≥ 20 |
-   | **against 256** | **≥ 308 — impossible** | **≈ 244 — fits with 12 to spare** |
+   | **against 256, naive simultaneous sum** | **≥ 308 — impossible** | **≈ 244 — 12 to spare** |
+   | **against 256, measured in isolation (`A10-RF-LADDER.md` §6)** | **219 VGPR, 0 spill** | **155 VGPR, 0 spill** |
 
-   **R1+R2 cannot be built on the atom this engine ships.** It is not tight, it is over the ceiling by more than 50
-   registers before a single pointer or loop counter is allocated. On the f16 atom the shape fits the way llama's
-   fits: tight, and spilling deliberately (`A2-census.md:78` traces 256 VGPR with 900 B/thread scratch at 1.9× our
-   rate), which moves point 6's "what is on the critical path" from a side note to the open question. Two catches
+   **R2 cannot be honoured on the atom this engine ships.** The naive sum is 308 against a 256 ceiling, and clang's
+   response is not to overflow but to decline: it re-issues the Q loads rather than keep 16 tuples live, which is
+   precisely the traffic R2 was funded to delete (`A10-RF-LADDER.md` §6 reading 2). That is a source kill in the
+   sense that matters — not "the compiler errors", but "the compiler silently gives back the thing you went to
+   remove". On the f16 atom the same probe measures **155 VGPR at 0 spill**, so the shape fits with ~100 VGPR of
+   room instead of none, and llama spends that room deliberately (`A2-census.md:78`: 256 VGPR, 900 B/thread scratch,
+   1.9× our rate regardless) — which moves point 6's "what is on the critical path" from a side note to the open
+   question. Two catches
    come with the f16 atom and neither is arithmetic: carrying the accumulator in f16 across 32,768 positions is a
    *format* change on the shipping path, admitted by the standing numeric-format rule **only if the gates stay
    green** and never by assumption; and `prototype/issue_rate_probe/results.md` §1 measured **only**
@@ -278,8 +285,13 @@ dependency, because order is the whole difficulty.
 
 | # | change | why it is required | cost / constraint | depends on |
 |---|---|---|---|---|
-| **R1** | **8 waves per block (256 threads), 16 query rows per wave → 128 query rows per block** | cuts the LDS cost per served row by 8/3 with nothing else changed, and at 1 block/CU of 256 threads the register file hands out **256 VGPR per thread**, which is what makes R2 possible | LDS ~64 KiB → **1 block/CU → 8 wf/CU** (the residency §48 bought is deliberately given up here); **rows per wave cannot go below 16** — see the note below | — |
-| **R2** | **Q in registers for the whole KV sweep** | deletes the 898 GB/pass re-read ≈ 60 % of our demanded bytes, and the VMEM/LSU slots behind it | only fits **after** R1: 16 rows/warp costs 128 accumulator VGPR and Q costs ~64 more, which needs the 256/thread that only 1 block/CU of 256 threads provides. Locally rejected before (variant A: spill 115) *because* it was attempted at 3 waves/block, where the budget is ~217/thread. Llama pays spill here too (256 VGPR + 900 B/thread scratch, traced) and wins anyway — so the question is *what* the spilled bytes are on the critical path, not whether spilling is allowed. **Repriced:** the 128 is our f32 atom; an f16-accumulating one prices that accumulator at 64 (§3 SETTLED item 3) | R1 |
+| **R1** | **8 waves per block (256 threads), 16 query rows per wave → 128 query rows per block** | cuts the LDS cost per served row by 8/3 with nothing else changed, and at 1 block/CU of 256 threads the register file hands out **256 VGPR per thread**, which is what makes R2
+   possible (**measured correction: 256/thread is also RDNA's own per-thread ceiling, and the shipped body sits at
+   185 — so R1 buys +29 VGPR/lane, not +128; `A10-RF-LADDER.md` §0, §3**) | LDS ~64 KiB → **1 block/CU → 8 wf/CU** (the residency §48 bought is deliberately given up here); **rows per wave cannot go below 16** — see the note below | — |
+| **R2** | **Q in registers for the whole KV sweep** | deletes the 898 GB/pass re-read ≈ 60 % of our demanded bytes, and the VMEM/LSU slots behind it | only fits **after** R1: 16 rows/warp costs 128 accumulator VGPR and Q **128** more (corrected: not ~64 —
+   `A10-RF-LADDER.md` §1), which needs the 256/thread that only 1 block/CU of 256 threads provides — and even then
+   **cannot be honoured on the shipped f32 atom**, because clang re-issues the Q loads instead of overflowing
+   (`A10-RF-LADDER.md` §6). It fits only on the f16-accumulating atom of llama's RDNA path, at 155 VGPR measured. Locally rejected before (variant A: spill 115) *because* it was attempted at 3 waves/block, where the budget is ~217/thread. Llama pays spill here too (256 VGPR + 900 B/thread scratch, traced) and wins anyway — so the question is *what* the spilled bytes are on the critical path, not whether spilling is allowed. **Repriced:** the 128 is our f32 atom; an f16-accumulating one prices that accumulator at 64 (§3 SETTLED item 3) | R1 |
 | **R3** | **KV stage 16 → 64 positions**, V kept `[dim][lane]` as today (`fattn_v_addr`) | cuts rounds/token ~4× (1,115 → ~280 at 32k) and raises MAC/byte toward 31 | LDS is what R1 gives up; **this is the reverse of L-b**, which is dead *because* it tried deep stages at 3 blocks/CU. **Not double-buffered** — llama's RDNA case asks for `nstages_target = 1` (`fattn-mma-f16.cuh:164`), so staging stays synchronous and no async copy machinery is needed (there is no `cp.async` equivalent here anyway). **Repriced:** llama aliases K and V in one 33,792 B buffer (total dynamic LDS 36,096 B), so a 64-position stage is a ~34 KiB stage, not a 65 KiB one — §3 SETTLED item 4 | R1 |
 | **R4** | **softmax rescale batched over 64 positions** (their `nbatch_fa`) | cuts the 428k-slot rescale/max chain ~4× | falls out of R3; L-d alone is −1.26 %, worth taking in context only | R3 |
 | **R5** | **GQA packing in the row index**: 64 rows = 16 positions × 4 heads of one KV group, so one staged tile serves 4 query heads | today each head column re-stages its group's K/V (up to 4×) | an **index** change in the launcher + mask logic, **not** a layout change; no producer touched | R1, R3 |
@@ -373,12 +385,14 @@ with enough reps to resolve 3 %, not a printed externality sum.
 * **Pre-gate 2 — the abort line, written before the build: a prototype must clear 6.5 TFLOP/s at 32k**
   (≈ +45 % over today's 4.47) to earn a second week. A number ends it, not fatigue.
 * **Step 2 outcome, compile-only, before any build or device window (`A10-RF-LADDER.md`):** the funded geometry —
-  R1 + R2 with the atom this engine ships — **does not fit**: 128 accumulator + 128 Q + 32 scores + addressing is
-  ≥ 308 VGPR against a 256 ceiling. The one shape that fits is llama's, on the f16-accumulating atom (~244), which
-  makes **R8 a precondition rather than a downstream item** and leaves that atom's rate on gfx1151 unmeasured. So the
-  next number owed is not a 32k run: it is `v_wmma_f16_16x16x16_f16`'s issue rate in the existing
-  `prototype/issue_rate_probe` harness, one short hold, because a slow f16 atom retires the whole route without
-  spending a week on it.
+  R1 + R2 with the atom this engine ships — **cannot be honoured**: 128 accumulator + 128 Q + 32 scores + addressing
+  is ≥ 308 VGPR against a 256 ceiling, and clang's response is to re-issue the Q loads, which is the traffic R2
+  exists to delete. The one shape that fits is llama's, on the f16-accumulating atom (**155 VGPR measured in
+  isolation, 0 spill**), which makes **R8 a precondition rather than a downstream item** and leaves that atom's rate
+  on gfx1151 unmeasured. So the next number owed is not a 32k run: it is `v_wmma_f16_16x16x16_f16`'s issue rate, and
+  the legs for it are **already written** in `prototype/issue_rate_probe/wmma_latency.cpp` (`wl_f16_i{1,2,4,8}`) with
+  no binary on disk — one build and one short hold, because a slow f16 atom retires the whole route without spending
+  a week on it.
 * **Success criterion, stated in advance:** parity is attention phase 5,908 → 3,093 ms at 32k (**−47.6 %**), i.e.
   the wave's 1.43× gap at 32k closes to ~1.0×; the long-context warm figures this shows up in today are 6,125
   tok/s at 16k and 3,924 at 32k against llama's 7,800 / 5,475 (§50/§51).
