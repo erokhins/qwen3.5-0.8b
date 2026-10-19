@@ -2319,3 +2319,57 @@ this still cannot see: GPU-side per-kernel durations (a `rocprofv3 --kernel-trac
 discipline is a separate item), a finer split of first-touch pages from library warm-up than the F1 bound, and
 clock state, which is read and not controlled — `sclk` here sat at 2572 MHz with a flat gap at 32k, which is
 consistent with DVFS ramp being part of what the short waves pay first.
+
+## §51. Headline convention is now **warm**; and the long-context gap is **attention and nothing else** — we lose 1.98× at 16k and 1.91× at 32k on that phase while winning everywhere else (2026-10-19)
+
+**Convention (user decision, 2026-10-19).** Every headline in this ledger from now on is the **warm** number: the
+same `prefill_wave` after `st.reset()`, i.e. `WAVEPASS gran=burst wall_ms`, first-execution cost excluded — the
+quantity llama-bench's rep-medians are closer to. Cold (`RESULT ms_total`) stays recorded as first-request latency
+and must never be compared against another engine's warm number (§50). Warm re-taken from `a7_host_split.sh` leg A
+(medians of 3, one process per width): **512 → 10,637 tok/s; 1,024 → 11,276; 4,096 → 9,790; 16,384 → 6,125;
+32,768 → 3,924.** The 4,096 headline is therefore **9,790 prompt tok/s warm** (9,790 = 4,096 / 0.418398 s), against
+the 7,986 cold figure §48 published — same window, same engine, different bracket.
+
+**The long-context phase attribution.** Traced both engines at the widths one cannot answer at 4,096
+(`tools/llama_phase_compare.sh` with the trace leg now width-parameterised via `TRWIDTHS`; pass counts **derived**
+from `attn_prep` at 6 sites per body for us and `gated_delta_net` at 18 per chunk for llama, giving 3 passes ours
+and 2 theirs; llama's traced ms are upper bounds, so every ratio below is conservative — and its launch density is
+1.91–1.92/token against our 0.77–0.78, so the conservatism is real):
+
+| width | phase | ours ms/pass | llama ms/pass | ours/llama | our share |
+|---|---|---|---|---|---|
+| 16,384 | **attention** | **1,518.91** | 767.54 | **1.98×** | 55.8 % |
+| | gemm | 619.40 | 701.66 | 0.88× (we win) | 22.8 % |
+| | gdn_recur | 365.99 | — | — | 13.4 % |
+| | all | 2,721.90 | 2,126.23 | 1.28× | |
+| 32,768 | **attention** | **5,908.16** | 3,093.25 | **1.91×** | 70.9 % |
+| | gemm | 1,237.93 | 1,380.25 | 0.90× (we win) | 14.9 % |
+| | gdn_recur | 746.07 | — | — | 9.0 % |
+| | all | 8,328.23 | 5,839.50 | 1.43× | |
+
+Read the excess, not just the ratio: at 16k the attention gap is **+751 ms** while the total gap is **+596 ms**; at
+32k it is **+2,815 ms** against a total of **+2,489 ms**. **The attention excess is larger than the whole gap**,
+because GEMM and everything else are net in our favour at both widths (§49 said the same at 4,096; it is now shown
+to hold as context grows). GDN's traced gap, which was the headline of §38, no longer bounds the total: at 32k
+`gdn_recur` is 9.0 % of our wave.
+
+**The shape of it.** Per-token attention cost doubles with each doubling for both engines (ours 0.0927 → 0.1803
+ms/token from 16k to 32k; llama 0.0468 → 0.0944), so this is **a constant factor on the quadratic term, not a
+faster decay** — matching §50's `b`-ratio and ruling out "our attention degrades worse". Our absolute
+achievement is the revealing number: 3.3 TFLOP of causal attention per pass at 32k in 5.908 s is **0.56 TFLOP/s**,
+llama's is 1.07 TFLOP/s, and the WMMA roof measured in `prototype/issue_rate_probe/results.md` §1 is 52.63 — so
+**both** engines are 50–90× under the matrix roof at long context, and we are 1.9× under llama's utilisation. That
+kills the bandwidth-wall story for long context (a bandwidth-bound phase would not sit 94 % below the roof) and puts
+the remaining attention question exactly where A4 left it: what the round *does* per unit of K/V at 16-row M tiles,
+against llama's 256×256 geometry.
+
+**Parked, on instruction.** A8 (execute the GEMM algorithms once during `load_ms` to move the ~85–110 ms
+first-execution cost out of the timed window) is **parked**: it is a short-context and first-request win, and the
+user's call is that long context is where the remaining gap lives. Recorded so it is not lost — the measurement
+stands in §50 and the legs are in `prototype/perprompt/a7_host_split.sh`.
+
+**What this cannot see.** The traces give per-phase ms and launch counts, not why a phase costs what it costs; no
+wasted-work accounting yet (padding to 16-row tiles, causal ragged tails, split-path partial traffic at 32k, the
+per-round 16-accumulator rescale). That census is the next item, and it must be done before anyone funds either a
+wider-M tile or the full llama-shaped rewrite — A5 §5 priced the rewrite at family −63 % and explicitly declined to
+fund it without this.

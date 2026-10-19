@@ -146,13 +146,20 @@ if [[ " $LEGS " == *" trace "* ]]; then
   echo
   echo "== leg 2: rocprofv3 kernel traces (SHARES and LAUNCH COUNTS only; llama.cpp ms are upper bounds) =="
   command -v rocprofv3 >/dev/null || fail "rocprofv3 not on PATH"
-  timeout 1800 rocprofv3 --kernel-trace --memory-copy-trace -f csv -d "$OUT/llama_pp4096" -o pp4096 -- \
-      "$LB" -m "$LM" -p 4096 -n 0 -ub 512 -fa on -ngl 99 -t 32 -b 2048 -r 1 -o csv \
-      > "$OUT/llama_pp4096.stdout" 2>&1 || fail "llama trace"
-  timeout 1800 rocprofv3 --kernel-trace --memory-copy-trace -f csv -d "$OUT/our_pp4096" -o pp4096 -- \
-      "$BIN" --model "$MODEL" --ids "$IDS" --steps 0 --time-waves --gemm lt --gemm-pins all --gdn-loop 512 \
-      --out "$OUT/our_trace" > "$OUT/our_pp4096.stdout" 2>&1 || fail "engine trace"
-  echo "traces in $OUT/{llama,our}_pp4096 — parse with the §22 pass-count division (llama.cpp holds warmup+timed = /2; ours holds three passes = /3)."
+  # Width-parameterised (TRWIDTHS, default 4096): §38/§49 only ever traced 4,096, which cannot answer
+  # "why are we slower at long context" - the phase that grows with W^2 is invisible at one width.
+  # Wide widths go through --ids-file because one argv slot caps at 131,072 B and a 32,768-id string is
+  # ~200 KB (AGENTS trap: the exec dies with 126 at exactly the width the question needs).
+  for W in ${TRWIDTHS:-4096}; do
+    ids_file_for "$W" >/dev/null
+    timeout 2400 rocprofv3 --kernel-trace --memory-copy-trace -f csv -d "$OUT/llama_pp$W" -o "pp$W" -- \
+        "$LB" -m "$LM" -p "$W" -n 0 -ub 512 -fa on -ngl 99 -t 32 -b 2048 -r 1 -o csv \
+        > "$OUT/llama_pp$W.stdout" 2>&1 || fail "llama trace at $W"
+    timeout 2400 rocprofv3 --kernel-trace --memory-copy-trace -f csv -d "$OUT/our_pp$W" -o "pp$W" -- \
+        "$BIN" --model "$MODEL" --ids-file "$OUT/ids_$W.csv" --cap "$W" --steps 0 --time-waves --gemm lt --gemm-pins all --gdn-loop 512 \
+        --out "$OUT/our_trace_$W" > "$OUT/our_pp$W.stdout" 2>&1 || fail "engine trace at $W"
+    echo "traces at $W lanes in $OUT/{llama,our}_pp$W — parse with the §22 pass-count division (llama.cpp holds warmup+timed = /2; ours holds three passes = /3)."
+  done
 fi
 
 echo "CLK@end: $(clk)"
