@@ -1,0 +1,8 @@
+| lanes at last step | marginal ms/token best of 3 | all runs | spread | tok/s |
+|---|---|---|---|---|
+| 128 | **11.475** | 11.475 / 11.660 / 11.703 | 1.99 % | 87.1 |
+| 512 | **12.928** | 13.115 / 13.078 / 12.928 | 1.45 % | 77.4 |
+| 1024 | **11.922** | 12.564 / 12.490 / 11.922 | 5.39 % | 83.9 |
+| 2048 | **12.558** | 12.897 / 12.861 / 12.558 | 2.70 % | 79.6 |
+
+marginal cost of a generation step at the stated lane count: two runs differing only in --steps (32 vs 64), same prompt and same prefill in both. Prompts are repeated prose, truncated, stop-id free.

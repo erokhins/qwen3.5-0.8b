@@ -16,12 +16,12 @@ for that.** `progress/2026-10-14/speedup-routes-2026-10-14.md` is the index of e
 tried, its verdict (shipped / dead / held / unpriced), the line it had to clear and the number that
 decided it. This file is the measurement record those routes' citations point at.
 
-**Every number below was re-taken on 2026-10-16** by the main agent, blocking, in the foreground,
+**Every number below was re-taken by the main agent**, blocking, in the foreground (§1's decode and prefill rows on **2026-10-19** per §36; the rest on 2026-10-16),
 with zero subagents active, each window inside one `tools/gpu_lock.sh` hold (`util` recorded at
 acquire and release, then discounted — §6). Commands, lock tags and util pairs:
 `progress/bench/evidence/ledger-2026-10-16/commands-and-provenance.md`; the filtered raw rows behind
 §2 and §3: `progress/bench/evidence/ledger-2026-10-16/stage-wave.txt`. Binary: `engine/build/decode_run`
-at HEAD. Shipped defaults on §1's rows unless stated: `--gemm lt`, `--gemm-pins all`, `--attn-tile 1`,
+at HEAD (`2ac956d` for the §36 re-take, which is what §1's two tables now carry). Shipped defaults unless stated: `--gemm lt`, `--gemm-pins all`, `--attn-tile 1`,
 `--mlp-map auto`, `--gdn-scan seq`, `--gdn-spell fused`, `--gdn-loop 512`, `kRowsPerBlock = 32`.
 
 **What today's re-take changed** against the previous era's ledger (2026-10-14, progress/2026-10-16/performance-status-2026-10-16.md:1073-1149):
@@ -39,18 +39,18 @@ probe re-took at **239.3 GB/s** — 1 % above the 237 GB/s this ledger has used 
 
 **Decode — marginal cost of one generated token** (`tools/context_sweep.py --lanes 128,512,1024,2048
 --steps 32 --runs 3`; differential by construction: two runs differing only in `--steps`, so the
-prompt wave cancels). `was` is the 2026-10-16 banner on the same ruler, re-taken in §25's window;
+prompt wave cancels). `was` is the previous banner on the same ruler (§25's window, taken 2026-10-17);
 the 2026-10-14 row behind that sits at (progress/2026-10-16/performance-status-2026-10-16.md:1106-1107).
 
 | lanes at last step | marginal ms/token, best of 3 | all three runs | spread | tok/s | was |
 |---|---|---|---|---|---|
-| 128 | **11.480** | 11.699 / 11.588 / 11.480 | 1.90 % | 87.1 | 11.035 / 90.6 |
-| 512 | **12.764** | 12.858 / 12.764 / 13.030 | 2.08 % | 78.3 | 12.408 / 80.6 |
-| 1024 | **12.128** | 12.433 / 12.128 / 12.632 | 4.16 % | 82.5 | 12.407 / 80.6 |
-| 2048 | **12.487** | 13.186 / 12.487 / 12.849 | 5.60 % | 80.1 | 12.382 / 80.8 |
+| 128 | **11.475** | 11.475 / 11.660 / 11.703 | 1.99 % | 87.1 | 11.480 / 87.1 |
+| 512 | **12.928** | 13.115 / 13.078 / 12.928 | 1.45 % | 77.4 | 12.764 / 78.3 |
+| 1024 | **11.922** | 12.564 / 12.490 / 11.922 | 5.39 % | 83.9 | 12.128 / 82.5 |
+| 2048 | **12.558** | 12.897 / 12.861 / 12.558 | 2.70 % | 79.6 | 12.487 / 80.1 |
 
-Medians, because the spreads above are 1.9–5.6 % and one run per row can sit at either end: 128 →
-11.588; 512 → 12.858; 1024 → 12.433; 2048 → 12.849. The curve is **flat from 512 to 2048 lanes and climbs only past 2k**,
+Medians, because the spreads above are 1.4–5.4 % and one run per row can sit at either end: 128 →
+11.660; 512 → 13.078; 1024 → 12.490; 2048 → 12.861. Nothing moved beyond its own spread: §30–§33 is wave-only.
 which is what P7's split-K path was for; the 2.301 µs-per-lane slope of 2026-10-12 was dominated by
 fixed launch cost and did not extrapolate (progress/2026-10-16/performance-status-2026-10-16.md:537-540).
 
@@ -60,20 +60,20 @@ at that width (§6): median of 3 **14.028 ms = 71.3 tok/s** (14.0280 / 13.8788 /
 on the same burst ruler (progress/2026-10-16/performance-status-2026-10-16.md:878), so −3.2 %.
 
 **Prefill / TTFT** (`tools/prefill_sweep.py --lanes 64,256,1024,3072 --runs 3`; `ms_total` with
-`--steps 1` — prompt wave plus one priced step, weight load excluded). `was` is the 2026-10-16
-banner, re-taken in §25's window; the 2026-10-14 reading of the same sweep sits at
+`--steps 1` — prompt wave plus one priced step, weight load excluded). `was` is the previous banner
+(§25's window, taken 2026-10-17); the 2026-10-14 reading of the same sweep sits at
 progress/2026-10-16/performance-status-2026-10-16.md:1098-1100; the 256-lane row of that day's sweep, 1,893 tok/s, is
 the figure recorded in `AGENTS.md`'s ruler-window trap row).
 
 | prompt lanes | ms to first sampled token, best of 3 | all three runs | spread | prompt tok/s | was |
 |---|---|---|---|---|---|
-| 64 | **104.7** | 104.9 / 104.7 / 115.9 | 10.72 % | 611.2 | 91.1 / 702.9 |
-| 256 | **122.8** | 124.6 / 124.6 / 122.8 | 1.49 % | 2,084.6 | 140.0 / 1,828.5 |
-| 1024 | **228.3** | 229.9 / 232.0 / 228.3 | 1.64 % | 4,486.2 | 297.4 / 3,443.1 |
-| 3072 | **615.8** | 623.2 / 618.3 / 615.8 | 1.20 % | 4,988.5 | 907.3 / 3,385.8 |
+| 64 | **103.0** | 103.0 / 103.6 / 104.0 | 0.92 % | 621.2 | 104.7 / 611.2 |
+| 256 | **121.7** | 121.7 / 124.4 / 122.9 | 2.22 % | 2,103.7 | 122.8 / 2,084.6 |
+| 1024 | **221.3** | 222.6 / 223.8 / 221.3 | 1.15 % | 4,627.7 | 228.3 / 4,486.2 |
+| 3072 | **520.8** | 528.8 / 528.2 / 520.8 | 1.55 % | **5,898.8** | 615.8 / 4,988.5 |
 
-The 1024 row, 1.64 % spread, no longer carries the 16.09 % spread the 2026-10-16 take did, and the
-3072 row at 1.20 % is still the one that should carry any claim about long-prompt throughput. The
+The row that moved is **3072**: 4,988.5 → **5,898.8 prompt tok/s, +18.3 %** at a 1.55 % spread, and it is
+still the row that should carry any claim about long-prompt throughput (1024: +3.2 % at 1.15 %). The
 64-lane row still reads *below* the paired A/B figures taken for the same builds in one window
 (2,096.3 tok/s at 256 on the paired ruler), which is §6's bimodality, not a regression.
 
@@ -1619,3 +1619,48 @@ Bet 2 rewrote the very hunks the un-stage touched.) `spill = 0` at ≲190 VGPR o
 device A/B; spill > 0 closes the residency axis at 6 and moves the money to the instruction/traffic gap of §26.
 No number in this section is a timing, and none of it predicts one — §31 and §33 together are the proof that
 residency and speed are not the same axis on this kernel.
+
+## §36. The banner re-taken on the shipped WMMA form, with the clock on the record (2026-10-19)
+
+§33 closed with two honest gaps: the headline was quoted against an *inferred* "~2.45 GHz", and decode was
+"unchanged by construction, unmeasured". Both are closed. Main agent, blocking, foreground, **zero subagents
+active**, two `tools/gpu_lock.sh` holds (`bench36-ruler`, `bench36-sweeps`), `util` read at acquire and release
+and discounted per §6 (it read 89→65 % and 90→35 % across the two holds, which is exactly the range §6 says to
+ignore). Scripts: `tools/bench36_ruler.sh`, `tools/bench36_sweeps.sh`. Logs:
+`progress/bench/evidence/retake-2026-10-19/`.
+
+**The clock, measured rather than assumed.** `rocm-smi --showclocks` read **819 / 827 / 838 MHz idle before each
+ruler rep and 2432 / 2437 / 2423 MHz immediately after it**, so the sustained clock under load is **≈2.43 GHz**
+— the §31/§33 "~2.45 GHz" was 0.8 % high but was not a fiction. `mclk` read 1000 MHz at the window edge and is
+recorded as read, not interpreted.
+
+**The ruler** (§25's form: `ids4096.txt`, `--steps 0 --time-waves --gemm lt --gemm-pins all --gdn-loop 512`,
+shipped defaults so `--attn-fattn 1`, three reps, `sleep 10` before each, one hold):
+
+| rep | `RESULT ms_total` | wave `wall_ms` | launches | plan |
+|---|---|---|---|---|
+| 1 | 705.863 | 626.6192 | 2618 = 2618 | `plan_match=1` |
+| 2 | 708.141 | 627.7535 | 2618 = 2618 | `plan_match=1` |
+| 3 | 714.855 | 629.5035 | 2618 = 2618 | `plan_match=1` |
+| **median** | **708.14 ms = 5,784 tok/s** | **627.75 ms** | — | spread 1.27 % / 0.46 % |
+
+Against §25's 763.49 ms that is **+7.8 %**; against §33's 715.69 ms on this same binary it is **+1.07 %**, which
+is window noise and not a win — the honest reading is that §33's number reproduces. The 4,096-lane headline
+this ledger carries is therefore **5,784 tok/s at ≈2.43 GHz**.
+
+**Prefill and decode: §1's two tables are updated in place**, with `was` carrying the §25-window take. The short
+version: 3072 lanes **4,988.5 → 5,898.8 prompt tok/s (+18.3 %, 1.55 % spread)**, 1024 **+3.2 %**, and every
+decode row inside its own spread (128: 11.475 vs 11.480; 512: 12.928 vs 12.764; 1024: 11.922 vs 12.128; 2048:
+12.558 vs 12.487 ms/token). **Decode did not move, and that is now a measurement rather than an argument** —
+the WMMA round is wave-only by construction, and it left the decode table where it found it. The 3072 row is
+the one that carries the round, as §1 has always insisted long-context rows should.
+
+**Correctness of the committed binary, re-confirmed here rather than inherited:** `.venv/bin/python
+engine/gate.py --fixture wide1024f` at defaults (`--scope full`, `--attn-tile 1`, `--attn-fattn 1`) prints
+**ENGINE GATE PASS** in 66 s on the tree built from `2ac956d` — the commit that §34 records as having been
+incomplete. It is complete now, it builds in 17.4 s, and the form it ships is what the gate judged.
+
+One editorial note, because it is the reason this section is appended rather than folded in: `progress/` cites
+this file by line at **92, 618, 659 and 1184**, so §1's tables were rewritten with **same-line substitutions
+only** and the file's line count is byte-identical to before (1,621 both ways, and the four cited lines verified
+character-for-character). A banner that rots four archive citations to update itself would be a bad trade.

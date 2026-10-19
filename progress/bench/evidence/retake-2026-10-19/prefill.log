@@ -1,0 +1,8 @@
+| prompt lanes | ms to first sampled token, best of 3 | all runs | spread | prompt tok/s |
+|---|---|---|---|---|
+| 64 | **103.0** | 103.0 / 103.6 / 104.0 | 0.92 % | 621.2 |
+| 256 | **121.7** | 121.7 / 124.4 / 122.9 | 2.22 % | 2103.7 |
+| 1024 | **221.3** | 222.6 / 223.8 / 221.3 | 1.15 % | 4627.7 |
+| 3072 | **520.8** | 528.8 / 528.2 / 520.8 | 1.55 % | 5898.8 |
+
+ms_total with --steps 1: prompt wave plus one priced step; weight load excluded.
