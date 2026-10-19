@@ -5245,6 +5245,11 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
                # `--attn-fattn 1` the covered share of the family is part of what any ratio means — the
                # launcher's `ATTN_FATTN ... fattn_rows=n/N` line is what makes that a printed number.
                "--attn-fattn", args.attn_fattn,
+               # The score-roll SPELLING inside that form (`--attn-fattn-roll`, bet A4-L1), forwarded for the
+               # identical reason as the form itself: a width A/B whose two sides ran different rolls measures
+               # two things at once, and unlike the form this one is NOT bit-identical, so the log has to say
+               # which roll its bits came from.
+               "--attn-fattn-roll", args.attn_fattn_roll,
                # The GDN scan too, for the identical reason: the two sides of a width A/B must differ
                # in width and nothing else. And its SPELLING for the same reason again — section (j)
                # is the only place the two spellings are allowed to differ, and it differs them alone.
@@ -7091,6 +7096,22 @@ def main() -> int:
                          " run's own NUMERICS echo for the same reason: a log that cannot say which"
                          " form made its bits adjudicates neither side. This default and"
                          " `decode_run.cpp`'s own move in one commit.")
+    ap.add_argument("--attn-fattn-roll", choices=("single", "two"), default="single",
+                    help="which SPELLING of the WMMA form's score roll runs, passed straight to"
+                         " `decode_run --attn-fattn-roll` and asserted against the run's own NUMERICS echo,"
+                         " exactly like --attn-fattn and --gdn-geom (bet A4-L1,"
+                         " engine/attn_fattn_kernels.h, prototype/attn_percost/A4-BET.md). `single` is what"
+                         " SHIPS and what HEAD's machine code is: one accumulator, `#pragma unroll 1`, a"
+                         " 16-long dependent `v_wmma` recurrence, 178 VGPR / 0 spill / 0 scratch. `two` gives"
+                         " the roll a second accumulator and fetches both tiles of a pair before either"
+                         " matrix op issues (200 VGPR / 0 spill / 0 scratch, LDS unchanged), which"
+                         " RE-ASSOCIATES the fixed ascending F32 dot -- so this knob is NOT owed bit-identity"
+                         " and cannot be, and A4-BET fixes the existing 10.1 cos/meanrel aggregates as the"
+                         " judge in advance. Nothing here adds a band: the bands this gate already applies"
+                         " are the admission, and a red `two` side is a finding to report, not a threshold"
+                         " to move. Wave-only like the flags around it (a one-row body is `attn_core`), and"
+                         " the engine refuses `--attn-fattn 0 --attn-fattn-roll two` rather than echoing a"
+                         " kernel that did not run.")
     ap.add_argument("--gdn-scan", choices=("seq", "collapse"), default="seq",
                     help="which §04.4 scan a GDN body runs, passed straight to `decode_run"
                          " --gdn-scan` (P9, §04.7, route A is progress/2026-10-14/p9-phase1-2026-10-14.md D-12):"
@@ -7440,6 +7461,12 @@ def main() -> int:
            # a streaming row's partial, so a judged run that cannot say which form ran cannot be compared
            # against a pinned dump at all.
            "--attn-fattn", args.attn_fattn,
+           # The score-roll SPELLING (`--attn-fattn-roll`, bet A4-L1). Forwarded and asserted like the form
+           # it qualifies: the two rolls are NOT bit-identical — two accumulators re-associate the score dot —
+           # so a judged run whose log cannot say which roll produced its rows adjudicates neither side, and a
+           # side that silently took the default would price the shipped roll twice and report the second
+           # price as the second accumulator's win.
+           "--attn-fattn-roll", args.attn_fattn_roll,
            # The GDN scan, named on every run and asserted below: P9's matrix is this flag twice over
            # the ten fixtures, and a judged run that cannot say which scan produced its rows is
            # evidence about neither.
@@ -7618,6 +7645,18 @@ def main() -> int:
                " claim about either form can be made from this log" if echoed_fattn is None else
                f"NUMERICS echoed attn_fattn={echoed_fattn}, this gate was run with --attn-fattn"
                f" {args.attn_fattn}"))
+        # The score-roll SPELLING, read off the same line for the same reason (`--attn-fattn-roll`). It is
+        # MANDATORY rather than nice: unlike the flags above it this knob is not claimed bit-identical, so a
+        # silent fall back to the default would price the shipped roll twice and report the second price as
+        # the second accumulator's win — and a binary that predates the field echoes nothing, which is its own
+        # failure (`--attn-touch`'s rule).
+        echoed_roll = run.get("numerics", {}).get("attn_fattn_roll")
+        check(str(echoed_roll) == str(args.attn_fattn_roll),
+              "the run ran the WMMA score roll this gate is judging it under",
+              ("its NUMERICS line carried no `attn_fattn_roll=` — the binary predates --attn-fattn-roll, so"
+               " no claim about either roll can be made from this log" if echoed_roll is None else
+               f"NUMERICS echoed attn_fattn_roll={echoed_roll}, this gate was run with --attn-fattn-roll"
+               f" {args.attn_fattn_roll}"))
         # The GDN scan, read off the same line for the same reason (P9). This is also the check that
         # catches a silent fall back: a `--gdn-scan chunk` run whose launcher decided to run `seq`
         # after all would echo `seq` here and fail, rather than pricing the shipped form twice.
@@ -8457,6 +8496,10 @@ def teacher_forced_checks(args, man: dict, prompt_ids: list, dec_logits: list, g
                # whole claim is that the two runs differ in nothing but the fed tokens, and a form flag
                # left out here takes the engine's default instead — a silent second form.
                "--attn-fattn", args.attn_fattn,
+               # And which SPELLING of that form's score roll, forwarded so this section's two runs differ in
+               # nothing but the fed tokens (the `missing_form_flags` lesson one knob in: a flag left out does
+               # not fail, it takes the engine's default and silently makes this a comparison of two rolls).
+               "--attn-fattn-roll", args.attn_fattn_roll,
                "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk),
                "--gdn-spell", args.gdn_spell,
                # Forwarded so this section's two runs differ in NOTHING but the fed token, and the echoed
