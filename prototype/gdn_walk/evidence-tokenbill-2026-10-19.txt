@@ -1,0 +1,52 @@
+listing  tmp/gdn_walk/rec_loop.s
+unit     one token-step = one iteration of the token loop (or one launch, for a per-token kernel), per wavefront; grid 16x128 threads, wave32 -> 64 wavefronts
+
+===== rec_loop_kernel
+  walks                 : loopA x8 (16 state-accesses/trip), loopB x8 (16/trip)
+  token loop            : BB5_4
+  per-LAUNCH straight   :  80 blocks,  203 slots
+  per-TOKEN straight    :  33 blocks,  255 slots
+  walks per token       : loopA 44x8=352,  loopB 90x8=720
+  FLAT token-step bill  : 1530 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  PER-TOKEN bill        : 1327 slots/wavefront   (flat - 203 per-launch slots)
+  ADDRESS ARITHMETIC    : 13 straight-line + 80 in walks = 93 slots = 7.0% of the per-token bill, 6.1% of the flat bill
+  category rollup       : per-launch | per-token-straight | per trip of the walks
+    xlane.exec-guard            82 |    57 |    0
+    salu.mov                    40 |    42 |    0
+    loop.salu                    6 |    25 |    6
+    xlane.permute                0 |    20 |    0
+    xlane.add                    0 |    19 |    0
+    norm.expf                    1 |    16 |    0
+    unclassified                23 |    12 |    2
+    addr.math                   15 |     9 |    4
+    state.mul                    0 |     8 |   10
+    xlane.range-select           0 |     7 |    0
+    dual.other                   1 |     6 |    0
+    barrier.sync                 0 |     5 |    0
+    state.load                   0 |     5 |   32
+    barrier.invalidate           0 |     5 |    0
+    xlane.lds-round-trip         0 |     5 |    0
+    xlane.addr-math              2 |     4 |    0
+    norm.rsqrt                   0 |     2 |    0
+    valu.mov                     0 |     2 |    2
+    salu.branch                 19 |     2 |    0
+    salu.offload                 0 |     1 |    0
+    state.fma                    0 |     1 |   46
+    state.store                  0 |     1 |   16
+    vmem.clause                  1 |     1 |    4
+    norm.lane-id                 5 |     0 |    0
+    salu.exit                    1 |     0 |    0
+    state.coef-lds-load          0 |     0 |   12
+    xlane.lane-id                1 |     0 |    0
+    salu.kernarg                 4 |     0 |    0
+    norm.warp-count              2 |     0 |    0
+  address-arithmetic mnemonics, straight line (per token) / walks (per trip):
+    v_add_co_ci_u32_e64           4 /   2
+    s_add_i32                     1 /   4
+    v_add_co_u32                  2 /   2
+    s_add_u32                     2 /   0
+    s_addc_u32                    2 /   0
+    s_lshl_b64                    2 /   0
+    v_mov_b32_e32                 0 /   2
+  must-not-catch        : address-set lines with no address-class operation at all = 0
+===== DELTA against the first kernel named, per token-step per wavefront
