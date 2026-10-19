@@ -5250,6 +5250,11 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
                # two things at once, and unlike the form this one is NOT bit-identical, so the log has to say
                # which roll its bits came from.
                "--attn-fattn-roll", args.attn_fattn_roll,
+               # And which STAGING PLAN inside that form (`--attn-fattn-qstage`, bet A6-G1), forwarded for the
+               # identical reason: a width A/B whose two sides ran different staging plans measures two things at
+               # once. Unlike the roll it is claimed byte-identical, so the echo below has to name it for the
+               # byte-compare to mean anything at all.
+               "--attn-fattn-qstage", args.attn_fattn_qstage,
                # The GDN scan too, for the identical reason: the two sides of a width A/B must differ
                # in width and nothing else. And its SPELLING for the same reason again — section (j)
                # is the only place the two spellings are allowed to differ, and it differs them alone.
@@ -7112,6 +7117,22 @@ def main() -> int:
                          " to move. Wave-only like the flags around it (a one-row body is `attn_core`), and"
                          " the engine refuses `--attn-fattn 0 --attn-fattn-roll two` rather than echoing a"
                          " kernel that did not run.")
+    ap.add_argument("--attn-fattn-qstage", choices=("stage", "unstaged8"), default="stage",
+                    help="which SPELLING of the WMMA form's staging plan runs, passed straight to"
+                         " `decode_run --attn-fattn-qstage` and asserted against the run's own NUMERICS echo,"
+                         " exactly like --attn-fattn and --attn-fattn-roll (bet A6-G1,"
+                         " engine/attn_fattn_kernels.h placement (E), prototype/attn_percost/A6-BET.md)."
+                         " `stage` is what SHIPS and what HEAD's machine code is: Q in a per-warp 8 KiB stage,"
+                         " the epilogue transposing 16 rows at a time in 2 passes, declared LDS 32,768 B = 2"
+                         " blocks/CU = 6 wf/CU. `unstaged8` reads Q from global at the use site and stages the"
+                         " epilogue 8 rows a pass in 4 passes, declared LDS 20,480 B = 3 blocks/CU = 9 wf/CU at"
+                         " 185 VGPR and spill 0 (A6-result.md §1, §3). NOTE how this differs from the roll"
+                         " above: it is owed BYTE identity with the default, not a band -- it moves staging"
+                         " addresses and where an operand is fetched from, never a value or an order -- so a"
+                         " red here is a premise falsified, not a threshold to move. Nothing in this gate"
+                         " changes for it: no band, no floor, no admission edit, only the argv and the echoed"
+                         " field. Wave-only like the flags around it, and the engine refuses `--attn-fattn 0`"
+                         " with this knob named rather than echoing a kernel that did not run.")
     ap.add_argument("--gdn-scan", choices=("seq", "collapse"), default="seq",
                     help="which §04.4 scan a GDN body runs, passed straight to `decode_run"
                          " --gdn-scan` (P9, §04.7, route A is progress/2026-10-14/p9-phase1-2026-10-14.md D-12):"
@@ -7467,6 +7488,12 @@ def main() -> int:
            # side that silently took the default would price the shipped roll twice and report the second
            # price as the second accumulator's win.
            "--attn-fattn-roll", args.attn_fattn_roll,
+           # And the STAGING PLAN (`--attn-fattn-qstage`, bet A6-G1), forwarded and asserted for the same reason
+           # with one sharpening: this knob's claim IS byte identity with the shipped default, so a judged run
+           # whose log cannot say which staging plan wrote its rows cannot witness that claim in either
+           # direction -- and a side that silently took the default would reproduce the shipped bits exactly,
+           # look perfectly green, and be reported as the un-stage's residency win.
+           "--attn-fattn-qstage", args.attn_fattn_qstage,
            # The GDN scan, named on every run and asserted below: P9's matrix is this flag twice over
            # the ten fixtures, and a judged run that cannot say which scan produced its rows is
            # evidence about neither.
@@ -7657,6 +7684,19 @@ def main() -> int:
                " no claim about either roll can be made from this log" if echoed_roll is None else
                f"NUMERICS echoed attn_fattn_roll={echoed_roll}, this gate was run with --attn-fattn-roll"
                f" {args.attn_fattn_roll}"))
+        # The STAGING PLAN the WMMA form ran (`--attn-fattn-qstage`, bet A6-G1), read off the same line. Read
+        # with the same sharpness as the roll above and for a stronger reason: this knob's whole claim is BYTE
+        # identity with the shipped default, so a run that silently took the default would reproduce the shipped
+        # logits exactly, every numerics section would read green, and the residency claim would be priced off a
+        # kernel that never ran. A binary that predates the field echoes nothing, which is its own failure
+        # (`--attn-touch`'s rule).
+        echoed_qstage = run.get("numerics", {}).get("attn_fattn_qstage")
+        check(str(echoed_qstage) == str(args.attn_fattn_qstage),
+              "the run ran the WMMA staging plan this gate is judging it under",
+              ("its NUMERICS line carried no `attn_fattn_qstage=` — the binary predates --attn-fattn-qstage, so"
+               " no claim about either staging plan can be made from this log" if echoed_qstage is None else
+               f"NUMERICS echoed attn_fattn_qstage={echoed_qstage}, this gate was run with --attn-fattn-qstage"
+               f" {args.attn_fattn_qstage}"))
         # The GDN scan, read off the same line for the same reason (P9). This is also the check that
         # catches a silent fall back: a `--gdn-scan chunk` run whose launcher decided to run `seq`
         # after all would echo `seq` here and fail, rather than pricing the shipped form twice.
@@ -8500,6 +8540,11 @@ def teacher_forced_checks(args, man: dict, prompt_ids: list, dec_logits: list, g
                # nothing but the fed tokens (the `missing_form_flags` lesson one knob in: a flag left out does
                # not fail, it takes the engine's default and silently makes this a comparison of two rolls).
                "--attn-fattn-roll", args.attn_fattn_roll,
+               # And the staging plan, forwarded for the identical reason: this section's two runs must differ
+               # in the fed tokens and nothing else, and a `--attn-fattn-qstage` left out here would take the
+               # engine's default and silently turn a byte-identity section into a comparison of two staging
+               # plans -- which, because the claim is byte identity, would look like a PASS.
+               "--attn-fattn-qstage", args.attn_fattn_qstage,
                "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk),
                "--gdn-spell", args.gdn_spell,
                # Forwarded so this section's two runs differ in NOTHING but the fed token, and the echoed
