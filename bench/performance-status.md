@@ -1791,3 +1791,64 @@ against a 125.36 ms shipped form at the 1,024-lane shape, 10.6 %, dead on its ow
 a "try the drawer again" item: it needs a cheaper *per-token* step at ~1 wavefront per block, or a form that
 fills the four idle CUs. That is a new campaign and it is the largest single number left in the engine:
 43.8 % of our traced prefill, and 5.76× from the only external yardstick we have.
+
+## §39. Long context is reachable now: 32,768 lanes runs, 32,769 refuses, and what the wide band costs (2026-10-19)
+
+Item L raised the attention lane ceiling from `MAXSC 512 × kAttnMaxSplit 9 = 4,608` to
+`512 × 64 = 32,768` (`c188aa3`, with `tools/attn_ceiling_proof.py` retargeted as the CPU witness: every plan
+the old ceiling admitted keeps its split, grid and byte offsets, so the raise is bit-preserving by
+construction rather than by sampling). The whole price is scratch — `attn_part_floats(kMaxWaveRows)` goes
+**36.28 MiB → 258.00 MiB per scratch instance**, ~0.78 % of the ~34 GiB pool — and the honest caveat is in the
+source comment where the constant lives: the charge is **per scratch, not per request-length**, because
+`allocate_scratch()` sizes from the constant and does not know the run's cap. One scratch per `decode_run`
+today, so nothing regresses; the day a server shares the allocator, `a_part` alone would hold ~25 GiB at 100
+requests. Sizing by `split_for(cap)` is the fix and was **deliberately not taken** in this commit — one
+constant that `gate.py::lane_ceiling()` reads from the enforcing files is what keeps the allocation and the
+refusal from disagreeing (§20.1's aliasing class), and trading that for memory is a decision, not a cleanup.
+
+**The device verdict** (`tools/longctx_check.sh`, five assertions per width, main agent, blocking, zero
+subagents, one `tools/gpu_lock.sh` hold, `util@acquire = 90 %`):
+
+| lanes | finish | finite + non-vacuous logits | `plan_match=1` | no silent clamp | prefix consistency at row W−1 |
+|---|---|---|---|---|---|
+| 8,192 | PASS | PASS | PASS | PASS | PASS |
+| 16,384 | PASS | PASS | PASS | PASS | PASS |
+| **32,768** | PASS | PASS (maxabs 9.45, 247,457 distinct of 248,320) | PASS (attn 384 calls / 196,608 rows = 6 sites × 64 bodies) | PASS (kv 402,653,184 B = 12,288 × 32,768) | PASS (inside the published band) |
+| 32,769 | **REFUSED**, naming `kAttnMaxSplit=64` — the ceiling is a wall, not a clamp | | | | |
+
+The last row is the one that matters most and it did not pass on the first try. **Three harness bugs, all found
+by running the check rather than reading it:** (1) `--ids` cannot carry a 32,768-token prompt at all — Linux
+caps **one argv slot** at `MAX_ARG_STRLEN = 131,072 B`, independent of `getconf ARG_MAX`, which quotes 2 MiB and
+misleads everyone; 32,768 ids is 191,588 B, so `exec` failed with E2BIG and shell exit 126 *before* the binary
+was reached, which read as "the engine crashed at 32k". `decode_run` now takes `--ids-file PATH` (same parser,
+same list). (2) The refusal width, ceiling+1, was **beyond the generated id pool**, so the refusal case was fed
+32,768 ids, ran a perfectly legal prompt, and reported "the ceiling moved somewhere other than the launcher's
+refusal" — a vacuous negative control wearing a real failure, the same class as `partalias` and `mixed_bw`.
+Fixed by generating to `max(widths, ceiling+1)` *and* by asserting the id count at every call site, since a
+silently short prompt is the failure mode, not the missing width. (3) `--selftest` writes its fixture pool into
+the work directory, which is the same directory a real run cuts its ids from — so after a selftest the next run
+was quietly fed **1,024 ids** while claiming 8,192. That one got me: the first 8k/16k timing set below is
+rebuilt because the original three reps at each width were 1,024-token runs wearing the wrong label, and every
+field in their `RESULT` line looked plausible. Treat "a check that shares a scratch dir with its own selftest"
+as the trap; the numbers here were re-taken from a pool whose field count was asserted first.
+
+**What the wide band costs.** Medians of 3, one lock hold per width, same ruler as §36/§37 (`--steps 0`, `--gemm lt
+--gemm-pins all --gdn-loop 512`), spreads 1.6 % / 0.15 % / 0.25 % — these are compute-bound and they repeat:
+
+| lanes | `RESULT ms_total` | prompt tok/s | vs the 4,096-lane banner |
+|---|---|---|---|
+| 4,096 | 710.661 | 5,764 | (the §37/§38 reference point) |
+| 8,192 | 1,541.690 | **5,314** | −7.8 % |
+| 16,384 | 3,952.271 | **4,145** | −28.1 % |
+| **32,768** | **11,729.095** | **2,794** | **−51.5 %** |
+
+The shape is the expected one and it cross-checks: attention is 21 % of the wave at 4,096 lanes and grows
+quadratically with the row, so at 32,768 it should cost ~64 × its 133 ms ≈ 8.5 s of the 11.7 s measured, with
+the linear families contributing the remaining ~3.5 s (their 4k sum × 8). So nothing here says the long-context
+path is doing anything dumber than attention-shaped work — and nothing here is a claim that the *quadratic term*
+is optimised either; at 32k, attention is now the majority of the run by share as well as by absolute ms, which
+is a reason the attention bets in `prototype/gdn_walk/BET.md` §5 matter more at long context than at 4k, not
+less. What this section cannot see: decode at 32k (`--steps 0` only), numerics *beyond* the published band (the
+prefix-consistency adjudication uses `engine/attn_form_band.py` verbatim and widens nothing), multi-request
+residency at the new ceiling (the 258 MiB/scratch caveat above), and any width past 32,768, which is refused by
+design and stays refused until someone funds the next raise.
