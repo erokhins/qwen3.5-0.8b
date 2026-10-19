@@ -2163,3 +2163,46 @@ never pre-registered), and the colour fixtures are generated from the harness's 
 hand-typed — the stale hand-typed dict survived as a second assignment and overrode the derived one, caught only
 because the colour test runs before any measurement. A pre-registered line is only pre-registered if the file
 that carries it is the file the harness reads.
+
+## §48. Residency was the wall: **G1 ships**, attention −22.09 %, the wave −5.90 % at 4,096 and **−18.61 % at 32,768**, headline **7,655 → 7,986 prompt tok/s** (2026-10-19)
+
+The first attention win of this arc, and it arrived only after three routes were closed and one cheap falsifier
+ran. Bases, lines and the two-step order are in `prototype/attn_percost/A6-BET.md`; the measurements are
+`prototype/attn_percost/A6-G0-verdict.md` and `A6-G1-verdict.md`.
+
+**G0, the falsifier (not shipped).** Warps 3 → 7 and nothing else: VGPR unchanged at 178, LDS 65,536 = exactly one
+block/CU, 7 wf/CU. It moved the `attn` family **137.5176 → 122.6404 ms (−10.82 %)**, traced **−8.62 %**, and its
+own wave row only −1.89 % — inside the paired floor, exactly as A5 predicted, which is why it was funded as a
+thesis test rather than as a bet. §31's log-elasticity of 0.72 had predicted −10.5 % for 6 → 7 wf/CU and got
+−10.82 %. Its externality was **+6.80 / +74.72 / −1.03 ms**, i.e. at 16k a 224-thread block slowed its neighbours
+by more than attention gained.
+
+**G1, shipped.** Q read from global at the use site (E1's port, re-anchored after the roll knob moved the roll) plus
+the epilogue's F32 transpose staged 8 rows at a time: `3 × 4,096 + 8,192 = 20,480 B` → 3 blocks/CU → **9 wf/CU**
+at 185 VGPR, spill 0, and the driver's own occupancy query grants 3 blocks — which settles the register-file
+question A3 left open as a bracket (53,280–71,040 lane-VGPRs) rather than an unknown. Paired window (`util` 29 %,
+NULL −0.41 %, rep spreads ≤ 1.56 %): `attn` family **135.3870 → 105.4753 ms (−22.09 %)**, traced **−17.54 %**,
+wave `wall_ms` **451.8840 → 425.2243 (−5.90 %)**, 16,384 lanes **−14.22 %**, 32,768 lanes **−18.61 %**. Every row
+cleared its live line, so the default moved (`stage` → `unstaged8`) in `decode_run.cpp`, `decode_step.h` and
+`gate.py` in one commit.
+
+**Why the ship cost nothing in numerics.** The change moves staging addresses only, and it is **byte-identical**:
+`base` vs default and `base` vs `unstaged8` match on every dumped logit file and all 44 `STATEFP` rows at 640,
+ragged 1,111 and 2,000 ids. `engine/gate.py --fixture wide640f` on the committed tree at the new default: **PASS**,
+nothing widened, no `--ack` of anything. A byte-identical win is the only kind that needs no decision from the user.
+
+**Headline and ladder.** Own window (`util` 5 %, `sclk` 845 MHz — clock-discounted, so the pair is the number):
+`RESULT ms_total` best-of-5 **512.908 ms** vs base best-of-3 **531.285 ms** = **+3.46 %** → **7,986 prompt tok/s**
+at 4,096 lanes. Long context from the paired A/B above, on §45's denominator: **5,801 tok/s at 16,384**
+(§45: 4,937, +17.5 %) and **3,838 tok/s at 32,768** (§45: 3,136, +22.4 %). The win grows with width, which is
+§46's claim that the quadratic term is bought with residency, observed. Decode did not move: paired 64-step reads
+base 7.438 vs new 7.545 ms/step (**+1.4 %**, inside the floor; three pairs one sign, so noted, not claimed, and
+not comparable to §44's absolute because that used the wave-timed denominator). Externality
+**+2.83 / +20.08 / +5.05 ms** — better than G0's +74.72 but not zero: a third resident block is not free for its
+neighbours, and attention's share of the wave is now 29.91 % of a smaller wave.
+
+**Method note worth keeping.** Three negative results bought the discriminating measurement: A2 bounded the pipes
+(5.56 % of the matrix roof, ≤ 8.8 % of issue), A3 closed the staging route by deriving the LDS floor, A4-L1 priced
+the accumulator chain at 1.67 %. Only then was the residency thesis tested with a one-constant change before the
+surgery was funded — and G1 reached the same byte count A3 called unreachable because A3's kill was specific to
+splitting a 16-row round, which G1 never does. **A closed route is a claim about a mechanism, not a byte count.**
