@@ -1893,3 +1893,35 @@ traffic the hoist itself adds (the worker's own traffic correction, +32 KB/token
 run). What this cannot see: a cheaper walk that adds no stage traffic — G2's geometry, one wavefront per block,
 `LDS = 0`, no barriers by construction — would keep the −5.91 % and drop the +6.06 ms. That is now the funded
 question, and G1's own knob is the instrument that will measure it.
+
+## §41. Attention's residency axis closes at 6 wf/CU — on LDS, not on spills — and the only lever left is per-launch cost (2026-10-19)
+
+No kernel ran for this section: it is note blocks, KFD properties and a launcher read, and it closes a research
+axis, which is as valuable as a small win and much cheaper. `attn_fattn_wave` ships at **178 VGPR / 0 spill /
+32,768 B LDS**, which is 2 blocks/CU (LDS from KFD: `lds_size_in_kb 64`; ceilings from `rocminfo`) = **6
+wavefronts/CU, LDS-bound**. Ladder rung **E1** — the 3-warp body with Q un-staged, a hand port because the old
+patch fails 4 of 5 hunks — gives **184 VGPR / 0 spill / 32,768 B LDS**: same blocks, same 6 wf/CU. The Q stage
+was never extra memory, it is the **epilogue's F32 transpose staging on loan**
+(`FATTN_MROWS·FATTN_TROW·4 == FATTN_MROWS·DH·2`, 8,192 B per warp either way), so removing it moves nothing
+that binds. Note blocks re-derived by the main agent from fresh compiles of both sides, not inherited.
+
+The ladder's E1 admission (`spill = 0 ∧ VGPR ≲ 190 ⇒ an 8+ wf/CU shape exists`) is now on record as
+**incomplete**: its antecedent assumed LDS would fall. Consequences: attention occupancy is **closed** at 6,
+and buying 3 blocks/CU would need the epilogue down to ≤ 21,845 B (transpose staged 8 rows at a time, or the
+three serialised through `s_kv`) — structural changes to a shipping kernel's epilogue with no measurement
+behind them, **not approved by anything in this ledger**.
+
+The same commit settles A0's loose end, and that removes a candidate too. The traced
+`prep 48 / slim 48 / fattn 42 / combine 42` at 4,096 lanes comes from **one integer**: `split = split_for(lanes_last)`
+(`engine/kernels_attn.cpp:248`), with `attn_fattn_wave` gated on `split ≥ 2` and `attn_combine` on `split > 1`.
+Body 0 has `lvalid = 1` (`engine/decode_step.cpp:687`), so `lanes_last = 512 = MAXSC`, so `split = 1`, so that
+one body per layer pays neither — 7 × 6 = 42. The WMMA form covers **87.5 % of rows and 98.4 % of the
+lane-work** (`prototype/attn_wmma/a0_work_split.py`, RECONCILED). "Too many launches go through it" is dead as
+a framing; what remains for attention is **per-launch cost** — §26's instruction/traffic gap, sized there at
+4.6×, at 2.92 ms per launch.
+
+Where the money is, restated with today's numbers: `gdn_rec` is 41.3 % of the wave at 266 ms against llama.cpp's
+47.2 on identical launch counts; attention is 21.6 % at 133 ms against 51.65 and its residency route is now
+closed. So the next funded implementation is **G2**, the barrier-free one-wavefront GDN geometry, whose lines
+(including the `wall_ms` denominator §40 made necessary) are pre-registered in `prototype/gdn_walk/BET.md` §10
+before any code exists.
