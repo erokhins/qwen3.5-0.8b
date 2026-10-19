@@ -121,3 +121,52 @@ A0 finds.
 Device work is the main agent's, blocking, zero subagents, one lock hold, per `AGENTS.md`; workers write
 kernels, gates and the CPU-side mirrors and hand over command lines. The numbers in §3/§4 are **pre-registered
 kill lines**, and a result between the lines is reported as unresolved rather than narrated.
+
+## 7. A0, half of it, taken the same day from the trace already on disk
+
+The attribution step did not need a new device window: §38's own trace already has per-kernel rows. Our
+attention family at 4,096 lanes, traced, per pass:
+
+| kernel | ms/pass | launches/pass | ms/launch |
+|---|---|---|---|
+| `attn_fattn_wave(CoreArgs)` | **122.72** | 42 | **2.92** |
+| `attn_slim_wave(CoreArgs)` | 5.27 | 48 | 0.11 |
+| `attn_combine(CoreArgs)` | 5.19 | 42 | 0.12 |
+| `attn_prep(CoreArgs)` | 3.65 | 48 | 0.076 |
+| family total | 136.83 | 180 | — |
+
+**90 % of the attention family is one kernel.** So "attention is 2.65× behind llama" is really the sentence
+"`attn_fattn_wave` is 2.65× behind `flash_attn_ext_f16`", and the 12.1 ms of prep+combine+slim is not where a
+bet can be won. Two things follow, and neither is a tile retune:
+
+1. **Rate, not ratio.** D56 priced the frozen attention path at **1.59 TFLOP/s** = 7.1 % of the mix roof. The
+   round that just landed made the family 1.996× faster (§37), so the shipping figure is **≈3.17 TFLOP/s**, i.e.
+   **6 % of the WMMA-class roof of 52.63 TFLOP/s** (`prototype/issue_rate_probe/results.md` §1). llama's traced
+   51.65 ms — an *upper* bound on its real time, since traced ≥ real — implies **≥8.1 TFLOP/s**, ~15 % of the
+   same roof. Both engines are nowhere near the matrix roof, which means the remaining gap is *not* a flop-roof
+   problem in either engine, and any bet expressed as "get closer to the WMMA roof" is unfunded by construction.
+2. **The ladder already names the one compile-only question.** `prototype/attn_wmma/fattn_regfile_ladder.md`
+   E1: the shipped 3-warp body is **LDS-bound at 6 wf/CU** (178 VGPR, 0 spill, 32,768 B LDS), and the family's
+   own ceiling formula puts 7 at NW=7. E1 asks whether **un-staging Q** from the shared stage (drop the `s_q`
+   fill, read Q from global at the use site, keep `s_kv` and the 3-warp geometry) yields `spill = 0` and
+   **VGPR ≲ 190** — and the ladder states the admission exactly: that pair *means* an 8+ wf/CU zero-spill shape
+   exists and is worth a device A/B; `spill > 0` closes the residency axis at 6.
+
+**A1 is therefore E1, and it is a CPU task.** The ladder is explicit that the old un-stage patch no longer
+applies (4 of 5 hunks fail; it is a **hand port**, not an apply), and that E1's evidence is a *note-block read*
+— `vgpr_count / vgpr_spill_count / private_segment_fixed_size / group_segment` from one `-O3 gfx1151` compile.
+No device, no timing, worker-legal by the letter and the spirit of the GPU rule. Its two outcomes:
+
+- **`spill = 0` and VGPR ≲ 190** → the main agent runs the device A/B, and *that* is pre-registered now:
+  against §38's traced 122.72 ms / §37's untraced family 132.85 ms, **live if the family drops ≥ 8 %** (the
+  ladder's own warning that "residency is not speed" is exactly why this line exists — §31 bought 4→8 wf/CU for
+  +20 % of the family *while spilling 50 registers*, and §33 got 1.217× back by *deleting* scratch at lower
+  residency); **dead if inside §37's ±3 % floor.**
+- **`spill > 0`** → the residency axis is closed at 6 wf/CU, A1 ships nothing, and the attention money moves to
+  the instruction/traffic gap §26 sized at 4.6×, which is a different and larger piece of work.
+
+**One thing A0 does NOT establish, recorded so nobody invents it:** why the traced launch counts are `slim 48 /
+fattn 42 / combine 42` at 4,096 lanes — i.e. which waves take the one-pass path and which take the streaming
+WMMA path — is not derived here. A1's brief must read that out of the launcher (`prototype/attn_decode/
+attn_decode_kernels.h` owns the row-block rule since Bet 2) before pricing anything about work split, because a
+bet on "the fattn kernel is slow per launch" is a different bet from "too many launches go through it".
