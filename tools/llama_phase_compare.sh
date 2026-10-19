@@ -25,6 +25,10 @@
 #   LEGS=trace bash tools/llama_phase_compare.sh # traces only
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# LC_ALL=C, deliberately: under a comma-decimal locale the medians and the awk-formatted ratios print as
+# "569,5 ms" and "1,33x", which no downstream tool parses and which a reader misreads as a thousands
+# separator. The measurements are the same; the log is not.
+export LC_ALL=C
 LB=${LB:-engines/llama.cpp/build-hip/bin/llama-bench}
 LM=${LM:-models/gguf/Qwen3.5-0.8B.f16.gguf}
 BIN=engine/build/decode_run
@@ -32,11 +36,33 @@ PY=${PY:-.venv/bin/python}
 MODEL=models/Qwen3.5-0.8B
 IDS=$(cat progress/bench/evidence/prefill-occupancy-2026-10-16/ids4096.txt)
 OURWIDTHS=${OURWIDTHS:-"512 1024 4096"}
+# The prefill widths llama-bench is asked for. It was hardcoded to 512/1024/4096, which answers §38's
+# matched-row question and cannot answer the decay question ("does llama.cpp degrade with context more
+# slowly than we do?"), which needs the SAME widths on both sides out to 32k. Keep PPS a superset of
+# OURWIDTHS or the ratio lines have no llama row to quote at the wide end.
+PPS=${PPS:-"512 1024 4096"}
+# Rows, pipe-separated so a row containing spaces stays one element. The FIRST row is the matched row the
+# ratio and decay lines quote. Default is exactly §38's set, so an unchanged run re-measures §38.
+IFS='|' read -r -a ROW_ARR <<< "${ROWS:-"-ub 512 -fa on -t 32|-ub 512 -fa off -t 32|-ub 128 -fa on -t 32|-ub 512 -fa on -t 4"}"
 REPS=${REPS:-3}
 LEGS=${LEGS:-bench trace}
 TAG=${TAG:-llama-phase}
 OUT=tmp/gcc/llamaphase
 mkdir -p "$OUT"
+
+ids_file_for() {
+    # Our side's ids for width $1, written to a file and passed with --ids-file rather than --ids: MAX_ARG_STRLEN
+    # caps ONE argv slot at 131,072 B, and a 32,768-id string is ~200 KB, so --ids would die at exec with exit
+    # 126 at exactly the widest row the decay question needs (AGENTS.md). The transport cannot change a timing;
+    # the ids are unchanged (4,096 keeps the pinned prose), and the count is asserted because a truncated ids
+    # file would feed a narrower prompt and report it as the wide one.
+    local w=$1 f="$OUT/ids_$1.csv"
+    if [ "$w" = "4096" ]; then printf '%s' "$IDS" > "$f"; else seq -s, 1 "$w" > "$f"; fi
+    local n
+    n=$(tr ',' '\n' < "$f" | grep -c .)
+    [ "$n" = "$w" ] || fail "ids file for $w holds $n ids, not $w"
+    printf '%s' "$f"
+}
 
 clk() { rocm-smi --showclocks 2>/dev/null | tr -d '\r' | grep -iE "sclk" | tr '\n' ' '; }
 res() { grep -h "^RESULT" "$1" | sed -E 's/.*ms_total=([0-9.]+).*/\1/' | tail -1; }
@@ -56,8 +82,8 @@ echo "model: $LM"
 if [[ " $LEGS " == *" bench "* ]]; then
   echo
   echo "== leg 1: throughput rows, one hold, medians of $REPS =="
-  for ROW in "-ub 512 -fa on -t 32" "-ub 512 -fa off -t 32" "-ub 128 -fa on -t 32" "-ub 512 -fa on -t 4"; do
-    for PP in 512 1024 4096; do
+  for ROW in "${ROW_ARR[@]}"; do
+    for PP in $PPS; do
       for R in $(seq 1 "$REPS"); do
         timeout 900 "$LB" -m "$LM" -p "$PP" -n 0 $ROW -ngl 99 -b 2048 -r 1 2>>"$OUT/llama.err" \
             | tee -a "$OUT/llama_${ROW// /_}_${PP}.txt" >/dev/null || fail "llama-bench pp$PP row '$ROW' rep $R"
@@ -71,9 +97,9 @@ if [[ " $LEGS " == *" bench "* ]]; then
   # Ids: 4,096 uses the pinned ids4096.txt as §21 did; 512/1,024 use synthetic 1..W, which is CLOSER to
   # what llama-bench feeds than the pinned prose is, and §21's own non-comparable note is honoured.
   for W in $OURWIDTHS; do
-    IDS_W=$( [ "$W" = "4096" ] && printf '%s' "$IDS" || seq -s, 1 "$W" )
+    IDS_F=$(ids_file_for "$W")
     for R in $(seq 1 "$REPS"); do
-      "$BIN" --model "$MODEL" --ids "$IDS_W" --steps 0 --gemm lt --gemm-pins all --gdn-loop 512 \
+      "$BIN" --model "$MODEL" --ids-file "$IDS_F" --steps 0 --gemm lt --gemm-pins all --gdn-loop 512 \
           --out "$OUT/our_${W}_$R" > "$OUT/our_${W}_$R.log" 2>&1 || fail "ours W=$W rep $R"
       sleep 3
     done
@@ -81,9 +107,9 @@ if [[ " $LEGS " == *" bench "* ]]; then
   echo "CLK@mid: $(clk)"
   echo
   echo "-- llama.cpp pp medians (tok/s) --"
-  for ROW in "-ub 512 -fa on -t 32" "-ub 512 -fa off -t 32" "-ub 128 -fa on -t 32" "-ub 512 -fa on -t 4"; do
+  for ROW in "${ROW_ARR[@]}"; do
     line="llama $ROW:"
-    for PP in 512 1024 4096; do
+    for PP in $PPS; do
       # llama-bench prints "<tok/s> ± <spread>" in the test column; reading the last float grabs the
       # ± spread, which is how a comparison harness reports 0.00 tok/s for a perfectly healthy engine.
       V=$(sed -n "s/.*| *pp[0-9]* *| *\([0-9][0-9.]*\) ±.*/\1/p" "$OUT/llama_${ROW// /_}_${PP}.txt" | tail -1)
@@ -93,12 +119,25 @@ if [[ " $LEGS " == *" bench "* ]]; then
     echo "$line"
   done
   echo "-- ours (prompt-only, --steps 0, same hold) and the matched ratio --"
+  declare -A RATIO_OF
   for W in $OURWIDTHS; do
     M=$(for R in $(seq 1 "$REPS"); do res "$OUT/our_${W}_${R}.log"; done | median -)
     OUR_TOKS=$(awk -v m="$M" -v w="$W" 'BEGIN{printf "%.0f", w*1000/m}')
     LM=$(sed -n "s/.*| *pp[0-9]* *| *\([0-9][0-9.]*\) ±.*/\1/p" "$OUT/llama_-ub_512_-fa_on_-t_32_${W}.txt" | tail -1)
-    echo "  W=$W ours ${M} ms = ${OUR_TOKS} tok/s ; llama(-ub512 fa-on t32) ${LM} tok/s ; llama/ours = "\
-        "$(awk -v l="$LM" -v o="$OUR_TOKS" 'BEGIN{printf "%.2f", l/o}')"x
+    RA=$(awk -v l="$LM" -v o="$OUR_TOKS" 'BEGIN{printf "%.2f", l/o}')
+    RATIO_OF[$W]=$RA
+    echo "  W=$W ours ${M} ms = ${OUR_TOKS} tok/s ; llama(-ub512 fa-on t32) ${LM} tok/s ; llama/ours = "${RA}"x"
+  done
+  # DECAY. The ratio at one width says who is faster; the ratio's DRIFT across widths says whether the gap is
+  # a constant we pay or an asymptotic term we pay — which is a different question and cannot be answered from
+  # one width, nor from two windows (a llama row taken in another window is not this window's ruler, §37/§38).
+  # Both sides, same hold, same widths: drift > 0 means we lose ground as context grows (a term that grows with
+  # context is worse on our side), drift < 0 means the gap narrows and the fixed constant is ours.
+  echo "-- decay: ratio drift with context, both engines measured in THIS hold --"
+  W0=$(printf '%s\n' $OURWIDTHS | head -1)
+  for W in $OURWIDTHS; do
+    echo "  W=$W  llama/ours=${RATIO_OF[$W]}x  drift vs W=$W0: "\
+"$(awk -v a="${RATIO_OF[$W]}" -v b="${RATIO_OF[$W0]}" 'BEGIN{printf "%+.1f%%", 100*(a/b-1)}')"
   done
   echo
 fi
