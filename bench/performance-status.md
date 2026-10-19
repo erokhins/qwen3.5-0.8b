@@ -2052,3 +2052,23 @@ script carried the claim — a requirement written after the object it constrain
 
 Commits: `46139e9` (the map), `0d1f41c` (gate can name a geometry), `e1df7a7` (default ships, guards fixed),
 `eb43ca1` (traced classifier), `6564161` (BET §13). Evidence in `progress/bench/evidence/g4ab-2026-10-19/`.
+
+## §45. Long-context ladder re-taken at the `reg16` default — every width moves, and the ceiling is unchanged (2026-10-19)
+
+§44 shipped a new default and thereby made §39's ladder stale, which is the one kind of staleness an ledger has
+to fix in the same sitting rather than note. Re-run of `tools/longctx_check.sh` at the shipping default, all five
+checks per width (feed/row parity against the one-row route, prefix consistency above `MAXSC`, argmax room,
+banded numerics, and the refusal leg past the ceiling), `--widths 8192,16384,32768`:
+
+| width | §39 median | this window | prompt tok/s now | change |
+|---|---|---|---|---|
+| 8,192 | 1541.690 ms | **1278.80 ms** | **6,406** | **−17.1 % time, +20.6 % tok/s** |
+| 16,384 | 3952.271 ms | **3319.25 ms** | **4,937** | **−16.0 % time, +19.1 % tok/s** |
+| 32,768 | 11729.095 ms | **10448.13 ms** | **3,136** | **−10.9 % time, +12.2 % tok/s** |
+
+All three widths **PASS**; the lane ceiling still reads 32,768 (`kAttnMaxSplit = 64`, §39), and the improvement
+decays with width exactly as it should for a GDN fix — GDN is a per-token cost, so as attention's quadratic
+term grows with context it claims a larger share of the wave and the same −66.6 % on 18.7 % of the wave buys
+less. That is the arithmetic check on the three numbers: 20.6 / 19.1 / 12.2 %, monotonically falling, which is
+what a fixed-fraction win on a shrinking share looks like. Two reps per width here (§39 meditated on three), so
+the rows are honest to about ±2 % and the direction is not in question.
