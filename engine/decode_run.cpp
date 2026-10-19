@@ -238,6 +238,21 @@ Options parse_args(int argc, char** argv) {
             o.model_dir = next();
         } else if (a == "--ids") {
             o.prompt = parse_ids(next());
+        } else if (a == "--ids-file") {
+            // The same list, read from a file, because an argument cannot always carry it: Linux caps
+            // ONE argv slot at MAX_ARG_STRLEN = 131,072 B (32 pages, independent of `getconf ARG_MAX`,
+            // which quotes 2 MiB and misleads everyone), so `--ids` dies at roughly 21,800 ids with
+            // exec E2BIG — shell exit 126 and "Argument list too long" — before this binary is
+            // reached at all. That is what stopped tools/longctx_check.sh at 32,768 lanes (191,588 B
+            // in one field) while 16,384 passed at 95,796 B: the wall was the harness, not the engine.
+            const std::string path = next();
+            std::ifstream in(path);
+            if (!in) throw std::runtime_error("--ids-file: cannot open " + path);
+            std::string all, line;
+            while (std::getline(in, line)) { all += line; all += ','; }
+            o.prompt = parse_ids(all);
+            if (o.prompt.empty())
+                throw std::runtime_error("--ids-file: " + path + " holds no token ids");
         } else if (a == "--replay") {
             o.feed = parse_ids(next());
         } else if (a == "--steps") {
@@ -375,7 +390,8 @@ Options parse_args(int argc, char** argv) {
     }
     if (!o.sizes_only && !o.session && o.prompt.empty()) {
         throw std::runtime_error(
-            "decode_run needs --ids <comma-separated token ids> (the fixture's prefill_ids); "
+            "decode_run needs --ids <comma-separated token ids> (the fixture's prefill_ids) or "
+            "--ids-file PATH holding the same list (a prompt beyond ~21,800 ids cannot be an argument); "
             "--sizes-only and --session are the two modes that run without them");
     }
     if (!o.sizes_only && !o.session && o.steps < 0) {
@@ -611,7 +627,7 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
 
 void print_usage(FILE* out) {
     std::fprintf(out,
-                 "usage: decode_run [--model DIR] [--ids ID,ID,...] [--steps N] [--out DIR]"
+                 "usage: decode_run [--model DIR] [--ids ID,ID,...|--ids-file PATH] [--steps N] [--out DIR]"
                  " [--replay ID,ID,...] [--cap N] [--session] [--no-stop] [--state-fp]"
                  " [--prefill-logits last|all] [--wave-rows N]"
                  " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
