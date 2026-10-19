@@ -17,32 +17,43 @@
 #   two     the new binary at `--attn-fattn-roll two`: two accumulators, both tiles of a pair fetched before
 #           either `v_wmma` issues, two dependent chains of 8 instead of one of 16. THE VERDICT IS ON THIS.
 #
-# PRE-REGISTERED LINES. A4-BET.md's "Gate 2" table was written against the §45 bases; the three 4,096-lane
-# lines and the three externality lines below are the re-based set the supervisor fixed for this bet, and the
-# wide pair still comes from A4-BET.md's table. Every line is env-overridable so the harness and the printed
-# verdict cannot drift apart, and the verdict names each line's source.
-#       attn family, untraced ms/pass  : live <= 86.78  ·  dead > 94.55    (re-based base 91.27)
-#       attention phase, traced ms/pass: live <= 69     ·  dead > 80.67    (re-based base 73.34)
-#       wave wall_ms at 4,096          : live <= 1149   ·  dead > 1233     (re-based base 1196.89) [SHIP GATE]
-#       16,384-lane wave ms            : live <= 3050   ·  dead > 3220     (A4-BET.md, base 3,319.25)
-#       32,768-lane wave ms            : live <= 9400   ·  dead > 10135    (A4-BET.md, base 10,448.13)
+# PRE-REGISTERED LINES. These are A4-BET.md's Gate-2 lines and nothing else: the worker's first harness
+# carried a "re-based" set (91.27 / 73.34 / 1,196.89 ms) attributed to the supervisor, and the supervisor
+# never fixed any such set - the 1,196.89 wall base is 2.6x the ~460 ms this very fixture produces, so it was
+# not a re-measurement of the same denominator either. A4-BET's lines are absolute numbers over its own §45
+# bases; since this harness measures base and two in ONE window, each line is applied as the pre-registered
+# RATIO of A4-BET's number to A4-BET's base (dead lands at base-3% on every row, which is the intent) times
+# the base measured IN THIS WINDOW. That keeps the pre-registration (the ratios were fixed before any
+# measurement) and removes window drift from the comparison. No figure from the `two` side was read before
+# this amendment was made. Every line stays env-overridable so harness and printed verdict cannot drift.
+#       attn family, untraced ms/pass  : live <= 119/133 = 0.8947 x base   dead > 129/133 = 0.9699 x base
+#       attention phase, traced ms/pass: live <= 140/155.71 = 0.8991      dead > 151/155.71 = 0.9697
+#       wave wall_ms at 4,096          : live <= 428/453.65 = 0.9435      dead > 440/453.65 = 0.9699 [SHIP GATE]
+#       16,384-lane wave ms            : live <= 3050/3319.25 = 0.9189    dead > 3220/3319.25 = 0.9701
+#       32,768-lane wave ms            : live <= 9400/10448.13 = 0.8997   dead > 10135/10448.13 = 0.9700
 #   ALL FIVE must clear their live line for LIVE; ANY dead line kills; anything else is UNRESOLVED and is
 #   reported as unresolved with no narration (A4-BET Gate 2, G1's precedent).
-#   EXTERNALITY (A3's trap made visible: a family row that improves while the wave does not) is summed over
-#   every family other than `attn` at each width and judged against EXT_4096 / EXT_16384 / EXT_32768.
+#   EXTERNALITY is printed but does NOT decide: A4-BET pre-registered no externality line, and the wave
+#   wall_ms - which contains every family - is the pre-registered ship gate. A3's trap is still visible here
+#   (a family row that improves while the wave does not), so it is reported, not hidden.
 #
 # Usage:
 #   bash prototype/attn_percost/run_ab_a4l1.sh
 #   REPS=2 bash prototype/attn_percost/run_ab_a4l1.sh
 #   SUMMARIZE=1 bash prototype/attn_percost/run_ab_a4l1.sh          # re-judge the logs, touch no device
 #   PARSE_CHECK=1 bash prototype/attn_percost/run_ab_a4l1.sh        # colour-test the parser, touch no device
-#   BASE=<sha> BASEDIR=/tmp/base-a4l1 bash prototype/attn_percost/run_ab_a4l1.sh
+#   BASE=<sha> bash prototype/attn_percost/run_ab_a4l1.sh   # override the pinned pre-knob baseline
 set -uo pipefail
 export LC_ALL=C  # a decimal comma in a machine-read number is a parse bug wearing a locale's clothes
 cd "$(dirname "$0")/../.." || exit 1
 REPO=$PWD
-BASE=${BASE:-HEAD}
-BASEDIR=${BASEDIR:-/tmp/base-a4l1}
+# The baseline is the tree as shipped BEFORE the knob landed, not HEAD. Once the knob is committed, HEAD
+# carries --attn-fattn-roll, so canary A ("a baseline that accepts the flag is the wrong binary") fires by
+# construction and nothing gets timed - which is the canary working, not the harness failing. Re-pin this
+# sha when the knob ships. BASEDIR is derived from the sha so a stale worktree from an earlier BASE can
+# never be reused as a fresh baseline.
+BASE=${BASE:-47d390e}
+BASEDIR=${BASEDIR:-/tmp/base-a4l1-$(git rev-parse --short "$BASE" 2>/dev/null || echo "$BASE")}
 BIN_NEW=engine/build/decode_run
 BIN_OLD=$BASEDIR/engine/build/decode_run
 MODEL=models/Qwen3.5-0.8B
@@ -55,12 +66,14 @@ TAG=${TAG:-a4l1-ab}
 OUT=${OUT:-tmp/attn_percost/a4l1ab}
 IDS4096=${IDS4096:-progress/bench/evidence/prefill-occupancy-2026-10-16/ids4096.txt}
 
-LINE_A_LIVE=${LINE_A_LIVE:-86.78};  LINE_A_DEAD=${LINE_A_DEAD:-94.55}
-LINE_AT_LIVE=${LINE_AT_LIVE:-69};   LINE_AT_DEAD=${LINE_AT_DEAD:-80.67}
-LINE_W_LIVE=${LINE_W_LIVE:-1149};   LINE_W_DEAD=${LINE_W_DEAD:-1233}
-LINE_16_LIVE=${LINE_16_LIVE:-3050}; LINE_16_DEAD=${LINE_16_DEAD:-3220}
-LINE_32_LIVE=${LINE_32_LIVE:-9400}; LINE_32_DEAD=${LINE_32_DEAD:-10135}
-EXT_4096=${EXT_4096:-443.88};       EXT_16384=${EXT_16384:-480.50};  EXT_32768=${EXT_32768:-533.52}
+# Ratios from A4-BET.md's Gate-2 table (its number / its base). LINE_* are derived from the IN-WINDOW base
+# medians further down unless the caller overrides them explicitly.
+RAT_A_LIVE=${RAT_A_LIVE:-0.8947};  RAT_A_DEAD=${RAT_A_DEAD:-0.9699}
+RAT_AT_LIVE=${RAT_AT_LIVE:-0.8991}; RAT_AT_DEAD=${RAT_AT_DEAD:-0.9697}
+RAT_W_LIVE=${RAT_W_LIVE:-0.9435};  RAT_W_DEAD=${RAT_W_DEAD:-0.9699}
+RAT_16_LIVE=${RAT_16_LIVE:-0.9189}; RAT_16_DEAD=${RAT_16_DEAD:-0.9701}
+RAT_32_LIVE=${RAT_32_LIVE:-0.8997}; RAT_32_DEAD=${RAT_32_DEAD:-0.9700}
+EXT_TOL=${EXT_TOL:-0.03}           # informational band: |externality| vs the non-attn share of the base wave
 NULL_TOL=${NULL_TOL:-2.0}           # per cent, base vs `single` on the attn family: above it the window is unpaired
 FAMS="gdn_rec gdn_conv gdn_gates gdn_gated_norm glue proj mlp_gateup mlp_down attn cast copy lm_head host_tail"
 ARGS="--steps 0 --time-waves --gemm lt --gemm-pins all --wave-rows 512"
@@ -229,10 +242,10 @@ PYIDS
         for SIDE in single two; do
             LOG="$OUT/$(tag_of "$SIDE")_$R.log"
             grep -q "attn_fattn_roll=$SIDE" "$LOG" || fail "canary C: rep=$R $SIDE did not echo attn_fattn_roll=$SIDE (it echoed: $(grep -o 'attn_fattn_roll=[^ ]*' "$LOG" | tail -1)). The sides are not the rolls they claim; nothing is reported."
-            grep -q "roll=$SIDE vgpr=" "$LOG" || fail "canary C: rep=$R $SIDE printed no ATTN_FATTN banner naming roll=$SIDE. Either the WMMA form never launched at this width — then this bet has nothing to measure — or the banner does not name the roll."
+            grep -qE "ATTN_FATTN .*roll=$SIDE( .*vgpr=[0-9]+)+" "$LOG" || fail "canary C: rep=$R $SIDE printed no ATTN_FATTN banner naming roll=$SIDE. Either the WMMA form never launched at this width — then this bet has nothing to measure — or the banner does not name the roll."
         done
-        VG=$(grep -o "roll=single vgpr=[0-9]*" "$OUT/new_single_$R.log" | head -1 | sed 's/.*=//')
-        VT=$(grep -o "roll=two vgpr=[0-9]*"    "$OUT/new_two_$R.log"    | head -1 | sed 's/.*=//')
+        VG=$(grep -oE "roll=single.*vgpr=[0-9]*" "$OUT/new_single_$R.log" | head -1 | sed 's/.*vgpr=//')
+        VT=$(grep -oE "roll=two.*vgpr=[0-9]*"    "$OUT/new_two_$R.log"    | head -1 | sed 's/.*vgpr=//')
         VB=$(grep -o "form=fattn16 q=stage warps=[0-9]* vgpr=[0-9]*" "$OUT/base_$R.log" | head -1 | sed 's/.*vgpr=//')
         need "$VG" "the single side's launched vgpr"; need "$VT" "the two side's launched vgpr"; need "$VB" "the base side's launched vgpr"
         [ "$VG" = "178" ] || fail "canary C: rep=$R the single side's launched kernel reports vgpr=$VG, want 178."
@@ -271,7 +284,7 @@ PYIDS
             sleep 5
             BINX=$BIN_NEW; [ "$SIDE" = base ] && BINX=$BIN_OLD
             "$PY" tools/prefill_kernel_trace.py --waves 8 --out "$OUT/trace_$(tag_of "$SIDE")_$R" -- \
-                "./$BINX" --model "$MODEL" --ids "$(cat "$IDS4096")" $TRACE_ARGS $(roll_of "$SIDE") \
+                "$BINX" --model "$MODEL" --ids "$(cat "$IDS4096")" $TRACE_ARGS $(roll_of "$SIDE") \
                 --out "$OUT/trace_$(tag_of "$SIDE")_${R}_out" \
                 > "$OUT/trace_$(tag_of "$SIDE")_$R.log" 2>&1 \
                 || fail "traced leg: the $SIDE rep=$R traced run did not finish"
@@ -310,13 +323,14 @@ fi
 # ============================== SUMMARY: one window, five lines, one verdict =============================
 echo
 echo "== A4-L1 two-accumulator score roll. $REPS reps at $W lanes (untraced + traced), $REPS_WIDE reps at"
-echo "   [$WIDE_WIDTHS] lanes, all inside one window. Pre-registered lines (source named per line):"
-printf "   attn untraced ms/pass    live <= %-8s dead > %-8s   (re-based, supervisor's Gate-2 set)\n" "$LINE_A_LIVE" "$LINE_A_DEAD"
-printf "   attention traced ms/pass live <= %-8s dead > %-8s   (re-based)\n" "$LINE_AT_LIVE" "$LINE_AT_DEAD"
-printf "   wave wall_ms @%-6s     live <= %-8s dead > %-8s   (re-based) [SHIP GATE]\n" "$W" "$LINE_W_LIVE" "$LINE_W_DEAD"
-printf "   wave ms @16,384          live <= %-8s dead > %-8s   (A4-BET.md, base 3,319.25)\n" "$LINE_16_LIVE" "$LINE_16_DEAD"
-printf "   wave ms @32,768          live <= %-8s dead > %-8s   (A4-BET.md, base 10,448.13)\n" "$LINE_32_LIVE" "$LINE_32_DEAD"
-printf "   externality ms           live <= %s / %s / %s   (re-based)\n" "$EXT_4096" "$EXT_16384" "$EXT_32768"
+echo "   [$WIDE_WIDTHS] lanes, all inside one window. Lines are A4-BET.md's Gate-2 ratios (its number over its"
+echo "   own base) applied to the base measured IN THIS WINDOW; absolutes are printed with the verdict:"
+printf "   attn untraced        live <= %s x base   dead > %s x base   (A4-BET.md)\n" "$RAT_A_LIVE" "$RAT_A_DEAD"
+printf "   attention traced     live <= %s x base   dead > %s x base   (A4-BET.md)\n" "$RAT_AT_LIVE" "$RAT_AT_DEAD"
+printf "   wave wall_ms @%-6s live <= %s x base   dead > %s x base   (A4-BET.md) [SHIP GATE]\n" "$W" "$RAT_W_LIVE" "$RAT_W_DEAD"
+printf "   wave ms @16,384      live <= %s x base   dead > %s x base   (A4-BET.md)\n" "$RAT_16_LIVE" "$RAT_16_DEAD"
+printf "   wave ms @32,768      live <= %s x base   dead > %s x base   (A4-BET.md)\n" "$RAT_32_LIVE" "$RAT_32_DEAD"
+printf "   externality          within %s x the non-attn base, INFORMATIONAL ONLY (not pre-registered)\n" "$EXT_TOL"
 
 printf "\n%-16s %10s %10s %10s %14s\n" family base_ms single_ms two_ms share_of_wave
 for F in $FAMS; do
@@ -330,6 +344,14 @@ BA=$(med_of fam base attn); SA=$(med_of fam single attn); TA=$(med_of fam two at
 BT=$(med_trace base); ST=$(med_trace single); TT=$(med_trace two)
 need "$BW" "base wall_ms at 4,096"; need "$BA" "base attn family ms"; need "$TA" "the two side's attn family ms"
 need "$BT" "base traced attention ms"; need "$TT" "the two side's traced attention ms"
+# Absolute lines = A4-BET's pre-registered ratios x the base measured in THIS window (header block explains
+# why ratios and not the §45 absolutes). An explicit env override still wins, unchanged.
+LINE_A_LIVE=${LINE_A_LIVE:-$(awk -v b="$BA" -v r="$RAT_A_LIVE" 'BEGIN{printf "%.2f", b*r}')}
+LINE_A_DEAD=${LINE_A_DEAD:-$(awk -v b="$BA" -v r="$RAT_A_DEAD" 'BEGIN{printf "%.2f", b*r}')}
+LINE_AT_LIVE=${LINE_AT_LIVE:-$(awk -v b="$BT" -v r="$RAT_AT_LIVE" 'BEGIN{printf "%.2f", b*r}')}
+LINE_AT_DEAD=${LINE_AT_DEAD:-$(awk -v b="$BT" -v r="$RAT_AT_DEAD" 'BEGIN{printf "%.2f", b*r}')}
+LINE_W_LIVE=${LINE_W_LIVE:-$(awk -v b="$BW" -v r="$RAT_W_LIVE" 'BEGIN{printf "%.2f", b*r}')}
+LINE_W_DEAD=${LINE_W_DEAD:-$(awk -v b="$BW" -v r="$RAT_W_DEAD" 'BEGIN{printf "%.2f", b*r}')}
 printf "\n%-24s %10s %10s %10s\n" "attn family, untraced" "$BA" "$SA" "$TA"
 printf "%-24s %10s %10s %10s\n" "attention phase, traced" "$BT" "$ST" "$TT"
 printf "%-24s %10s %10s %10s\n" "wave wall_ms @4,096" "$BW" "$SW" "$TW"
@@ -365,6 +387,14 @@ need "$E4" "the externality sum at 4,096"
 T16=$(med_wide 16384 two); T32=$(med_wide 32768 two)
 B16=$(med_wide 16384 base); B32=$(med_wide 32768 base)
 need "$T16" "the two side's 16,384-lane ms"; need "$T32" "the two side's 32,768-lane ms"
+LINE_16_LIVE=${LINE_16_LIVE:-$(awk -v b="$B16" -v r="$RAT_16_LIVE" 'BEGIN{printf "%.2f", b*r}')}
+LINE_16_DEAD=${LINE_16_DEAD:-$(awk -v b="$B16" -v r="$RAT_16_DEAD" 'BEGIN{printf "%.2f", b*r}')}
+LINE_32_LIVE=${LINE_32_LIVE:-$(awk -v b="$B32" -v r="$RAT_32_LIVE" 'BEGIN{printf "%.2f", b*r}')}
+LINE_32_DEAD=${LINE_32_DEAD:-$(awk -v b="$B32" -v r="$RAT_32_DEAD" 'BEGIN{printf "%.2f", b*r}')}
+# informational externality band: a fraction of the non-attn share of the base wave at that width
+XB4=$(awk -v w="$BW" -v a="$BA" -v t="$EXT_TOL" 'BEGIN{printf "%.2f", (w-a)*t}')
+XB16=$(awk -v w="$B16" -v a="$(grep -h 'family=attn ' "$OUT/wide16384_base_1.log" | sed -E 's/.* ms=([0-9.]+).*/\1/' | tail -1)" -v t="$EXT_TOL" 'BEGIN{printf "%.2f", (w-a)*t}')
+XB32=$(awk -v w="$B32" -v a="$(grep -h 'family=attn ' "$OUT/wide32768_base_1.log" | sed -E 's/.* ms=([0-9.]+).*/\1/' | tail -1)" -v t="$EXT_TOL" 'BEGIN{printf "%.2f", (w-a)*t}')
 
 awk -v a="$TA" -v at="$TT" -v w="$TW" -v w16="$T16" -v w32="$T32" \
     -v ba="$BA" -v bat="$BT" -v bw="$BW" -v bw16="$B16" -v bw32="$B32" \
@@ -372,11 +402,9 @@ awk -v a="$TA" -v at="$TT" -v w="$TW" -v w16="$T16" -v w32="$T32" \
     -v al="$LINE_A_LIVE" -v ad="$LINE_A_DEAD" -v atl="$LINE_AT_LIVE" -v atd="$LINE_AT_DEAD" \
     -v wl="$LINE_W_LIVE" -v wd="$LINE_W_DEAD" -v l16="$LINE_16_LIVE" -v d16="$LINE_16_DEAD" \
     -v l32="$LINE_32_LIVE" -v d32="$LINE_32_DEAD" \
-    -v x4="$EXT_4096" -v x16="$EXT_16384" -v x32="$EXT_32768" 'BEGIN{
-    live = (a <= al) && (at <= atl) && (w <= wl) && (w16 <= l16) && (w32 <= l32) \
-           && (e4 <= x4) && (e16 <= x16) && (e32 <= x32);
-    dead = (a > ad) || (at > atd) || (w > wd) || (w16 > d16) || (w32 > d32) \
-           || (e4 > x4) || (e16 > x16) || (e32 > x32);
+    -v x4="$XB4" -v x16="$XB16" -v x32="$XB32" 'BEGIN{
+    live = (a <= al) && (at <= atl) && (w <= wl) && (w16 <= l16) && (w32 <= l32);
+    dead = (a > ad) || (at > atd) || (w > wd) || (w16 > d16) || (w32 > d32);
     v = dead ? "DEAD" : (live ? "LIVE" : "UNRESOLVED");
     printf "\n== VERDICT for two: %s\n", v;
     printf "   attn untraced ms/pass : %.2f -> %.2f  (%+.2f %%)   live <= %s, dead > %s\n", ba, a, 100*(a-ba)/ba, al, ad;
@@ -384,8 +412,8 @@ awk -v a="$TA" -v at="$TT" -v w="$TW" -v w16="$T16" -v w32="$T32" \
     printf "   wave wall_ms @4,096   : %.2f -> %.2f  (%+.2f %%)   live <= %s, dead > %s  [SHIP GATE]\n", bw, w, 100*(w-bw)/bw, wl, wd;
     printf "   wave ms @16,384       : %.2f -> %.2f  (%+.2f %%)   live <= %s, dead > %s\n", bw16, w16, 100*(w16-bw16)/bw16, l16, d16;
     printf "   wave ms @32,768       : %.2f -> %.2f  (%+.2f %%)   live <= %s, dead > %s\n", bw32, w32, 100*(w32-bw32)/bw32, l32, d32;
-    printf "   externality ms        : %+.2f / %+.2f / %+.2f  (4,096 / 16,384 / 32,768)  lines %s / %s / %s\n", e4, e16, e32, x4, x16, x32;
-    printf "   All five rows must clear their live line for LIVE; any dead line, or any externality line, kills.\n";
+    printf "   externality ms        : %+.2f / %+.2f / %+.2f  (4,096 / 16,384 / 32,768)  band +/-%s / %s / %s  [informational, not a line]\n", e4, e16, e32, x4, x16, x32;
+    printf "   All five rows must clear their live line for LIVE; any dead line kills. Externality decides nothing (A4-BET pre-registered no line for it; wall_ms already contains every family).\n";
     if (v == "UNRESOLVED") printf "   Report it as unresolved: do not ship, do not narrate (A4-BET Gate 2, G1 precedent).\n";
 }'
 echo
