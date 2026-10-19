@@ -118,3 +118,43 @@ where it would actually bite: a 0.09 GB attention projection cannot hide 1.8 µs
 The lever is fusion (fewer, bigger kernels: fuse norms/gating into the GEMV epilogue), not
 graph capture. That is a change to the usual advice, so the probe exists to re-check it on
 any other ROCm part.
+
+## The size–bandwidth curve, measured: the big tier is real, it is ~32 MiB, and it reads at 877 GB/s (2026-10-19)
+
+This closes the question `strix-halo-official-specs.md` recorded as open item 2 ("is the ~54 MiB tier MALL?").
+Warm read bandwidth vs working-set size, `tools/build/bw_probe_hip <GiB> 3`, one `gpu_lock` hold (`util` 91 % at
+acquire), best of 3, every leg foreground and blocking:
+
+| buffer | best read GB/s | best copy GB/s |
+|---|---|---|
+| 4 MiB | 467.2 | 675.2 |
+| 8 MiB | 640.1 | 812.9 |
+| 16 MiB | 784.0 | **887.0** |
+| **32 MiB** | **876.7** | 325.7 |
+| 64 MiB | 239.4 | 251.3 |
+| 128 MiB | 242.2 | 230.0 |
+| 256 MiB | 241.1 | 221.4 |
+| 1 GiB | 237.2 | 211.2 |
+
+Four things follow, and the first two change how numbers in this repo must be read.
+
+1. **The plateau is a cliff between 32 and 64 MiB**, not a gradual decay: 876.7 GB/s at 32 MiB, 239.4 at 64 MiB.
+   So the big tier's *effective* capacity is ~32–48 MiB (the copy column peaks at 887 GB/s already at 16 MiB), which
+   matches Chips and Cheese's **32 MB MALL on the I/O die** and contradicts nothing in `rocminfo` — `rocminfo`
+   reports the 2 MiB L2 and has no notion of MALL at all. The "~54 MiB at ~876 GB/s" inferred from the GDN state
+   working set is confirmed in *rate* and tightened in *size*: the GPU reaches this tier, and the budget is 32 MiB,
+   not 54 and certainly not 2.
+2. **The standing rule "a bandwidth number above ~240 GB/s is evidence of skipped work" is only true for
+   DRAM-resident working sets.** A warm 32 MiB read stream legitimately does **876.7 GB/s** — 3.7× the DRAM ceiling
+   — so the rule needs its exception written into it: *above ~240 GB/s is evidence of skipped work **unless the
+   working set is under ~32 MiB and warm**, in which case it is evidence of the big tier*. Quoting the old rule
+   unqualified would have us "investigate" a real result and throw it away.
+3. **Decode budgeting has to know this too.** Per-request state is 18.66 MiB (GDN 18.0 + conv 0.63) and KV is
+   12 KiB/token, so one request at 512 tokens is ~24.7 MiB and fits; the same request at 2k tokens is ~42.7 MiB and
+   does not; two requests at 512 tokens is ~49.4 MiB and does not. The "does the hot set stay resident" question sits
+   exactly at the sizes a 0.8B model actually serves — a few hundred tokens and a couple of concurrent requests —
+   and no probe here has measured decode throughput against that boundary yet.
+4. **The copy column is not the read column.** Copy peaks at 887 GB/s at 16 MiB and falls to 325.7 at 32 MiB while
+   read is still at 876.7 — writes pay a fetch/allocate cost the tier does not absorb. Any "keep it in the big tier"
+   idea must be checked against the *copy* number when the buffer is written as well as read, which the attention
+   split partials are.

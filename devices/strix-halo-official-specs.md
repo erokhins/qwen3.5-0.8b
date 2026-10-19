@@ -122,7 +122,7 @@ These are recorded as **open**, not resolved; each has an experiment attached.
    and a **32 MB Infinity Cache (MALL) on the I/O die that the CPU cannot reach**
    (<https://chipsandcheese.com/p/amds-chiplet-apu-an-overview-of-strix>). Our 54 MiB tier is bigger than
    any L2 either side claims, so MALL is the obvious candidate — and if it is MALL, the whole
-   "does the layer's KV set stay resident" question has a 32 MB budget, not a 2 MiB one. Untested.
+   "does the layer's KV set stay resident" question has a 32 MB budget, not a 2 MiB one. **RESOLVED 2026-10-19 — measured, was untested: read curve is 876.7 GB/s at 32 MiB and 239.4 GB/s at 64 MiB, so the tier is ~32 MiB and the GPU reaches it; the budget is 32 MiB. See `strix-halo-memory-bandwidth.md`, "The size–bandwidth curve, measured".**
 3. **Occupancy metrics that exceed the architecture.** `rocminfo` says **Max Waves Per CU = 32** (2 SIMDs
    × 16). A `SQ_WAVE_CYCLES / SQ_BUSY_CYCLES` ratio taken from `rocprofv3` today came out at **41**, which
    is above that ceiling, so the ratio is *not* "wavefronts resident per CU" on this part and must not be
