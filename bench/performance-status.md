@@ -1852,3 +1852,44 @@ less. What this section cannot see: decode at 32k (`--steps 0` only), numerics *
 prefix-consistency adjudication uses `engine/attn_form_band.py` verbatim and widens nothing), multi-request
 residency at the new ceiling (the 258 MiB/scratch caveat above), and any width past 32,768, which is refused by
 design and stays refused until someone funds the next raise.
+
+## §40. G1: three barriers and an LDS round-trip left the GDN walk, and the row got 5.9 % cheaper — which is not a win (2026-10-19)
+
+The bet and its kill lines are pre-registered in `prototype/gdn_walk/BET.md` §3; the implementation and its
+checks are `1e92500`; this is the measurement. `--gdn-norm hoist` moves the per-token k/q L2-norms out of
+`rec_loop_kernel`'s token loop into a pre-pass, leaving a walk that issues **0 barriers and 0 LDS ops** where
+the shipped one issues 5 and 39 (ISA-verified, `walk_isa_diff.py`). Admission was bit-identity, and it holds:
+`base == inline == hoist` on every prefill logit row and every `STATEFP` state fingerprint across all 18 GDN
+layers — settled by the device diff, not by the association argument, after it read red twice (a grid-axis swap
+that zeroed layer 0's state; operand pointers hoisted above the token loop so every token walked token 0's rows).
+
+Window `g1-ab`, main agent, blocking, zero subagents, one `gpu_lock` hold, medians of 3 at 4,096 lanes, canary A
+(baseline rejects `--gdn-norm`) and canary B (each side echoes its form and submits 144 vs 288 planned
+launches) both green before any ms was read; digest in `progress/bench/evidence/g1ab-2026-10-19/`:
+
+| quantity | base | new `inline` | new `hoist` | hoist vs base |
+|---|---|---|---|---|
+| **`gdn_rec` — the pre-registered row** | 266.60 | 264.21 | **250.84** | **−5.91 %** |
+| every other family summed | — | — | — | **+6.06 ms** |
+| wave `wall_ms` | 626.75 | 623.45 | **612.87** | **−2.21 %** |
+| `RESULT ms_total` | 717.27 | 714.87 | 707.88 | −1.31 % |
+
+Rep spread on the hoist side: 246.49 / 250.84 / 255.09 (3.5 %). The inline-vs-base null is **−0.89 %**, so the
+shipping path did not move and the hoist number is real. It landed **0.84 ms above the 250 ms live line** —
+one fifth of its own spread — inside the 250–258 band declared **no verdict**. Per the pre-registration: **not
+shipped, default stays `inline`, no narration.**
+
+**The measurement's real product is a methodology correction.** The hoist removes work from `gdn_rec` and puts
+traffic into the stage, paid in `gdn_gated_norm` (+15.6 %) and `glue` (+8.8 %): **+6.06 ms outside the row that
+improved**, against −15.75 ms inside it. A pre-registered line on a single family row therefore **over-counts a
+change whose cost lands in its neighbours** — the honest whole-change figure is −2.21 % of `wall_ms`, not
+−5.91 %. From G2 onward the lines are written on both denominators before measurement: the family row answers
+"did the walk get cheaper", `wall_ms` answers "did the engine get faster", and only the second one ships.
+
+And the barrier hypothesis is neither disproved nor vindicated beyond its own size: 3 barriers, 18 shuffles and
+the LDS round-trip left the per-token chain and the row moved 5.9 %, which is what the census's 9.2 % slot share
+allowed — not the multiple a latency story could have been read to promise, and most of it was eaten by the
+traffic the hoist itself adds (the worker's own traffic correction, +32 KB/token/layer, called that before the
+run). What this cannot see: a cheaper walk that adds no stage traffic — G2's geometry, one wavefront per block,
+`LDS = 0`, no barriers by construction — would keep the −5.91 % and drop the +6.06 ms. That is now the funded
+question, and G1's own knob is the instrument that will measure it.
