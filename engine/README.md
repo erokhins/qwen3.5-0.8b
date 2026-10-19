@@ -445,16 +445,28 @@ tools/gpu_lock.sh release "engine Q2 breadth gates"
 #   is emitted first), one index away from run mode's alignment — `engine/results.md`, Q2 section.
 ```
 
-`engine/chat.sh` — the engine's own REPL (device, holds the GPU lock for its whole life):
+`engine/chat.sh` — the engine's own REPL and one-shot summariser (device, holds the GPU lock for its whole life):
 
 ```bash
 engine/chat.sh                                        # REPL: /stats /reset /raw <text> /quit
 engine/chat.sh --prompt "Name two prime numbers bigger than 90." --max-new 24
+engine/chat.sh --summary notes.md                     # summarize a document, then the rates
+engine/chat.sh --summary a.md b.md --max-new 400      # several, each as its own fresh request
+engine/chat.sh --summary - < notes.md                 # document on stdin
 # Drives `decode_run --session`, so weights and RequestState stay resident between turns and a turn is
 # one decode_step per token with no reload and no re-prefill. Its tok/s and TTFT are NOT ledger numbers
 # (bench/performance-status.md §6 owns clean windows); the header says so on every start. It refuses to
 # start if engine/build/decode_run is missing or tools/gpu_lock.sh is held, and it never prints a chat
 # template special as literal text — special ids come out as [248046] markers, per AGENTS.md.
+# QUIET BY DEFAULT, AND THAT IS A PROTOCOL FIX NOT A COSMETIC ONE: `session_loop` shares stdout with the
+# engine's own report, and hipBLASLt prints a `GEMM-LT` line for every (shape, M) it prices for the first
+# time — so the first turn of a new prompt width emits a dozen of them INSIDE the `feed` reply. A driver
+# that reads "the first non-GEN line is the answer" takes an algo hex for `FED`, generates zero tokens,
+# and reports `prefix -1`. `chat.py`'s `TERMINAL` is the verb list `session_loop` ends replies with, and
+# anything else is a diagnostic — echoed only with --verbose.
+# --summary sizes the state from the document before the engine starts (a `feed` past the cap throws and
+# poisons the session, so the cap cannot be decided afterwards): cap = largest prompt + --max-new, rounded
+# up to 512, floor 4096, ceiling --max-auto-cap; an oversized document is refused with its token count.
 ```
 
 ## What the next worker owes W5b

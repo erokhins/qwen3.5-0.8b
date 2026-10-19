@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Interactive chat on the HIP engine, with per-turn stats.
+# Chat and document summarisation on the HIP engine, with prefill/decode rates.
 #
-#   engine/chat.sh                      # REPL
+#   engine/chat.sh                      # REPL: /stats /reset /raw <text> /quit
 #   engine/chat.sh --prompt "..."       # one answer, then exit
+#   engine/chat.sh --summary doc.md     # summarize a document (or `-` for stdin)
+#   engine/chat.sh --summary a.md b.md --max-new 400
+#   engine/chat.sh --verbose            # also echo the engine's own diagnostic lines
 #   engine/chat.sh --max-new 32         # cap generation length
 #   engine/chat.sh --ignore-lock        # start even while the GPU lock is held
 #
@@ -11,6 +14,13 @@
 # engine/state.h) live on the GPU for the whole session, so a turn is one decode_step per
 # token with no reload and no re-prefill of the transcript. `speccheck/chat.sh` is the
 # other implementation's driver and the one that validates specification/02..07.
+#
+# OUTPUT. The engine writes its own report (`STATE`, `LAUNCH`, `NUMERICS`, and a `GEMM-LT`
+# line per hipBLASLt shape it prices, several of them mid-turn) to the same stdout as the
+# session protocol, so `chat.py` separates them by the protocol's verb list rather than by
+# position — see the `TERMINAL` note there. By default you see the answer and one rate line
+# per turn; `--summary` prints the summary and then the prefill and generation rates, and
+# `--verbose` puts the engine's own lines back.
 #
 # The tok/s and TTFT this prints are the engine's own wall clock on a box that is also
 # serving this session's tokens. They are NOT ledger numbers: bench/performance-status.md

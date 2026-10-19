@@ -4688,3 +4688,45 @@ line and the other 17 runs of the set are unchanged. The census, the injections 
 line, the blocker that forced the split (`--break-runnerup`, admitted under a single symmetric reading and
 refused under the reference one) and the commands are in `prototype/gemm_algo_sweep/results.md` §3f.
 **`--gemm` still defaults to `library`; nothing here flips it.**
+
+## `engine/chat` follow-up (2026-10-19): the session driver read its reply **by position**, so the first turn of a new prompt width returned a `GEMM-LT` line — and `--summary` mode
+
+Reported as "chat.sh does not work and prints a lot of debug info". Both halves were one cause plus
+one consequence of it.
+
+**The bug.** `decode_run --session` writes its protocol and its self-report to the same stdout, and
+`session_loop` is not the only writer: `engine/kernels_gemm.cpp:875` prints a `GEMM-LT` provenance line
+for every `(shape, M)` the hipBLASLt route prices for the first time, and a plan built at a call site
+that did not go through `gemm_route_plan` prints it *there*, mid-command. So the first `feed` of a width
+no earlier turn used emitted seven of them before its `FED`. The driver's rule was "the first non-`GEN`
+line is the reply", so `feed` came back as `{'verb': 'GEMM-LT', 'algo': '1a040000…'}` — which is where
+`fed -1`, `generated 0 tok`, `prefix -1` and "the END line carried no prefix_len" came from — and every
+read after that was one line out of step. The turn printed nothing and the numbers were fabrications of
+the desync. A driver whose reply is identified by position in a stream that has two writers cannot
+adjudicate anything; the fix is the verb list.
+
+**The fix.** `TERMINAL` in `engine/chat.py` is now the set of verbs `session_loop` ends a reply with
+(`FED END RESET PREFIX ERROR BYE READY`), and anything else that arrives while a reply is open is a
+diagnostic: kept in `EngineSession.diag`, echoed only under `--verbose`. That is also what makes the
+"lot of debug info" optional rather than structural — the loader banner, `STATE`, `LAUNCH`, `NUMERICS`,
+`GEMM` and the `GEMM-LT` lines were always the engine's own report, and the default view is now the
+answer plus one rate line per turn. Witnessed by reading the desync back: the same `GEMM-LT shape=in_proj_z … M=19`
+line the failing run had printed as its `FED` now arrives as a diagnostic and the same prompt generates
+text (`engine/README.md`, the `QUIET BY DEFAULT` note).
+
+**`--summary FILE`** (one or more, or `-` for stdin): each document is a fresh request — `reset`, then the
+rendered summarisation instruction plus the text — so its prefill is its own wave and no previous
+document is in the state. It prints the summary, then `prefill` and `generation` rates per document and
+an aggregate. Two things it has to do that chat mode does not:
+
+- **size the state before the engine starts.** `feed` past the cap throws and §07.1's half-advanced state
+  poisons the session, so the cap cannot be decided afterwards: documents are read and rendered, and the
+  cap is `largest prompt + --max-new` rounded up to 512 (floor 4096, ceiling `--max-auto-cap`), and an
+  oversized document is refused with its token count before anything launches. A 17 719-token document
+  reached `cap=18432` and prefilled as 35 waves of 512 rows without a special case in the driver.
+- **not print the stop marker.** chat mode shows masked specials as `[248046]` per `AGENTS.md`; a
+  summariser's output is a document, so `--summary` runs the same masking path with the marker off.
+
+Rates printed by this tool are, as before, the engine's wall clock on a box that is also serving this
+session — `bench/performance-status.md` §6 owns clean windows, and no figure from a chat session belongs
+there. Nothing in this section is a timing claim.
