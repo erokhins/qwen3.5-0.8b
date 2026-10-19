@@ -172,7 +172,7 @@ struct Options {
     // `prototype/attn_percost/A6-BET.md`). Unlike the roll above it, this knob is OWED byte identity with the
     // default rather than judged by a band: it moves staging addresses and where an operand is fetched from,
     // never a value or an order. Parse-or-throw like the flags above, echoed on the same NUMERICS line.
-    engine::kernels::FattnQStage attn_fattn_qstage = engine::kernels::FattnQStage::kStaged;
+    engine::kernels::FattnQStage attn_fattn_qstage = engine::kernels::FattnQStage::kUnstaged8;
     // Whether the knob was NAMED, for the identical reason as the one above: `stage` IS the default, so a guard
     // keyed on its value would manufacture a refusal for every bare run.
     bool attn_fattn_qstage_given = false;

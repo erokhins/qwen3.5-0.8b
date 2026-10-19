@@ -7117,7 +7117,7 @@ def main() -> int:
                          " to move. Wave-only like the flags around it (a one-row body is `attn_core`), and"
                          " the engine refuses `--attn-fattn 0 --attn-fattn-roll two` rather than echoing a"
                          " kernel that did not run.")
-    ap.add_argument("--attn-fattn-qstage", choices=("stage", "unstaged8"), default="stage",
+    ap.add_argument("--attn-fattn-qstage", choices=("stage", "unstaged8"), default="unstaged8",
                     help="which SPELLING of the WMMA form's staging plan runs, passed straight to"
                          " `decode_run --attn-fattn-qstage` and asserted against the run's own NUMERICS echo,"
                          " exactly like --attn-fattn and --attn-fattn-roll (bet A6-G1,"

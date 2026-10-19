@@ -100,11 +100,12 @@ struct DecodeScratch {
     kernels::FattnRoll attn_fattn_roll = kernels::FattnRoll::kSingle;
     // Where that form keeps Q, and how deep its epilogue stages (`--attn-fattn-qstage`, bet A6-G1; see
     // `kernels.h:AttnLayerArgs::fattn_qstage`). Same riding reason and the same one-row immunity: a one-row
-    // body is `attn_core`, so no decode bit moves under it. `kStaged` is the shipped spelling and also HEAD's
-    // code path — and, unlike the roll above, this knob is OWED byte identity with that default rather than
-    // judged by a band, which is what makes "the default side is inert" and "the other side moved nothing"
-    // both byte-compares (`prototype/attn_percost/A6-G1-impl.md`).
-    kernels::FattnQStage attn_fattn_qstage = kernels::FattnQStage::kStaged;
+    // body is `attn_core`, so no decode bit moves under it. `kUnstaged8` is the default from A6-G1: the form
+    // that takes Q out of LDS and stages the epilogue 8 rows at a time, measured LIVE on all five rows with
+    // byte-identical logits and STATEFP (`prototype/attn_percost/A6-G1-verdict.md`), while `kStaged` remains
+    // selectable and stays byte-identical to the pre-A6-G1 engine — which is why the default here carries no
+    // numerics negotiation at all. Both sides are byte-compares, not bands.
+    kernels::FattnQStage attn_fattn_qstage = kernels::FattnQStage::kUnstaged8;
     // Which §04.4 scan a GDN body runs (P9, `kernels.h:GdnScan`). Same riding reason as the three
     // above, and it too is overridden per body — a ONE-ROW body is `gdn_rec` whatever this says,
     // because decode's bits are pinned through the sequential recurrence and a chunked scan of one
