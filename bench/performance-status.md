@@ -2437,3 +2437,50 @@ demanded-bytes arithmetic D21 retired, which is why it is the only traffic-shape
 going our way. Closing the last factor is a scope decision about rewriting the attention geometry (~1.1k lines in
 this engine's terms), and it is the user's to make, not mine to spend days on. Cold/warm conventions from §50–§51
 still apply: every figure here is warm or trace-based, never a cold number against a peer's warm one.
+
+## §53. L-c measured and **DISPLACED**: the split cap takes −4.61 % off attention and only −2.38 % off the 32k wave — the last targeted attention lever with a measured mechanism is now spent (2026-10-19)
+
+`prototype/attn_percost/A9-LC-verdict.md` is the record; `A9-LC-impl.md` the implementation. Window:
+`prototype/attn_percost/run_ab_a9lc.sh`, one `gpu_lock` hold (`util` 91 % at acquire, 55 % at release), base pinned
+to the pre-change sha `8b0a3b4`, `NULL` arm **−0.75 % family / −0.40 % wall** so the window is paired, deciding-family
+rep spreads 1.49 % (base) and 0.15 % (cap). The knob is `--attn-split-cap`, default inert, and its inertness was
+witnessed rather than assumed: committed binary with no flag vs `8b0a3b4` at 4,608 lanes gives **byte-identical
+`logits4607.bin` and `sampled.txt`** with identical geometry lines (`vgpr=185 lds=20480 wf_per_cu=9`) and
+`SPLITCAP split=9 cap=0 span=512`.
+
+| pre-registered line at 32,768 lanes | base | cap 8 | ratio | line | result |
+|---|---|---|---|---|---|
+| LINE 1 — `attn` family ms | 5,961.62 | 5,686.51 | **0.9539 (−4.61 %)** | ≤ 0.9700 | **cleared** |
+| LINE 2 — wave `wall_ms` | 8,607.94 | 8,403.26 | **0.9762 (−2.38 %)** | ≤ 0.9700 | **missed** |
+
+**DISPLACED: not shipped.** The verdict is not a rep artifact — per-rep paired wall is **−2.90 %** and **−1.85 %**,
+both individually short of the −3.0 % line — and the cap genuinely bound (the capped arm printed
+`span 576 > MAXSC 512` at 4,608 lanes, so it was not the same geometry timed twice). A9 §4.2's claim of
+**−4.2…−4.7 % of the 32k wave** is retired; measured −2.38 %.
+
+Three things this buys that are worth more than the millisecond count:
+
+1. **The mechanism survives; the conversion factor does not.** Removing 77 % of a 105 GB/pass partial round-trip
+   moved the phase it lives in by −4.61 %, so §52's reason for funding L-c — `attn_combine` traced at 208 GB/s =
+   88 % of the roof, a *measured* rate rather than a modelled demand — is **not** falsified. But even a traced rate
+   times traced bytes overstates the payoff by **~1.35×**. That is a calibration point for every future
+   traffic-shaped estimate in this ledger, sitting alongside D21's much harsher finding (demanded bytes are not DRAM
+   bytes at all).
+2. **An externality line printed beside two lines is what kept this honest in both directions.** The ~70 ms between
+   the two lines was blamed on `gdn_rec` (758.52 → 837.98 ms), but per-rep `gdn_rec` spans **730–886 ms** across
+   the four runs — 7.7 % and 12.1 % rep-to-rep, intervals overlapping. So the gap is recorded as **unattributed**,
+   not "GDN got slower": a family whose own spread is ±10 % cannot adjudicate a 70 ms claim from a median of two.
+   Had only LINE 1 existed, this same window would have been reported as a −4.61 % win.
+3. **The lever was inert where the headline is read.** `split_for(4,096) = 8`, so cap 8 changes nothing at or below
+   4,608 lanes; even a SHIP would not have moved the §51 warm headline, which stands unchanged at **9,790 prompt
+   tok/s at 4,096 lanes** (6,125 at 16,384; 3,924 at 32,768). The remaining long-context distance to llama.cpp is
+   still **1.91× on the attention phase at 32,768**.
+
+**Where that leaves the plan.** §52 funded L-c as the one targeted lever whose mechanism was measured rather than
+theorised, and it is now spent: it produced a real phase-level win that does not reach the wave. Combined with A3
+(LDS floor), A4-L1 (accumulator dependency), G0/G1 (residency, which shipped and helped), L-b (bandwidth, killed on
+declared LDS) and now L-c, every axis except the round's *work per operand byte* has been falsified from its own
+direction. That is precisely the residual A9 §5 named — **9.6 vs 31 MAC per LSU byte** — and the only route to it is
+the geometry rewrite, which stays **pre-gated and unfunded**: an `SQ_WAIT*` stall census on the shipped kernel at
+32k first, and a prototype that must clear **6.5 TFLOP/s** to earn the build. It is a scope decision for the user
+(§51/§52), not a queue item.
