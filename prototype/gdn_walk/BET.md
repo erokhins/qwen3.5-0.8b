@@ -263,3 +263,44 @@ Three constraints carried in from G1, as requirements not advice:
    explains, not in a way the change hopes nobody diffs.
 3. **Price it in cycles-per-dependency at realised occupancy** (AGENTS.md), which for this shape means
    wavefronts-per-SIMD before and after, derived from the note block and KFD — not an instruction count.
+
+## 11. G2 measured (2026-10-19): the barrier-free geometry is **2.2× slower**, and that kills the shape explanation of §38's 5.76×
+
+Measured before this section was written, so the writing has no opinions left to protect. Lines were
+pre-registered in §10 above; the code landed at `8b65fb0` with the default off.
+
+| side | `gdn_rec` ms (lines: ≤180 live / >230 dead) | wave `wall_ms` (≤560 / >607) | externality | verdict |
+|---|---|---|---|---|
+| `wf4` — 4 state columns per lane | 264.00 → **585.79** (+121.9 %) | 626.44 → 951.13 (+51.8 %) | +2.69 ms | **DEAD** |
+| `wf2` — 2 state columns per lane | 264.00 → **380.73** (+44.2 %) | 626.44 → 742.32 (+18.5 %) | +1.89 ms | **DEAD** |
+
+Both past the dead line, not near it; spread within a side 1.3–5.2 %, so nothing here is a window artefact —
+the contrast with G1 is exact and deliberate: G1's −5.9 % sat *inside* its own 3.5 % spread and was therefore
+UNRESOLVED, G2's +122 % is 45× its spread. The null held at −0.33 %, both forms move the state fingerprint,
+and the main agent re-derived the structure on a separate compile (`walk_isa_diff.py --g2` PASS: 0 barriers,
+0 LDS data ops, 15 permutes, state traffic all `b128`, against the shipped 5 barriers / 19 LDS ops). So the
+geometry did what it said and the machine hated it.
+
+**What this falsifies is bigger than the kernel.** §38 read llama.cpp's `gated_delta_net` as
+*same launch counts, same 0.80 blocks/CU, no LDS, no barriers, 32-thread blocks, 5.76× faster*, and inferred
+that our barriers and block shape were the gap. G2 removes **all** of that — every barrier, the whole LDS
+round-trip, the block shape — and is 2.2× **slower**. So the gap is not shape. Combined with G1 (norm hoisted,
+−5.9 %, inside the census's own 9.2 % slot share) and with the two earlier dead ends (route A's LDS-resident
+state +10.6 %, the chunked scan 5.9× worse), every structural explanation of the GDN gap is now closed:
+
+| hypothesis for the 5.76× | bet | result |
+|---|---|---|
+| the per-token barrier + LDS round-trip for the norms | G1 | −5.9 % — real, small, ~the census's own bound |
+| the block shape / wavefront count / barriers | G2 | **+121.9 %** |
+| state resident in LDS instead of global | A | +10.6 % |
+| trading the serial chain for cross-block parallelism | (chunked scan, §2) | +493 % |
+| unrolling the serial loop | §8 | +0.5 % |
+
+What is left is **what one token's work actually is**: per-element instruction mix, vector width, and how the
+state is laid out relative to the thread that owns it — i.e. §26's 4.6× instruction/traffic gap, which is the
+only axis still standing. And it is now cheap to investigate honestly, because llama.cpp's kernel is *source*
+in this repo (`engines/llama.cpp/ggml/src/ggml-cuda/gated_delta_net.cu`), not a black box: we have been
+inferring its shape from `hipGetDeviceProperties`-shaped traces when we could have read it. **G3 is therefore
+funded as a census of that source, not as an implementation** — decomposition, state layout, vector width,
+reduction strategy, per-token work volume, diffed against `rec_loop_kernel`, with one bet pre-registered from
+what it finds. No further GDN implementation is funded before G3 reports.
