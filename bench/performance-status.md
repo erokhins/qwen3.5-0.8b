@@ -2072,3 +2072,48 @@ term grows with context it claims a larger share of the wave and the same −66.
 less. That is the arithmetic check on the three numbers: 20.6 / 19.1 / 12.2 %, monotonically falling, which is
 what a fixed-fraction win on a shrinking share looks like. Two reps per width here (§39 meditated on three), so
 the rows are honest to about ±2 % and the direction is not in question.
+
+## §46. The gap is not one number: against llama.cpp we pay a **1.285× constant and a 2.164× quadratic term** (2026-10-19)
+
+The operator's question, in the form that can be answered: llama.cpp and this engine were measured at the **same
+five widths in one lock hold** (`decay3`, util 5 %→9 %, `tools/llama_phase_compare.sh` with `PPS`/`OURWIDTHS`
+extended to 2,048–32,768 and ids routed through `--ids-file`, because a 32,768-id argv string is ~200 KB and
+dies at exec at exactly the width that matters). Ratios are `llama tok/s ÷ ours`, both engines, this window —
+no cross-window ruler (§37/§38's rule), and the second pass of this window replaced a 2-rep one whose 16k llama
+row came out *faster* than its 8k row, which is what two reps at these widths is worth.
+
+| width | ours tok/s | llama tok/s | llama/ours | drift vs 2,048 |
+|---|---|---|---|---|
+| 2,048 | 6,735 | 9,614 | 1.43× | — |
+| 4,096 | 7,441 | 10,236 | 1.39× | −2.8 % |
+| 8,192 | 6,684 | 9,315 | 1.41× | −1.4 % |
+| 16,384 | 4,975 | 7,726 | 1.56× | **+9.1 %** |
+| 32,768 | 3,153 | 5,481 | 1.74× | **+21.7 %** |
+
+**The suspicion is confirmed, and it is not flat.** Up to 8,192 the ratio is flat inside noise (1.39–1.43×); from
+there it worsens monotonically. Over the same span we lose 46.8 % of our 2k rate per doubling-to-32k where llama
+loses 43.0 % — no model needed for that. Splitting the curve properly (`tools/prefill_scaling_fit.py`, fit
+`ms/token = a + b·W`, five points, medians of 3):
+
+| engine | `a` (per token, context-independent) | `b` (grows with context) | max residual |
+|---|---|---|---|
+| ours | 0.114956 ms | 5.920e-06 ms/token² | 18.6 % of `a` |
+| llama.cpp | 0.089456 ms | 2.735e-06 ms/token² | 10.0 % of `a` |
+| **ratio** | **1.285×** | **2.164×** | ratio of ratios **1.684×** |
+
+So there is **both a constant and an asymptotic problem, and the asymptotic one is 1.68× worse in relative terms
+than the constant.** The widening is not a mystery: `b` is the term attention owns — at these widths attention is
+the only quadratic cost this engine emits, which is an argument about the code rather than a measurement of the
+kernel, and A2 is funded to make that a measurement. It also says something sober about the headline: §44's
++32.8 % came almost entirely to `a` (GDN is per-token), so it *flattens* the curve without touching `b` — which
+is exactly why the ratio at 32,768 got worse in the same window that the 4,096 headline improved.
+
+Residuals are honest: 18.6 % and 10.0 % of `a`, and they live at the narrow end, where per-process page-in of the
+weights (the 35 GB/s first-pass trap) and wave quantisation at 4 waves are both per-prompt costs a two-term model
+cannot express. The 16k/32k points, which are what the claim is about, sit within 3 % of the fit. The direct
+drift measurement above needs no model at all.
+
+**Consequence for funding.** Attention is now the phase that owns the term that grows, at 2.164×. Long-context
+work has to be priced against `b`, not against the 4,096 headline: a change that improves `a` by 5 % while
+leaving `b` alone buys +5 % at short context and about nothing at 32k. §39's ladder (§45's re-take) and this fit
+are the two together: absolute capacity, and the shape of its decay.
