@@ -101,8 +101,17 @@ The traffic table behind it (A9 §3, derived from these constants):
 | total demanded per touch | **58.08 B** | ≈16.6 B |
 | implied demand at 32k | **253 GB/s — above the 237 GB/s DRAM roof**, so *provably* cache-served (32 KB L1/CU, 2 MiB L2) | 138 GB/s |
 
-Which is why the Q re-read is described as *"free in bytes, expensive in queue slots"*: the data arrives from L1,
-but the LSU and VMEM issue slots spent fetching it are real, and no wavefront count pays them back.
+Which is why the Q re-read is described as *"free in bytes, expensive in queue slots"*: the LSU and VMEM issue
+slots spent fetching it are real, and no wavefront count pays them back.
+
+> **MEASURED REFINEMENT, same day — §54 of `bench/performance-status.md`.** "Provably cache-served" is right; "from
+> L1" was not checked and is only partly true. Counters on the shipped kernel at 32k give **TCP_REQ 3.17e10 with a
+> 26.8 % L1 miss rate** — L1 absorbs ~73 % of its traffic, not all of it — and Q's own footprint is **24,576 B per
+> block × 3 blocks/CU = 73,728 B, above the 32 KB L1**, so a meaningful share of the re-read comes from the deeper
+> tiers. Those tiers are now measured too: **876.7 GB/s at 32 MiB, 239.4 GB/s at 64 MiB**
+> (`devices/strix-halo-memory-bandwidth.md`, "The size–bandwidth curve, measured"), so the load that G1 pushed out
+> of LDS lands in a ~32 MiB tier running ~3.7× DRAM speed — **G1's −22 % has an unstated dependency on that tier**,
+> and a change that streams more K/V through it could regress G1 without touching a line of Q code.
 
 ---
 
@@ -236,10 +245,14 @@ with enough reps to resolve 3 %, not a printed externality sum.
 * **Size: ~1.1k lines** (round body + launcher/mirror/gate plumbing) and **2–3 weeks** at this repo's cadence: one
   pre-registered BET, paired windows inside one lock hold, falsifiers, negative controls derived from geometry, at
   512 / 4k / 16k / 32k, plus a routing decision. The measurement discipline, not the C++, is the schedule.
-* **Pre-gate 1 — the stall census (cheap, device, main agent).** An `SQ_WAIT*` counter pass on the shipped kernel at
-  32k, with the pass-count discipline (dedup by `(Dispatch_Id, Counter_Name)`, derive the pass count from a kernel
-  whose per-site count is known). It asks one question: is the binding stall the LSU/VMEM queue that R2/R3 relieve,
-  or something they would sit next to? **This should run before any rewrite work is funded.**
+* **Pre-gate 1 — the stall census: RUN, outcome "not falsified" (§54).** An `SQ_WAIT*` counter pass on the shipped
+  kernel at 32k, with the pass-count discipline (dedup by `(Dispatch_Id, Counter_Name)`, derive the pass count from a
+  kernel whose per-site count is known). It asks one question: is the binding stall the LSU/VMEM queue that R2/R3
+  relieve, or something they would sit next to? **Measured: 72.1 % of the shipping kernel's waiting is none of
+  LDS-instruction (13.9 %), barrier (11.2 %) or ifetch (0.4 %)** — consistent with memory-return waiting, and that is
+  the strongest statement the data supports, because `DRAM_REQ_PER_CLIGRP` and `TCP_BACK_PRESSURE` both read exactly
+  0.0 (vacuous) and counter semantics on this part are unverified. It does not point away from the operand-reuse
+  explanation, and it cannot confirm it.
 * **Pre-gate 2 — the abort line, written before the build: a prototype must clear 6.5 TFLOP/s at 32k**
   (≈ +45 % over today's 4.47) to earn a second week. A number ends it, not fatigue.
 * **Success criterion, stated in advance:** parity is attention phase 5,908 → 3,093 ms at 32k (**−47.6 %**), i.e.
