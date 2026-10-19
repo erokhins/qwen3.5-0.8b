@@ -282,6 +282,20 @@ __device__ __forceinline__ int fattn_c_col(int lane, int l) { return 2 * l + (la
 // The operand map: lane t holds the 16 contiguous halves of row t%16, the run along the dot index.
 __device__ __forceinline__ int fattn_ab_row(int lane) { return lane & 15; }
 
+// THE SCORE ROLL'S OPERAND TILES, spelled exactly once. This file can launch two roll spellings (the shipped
+// single accumulator and bet A4-L1's pair, selected by `--attn-fattn-roll`), and a branch between two
+// spellings of the SAME staged object is precisely where §20.1's bug lives: two self-consistent address
+// formulas that each agree with themselves and disagree with each other. So neither spelling writes an
+// address — both call these two lines, which are the only place the score leg's tile geometry is written.
+// The `16` is the WMMA K width, the same 16 that `FATTN_KTILES = DH / 16` divides by: `t` counts k-tiles and
+// a k-tile is 16 halves of one staged row.
+__device__ __forceinline__ fattn_ARegs fattn_score_k_tile(const __half* s_kv, int lane, int t) {
+    return fattn_load_tile(&s_kv[fattn_kv_addr(fattn_ab_row(lane), 16 * t)]);
+}
+__device__ __forceinline__ fattn_ARegs fattn_score_q_tile(const __half* s_q, int w, int lane, int t) {
+    return fattn_load_tile(&s_q[w * FATTN_MROWS * DH + fattn_q_addr(fattn_ab_row(lane), 16 * t)]);
+}
+
 // C (8 F32) -> the next WMMA's operand (16 F16), by the `get_half2` exchange. It lives FUSED into the exp
 // loop of `attn_fattn_body` (round -> max -> exp -> operand, one pass over the lane's 8 columns), not as a
 // helper taking the exponentials by pointer: the first port did have such a helper, the array it passed
@@ -444,6 +458,13 @@ __device__ __forceinline__ int fattn_warp_max(int v) {
     return v;
 }
 
+// The body is templated on the score-roll spelling rather than branching on it at RUNTIME, for one reason:
+// a runtime `if` would make both accumulator sets live in every build and move the register count of the
+// DEFAULT path, which would stop it being the shipped path. Two instantiations are two kernels in this
+// binary and the knob selects a LAUNCH (`engine/kernels_attn.cpp`), so the A/B is one window instead of two
+// builds — AGENTS: a ruler re-taken in a different window is not an A/B — and the launch count, the grid and
+// the declared LDS are the same on both sides either way.
+template <bool kTwoAcc>
 __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
     // ONE Q STAGE PER WARP. The score leg's SECOND operand is this warp's 16 rows, staged once per launch
     // (8 KiB), and the three warps of the block each stage their own row-block. Q cannot be shared: per-warp Q
@@ -574,12 +595,49 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
         // which is the whole-row, whole-coverage NaN signature recorded in §29 of
         // `bench/performance-status.md` and decision D64.
         fattn_CRegs acc{};
+        if constexpr (kTwoAcc) {
+            // THE TWO-ACCUMULATOR ROLL (`--attn-fattn-roll two`, bet A4-L1). Gate 0 of
+            // `prototype/attn_percost/A4-L1-gates.md` §1 read the shipped roll off the shipping object as ONE
+            // `v_wmma` site in a 16-trip rolled loop whose destination tuple is also its accumulator operand
+            // — a 16-long loop-carried recurrence with nothing independent between trips. This spelling gives
+            // the roll a second accumulator so two chains of 8 progress at once.
+            //
+            // The ORDER of the four loads is the lever, not the second accumulator: BOTH tiles of a pair are
+            // fetched before EITHER matrix op issues, so one LDS round-trip pays for two independent WMATAs
+            // and the chain halves. Read back from the emitted loop in `A4-L1-gates.md` §3 — 8 trips, eight
+            // `ds_load_b128` before the first `v_wmma`, and the first wait is `lgkmcnt(2)`, not `lgkmcnt(0)`.
+            fattn_CRegs acc0{}, acc1{};
+            static_assert(FATTN_KTILES % 2 == 0, "the two-accumulator roll pairs k-tiles");
 #pragma unroll 1
-        for (int t = 0; t < FATTN_KTILES; ++t) {
-            const fattn_ARegs first = fattn_load_tile(&s_kv[fattn_kv_addr(fattn_ab_row(lane), 16 * t)]);
-            const fattn_ARegs second =
-                fattn_load_tile(&s_q[w * FATTN_MROWS * DH + fattn_q_addr(fattn_ab_row(lane), 16 * t)]);
-            acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(first, second, acc);
+            for (int t = 0; t < FATTN_KTILES; t += 2) {
+                const fattn_ARegs k0 = fattn_score_k_tile(s_kv, lane, t);
+                const fattn_ARegs q0 = fattn_score_q_tile(s_q, w, lane, t);
+                const fattn_ARegs k1 = fattn_score_k_tile(s_kv, lane, t + 1);
+                const fattn_ARegs q1 = fattn_score_q_tile(s_q, w, lane, t + 1);
+                acc0 = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(k0, q0, acc0);
+                acc1 = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(k1, q1, acc1);
+            }
+            // ONE add after the roll, not one per trip.
+            //
+            // WHAT THIS COSTS, said in advance rather than discovered afterwards: the shipped dot is a fixed
+            // ascending F32 sum of the 16 k-tile partials, and `acc0` (even tiles) + `acc1` (odd) is a
+            // RE-ASSOCIATION of it, so `o` moves and bit-identity with the shipped form is gone by
+            // construction. `prototype/attn_percost/A4-BET.md` fixes the judge in advance: the existing §10.1
+            // cos/meanrel aggregates through `engine/gate.py`, no new band, no widening, no `--ack-spill`.
+#pragma unroll
+            for (int i = 0; i < 8; ++i) acc[i] = acc0[i] + acc1[i];
+        } else {
+            // THE SHIPPED ROLL — `--attn-fattn-roll single`, the default, and the code path this file carried
+            // before the knob existed, transcribed (the loop, the `#pragma unroll 1` that keeps it one
+            // accumulator, and the operand order the measured correction of
+            // `prototype/attn_wmma/fattn_map_results.md` fixes). `single` owes HEAD bit-identity, and
+            // `prototype/attn_percost/A4-L1-impl.md` is where that is proved, not asserted.
+#pragma unroll 1
+            for (int t = 0; t < FATTN_KTILES; ++t) {
+                const fattn_ARegs first = fattn_score_k_tile(s_kv, lane, t);
+                const fattn_ARegs second = fattn_score_q_tile(s_q, w, lane, t);
+                acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(first, second, acc);
+            }
         }
 
         // ---- mask, fold, exp, P. The bound is per (row, round): a cell is live iff its lane index is
@@ -745,7 +803,15 @@ __device__ __host__ inline bool fattn_plan_ok(const CoreArgs a, std::string* why
 // 196,608/96 = 2048 is far above the cap — so the declaration is what lets the form exist at all, and
 // widening the block from 32 to 96 threads does NOT buy any register headroom. That is the arithmetic Bet 2
 // had to check before believing the skeleton's zero-spill claim.
-__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave(CoreArgs a) { attn_fattn_body(a); }
+__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave(CoreArgs a) { attn_fattn_body<false>(a); }
+
+// The A4-L1 side of the knob: the SAME body, the SAME grid, the SAME declared LDS, the second score-roll
+// spelling. A separate `__global__` rather than a runtime branch inside one kernel, because a runtime branch
+// would raise the register count of the default side too (see the note above `attn_fattn_body`). The A/B
+// reads `vgpr_count` out of both of these note blocks in the same window
+// (`prototype/attn_percost/a4_l1_note_read.py`); `engine/build.sh` is not bit-reproducible on this box and a
+// canary that lives inside the binary under test is blind to a stale binary (AGENTS, 2026-10-17).
+__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_two(CoreArgs a) { attn_fattn_body<true>(a); }
 
 // The launcher's two host helpers live in the op header beside `tile_rtiles_of`: `fattn_rtiles_of` (this
 // form's row-block rule, 16 query rows per block) and `fattn_covers` (the ONE coverage predicate both sides

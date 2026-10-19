@@ -714,6 +714,11 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // because the fused single-row form runs whatever it says, which is the property that keeps a
             // decode step bit-identical under the flag.
             a.wave_fattn = sc.attn_fattn;
+            // And which SPELLING of that form's score roll (`--attn-fattn-roll`). Same riding reason and the
+            // same one-row immunity: `attn_decode_layer` only reaches the WMMA branch on a wave, so a decode
+            // step cannot be moved by it — which is the property that makes "the default side is inert" a
+            // checkable claim instead of a hope (`prototype/attn_percost/A4-L1-impl.md`).
+            a.fattn_roll = sc.attn_fattn_roll;
             stageclock::note(stageclock::kAttn);
             kernels::attn_decode_layer(a);
             // One widening over the whole [n][2048] tile, for the same reason P5 packed the casts

@@ -125,8 +125,15 @@ hip_bfloat16* bf16(const uint16_t* p) {
 // the row share would understate coverage — at 4,096 lanes the row share is ~87 % and the work share is
 // ~99 %, and a burst that divides by the wrong one is wrong by 1.14x. Both are printed so the reader cannot
 // pick the flattering one by accident.
-void fattn_echo(int rows, int split, int lvalid, int nrows) {
+void fattn_echo(int rows, int split, int lvalid, int nrows, const void* launched,
+                const char* roll_name) {
     static std::string last;
+    // `launched` is the function pointer of the kernel THIS LAUNCH submitted, not a name typed beside the
+    // banner. With two roll spellings in one binary that distinction is the whole value of `vgpr=`/`lds=`/
+    // `scratch=` here: read off `attn_fattn_wave` unconditionally, the banner would describe the shipped
+    // kernel while the run was pricing the two-accumulator one, and the two sides of the A/B would print
+    // byte-identical banners while their milliseconds differed. `roll=` names the spelling in the line so
+    // the once-per-geometry dedup below cannot collapse the two sides into one printed banner.
     // THE FORM'S OWN COSTS, read from the loaded code object rather than from a comment. `hipFuncGetAttributes`
     // is authoritative here and the compiler's `-Rpass-analysis=kernel-resource-usage` note is not: that note
     // prints a constant `Occupancy [waves/SIMD]: 16` for every kernel in the TU whatever the LDS
@@ -139,10 +146,9 @@ void fattn_echo(int rows, int split, int lvalid, int nrows) {
     // `.private_segment_fixed_size 332` in `engine/attn_fattn_kernels.h`'s note).
     hipFuncAttributes at{};
     const bool have_attrs =
-        hipFuncGetAttributes(&at, reinterpret_cast<const void*>(attn_fattn_wave)) == hipSuccess;
+        hipFuncGetAttributes(&at, launched) == hipSuccess;
     int blocks_per_cu = -1;
-    if (hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_cu,
-                                                    reinterpret_cast<const void*>(attn_fattn_wave),
+    if (hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_cu, launched,
                                                     FATTN_THREADS, 0) != hipSuccess) {
         blocks_per_cu = -1;
     }
@@ -170,9 +176,11 @@ void fattn_echo(int rows, int split, int lvalid, int nrows) {
     }
     char buf[400];
     std::snprintf(buf, sizeof(buf),
-                  "ATTN_FATTN form=fattn16 q=stage warps=%d vgpr=%d lds=%d scratch=%d vtiles=%d wf_per_cu=%d"
+                  "ATTN_FATTN form=fattn16 q=stage roll=%s warps=%d vgpr=%d lds=%d scratch=%d vtiles=%d"
+                  " wf_per_cu=%d"
                   " wave_rows=%d split=%d fattn_rows=%d/%d fallback_rows=%d"
                   " covered_rows_pct=%.1f covered_work_pct=%.1f%s",
+                  roll_name,
                   FATTN_WARPS,
                   have_attrs ? at.numRegs : -1,
                   have_attrs ? (int)(at.sharedSizeBytes) : -1,
@@ -190,8 +198,7 @@ void fattn_echo(int rows, int split, int lvalid, int nrows) {
 }
 }  // namespace
 
-std::size_t attn_part_floats(int rows) {
-    // `attn_core`'s own partial layout: one `(max, sum, acc[DH])` tuple per (query head, split
+std::size_t attn_part_floats(int rows) {    // `attn_core`'s own partial layout: one `(max, sum, acc[DH])` tuple per (query head, split
     // block), F32 — `a.part + ((qrow*N_Q + head)*split + blockIdx.y)*(DH + 2)` in the kernel. The
     // slot index never exceeds `rows*N_Q*split - 1`, and the throw in `attn_decode_layer` is what
     // keeps `split <= kAttnMaxSplit`, so sizing for the cap cannot overrun. At `kMaxWaveRows` = 512
@@ -464,8 +471,28 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                     // (`engine/attn_fattn_kernels.h`, Q placement).
                     // A wave whose rows are ALL one-pass still launches it and every block returns at its
                     // first ballot: an inert launch is a cheap, visible cost, a silently-skipped one is not.
-                    attn_fattn_wave<<<dim3(N_Q, split, fattn_rtiles_of(rows)), FATTN_THREADS>>>(core);
-                    fattn_echo(rows, split, c.lvalid, c.nrows);
+                    //
+                    // WHICH ROLL THAT LAUNCH RUNS (`--attn-fattn-roll`, `AttnLayerArgs::fattn_roll`). The two
+                    // spellings are two `__global__`s in this TU and this is the only place one is picked, so
+                    // the knob moves a function and nothing else: same grid expression, same block extent, same
+                    // declared LDS, same `CoreArgs`, one launch either way. That is what makes A4-BET's
+                    // `launches`-identical requirement checkable rather than hoped for — §41 closed launch count
+                    // as a variable and this bet must not reopen it, so the A/B harness asserts the equality
+                    // instead of trusting it (`prototype/attn_percost/run_ab_a4l1.sh`). Like every knob above
+                    // it, an error is never a fallback: a side that silently ran the other roll would price one
+                    // kernel twice and report the second price as the accumulator's win.
+                    const bool roll_two = a.fattn_roll == FattnRoll::kTwo;
+                    const dim3 fattn_grid(N_Q, split, fattn_rtiles_of(rows));
+                    const void* fattn_kernel =
+                        roll_two ? reinterpret_cast<const void*>(attn_fattn_wave_two)
+                                 : reinterpret_cast<const void*>(attn_fattn_wave);
+                    if (roll_two) {
+                        attn_fattn_wave_two<<<fattn_grid, FATTN_THREADS>>>(core);
+                    } else {
+                        attn_fattn_wave<<<fattn_grid, FATTN_THREADS>>>(core);
+                    }
+                    fattn_echo(rows, split, c.lvalid, c.nrows, fattn_kernel,
+                               fattn_roll_name(a.fattn_roll));
                 }
             } else {
                 attn_tile_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
@@ -491,6 +518,25 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     // kernel factor is lane depth, which is the same on both sides of the A/B. `launch_stats.h` owns
     // the wording; `gate.py`'s `launch_plan()["attn"]` is the same number from §07.
     launchstats::attn().record(rows);
+}
+
+// Parse-or-throw, `parse_gdn_geom`'s rule and for the same reason: this flag names which side of an A/B a run
+// is, and the two sides are NOT bit-identical (two accumulators re-associate the score dot), so a value that
+// silently fell back to the default would price the shipped roll twice and report the second price as the
+// second accumulator's win. An unknown value is an error, never a default.
+FattnRoll parse_fattn_roll(const std::string& name) {
+    if (name == "single") return FattnRoll::kSingle;
+    if (name == "two") return FattnRoll::kTwo;
+    throw std::runtime_error("--attn-fattn-roll takes `single` (the shipped score roll: ONE accumulator,"
+                             " 16 dependent v_wmma trips — THE DEFAULT) or `two` (bet A4-L1: two"
+                             " accumulators, both tiles of a pair fetched before either matrix op issues,"
+                             " two dependent chains of 8; engine/attn_fattn_kernels.h). Got '" + name +
+                             "'. Refusing rather than guessing, because this names which roll produced the"
+                             " bits in this log");
+}
+
+const char* fattn_roll_name(FattnRoll r) {
+    return r == FattnRoll::kTwo ? "two" : "single";
 }
 
 }  // namespace engine::kernels

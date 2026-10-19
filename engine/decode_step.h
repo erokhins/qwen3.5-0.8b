@@ -92,6 +92,12 @@ struct DecodeScratch {
     // but the form itself has not met the device (`prototype/attn_wmma/`), and a form that has not met the
     // device does not become the engine's default by having been written.
     int attn_fattn = 1;   // default since the form met the device: 1.3955x attn at 4096 lanes, wide1024f green both ways, covered rows inside the floors in force
+    // Which SPELLING of that form's score roll (`--attn-fattn-roll`,
+    // `kernels.h:AttnLayerArgs::fattn_roll`). Same riding reason and the same one-row immunity: a one-row
+    // body is the fused `attn_core`, so no decode bit moves under it. `kSingle` is the shipped roll and the
+    // default, and unlike the flag above it a default that is also HEAD's code path — the two-accumulator
+    // side is bet A4-L1 and is only ever run by naming it (`prototype/attn_percost/A4-BET.md`).
+    kernels::FattnRoll attn_fattn_roll = kernels::FattnRoll::kSingle;
     // Which §04.4 scan a GDN body runs (P9, `kernels.h:GdnScan`). Same riding reason as the three
     // above, and it too is overridden per body — a ONE-ROW body is `gdn_rec` whatever this says,
     // because decode's bits are pinned through the sequential recurrence and a chunked scan of one

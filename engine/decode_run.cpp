@@ -150,6 +150,19 @@ struct Options {
     // Parse-or-throw like `--attn-tile`, and echoed on the NUMERICS line for the same reason: a log that
     // cannot say which form produced its bits adjudicates neither side.
     int attn_fattn = 1;   // default since the form met the device (1.3955x attn at 4096 lanes, wide1024f green on both flag values, streaming rows inside the floors in force). THIS is the CLI default; the field of the same name in decode_step.h is an internal struct and was flipped alongside it, not instead of it.
+    // Which SPELLING of that form's score roll (`--attn-fattn-roll`, bet A4-L1).
+    // `single` — one accumulator, 16 dependent `v_wmma` trips — is the code path this header carried before
+    // the knob existed, so the default side of the A/B is HEAD's own machine code, which is what makes
+    // "default is inert" a byte-compare rather than an argument. `two` gives the roll a second accumulator
+    // and fetches both tiles of a pair before either matrix op issues (`engine/attn_fattn_kernels.h`,
+    // `prototype/attn_percost/A4-BET.md`); it is NOT bit-identical and cannot be, since two accumulators
+    // re-associate the fixed ascending F32 dot, and A4-BET fixes the existing §10.1 bands as the judge.
+    // Parse-or-throw like the flags above, and echoed on the same NUMERICS line for the same reason.
+    engine::kernels::FattnRoll attn_fattn_roll = engine::kernels::FattnRoll::kSingle;
+    // Whether the knob was NAMED, which is the only honest key for the inertness refusal below: `single` is
+    // the default, so a guard written as `roll != single` would turn every bare run into a refusal the day
+    // the default moved — the `--gdn-geom` precedent, stated at `--gdn-norm hoist`'s refusal above.
+    bool attn_fattn_roll_given = false;
     // Which §04.4 scan a GDN body runs (P9, §04.7; route A is D-12). `seq` is the shipped recurrence —
     // one launch per token per layer, the form every decode pin is pinned through — and `collapse` is
     // the same recurrence held resident, one launch per layer per BODY. `chunk` is refused at
@@ -344,6 +357,12 @@ Options parse_args(int argc, char** argv) {
                                          " form produced the bits in this log");
             }
             o.attn_fattn = v == "1";
+        } else if (a == "--attn-fattn-roll") {
+            // Parses or throws, like `--gdn-geom`: the two sides of this A/B are explicitly NOT bit-identical,
+            // so a run that silently took the default would report the shipped roll's family row as the second
+            // accumulator's.
+            o.attn_fattn_roll = engine::kernels::parse_fattn_roll(next());
+            o.attn_fattn_roll_given = true;
         } else if (a == "--gdn-scan") {
             o.gdn_scan = engine::kernels::parse_gdn_scan(next());
             o.gdn_scan_given = true;
@@ -564,6 +583,19 @@ Options parse_args(int argc, char** argv) {
                                  " --gdn-norm hoist (bet G1's form) or --gdn-geom wf4/reg16 with the"
                                  " default --gdn-norm inline (bets G2 and G4)");
     }
+    if (o.attn_fattn_roll_given && !o.attn_fattn) {
+        // The `--gdn-geom`-under-`--gdn-scan collapse` refusal, one layer over: naming a spelling of a form
+        // that does not run would echo a kernel that did not exist in this run and price one launch twice.
+        // Keyed on `attn_fattn_roll_given`, NOT on `roll != single`, because `single` IS the default and a
+        // default must not manufacture a refusal — a bare `--attn-fattn 0` is the shipped VALU wave path and
+        // has been legal since that flag existed. An asked-for pair that contradicts itself is still a
+        // mistake to report rather than a default to route around.
+        throw std::runtime_error("--attn-fattn-roll " + std::string(engine::kernels::fattn_roll_name(o.attn_fattn_roll)) +
+                                 " re-spells the WMMA wave's score roll and --attn-fattn 0 launches no WMMA"
+                                 " wave at all, so there is nothing here for it to spell. Use"
+                                 " --attn-fattn 1 (the default) with this flag, or drop it for the shipped"
+                                 " VALU wave");
+    }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
         // caller's, and a resident process cannot know which one a gate wants — and --sizes-only
@@ -748,6 +780,7 @@ void print_usage(FILE* out) {
                  " [--prefill-logits last|all] [--wave-rows N]"
                  " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
                  " [--gemm-pins all|none|<csv>] [--gemm-heur N] [--attn-touch 0|1]"
+                 " [--attn-fattn-roll single|two]"
                  " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
                  " [--gdn-geom block|wf4|wf2|reg16]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
@@ -824,6 +857,19 @@ void print_usage(FILE* out) {
                  "measured but not its numerics admitted. Wave-only, like the two above; the launcher "
                  "REFUSES (fused plan, null `part`, `--attn-tile 0`, `--attn-touch 0`) rather than "
                  "silently running the shipped form and reporting it as the WMMA one\n"
+                 "  --attn-fattn-roll single|two  which SPELLING of that form's score roll runs "
+                 "(bet A4-L1, engine/attn_fattn_kernels.h, prototype/attn_percost/A4-BET.md). `single` is"
+                 " the SHIPPED roll and the default: one accumulator, `#pragma unroll 1`, a 16-long"
+                 " dependent `v_wmma` chain — the same machine code this binary carried before the knob"
+                 " existed, which is why the default side is owed byte-identity and gets it checked. `two`"
+                 " gives the roll a second accumulator and fetches BOTH tiles of a pair before EITHER"
+                 " matrix op issues, so two chains of 8 progress at once and one LDS round-trip pays for"
+                 " two WMATAs; it costs +22 VGPR (178 -> 200, spill 0, scratch 0, LDS unchanged at 32,768 B"
+                 " per block — A4-L1-gates.md §2) and it RE-ASSOCIATES the score dot, so `o` moves and the"
+                 " existing §10.1 cos/meanrel bands judge it (no new band, no `--ack-spill`). Wave-only like"
+                 " the flags above, one launch and the same grid either way, and both kernels are in the"
+                 " binary whatever this says. `--attn-fattn 0` REFUSES it: naming a spelling of a form that"
+                 " does not run would echo a kernel that did not\n"
                  "  --gdn-spell ship|unroll4|fused  which SPELLING of the sequential recurrence's state"
                  " walks a `gdn_rec` launch runs (`engine/gdn_rec_unroll4_kernels.h`, "
                  "prototype/gdn_rec_isa/results.md §10, decision D32). `unroll4` is the SHIPPED"
@@ -1535,12 +1581,19 @@ int main(int argc, char** argv) {
         // the library it is linked against, not about the run — and read by `gate.py`'s
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
         std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d"
-                    " attn_touch=%d attn_fattn=%d gdn_scan=%s gdn_chunk=%d gdn_spell=%s gdn_loop=%d"
+                    " attn_touch=%d attn_fattn=%d attn_fattn_roll=%s gdn_scan=%s gdn_chunk=%d gdn_spell=%s gdn_loop=%d"
                     " gdn_norm=%s gdn_geom=%s\n",
                     engine::kMaxWaveRows, o.wave_rows,
                     engine::kernels::wave_gemm_name(o.wave_gemm),
                     engine::kernels::gemm_route_version().c_str(), o.attn_tile,
                     o.attn_touch, o.attn_fattn,
+                    // Which score roll the WMMA form would run, echoed on the same line for the same reason
+                    // as `attn_fattn=` itself: the two sides of A4-L1 are NOT bit-identical, so a family row
+                    // that cannot say which roll produced it adjudicates neither. The one case it cannot see
+                    // is the one `attn_fattn=` cannot see either — a wave whose rows are all one-pass launches
+                    // no WMMA kernel at all, and says so on its own `ATTN_FATTN_SKIP` line rather than having
+                    // this field imply a launch that did not happen.
+                    engine::kernels::fattn_roll_name(o.attn_fattn_roll),
                     engine::kernels::gdn_scan_name(o.gdn_scan), o.gdn_chunk,
                     // Truthful, not decorative. `collapse` submits `gdn_rc::rec_collapse_kernel`, which
                     // never reads this flag, so an echo naming a spelling here would report a kernel that
@@ -1596,6 +1649,7 @@ int main(int argc, char** argv) {
         sc.attn_tile = o.attn_tile;
         sc.attn_touch = o.attn_touch;
         sc.attn_fattn = o.attn_fattn;
+        sc.attn_fattn_roll = o.attn_fattn_roll;
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;
         sc.gdn_spell = o.gdn_spell;

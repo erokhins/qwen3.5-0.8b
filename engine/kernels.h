@@ -550,6 +550,14 @@ void gdn_gated_norm(const float* o, const uint16_t* z, const float* w_norm, uint
 // picks its own route and the extra lane blocks of a short row return before they touch anything. The
 // lane ceiling is therefore `MAXSC × kAttnMaxSplit`, both constants living in `kernels_attn.cpp` where
 // they are enforced, and past it the launcher throws instead of writing past a stage.
+
+// Which score roll the WMMA wave runs (`decode_run --attn-fattn-roll`, bet A4-L1). Two spellings of one
+// loop, two kernels, one binary: `kSingle` is the shipped roll (one accumulator, a 16-long `v_wmma`
+// recurrence) and `kTwo` is the pair of 8-long recurrences whose note block reads 200 VGPR / 0 spill /
+// 0 scratch against the shipped 178 / 0 / 0 — `prototype/attn_percost/A4-L1-gates.md` §2 is that reading,
+// and §33's spilled-at-8-lost-to-spill-free-at-6 precedent is why spill is the admission line.
+enum class FattnRoll { kSingle, kTwo };
+
 struct AttnLayerArgs {
     const uint16_t *q_proj_out, *k_proj_out, *v_proj_out, *q_norm, *k_norm;
     uint16_t *k_cache, *v_cache;            // [2][cap][256], appended at `pos` in place
@@ -606,8 +614,27 @@ struct AttnLayerArgs {
     // `engine/gate.py` asserts this echo equals the flag it was given, so a binary cannot be judged by the
     // other side.
     int wave_fattn = 0;
+
+    // Which SPELLING of the WMMA form's score roll runs (`--attn-fattn-roll`, bet A4-L1). Only consulted
+    // when `wave_fattn` picked the WMMA form for at least one row, and wave-only like every knob above it:
+    // a one-row body is `attn_core`, so no decode bit moves under it. `kSingle` is the shipped roll — one
+    // accumulator, 16 dependent `v_wmma` trips, the code path this header carried before the knob existed —
+    // and `kTwo` gives the roll a second accumulator and fetches both tiles of a pair before either matrix
+    // op issues, so two chains of 8 progress at once (`engine/attn_fattn_kernels.h`,
+    // `prototype/attn_percost/A4-BET.md`). NOT bit-identical and cannot be: two accumulators re-associate
+    // the fixed ascending F32 dot, so `o` moves, and A4-BET fixes the existing §10.1 cos/meanrel bands as
+    // the judge in advance rather than discovering the band afterwards. Both kernels are in the binary
+    // whatever this says, which is what makes the paired timing one window instead of two builds.
+    FattnRoll fattn_roll = FattnRoll::kSingle;
 };
 void attn_decode_layer(const AttnLayerArgs& a);
+
+// The score-roll spellings' parse/name pair, `parse_gdn_geom`'s shape for the same reason: this names which
+// side of an A/B a run is, so a typo that silently became the default would price the shipped roll twice and
+// report the second price as the second accumulator's win. Defined in `kernels_attn.cpp`, the TU that owns
+// the two kernels.
+FattnRoll parse_fattn_roll(const std::string& name);
+const char* fattn_roll_name(FattnRoll r);
 
 // How many F32 elements `AttnLayerArgs::part` must hold for a body of `rows` query rows: one (max,
 // sum, acc[head_dim]) tuple per query head per split block, at the maximum split the engine serves.
