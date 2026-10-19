@@ -2484,3 +2484,66 @@ direction. That is precisely the residual A9 §5 named — **9.6 vs 31 MAC per L
 the geometry rewrite, which stays **pre-gated and unfunded**: an `SQ_WAIT*` stall census on the shipped kernel at
 32k first, and a prototype that must clear **6.5 TFLOP/s** to earn the build. It is a scope decision for the user
 (§51/§52), not a queue item.
+
+## §54. A11: the big cache tier is measured (~32 MiB at 877 GB/s — the ">240 GB/s means skipped work" rule needed an exception), the stall census neither confirms nor falsifies, and **the geometry rewrite becomes the main line** (2026-10-19)
+
+Two device legs, existing tools only, one `gpu_lock` hold each (`util` 91 % / 88 % at acquire), foreground and
+blocking, zero subagents. The user's instruction with it: *"don't invest heavily in new
+implementations/prototypes — changing geometry to llama.cpp is our best bet."* So this census reused
+`tools/build/bw_probe_hip` and `rocprofv3` rather than building anything, and its output is a **direction**, not a
+new instrument line.
+
+**Leg A closes open item 2 of `devices/strix-halo-official-specs.md`** — the question "is the ~54 MiB tier MALL?"
+was recorded as *Untested* and is now answered. Warm read bandwidth falls off a **cliff between 32 and 64 MiB**:
+467 → 640 → 784 → **876.7 GB/s at 32 MiB** → 239.4 at 64 MiB → 237.2 at 1 GiB (full table in
+`devices/strix-halo-memory-bandwidth.md`, "The size–bandwidth curve, measured"). Three consequences:
+
+1. The big tier exists, the GPU reaches it, and its effective budget is **~32 MiB** — matching the Chips and Cheese
+   32 MB MALL figure and our own earlier "~54 MiB at ~876 GB/s" inference in *rate* while tightening its *size*.
+2. **The standing trap "a bandwidth number above ~240 GB/s is evidence of skipped work" is only valid for
+   DRAM-resident working sets.** A warm ≤32 MiB read stream legitimately reaches 876.7 GB/s, 3.7× the DRAM ceiling.
+   The rule is amended in place at the source doc rather than left to be re-broken.
+3. **The copy column is not the read column** (887 GB/s copy at 16 MiB but 325.7 at 32 MiB while read holds 876.7),
+   so any "keep it in the big tier" idea must be judged on copy, not read, when the buffer is written as well as
+   read — which the attention split partials are, and which is consistent with §53's finding that shrinking their
+   traffic by 77 % bought only −4.61 % of the family.
+
+**Legs B/C, the counter census, and its honest verdict.** One `rocprofv3 --pmc` pass at 32,768 lanes, filtered by
+kernel name (`attn_fattn_wave_u8` 378 dispatches — prefill only, decode kernels excluded by name):
+
+| kernel | TCP_REQ | L1 miss % | note |
+|---|---|---|---|
+| `attn_fattn_wave_u8` | 3.17e10 | **26.8 %** | L1 absorbs ~73 % of the shipping attention kernel's traffic |
+| `attn_combine` | 4.38e8 | **73.7 %** | the DRAM one, exactly as A9 §2.3 and §53 said |
+| `attn_prep` | 5.18e7 | 68.2 % | |
+| `attn_slim_wave` | 1.27e7 | 53.6 % | |
+
+Stall composition for the shipping kernel, as shares of `SQ_WAIT_ANY`: **`INST_ANY` 16.3 % (of which
+`INST_LDS` 13.9 %), `BARRIER` 11.2 %, `IFETCH` 0.4 %, and **`other` 72.1 %** — i.e. the overwhelming majority of
+waiting is *not* LDS-instruction availability, *not* barrier, *not* instruction fetch, which is consistent with
+memory-return/dependency waiting, the class operand reuse reduces. **But that is as far as it goes, and two things
+must be said plainly:**
+
+* **Two counters read exactly 0.0 across a whole run** — `DRAM_REQ_PER_CLIGRP` and `TCP_BACK_PRESSURE`. Those are
+  **vacuous, not clean**: a counter that never fires cannot say "no back-pressure" any more than an empty list can
+  say "no violations". Anyone using `rocprofv3` on this part must first witness a counter reading non-zero on a run
+  where it must fire. Recorded as a trap because it fails in the direction of a plausible negative result.
+* **Counter semantics on this part are unverified** — the same ledger already records `SQ_WAVE_CYCLES/SQ_BUSY_CYCLES`
+  reading 41 against a 32-wave-per-CU architectural ceiling. So the 72 % "other" share cannot be *claimed* as
+  proof of the operand-reuse thesis; it fails to falsify it and fails to confirm it.
+
+Therefore **pre-gate 1 of §52/A10 resolves to "not falsified"**, and the decisive gate becomes the timing one: a
+deep-stage prototype must clear **6.5 TFLOP/s** at 32,768 lanes (vs today's 4.47), which is a measurement rather
+than an interpretation. One derived number worth keeping: the fattn kernel's 26.8 % miss rate on 3.17e10 requests
+is ~8.5e9 missed lines ≈ **1.09 TB over the ~8.3 s prefill ≈ 131 GB/s**, *below* the 237 GB/s DRAM ceiling — so this
+pass cannot even say whether the big tier absorbs the misses. And it refines a claim in `A9-LONGCTX-CENSUS.md` §3
+that §A10 repeated: Q's per-block working set is 24,576 B, but at **3 blocks/CU that is 73,728 B, above the 32 KB
+L1**, so the Q re-read is *not* wholly an L1 phenomenon — the deeper tiers are load-bearing for G1's trade, which
+is a hidden dependency worth remembering before any change that streams more K/V through them.
+
+**Direction, recorded as the user's decision.** The targeted-lever space is exhausted (§53) and the census does not
+point away from the geometry explanation, so **the llama-shaped geometry becomes the funded main line** — starting
+at R1 of `prototype/attn_percost/A10-REWRITE-BRIEF.md` (256 threads / 8 warps / 8 query rows per warp), because R2
+(Q in registers) is impossible before it. Instruments are reused, not rebuilt; no further side prototypes. The
+abort line stays: **below 6.5 TFLOP/s at 32k, the geometry route is dead and gets recorded as dead**, and short
+context (warm 10,637 tok/s at 512 lanes, 9,790 at 4,096) is a non-regression line, not collateral.
