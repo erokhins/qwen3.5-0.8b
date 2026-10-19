@@ -21,9 +21,36 @@ Usage:
 """
 import argparse
 import csv
+import glob
 import re
 import sys
 from collections import defaultdict
+
+KFD_NODE_PROPS = "/sys/devices/virtual/kfd/kfd/topology/nodes/*/properties"
+
+
+def kfd_topology():
+    """Return (simd_count, simd_per_cu) read from KFD, taking the largest values seen across nodes (the GPU
+    row; the CPU rows report 0 or small values). This is the source AGENTS.md requires for occupancy, because
+    hipGetDeviceProperties reports a halved SM count on this SKU and clang's `-Rpass-analysis` occupancy line
+    is a constant. Falls back to (80, 2) only if sysfs is unreadable, and says so on stderr."""
+    simd = cu_simd = 0
+    for path in glob.glob(KFD_NODE_PROPS):
+        vals = {}
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    parts = line.split()
+                    if len(parts) == 2:
+                        vals[parts[0]] = int(parts[1])
+        except OSError:
+            continue
+        simd = max(simd, vals.get("simd_count", 0))
+        cu_simd = max(cu_simd, vals.get("simd_per_cu", 0))
+    if simd <= 0 or cu_simd <= 0:
+        print("# WARN: KFD topology unreadable, falling back to (80, 2)", file=sys.stderr)
+        return 80, 2
+    return simd, cu_simd
 
 # Phase classification, first match wins. Ordered: specific kernels before their families.
 PHASES = [
@@ -76,7 +103,9 @@ def main():
             if a.calibrate in name:
                 n_cal += 1
             if a.geom and a.geom in name:
-                key = (int(row["Workgroup_Size_X"]), int(row["Grid_Size_X"]),
+                key = (int(row["Workgroup_Size_X"]), int(row["Workgroup_Size_Y"]),
+                       int(row["Workgroup_Size_Z"]), int(row["Grid_Size_X"]),
+                       int(row["Grid_Size_Y"]), int(row["Grid_Size_Z"]),
                        int(row["VGPR_Count"]), int(row["LDS_Block_Size"]))
                 geom[key][0] += 1
                 geom[key][1] += dur
@@ -110,13 +139,27 @@ def main():
         print(f"  {ms/passes:>9.2f} ms  {c/passes:>7.1f}/pass  {classify(name):<11} {name[:96]}")
 
     if a.geom:
-        print(f"\n# geometry census for kernels matching {a.geom!r} (20 CUs on this SKU, per device_facts)")
-        print(f"  {'wgsize':>7} {'grid':>7} {'vgpr':>5} {'lds_B':>7} {'launches':>9} {'us/launch':>10} {'blocks/CU':>10}")
+        simd, simd_per_cu = kfd_topology()
+        cus = max(1, simd // max(1, simd_per_cu))
+        print(f"\n# geometry census for kernels matching {a.geom!r} — CUs and SIMDs read from KFD "
+              f"(simd_count {simd}, simd_per_cu {simd_per_cu} => {cus} CUs). Never hipGetDeviceProperties "
+              f"(halved SM count on this SKU) and never clang's constant `Occupancy [waves/SIMD]` line.")
+        print("# Grid_Size_* in a rocprofv3 kernel_trace is in THREADS, not blocks: blocks = grid / workgroup. "
+              "Reading the X axis alone is how a 3-D launch mis-reads as 16 blocks (§38's retirement, §43).")
+        print(f"  {'workgroup':>16} {'grid_threads':>18} {'thr/blk':>8} {'blk/launch':>10} "
+              f"{'wf/SIMD':>8} {'blk/CU':>7} {'vgpr':>5} {'lds_B':>7} {'launches':>9} {'us/launch':>10}")
         for key, (c, ms) in sorted(geom.items(), key=lambda kv: -kv[1][1]):
-            wg, grid, vgpr, lds = key
-            blocks = grid // max(wg, 1)
-            print(f"  {wg:>7} {grid:>7} {vgpr:>5} {lds:>7} {c/passes:>9.1f} {ms/max(c,1)*1000:>10.1f} "
-                  f"{blocks/20:>10.2f}")
+            (wx, wy, wz, gx, gy, gz), vgpr, lds = key[:6], key[6], key[7]
+            threads = max(1, wx * wy * wz)
+            tgrid = gx * gy * gz
+            if tgrid % threads:
+                sys.exit(f"REFUSE: grid_threads {tgrid} is not a whole number of {threads}-thread workgroups "
+                         f"for {a.geom!r}. Either the CSV columns changed meaning or this row is not a launch.")
+            blocks = tgrid // threads
+            wf = blocks * ((threads + 31) // 32)
+            print(f"  {f'({wx},{wy},{wz})':>16} {f'({gx},{gy},{gz})':>18} {threads:>8} {blocks:>10} "
+                  f"{wf / simd:>8.2f} {blocks / cus:>7.2f} {vgpr:>5} {lds:>7} {c / passes:>9.1f} "
+                  f"{ms / max(c, 1) * 1000:>10.1f}")
 
 
 if __name__ == "__main__":
