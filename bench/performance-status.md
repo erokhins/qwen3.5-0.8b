@@ -1558,3 +1558,36 @@ gap on the census's side, not a finding about the kernel — but it is a red gat
 to teach `geometry()` about `FATTN_WARPS` and re-derive per-warp traffic from the source, not to bypass it.
 Next lever, now that spill is separated: **push residency further inside a zero-spill geometry** — the live
 question is whether anything at 8+ wf/CU exists that does not pay for it in scratch.
+
+## §34. The tip did not build: §33's commit carried the kernel half of Bet 2 and not the launcher half (2026-10-19)
+
+`5b82c56` shipped `engine/attn_fattn_kernels.h` at `FATTN_WARPS 3` while the header that **defines** the
+launcher's row-block rule — `prototype/attn_decode/attn_decode_kernels.h`, `FATTN_ROWS_PER_BLOCK` — was still
+`16` and sat **uncommitted in the working tree**. So HEAD failed to compile:
+
+```
+engine/attn_fattn_kernels.h:211:15: error: static assertion failed due to requirement '16 == 3 * 16'
+```
+
+That assert is the one written against the other failure of §20.1 of
+`prototype/attn_decode/results.md` ("a row neither kernel owns is invisible in both"), and it is what caught
+this — one level up, at the commit boundary rather than on device. The fact it
+guards is a **two-header** fact (`fattn_rtiles_of` counts blocks in one header, the kernel carries rows in the
+other, and the launcher's grid is built from the first), so no single-file review of the diff could have seen
+the missing half; only a build of the committed tree can. Fixed by amending the same topic (`2ac956d`), which
+is what amending is for; `backup-bet2-5b82c56` keeps the pre-amend ref.
+
+**Every number in §33 stands.** The three-sided discriminator and the `wide1024f --scope full` admission were
+both run from a tree carrying both halves — it is the *record* that was half-committed, not the measurement.
+The rule this installs is cheap: **build the committed tree before the commit is called landed.** Not the
+working tree — the working tree is precisely where the missing half hides. `engine/build.sh` is **17.4 s**
+(measured, this session, both binaries), and the one-TU form is cheaper still:
+
+```
+worktree=$(mktemp -d); git worktree add "$worktree" HEAD --detach -q
+git worktree remove "$worktree" --force   # or: hipcc -fsyntax-only -I. -Iengine engine/kernels_attn.cpp
+```
+
+This is the same failure family as the two `--attn-tile`-default rows in the traps index (a geometry fact that
+lives in two files must move in one commit) plus a new half: **moving it in one commit is not enough if only
+one of the two files is staged.** The gate for that is a build, and the build is 17 s.
