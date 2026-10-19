@@ -1,9 +1,12 @@
 # A10 — the attention geometry rewrite: what it is, what it costs, and what would make it the wrong call
 
-**Status: decision brief, not an approved plan.** Nothing here is funded or started. §52 of
-`bench/performance-status.md` pre-gates it (stall census first, prototype must clear **6.5 TFLOP/s**), and it is the
-user's scope decision. This file exists so the arithmetic behind that decision can be read, questioned and attacked
-instead of being re-derived from memory each time.
+**Status: the funded main line (§54), with R1+R2 source-killed on step 2 — see `A10-RF-LADDER.md`.** Nothing here is
+built. §52 of `bench/performance-status.md` pre-gated it (stall census first, prototype must clear **6.5 TFLOP/s**),
+§54 made it the main line, and A10 step 2's compile-only register ladder then found that **Q in registers costs 128
+VGPR per lane, not 64, so R1+R2 overflows the 256-VGPR per-thread ceiling by ≥ 52 on the atom this engine ships**.
+The only shape that fits is llama's, which needs the f16-accumulating atom — a numerics-format decision, not a
+queue item. This file exists so the arithmetic behind that decision can be read, questioned and attacked instead
+of being re-derived from memory each time.
 
 Evidence it rests on: §51 (long-context phase attribution, warm convention) and §53 (L-c measured DISPLACED) of
 `bench/performance-status.md`; `A9-LONGCTX-CENSUS.md` (traffic, waste, levers, verdict); `A3-result.md` (the LDS
@@ -127,25 +130,43 @@ Four things follow, and three of them reprice the route.
    cost side, to be priced at the gate rather than waved off: 128 rows of one KV group is 32 positions × 4 heads, so
    the causal-union overhang (A9 §2.2, 4.01 % today) grows with positions per block, and a 32-position row-set wastes
    more of a 64-position stage's tail than llama's 16.
-2. **Q-in-registers is per warp and duplicated across the KV pair, not shared per block.** `j0 = (threadIdx.y/np) ×
-   cols_per_warp`, then `Q_B[k] = load_ldmatrix(tile_Q + j0·stride + k)` across all `DKQ/2` (`:1321-1327`), with
-   `Q_B[DKQ/(2·T_B_KQ::J)]` = 16 fragments of 4 VGPR = **64 VGPR/lane** (`:1255`). The two warps of a pair load the
-   same 16 rows, so the cheap branch this question could have landed on does not exist. What R1's shape does buy is
-   that nothing is duplicated there: 8 waves × 16 distinct rows means each warp's 64 VGPR of Q is 16 rows nobody else
-   holds.
-3. **The accumulator is a format choice, not an atom limit — the largest reprice in the route.** §4 point 2 says a
-   16-row × 256-dim P·V accumulator costs 128 f32 per lane and that M therefore cannot grow. That is a property of
-   *our* atom (`v_wmma_f32_16x16x16_f16`), not of the machine: llama's RDNA3 path declares `T_C_VKQ = tile<16,16,
-   half2>` (`:1125`) and its mma is `__builtin_amdgcn_wmma_f16_16x16x16_f16_w32` issued twice with `opsel` 0 and 1
-   (`mma.cuh:1556-1566`) — an **f16-accumulating** WMMA covering 16 queries × 32 dims in 8 VGPR/lane, × 8 tiles =
-   **64 VGPR/lane**, rescaled in `half2` (`:1470-1478`) and held in f16 across the whole KV sweep. Priced with it,
-   R1+R2 is 64 (acc) + 64 (Q) + 16 (`KQ_C`, f32) + ~16-24 transient A/B fragments + addressing ≈ **~180-190 of the
-   256** a 1-block/CU 256-thread block hands out — not "tight but not obviously impossible". Two catches, and neither
-   is arithmetic: an f16 accumulator carried over 32,768 positions is a *format* change on the shipping path, which
-   the standing numeric-format rule admits **only if the gates stay green** and never by assumption; and
-   `prototype/issue_rate_probe/results.md` §1 measured **only** `v_wmma_f32_16x16x16_f16` at 52.63 TFLOP/s, so the
-   f16-accum form's rate on gfx1151 is unknown and it must be treated as a register lever with an unmeasured rate
-   until that probe runs it.
+2. **Q-in-registers is per warp and duplicated across the KV pair, not shared per block — and it costs 128 VGPR
+   per lane, not the 64 this brief first priced it at.** `j0 = (threadIdx.y/np) × cols_per_warp`, then
+   `Q_B[k] = load_ldmatrix(tile_Q + j0·stride + k)` across all `DKQ/2` (`:1321-1327`): **16 operand tuples** of 16
+   query rows × 16 dims each. On this part one 16×16 F16 operand tuple is **8 VGPR per lane**, read three ways in
+   `A10-RF-LADDER.md` §1 — the `.vgpr_count` slope of a hold probe (12 → 36 → 68 for 1 → 4 → 8 fragments), the
+   shipping kernel's own `v_wmma_f32_16x16x16_f16 v[129:136], v[159:166], v[167:174], v[129:136]` operand spans,
+   and the engine's declared `fattn_ARegs` (`engine/attn_fattn_kernels.h:184`). 16 × 8 = **128**. The packing
+   argument that gives 64 (128 halves per lane, two per VGPR) fails because the tuple is per 16 dims of K, not per
+   32. The two warps of a pair load the same 16 rows, so the cheap branch this question could have landed on does
+   not exist — and **this is the number that kills R1+R2 as funded**, item 3.
+3. **The accumulator is a format choice, not an atom limit — and with item 2 it decides whether the route is
+   buildable at all.** §4 point 2 says a 16-row × 256-dim P·V accumulator costs 128 f32 per lane and that M
+   therefore cannot grow. That is a property of *our* atom (`v_wmma_f32_16x16x16_f16`), not of the machine: llama's
+   RDNA3 path declares `T_C_VKQ = tile<16,16,half2>` (`:1125`) and its mma is
+   `__builtin_amdgcn_wmma_f16_16x16x16_f16_w32` issued twice with `opsel` 0 and 1 (`mma.cuh:1556-1566`) — an
+   **f16-accumulating** WMMA covering 16 queries × 32 dims per 8-VGPR tile, 8 tiles = **64 VGPR/lane**, rescaled in
+   `half2` (`:1470-1478`) and held in f16 across the whole KV sweep. Put the two together against the ceiling,
+   **256 VGPR/thread** (65,536 lane-VGPRs per CU ÷ 256 threads at 1 block/CU — and RDNA's own per-thread maximum,
+   which no code object in this tree exceeds):
+
+   | one wave, mid-round | f32 atom (ours) | f16 atom (llama's) |
+   |---|---|---|
+   | P·V accumulator, 16 rows × 256 dims | 128 | 64 |
+   | Q resident (item 2) | 128 | 128 |
+   | a 64-position round's scores | 32 | 32 |
+   | P operands, staging temps, addressing | ≥ 20 | ≥ 20 |
+   | **against 256** | **≥ 308 — impossible** | **≈ 244 — fits with 12 to spare** |
+
+   **R1+R2 cannot be built on the atom this engine ships.** It is not tight, it is over the ceiling by more than 50
+   registers before a single pointer or loop counter is allocated. On the f16 atom the shape fits the way llama's
+   fits: tight, and spilling deliberately (`A2-census.md:78` traces 256 VGPR with 900 B/thread scratch at 1.9× our
+   rate), which moves point 6's "what is on the critical path" from a side note to the open question. Two catches
+   come with the f16 atom and neither is arithmetic: carrying the accumulator in f16 across 32,768 positions is a
+   *format* change on the shipping path, admitted by the standing numeric-format rule **only if the gates stay
+   green** and never by assumption; and `prototype/issue_rate_probe/results.md` §1 measured **only**
+   `v_wmma_f32_16x16x16_f16` at 52.63 TFLOP/s, so the f16 form's rate on gfx1151 is unknown and may be worse. The
+   cheap probe that settles the rate is named in `A10-RF-LADDER.md` §4.
 4. **A 64-position stage is a ~34 KiB stage, not a 64 KiB one, so R3's premise is half wrong.** With `nstages = 0` on
    this part (`:366` + `:372`; `cp_async_available` is false, which confirms R3's synchronous-staging assumption) the
    pointers collapse: `tile_K = Q_in_reg ? tile_Q : …` and `tile_V = nstages > 1 ? … : tile_K` (`:1251-1252`), so Q, K
@@ -351,6 +372,13 @@ with enough reps to resolve 3 %, not a printed externality sum.
   explanation, and it cannot confirm it.
 * **Pre-gate 2 — the abort line, written before the build: a prototype must clear 6.5 TFLOP/s at 32k**
   (≈ +45 % over today's 4.47) to earn a second week. A number ends it, not fatigue.
+* **Step 2 outcome, compile-only, before any build or device window (`A10-RF-LADDER.md`):** the funded geometry —
+  R1 + R2 with the atom this engine ships — **does not fit**: 128 accumulator + 128 Q + 32 scores + addressing is
+  ≥ 308 VGPR against a 256 ceiling. The one shape that fits is llama's, on the f16-accumulating atom (~244), which
+  makes **R8 a precondition rather than a downstream item** and leaves that atom's rate on gfx1151 unmeasured. So the
+  next number owed is not a 32k run: it is `v_wmma_f16_16x16x16_f16`'s issue rate in the existing
+  `prototype/issue_rate_probe` harness, one short hold, because a slow f16 atom retires the whole route without
+  spending a week on it.
 * **Success criterion, stated in advance:** parity is attention phase 5,908 → 3,093 ms at 32k (**−47.6 %**), i.e.
   the wave's 1.43× gap at 32k closes to ~1.0×; the long-context warm figures this shows up in today are 6,125
   tok/s at 16k and 3,924 at 32k against llama's 7,800 / 5,475 (§50/§51).
