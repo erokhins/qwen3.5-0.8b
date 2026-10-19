@@ -123,7 +123,7 @@ do not repeat across windows. Quote a pair measured in one window, never two run
 into a separate loop that adds constants, so the only billable loop measures staging while the row
 would claim it measures LDS reads. See `HANDOFF.md` for the attempts and what a fix would need.
 
-## WMMA latency legs (`wmma_latency.cpp`) — written, not run
+## WMMA latency legs (`wmma_latency.cpp`) — run 2026-10-19: both accumulator widths, the F16 one costs the same (see §2b)
 
 Everything above this section is a **rate**: one WMMA at a time, four independent chains, 32 wavefronts
 per CU, best-of-N. The census that prices `m16_fattn_score` does not spend a rate — it spends

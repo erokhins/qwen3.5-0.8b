@@ -1,21 +1,62 @@
 === WMMA latency leg — RAW rows, no verdict arithmetic here
-# util at start: gpu use: 86%
-# sclk at start: sclk clock level: 1: (2502Mhz)
+# util at start: gpu use: 91%
+# sclk at start: sclk clock level: 1: (2616Mhz)
 # occupancy default: 160 blocks x 128 threads = 640 wavefronts over the KFD 40 CUs =
 #   -> 16 wavefronts/CU, 8 wavefronts/SIMD (KFD simd_per_cu 2). The cross-check below uses
 #   --blocks 320 for 32 wavefronts/CU, which is the rate probe's saturation geometry.
 # clocks: --clock-mhz 2894 (the divisor prototype/issue_rate_probe/README.md books (a MAX clock; sclk is printed with the rows)), same divisor as prototype/issue_rate_probe/results.md §1
 === 1. loop-overhead baseline (subtract this from every row below)
+WL kernel=wl_empty_i1 acc=none ilp=1 instr_per_step=1 iters_lo=128 iters_hi=512 blocks=160 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=7 lds=0 local=0 elems_per_lane=2 | ms_lo=0.008390 ms_hi=0.022144 fixed_us_per_launch=3.805 clk_per_wmma_per_simd=12.957 Tflops_hi=121.225 wmma_per_launch=327680 | band=0.0001 readback_relmax=0
 === 2. F32 accumulator, the ILP curve (i1 is the latency, i8 approaches the roof)
-=== 3. F16 accumulator, same geometry (exact range caps --iters at 512 with --scale 0.5)
+WL kernel=wl_f32_i1 acc=f32 ilp=1 instr_per_step=1 iters_lo=128 iters_hi=512 blocks=160 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=25 lds=0 local=0 elems_per_lane=8 | ms_lo=0.016077 ms_hi=0.052253 fixed_us_per_launch=4.018 clk_per_wmma_per_simd=34.080 Tflops_hi=51.372 wmma_per_launch=327680 | band=0.0001 readback_relmax=0
+WL kernel=wl_f32_i2 acc=f32 ilp=2 instr_per_step=1 iters_lo=128 iters_hi=512 blocks=160 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=33 lds=0 local=0 elems_per_lane=8 | ms_lo=0.030219 ms_hi=0.106374 fixed_us_per_launch=4.834 clk_per_wmma_per_simd=35.871 Tflops_hi=50.470 wmma_per_launch=655360 | band=0.0001 readback_relmax=0
+WL kernel=wl_f32_i4 acc=f32 ilp=4 instr_per_step=1 iters_lo=128 iters_hi=512 blocks=160 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=49 lds=0 local=0 elems_per_lane=8 | ms_lo=0.057165 ms_hi=0.205246 fixed_us_per_launch=7.804 clk_per_wmma_per_simd=34.875 Tflops_hi=52.315 wmma_per_launch=1310720 | band=0.0001 readback_relmax=0
+WL kernel=wl_f32_i8 acc=f32 ilp=8 instr_per_step=1 iters_lo=128 iters_hi=512 blocks=160 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=14 vgpr=81 lds=0 local=0 elems_per_lane=8 | ms_lo=0.114297 ms_hi=0.406682 fixed_us_per_launch=16.835 clk_per_wmma_per_simd=34.430 Tflops_hi=52.805 wmma_per_launch=2621440 | band=0.0001 readback_relmax=0
+=== 2b. the SAME F32 legs on the SHORT pair (64/128), because the F16 legs can only be run there
+===     (see the refusal note above): a cross-width rate comparison is only honest inside one pair,
+===     and the pair itself is worth ~17 % at ILP 1 (42.4 vs 51.3 TFLOP/s at i1), which is more than
+===     the difference being asked about.
+WL kernel=wl_f32_i1 acc=f32 ilp=1 instr_per_step=1 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=25 lds=0 local=0 elems_per_lane=8 | ms_lo=0.010273 ms_hi=0.015803 fixed_us_per_launch=4.744 clk_per_wmma_per_simd=31.254 Tflops_hi=42.467 wmma_per_launch=81920 | band=0.0001 readback_relmax=0
+WL kernel=wl_f32_i4 acc=f32 ilp=4 instr_per_step=1 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=49 lds=0 local=0 elems_per_lane=8 | ms_lo=0.033032 ms_hi=0.056989 fixed_us_per_launch=9.076 clk_per_wmma_per_simd=33.853 Tflops_hi=47.103 wmma_per_launch=327680 | band=0.0001 readback_relmax=0
+=== 3. F16 accumulator, same geometry. --scale 0.0625 (2^-4, exact in F16) is not arbitrary: the
+===    exactness budget is on the accumulated VALUE (F16 holds integers exactly to 2048), the step is
+===    128*ilp*scale^2 per iteration, so 0.5 would cap iters-hi at 64/ilp -- too short for a slope.
+===    At 0.0625 the cap clears every pair this window uses at every ILP.
+===    --iters pair 64/128 rather than the default 128/512: every F16 spelling refused at iters-hi=512
+===    with relative drift EXACTLY 0.5 (single op_sel and the two-op_sel form alike) while the same leg
+===    read back exactly at iters-hi=128. That is the leg's uniform-fragment value model, not the atom;
+===    the slope method makes the pair choice free, so the pair is taken where the witness is green.
+WL kernel=wl_f16_i1 acc=f16 ilp=1 instr_per_step=1 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=34 lds=0 local=0 elems_per_lane=8 | ms_lo=0.011737 ms_hi=0.017274 fixed_us_per_launch=6.200 clk_per_wmma_per_simd=31.296 Tflops_hi=38.850 wmma_per_launch=81920 | band=0.005 readback_relmax=0
+WL kernel=wl_f16_i2 acc=f16 ilp=2 instr_per_step=1 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=33 lds=0 local=0 elems_per_lane=8 | ms_lo=0.020335 ms_hi=0.032617 fixed_us_per_launch=8.053 clk_per_wmma_per_simd=34.711 Tflops_hi=41.150 wmma_per_launch=163840 | band=0.005 readback_relmax=0
+WL kernel=wl_f16_i4 acc=f16 ilp=4 instr_per_step=1 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=51 lds=0 local=0 elems_per_lane=8 | ms_lo=0.038881 ms_hi=0.062499 fixed_us_per_launch=15.262 clk_per_wmma_per_simd=33.376 Tflops_hi=42.950 wmma_per_launch=327680 | band=0.005 readback_relmax=0
+WL kernel=wl_f16_i8 acc=f16 ilp=8 instr_per_step=1 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=92 lds=0 local=0 elems_per_lane=8 | ms_lo=0.079219 ms_hi=0.126706 fixed_us_per_launch=31.733 clk_per_wmma_per_simd=33.551 Tflops_hi=42.371 wmma_per_launch=655360 | band=0.005 readback_relmax=0
+=== 3b. F16 in the form the engine would actually ship: op_sel 0 then 1 per chain step (llama's RDNA
+===     spelling, mma.cuh:1556-1566). If these pass where section 3 refused, the refusal was the
+===     single-op_sel D-block layout and not a broken chain.
+WL kernel=wl_f16x2_i1 acc=f16 ilp=1 instr_per_step=2 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=34 lds=0 local=0 elems_per_lane=16 | ms_lo=0.017654 ms_hi=0.029727 fixed_us_per_launch=5.581 clk_per_wmma_per_simd=34.121 Tflops_hi=45.150 wmma_per_launch=163840 | band=0.005 readback_relmax=0
+WL kernel=wl_f16x2_i2 acc=f16 ilp=2 instr_per_step=2 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=33 lds=0 local=0 elems_per_lane=16 | ms_lo=0.032835 ms_hi=0.056646 fixed_us_per_launch=9.024 clk_per_wmma_per_simd=33.647 Tflops_hi=47.388 wmma_per_launch=327680 | band=0.005 readback_relmax=0
+WL kernel=wl_f16x2_i4 acc=f16 ilp=4 instr_per_step=2 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=51 lds=0 local=0 elems_per_lane=16 | ms_lo=0.063004 ms_hi=0.114909 fixed_us_per_launch=11.099 clk_per_wmma_per_simd=36.673 Tflops_hi=46.722 wmma_per_launch=655360 | band=0.005 readback_relmax=0
+WL kernel=wl_f16x2_i8 acc=f16 ilp=8 instr_per_step=2 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=92 lds=0 local=0 elems_per_lane=16 | ms_lo=0.127594 ms_hi=0.226064 fixed_us_per_launch=29.124 clk_per_wmma_per_simd=34.787 Tflops_hi=47.497 wmma_per_launch=1310720 | band=0.005 readback_relmax=0
 === 4. slope stability: the same legs at two DIFFERENT pairs. The bill is the slope between
 ===    iters-lo and iters-hi, so two pairs must agree; if they do not, the leg is not latency-shaped
 ===    and neither number can be quoted (the recorded reason --iters is never divided into itself).
+WL kernel=wl_f32_i1 acc=f32 ilp=1 instr_per_step=1 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=25 lds=0 local=0 elems_per_lane=8 | ms_lo=0.010082 ms_hi=0.015813 fixed_us_per_launch=4.351 clk_per_wmma_per_simd=32.395 Tflops_hi=42.438 wmma_per_launch=81920 | band=0.0001 readback_relmax=0
+WL kernel=wl_f16_i1 acc=f16 ilp=1 instr_per_step=1 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=34 lds=0 local=0 elems_per_lane=8 | ms_lo=0.011538 ms_hi=0.017308 fixed_us_per_launch=5.769 clk_per_wmma_per_simd=32.610 Tflops_hi=38.774 wmma_per_launch=81920 | band=0.005 readback_relmax=0
+WL kernel=wl_empty_i1 acc=none ilp=1 instr_per_step=1 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=7 lds=0 local=0 elems_per_lane=2 | ms_lo=0.006079 ms_hi=0.008078 fixed_us_per_launch=4.081 clk_per_wmma_per_simd=11.295 Tflops_hi=83.079 wmma_per_launch=81920 | band=0.0001 readback_relmax=0
+WL kernel=wl_f32_i1 acc=f32 ilp=1 instr_per_step=1 iters_lo=256 iters_hi=512 blocks=160 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=25 lds=0 local=0 elems_per_lane=8 | ms_lo=0.028484 ms_hi=0.051904 fixed_us_per_launch=5.064 clk_per_wmma_per_simd=33.095 Tflops_hi=51.718 wmma_per_launch=327680 | band=0.0001 readback_relmax=0
+REFUSED leg=wl_f16_i1 read-back bad=0@iters_lo 20480@iters_hi of 20480 (calibrated step 0.5, band 0.005): worst relative drift 0.5 (128 where 256 was wanted at iters-hi). A timed run that is not `iters` x the calibrated step is not the chain being billed, so no clock figure is printed
+WL kernel=wl_empty_i1 acc=none ilp=1 instr_per_step=1 iters_lo=256 iters_hi=512 blocks=160 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=7 lds=0 local=0 elems_per_lane=2 | ms_lo=0.012939 ms_hi=0.022235 fixed_us_per_launch=3.642 clk_per_wmma_per_simd=13.137 Tflops_hi=120.725 wmma_per_launch=327680 | band=0.0001 readback_relmax=0
+=== 4b. the same stability question for the two-op_sel form: two different pairs must agree
+WL kernel=wl_f16x2_i1 acc=f16 ilp=1 instr_per_step=2 iters_lo=64 iters_hi=128 blocks=160 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=16.00 wavefronts_per_simd=8.00 driver_blocks_per_cu=16 vgpr=34 lds=0 local=0 elems_per_lane=16 | ms_lo=0.017553 ms_hi=0.029724 fixed_us_per_launch=5.381 clk_per_wmma_per_simd=34.400 Tflops_hi=45.154 wmma_per_launch=163840 | band=0.005 readback_relmax=0
+REFUSED leg=wl_f16x2_i1 read-back bad=0@iters_lo 20480@iters_hi of 20480 (calibrated step 1, band 0.005): worst relative drift 0.5 (256 where 512 was wanted at iters-hi). A timed run that is not `iters` x the calibrated step is not the chain being billed, so no clock figure is printed
 === 5. cross-check against the ledger's own WMMA roof: 32 wavefronts/CU (= 320 blocks), ILP 4
 # wl_f32_i4 here should reproduce the 52.63 TFLOP/s row in prototype/issue_rate_probe/results.md §1; if it does not, these
 # rows and that row are not the same measurement and none of this is comparable.
-# util at end: gpu use: 8%
-# sclk at end: sclk clock level: 1: (1019Mhz)
-=== rows: 0 WL, 0 REFUSED (18 rows expected: 1 baseline + 8 curve + 6 pair-stability + 3 cross-check)
-FATAL: window produced 0 of 15 expected WL rows. A short log is a red result, not a quiet one:
-       read the REFUSED lines before drawing anything from the rows that did print.
+WL kernel=wl_f32_i4 acc=f32 ilp=4 instr_per_step=1 iters_lo=128 iters_hi=512 blocks=320 threads=128 launches=20 reps=5 scale=0.5 | wavefronts_per_cu=32.00 wavefronts_per_simd=16.00 driver_blocks_per_cu=16 vgpr=49 lds=0 local=0 elems_per_lane=8 | ms_lo=0.115116 ms_hi=0.404427 fixed_us_per_launch=18.679 clk_per_wmma_per_simd=34.068 Tflops_hi=53.099 wmma_per_launch=2621440 | band=0.0001 readback_relmax=0
+WL kernel=wl_f16_i4 acc=f16 ilp=4 instr_per_step=1 iters_lo=64 iters_hi=128 blocks=320 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=32.00 wavefronts_per_simd=16.00 driver_blocks_per_cu=16 vgpr=51 lds=0 local=0 elems_per_lane=8 | ms_lo=0.078484 ms_hi=0.125826 fixed_us_per_launch=31.142 clk_per_wmma_per_simd=33.449 Tflops_hi=42.668 wmma_per_launch=655360 | band=0.005 readback_relmax=0
+WL kernel=wl_f16x2_i4 acc=f16 ilp=4 instr_per_step=2 iters_lo=64 iters_hi=128 blocks=320 threads=128 launches=20 reps=5 scale=0.0625 | wavefronts_per_cu=32.00 wavefronts_per_simd=16.00 driver_blocks_per_cu=16 vgpr=51 lds=0 local=0 elems_per_lane=16 | ms_lo=0.126842 ms_hi=0.223365 fixed_us_per_launch=30.319 clk_per_wmma_per_simd=34.099 Tflops_hi=48.071 wmma_per_launch=1310720 | band=0.005 readback_relmax=0
+# util at end: gpu use: 29%
+# sclk at end: sclk clock level: 1: (1588Mhz)
+=== invocations: 26   rows: 24 WL, 2 REFUSED, 0 INVOKED-FAILED   (a REFUSED row is a witness that fired,
+===    an INVOKED-FAILED row is the tool itself failing; only the first is a measurement result)
+OK: every invocation produced exactly one accounted-for row (24 measured, 2 refused by witness).

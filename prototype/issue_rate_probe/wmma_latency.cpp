@@ -120,6 +120,7 @@
 #include <hip/hip_runtime.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -151,6 +152,20 @@ __device__ __forceinline__ u8 wmma_f16(const h16 a, const h16 b, const u8 c) {
     const h16 ch = *reinterpret_cast<const h16*>(&c);
     const h16 dh = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a, b, ch, false);
     return *reinterpret_cast<const u8*>(&dh);
+}
+
+// THE FORM THE ENGINE WOULD ACTUALLY SHIP. llama's RDNA path issues the F16 accumulator instruction TWICE,
+// op_sel 0 then 1, per 32 output dims
+// (`engines/llama.cpp/ggml/src/ggml-cuda/mma.cuh:1556-1566`), and so does A10's own ladder variant
+// (`prototype/attn_percost/a10_rf_ladder.hip.cpp:168-175`), so these legs price the atom as it would be
+// emitted: two instructions per chain step, `instr = 2`. Recorded honestly: these legs were NOT added to
+// fix the F16 refusals — the refusals reproduce here identically (drift exactly 0.5 at `iters_hi=512`), so
+// the cause is not op_sel; see the witness-band note in `main` for what it actually was.
+__device__ __forceinline__ u8 wmma_f16x2(const h16 a, const h16 b, const u8 c) {
+    const h16 ch = *reinterpret_cast<const h16*>(&c);
+    const h16 d0 = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a, b, ch, false);   // op_sel LOW
+    const h16 d1 = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a, b, d0, true);    // op_sel HIGH
+    return *reinterpret_cast<const u8*>(&d1);
 }
 
 // Sum one accumulator into a double. Every element is summed, so the witness does not need to know how
@@ -191,6 +206,17 @@ __device__ __forceinline__ double sum_acc(const u8 v) {
         out[(size_t)blockIdx.x * blockDim.x + threadIdx.x] = s;                   \
     }
 
+// A `__global__` function cannot be launched through a function pointer, and calling one as if it were a
+// host function is WORSE than a compile error on this toolchain: it builds, and the host stub segfaults the
+// first time it reads `threadIdx` (`wl_empty_i1` at launch, core dumped, nothing printed). That is what this
+// leg did on its first-ever run. So every leg gets a generated launcher that does the real `<<<blocks,
+// threads>>>`, and the kernel symbol is kept separately for the attribute queries, which do want the symbol.
+#define IRP_LAT_LAUNCHER(name)                                                    \
+    static void launch_##name(const __half* f, double* o, int it, int blocks,     \
+                              int threads) {                                      \
+        name<<<blocks, threads>>>(f, o, it);                                      \
+    }
+
 IRP_LAT_LEG(wl_f32_i1, 1, f8, wmma_f32(A, B, acc[j]))
 IRP_LAT_LEG(wl_f32_i2, 2, f8, wmma_f32(A, B, acc[j]))
 IRP_LAT_LEG(wl_f32_i4, 4, f8, wmma_f32(A, B, acc[j]))
@@ -203,19 +229,45 @@ IRP_LAT_LEG(wl_f16_i8, 8, u8, wmma_f16(A, B, acc[j]))
 // (wmma row - this row), so quoting a wmma row without it quotes loop overhead as matrix time.
 IRP_LAT_LEG(wl_empty_i1, 1, f8, acc[j] + 1.0f)
 
+IRP_LAT_LAUNCHER(wl_f32_i1)  IRP_LAT_LAUNCHER(wl_f32_i2)
+IRP_LAT_LAUNCHER(wl_f32_i4)  IRP_LAT_LAUNCHER(wl_f32_i8)
+IRP_LAT_LAUNCHER(wl_f16_i1)  IRP_LAT_LAUNCHER(wl_f16_i2)
+IRP_LAT_LAUNCHER(wl_f16_i4)  IRP_LAT_LAUNCHER(wl_f16_i8)
+IRP_LAT_LAUNCHER(wl_empty_i1)
+
+// The two-op_sel form at the same four ILP depths. `instr_per_step` is 2 for these, because a chain step is
+// two instructions and every rate denominator must know that (the static check below the build confirms the
+// body really carries 2 x ILP `v_wmma_f16` sites).
+IRP_LAT_LEG(wl_f16x2_i1, 1, u8, wmma_f16x2(A, B, acc[j]))
+IRP_LAT_LEG(wl_f16x2_i2, 2, u8, wmma_f16x2(A, B, acc[j]))
+IRP_LAT_LEG(wl_f16x2_i4, 4, u8, wmma_f16x2(A, B, acc[j]))
+IRP_LAT_LEG(wl_f16x2_i8, 8, u8, wmma_f16x2(A, B, acc[j]))
+IRP_LAT_LAUNCHER(wl_f16x2_i1) IRP_LAT_LAUNCHER(wl_f16x2_i2)
+IRP_LAT_LAUNCHER(wl_f16x2_i4) IRP_LAT_LAUNCHER(wl_f16x2_i8)
+
 struct Leg {
     const char* name;
-    void (*fn)(const __half*, double*, int);
+    void (*kern)(const __half*, double*, int);            // the __global__ symbol: attribute queries only
+    void (*launch)(const __half*, double*, int, int, int); // the real launch: blocks, threads last
     int ilp;
     const char* acc;      // "f32" | "f16" | "none"
+    int instr;            // instructions per chain step: 1, or 2 for the two-op_sel F16 form
 };
 
 const Leg kLegs[] = {
-    {"wl_f32_i1", &wl_f32_i1, 1, "f32"},   {"wl_f32_i2", &wl_f32_i2, 2, "f32"},
-    {"wl_f32_i4", &wl_f32_i4, 4, "f32"},   {"wl_f32_i8", &wl_f32_i8, 8, "f32"},
-    {"wl_f16_i1", &wl_f16_i1, 1, "f16"},   {"wl_f16_i2", &wl_f16_i2, 2, "f16"},
-    {"wl_f16_i4", &wl_f16_i4, 4, "f16"},   {"wl_f16_i8", &wl_f16_i8, 8, "f16"},
-    {"wl_empty_i1", &wl_empty_i1, 1, "none"},
+    {"wl_f32_i1", &wl_f32_i1, &launch_wl_f32_i1, 1, "f32", 1},
+    {"wl_f32_i2", &wl_f32_i2, &launch_wl_f32_i2, 2, "f32", 1},
+    {"wl_f32_i4", &wl_f32_i4, &launch_wl_f32_i4, 4, "f32", 1},
+    {"wl_f32_i8", &wl_f32_i8, &launch_wl_f32_i8, 8, "f32", 1},
+    {"wl_f16_i1", &wl_f16_i1, &launch_wl_f16_i1, 1, "f16", 1},
+    {"wl_f16_i2", &wl_f16_i2, &launch_wl_f16_i2, 2, "f16", 1},
+    {"wl_f16_i4", &wl_f16_i4, &launch_wl_f16_i4, 4, "f16", 1},
+    {"wl_f16_i8", &wl_f16_i8, &launch_wl_f16_i8, 8, "f16", 1},
+    {"wl_f16x2_i1", &wl_f16x2_i1, &launch_wl_f16x2_i1, 1, "f16", 2},
+    {"wl_f16x2_i2", &wl_f16x2_i2, &launch_wl_f16x2_i2, 2, "f16", 2},
+    {"wl_f16x2_i4", &wl_f16x2_i4, &launch_wl_f16x2_i4, 4, "f16", 2},
+    {"wl_f16x2_i8", &wl_f16x2_i8, &launch_wl_f16x2_i8, 8, "f16", 2},
+    {"wl_empty_i1", &wl_empty_i1, &launch_wl_empty_i1, 1, "none", 1},
 };
 
 struct Cfg {
@@ -310,6 +362,10 @@ int main(int argc, char** argv) {
     for (const Leg& leg : kLegs) {
         if (!c.only.empty() && c.only != leg.name) continue;
         const double budget = (std::strcmp(leg.acc, "f16") == 0) ? 2048.0 : 16777216.0;  // 2^24
+        // A cheap PRE-guard only, and it is not the check. It assumes one element per step, which the
+        // calibration below measures as 8 on this part, so it is optimistic by that factor and every F16
+        // leg used to pass it and then be refused by the read-back witness after the device time was already
+        // spent. The real check is the one after calibration, where `one_value` is known.
         if (per_step * c.iters_hi > budget) {
             std::printf("REFUSED leg=%s per-element accumulator value %.1f at iters-hi exceeds the exact"
                         " %s range %.0f; lower --iters-hi or --scale (a rounded accumulator is not a"
@@ -317,12 +373,12 @@ int main(int argc, char** argv) {
             continue;
         }
         hipFuncAttributes attr{};
-        if (hipFuncGetAttributes(&attr, (const void*)leg.fn) != hipSuccess) {
+        if (hipFuncGetAttributes(&attr, (const void*)leg.kern) != hipSuccess) {
             std::printf("REFUSED leg=%s hipFuncGetAttributes failed\n", leg.name);
             continue;
         }
         int bpc = 0;
-        IRP_CK(hipOccupancyMaxActiveBlocksPerMultiprocessor(&bpc, (const void*)leg.fn, c.threads, 0));
+        IRP_CK(hipOccupancyMaxActiveBlocksPerMultiprocessor(&bpc, (const void*)leg.kern, c.threads, 0));
         if (attr.localSizeBytes != 0) {
             std::printf("REFUSED leg=%s local_spilled=%zu B/thread: the accumulators live in private\n"
                         "  memory, so this would measure scratch latency, not WMMA latency (the rolled-\n"
@@ -333,7 +389,7 @@ int main(int argc, char** argv) {
 
         // ---- witness 1, calibration: ONE wmma per accumulator, read back, so the expected timed value
         // is measured rather than derived from an assumed fragment width.
-        leg.fn(dfrag, dout, 1);
+        leg.launch(dfrag, dout, 1, c.blocks, c.threads);
         IRP_CK(hipDeviceSynchronize());
         std::vector<double> one(slots, -1.0);
         IRP_CK(hipMemcpy(one.data(), dout, slots * sizeof(double), hipMemcpyDeviceToHost));
@@ -353,6 +409,49 @@ int main(int argc, char** argv) {
         const double one_value = one[0];
         const double elems = one_value / ((double)leg.ilp * per_step);   // elements per lane, measured
 
+        // ---- the exactness budget, checked WHERE THE STEP IS KNOWN.
+        //
+        // The timed run must read back as exactly `iters` x the calibrated step, so the largest value any
+        // element reaches is `one_value * iters_hi`. F16 holds integers exactly only to 2048 (F32 to 2^24),
+        // and a rounded accumulator is not the chain being billed — so this must refuse BEFORE the burst,
+        // not after it in the read-back witness. The nominal pre-guard above could not do this job: it
+        // assumes one element per step and the calibration measures 8 (F32 and single-op_sel F16) or 16
+        // (two-op_sel F16) on this part, so every F16 leg slipped past it and then died in the witness,
+        // which is a check that fires late instead of a check that is wrong, but it cost a device window to
+        // learn the difference. The message names the largest --scale that clears the budget, computed from
+        // the measured step rather than guessed.
+        //
+        // The witness band, per format. F32: ULP 6e-8, so even 512 dependent adds drift ~3e-5 and 1e-4 is
+        // ~3x that floor -- tight enough to catch a wrong elems or a folded chain. F16: its ULP is 2^-11,
+        // so 5e-3 is room for the format rather than something the measurements needed: every F16 row that
+        // passed printed `readback_relmax=0`.
+        //
+        // And the thing the F16 refusals really were, measured rather than guessed: at `iters_hi=512` the
+        // read-back came in at EXACTLY half the linear value at every ILP and in BOTH spellings (single
+        // op_sel and llama's two-op_sel), while the same legs read back exactly at `iters_hi=128`. That is
+        // the leg's own arithmetic: the D block is an F16 accumulator, so an add dies once the running value
+        // is far enough above the addend that the add is below half an F16 ULP — with an addend that is a
+        // fixed fraction of the value, that onset is at a fixed CHAIN LENGTH, and round-half-even then drops
+        // exactly half the remaining adds, which is why the drift is 0.5 and not noise. The F16 legs
+        // therefore run on the 64/128 pair, where the witness is green, and this is a finding about the
+        // engine rather than about the probe: **an F16 P.V accumulator has a maximum chain length at a fixed
+        // addend scale**, so a 32,768-position sweep cannot carry one without rescaling it, which is exactly
+        // what llama does in `half2` every batch (`mma.cuh:1470-1478`) and what the engine's per-round fold
+        // of `m` into the accumulator already does for F32.
+        const double tol = (std::strcmp(leg.acc, "f16") == 0) ? 5e-3 : 1e-4;
+        const double peak = one_value * (double)c.iters_hi;
+        if (peak > budget) {
+            const double max_scale =
+                std::sqrt(budget / (16.0 * elems * (double)c.iters_hi));
+            std::printf("REFUSED leg=%s peak per-element accumulator %.1f at iters-hi=%d exceeds the exact"
+                        " %s range %.0f (calibrated step %.4g per iteration, %.0f elements per lane);"
+                        " re-run with --scale <= %.4g or --iters-hi <= %d — a rounded accumulator measures"
+                        " rounding, not latency\n",
+                        leg.name, peak, c.iters_hi, leg.acc, budget, one_value, elems, max_scale,
+                        (int)(budget / one_value));
+            continue;
+        }
+
         // ---- the two-point burst, which is the whole measurement.
         //
         // WHY TWO POINTS AND NEVER ONE. A launch carries a fixed residue the leg is not about: dispatch
@@ -369,8 +468,9 @@ int main(int argc, char** argv) {
         // The slope doubling is also the witness that the chain is real and latency-shaped: a leg whose
         // time does not grow with its own chain length is not measuring a chain, so `slope <= 0` is
         // refused rather than reported.
-        const auto burst = [&](int iters, double* ms_out, size_t* bad_out) -> bool {
-            leg.fn(dfrag, dout, iters);                       // warm launch, untimed
+        const auto burst = [&](int iters, double* ms_out, size_t* bad_out, double* rel_out,
+                               double* sample_out) -> bool {
+            leg.launch(dfrag, dout, iters, c.blocks, c.threads);   // warm launch, untimed
             if (hipDeviceSynchronize() != hipSuccess) return false;
             double best = 1e30;
             for (int r = 0; r < c.reps; ++r) {
@@ -378,7 +478,7 @@ int main(int argc, char** argv) {
                 // at these sizes (bench/performance-status.md §6), and best-of-N because the box is not
                 // pinned (prototype/README.md).
                 const auto t0 = std::chrono::steady_clock::now();
-                for (int L = 0; L < c.launches; ++L) leg.fn(dfrag, dout, iters);
+                for (int L = 0; L < c.launches; ++L) leg.launch(dfrag, dout, iters, c.blocks, c.threads);
                 if (hipDeviceSynchronize() != hipSuccess) return false;
                 const auto t1 = std::chrono::steady_clock::now();
                 const double ms =
@@ -391,21 +491,38 @@ int main(int argc, char** argv) {
                 return false;
             const double want = one_value * (double)iters;
             size_t bad = 0;
+            // The witness band must be sized by the format, not by taste (AGENTS: a gate's band comes from a
+            // floor probe). Printed here as a measurement so the band can be chosen from drift actually seen
+            // rather than from an assumed fragment width -- which is exactly the error the hard-coded 1e-4
+            // below encodes: it is an F32-shaped tolerance (ULP 6e-8, drift ~3e-5 over 512 steps) applied to
+            // an F16 chain whose per-add relative error is up to 2^-11 = 4.9e-4, so an F16 leg can drift out
+            // of a band it was never in danger of failing semantically.
+            double maxrel = 0.0, sample_got = 0.0;
             for (size_t i = 0; i < slots; ++i) {
-                if (!(got[i] > want * 0.9999 && got[i] < want * 1.0001)) ++bad;
+                const double rel = std::fabs(got[i] / want - 1.0);
+                if (rel > maxrel) { maxrel = rel; sample_got = got[i]; }
+                if (!(got[i] > want * (1.0 - tol) && got[i] < want * (1.0 + tol))) ++bad;
             }
+            *rel_out = maxrel;
+            *sample_out = sample_got;
             *ms_out = best;
             *bad_out = bad;
             return bad == 0;
         };
 
-        double ms_lo = 0.0, ms_hi = 0.0;
+        double ms_lo = 0.0, ms_hi = 0.0, rel_lo = 0.0, rel_hi = 0.0, got_lo = 0.0, got_hi = 0.0;
         size_t bad_lo = 0, bad_hi = 0;
-        if (!burst(c.iters_lo, &ms_lo, &bad_lo) || !burst(c.iters_hi, &ms_hi, &bad_hi)) {
+        const auto burst2 = [&](int iters, double* ms, double* rel, double* gotv, size_t* bad) {
+            return burst(iters, ms, bad, rel, gotv);
+        };
+        if (!burst2(c.iters_lo, &ms_lo, &rel_lo, &got_lo, &bad_lo) ||
+            !burst2(c.iters_hi, &ms_hi, &rel_hi, &got_hi, &bad_hi)) {
             std::printf("REFUSED leg=%s read-back bad=%zu@iters_lo %zu@iters_hi of %zu (calibrated step"
-                        " %.6g): a timed run that is not `iters` x the calibrated step is not the chain"
+                        " %.6g, band %.3g): worst relative drift %.3g (%.6g where %.6g was wanted at"
+                        " iters-hi). A timed run that is not `iters` x the calibrated step is not the chain"
                         " being billed, so no clock figure is printed\n",
-                        leg.name, bad_lo, bad_hi, slots, one_value);
+                        leg.name, bad_lo, bad_hi, slots, one_value, tol, rel_hi > rel_lo ? rel_hi : rel_lo,
+                        got_hi, one_value * (double)c.iters_hi);
             continue;
         }
 
@@ -425,18 +542,21 @@ int main(int argc, char** argv) {
         // WMMA_CLK = 32 assumed and this replaces.
         const double secs_per_iter = slope_ms_per_iter / 1000.0;
         const double clk_per_wmma =
-            secs_per_iter * c.clock_mhz * 1e6 / (wf_per_simd * (double)leg.ilp);
-        const double wmma_per_launch_hi = (double)warps * (double)c.iters_hi * (double)leg.ilp;
+            secs_per_iter * c.clock_mhz * 1e6 / (wf_per_simd * (double)leg.ilp * leg.instr);
+        const double wmma_per_launch_hi =
+            (double)warps * (double)c.iters_hi * (double)leg.ilp * (double)leg.instr;
         const double tflops_hi = 2.0 * 4096.0 * wmma_per_launch_hi / (ms_hi / 1000.0) / 1e12;
-        std::printf("WL kernel=%s acc=%s ilp=%d iters_lo=%d iters_hi=%d blocks=%d threads=%d"
+        std::printf("WL kernel=%s acc=%s ilp=%d instr_per_step=%d iters_lo=%d iters_hi=%d blocks=%d threads=%d"
                     " launches=%d reps=%d scale=%g | wavefronts_per_cu=%.2f wavefronts_per_simd=%.2f"
                     " driver_blocks_per_cu=%d vgpr=%d lds=%zu local=%zu elems_per_lane=%.4g"
                     " | ms_lo=%.6f ms_hi=%.6f fixed_us_per_launch=%.3f"
-                    " clk_per_wmma_per_simd=%.3f Tflops_hi=%.3f wmma_per_launch=%.0f\n",
-                    leg.name, leg.acc, leg.ilp, c.iters_lo, c.iters_hi, c.blocks, c.threads,
+                    " clk_per_wmma_per_simd=%.3f Tflops_hi=%.3f wmma_per_launch=%.0f"
+                    " | band=%g readback_relmax=%.3g\n",
+                    leg.name, leg.acc, leg.ilp, leg.instr, c.iters_lo, c.iters_hi, c.blocks, c.threads,
                     c.launches, c.reps, c.scale, waves_per_cu, wf_per_simd, bpc, attr.numRegs,
                     attr.sharedSizeBytes, (size_t)attr.localSizeBytes, elems, ms_lo, ms_hi,
-                    fixed_us_per_launch, clk_per_wmma, tflops_hi, wmma_per_launch_hi);
+                    fixed_us_per_launch, clk_per_wmma, tflops_hi, wmma_per_launch_hi,
+                    tol, (rel_hi > rel_lo ? rel_hi : rel_lo));
         std::fflush(stdout);
     }
     return 0;

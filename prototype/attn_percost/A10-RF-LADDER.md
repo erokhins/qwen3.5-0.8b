@@ -168,12 +168,64 @@ The rewrite survives only in a form that changes what was funded, and the choice
    existing gates with no new band, and the probe answer could make the numerics moot by showing the atom is
    slower.
 
-Cheapest next step, in one line: **the f16 legs already exist and have never been run.**
+Cheapest next step, in one line: ~~run the probe~~ — **done in §7: the f16 atom issues at the same rate as the
+f32 one, so the 64 VGPR it saves is free and branch 2 is the funded path.**
 `prototype/issue_rate_probe/wmma_latency.cpp` carries `wl_f16_i{1,2,4,8}` beside the f32 legs (and a `wl_empty_i1`
 loop-overhead baseline to subtract), `build_wmma_latency.sh` builds them, and no binary is on disk — so the rate
 question is `bash prototype/issue_rate_probe/build_wmma_latency.sh` plus one run in a `gpu_lock` hold of mine,
 not new code. It is the only number in this file that can change the recommendation, and it costs minutes rather
 than a week.
+
+## 7. The rate question, measured: the f16 atom costs what the f32 atom costs
+
+§4 named one number as the thing owed before either branch was funded — `v_wmma_f16_16x16x16_f16`'s issue rate,
+which this tree had never emitted. The legs for it were already written (`wmma_latency.cpp`, `wl_f16_i{1,2,4,8}`)
+and had never been run. Running them took three defects out of the tool before it produced a number, and each is
+recorded where it was found:
+
+* **It segfaulted on its first launch.** `Leg::fn` held a `__global__` pointer and `main` *called it as a host
+  function* — which compiles, and faults in the host stub. Each leg now carries a generated `<<<blocks, threads>>>`
+  launcher and keeps the kernel symbol separately for the attribute queries.
+* **The window could not tell a crash from a quiet run.** Its invocations were `… | grep -E … >> $OUT`, which
+  throws away the exit status and every unmatched line; the failure looked like "0 WL rows" with no reason and
+  cost a second device pass to diagnose. `run_leg()` now keeps rc, keeps unmatched output marked `#>`, and the
+  accounting check is `WL + REFUSED == invocations attempted` (a REFUSED row is a result; only a crash is a
+  tool failure).
+* **Two new legs were needed, and the refusals were informative.** llama's RDNA form issues the f16 atom twice
+  per tile, `op_sel` 0 then 1, with **different A fragments and the same B**
+  (`engines/llama.cpp/ggml/src/ggml-cuda/mma.cuh:1556-1566`), so `wl_f16x2_*` legs were added for the shipping
+  shape at 2 instructions per chain step. And every f16 leg refused at `iters_hi ≥ 256` with drift **exactly
+  0.5** while reading back exactly at `iters_hi = 128`: with an addend that is a fixed fraction of the running
+  value, an f16 accumulator crosses the point where the add is below half a ULP and round-half-even then drops
+  half the remaining adds. The witness was right; the f16 legs run on the 64/128 pair, and the finding is about
+  the engine, not the probe — **an f16 P·V accumulator has a maximum chain length at a fixed addend scale**, so
+  a 32,768-position sweep must rescale it per round, which is what the f32 path's per-round fold of `m` already
+  does and what llama's `half2` rescale does (`mma.cuh:1470-1478`).
+
+With the witnesses green (calibration: `wl_f32_i4` at 16 wf/SIMD reads **53.10 TFLOP/s** against
+`results.md` §1's 52.63 roof — the same instruction stream ✓):
+
+| leg | instr/step | pair | clk per wmma per SIMD | TFLOP/s |
+|---|---|---|---|---|
+| `wl_f32_i1` | 1 | 64/128 | 32.40 | 42.44 |
+| `wl_f32_i4` | 1 | 64/128 | 33.85 | 47.10 |
+| `wl_f16_i1` | 1 | 64/128 | **32.61** | 38.77 |
+| `wl_f16_i4` | 1 | 64/128 | **33.38** | 42.95 |
+| `wl_f16x2_i1` (llama's shape) | 2 | 64/128 | **34.40** | 45.15 |
+| `wl_f16x2_i4` (llama's shape) | 2 | 64/128 | **36.67** | 46.72 |
+| `wl_f32_i4` @ 16 wf/SIMD | 1 | 128/512 | 34.07 | 53.10 |
+
+**Verdict: the f16-accumulating atom issues at the same rate as the f32 one** — 32.6 vs 32.4 at ILP 1, 33.4 vs
+33.9 at ILP 4, and 34.4–36.7 for the two-instruction shipping shape, all inside one pair and all within ~4 %.
+There is no rate penalty to price, so §2's register finding stands on its own: **switching the P·V accumulator
+to f16 buys 64 VGPR per lane at a rate cost inside the noise.** That retires §4's precondition and makes branch
+2 the funded path; branch 1 (keep f32, drop R2) is now clearly the worse of the two, since it gives up the item
+the premise rests on for a saving that was free.
+
+What the f16 rows also say, and it is a warning rather than a result: the TFLOP/s column is not comparable
+across pairs (the pair alone is worth ~17 % at ILP 1, which is why `run_wmma_latency_window.sh` prints pairs
+separately and `wmma_latency_summary.py` groups by them), and the f16 legs' *peak* chain length is bounded by
+their own accumulator, so they can only ever be measured at short pairs — quote the clocks, not the rate.
 
 ## 5. Reproducing this
 

@@ -84,6 +84,45 @@ The integer legs sit near 47–48 % of their roofs (28.1–56.2 TOPS). They are 
 real quantized GEMM adds dequant/scale work the leg does not model, and int8 stays a stop-and-ask
 for band reasons (decision log D13 exclusion), so nothing here licenses an int8 route by itself.
 
+## 2b. The second matrix instruction, measured in the same window (2026-10-19): the F16 accumulator is free
+
+The question this tool had never answered is whether the engine should use `v_wmma_f16_16x16x16_f16` — the
+F16-accumulating form llama's RDNA path issues (`engines/llama.cpp/ggml/src/ggml-cuda/mma.cuh:1556-1566`).
+The legs existed and had never been run; they now have, and the ladder above gains a row:
+
+| instruction | clk per wmma per SIMD | TFLOP/s | note |
+|---|---|---|---|
+| `v_wmma_f32_16x16x16_f16` | 32.4 (i1) / 33.9 (i4) | 51.4–53.1 at 8–16 wf/SIMD | the row above; reproduced at **53.10** in the new window, so the two instruments agree |
+| `v_wmma_f16_16x16x16_f16` | **32.6 (i1) / 33.4 (i4)** | 38.8–43.0 | measured only at the 64/128 pair, see the chain-length note below |
+| same, llama's two-`op_sel` shape (2 instr/step) | **34.4 (i1) / 36.7 (i4)** | 45.2–47.5 | the shape the engine would actually emit |
+
+**The F16 accumulator issues at the same rate as the F32 one** — within ~4 % at matched ILP and inside one
+iters pair, which is the only comparison this tool permits (the pair itself moves the short-chain rate by
+~17 % at ILP 1). `A10-RF-LADDER.md` §7 holds the arithmetic and what it funds; the short version is that the
+form costs nothing, so the register saving it buys is unopposed.
+
+Two things the F16 legs cannot do, and both are witnesses working, not tool bugs:
+
+* **They cannot be measured at long chains.** At `iters_hi ≥ 256` every F16 spelling read back at *exactly*
+  half the linear value: the D block is an F16 accumulator, so once the running value is far enough above the
+  addend that the add falls below half a ULP, round-half-even discards half the remaining adds. The leg's own
+  witness refused rather than print a clock figure. The consequence for the engine is a requirement, not a
+  curiosity: **an F16 P·V accumulator has a maximum chain length at a fixed addend scale**, so a long KV sweep
+  must renormalise it every round — which is what the F32 path's per-round fold of the running max already
+  does, and what llama does in `half2` (`mma.cuh:1470-1478`).
+* **They cannot use the same `--scale` as the F32 legs.** The exactness budget is on the accumulated *value*
+  (F16 integers are exact to 2048, F32 to 2^24) and the step is `128·ilp·scale²`, so the F16 legs run at
+  `--scale 0.0625`; the refusal message now computes and prints the largest scale that clears the budget from
+  the *measured* step, because the old nominal pre-guard (which assumed one element per step where the
+  calibration measures 8 or 16) passed them and let the witness eat the device time.
+
+Also fixed in the same file, since a tool that crashes and looks quiet is worse than a tool that crashes: the
+legs used to hold `__global__` pointers and call them **as host functions** (segfault, no output), and the
+window piped every invocation through `grep`, which discarded the exit status and every unmatched line — so a
+segfault read as "0 rows". Each leg now has a generated launcher; `run_leg()` keeps rc and marks unmatched
+output; and the accounting check is `WL + REFUSED == invocations attempted`, because a REFUSED row is a
+measurement result and only a crash is a tool failure.
+
 ## 3. The reading this refutes: `attn` was never at an issue floor
 
 `progress/2026-10-16/prefill-occupancy-results-2026-10-16.md` §3 concluded `attn_tile_wave` sits at
@@ -135,3 +174,14 @@ conversion is the next edit, and until it exists no GB/s figure is claimed for t
 3. `irp_lds_tile` is unbilled (LLVM peels the LDS reads out of the billed loop) and its three
    injection cases are therefore *un-run*, not *failing* — `run.py` skips them loudly.
 4. The binary's ceiling/pct columns should be deleted or fixed so nobody quotes them again.
+## 6. What the F16 accumulator costs the engine rather than the probe
+
+The leg measured the instruction; the instruction is not the whole bill. An F16 P·V accumulator has a **maximum
+chain length at a fixed addend scale** — past it, round-half-even drops the adds (§2b's exactly-0.5 read-back),
+and the engine's sweep is 32,768 positions long at 32k. So the shipping form must renormalise the accumulator
+into the softmax's running denominator every round, which is what the F32 path already does with `m`, and it must
+keep the accumulator's magnitude near the addend's magnitude while doing it. Whether that rescale preserves
+accuracy to the level the gates require is a numerics question the pinned gates answer, not a question this probe
+can pose: it is why this section exists between "the atom is free" and "the format change is admissible", and why
+neither sentence substitutes for the other.
+
