@@ -105,6 +105,10 @@ TRACE_ARGS="--steps 0 --gemm lt --gemm-pins all --wave-rows 512"
 NOTE_BASE_WANT=${NOTE_BASE_WANT:-"178 0 0 32768"}          # vgpr spill private group
 NOTE_G0_GROUP=${NOTE_G0_GROUP:-65536}
 mkdir -p "$OUT"
+# Absolute, because the build legs `cd` into a worktree before redirecting into $OUT: a relative log path
+# resolves inside the worktree, where tmp/ does not exist, and the build then fails with "No such file or
+# directory" for a bug that has nothing to do with the code under test.
+OUT="$(cd "$OUT" && pwd)"
 
 clk()    { rocm-smi --showclocks 2>/dev/null | tr -d '\r' | grep -iE "sclk" | tr '\n' ' '; }
 fam()    { grep -h "WAVE gran=stage family=$1 " "$2" | sed -E 's/.* ms=([0-9.]+).*/\1/' | tail -1; }
