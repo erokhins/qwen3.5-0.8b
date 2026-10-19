@@ -1612,8 +1612,10 @@ answers it on paper, compile-only and driver-only, and the answer has three part
    blocks/CU at 3 warps × 256 VGPR = 24 wavefronts, needing 3× that file), and `rocminfo` prints no register
    size here — after two retirements of HIP's own numbers on this SKU, a third cannot be assumed.
 
-So the queue's next bet is one transient patch and one read: **re-apply `tmp/gcc/fattn_unstage_q.patch` to the
-shipped 3-warp body and read its note block.** `spill = 0` at ≲190 VGPR opens an 8+ zero-spill rung worth a
+So the queue's next bet is a **port and a read**: re-establish Bet 1's un-stage on the shipped 3-warp body and
+read its note block. (Written first as "one transient patch", then disproved by `patch --dry-run` on a clean
+snapshot: 4 of 5 hunks of `engine/attn_fattn_kernels.h` and 1 of 1 of `engine/kernels_attn.cpp` fail, because
+Bet 2 rewrote the very hunks the un-stage touched.) `spill = 0` at ≲190 VGPR opens an 8+ zero-spill rung worth a
 device A/B; spill > 0 closes the residency axis at 6 and moves the money to the instruction/traffic gap of §26.
 No number in this section is a timing, and none of it predicts one — §31 and §33 together are the proof that
 residency and speed are not the same axis on this kernel.

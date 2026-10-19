@@ -60,7 +60,9 @@ near **8192 B of LDS with zero spill**, which is 8 blocks/CU of LDS headroom and
 registers instead of LDS — i.e. **the 8+ zero-spill rung exists**. If it lands at 256-with-spill, V6's story
 holds, the spill tax of §33 applies again, and the residency axis is closed.
 
-So the question is not "is there a geometry" — it is **one compile of a patch that already exists**.
+So the question is not "is there a geometry" — it is **one compile of an un-staged 3-warp body**, which does not
+exist yet: Bet 1's patch no longer applies to it (§4, E1), so the prize is priced by a port of a 102-line patch
+and one note-block read.
 
 ## 3. The missing fact: the register file per CU has never been measured here
 
@@ -87,9 +89,16 @@ every number in §2 above 8 wf/CU is **model, not measurement**, and must not be
 
 None of E1–E3 is a timing. All are compile-only or driver-only, and all are worker-legal under the GPU rule.
 
-* **E1 — the deciding one: the 3-warp body with Q un-staged.** Re-apply `tmp/gcc/fattn_unstage_q.patch` to the
-  shipped kernel (transiently, as §5 did for Bet 1: `git apply --check`, compile, read the note block, revert)
-  and report `vgpr_count / vgpr_spill_count / private_segment_fixed_size / group_segment`.
+* **E1 — the deciding one: the 3-warp body with Q un-staged. It is a port, not an apply.** The obvious version
+  — re-apply `tmp/gcc/fattn_unstage_q.patch` transiently as §5 did for Bet 1 — was tried first and **fails**:
+  `patch -p1 --dry-run` on a clean snapshot of the tip gives **4 of 5 hunks FAILED in
+  `engine/attn_fattn_kernels.h` and 1 of 1 in `engine/kernels_attn.cpp`** (only the score-leg hunk still lands,
+  with fuzz), because Bet 2 rewrote exactly the hunks the un-stage patch touched: the Q-stage fill is now the
+  per-warp `for (qr = 0; qr < 16; ++qr)` loop over `s_q[w * FATTN_MROWS * DH]`, and the launcher's row-block rule
+  moved into `prototype/attn_decode/attn_decode_kernels.h`. So E1 costs a hand port of the un-stage onto the
+  per-warp stage (drop `s_q`'s fill and read the Q operand tile from global at the use site, keeping the shared
+  `s_kv` and the 3-warp geometry), and then one note-block read:
+  `vgpr_count / vgpr_spill_count / private_segment_fixed_size / group_segment`.
   * `spill = 0` and VGPR ≲ 190 ⇒ there **is** an 8+ wf/CU zero-spill shape, and it is worth a device A/B
     against the shipped 6-wf form;
   * spill > 0 ⇒ §33's spill tax re-applies and the residency axis is closed at 6 (with NW=7 as a footnote).
