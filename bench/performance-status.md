@@ -2206,3 +2206,46 @@ neighbours, and attention's share of the wave is now 29.91 % of a smaller wave.
 the accumulator chain at 1.67 %. Only then was the residency thesis tested with a one-constant change before the
 surgery was funded — and G1 reached the same byte count A3 called unreachable because A3's kill was specific to
 splitting a 16-row round, which G1 never does. **A closed route is a claim about a mechanism, not a byte count.**
+
+## §49. Re-compared with llama.cpp after G1: **1.29× at 4,096** (was 1.80×), the quadratic gap cut from 2.164× to **1.554×** — and a **~65–71 ms per-prompt constant** that is most of what is left (2026-10-19)
+
+One lock hold (`llama-phase`, `util` 90 %→9 %, `sclk` 2573 MHz at start, 951/933 mid/end — clock-discounted as
+always, and every ratio here is two engines measured inside the same hold), matched row `-ub 512 -fa on -t 32`,
+medians of 3, six widths. `tools/llama_phase_compare.sh`, logs `tmp/gcc/llamaphase/`.
+
+| lanes | ours tok/s | llama tok/s | llama/ours |
+|---|---|---|---|
+| 512 | 3,544 | 7,378.72 | **2.08×** |
+| 1,024 | 5,446 | 8,014.23 | 1.47× |
+| 4,096 | **7,983** | 10,259.19 | **1.29×** |
+| 8,192 | 7,393 | 9,449.85 | 1.28× |
+| 16,384 | 5,890 | 7,800.29 | 1.32× |
+| 32,768 | 3,915 | 5,475.38 | **1.40×** |
+
+§38 measured 1.80× at this row; §46 measured a ratio that *widened* past 8,192. It no longer widens: the worst
+ratio is now at the **short** end. The two-term fit (`tools/prefill_scaling_fit.py`, widths 4,096–32,768, residuals
+≤ 6.4 % of `a`) puts it as **`a` ours/llama = 1.207×** (was 1.285×) and **`b` ours/llama = 1.554×** (was
+2.164×) — G1 took 21.6 % out of our quadratic term (`b` 5.920e-06 → 4.644e-06) and the wide-end ratio with it. The
+six-width fit is reported but not used: including 512 pushes the residual to 58 % of `a`, because a fixed per-prompt
+cost is not a per-token constant — which is the finding below.
+
+**Traced phases at pp4096, same engine, one hold** (`tools/trace_phase_split.py`, ours ÷ derived passes; llama's
+traced ms are upper bounds, so its ratios are conservative floors): attention **ours 100.79 vs llama 52.31 =
+1.93×** (was 2.65× pre-G1 — `attn_fattn_wave_u8` at 42 launches/pass); GDN-recur **ours 89.11 vs llama 44.93 =
+1.98×**; GEMM ours ≈ 150 ms vs llama ≈ 172 ms, **still ours**. llama spends a further ~58 ms/pass on
+`concat_non_cont` and `convert_unary_cont_vec4` (328–1,464 launches each) that this engine has no analogue for,
+which is part of why closing to 1.29× on a kernel-by-kernel basis is not the same as closing to 1.29× in the wall.
+
+**The new number, and the one that reframes the rest.** `RESULT ms_total` minus the wave's own `wall_ms`, measured
+in one window at three widths: **512 lanes 119.830 − 48.733 = 71.1 ms; 1,024 lanes 167.080 − 96.229 = 70.9 ms;
+4,096 lanes 494.957 − 430.053 = 64.9 ms.** A **fixed ~65–71 ms per prompt that does not scale with context**, and
+it is *not* new — §44's 535.105 against a 453.65 wall carried the same ~81 ms, and every headline in this ledger
+has included it silently. It is **59 % of a 512-token run** and 13 % of a 4,096-token one, and it is roughly equal
+to llama.cpp's *entire* measured pp512 (69 ms). That is what the 2.08× at 512 lanes actually is, and most of the
+1.207× `a` ratio with it: the remaining constant gap is not a kernel, it is per-prompt cost outside the wave.
+
+**Not attributed.** Nothing here says what the 65–71 ms is made of. Candidates this ledger can already name:
+host-side prompt feeding and per-prompt H2D copies; `--gemm lt` shape/algo work at a new shape despite
+`--gemm-pins all`; the first-touch page-warming cost recorded in `devices/strix-halo-unified-memory.md` (~35 GB/s
+on a first pass over fresh pages); and the ~2,083 syncs a 4,096-lane wave issues. Attributing it is the next funded
+item, because no kernel-level attention or GDN work can reach it.
