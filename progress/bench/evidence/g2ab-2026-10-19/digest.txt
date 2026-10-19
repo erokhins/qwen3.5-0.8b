@@ -1,0 +1,33 @@
+Window g2-ab, 2026-10-19, main agent, blocking, zero subagents, one gpu_lock hold.
+Window tag: g2-ab. util@acquire 5%, util@release 73%. sclk 832 MHz (level 1) at start, 2488 MHz at end;
+clocks recorded then discounted (AGENTS.md rule), because every µs of these totals is GPU execution.
+4,096 lanes, 3 reps, one timer family (wall-clock burst per family row).
+
+Baseline /tmp/base-g2 = committed tip 785082d. New = worker tree carrying the G2 knob (default `block`).
+
+Canaries, before any timing:
+  A  baseline rejects --gdn-geom (refusal proves the flag is new, not pre-existing).
+  B  every side echoes its geom and submits launches=144 plan_launches=144 counts_match=1 — nothing is
+     timed on a form that did not submit its planned launch counts.
+  Numerics legs run before the lock hold: base == block bit-for-bit on every prefill logit row and every
+  STATEFP line; wf4 and wf2 each MOVE the state fingerprint, so neither is a flag that selects nothing;
+  g2_mirror.py green inside the existing §10.1 band.
+
+VERDICTS (BET.md §10, pre-registered before the code existed):
+  wf4  DEAD  — gdn_rec 264.00 -> 585.79 ms (+121.89%); wall 626.44 -> 951.13 ms (+51.83%)
+  wf2  DEAD  — gdn_rec 264.00 -> 380.73 ms (+44.21%);  wall 626.44 -> 742.32 ms (+18.50%)
+  lines were live <=180 / dead >230 on gdn_rec, and live <=560 / dead >607 on wall_ms; both sides are past
+  their dead line by 65% and 65%, so there is no unresolved band to argue about.
+  NULL held: base 264.00 vs the same new binary at default 263.12 = -0.33%.
+  EXTERNALITY: +2.69 ms (wf4) and +1.89 ms (wf2) summed over every family other than gdn_rec — this is not
+  a cost that hid in a neighbour the way G1's did; the walk itself is slower.
+
+Independent main-agent verification on a separate compile (not inherited from the worker):
+  walk_isa_diff.py --g2 PASS — wf4/wf2 emit 0 barriers, 0 LDS data ops, 15 permutes, all state traffic
+  b128; shipped emits 5 barriers and 19 LDS ops. The geometry is what it claims; it is simply slower.
+
+Per-rep figures in per-rep.txt; the 16 *.log files are the raw clock dumps.
+
+NOT owed and not run: engine/gate.py's fixture admission. The form is not shipped, so the admission question
+never arises. What shipping safety needs is default-inertness, and the worker proved that against a HEAD
+build: 46/46 logit rows and 44/44 STATEFP lines byte-identical, all four refusals re-checked.

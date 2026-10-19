@@ -231,6 +231,12 @@ struct WaveShape {
     // kernels) and for a ONE-ROW body, which runs the per-token kernel with its own prologue —
     // `wave_plan_bill` derives that exception from the shape, as it derives the other two.
     bool gdn_norm_hoisted = false;
+    // Bet G2's block shape (`decode_run --gdn-geom wf4|wf2`) needs NO field here, and that is worth saying
+    // where a reader looking for one would otherwise wonder: the wavefront geometry submits ONE launch per
+    // span, exactly as `gdn_loop_span` already bills, so the derived `gdn_rec` count is unchanged by it and
+    // the plan would lie if it were billed differently. The consequence for an A/B is that the launch count
+    // cannot be its canary — both sides must read the same `launches=` — so the behavioural canary is the
+    // `gdn_geom=` field on the NUMERICS line (`prototype/gdn_walk/run_ab_g2.sh`, canary B).
     // Which GEMM the pass ran, as the ROUTE the run asked for rather than as a per-body resolution: the
     // plan needs it because `submit_wave_body` guards the F32 widenings whose only reader is a hand
     // kernel, so a library body and a hand body owe DIFFERENT `cast` counts. It is the requested route

@@ -804,8 +804,24 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 // reason: a change that moves milliseconds to another row has not moved them, and here
                 // the pre-pass's DRAM is part of what the change costs.
                 const bool norm_hoist = sc.gdn_norm == kernels::GdnNorm::kHoist;
+                // Bet G2's geometry (`--gdn-geom wf4|wf2`): the same spans, the SAME one-launch-per-span
+                // bill, a different block. Checked BEFORE `norm_hoist` because the two are not
+                // combinable — the wavefront form computes the norms in registers, so there is nothing for
+                // the pre-pass to hoist — and `decode_run` refuses the pair at parse time rather than
+                // letting this ordering quietly pick one of two flags the caller named.
+                const bool wf_geom = sc.gdn_geom != kernels::GdnGeom::kBlock;
                 for (int t = 0; t < n; t += gdn_span) {
                     const int rows = gdn_span < n - t ? gdn_span : n - t;   // the ragged tail
+                    if (wf_geom) {
+                        stageclock::note(stageclock::kGdnRec);              // one site, one launch
+                        kernels::gdn_rec_span_wf(sc.g_u + (size_t)t * kQkvRows,
+                                                 sc.g_g + (size_t)t * kNumValueHeads,
+                                                 sc.g_beta + (size_t)t * kNumValueHeads,
+                                                 st.gdn_state_layer(layer),
+                                                 sc.g_o + (size_t)t * kValueDim,
+                                                 rows, sc.gdn_spell, sc.gdn_geom);
+                        continue;
+                    }
                     if (norm_hoist) {
                         stageclock::note(stageclock::kGdnRec, 2);           // one site, two launches
                         kernels::GdnNormStage nst{};

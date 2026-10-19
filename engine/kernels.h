@@ -391,6 +391,40 @@ struct GdnNormStage {
 void gdn_rec_span_hoisted(const float* u, const float* g, const float* beta, float* S, float* o,
                           const GdnNormStage& stage, int tokens, GdnRecSpell spell);
 
+// ---- bet G2: the geometry of the looped walk (`decode_run --gdn-geom`) ----------------------------
+//
+// One launch per SPAN in every case, which is what keeps the `gdn_rec` plan row identical across the
+// three sides; what differs is the block.
+//
+//   kBlock  `<<<NH=16, D=128>>>`, one state column per thread, the two row norms reduced inside the
+//           walk by `block_sum_pair_f32` — the SHIPPED form and the default.
+//   kWf4    `<<<16, 32>>>`: ONE wavefront per block, 4 state columns per lane, the row norms reduced
+//           by warp butterfly from the rows the lane already loads. `LDS = 0`, zero `__syncthreads()`
+//           (`engine/gdn_rec_wf_kernels.h`; the shape §38's trace shows llama.cpp running).
+//   kWf2    the same kernel at `<<<32, 32>>>`, 2 columns per lane — the split leg, which prices the
+//           wavefronts-for-work-per-wavefront trade named in that header.
+//
+// NOT claimed bit-identical, and it cannot be: the state dot and the `o` dot re-associate (the header
+// names the three things that move). BET.md §10 constraint 2 fixes the admission as the EXISTING §10.1
+// aggregates — cos >= 0.9995 and meanrel <= 5 % through `engine/gate.py` on the pinned fixtures, no new
+// band and no `--ack-spill` — and `prototype/gdn_walk/g2_mirror.py` is the CPU-side size-of-the-move.
+// Like every knob on this recurrence it reaches the `--gdn-loop` span branch only: a one-row body takes
+// the per-token kernels whatever this says (`resolve_gdn_loop`), so no decode bit can move under it, and
+// `parse_args` refuses the combinations where it would be inert (`--gdn-loop 1`, `--gdn-scan collapse`,
+// and `--gdn-norm hoist`, whose pre-pass has nothing left to hoist here).
+enum class GdnGeom { kBlock, kWf4, kWf2 };
+
+// Parse-or-throw, for the standing reason: this names which side of an A/B the run is.
+GdnGeom parse_gdn_geom(const std::string& name);
+const char* gdn_geom_name(GdnGeom g);
+
+// The barrier-free geometry: ONE launch for what `gdn_rec_span` does in one, over the same tiles at the
+// same addresses (`u` is the conv's [n][6144] tile, its q|k|v slices at +0/+kValueDim/+2*kValueDim), the
+// same state buffer and the same `otile`. No stage tiles, because the norms are computed in registers.
+// Refuses `tokens < 2` and any `spell` without a looped body, for `gdn_rec_span`'s two reasons.
+void gdn_rec_span_wf(const float* u, const float* g, const float* beta, float* S, float* o,
+                     int tokens, GdnRecSpell spell, GdnGeom geom);
+
 // One GDN layer, one BODY, route A: `kNumValueHeads * (d_v / 32)` blocks = 64, and the state stays
 // in LDS for the whole body. `u`/`g`/`beta`/`o` are the same tiles `gdn_rec` is fed one row at a
 // time, so the two forms read and write identical addresses; `rows` is the body's row count.

@@ -1,0 +1,185 @@
+loaded 335 tensors, 1.5457 GB resident in 361.3 ms (335 allocations)
+check_weights: PASS
+state: cap=48 GDN state 18.000 MiB + conv window 1.266 MiB + KV 0.562 MiB = 19.828 MiB (KV 12288 B/token, constant 19.266 MiB/request)
+STATE cap=48 gdn=18874368 conv=1327104 kv=589824 total=20791296 per_token=12288
+LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=97 other=20 total=406
+NUMERICS wave_rows_cap=512 wave_rows=16 gemm=lt hipblas=3.6.0 attn_tile=1 attn_touch=1 attn_fattn=1 gdn_scan=seq gdn_chunk=64 gdn_spell=fused gdn_loop=8 gdn_norm=inline gdn_geom=wf2
+GEMM route=hipblaslt handle=1 workspace_mib=128 version=10.4.1 algo_source=heuristic-rank-0-per-shape heur_width=8 pins=2/2 pin_names=down_proj,deep_gate_proj+up_proj cand=0/3 stream=default
+GEMM-LT shape=q_proj N=4096 K=1024 M=16 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=190400000000000000000000000000000000000800000000
+GEMM-LT shape=k_proj+v_proj N=512 K=1024 M=16 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=190400000000000000000000000000000000000800000000
+GEMM-LT shape=o_proj+out_proj N=1024 K=2048 M=16 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=720400000000000000000000000000000000000800000000
+GEMM-LT shape=in_proj_qkv N=6144 K=1024 M=16 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=190400000000000000000000000000000000000800000000
+GEMM-LT shape=in_proj_z N=2048 K=1024 M=16 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=1a0400000000000000000000000000000000000800000000
+GEMM-LT shape=gate_proj+up_proj N=3584 K=1024 M=16 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=220400000000000000000000000000000000000800000000
+GEMM-LT shape=down_proj N=1024 K=3584 M=16 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=290400000000000000000000000000000000000800000000
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/16: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+GEMM-LT shape=in_proj_qkv N=6144 K=1024 M=14 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=190400000000000000000000000000000000000800000000
+GEMM-LT shape=in_proj_z N=2048 K=1024 M=14 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=1a0400000000000000000000000000000000000800000000
+GEMM-LT shape=o_proj+out_proj N=1024 K=2048 M=14 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=720400000000000000000000000000000000000800000000
+GEMM-LT shape=gate_proj+up_proj N=3584 K=1024 M=14 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=220400000000000000000000000000000000000800000000
+GEMM-LT shape=down_proj N=1024 K=3584 M=14 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=290400000000000000000000000000000000000800000000
+GEMM-LT shape=q_proj N=4096 K=1024 M=14 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=190400000000000000000000000000000000000800000000
+GEMM-LT shape=k_proj+v_proj N=512 K=1024 M=14 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=190400000000000000000000000000000000000800000000
+ATTN_FATTN_SKIP rows=0/14: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/14: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/14: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/14: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/14: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/14: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+PREFILL tokens=46 logits=all prefix_len=46 wave_rows=16 pos=0..45
+prefill 0 | fed  248045 | sampled     846 | top 14.692956 | P 0 -> 1
+STEP kind=prefill index=0 input=248045 sampled=846 top_logit=14.692956 pos_before=0 pos_after=1 stop=0
+prefill 1 | fed     846 | sampled     198 | top 23.033211 | P 1 -> 2
+STEP kind=prefill index=1 input=846 sampled=198 top_logit=23.0332108 pos_before=1 pos_after=2 stop=0
+prefill 2 | fed     198 | sampled    3710 | top 16.748947 | P 2 -> 3
+STEP kind=prefill index=2 input=198 sampled=3710 top_logit=16.7489471 pos_before=2 pos_after=3 stop=0
+prefill 3 | fed     760 | sampled    2614 | top 14.709530 | P 3 -> 4
+STEP kind=prefill index=3 input=760 sampled=2614 top_logit=14.7095299 pos_before=3 pos_after=4 stop=0
+prefill 4 | fed   23010 | sampled     364 | top 17.294043 | P 4 -> 5
+STEP kind=prefill index=4 input=23010 sampled=364 top_logit=17.2940426 pos_before=4 pos_after=5 stop=0
+prefill 5 | fed   34130 | sampled  248046 | top 15.750067 | P 5 -> 6 [stop id in prompt phase — ignored]
+STEP kind=prefill index=5 input=34130 sampled=248046 top_logit=15.7500668 pos_before=5 pos_after=6 stop=0
+prefill 6 | fed    9240 | sampled  248046 | top 15.788271 | P 6 -> 7 [stop id in prompt phase — ignored]
+STEP kind=prefill index=6 input=9240 sampled=248046 top_logit=15.788271 pos_before=6 pos_after=7 stop=0
+prefill 7 | fed     264 | sampled  248046 | top 14.079430 | P 7 -> 8 [stop id in prompt phase — ignored]
+STEP kind=prefill index=7 input=264 sampled=248046 top_logit=14.0794296 pos_before=7 pos_after=8 stop=0
+prefill 8 | fed    2330 | sampled  248046 | top 15.041504 | P 8 -> 9 [stop id in prompt phase — ignored]
+STEP kind=prefill index=8 input=2330 sampled=248046 top_logit=15.0415039 pos_before=8 pos_after=9 stop=0
+prefill 9 | fed   17708 | sampled  248046 | top 15.290652 | P 9 -> 10 [stop id in prompt phase — ignored]
+STEP kind=prefill index=9 input=17708 sampled=248046 top_logit=15.2906523 pos_before=9 pos_after=10 stop=0
+prefill 10 | fed   21966 | sampled  248046 | top 17.858337 | P 10 -> 11 [stop id in prompt phase — ignored]
+STEP kind=prefill index=10 input=21966 sampled=248046 top_logit=17.8583374 pos_before=10 pos_after=11 stop=0
+prefill 11 | fed     321 | sampled     264 | top 15.623740 | P 11 -> 12
+STEP kind=prefill index=11 input=321 sampled=264 top_logit=15.6237402 pos_before=11 pos_after=12 stop=0
+prefill 12 | fed     264 | sampled    2330 | top 15.570325 | P 12 -> 13
+STEP kind=prefill index=12 input=264 sampled=2330 top_logit=15.5703249 pos_before=12 pos_after=13 stop=0
+prefill 13 | fed    2609 | sampled     314 | top 20.525051 | P 13 -> 14
+STEP kind=prefill index=13 input=2609 sampled=314 top_logit=20.5250511 pos_before=13 pos_after=14 stop=0
+prefill 14 | fed     314 | sampled     975 | top 15.792047 | P 14 -> 15
+STEP kind=prefill index=14 input=314 sampled=975 top_logit=15.7920465 pos_before=14 pos_after=15 stop=0
+prefill 15 | fed   41275 | sampled    4779 | top 16.830305 | P 15 -> 16
+STEP kind=prefill index=15 input=41275 sampled=4779 top_logit=16.8303051 pos_before=15 pos_after=16 stop=0
+prefill 16 | fed    4779 | sampled  248046 | top 19.294573 | P 16 -> 17 [stop id in prompt phase — ignored]
+STEP kind=prefill index=16 input=4779 sampled=248046 top_logit=19.2945728 pos_before=16 pos_after=17 stop=0
+prefill 17 | fed     383 | sampled     279 | top 16.193508 | P 17 -> 18
+STEP kind=prefill index=17 input=383 sampled=279 top_logit=16.1935081 pos_before=17 pos_after=18 stop=0
+prefill 18 | fed     799 | sampled  248046 | top 15.112911 | P 18 -> 19 [stop id in prompt phase — ignored]
+STEP kind=prefill index=18 input=799 sampled=248046 top_logit=15.1129112 pos_before=18 pos_after=19 stop=0
+prefill 19 | fed    6129 | sampled  248046 | top 19.925892 | P 19 -> 20 [stop id in prompt phase — ignored]
+STEP kind=prefill index=19 input=6129 sampled=248046 top_logit=19.9258919 pos_before=19 pos_after=20 stop=0
+prefill 20 | fed      11 | sampled     694 | top 18.203602 | P 20 -> 21
+STEP kind=prefill index=20 input=11 sampled=694 top_logit=18.2036018 pos_before=20 pos_after=21 stop=0
+prefill 21 | fed     321 | sampled     424 | top 16.390965 | P 21 -> 22
+STEP kind=prefill index=21 input=321 sampled=424 top_logit=16.3909645 pos_before=21 pos_after=22 stop=0
+prefill 22 | fed     279 | sampled  248046 | top 14.559950 | P 22 -> 23 [stop id in prompt phase — ignored]
+STEP kind=prefill index=22 input=279 sampled=248046 top_logit=14.5599499 pos_before=22 pos_after=23 stop=0
+prefill 23 | fed   11013 | sampled     314 | top 19.739408 | P 23 -> 24
+STEP kind=prefill index=23 input=11013 sampled=314 top_logit=19.7394085 pos_before=23 pos_after=24 stop=0
+prefill 24 | fed     314 | sampled     279 | top 16.033180 | P 24 -> 25
+STEP kind=prefill index=24 input=314 sampled=279 top_logit=16.0331802 pos_before=24 pos_after=25 stop=0
+prefill 25 | fed    4779 | sampled     310 | top 17.771454 | P 25 -> 26
+STEP kind=prefill index=25 input=4779 sampled=310 top_logit=17.7714539 pos_before=25 pos_after=26 stop=0
+prefill 26 | fed     310 | sampled   21966 | top 18.580654 | P 26 -> 27
+STEP kind=prefill index=26 input=310 sampled=21966 top_logit=18.5806541 pos_before=26 pos_after=27 stop=0
+prefill 27 | fed   32288 | sampled     369 | top 19.521120 | P 27 -> 28
+STEP kind=prefill index=27 input=32288 sampled=369 top_logit=19.5211201 pos_before=27 pos_after=28 stop=0
+prefill 28 | fed   26731 | sampled     279 | top 18.631884 | P 28 -> 29
+STEP kind=prefill index=28 input=26731 sampled=279 top_logit=18.6318836 pos_before=28 pos_after=29 stop=0
+prefill 29 | fed    4156 | sampled      13 | top 19.879803 | P 29 -> 30
+STEP kind=prefill index=29 input=4156 sampled=13 top_logit=19.8798027 pos_before=29 pos_after=30 stop=0
+prefill 30 | fed     883 | sampled     279 | top 17.758179 | P 30 -> 31
+STEP kind=prefill index=30 input=883 sampled=279 top_logit=17.7581787 pos_before=30 pos_after=31 stop=0
+prefill 31 | fed   16401 | sampled  248046 | top 17.147894 | P 31 -> 32 [stop id in prompt phase — ignored]
+STEP kind=prefill index=31 input=16401 sampled=248046 top_logit=17.1478939 pos_before=31 pos_after=32 stop=0
+prefill 32 | fed    4906 | sampled      13 | top 20.645267 | P 32 -> 33
+STEP kind=prefill index=32 input=4906 sampled=13 top_logit=20.6452675 pos_before=32 pos_after=33 stop=0
+prefill 33 | fed     383 | sampled     279 | top 16.529541 | P 33 -> 34
+STEP kind=prefill index=33 input=383 sampled=279 top_logit=16.529541 pos_before=33 pos_after=34 stop=0
+prefill 34 | fed     411 | sampled  248046 | top 16.665283 | P 34 -> 35 [stop id in prompt phase — ignored]
+STEP kind=prefill index=34 input=411 sampled=248046 top_logit=16.6652832 pos_before=34 pos_after=35 stop=0
+prefill 35 | fed    5484 | sampled      13 | top 20.229614 | P 35 -> 36
+STEP kind=prefill index=35 input=5484 sampled=13 top_logit=20.2296143 pos_before=35 pos_after=36 stop=0
+prefill 36 | fed      13 | sampled  248046 | top 19.675858 | P 36 -> 37 [stop id in prompt phase — ignored]
+STEP kind=prefill index=36 input=13 sampled=248046 top_logit=19.6758575 pos_before=36 pos_after=37 stop=0
+prefill 37 | fed  248046 | sampled     198 | top 27.140987 | P 37 -> 38
+STEP kind=prefill index=37 input=248046 sampled=198 top_logit=27.1409874 pos_before=37 pos_after=38 stop=0
+prefill 38 | fed     198 | sampled  248045 | top 30.901970 | P 38 -> 39
+STEP kind=prefill index=38 input=198 sampled=248045 top_logit=30.9019699 pos_before=38 pos_after=39 stop=0
+prefill 39 | fed  248045 | sampled   74455 | top 24.899405 | P 39 -> 40
+STEP kind=prefill index=39 input=248045 sampled=74455 top_logit=24.8994045 pos_before=39 pos_after=40 stop=0
+prefill 40 | fed   74455 | sampled     198 | top 23.894569 | P 40 -> 41
+STEP kind=prefill index=40 input=74455 sampled=198 top_logit=23.8945694 pos_before=40 pos_after=41 stop=0
+prefill 41 | fed     198 | sampled  248068 | top 30.311821 | P 41 -> 42
+STEP kind=prefill index=41 input=198 sampled=248068 top_logit=30.311821 pos_before=41 pos_after=42 stop=0
+prefill 42 | fed  248068 | sampled     271 | top 21.926769 | P 42 -> 43
+STEP kind=prefill index=42 input=248068 sampled=271 top_logit=21.9267693 pos_before=42 pos_after=43 stop=0
+prefill 43 | fed     271 | sampled  248069 | top 29.569368 | P 43 -> 44
+STEP kind=prefill index=43 input=271 sampled=248069 top_logit=29.5693684 pos_before=43 pos_after=44 stop=0
+prefill 44 | fed  248069 | sampled     271 | top 29.835037 | P 44 -> 45
+STEP kind=prefill index=44 input=248069 sampled=271 top_logit=29.8350372 pos_before=44 pos_after=45 stop=0
+prefill 45 | fed     271 | sampled    2523 | top 24.108013 | P 45 -> 46
+STEP kind=prefill index=45 input=271 sampled=2523 top_logit=24.1080132 pos_before=45 pos_after=46 stop=0
+STATEFP phase=prefill note=no_generation_steps_ran
+STATEFP phase=prefill prefix=46
+STATEFP phase=prefill family=state row=0 layer=0 n=262144 n2=221.73702689019268 maxabs=3.4914374351501465 mean=4.2635103981205225e-05 dn2=221.73702689019268
+STATEFP phase=prefill family=conv row=0 layer=0 cols=3 n=18432 n2=48253.658995525751 maxabs=25 mean=-0.0052967968448582627 dn2=48253.658995525751
+STATEFP phase=prefill family=state row=1 layer=1 n=262144 n2=24.993595317149907 maxabs=2.3494565486907959 mean=2.9232815163607992e-05 dn2=24.993595317149907
+STATEFP phase=prefill family=conv row=1 layer=1 cols=3 n=18432 n2=14677.242647239989 maxabs=10.0625 mean=-0.0041414428883904796 dn2=14677.242647239989
+STATEFP phase=prefill family=state row=2 layer=2 n=262144 n2=37.58457309260482 maxabs=2.1290469169616699 mean=5.4878654326348257e-05 dn2=37.58457309260482
+STATEFP phase=prefill family=conv row=2 layer=2 cols=3 n=18432 n2=21377.716544826078 maxabs=15.9375 mean=-0.015064212369098742 dn2=21377.716544826078
+STATEFP phase=prefill family=state row=3 layer=4 n=262144 n2=940.04556295647228 maxabs=12.598860740661621 mean=9.0963244471320252e-05 dn2=940.04556295647228
+STATEFP phase=prefill family=conv row=3 layer=4 cols=3 n=18432 n2=41303.750380887286 maxabs=17.75 mean=0.0077590821698928876 dn2=41303.750380887286
+STATEFP phase=prefill family=state row=4 layer=5 n=262144 n2=75.355578141368213 maxabs=2.0635988712310791 mean=6.9099447699308748e-05 dn2=75.355578141368213
+STATEFP phase=prefill family=conv row=4 layer=5 cols=3 n=18432 n2=33028.302125297945 maxabs=11.75 mean=-0.0040740134039272862 dn2=33028.302125297945
+STATEFP phase=prefill family=state row=5 layer=6 n=262144 n2=24.237597282506776 maxabs=1.2860850095748901 mean=3.2573831396534843e-05 dn2=24.237597282506776
+STATEFP phase=prefill family=conv row=5 layer=6 cols=3 n=18432 n2=21651.253169581858 maxabs=15.1875 mean=-0.019767284238090117 dn2=21651.253169581858
+STATEFP phase=prefill family=state row=6 layer=8 n=262144 n2=121.89693814769009 maxabs=3.9880592823028564 mean=-0.00018370090363481982 dn2=121.89693814769009
+STATEFP phase=prefill family=conv row=6 layer=8 cols=3 n=18432 n2=34148.836259108968 maxabs=13.4375 mean=-0.0067826376374190049 dn2=34148.836259108968
+STATEFP phase=prefill family=state row=7 layer=9 n=262144 n2=30.731246592177094 maxabs=1.4962222576141357 mean=8.7613760891604446e-06 dn2=30.731246592177094
+STATEFP phase=prefill family=conv row=7 layer=9 cols=3 n=18432 n2=23179.499859632066 maxabs=15.875 mean=-0.0035700958817162448 dn2=23179.499859632066
+STATEFP phase=prefill family=state row=8 layer=10 n=262144 n2=15.354771289468061 maxabs=0.75432461500167847 mean=8.8457015844026392e-05 dn2=15.354771289468061
+STATEFP phase=prefill family=conv row=8 layer=10 cols=3 n=18432 n2=19020.252774023964 maxabs=17.625 mean=-0.010784169344535459 dn2=19020.252774023964
+STATEFP phase=prefill family=state row=9 layer=12 n=262144 n2=163.86799990341746 maxabs=4.7788939476013184 mean=1.2601072597463573e-06 dn2=163.86799990341746
+STATEFP phase=prefill family=conv row=9 layer=12 cols=3 n=18432 n2=45445.850068314554 maxabs=17.5 mean=0.0099173611702604424 dn2=45445.850068314554
+STATEFP phase=prefill family=state row=10 layer=13 n=262144 n2=20.839133667312652 maxabs=1.0016199350357056 mean=4.0694767611461001e-05 dn2=20.839133667312652
+STATEFP phase=prefill family=conv row=10 layer=13 cols=3 n=18432 n2=34979.479649939087 maxabs=13.875 mean=-0.0099770496599376202 dn2=34979.479649939087
+STATEFP phase=prefill family=state row=11 layer=14 n=262144 n2=57.032458349348452 maxabs=2.5379757881164551 mean=-3.7437728078348073e-05 dn2=57.032458349348452
+STATEFP phase=prefill family=conv row=11 layer=14 cols=3 n=18432 n2=26880.167084315166 maxabs=19.875 mean=-0.00047340567430688278 dn2=26880.167084315166
+STATEFP phase=prefill family=state row=12 layer=16 n=262144 n2=279.15472784544215 maxabs=2.6149632930755615 mean=0.0010155687930533857 dn2=279.15472784544215
+STATEFP phase=prefill family=conv row=12 layer=16 cols=3 n=18432 n2=80332.478354283812 maxabs=26.5 mean=0.0042547942139208317 dn2=80332.478354283812
+STATEFP phase=prefill family=state row=13 layer=17 n=262144 n2=397.58565342066947 maxabs=3.5822517871856689 mean=0.0012629534091938273 dn2=397.58565342066947
+STATEFP phase=prefill family=conv row=13 layer=17 cols=3 n=18432 n2=112086.0671376813 maxabs=30.875 mean=-0.038916971612100802 dn2=112086.0671376813
+STATEFP phase=prefill family=state row=14 layer=18 n=262144 n2=825.37960176874913 maxabs=7.8521690368652344 mean=0.0020214504827965199 dn2=825.37960176874913
+STATEFP phase=prefill family=conv row=14 layer=18 cols=3 n=18432 n2=144095.48289326258 maxabs=23.25 mean=0.007950872907208072 dn2=144095.48289326258
+STATEFP phase=prefill family=state row=15 layer=20 n=262144 n2=448.89542357930696 maxabs=5.5152773857116699 mean=0.0017807892372363454 dn2=448.89542357930696
+STATEFP phase=prefill family=conv row=15 layer=20 cols=3 n=18432 n2=124946.8316944206 maxabs=18.125 mean=-0.021227150508720014 dn2=124946.8316944206
+STATEFP phase=prefill family=state row=16 layer=21 n=262144 n2=269.32423568983171 maxabs=2.6139252185821533 mean=0.00072720227324372857 dn2=269.32423568983171
+STATEFP phase=prefill family=conv row=16 layer=21 cols=3 n=18432 n2=128445.78421996743 maxabs=39.5 mean=-0.04667713213711977 dn2=128445.78421996743
+STATEFP phase=prefill family=state row=17 layer=22 n=262144 n2=71.478898783931797 maxabs=2.3842580318450928 mean=-3.4835874765798366e-05 dn2=71.478898783931797
+STATEFP phase=prefill family=conv row=17 layer=22 cols=3 n=18432 n2=73523.31750462536 maxabs=18.375 mean=-0.0027341184516747794 dn2=73523.31750462536
+STATEFP phase=prefill family=kv row=0 layer=3 lanes=46 n=47104 n2=56387.814543320725 maxabs=9.0625 mean=-0.017881841445594782 dn2=56387.814543320725
+STATEFP phase=prefill family=kv row=1 layer=7 lanes=46 n=47104 n2=60527.598930047534 maxabs=21.75 mean=0.010900297758938826 dn2=60527.598930047534
+STATEFP phase=prefill family=kv row=2 layer=11 lanes=46 n=47104 n2=63956.332622900765 maxabs=22.25 mean=0.014529550113998677 dn2=63956.332622900765
+STATEFP phase=prefill family=kv row=3 layer=15 lanes=46 n=47104 n2=74146.957703401858 maxabs=37.25 mean=0.025546326699322493 dn2=74146.957703401858
+STATEFP phase=prefill family=kv row=4 layer=19 lanes=46 n=47104 n2=73174.027460432626 maxabs=13.9375 mean=-0.0044558712144625251 dn2=73174.027460432626
+STATEFP phase=prefill family=kv row=5 layer=23 lanes=46 n=47104 n2=179198.83874623958 maxabs=16.125 mean=-0.06280890117277918 dn2=179198.83874623958
+LAUNCHSTAT family=glue calls=147 calls_batched=147 rows_total=2254 rows_max=16
+LAUNCHSTAT family=proj calls=342 calls_batched=342 rows_total=5244 rows_max=16
+LAUNCHSTAT family=mlp_gateup calls=72 calls_batched=72 rows_total=1104 rows_max=16
+LAUNCHSTAT family=mlp_down calls=72 calls_batched=72 rows_total=1104 rows_max=16
+LAUNCHSTAT family=gdn_conv calls=54 calls_batched=54 rows_total=828 rows_max=16
+LAUNCHSTAT family=gdn_gates calls=54 calls_batched=54 rows_total=828 rows_max=16
+LAUNCHSTAT family=gdn_gated_norm calls=54 calls_batched=54 rows_total=828 rows_max=16
+LAUNCHSTAT family=attn calls=18 calls_batched=18 rows_total=276 rows_max=16
+RESULT mode=run steps=46 ms_total=242.013 ms_per_step=5.261 last_sampled=2523 prefix_len=46 stopped=0

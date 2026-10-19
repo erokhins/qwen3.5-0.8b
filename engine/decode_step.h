@@ -128,6 +128,15 @@ struct DecodeScratch {
     // 4,096-lane pass, and BET.md §3's pre-registered lines on the `gdn_rec` family row are what decide
     // whether the default moves. Inert under `kCollapse`, which submits a different kernel.
     kernels::GdnNorm gdn_norm = kernels::GdnNorm::kInline;
+    // The BLOCK SHAPE of the looped body (`--gdn-geom`, bet G2, `kernels.h:GdnGeom`). Same riding reason
+    // as the six above: it reaches the launch site inside the body loop, and the same one-row override —
+    // a ONE-ROW body takes the per-token kernels whatever this says, so no decode bit moves under it.
+    // The default is `kBlock`, the shipped `<<<16,128>>>` looped walk; `kWf4` is BET.md §10's
+    // pre-registered one-wavefront-per-block form (no LDS, no barrier, norms by warp butterfly) and `kWf2`
+    // its split leg. It does NOT claim bit-identity — the state and `o` dots re-associate — and the band is
+    // the existing one (§10.1 aggregates via `engine/gate.py`). Inert under `kCollapse` and under
+    // `--gdn-loop 1`, and `decode_run` refuses those pairs rather than echo a shape that did not run.
+    kernels::GdnGeom gdn_geom = kernels::GdnGeom::kBlock;
     // The chunk size in tokens, echoed so a run states which chunk it claimed. Only 64 is accepted
     // (`kernels.h:kGdnChunkTokens`); the refusal text carries the measured reason.
     int gdn_chunk = kernels::kGdnChunkTokens;

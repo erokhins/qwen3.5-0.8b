@@ -1,0 +1,91 @@
+G2 ISA EVIDENCE — captured 2026-10-19, CPU only (no device run, no ms figure in this file).
+
+HOW EVERY NUMBER HERE IS RE-TAKEN (three commands, ~20 s, all CPU):
+    hipcc -O3 -Wno-unused-command-line-argument -I. -Iengine --save-temps=obj \
+          -c engine/kernels_gdn.cpp -o tmp/gdn_walk/s/kernels_gdn.o
+    # the listing is tmp/gdn_walk/s/kernels_gdn-hip-amdgcn-amd-amdhsa-gfx1151.s
+    .venv/bin/python prototype/gdn_walk/walk_isa_diff.py --g2 \
+          --asm tmp/gdn_walk/s/kernels_gdn-hip-amdgcn-amd-amdhsa-gfx1151.s
+    .venv/bin/python prototype/gdn_rec_isa/token_bill.py --asm SAME --kernels rec_loop_kernel
+    # and, because token_bill keys a template by its UNMANGLED name, one instantiation per file:
+    #   awk 'BEGIN{p=0} /^_Z[0-9]+[A-Za-z]/{if(index($0,"rec_wf_kernelILi4")) p=1; else if(p) p=0} p' \
+    #     SAME > tmp/gdn_walk/s/wf4.s      (same with ILi2 > wf2.s)
+    .venv/bin/python prototype/attn_wmma/fattn_residency_read.py --asm SAME \
+          --kernel _Z13rec_wf_kernelILi4EEvPKfS1_S1_S1_S1_PfS2_ii --threads 32 --warps 1
+The three note blocks, verbatim from the listing's `.note` section (vgpr/spill/sgpr/private/group):
+    _Z15rec_loop_kernelPKfS0_S0_S0_S0_PfS1_ii     vgpr 75  spill 0  sgpr 40  spill 0  private 0  group 1280
+    _Z13rec_wf_kernelILi4EEv...                   vgpr 54  spill 0  sgpr 50  spill 0  private 0  group 0
+    _Z13rec_wf_kernelILi2EEv...                   vgpr 52  spill 0  sgpr 53  spill 0  private 0  group 0
+and the residency derivation from KFD + rocminfo (NOT `hipGetDeviceProperties`, which halves the CU count,
+and NOT clang's `-Rpass-analysis` "waves/SIMD: 16", which is a constant):
+
+== walk_isa_diff.py --g2 (structure: barriers / LDS data ops / permutes / vectorised state traffic)
+G2 STRUCTURAL CENSUS (0 barriers / 0 LDS data ops / butterfly present / state vectorised)
+kernel            barrier  lds_data   perm  s_load  gld_any  gld_x4  gld_x2  gst_any  gst_x4  gst_x2   fma  rsq_exp
+block(shipped)          5        19     20       4       37       0       0       17       0       0    47        3
+wf4                     0         0     15       8       11      11       0        5       5       0    39        3
+wf2                     0         0     15       8       19       2      17        9       0       9    42        3
+RESULT walk_isa_diff --g2 PASS — the wavefront walk is barrier-free and LDS-free, and it still reduces across the warp by permute.
+
+== note blocks and residency, derived from KFD + rocminfo
+listing                : tmp/gdn_walk/s/kernels_gdn-hip-amdgcn-amd-amdhsa-gfx1151.s
+kernel                 : _Z15rec_loop_kernelPKfS0_S0_S0_S0_PfS1_ii
+  vgpr_count               75
+  vgpr_spill_count         0
+  sgpr_count               40
+  sgpr_spill_count         0
+  private_segment_fixed_size 0
+  group_segment_fixed_size 1280
+  block threads            128
+  block warps              4
+device facts (must be re-read to re-take this):
+  LDS per CU             : 65536 B  [KFD nodes/1/properties lds_size_in_kb 64]
+  work items per CU      : 1024   [rocminfo 'Max Work-item Per CU']
+  waves per CU           : 32   [rocminfo 'Max Waves Per CU']
+  register file per CU   : UNKNOWN on this part (fattn_regfile_ladder.md §3) — not applied
+derived blocks/CU        : 8   (LDS=51  threads=8  wavefronts=8)
+listing                : tmp/gdn_walk/s/kernels_gdn-hip-amdgcn-amd-amdhsa-gfx1151.s
+kernel                 : _Z13rec_wf_kernelILi4EEvPKfS1_S1_S1_S1_PfS2_ii
+  vgpr_count               54
+  vgpr_spill_count         0
+  sgpr_count               50
+  sgpr_spill_count         0
+  private_segment_fixed_size 0
+  group_segment_fixed_size 0
+  block threads            32
+  block warps              1
+device facts (must be re-read to re-take this):
+  LDS per CU             : 65536 B  [KFD nodes/1/properties lds_size_in_kb 64]
+  work items per CU      : 1024   [rocminfo 'Max Work-item Per CU']
+  waves per CU           : 32   [rocminfo 'Max Waves Per CU']
+  register file per CU   : UNKNOWN on this part (fattn_regfile_ladder.md §3) — not applied
+derived blocks/CU        : 32   (LDS=None  threads=32  wavefronts=32)
+listing                : tmp/gdn_walk/s/kernels_gdn-hip-amdgcn-amd-amdhsa-gfx1151.s
+kernel                 : _Z13rec_wf_kernelILi2EEvPKfS1_S1_S1_S1_PfS2_ii
+  vgpr_count               52
+  vgpr_spill_count         0
+  sgpr_count               53
+  sgpr_spill_count         0
+  private_segment_fixed_size 0
+  group_segment_fixed_size 0
+  block threads            32
+  block warps              1
+device facts (must be re-read to re-take this):
+  LDS per CU             : 65536 B  [KFD nodes/1/properties lds_size_in_kb 64]
+  work items per CU      : 1024   [rocminfo 'Max Work-item Per CU']
+  waves per CU           : 32   [rocminfo 'Max Waves Per CU']
+  register file per CU   : UNKNOWN on this part (fattn_regfile_ladder.md §3) — not applied
+derived blocks/CU        : 32   (LDS=None  threads=32  wavefronts=32)
+
+== token_bill.py per-token-step bills, per wavefront (three listings: the shipped kernel, then one instantiation per file because token_bill keys templates by the unmangled name)
+  FLAT token-step bill  : 1530 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  PER-TOKEN bill        : 1327 slots/wavefront   (flat - 203 per-launch slots)
+  ADDRESS ARITHMETIC    : 13 straight-line + 80 in walks = 93 slots = 7.0% of the per-token bill, 6.1% of the flat bill
+  walks                 : loopA x32 (4 state-accesses/trip), loopB x32 (4/trip)
+  FLAT token-step bill  : 2860 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  PER-TOKEN bill        : 2767 slots/wavefront   (flat - 93 per-launch slots)
+  ADDRESS ARITHMETIC    : 15 straight-line + 320 in walks = 335 slots = 12.1% of the per-token bill, 11.7% of the flat bill
+  walks                 : loopA x16 (8 state-accesses/trip), loopB x16 (8/trip)
+  FLAT token-step bill  : 1885 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  PER-TOKEN bill        : 1794 slots/wavefront   (flat - 91 per-launch slots)
+  ADDRESS ARITHMETIC    : 12 straight-line + 128 in walks = 140 slots = 7.8% of the per-token bill, 7.4% of the flat bill

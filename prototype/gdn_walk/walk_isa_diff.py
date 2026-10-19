@@ -169,21 +169,200 @@ _Z9other_onei:
     return ok and moved
 
 
+# ----------------------------------------------------------------------------------------------------
+# bet G2's census: the wavefront geometry, checked structurally rather than believed.
+#
+# WHY THIS IS HERE AND NOT IN A NEW FILE: this is the third census over the same kernel family and
+# `AGENTS.md` has a trap row about exactly that ("before writing a census tool, list the census
+# tools"), and the slicing rules — clang emits a kernel body under a bare column-0 mangled label, and
+# the templated instantiations sort under `_Z13rec_wf_kernelILi4…` where the length prefix counts the
+# UNMANGLED name — are already written down and tested above. What is new here is only the question: the
+# G1 mode asks "did the FP-op multiset survive the split", which is the bit-identity question. G2 does
+# not claim bit-identity; it claims a SHAPE, and the shape is checkable in a listing:
+#
+#   * ZERO `s_barrier` in the walk (the bet's whole point: 32 lanes, so a block IS a wavefront and there
+#     is no cross-warp hand-off left to order);
+#   * ZERO LDS *data* accesses (`ds_read_*`/`ds_write_*`/`ds_load_*`/`ds_store_*`) — the state stays in
+#     global memory and the norms stay in registers;
+#   * the cross-lane reduction is a PERMUTE, not a memory round-trip: `ds_bpermute_b32`/`ds_swizzle_b32`
+#     move values between lanes through the LDS *unit* without addressing one byte of LDS, which is why
+#     the note block's `group_segment_fixed_size` reads 0 while the permute count is positive. So the
+#     `lds` bucket above MUST be split, or the claim "0 LDS ops" is either false or vacuous depending on
+#     which regex you wrote — and a check that cannot distinguish those two is the empty-parse class of
+#     bug in AGENTS.md.
+#   * the butterfly must actually be PRESENT (permutes > 0). A kernel that had no cross-lane traffic at
+#     all would pass a "0 barriers, 0 LDS" test while being a completely different program.
+#   * the per-row k/q operands arrive as UNIFORM loads; whether LLVM scalarised them (`s_load_b32`) or
+#     issues a per-lane broadcast `global_load_dword` is a listing fact the A/B has to be read against,
+#     so it is reported per kernel rather than asserted in a header.
+#   * the state traffic must still be VECTORED: `global_load_dwordx4`/`global_store_dwordx4` for the
+#     4-columns-per-lane form. If the float4 became four scalar loads the geometry is the same shape and
+#     a different machine cost, and the per-token bill claim in BET.md §10 would be wrong.
+# ----------------------------------------------------------------------------------------------------
+G2_REF = "rec_loop_kernel"
+G2_TARGETS = (("rec_loop_kernel", "block(shipped)"),
+              ("rec_wf_kernelILi4", "wf4"),
+              ("rec_wf_kernelILi2", "wf2"))
+G2_LDS_DATA_RE = re.compile(r"^ds_(read|write|load|store)")
+G2_PERM_RE = re.compile(r"^ds_(bpermute|swizzle|sw_)")
+
+
+def slice_symbol(text: str, needle: str) -> list:
+    """One kernel body by a substring of its label — the templated instantiations need this."""
+    lines = text.splitlines()
+    labels = kernel_labels(text)
+    hits = [(i, sym) for i, sym, _ in labels if needle in sym]
+    if len(hits) != 1:
+        raise SystemExit(f"SLICE FAIL: {needle!r} matched {len(hits)} labels (want exactly 1):"
+                         f" {', '.join(s for _, s in hits[:8])}")
+    idx = [i for i, (line_no, sym, _) in enumerate(labels) if sym == hits[0][1]][0]
+    end = labels[idx + 1][0] if idx + 1 < len(labels) else len(lines)
+    return [l.strip() for l in lines[hits[0][0] + 1:end]]
+
+
+def g2_census(lines: list) -> Counter:
+    c = Counter()
+    for line in lines:
+        if not line or line.startswith((".", ";", "/")):
+            continue
+        mn = line.split()[0].rstrip(":")
+        if BARRIER_RE.match(mn):
+            c["barrier"] += 1
+        elif G2_LDS_DATA_RE.match(mn):
+            c["lds_data"] += 1
+        elif G2_PERM_RE.match(mn):
+            c["perm"] += 1
+        if mn.startswith("s_load"):
+            c["s_load"] += 1
+        # RDNA3 spells a vector global access `global_load_b128`/`global_store_b64`, NOT the GCN
+        # `dwordx4`/`dwordx2` names — the mnemonic-class trap AGENTS.md records for `ds_load_b128`. A
+        # census that matches only the old names reports "not vectorised" on a kernel that is, which is a
+        # false FAIL, and the only worse outcome than a false PASS.
+        if mn.startswith(("global_load_b128", "global_load_dwordx4")):
+            c["gld_x4"] += 1
+        if mn.startswith(("global_load_b64", "global_load_dwordx2")):
+            c["gld_x2"] += 1
+        if mn.startswith("global_load_"):
+            c["gld_any"] += 1
+        if mn.startswith(("global_store_b128", "global_store_dwordx4")):
+            c["gst_x4"] += 1
+        if mn.startswith(("global_store_b64", "global_store_dwordx2")):
+            c["gst_x2"] += 1
+        if mn.startswith("global_store_"):
+            c["gst_any"] += 1
+        if mn.startswith(("v_fma", "v_fmac", "v_dual_fma")):
+            c["fma"] += 1
+        if mn.startswith(("v_exp", "v_rsq")):
+            c["rsq_exp"] += 1
+    return c
+
+
+def g2_report(text: str) -> bool:
+    print("G2 STRUCTURAL CENSUS (0 barriers / 0 LDS data ops / butterfly present / state vectorised)")
+    cens = {}
+    for needle, label in G2_TARGETS:
+        cens[label] = g2_census(slice_symbol(text, needle))
+    hdr = f"{'kernel':16s} {'barrier':>8s} {'lds_data':>9s} {'perm':>6s} {'s_load':>7s} " \
+          f"{'gld_any':>8s} {'gld_x4':>7s} {'gld_x2':>7s} {'gst_any':>8s} {'gst_x4':>7s} " \
+          f"{'gst_x2':>7s} {'fma':>5s} {'rsq_exp':>8s}"
+    print(hdr)
+    for _needle, label in G2_TARGETS:
+        c = cens[label]
+        print(f"{label:16s} {c['barrier']:8d} {c['lds_data']:9d} {c['perm']:6d} {c['s_load']:7d} "
+              f"{c['gld_any']:8d} {c['gld_x4']:7d} {c['gld_x2']:7d} {c['gst_any']:8d} "
+              f"{c['gst_x4']:7d} {c['gst_x2']:7d} {c['fma']:5d} {c['rsq_exp']:8d}")
+    ok = True
+    ref = cens["block(shipped)"]
+    if ref["barrier"] < 3 or ref["lds_data"] == 0:
+        ok = False
+        print(f"FAIL   the shipped walk reads barrier={ref['barrier']} lds_data={ref['lds_data']};"
+              " the reference side must show the machinery the bet removes, or the checks below are"
+              " decoration")
+    for label in ("wf4", "wf2"):
+        c = cens[label]
+        if c["barrier"]:
+            ok = False
+            print(f"FAIL   {label} still issues {c['barrier']} `s_barrier`")
+        if c["lds_data"]:
+            ok = False
+            print(f"FAIL   {label} still issues {c['lds_data']} LDS data accesses — the state or the"
+                  " norms are being staged, which BET.md §10 constraint 1 forbids")
+        if c["perm"] == 0:
+            ok = False
+            print(f"FAIL   {label} has no cross-lane permute: the row-norm butterfly is not in the body,"
+                  " so this is not the geometry the bet is about")
+        if cens[label]["gld_x4"] + cens[label]["gld_x2"] == 0:
+            ok = False
+            print(f"FAIL   {label} has no vectorised global LOAD: the state is being walked one scalar"
+                  " column at a time, so the per-token cost is not the one BET.md §10 priced")
+    if not ok:
+        print("RESULT walk_isa_diff --g2 FAIL")
+    else:
+        print("RESULT walk_isa_diff --g2 PASS — the wavefront walk is barrier-free and LDS-free, and it"
+              " still reduces across the warp by permute.")
+    return ok
+
+
+def g2_selftest() -> bool:
+    """The G2 buckets must separate a permute from an LDS access, and count both ways."""
+    fake = """
+_Z13rec_wf_kernelILi4EEvPKfS1_S1_S1_S1_PfS2_ii:
+    ds_bpermute_b32 v1, v2, v3
+    ds_swizzle_b32 v1, v2
+    global_load_b128 v[4:7], v5, off
+    global_store_b128 v[4:7], v5, off
+    s_load_b32 s4, s[4:5], 0x10
+    v_fmac_f32_e32 v1, v1, v2
+_Z15rec_loop_kernelPKfS0_S0_S0_S0_PfS1_ii:
+    s_barrier
+    ds_write_b32 v3, v4
+    ds_read_b32 v3, v4
+_Z9other_onei:
+    s_nop 0
+"""
+    wf = g2_census(slice_symbol(fake, "rec_wf_kernelILi4"))
+    ref = g2_census(slice_symbol(fake, "rec_loop_kernel"))
+    checks = [
+        ("a permute is NOT an LDS data access", wf["lds_data"] == 0),
+        ("the permutes are counted (2)", wf["perm"] == 2),
+        ("an LDS read/write IS an LDS data access (2)", ref["lds_data"] == 2),
+        ("a barrier in the reference is counted", ref["barrier"] == 1),
+        ("the RDNA3 vector load name counts (b128)", wf["gld_x4"] == 1 and wf["gst_x4"] == 1),
+        ("the scalar load is seen (s_load)", wf["s_load"] == 1),
+        ("the slice stops at the next label", wf["barrier"] == 0),
+    ]
+    for name, passed in checks:
+        print(f"  {'ok  ' if passed else 'FAIL'} {name}")
+    try:
+        slice_symbol(fake, "no_such_kernel")
+        raised = False
+    except SystemExit:
+        raised = True
+    print(f"  {'ok  ' if raised else 'FAIL'} a missing symbol raises rather than censusing nothing")
+    return all(p for _n, p in checks) and raised
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--asm", type=Path)
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--g2", action="store_true",
+                    help="bet G2's structural census instead of G1's: the wavefront geometry must ship"
+                         " 0 barriers and 0 LDS DATA accesses, and must still contain its butterfly")
     args = ap.parse_args()
 
     if args.selftest:
         print("SELFTEST walk_isa_diff")
         ok = selftest()
+        ok = g2_selftest() and ok
         print("RESULT " + ("walk_isa_diff SELFTEST PASS" if ok else "walk_isa_diff SELFTEST FAIL"))
         return 0 if ok else 1
     if not args.asm or not args.asm.exists():
         raise SystemExit("need --asm PATH (see the file header for the hipcc command that makes one)")
 
     text = args.asm.read_text()
+    if args.g2:
+        return 0 if g2_report(text) else 1
     cen = census(text)
     shipped = cen[SHIPPED]
     print(f"LISTING {args.asm.name}")

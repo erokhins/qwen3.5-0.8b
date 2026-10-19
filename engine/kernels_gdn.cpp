@@ -9,6 +9,7 @@
 #include "engine/gdn_rec_hoist_kernels.h"
 #include "engine/gdn_rec_loop_kernels.h"
 #include "engine/gdn_rec_unroll4_kernels.h"
+#include "engine/gdn_rec_wf_kernels.h"
 #include "prototype/gdn_chunk/gdn_chunk_kernels.h"
 #include "prototype/gdn_decode/gdn_decode_kernels.h"
 #include "prototype/gdn_gated_norm/gdn_gated_norm_kernels.h"
@@ -174,6 +175,61 @@ void gdn_rec_span_hoisted(const float* u, const float* g, const float* beta, flo
                                       NH, tokens);
 }
 
+// bet G2: the barrier-free geometry, ONE launch, no stage tiles. `<<<NH * (D/(32*COLS)), 32>>>` —
+// 16 blocks of one wavefront at the pre-registered 4 columns per lane, 32 blocks at 2 — and the SAME
+// operand tiles `gdn_rec_span` hands `rec_loop_kernel`, so the two forms touch identical addresses and a
+// diff of their outputs is a claim about the schedule and the arithmetic rather than about the access
+// pattern.
+//
+// Not counted in `launch_stats`, and the plan bill does not change for it either: one launch per span,
+// exactly as the looped form bills (`engine/stage_clock.h`). That is deliberate — the whole point of
+// charging it on the SAME `gdn_rec` row is that a win which moved the milliseconds to another row would
+// not be a win (§40 is that lesson), and here even the launch count is unchanged, so canary B of the A/B
+// asserts the two sides submit the SAME 144 launches and distinguishes them only by the NUMERICS echo.
+void gdn_rec_span_wf(const float* u, const float* g, const float* beta, float* S, float* o,
+                     int tokens, GdnRecSpell spell, GdnGeom geom) {
+    // The same refusals `gdn_rec_span` makes, for the same reasons: a one-row body is
+    // `resolve_gdn_loop`'s to route (and a decode bit must not be walked through a kernel the decode pins
+    // were not pinned through), and only the `fused` body has a looped transcription to re-spell.
+    if (tokens < 2) {
+        throw std::runtime_error("gdn_rec_span_wf: tokens=" + std::to_string(tokens) +
+                                 "; a one-row body is `resolve_gdn_loop`'s to route to the per-token"
+                                 " kernels. Decode bits depend on that routing.");
+    }
+    if (spell != GdnRecSpell::kFused) {
+        throw std::runtime_error(std::string("gdn_rec_span_wf: --gdn-spell ") + gdn_rec_spell_name(spell)
+                                 + " has no looped body to re-spell; the wavefront geometry is the"
+                                 " looped body's (engine/gdn_rec_wf_kernels.h). Use --gdn-spell fused"
+                                 " (the default) or --gdn-loop 1");
+    }
+    // The strides the kernel walks are its own constants; the call site walks the engine's. Same rule
+    // `gdn_rec_span` states: a stride that only looked equal is a silent re-map of every row after 0.
+    static_assert(CH == kQkvRows, "rec_wf's q|k|v row stride (CH) must be kQkvRows");
+    static_assert(NH * D == kValueDim, "rec_wf's o row stride (NH*D) must be kValueDim");
+    // The grid is DERIVED from the same column count the kernel divides the head by, in this TU, next to
+    // the kernel it must agree with — the §20 rule (one address expression shared by writer and reader)
+    // and the Bet 2 rule (a geometry fact that lives in two headers gets one half committed).
+    static_assert(D % (GDN_WF_LANES * 4) == 0 && D % (GDN_WF_LANES * 2) == 0,
+                  "rec_wf's blocks-per-head must divide the 128-column head exactly");
+    const float* q = u;
+    const float* k = u + kValueDim;
+    const float* v = u + 2 * kValueDim;
+    if (geom == GdnGeom::kWf4) {
+        rec_wf_kernel<4><<<dim3(NH * (D / (GDN_WF_LANES * 4)), 1), GDN_WF_LANES>>>(
+            q, k, v, g, beta, S, o, NH, tokens);
+    } else if (geom == GdnGeom::kWf2) {
+        rec_wf_kernel<2><<<dim3(NH * (D / (GDN_WF_LANES * 2)), 1), GDN_WF_LANES>>>(
+            q, k, v, g, beta, S, o, NH, tokens);
+    } else {
+        // Unreachable from `parse_gdn_geom`, and still refused rather than served by the block form:
+        // a launcher that quietly ran `rec_loop_kernel` under `--gdn-geom block` would price the shipped
+        // form twice and report the second price as the geometry's win.
+        throw std::runtime_error(std::string("gdn_rec_span_wf: --gdn-geom ") + gdn_geom_name(geom) +
+                                 " is the block form and does not reach this launcher; the shipping"
+                                 " path runs gdn_rec_span");
+    }
+}
+
 // `--gdn-norm`, bet G1. Parses or throws, like every other knob that names a side of an A/B.
 GdnNorm parse_gdn_norm(const std::string& name) {
     if (name == "inline") return GdnNorm::kInline;
@@ -190,6 +246,31 @@ const char* gdn_norm_name(GdnNorm n) {
     switch (n) {
         case GdnNorm::kInline: return "inline";
         case GdnNorm::kHoist: return "hoist";
+    }
+    return "invalid";
+}
+
+// `--gdn-geom`, bet G2. Parses or throws: the flag names which block shape produced a family row, and a
+// typo that silently became the default would price the shipped walk twice and report the second price as
+// the geometry's win.
+GdnGeom parse_gdn_geom(const std::string& name) {
+    if (name == "block") return GdnGeom::kBlock;
+    if (name == "wf4") return GdnGeom::kWf4;
+    if (name == "wf2") return GdnGeom::kWf2;
+    throw std::runtime_error("--gdn-geom takes `block` (the shipped looped body: 16 blocks of 128"
+                             " threads, one state column per thread, the row norms reduced inside the"
+                             " walk — THE DEFAULT), `wf4` (engine/gdn_rec_wf_kernels.h: one wavefront"
+                             " per block, 4 columns per lane, no LDS and no barrier — BET.md §10's"
+                             " pre-registered shape) or `wf2` (the same kernel at 2 columns per lane,"
+                             " 32 blocks, the split leg); got '" + name + "'. Refusing rather than"
+                             " guessing, because this flag names which side of an A/B the run is");
+}
+
+const char* gdn_geom_name(GdnGeom g) {
+    switch (g) {
+        case GdnGeom::kBlock: return "block";
+        case GdnGeom::kWf4: return "wf4";
+        case GdnGeom::kWf2: return "wf2";
     }
     return "invalid";
 }
