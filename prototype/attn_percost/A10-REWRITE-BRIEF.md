@@ -73,7 +73,7 @@ conservative — and its launch density is 1.91/token against our 0.77):
 |---|---|---|
 | threads / block | **96** = 3 waves (`:235`) | **256** = 8 waves |
 | query rows / block | **48** = 3 × 16 (`:187`, `:267`) | **64** = `ncols1 16 × ncols2 4` (`template-instances/fattn-mma-f16-instance-ncols1_16-ncols2_4.cu:10`) |
-| query rows / warp | **16** | **8** |
+| query rows / warp | **16** (forced by the atom) | **not established** — see the note under §3 |
 | KV positions per stage/round | **16** (`FATTN_MLANES`, `:188`) | **64** (`nbatch_fa`, `fattn-mma-f16.cuh:13`, `:164`) |
 | stage bytes | K/V aliased: 16×512 B ×2 = **8,192 B**; block LDS **20,480 B** (`:280`, `:287-291`) | K+V **67,584 B** (row stride `nbatch_K2+4 = 132` half2), LDS ~64 KiB |
 | **Q operand** | **re-read from global every round** (`:398-410`, called from the score leg `:815`) | **`Q_in_reg = true`** — registers for the whole work unit (`fattn-mma-f16.cuh:18`, `:665`); its shared tile is aliased, not added (`:2041-2043`) |
@@ -91,6 +91,23 @@ Per-round arithmetic behind the last two rows, from A9 §5.1:
   → 2,097,152 / 67,584 = **≈31 MAC per byte**.
 
 **3.2× the matrix work per byte that crosses the LSU. That single number is the 1.91×.**
+
+### What is and is not established about llama's shape (read from the vendored source, 2026-10-19)
+
+**Verified.** For our head size the RDNA config case is `DKQ=256, DV=256, ncols=64` → **`nthreads 256, occupancy 2,
+`nbatch_fa 64, nbatch_K2 128, nbatch_V2 128, nbatch_combine 64, nstages_target 1, Q_in_reg true`**
+(`engines/llama.cpp/ggml/src/ggml-cuda/fattn-mma-f16.cuh:163`, selected by `amd_wmma_available(cc)` at `:245`).
+`Q_in_reg` and `nbatch_fa = 64` are therefore facts, and `nstages_target = 1` means **their staging is synchronous —
+there is no double-buffering to copy**. The block is 256 threads and its own LDS demand leaves **1 block/CU**
+(§5's 8 wf/CU figure).
+
+**Not established, and it changes what R1/R2 look like: how 64 query rows map onto 8 waves under a 16×16×16 atom.**
+If their warps split along the **KV** axis while sharing one query set, then Q-in-registers is *shared per block*
+rather than per warp — which would make R2 much cheaper than my pricing and would be a genuinely different lever
+from anything in this brief. If they split along **queries**, then 8 rows/warp must come from a 16-row tile that two
+waves co-own, and the atom argument in §4 stands. **Read `fattn_mma_body_dev`'s warp/`cols_per_warp` mapping for the
+AMD WMMA path and settle this in writing before the compile ladder is built** — it is a source read, not a device
+window, and it is the one input that could reprice the whole route.
 
 The traffic table behind it (A9 §3, derived from these constants):
 
@@ -141,10 +158,15 @@ simply "used bigger tiles".
    (`attn_fattn_kernels.h:55-59`). The same comment notes llama's 358 VGPR is "not a number to admire from a
    distance": **they spill too.**
 
-Point 6 is the one most often misread. llama reaches register-resident Q because it spreads 64 rows over **8 warps
-= 8 rows/warp**, so their per-lane accumulator slice is ~64 f32 where ours is 128 — Q fits in the space that is
-left, at 1 block/CU where the register file hands out **65,536/256 = 256 VGPR per thread**. Register-resident Q is
-therefore a **consequence** of more-warps-fewer-rows-per-warp, not an independent wish that can be adopted first.
+Point 6 is the one most often misread, and correcting it changed what this brief funds. **Rows per wave is 16 on
+both sides** — the atom forces it here (`attn_fattn_kernels.h:192`), and llama's own config for our shape takes it
+through 4 warps × 16 rows rather than 8 warps × 8. So the difference is **not** a smaller accumulator per lane.
+What differs is what llama *does with the rest of the machine*: a **64-position KV stage** instead of 16, Q held in
+registers for the whole sweep, the softmax rescale batched over those 64 positions — and a **willingness to spill**:
+their kernel reports 358 VGPR *with* spill and is still 1.9× faster, which means scratch traffic on their side sits
+somewhere harmless, whereas our rejected attempt (A above) spilled into the same dependent chain §28 identified.
+R1 is therefore not "cut the accumulator", it is **buy 256 VGPR/thread by making the block one 8-wave block per CU**,
+and that is a compile question before it is anything else.
 
 ---
 
@@ -174,9 +196,9 @@ dependency, because order is the whole difficulty.
 
 | # | change | why it is required | cost / constraint | depends on |
 |---|---|---|---|---|
-| **R1** | **256 threads (8 waves) per block, 8 query rows per warp, 64 rows per block** | the only way to cut the per-lane accumulator from 128 f32 to ~64 f32, which is what makes everything after it affordable | LDS ~64 KiB → **1 block/CU → 8 wf/CU** (the residency we bought in §48 is deliberately given up here) | — |
-| **R2** | **Q in registers for the whole KV sweep** | deletes the 898 GB/pass re-read ≈ 60 % of our demanded bytes, and the VMEM/LSU slots behind it | only fits **after** R1 (8 rows/warp + 256 VGPR/thread at 1 block/CU). Locally rejected before (A: spill 115) *because* it was attempted at 16 rows/warp | R1 |
-| **R3** | **KV stage 16 → 64 positions, double-buffered**, V kept `[dim][lane]` as today (`fattn_v_addr`) | cuts rounds/token ~4× (1,115 → ~280 at 32k) and raises MAC/byte toward 31 | LDS is what R1 gives up; **this is the reverse of L-b**, which is dead *because* it tried deep stages at 3 blocks/CU. Deep stages only make sense at 1 block/CU | R1 |
+| **R1** | **8 waves per block (256 threads), 16 query rows per wave → 128 query rows per block** | cuts the LDS cost per served row by 8/3 with nothing else changed, and at 1 block/CU of 256 threads the register file hands out **256 VGPR per thread**, which is what makes R2 possible | LDS ~64 KiB → **1 block/CU → 8 wf/CU** (the residency §48 bought is deliberately given up here); **rows per wave cannot go below 16** — see the note below | — |
+| **R2** | **Q in registers for the whole KV sweep** | deletes the 898 GB/pass re-read ≈ 60 % of our demanded bytes, and the VMEM/LSU slots behind it | only fits **after** R1: 16 rows/warp costs 128 accumulator VGPR and Q costs ~64 more, which needs the 256/thread that only 1 block/CU of 256 threads provides. Locally rejected before (variant A: spill 115) *because* it was attempted at 3 waves/block, where the budget is ~217/thread. Llama pays spill here too (358 VGPR) and wins anyway — so the question is *what* the spilled bytes are on the critical path, not whether spilling is allowed | R1 |
+| **R3** | **KV stage 16 → 64 positions**, V kept `[dim][lane]` as today (`fattn_v_addr`) | cuts rounds/token ~4× (1,115 → ~280 at 32k) and raises MAC/byte toward 31 | LDS is what R1 gives up; **this is the reverse of L-b**, which is dead *because* it tried deep stages at 3 blocks/CU. **Not double-buffered** — llama's RDNA case asks for `nstages_target = 1` (`fattn-mma-f16.cuh:163`), so staging stays synchronous and no async copy machinery is needed (there is no `cp.async` equivalent here anyway) | R1 |
 | **R4** | **softmax rescale batched over 64 positions** (their `nbatch_fa`) | cuts the 428k-slot rescale/max chain ~4× | falls out of R3; L-d alone is −1.26 %, worth taking in context only | R3 |
 | **R5** | **GQA packing in the row index**: 64 rows = 16 positions × 4 heads of one KV group, so one staged tile serves 4 query heads | today each head column re-stages its group's K/V (up to 4×) | an **index** change in the launcher + mask logic, **not** a layout change; no producer touched | R1, R3 |
 | **R6** | **epilogue / O transpose in 8-row groups** | matches R1's per-warp row count | **mostly already built** — G1's `FATTN_TRG 8` machinery (`:242-264`) | R1 |
@@ -185,6 +207,19 @@ dependency, because order is the whole difficulty.
 
 Explicitly **not** part of it: changing the tensor atom (there is no wider atom), and producer-side K/V swizzling —
 see §8.
+
+> **CORRECTION TO R1, made before any work was spent on it.** The first version of this table said "8 query rows per
+> warp, 64 rows per block". **That is impossible on this part**: the tensor atom is 16×16×16 *per wave*, and the
+> repo already asserts it — `static_assert(FATTN_MROWS == 16 && FATTN_MLANES == 16, "the WMMA tile is 16x16x16: MROWS
+> below 16 cannot build an A operand…")` (`engine/attn_fattn_kernels.h:192`). A wave cannot own 8 query rows and
+> still build an A operand. The corrected shape keeps **16 rows per wave** and raises the **wave count to 8**,
+> i.e. 128 query rows per block, which preserves the accumulator cost per lane (still 128 f32) instead of halving
+> it — and that is also why **R2 is priced harder than the first version implied**: at 256 threads and 1 block/CU,
+> 256 VGPR/thread has to hold 128 accumulator + Q (~64 f16-packed) + scores + addressing, which is tight but not
+> obviously impossible, and it is exactly the register picture llama's *358-with-spill* kernel is sitting in. R1 is
+> therefore a **compile question first**, and it is answered by a compile-only ladder (A6's method: build the
+> variant, read `.vgpr_count` / `.vgpr_spill_count` / `group_segment_fixed_size`, no kernel launched) before any
+> device window is asked for.
 
 ---
 
