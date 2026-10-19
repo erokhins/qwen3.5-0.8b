@@ -126,14 +126,16 @@ hip_bfloat16* bf16(const uint16_t* p) {
 // ~99 %, and a burst that divides by the wrong one is wrong by 1.14x. Both are printed so the reader cannot
 // pick the flattering one by accident.
 void fattn_echo(int rows, int split, int lvalid, int nrows, const void* launched,
-                const char* roll_name) {
+                const char* roll_name, const char* qstage_name) {
     static std::string last;
     // `launched` is the function pointer of the kernel THIS LAUNCH submitted, not a name typed beside the
-    // banner. With two roll spellings in one binary that distinction is the whole value of `vgpr=`/`lds=`/
-    // `scratch=` here: read off `attn_fattn_wave` unconditionally, the banner would describe the shipped
-    // kernel while the run was pricing the two-accumulator one, and the two sides of the A/B would print
-    // byte-identical banners while their milliseconds differed. `roll=` names the spelling in the line so
-    // the once-per-geometry dedup below cannot collapse the two sides into one printed banner.
+    // banner. With four spellings in one binary that distinction is the whole value of `vgpr=`/`lds=`/
+    // `scratch=`/`wf_per_cu=` here: read off `attn_fattn_wave` unconditionally, the banner would describe the
+    // shipped kernel while the run was pricing an alternative one, and the two sides of the A/B would print
+    // byte-identical banners while their milliseconds — and their whole residency claim — differed. `roll=` and
+    // `q=` name the spelling in the line, so the once-per-geometry dedup below cannot collapse two sides into
+    // one printed banner, and `lds=`/`wf_per_cu=` are the fields the A6-G1 canary reads (32768/6 shipped against
+    // 20480/9 for `unstaged8`).
     // THE FORM'S OWN COSTS, read from the loaded code object rather than from a comment. `hipFuncGetAttributes`
     // is authoritative here and the compiler's `-Rpass-analysis=kernel-resource-usage` note is not: that note
     // prints a constant `Occupancy [waves/SIMD]: 16` for every kernel in the TU whatever the LDS
@@ -176,10 +178,11 @@ void fattn_echo(int rows, int split, int lvalid, int nrows, const void* launched
     }
     char buf[400];
     std::snprintf(buf, sizeof(buf),
-                  "ATTN_FATTN form=fattn16 q=stage roll=%s warps=%d vgpr=%d lds=%d scratch=%d vtiles=%d"
+                  "ATTN_FATTN form=fattn16 q=%s roll=%s warps=%d vgpr=%d lds=%d scratch=%d vtiles=%d"
                   " wf_per_cu=%d"
                   " wave_rows=%d split=%d fattn_rows=%d/%d fallback_rows=%d"
                   " covered_rows_pct=%.1f covered_work_pct=%.1f%s",
+                  qstage_name,
                   roll_name,
                   FATTN_WARPS,
                   have_attrs ? at.numRegs : -1,
@@ -472,27 +475,40 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                     // A wave whose rows are ALL one-pass still launches it and every block returns at its
                     // first ballot: an inert launch is a cheap, visible cost, a silently-skipped one is not.
                     //
-                    // WHICH ROLL THAT LAUNCH RUNS (`--attn-fattn-roll`, `AttnLayerArgs::fattn_roll`). The two
-                    // spellings are two `__global__`s in this TU and this is the only place one is picked, so
-                    // the knob moves a function and nothing else: same grid expression, same block extent, same
-                    // declared LDS, same `CoreArgs`, one launch either way. That is what makes A4-BET's
-                    // `launches`-identical requirement checkable rather than hoped for — §41 closed launch count
-                    // as a variable and this bet must not reopen it, so the A/B harness asserts the equality
-                    // instead of trusting it (`prototype/attn_percost/run_ab_a4l1.sh`). Like every knob above
-                    // it, an error is never a fallback: a side that silently ran the other roll would price one
-                    // kernel twice and report the second price as the accumulator's win.
+                    // WHICH SPELLING THAT LAUNCH RUNS. Two knobs pick one of four kernels here:
+                    // `--attn-fattn-roll` (the score roll, bet A4-L1) and `--attn-fattn-qstage` (where Q lives
+                    // and how deep the epilogue stages, bet A6-G1). The four spellings are four `__global__`s in
+                    // this TU and this is the only place one is picked, so a knob moves a FUNCTION and nothing
+                    // else: same grid expression, same block extent, same `CoreArgs`, ONE launch either way, and
+                    // the only thing that differs between `stage` and `unstaged8` is what that kernel declares as
+                    // its LDS. That is what makes A4-BET's and A6-BET's `launches`-identical requirement
+                    // checkable rather than hoped for — §41 closed launch count as a variable and neither bet may
+                    // reopen it, so the A/B harness asserts the equality instead of trusting it
+                    // (`prototype/attn_percost/run_ab_a6g0.sh`, `run_ab_a4l1.sh`). Like every knob above it, an
+                    // error is never a fallback: a side that silently ran another spelling would price one kernel
+                    // twice and report the second price as the second spelling's win.
+                    //
+                    // Each branch names its kernel exactly once and records the same pointer it launched, so the
+                    // banner cannot describe a kernel other than the one this launch submitted.
                     const bool roll_two = a.fattn_roll == FattnRoll::kTwo;
+                    const bool q_unstaged = a.fattn_qstage == FattnQStage::kUnstaged8;
                     const dim3 fattn_grid(N_Q, split, fattn_rtiles_of(rows));
-                    const void* fattn_kernel =
-                        roll_two ? reinterpret_cast<const void*>(attn_fattn_wave_two)
-                                 : reinterpret_cast<const void*>(attn_fattn_wave);
-                    if (roll_two) {
+                    const void* fattn_kernel = nullptr;
+                    if (q_unstaged && roll_two) {
+                        attn_fattn_wave_two_u8<<<fattn_grid, FATTN_THREADS>>>(core);
+                        fattn_kernel = reinterpret_cast<const void*>(attn_fattn_wave_two_u8);
+                    } else if (q_unstaged) {
+                        attn_fattn_wave_u8<<<fattn_grid, FATTN_THREADS>>>(core);
+                        fattn_kernel = reinterpret_cast<const void*>(attn_fattn_wave_u8);
+                    } else if (roll_two) {
                         attn_fattn_wave_two<<<fattn_grid, FATTN_THREADS>>>(core);
+                        fattn_kernel = reinterpret_cast<const void*>(attn_fattn_wave_two);
                     } else {
                         attn_fattn_wave<<<fattn_grid, FATTN_THREADS>>>(core);
+                        fattn_kernel = reinterpret_cast<const void*>(attn_fattn_wave);
                     }
                     fattn_echo(rows, split, c.lvalid, c.nrows, fattn_kernel,
-                               fattn_roll_name(a.fattn_roll));
+                               fattn_roll_name(a.fattn_roll), fattn_qstage_name(a.fattn_qstage));
                 }
             } else {
                 attn_tile_wave<<<dim3(N_KV, split, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
@@ -537,6 +553,27 @@ FattnRoll parse_fattn_roll(const std::string& name) {
 
 const char* fattn_roll_name(FattnRoll r) {
     return r == FattnRoll::kTwo ? "two" : "single";
+}
+
+// Parse-or-throw, `parse_fattn_roll`'s rule and for a sharper reason: this knob carries a NUMERICS claim (the
+// `unstaged8` side is owed byte identity with the default, `prototype/attn_percost/A6-G1-impl.md`), so a value
+// that silently fell back to the default would price the shipped form twice and report the second price as the
+// un-stage's win — and it would do so while looking green. An unknown value is an error, never a default.
+FattnQStage parse_fattn_qstage(const std::string& name) {
+    if (name == "stage") return FattnQStage::kStaged;
+    if (name == "unstaged8") return FattnQStage::kUnstaged8;
+    throw std::runtime_error("--attn-fattn-qstage takes `stage` (THE DEFAULT, the shipped spelling: Q staged"
+                             " in a per-warp 8 KiB stage, the epilogue transposing 16 rows at a time in 2"
+                             " passes, declared LDS 32,768 B = 2 blocks/CU = 6 wf/CU) or `unstaged8` (bet"
+                             " A6-G1: Q read from global at the use site, the epilogue staging FATTN_TRG = 8"
+                             " rows a pass in 4 passes, declared LDS 20,480 B = 3 blocks/CU = 9 wf/CU at 185"
+                             " VGPR and spill 0; engine/attn_fattn_kernels.h placement (E)). Got '" + name +
+                             "'. Refusing rather than guessing, because this names which kernel produced the"
+                             " bits in this log and the residency claim is read off its `lds=`/`wf_per_cu=`");
+}
+
+const char* fattn_qstage_name(FattnQStage s) {
+    return s == FattnQStage::kUnstaged8 ? "unstaged8" : "stage";
 }
 
 }  // namespace engine::kernels

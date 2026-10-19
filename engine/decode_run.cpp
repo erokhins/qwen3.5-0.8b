@@ -163,6 +163,19 @@ struct Options {
     // the default, so a guard written as `roll != single` would turn every bare run into a refusal the day
     // the default moved — the `--gdn-geom` precedent, stated at `--gdn-norm hoist`'s refusal above.
     bool attn_fattn_roll_given = false;
+    // Where that form keeps Q, and how deep its output transpose stages (`--attn-fattn-qstage`, bet A6-G1).
+    // `stage` — Q in a per-warp 8 KiB stage, the epilogue transposing 16 rows at a time — is the code path this
+    // header carried before the knob existed, so the default side of the A/B is HEAD's own machine code and its
+    // inertness is a byte-compare. `unstaged8` reads Q from global at the use site and stages the epilogue
+    // FATTN_TRG = 8 rows a pass, which takes the block's declared LDS from 32,768 B to 20,480 B — 3 blocks/CU
+    // instead of 2, 9 wf/CU instead of 6 (`engine/attn_fattn_kernels.h` placement (E),
+    // `prototype/attn_percost/A6-BET.md`). Unlike the roll above it, this knob is OWED byte identity with the
+    // default rather than judged by a band: it moves staging addresses and where an operand is fetched from,
+    // never a value or an order. Parse-or-throw like the flags above, echoed on the same NUMERICS line.
+    engine::kernels::FattnQStage attn_fattn_qstage = engine::kernels::FattnQStage::kStaged;
+    // Whether the knob was NAMED, for the identical reason as the one above: `stage` IS the default, so a guard
+    // keyed on its value would manufacture a refusal for every bare run.
+    bool attn_fattn_qstage_given = false;
     // Which §04.4 scan a GDN body runs (P9, §04.7; route A is D-12). `seq` is the shipped recurrence —
     // one launch per token per layer, the form every decode pin is pinned through — and `collapse` is
     // the same recurrence held resident, one launch per layer per BODY. `chunk` is refused at
@@ -363,6 +376,12 @@ Options parse_args(int argc, char** argv) {
             // accumulator's.
             o.attn_fattn_roll = engine::kernels::parse_fattn_roll(next());
             o.attn_fattn_roll_given = true;
+        } else if (a == "--attn-fattn-qstage") {
+            // Parses or throws, like `--attn-fattn-roll` beside it — and for a sharper reason: this knob's claim
+            // is byte identity, so a silently-defaulted side would reproduce the shipped kernel exactly, look
+            // perfectly green, and be priced as the un-stage's residency win.
+            o.attn_fattn_qstage = engine::kernels::parse_fattn_qstage(next());
+            o.attn_fattn_qstage_given = true;
         } else if (a == "--gdn-scan") {
             o.gdn_scan = engine::kernels::parse_gdn_scan(next());
             o.gdn_scan_given = true;
@@ -596,6 +615,16 @@ Options parse_args(int argc, char** argv) {
                                  " --attn-fattn 1 (the default) with this flag, or drop it for the shipped"
                                  " VALU wave");
     }
+    if (o.attn_fattn_qstage_given && !o.attn_fattn) {
+        // The refusal above, one knob in: naming a spelling of a form that does not run would echo a kernel that
+        // did not exist in this run and price one launch twice. Keyed on `attn_fattn_qstage_given`, NOT on
+        // `qstage != stage`, because `stage` IS the default and a default must not manufacture a refusal.
+        throw std::runtime_error("--attn-fattn-qstage " +
+                                 std::string(engine::kernels::fattn_qstage_name(o.attn_fattn_qstage)) +
+                                 " re-spells where the WMMA wave keeps Q and --attn-fattn 0 launches no WMMA"
+                                 " wave at all, so there is nothing here for it to spell. Use --attn-fattn 1"
+                                 " (the default) with this flag, or drop it for the shipped VALU wave");
+    }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
         // caller's, and a resident process cannot know which one a gate wants — and --sizes-only
@@ -780,7 +809,7 @@ void print_usage(FILE* out) {
                  " [--prefill-logits last|all] [--wave-rows N]"
                  " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
                  " [--gemm-pins all|none|<csv>] [--gemm-heur N] [--attn-touch 0|1]"
-                 " [--attn-fattn-roll single|two]"
+                 " [--attn-fattn-roll single|two] [--attn-fattn-qstage stage|unstaged8]"
                  " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
                  " [--gdn-geom block|wf4|wf2|reg16]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
@@ -870,6 +899,23 @@ void print_usage(FILE* out) {
                  " the flags above, one launch and the same grid either way, and both kernels are in the"
                  " binary whatever this says. `--attn-fattn 0` REFUSES it: naming a spelling of a form that"
                  " does not run would echo a kernel that did not\n"
+                 "  --attn-fattn-qstage stage|unstaged8  which SPELLING of that form's staging plan runs "
+                 "(bet A6-G1, engine/attn_fattn_kernels.h placement (E),"
+                 " prototype/attn_percost/A6-BET.md). `stage` is the SHIPPED plan and the default: Q staged"
+                 " in a per-warp 8 KiB buffer, and the epilogue transposing its F32 output through that dead"
+                 " buffer 16 rows at a time in 2 passes — declared LDS 32,768 B per block, which on this"
+                 " part's 64 KiB is 2 blocks/CU = 6 wf/CU. `unstaged8` reads Q from global at the use site"
+                 " (same 16 source bytes, same `bf16 -> f32 -> f16 RN`, so the operand VALUES do not move) and"
+                 " gives that whole buffer to the epilogue at FATTN_TRG = 8 rows a pass, 4 passes instead of 2"
+                 " — declared LDS 20,480 B = 3 blocks/CU = 9 wf/CU at 185 VGPR, spill 0, scratch 0"
+                 " (A6-result.md §1, §3). The two halves are ONE candidate: un-staging Q alone moves no byte"
+                 " of LDS, because the epilogue stands on the same buffer either way. Unlike the roll above"
+                 " this knob is owed BYTE identity with the default, not a band — it moves staging addresses"
+                 " and where an operand is fetched from, never a value or an order — and the device proof is"
+                 " prototype/attn_percost/A6-G1-impl.md. Wave-only like the flags above, one launch and the"
+                 " same grid either way, all four roll×qstage combinations are real kernels in the binary, and"
+                 " the launcher's ATTN_FATTN line reports `q=`/`lds=`/`wf_per_cu=`/`vgpr=` from the kernel that"
+                 " actually ran. `--attn-fattn 0` REFUSES it, for the same reason as the roll\n"
                  "  --gdn-spell ship|unroll4|fused  which SPELLING of the sequential recurrence's state"
                  " walks a `gdn_rec` launch runs (`engine/gdn_rec_unroll4_kernels.h`, "
                  "prototype/gdn_rec_isa/results.md §10, decision D32). `unroll4` is the SHIPPED"
@@ -1581,7 +1627,8 @@ int main(int argc, char** argv) {
         // the library it is linked against, not about the run — and read by `gate.py`'s
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
         std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d"
-                    " attn_touch=%d attn_fattn=%d attn_fattn_roll=%s gdn_scan=%s gdn_chunk=%d gdn_spell=%s gdn_loop=%d"
+                    " attn_touch=%d attn_fattn=%d attn_fattn_roll=%s attn_fattn_qstage=%s gdn_scan=%s"
+                    " gdn_chunk=%d gdn_spell=%s gdn_loop=%d"
                     " gdn_norm=%s gdn_geom=%s\n",
                     engine::kMaxWaveRows, o.wave_rows,
                     engine::kernels::wave_gemm_name(o.wave_gemm),
@@ -1594,6 +1641,14 @@ int main(int argc, char** argv) {
                     // no WMMA kernel at all, and says so on its own `ATTN_FATTN_SKIP` line rather than having
                     // this field imply a launch that did not happen.
                     engine::kernels::fattn_roll_name(o.attn_fattn_roll),
+                    // Where the WMMA wave keeps Q, echoed on the same line for the same reason. This one carries
+                    // a numerics claim rather than a band: `unstaged8` is owed BYTE identity with `stage`, so a
+                    // log that cannot say which staging plan produced its rows cannot witness that claim in
+                    // either direction — and a side that silently took the default would reproduce the shipped
+                    // bits exactly, look green, and be priced as the un-stage's residency win. Same blind spot as
+                    // `attn_fattn=`/`attn_fattn_roll=`: a wave of all one-pass rows launches no WMMA kernel and
+                    // says so on its own `ATTN_FATTN_SKIP` line.
+                    engine::kernels::fattn_qstage_name(o.attn_fattn_qstage),
                     engine::kernels::gdn_scan_name(o.gdn_scan), o.gdn_chunk,
                     // Truthful, not decorative. `collapse` submits `gdn_rc::rec_collapse_kernel`, which
                     // never reads this flag, so an echo naming a spelling here would report a kernel that
@@ -1650,6 +1705,7 @@ int main(int argc, char** argv) {
         sc.attn_touch = o.attn_touch;
         sc.attn_fattn = o.attn_fattn;
         sc.attn_fattn_roll = o.attn_fattn_roll;
+        sc.attn_fattn_qstage = o.attn_fattn_qstage;
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;
         sc.gdn_spell = o.gdn_spell;

@@ -558,6 +558,18 @@ void gdn_gated_norm(const float* o, const uint16_t* z, const float* w_norm, uint
 // and §33's spilled-at-8-lost-to-spill-free-at-6 precedent is why spill is the admission line.
 enum class FattnRoll { kSingle, kTwo };
 
+// Where the WMMA wave keeps Q, and how deep its output transpose stages (`decode_run --attn-fattn-qstage`,
+// bet A6-G1). Two spellings of one staging plan, two kernels, one binary — and the two knobs above are
+// orthogonal to these, so the TU carries all four combinations (`engine/attn_fattn_kernels.h`).
+// `kStaged` is SHIPPED: Q in a per-warp 8 KiB stage, the F32 transpose riding that dead stage 16 rows at a
+// time, two passes; declared LDS 32,768 B, which on this part's 64 KiB is 2 blocks/CU = 6 wavefronts/CU.
+// `kUnstaged8` reads Q from global at the use site and gives the whole per-warp buffer to the transpose at
+// FATTN_TRG = 8 rows a pass (4 passes, 4 KiB/warp): declared LDS 20,480 B = 3 blocks/CU = 9 wf/CU at 185 VGPR
+// and spill 0 (`prototype/attn_percost/A6-result.md` §1, §3). Unlike the roll knob this one IS owed byte
+// identity with the default — same operand values, same order, only the staging addresses and the operand's
+// provenance move — and `prototype/attn_percost/A6-G1-impl.md` is where that is proved on device.
+enum class FattnQStage { kStaged, kUnstaged8 };
+
 struct AttnLayerArgs {
     const uint16_t *q_proj_out, *k_proj_out, *v_proj_out, *q_norm, *k_norm;
     uint16_t *k_cache, *v_cache;            // [2][cap][256], appended at `pos` in place
@@ -626,6 +638,19 @@ struct AttnLayerArgs {
     // the judge in advance rather than discovering the band afterwards. Both kernels are in the binary
     // whatever this says, which is what makes the paired timing one window instead of two builds.
     FattnRoll fattn_roll = FattnRoll::kSingle;
+
+    // Where the WMMA wave keeps Q, and how deep its output transpose stages (`--attn-fattn-qstage`, bet A6-G1).
+    // Wave-only like every knob above it — a one-row body is `attn_core`, so no decode bit moves under it — and
+    // consulted only when `wave_fattn` picked the WMMA form for at least one row. `kStaged` is the shipped
+    // spelling and the code path this header carried before the knob existed, so the default side of its A/B is
+    // HEAD's own machine code and "the default is inert" is a byte-compare rather than an argument.
+    // `kUnstaged8` reads Q from global at the use site and stages the epilogue FATTN_TRG rows a pass, which
+    // takes the block's declared LDS from 32,768 B to 20,480 B — 3 blocks/CU instead of 2, 9 wf/CU instead of
+    // 6 (`engine/attn_fattn_kernels.h` placement (E), `prototype/attn_percost/A5-GEOMETRY.md` §3.2). It is owed
+    // byte identity, not a band: a row's round boundaries do not move (`blo = blockIdx.y · span` is per row and
+    // geometry-independent), and the operand conversion is the same `bf16 -> f32 -> f16 RN`. Both kernels are in
+    // the binary whatever this says, which is what makes the paired timing one window instead of two builds.
+    FattnQStage fattn_qstage = FattnQStage::kStaged;
 };
 void attn_decode_layer(const AttnLayerArgs& a);
 
@@ -635,6 +660,13 @@ void attn_decode_layer(const AttnLayerArgs& a);
 // the two kernels.
 FattnRoll parse_fattn_roll(const std::string& name);
 const char* fattn_roll_name(FattnRoll r);
+
+// The Q-placement spellings' parse/name pair, same rule and same reason as the roll's: this names which side of
+// an A/B a run is and, unlike the roll, it carries a numerics claim (byte identity with the default), so a value
+// that silently fell back to the default would price the shipped form twice and report the second price as the
+// un-stage's win. Defined in `kernels_attn.cpp`, the TU that owns the four kernels.
+FattnQStage parse_fattn_qstage(const std::string& name);
+const char* fattn_qstage_name(FattnQStage s);
 
 // How many F32 elements `AttnLayerArgs::part` must hold for a body of `rows` query rows: one (max,
 // sum, acc[head_dim]) tuple per query head per split block, at the maximum split the engine serves.

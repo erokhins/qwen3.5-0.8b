@@ -83,8 +83,27 @@
  *       epilogue's F32 transpose now goes through each warp's own dead Q stage, because one warp's staging is
  *       the whole 8 KiB K/V stage and three warps sharing it would be §20.1's aliasing bug. What it buys is
  *       interleave WITHOUT touching the accumulator's live range, which is the one thing Bet 1 could not do.
- *       The variant that keeps Bet 1's un-staged Q at three warps (V6, 8 KiB/block, 24 wf/CU on paper) is
- *       REFUTED on measurement: 73 spilled VGPRs, 284 B/lane of scratch.
+ *       The variant that keeps Bet 1's un-staged Q at three warps (V6 ON THE SKELETON: 73 spilled VGPRs,
+ *       284 B/lane of scratch) was re-measured on the real body by `prototype/attn_wmma/E1-result.md` §1 and
+ *       lands at 184 VGPR / 0 spill / 0 scratch. What the skeleton got wrong is the LDS: the per-warp 8 KiB is
+ *       the epilogue's transpose staging whether or not Q is parked in it, so un-staging Q buys a register
+ *       question and no residency.
+ *   (E) THREE WARPS PER BLOCK, Q UN-STAGED, EPILOGUE STAGED 8 ROWS AT A TIME (`--attn-fattn-qstage
+ *       unstaged8`, bet A6-G1). Same block, same grid, same launch count; two things move:
+ *         s_warp 3 x 8 rows x 128 dims x 4 B  = 12288 B   (the epilogue's F32 transpose only — Q is read from
+ *                                                        global at the use site, so the stage is 4 KiB/warp)
+ *         s_kv   16 lanes x 256 dims x 2 B    =  8192 B   (unchanged)
+ *         total                               = 20480 B  -> 3 blocks/CU on this part's 64 KiB = 9 wf/CU
+ *       (D)'s error was pricing the buffer, not its content: the epilogue needs 16 rows x FATTN_TROW floats
+ *       per warp because that is one half of DH of one warp's accumulator, and (D) parked Q in the same bytes.
+ *       Un-staging Q alone therefore bought 6 VGPRs and no residency (`E1` §1, 32,768 B unchanged); shrinking
+ *       the transpose to 8 rows per pass and running 4 passes instead of 2 is what moves the bytes, and it is
+ *       the same candidate — neither half alone changes the block's LDS. Compile-side: 185 VGPR / 0 spill /
+ *       0 scratch, and the driver grants 3 blocks/CU at it (`prototype/attn_percost/A6-result.md` §1, §3).
+ *       The two prices it pays, both named: the Q operand's 16 loads per lane-round move from `ds` to `global`
+ *       (A5 §3.2 prices that at 568 KB/token/layer of DEMANDED traffic, L1/L2 material by construction), and
+ *       the epilogue runs twice as many passes, so twice as many staging barriers. It is owed BYTE identity
+ *       with (D), which is what `prototype/attn_percost/A6-G1-impl.md` proves on device rather than argues.
  *
  * CLAIM (i) ARRIVED RED, and that is a result, not an omission: the port as committed (`d7057c4`) compiled
  * to `.vgpr_count 192 / .vgpr_spill_count 242 / .private_segment_fixed_size 332`, so 4 blocks/CU was already
@@ -97,9 +116,13 @@
  * ported here at all — see COVERAGE above.
  *
  * ONE ADDRESS EXPRESSION PER STAGED OBJECT, writer and reader alike (§20.1). `fattn_kv_addr` and
- * `fattn_v_addr` are the only way the two stages are indexed (Q has no stage: `fattn_q_frag` is the only way
- * its operand tiles are produced), and the partial slot expression is the shipped one, verbatim, keyed by
- * the FULL head, so `attn_combine` needs no branch for this form either.
+ * `fattn_v_addr` are the only way the two K/V layouts are indexed; the per-warp stage is sized by ONE formula
+ * (`fattn_warp_stage_halves`) and its slots by one (`fattn_tr_addr`), because that buffer now carries TWO
+ * layouts across the two Q spellings — Q's F16 operand rows in the default, the F32 output transpose in
+ * `unstaged8` — and §20.1 is what happens when two self-consistent spellings of one buffer are joined by a
+ * branch; Q's operand tiles come from exactly one place (`fattn_score_q_tile`, which selects stage-or-global at
+ * COMPILE time and is the only caller of `fattn_load_q_tile`/`fattn_q_row`); and the partial slot expression is
+ * the shipped one, verbatim, keyed by the FULL head, so `attn_combine` needs no branch for this form either.
  *
  * COSTS THIS FORM PAYS THAT THE PROTOTYPE CENSUS DID NOT PRICE, named because they will show up in the
  * census of this file and nowhere else:
@@ -193,6 +216,13 @@ struct FattnO { fattn_CRegs t[FATTN_VTILES]; };   // the P*V accumulators over D
 // score leg, V transposed for P*V) and is legal only because a barrier separates every reader 
 // of one from every writer of the other; its third layout is the F32 output transpose, below.
 __device__ __forceinline__ int fattn_q_addr(int q, int d) { return q * DH + d; }      // [row][dim]
+// Q's GLOBAL source row, the one spelling of it (the other spelling is the stage, above, and a lane reaches Q
+// by exactly one of the two, chosen at compile time by `fattn_score_q_tile`). `qrow` is an absolute wave-row
+// index and the clamp that keeps it inside the wave lives at its single call site in the body — it is not
+// cosmetic: at 48 rows per BLOCK a whole warp's row-block can be past `nrows`.
+__device__ __forceinline__ const hip_bfloat16* fattn_q_row(const CoreArgs& a, int qrow, int head0) {
+    return a.qrope + (size_t)ROW_H * qrow + (size_t)head0 * DH;                    // [row][head][dim]
+}
 __device__ __forceinline__ int fattn_kv_addr(int kv, int d) { return kv * DH + d; }   // [lane][dim]
 __device__ __forceinline__ int fattn_v_addr(int d, int kv) { return d * FATTN_MLANES + kv; }  // [dim][lane]
 // THREE WARPS PER BLOCK (Bet 2): each warp owns its OWN 16 query rows of the same head and its own 8 KiB Q
@@ -206,6 +236,32 @@ __device__ __forceinline__ int fattn_v_addr(int d, int kv) { return d * FATTN_ML
 // The output transpose stages F32 through the warp's own dead Q stage
 // that stage, which is why it is a half of DH at a time and not the whole of it.
 #define FATTN_TROW (DH / 2)                       // floats per query row of the transpose stage
+#define FATTN_TBLK 8                       // dims one publish block carries (declared here so the pass
+                                           // geometry below can be written beside its siblings)
+// THE TRANSPOSE PASS GEOMETRY, one place. The SHIPPED epilogue stages all FATTN_MROWS = 16 row-slots of a warp
+// at a time, two passes (one per half of DH). G1 (`--attn-fattn-qstage unstaged8`) stages FATTN_TRG = 8 at a
+// time, so a warp's stage is 4 KiB instead of 8 and the epilogue runs FATTN_NPASS = 4 passes — HALF-MAJOR
+// (`half = pass / FATTN_NGRP`), so a float's destination order is the shipped one and only the staging depth
+// moves. `FATTN_LBLK` is the publish blocks one lane owns per PASS: four lanes per staged row where the
+// shipped stage used two, and it is asserted below, not assumed.
+#define FATTN_TRG  8                       // query rows per transpose pass (G1; the shipped form uses all 16)
+#define FATTN_NGRP (FATTN_MROWS / FATTN_TRG)      // row groups per half of DH: 2
+#define FATTN_NPASS (2 * FATTN_NGRP)              // 4 passes instead of 2
+#define FATTN_LBLK ((FATTN_TRG * (FATTN_TROW / FATTN_TBLK)) / 32)   // publish blocks per lane per pass: 4
+// THE PER-WARP STAGE, IN HALVES, spelled once. This buffer carries two layouts across the two Q spellings: the
+// default parks Q in it (16 rows x DH F16 = 8,192 B/warp) and reuses it for the F32 transpose afterwards; the
+// un-staged spelling parks ONLY the transpose (FATTN_TRG rows x FATTN_TROW F32 = 4,096 B/warp, i.e. two halves
+// per float). It has to be ONE array whose size is a constant expression in the spelling, not two `__shared__`
+// arrays: LDS is the SUM of a kernel's `__shared__` declarations, so a second array would move the default's
+// declared 32,768 B and the banner's `lds=` field with it — the exact number the residency claim is about.
+constexpr int fattn_warp_stage_halves(bool q_unstaged8) {
+    return q_unstaged8 ? (2 * FATTN_TRG * FATTN_TROW) : (FATTN_MROWS * DH);
+}
+static_assert(fattn_warp_stage_halves(false) == FATTN_MROWS * DH,
+              "the staged spelling's per-warp stride must be the one `fattn_score_q_tile`'s staged branch"
+              " indexes verbatim, or the two spellings of one buffer have silently diverged (§20.1)");
+static_assert(fattn_warp_stage_halves(true) * 2 == FATTN_TRG * FATTN_TROW * 4,
+              "the un-staged spelling's per-warp stage is FATTN_TRG rows x FATTN_TROW F32 = 4,096 B");
 static_assert(FATTN_THREADS == 32 * FATTN_WARPS,
               "FATTN_THREADS is the warp count spelled in threads; the two must be one fact");
 static_assert(FATTN_ROWS_PER_BLOCK == FATTN_WARPS * FATTN_MROWS,
@@ -217,25 +273,43 @@ static_assert(FATTN_MROWS * FATTN_TROW * 4 == FATTN_MROWS * DH * 2,
               "a warp's dead Q stage is exactly its own output transpose staging: 16 rows x 128 F32 = 16 rows "
               "x 256 F16 = 8192 B. PER WARP, not per block: the three warps transpose into three stages at "
               "once, which is what keeps the epilogue from serialising behind one shared stage");
+static_assert(FATTN_TRG * FATTN_TROW * 4 == FATTN_TRG * DH * 2,
+              "G1's narrower staging, the same statement one row-group at a time: FATTN_TRG rows x 128 F32 = "
+              "4,096 B per warp per pass. This is the byte the residency arithmetic turns on, and it is why "
+              "un-staging Q alone bought nothing (`prototype/attn_wmma/E1-result.md` §4)");
 static_assert(FATTN_MLANES * DH * 2 == 8192,
               "the aliased K/V stage is one 8 KiB buffer shared by the whole block, so that the three "
               "row-blocks amortise its fill instead of each paying for one");
-static_assert(FATTN_WARPS * FATTN_MROWS * DH * 2 + FATTN_MLANES * DH * 2 == 32768,
-              "the block declares FATTN_WARPS Q stages and ONE aliased K/V stage: 3 x 8192 + 8192 = 32 KiB, "
-              "which on this part is the 2-blocks/CU boundary, i.e. 6 wavefronts/CU. The census reads this off "
-              "the declarations, not from here.");
+static_assert(FATTN_WARPS * fattn_warp_stage_halves(false) * 2 + FATTN_MLANES * DH * 2 == 32768,
+              "the SHIPPED block declares FATTN_WARPS Q stages and ONE aliased K/V stage: 3 x 8192 + 8192 = "
+              "32 KiB, which on this part is the 2-blocks/CU boundary, i.e. 6 wavefronts/CU. The census reads "
+              "this off the declarations, not from here.");
+static_assert(FATTN_WARPS * fattn_warp_stage_halves(true) * 2 + FATTN_MLANES * DH * 2 == 20480,
+              "the `unstaged8` block declares FATTN_WARPS transpose stages of FATTN_TRG rows and ONE aliased "
+              "K/V stage: 3 x 4096 + 8192 = 20,480 B, which on this part's 64 KiB of LDS (KFD "
+              "`lds_size_in_kb 64`, read, not quoted from a ladder) is the 3-blocks/CU boundary, i.e. 9 "
+              "wavefronts/CU — the number G1 exists to buy. Same sum, same formula, other side of the knob.");
 // HOW THE PARTIAL IS PUBLISHED: `part` wants the row's DH dims in blocks of FATTN_TBLK, the transpose stages
-// half of DH at a time, and FATTN_PBLK is the blocks one lane publishes per half. The assert is the
-// COVERAGE claim — every dim of every staged row is written exactly once per half — and it is the guard that
-// retires the defect described on `fattn_transpose_out`: a publish loop that covers 16 of every row's 256
-// dims satisfies every bound-style assert in this file and still merges scratch.
-#define FATTN_TBLK 8
+// half of DH at a time, and FATTN_PBLK is the blocks one lane publishes per half in the SHIPPED 16-row stage
+// (FATTN_LBLK, defined above, is the same quantity for one G1 pass). The two asserts are the COVERAGE claim —
+// every dim of every staged row is written exactly once per half — and they are the guard that retires the
+// defect described on `fattn_transpose_out`: a publish loop that covers 16 of every row's 256 dims satisfies
+// every bound-style assert in this file and still merges scratch. The G1 assert is the shipped claim RE-DERIVED
+// for the narrower stage rather than asserted beside it, because the stage being narrower does not make the
+// destination set smaller: both spellings publish 16 rows x 256 dims, they just do it in 2 passes of 16 rows
+// or 4 passes of 8.
 #define FATTN_PBLK 8
 static_assert(FATTN_MROWS * FATTN_TROW == 32 * FATTN_PBLK * FATTN_TBLK,
               "one warp publishes its OWN row-block's stage, every float exactly once per half: rows x "
               "dims-per-half must equal 32 lanes x blocks x block-width. The 32 is a warp and not "
               "FATTN_THREADS, because the stage and the publishing set are both per warp; making it the block "
               "would have three warps publishing into one stage, which is §20.1's aliasing bug wearing a hat");
+static_assert(FATTN_MROWS % FATTN_TRG == 0, "the transpose row groups must tile the warp's 16 row-slots");
+static_assert(FATTN_TRG * FATTN_TROW == 32 * FATTN_LBLK * FATTN_TBLK,
+              "the same coverage claim for one G1 pass: 8 rows x 128 floats = 32 lanes x 4 blocks x 8 dims. "
+              "A pass that published the shipped 8 blocks/lane would walk 4,096 B past its own stage — and "
+              "into the next warp's, which is the §19/§20.1 aliasing class, caught by a compiler instead of "
+              "on a device");
 // THE INDEX BOUNDS OF THE EPILOGUE TRANSPOSE, as compile-time facts. Every index into the transpose
 // stage and into the partial slot is closed-form in lane, u, t, l and half, so the two bounds
 // the first version of `fattn_transpose_out` violated are asserted here rather than watched for at
@@ -247,6 +321,10 @@ static_assert(FATTN_MROWS * FATTN_TROW == 32 * FATTN_PBLK * FATTN_TBLK,
 static_assert((FATTN_MROWS - 1) * FATTN_TROW + (16 * (FATTN_VTILES / 2 - 1) + 15) + 1
                   == FATTN_MROWS * FATTN_TROW,
               "the widest transpose stage write is the last float of the staging area");
+static_assert((FATTN_TRG - 1) * FATTN_TROW + (16 * (FATTN_VTILES / 2 - 1) + 15) + 1
+                  == FATTN_TRG * FATTN_TROW,
+              "the same bound on the narrower (G1) staging area: a row-slot left over from the 16-row geometry "
+              "would walk into the next warp's stage, and an assert is the only instrument that sees that");
 static_assert(2 + (DH - FATTN_TBLK) + (FATTN_TBLK - 1) + 1 == DH + 2,
               "the widest partial write, the last block of the last dim, is the slot's last float");
 
@@ -282,18 +360,54 @@ __device__ __forceinline__ int fattn_c_col(int lane, int l) { return 2 * l + (la
 // The operand map: lane t holds the 16 contiguous halves of row t%16, the run along the dot index.
 __device__ __forceinline__ int fattn_ab_row(int lane) { return lane & 15; }
 
-// THE SCORE ROLL'S OPERAND TILES, spelled exactly once. This file can launch two roll spellings (the shipped
-// single accumulator and bet A4-L1's pair, selected by `--attn-fattn-roll`), and a branch between two
-// spellings of the SAME staged object is precisely where §20.1's bug lives: two self-consistent address
-// formulas that each agree with themselves and disagree with each other. So neither spelling writes an
-// address — both call these two lines, which are the only place the score leg's tile geometry is written.
-// The `16` is the WMMA K width, the same 16 that `FATTN_KTILES = DH / 16` divides by: `t` counts k-tiles and
-// a k-tile is 16 halves of one staged row.
+// THE SCORE ROLL'S OPERAND TILES, spelled exactly once. This file can launch four spellings — two score rolls
+// (`--attn-fattn-roll`) crossed with two places Q lives (`--attn-fattn-qstage`) — and a branch between two
+// spellings of the SAME operand is precisely where §20.1's bug lives: two self-consistent address formulas that
+// each agree with themselves and disagree with each other. So no spelling writes an address — every one calls
+// these two lines, which are the only place the score leg's tile geometry is written. The `16` is the WMMA K
+// width, the same 16 that `FATTN_KTILES = DH / 16` divides by: `t` counts k-tiles and a k-tile is 16 halves of
+// one row.
 __device__ __forceinline__ fattn_ARegs fattn_score_k_tile(const __half* s_kv, int lane, int t) {
     return fattn_load_tile(&s_kv[fattn_kv_addr(fattn_ab_row(lane), 16 * t)]);
 }
-__device__ __forceinline__ fattn_ARegs fattn_score_q_tile(const __half* s_q, int w, int lane, int t) {
-    return fattn_load_tile(&s_q[w * FATTN_MROWS * DH + fattn_q_addr(fattn_ab_row(lane), 16 * t)]);
+// THE Q OPERAND, read from global at the use site (`--attn-fattn-qstage unstaged8`). The same 32-byte
+// `fattn_ARegs` `fattn_load_tile` returns out of a stage, built from the two uint4s of the lane's row: the
+// conversion is exactly the `__float2half_rn(fattn_bf(x))` that `fattn_stage_row` applies on the way in, so the
+// operand VALUES are bit-identical and what moves is where the bytes come from — 8 KiB per warp per LAUNCH
+// becomes 8 KiB per warp per ROUND, which is a traffic question for the device (`prototype/attn_percost/A5-
+// GEOMETRY.md` §3.2 prices the demanded extra) and not a bits question.
+__device__ __forceinline__ fattn_ARegs fattn_load_q_tile(const hip_bfloat16* p) {
+    const uint4 lo = *reinterpret_cast<const uint4*>(p);
+    const uint4 hi = *reinterpret_cast<const uint4*>(p + 8);
+    const hip_bfloat16* s0 = reinterpret_cast<const hip_bfloat16*>(&lo);
+    const hip_bfloat16* s1 = reinterpret_cast<const hip_bfloat16*>(&hi);
+    fattn_ARegs r;
+#pragma unroll
+    for (int e = 0; e < 8; ++e) r[e] = (short)__half_as_ushort(__float2half_rn(fattn_bf(s0[e])));
+#pragma unroll
+    for (int e = 0; e < 8; ++e) r[8 + e] = (short)__half_as_ushort(__float2half_rn(fattn_bf(s1[e])));
+    return r;
+}
+// The roll's Q tile, THE one spelling for both Q placements. The selection is `if constexpr`, not a runtime
+// `?:`, for the reason the roll axis is templated too: a live-in runtime branch would keep the global-address
+// arithmetic in the DEFAULT instantiation and move its register budget, which would stop the default being
+// HEAD's machine code and therefore stop "the default is inert" from being a byte-compare. In the staged
+// instantiation `qrow` is a null that no read reaches (its branch is not in this instantiation at all), and in
+// the un-staged one `s_warp`/`w`/`lane` are unread because the stage is the epilogue's, not Q's.
+template <bool kQUnstaged8>
+__device__ __forceinline__ fattn_ARegs fattn_score_q_tile(const __half* s_warp, int w, int lane,
+                                                         const hip_bfloat16* qrow, int t) {
+    if constexpr (kQUnstaged8) {
+        (void)s_warp; (void)w; (void)lane;
+        return fattn_load_q_tile(qrow + 16 * t);
+    } else {
+        (void)qrow;
+        // The per-warp stride comes from the same constexpr as the buffer's declaration — one spelling of the
+        // layout, so a stage and its reader cannot be sized differently (§20.1). This branch IS the staged
+        // spelling, which is why the argument is `false`; `kQUnstaged8` is what selected this branch.
+        return fattn_load_tile(&s_warp[w * fattn_warp_stage_halves(false) +
+                                       fattn_q_addr(fattn_ab_row(lane), 16 * t)]);
+    }
 }
 
 // C (8 F32) -> the next WMMA's operand (16 F16), by the `get_half2` exchange. It lives FUSED into the exp
@@ -325,12 +439,13 @@ __device__ __forceinline__ void fattn_stage_row(__half* dst, const hip_bfloat16*
     *reinterpret_cast<uint4*>(dst + lane * 8) = o.o;
 }
 
-// THE Q OPERAND, staged: one 32-byte tile out of the warp's own Q stage, which is what `fattn_load_tile` reads.
-// There is deliberately no global-Q loader here any more. Bet 1 (shipped, `q=global`) stopped staging Q and
-// bought 8 blocks/CU with 50 spilled VGPRs; at THREE warps per block the same un-staging is variant V6 of
-// `tmp/gcc/fattn_residency.md` §4, which the skeleton measures at 73 spilled VGPRs and 284 B/lane of scratch.
-// So on this geometry the Q stage is not a lever, it is a precondition, and per-warp Q data is 8 KiB whatever
-// the layout (file header, placement (B)).
+// THE TWO Q SPELLINGS, side by side. This file used to say the Q stage was a precondition, and on the evidence
+// it had it was right at the time: the one-warp form spilled (Bet 1, 50 spilled VGPRs) and the skeleton's
+// three-warp un-stage spilled harder (V6, 73). `prototype/attn_wmma/E1-result.md` §1 re-measured the un-stage
+// on the REAL body at 184 VGPR and ZERO spill, so the precondition was a register myth; what it does not buy —
+// and this is the other half of E1's finding, and the reason `--attn-fattn-qstage` names a PAIR of changes
+// rather than one — is any LDS, because the epilogue stands on the same per-warp 8 KiB whatever Q does. See
+// placement (E) in the file header for the byte sums and what they buy.
 
 // One row's slice of this launch. Every quantity here is per ROW, and a row belongs to exactly one row-slot
 // of the warp (row fattn_c_row(lane), held by the lane pair t and t^16), so the whole per-row geometry
@@ -373,13 +488,21 @@ __device__ __forceinline__ float* fattn_part_slot(const CoreArgs& a, int row, in
     return a.part + (((size_t)row * N_Q + head) * a.split + blockIdx.y) * (DH + 2);
 }
 
+// THE TRANSPOSE STAGE SLOT, one spelling for both epilogues (§20.1, and the reason a narrower stage cannot be
+// addressed two ways by the two halves of one epilogue): [row WITHIN THIS PASS][dim within this half of DH].
+// Writer and reader both go through it, and rows are renumbered per pass — that renumbering is the whole content
+// of G1's staging change, so it is written once here rather than reasoned about at each index site.
+__device__ __forceinline__ int fattn_tr_addr(int row_in_pass, int d) { return row_in_pass * FATTN_TROW + d; }
+
 // The accumulator transpose, THE only spelling of these addresses (§20.1). The P*V tiles hold columns
 // PARITY-SPLIT across the half-warps (dim = 16t + 2l + lane/16) of ONE ROW — lane t holds row t%16 only —
 // while `part` wants the row's 256 dims at `[2 + d]`, which is what `attn_slim_body`'s epilogue writes and
 // what `attn_combine` reads, and that is not negotiable without editing the merge. So the output is staged
-// in F32 through the CALLER's dead Q stage, half of DH at a time: 16 rows x (DH/2) floats = 8192 B = exactly
-// one warp's Q stage. It is PER WARP on purpose: the shared K/V stage is the same 8192 B and one warp's
-// staging fills all of it, so three warps transposing through it would write one another's rows.
+// in F32 through the CALLER's own per-warp stage, half of DH at a time: the shipped form stages all 16 rows
+// (16 x (DH/2) floats = 8192 B = exactly one warp's Q stage, which is dead by now) in TWO passes; `unstaged8`
+// stages FATTN_TRG = 8 rows (4,096 B) in FOUR, half-major so a float's destination order is unchanged. It is
+// PER WARP either way on purpose: one warp's staging is bigger than a third of the shared K/V stage, so three
+// warps transposing through `s_kv` would write one another's rows.
 // A separate output array would have been 8 KiB ON TOP of the stages, i.e. 1 block/CU instead of 2.
 //
 // WHO PUBLISHES WHAT is the whole content of this function, and three versions of it have now been wrong:
@@ -397,46 +520,98 @@ __device__ __forceinline__ float* fattn_part_slot(const CoreArgs& a, int row, in
 //      which fails if a publish loop stops covering the stage.
 //   3. the (m, l) header, published by `lane == 0` alone: legal for a one-row warp, one row of sixteen here.
 //
-// THE RULE, once. Per half the stage holds 16 rows x FATTN_TROW floats = 2048 floats, and 32 lanes each
-// publish FATTN_PBLK blocks of FATTN_TBLK — asserted to be exactly the stage, so coverage is a fact and not
-// a reading. Lane L publishes row-slot L/2, blocks 8*(L&1) .. +7 of it, so exactly one lane owns each
-// (row, 8-dim block) pair and every destination index is in [2, 2+DH). A row whose bit is not in `row_mask`
+// THE RULE, once. The SHIPPED half-stage holds 16 rows x FATTN_TROW floats = 2048 floats, and 32 lanes each
+// publish FATTN_PBLK blocks of FATTN_TBLK — asserted above to be exactly the stage, so coverage is a fact and
+// not a reading. Lane L publishes row-slot L/2, blocks 8*(L&1) .. +7 of it, so exactly one lane owns each
+// (row, 8-dim block) pair and every destination index is in [2, 2+DH). In a G1 pass the stage holds FATTN_TRG
+// rows and FOUR lanes publish each of them, FATTN_LBLK blocks apiece — the same (row, block) pairs, produced by
+// a different split, which is what the second coverage assert above pins. A row whose bit is not in `row_mask`
 // — uncovered, or past `nrows` — publishes NOTHING, which is what makes `attn_slim_wave`'s write of that
 // slot the only one; the STAGING still runs for those rows, because the barriers around it are block-wide
 // and cannot be taken by some lanes only. `row_mask` is the ballot of `me.covered`, whose bit r is row-slot r
 // (lane r and lane r^16 hold the same row and agree), so the publish set IS the coverage predicate rather
 // than a range reasoned about next to it.
-__device__ __forceinline__ void fattn_transpose_out(__half* stage_as_f32, const FattnO& out,
+//
+// WHY TEMPLATED AND NOT BRANCHED: same reason as the score roll and the Q placement. A runtime branch would make
+// both staging geometries live in every instantiation and move the default's declared LDS, and `lds=` is the
+// field the residency claim and the A/B's canary are read from.
+template <bool kNarrow>
+__device__ __forceinline__ void fattn_transpose_out(float* stage, const FattnO& out,
                                                     const CoreArgs& a, int rt, int head0,
                                                     unsigned row_mask, int lane) {
-    float* stage = reinterpret_cast<float*>(stage_as_f32);
-    const int srow = lane >> 1;                          // the row-slot this lane publishes
-    const int sblk = (lane & 1) * FATTN_PBLK;            // its first 8-dim block within that row
-    const bool mine = ((row_mask >> srow) & 1u) != 0u;   // the ballot, per row-slot
+    if constexpr (kNarrow) {
+        // G1 (`--attn-fattn-qstage unstaged8`): FATTN_NPASS passes of FATTN_TRG rows. `half` still picks which
+        // half of DH this pass stages — HALF-MAJOR, so a float's destination order is the shipped one — and `rg`
+        // picks which group of row-slots it stages, so the published VALUES are untouched: same source register,
+        // same `part` slot, same (m, l) publish above. What moves is the staging addresses and the barrier count.
 #pragma unroll
-    for (int half = 0; half < 2; ++half) {
-        __syncthreads();                     // the previous half's reads (and the last P*V read of V) are done
+        for (int pass = 0; pass < FATTN_NPASS; ++pass) {
+            const int half = pass / FATTN_NGRP;
+            const int rg = pass % FATTN_NGRP;
+            const int row0 = rg * FATTN_TRG;              // this pass's first row-slot within the warp
+            __syncthreads();      // the previous pass's reads (and the last P*V read of V) are done
+            // STAGE. `fattn_c_row(lane)` is the row-slot this lane ACCUMULATED (held by the pair t, t^16), so
+            // half the warp's lanes hold rows this pass does not stage and write nothing — a guarded store, not
+            // a divergent barrier: the barriers are above and below it, and every lane takes both.
+            if (fattn_c_row(lane) >= row0 && fattn_c_row(lane) < row0 + FATTN_TRG) {
 #pragma unroll
-        for (int t = half * (FATTN_VTILES / 2); t < (half + 1) * (FATTN_VTILES / 2); ++t) {
+                for (int t = half * (FATTN_VTILES / 2); t < (half + 1) * (FATTN_VTILES / 2); ++t) {
 #pragma unroll
-            for (int l = 0; l < 8; ++l) {
-                const int d = 16 * t + fattn_c_col(lane, l) - half * FATTN_TROW;   // always in [0, 128)
-                stage[fattn_c_row(lane) * FATTN_TROW + d] = out.t[t][l];
+                    for (int l = 0; l < 8; ++l) {
+                        const int d = 16 * t + fattn_c_col(lane, l) - half * FATTN_TROW;  // always in [0, 128)
+                        stage[fattn_tr_addr(fattn_c_row(lane) - row0, d)] = out.t[t][l];
+                    }
+                }
+            }
+            __syncthreads();
+            // PUBLISH: FATTN_LBLK blocks of FATTN_TBLK per lane, four lanes per staged row where the shipped
+            // 16-row stage used two.
+            const int srow = row0 + (lane >> 2);          // the row-slot THIS lane publishes
+            const int sblk = (lane & 3) * FATTN_LBLK;     // its first block within that row's half
+            if (((row_mask >> srow) & 1u) != 0u) {   // NO barrier below this line inside the loop
+                float* pp = fattn_part_slot(a, rt * FATTN_MROWS + srow, head0);
+#pragma unroll
+                for (int k = 0; k < FATTN_LBLK; ++k) {
+                    const int sbase = (sblk + k) * FATTN_TBLK;   // [0, FATTN_TROW) by the pass coverage assert
+                    const int dbase = half * FATTN_TROW + sbase; // the dim this block carries, in [0, DH)
+#pragma unroll
+                    for (int u = 0; u < FATTN_TBLK; ++u) {
+                        // Row-within-pass is `lane >> 2` for the reader exactly as it was `fattn_c_row(lane) -
+                        // row0` for the writer — one expression, `fattn_tr_addr`, on both sides (§20.1).
+                        pp[2 + dbase + u] = stage[fattn_tr_addr(lane >> 2, sbase + u)];
+                    }
+                }
             }
         }
-        __syncthreads();
-        if (mine) {        // NO barrier below this line inside the loop, so a guarded store cannot diverge one
-            float* pp = fattn_part_slot(a, rt * FATTN_MROWS + srow, head0);
+    } else {
+        const int srow = lane >> 1;                          // the row-slot this lane publishes
+        const int sblk = (lane & 1) * FATTN_PBLK;            // its first 8-dim block within that row
+        const bool mine = ((row_mask >> srow) & 1u) != 0u;   // the ballot, per row-slot
 #pragma unroll
-            for (int k = 0; k < FATTN_PBLK; ++k) {
-                const int sbase = (sblk + k) * FATTN_TBLK;   // [0, FATTN_TROW) by the coverage assert
-                const int dbase = half * FATTN_TROW + sbase; // the dim this block carries, in [0, DH)
+        for (int half = 0; half < 2; ++half) {
+            __syncthreads();         // the previous half's reads (and the last P*V read of V) are done
 #pragma unroll
-                for (int u = 0; u < FATTN_TBLK; ++u) {
-                    // The stage row is `srow`, the row-slot this lane PUBLISHES — not `fattn_c_row(lane)`,
-                    // the row-slot this lane ACCUMULATED. Those coincide only for lane < 16, and the
-                    // published block of a row is written by two lanes (2*srow and 2*srow+1).
-                    pp[2 + dbase + u] = stage[srow * FATTN_TROW + sbase + u];
+            for (int t = half * (FATTN_VTILES / 2); t < (half + 1) * (FATTN_VTILES / 2); ++t) {
+#pragma unroll
+                for (int l = 0; l < 8; ++l) {
+                    const int d = 16 * t + fattn_c_col(lane, l) - half * FATTN_TROW;  // always in [0, 128)
+                    stage[fattn_tr_addr(fattn_c_row(lane), d)] = out.t[t][l];
+                }
+            }
+            __syncthreads();
+            if (mine) {    // NO barrier below this line inside the loop, so a guarded store cannot diverge one
+                float* pp = fattn_part_slot(a, rt * FATTN_MROWS + srow, head0);
+#pragma unroll
+                for (int k = 0; k < FATTN_PBLK; ++k) {
+                    const int sbase = (sblk + k) * FATTN_TBLK;   // [0, FATTN_TROW) by the coverage assert
+                    const int dbase = half * FATTN_TROW + sbase; // the dim this block carries, in [0, DH)
+#pragma unroll
+                    for (int u = 0; u < FATTN_TBLK; ++u) {
+                        // The stage row is `srow`, the row-slot this lane PUBLISHES — not `fattn_c_row(lane)`,
+                        // the row-slot this lane ACCUMULATED. Those coincide only for lane < 16, and the
+                        // published block of a row is written by two lanes (2*srow and 2*srow+1).
+                        pp[2 + dbase + u] = stage[fattn_tr_addr(srow, sbase + u)];
+                    }
                 }
             }
         }
@@ -464,13 +639,25 @@ __device__ __forceinline__ int fattn_warp_max(int v) {
 // binary and the knob selects a LAUNCH (`engine/kernels_attn.cpp`), so the A/B is one window instead of two
 // builds — AGENTS: a ruler re-taken in a different window is not an A/B — and the launch count, the grid and
 // the declared LDS are the same on both sides either way.
-template <bool kTwoAcc>
+//
+// The SECOND parameter is the Q placement (`--attn-fattn-qstage`, bet A6-G1) and is templated for the same
+// reason spelled twice in this file already: the two placements differ in the block's declared LDS, and a
+// runtime branch would declare both buffers in every build. `false` = Q staged in this warp's per-warp stage
+// (SHIPPED, the code path this header carried before either knob existed); `true` = Q read from global at the
+// use site and that same stage given over to the epilogue at FATTN_TRG rows a pass. The two are ONE candidate
+// — un-staging Q alone moves no byte of LDS, and narrowing the epilogue alone would shrink the buffer Q lives
+// in — which is why one knob names the pair.
+template <bool kTwoAcc, bool kQUnstaged8>
 __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
-    // ONE Q STAGE PER WARP. The score leg's SECOND operand is this warp's 16 rows, staged once per launch
-    // (8 KiB), and the three warps of the block each stage their own row-block. Q cannot be shared: per-warp Q
-    // data is 8 KiB whatever the layout (file header, placement (B)), and it cannot be left in global either at
-    // three warps — that variant is V6 of `tmp/gcc/fattn_residency.md` §4, 73 spilled VGPRs on the skeleton.
-    __shared__ __align__(16) __half s_q[FATTN_WARPS * FATTN_MROWS * DH];  // [warp][row][dim], 8 KiB each
+    // ONE PER-WARP STAGE, sized by the spelling (see `fattn_warp_stage_halves`: one array, not two, because
+    // `__shared__` arrays SUM and would move the default's declared LDS). In the SHIPPED spelling this is the
+    // Q stage: the score leg's SECOND operand is this warp's 16 rows, staged once per launch (8 KiB), and the
+    // three warps of the block each stage their own row-block. Q cannot be shared: per-warp Q data is 8 KiB
+    // whatever the layout (file header, placement (B)). In the G1 spelling Q is read from global per round and
+    // the buffer holds only the epilogue's F32 transpose, 4 KiB a warp — which is placement (E) and the whole
+    // residency claim of this knob.
+    constexpr int warp_stage_halves = fattn_warp_stage_halves(kQUnstaged8);
+    __shared__ __align__(16) __half s_warp[FATTN_WARPS * warp_stage_halves];
     // ONE K/V stage per BLOCK, shared by all three row-blocks. This is what the third warp buys: the stage fill
     // runs once for three row-blocks instead of once per row-block. ALIASED uses (K row-major for the score leg,
     // then V transposed for P*V) with a barrier between the two users, and its first ints double as the
@@ -506,28 +693,42 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
     const FattnRow me = fattn_row_of(a, rb, lane);
     const unsigned row_mask = (unsigned)__ballot_sync(FULL_MASK, me.covered ? 1 : 0);
 
-    // ---- Q, staged once per launch into this warp's own 8 KiB: ALL SIXTEEN ROW-SLOTS, BY THIS WARP ALONE.
-    // The fill MUST NOT stride on `w`, and that is the one place the shared-stage pattern must not be
-    // copied. `s_kv` is one buffer for three row-blocks, so ITS fill splits across the warps; `s_q[w]` is
-    // one warp's own operand and the score leg below reads all 16 of its row-slots every round. A strided
-    // `for (qr = w; qr < FATTN_MROWS; qr += nw)` — the shape the two K/V fills below use — stages 6/5/5
-    // slots for warps 0/1/2 and leaves the other 11 slots of every stage unwritten; the score leg then
-    // reads them as whatever LDS held, `live` is true so nothing masks them, and every such row's `l` and
-    // accumulator go non-finite (`bench/performance-status.md` §32's all-NaN red). Note what that means for
-    // a bisect: at `FATTN_WARPS = 1` the strided loop and this loop are THE SAME LOOP, so a `WARPS=1` probe
-    // cannot see this defect, and its green result is not evidence about the per-warp Q stage.
+    // ---- Q, in one of two spellings, and both of them keep the SHIPPED clamp.
     //
-    // The clamp is not cosmetic and it now has a second case: a row block at the end of a wave can be
+    // STAGED (`--attn-fattn-qstage stage`, the default): Q goes into this warp's own 8 KiB once per launch,
+    // ALL SIXTEEN ROW-SLOTS, BY THIS WARP ALONE. The fill MUST NOT stride on `w`, and that is the one place the
+    // shared-stage pattern must not be copied. `s_kv` is one buffer for three row-blocks, so ITS fill splits
+    // across the warps; this warp's own stage is one warp's operand and the score leg below reads all 16 of its
+    // row-slots every round. A strided `for (qr = w; qr < FATTN_MROWS; qr += nw)` — the shape the two K/V fills
+    // below use — stages 6/5/5 slots for warps 0/1/2 and leaves the other 11 slots of every stage unwritten;
+    // the score leg then reads them as whatever LDS held, `live` is true so nothing masks them, and every such
+    // row's `l` and accumulator go non-finite (`bench/performance-status.md` §32's all-NaN red). Note what that
+    // means for a bisect: at `FATTN_WARPS = 1` the strided loop and this loop are THE SAME LOOP, so a `WARPS=1`
+    // probe cannot see this defect, and its green result is not evidence about the per-warp Q stage.
+    //
+    // UN-STAGED (`unstaged8`, bet A6-G1): there is no fill at all. Each lane keeps ONE pointer — the global row
+    // its operand tile carries, read again every round — and nothing about the round sequence, the masks or the
+    // fold order moves.
+    //
+    // THE CLAMP IS THE SHIPPED ONE IN BOTH and it is not cosmetic: a row block at the end of a wave can be
     // partly out of range, and at 48 rows per BLOCK a whole warp's row-block can be PAST `nrows`
-    // (`qrmax <= 0`), where `qrmax - 1` alone would index rows before the buffer. A clamped row's cells are
-    // masked below, so the bytes it cost are never used for anything; a slot no clamp writes stays unwritten
-    // and is masked for the same reason.
+    // (`qrmax <= 0`), where `qrmax - 1` alone would index rows before the buffer. The staged form `break`s out
+    // of its fill; the un-staged form resolves to row `nrows - 1` there, so every lane dereferences a row that
+    // exists. In both, a clamped row's cells are masked out below (`live`), so the bytes it cost are never used
+    // for anything.
     const int qrmax = nrows_of(a) - rb * FATTN_MROWS;   // row-slots of this warp that exist; may be <= 0
-    for (int qr = 0; qr < FATTN_MROWS; ++qr) {           // every slot of THIS warp's stage, exactly once
-        const int qrs = qr < qrmax ? qr : qrmax - 1;
-        if (qrs < 0) break;                             // this whole row-block is past the last row
-        fattn_stage_row(&s_q[w * FATTN_MROWS * DH + fattn_q_addr(qrs, 0)],
-                        a.qrope + (size_t)ROW_H * (rb * FATTN_MROWS + qrs) + (size_t)head0 * DH, lane);
+    const hip_bfloat16* qrow = nullptr;
+    if constexpr (kQUnstaged8) {
+        const int qslot = fattn_ab_row(lane);              // the row-slot THIS lane's operand tile carries
+        const int qrs = qslot < qrmax ? qslot : qrmax - 1;  // the shipped clamp, per lane
+        qrow = fattn_q_row(a, rb * FATTN_MROWS + qrs, head0);
+    } else {
+        for (int qr = 0; qr < FATTN_MROWS; ++qr) {         // every slot of THIS warp's stage, exactly once
+            const int qrs = qr < qrmax ? qr : qrmax - 1;
+            if (qrs < 0) break;                            // this whole row-block is past the last row
+            fattn_stage_row(&s_warp[w * warp_stage_halves + fattn_q_addr(qrs, 0)],
+                            a.qrope + (size_t)ROW_H * (rb * FATTN_MROWS + qrs) + (size_t)head0 * DH, lane);
+        }
     }
 
     // ---- THE ROUND RANGE MUST BE BLOCK-UNIFORM, and that is the structural price of the shared stage: if the
@@ -611,9 +812,9 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
 #pragma unroll 1
             for (int t = 0; t < FATTN_KTILES; t += 2) {
                 const fattn_ARegs k0 = fattn_score_k_tile(s_kv, lane, t);
-                const fattn_ARegs q0 = fattn_score_q_tile(s_q, w, lane, t);
+                const fattn_ARegs q0 = fattn_score_q_tile<kQUnstaged8>(s_warp, w, lane, qrow, t);
                 const fattn_ARegs k1 = fattn_score_k_tile(s_kv, lane, t + 1);
-                const fattn_ARegs q1 = fattn_score_q_tile(s_q, w, lane, t + 1);
+                const fattn_ARegs q1 = fattn_score_q_tile<kQUnstaged8>(s_warp, w, lane, qrow, t + 1);
                 acc0 = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(k0, q0, acc0);
                 acc1 = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(k1, q1, acc1);
             }
@@ -635,7 +836,7 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
 #pragma unroll 1
             for (int t = 0; t < FATTN_KTILES; ++t) {
                 const fattn_ARegs first = fattn_score_k_tile(s_kv, lane, t);
-                const fattn_ARegs second = fattn_score_q_tile(s_q, w, lane, t);
+                const fattn_ARegs second = fattn_score_q_tile<kQUnstaged8>(s_warp, w, lane, qrow, t);
                 acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(first, second, acc);
             }
         }
@@ -758,14 +959,15 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
         pp[0] = m;
         pp[1] = l;
     }
-    // The transpose stage is this warp's OWN dead Q stage, not the shared K/V stage. It has to be: one warp's
-    // half-DH staging is 16 rows x FATTN_TROW floats = 8192 B = the whole K/V stage, so three warps
-    // transposing through `s_kv` would write each other's rows — §20.1's aliasing bug exactly, and it would
-    // then need the warps serialised through the epilogue to be correct. Per warp it costs nothing extra (the Q
-    // stage is dead the moment the round loop ends) and the three transposes run independently. The barriers
-    // inside stay block-wide because they are cheaper to reason about than to re-derive per warp, and every
-    // warp executes the same sequence of them.
-    fattn_transpose_out(s_q + w * FATTN_MROWS * DH, out, a, rb, head0, row_mask, lane);
+    // The transpose stage is this warp's OWN per-warp stage — the dead Q stage in the default spelling, and the
+    // only thing living there in `unstaged8`. It has to be per warp either way: one warp's staging is bigger
+    // than a third of the shared K/V stage, so three warps transposing through `s_kv` would write each other's
+    // rows — §20.1's aliasing bug exactly, and it would then need the warps serialised through the epilogue to
+    // be correct. Per warp it costs nothing extra (the Q stage is dead the moment the round loop ends) and the
+    // three transposes run independently. The barriers inside stay block-wide because they are cheaper to reason
+    // about than to re-derive per warp, and every warp executes the same sequence of them.
+    fattn_transpose_out<kQUnstaged8>(reinterpret_cast<float*>(s_warp + w * warp_stage_halves),
+                                     out, a, rb, head0, row_mask, lane);
 }
 
 // The staged plan only. In `fused = 0`, `attn_prep` has already written every row's §05.7 append into the
@@ -803,15 +1005,34 @@ __device__ __host__ inline bool fattn_plan_ok(const CoreArgs a, std::string* why
 // 196,608/96 = 2048 is far above the cap — so the declaration is what lets the form exist at all, and
 // widening the block from 32 to 96 threads does NOT buy any register headroom. That is the arithmetic Bet 2
 // had to check before believing the skeleton's zero-spill claim.
-__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave(CoreArgs a) { attn_fattn_body<false>(a); }
+__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave(CoreArgs a) {
+    attn_fattn_body<false, false>(a);
+}
 
-// The A4-L1 side of the knob: the SAME body, the SAME grid, the SAME declared LDS, the second score-roll
+// The A4-L1 side of the roll knob: the SAME body, the SAME grid, the SAME declared LDS, the second score-roll
 // spelling. A separate `__global__` rather than a runtime branch inside one kernel, because a runtime branch
 // would raise the register count of the default side too (see the note above `attn_fattn_body`). The A/B
 // reads `vgpr_count` out of both of these note blocks in the same window
 // (`prototype/attn_percost/a4_l1_note_read.py`); `engine/build.sh` is not bit-reproducible on this box and a
 // canary that lives inside the binary under test is blind to a stale binary (AGENTS, 2026-10-17).
-__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_two(CoreArgs a) { attn_fattn_body<true>(a); }
+__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_two(CoreArgs a) {
+    attn_fattn_body<true, false>(a);
+}
+
+// THE G1 SIDES of the qstage knob (bet A6-G1, `--attn-fattn-qstage unstaged8`): Q read from global, the
+// epilogue staged FATTN_TRG rows at a time, declared LDS 20,480 B instead of 32,768 B — 3 blocks/CU instead of
+// 2, i.e. 9 wf/CU instead of 6, at 185 VGPR / spill 0 / scratch 0 on the compile-side read
+// (`prototype/attn_percost/A6-result.md` §1). Same grid, same block extent, same launch count, and owed BYTE
+// identity with the shipped pair because it moves staging addresses and operand provenance only
+// (`prototype/attn_percost/A6-G1-impl.md`, the device proof). The `_two_` variant is the same candidate under
+// the two-accumulator roll: the two knobs are orthogonal, every combination is a real kernel, and no combination
+// is a route no gate can reach.
+__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_u8(CoreArgs a) {
+    attn_fattn_body<false, true>(a);
+}
+__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_two_u8(CoreArgs a) {
+    attn_fattn_body<true, true>(a);
+}
 
 // The launcher's two host helpers live in the op header beside `tile_rtiles_of`: `fattn_rtiles_of` (this
 // form's row-block rule, 16 query rows per block) and `fattn_covers` (the ONE coverage predicate both sides

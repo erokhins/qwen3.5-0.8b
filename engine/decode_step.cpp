@@ -719,6 +719,10 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // step cannot be moved by it — which is the property that makes "the default side is inert" a
             // checkable claim instead of a hope (`prototype/attn_percost/A4-L1-impl.md`).
             a.fattn_roll = sc.attn_fattn_roll;
+            // And where that form keeps Q / how deep its epilogue stages (`--attn-fattn-qstage`, bet A6-G1).
+            // Same riding reason, same one-row immunity, and the same consequence for the A/B: the knob reaches
+            // the launcher, which picks a KERNEL, so nothing else in the launch plan can drift with it.
+            a.fattn_qstage = sc.attn_fattn_qstage;
             stageclock::note(stageclock::kAttn);
             kernels::attn_decode_layer(a);
             // One widening over the whole [n][2048] tile, for the same reason P5 packed the casts
