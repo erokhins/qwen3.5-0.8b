@@ -8,6 +8,7 @@
 #include "engine/gdn_rec_fused_kernels.h"
 #include "engine/gdn_rec_hoist_kernels.h"
 #include "engine/gdn_rec_loop_kernels.h"
+#include "engine/gdn_rec_reg16_kernels.h"
 #include "engine/gdn_rec_unroll4_kernels.h"
 #include "engine/gdn_rec_wf_kernels.h"
 #include "prototype/gdn_chunk/gdn_chunk_kernels.h"
@@ -221,13 +222,55 @@ void gdn_rec_span_wf(const float* u, const float* g, const float* beta, float* S
         rec_wf_kernel<2><<<dim3(NH * (D / (GDN_WF_LANES * 2)), 1), GDN_WF_LANES>>>(
             q, k, v, g, beta, S, o, NH, tokens);
     } else {
-        // Unreachable from `parse_gdn_geom`, and still refused rather than served by the block form:
-        // a launcher that quietly ran `rec_loop_kernel` under `--gdn-geom block` would price the shipped
-        // form twice and report the second price as the geometry's win.
+        // Unreachable from `parse_gdn_geom` for `block`/`reg16` routing, and still refused rather than
+        // served by one of the two wavefront shapes: a launcher that quietly ran a different body than the
+        // one it was asked for would price one kernel twice and report the second price as the geometry's
+        // win. `reg16` has its own launcher (`gdn_rec_span_reg16`) because its grid is a different map, not
+        // a different split of this one.
         throw std::runtime_error(std::string("gdn_rec_span_wf: --gdn-geom ") + gdn_geom_name(geom) +
-                                 " is the block form and does not reach this launcher; the shipping"
-                                 " path runs gdn_rec_span");
+                                 " does not reach this launcher: `block` is the shipped form (run by"
+                                 " gdn_rec_span) and `reg16` is the register-resident map (run by"
+                                 " gdn_rec_span_reg16)");
     }
+}
+
+// bet G4: llama's thread map under our recurrence, ONE launch per span, no stage tiles. The grid is
+// DERIVED here, in this TU, from the same `constexpr` names the kernel indexes with — the §20 rule (one
+// address expression shared by writer and reader) and the AGENTS.md 2026-10-19 row (a geometry fact that
+// lives in two headers gets one half committed and the tip does not build). 128 blocks of 128 threads,
+// and the SAME operand tiles `gdn_rec_span` hands `rec_loop_kernel`, so the two forms touch identical
+// addresses and a diff of their outputs is a claim about the map and the arithmetic, never about the
+// access pattern.
+//
+// Not counted in `launch_stats`, and the plan bill does not change for it either: one launch per span on
+// the SAME `gdn_rec` row, exactly as the looped form bills (`engine/stage_clock.h`). Moving submissions
+// to another row would make the win line a lie (§40), and at the A/B shape both sides still submit 144.
+void gdn_rec_span_reg16(const float* u, const float* g, const float* beta, float* S, float* o,
+                        int tokens, GdnRecSpell spell) {
+    // The same two refusals `gdn_rec_span` and `gdn_rec_span_wf` make, for the same two reasons: a one-row
+    // body is `resolve_gdn_loop`'s to route (a decode bit must not be walked through a kernel the decode
+    // pins were not pinned through — and this kernel IS correct at `tokens == 1`, which is exactly why the
+    // refusal has to be here rather than left to the arithmetic), and only the `fused` body has a looped
+    // transcription to re-spell.
+    if (tokens < 2) {
+        throw std::runtime_error("gdn_rec_span_reg16: tokens=" + std::to_string(tokens) +
+                                 "; a one-row body is `resolve_gdn_loop`'s to route to the per-token"
+                                 " kernels. Decode bits depend on that routing.");
+    }
+    if (spell != GdnRecSpell::kFused) {
+        throw std::runtime_error(std::string("gdn_rec_span_reg16: --gdn-spell ") + gdn_rec_spell_name(spell)
+                                 + " has no looped body to re-spell; the register-resident map is the"
+                                 " looped body's (engine/gdn_rec_reg16_kernels.h). Use --gdn-spell fused"
+                                 " (the default) or --gdn-loop 1");
+    }
+    static_assert(CH == kQkvRows, "reg16's q|k|v row stride (CH) must be kQkvRows");
+    static_assert(NH * D == kValueDim, "reg16's o row stride (NH*D) must be kValueDim");
+    static_assert(kGdnR16GridX == NH, "reg16's grid.x is one block column per value head");
+    static_assert(kGdnR16GridX * kGdnR16GridY == 128 && kGdnR16BlockX * kGdnR16BlockY == 128,
+                  "128 blocks of 128 threads is the map G4 is about; if this fires the constants and the"
+                  " launch line have drifted apart, which is the two-header failure the assert exists for");
+    rec_reg16_kernel<<<dim3(kGdnR16GridX, kGdnR16GridY), dim3(kGdnR16BlockX, kGdnR16BlockY)>>>(
+        u, u + kValueDim, u + 2 * kValueDim, g, beta, S, o, NH, tokens);
 }
 
 // `--gdn-norm`, bet G1. Parses or throws, like every other knob that names a side of an A/B.
@@ -257,12 +300,17 @@ GdnGeom parse_gdn_geom(const std::string& name) {
     if (name == "block") return GdnGeom::kBlock;
     if (name == "wf4") return GdnGeom::kWf4;
     if (name == "wf2") return GdnGeom::kWf2;
+    if (name == "reg16") return GdnGeom::kReg16;
     throw std::runtime_error("--gdn-geom takes `block` (the shipped looped body: 16 blocks of 128"
                              " threads, one state column per thread, the row norms reduced inside the"
                              " walk — THE DEFAULT), `wf4` (engine/gdn_rec_wf_kernels.h: one wavefront"
                              " per block, 4 columns per lane, no LDS and no barrier — BET.md §10's"
-                             " pre-registered shape) or `wf2` (the same kernel at 2 columns per lane,"
-                             " 32 blocks, the split leg); got '" + name + "'. Refusing rather than"
+                             " pre-registered shape, measured DEAD in §42), `wf2` (the same kernel at 2"
+                             " columns per lane, 32 blocks, the split leg) or `reg16`"
+                             " (engine/gdn_rec_reg16_kernels.h: llama's map — 128 blocks of 128 threads"
+                             " = 512 wavefronts, 8 lanes per state column, 16 state elements per thread"
+                             " held in registers across the whole span, the norms as 8-lane butterflies;"
+                             " bet G4, BET.md §12); got '" + name + "'. Refusing rather than"
                              " guessing, because this flag names which side of an A/B the run is");
 }
 
@@ -271,6 +319,7 @@ const char* gdn_geom_name(GdnGeom g) {
         case GdnGeom::kBlock: return "block";
         case GdnGeom::kWf4: return "wf4";
         case GdnGeom::kWf2: return "wf2";
+        case GdnGeom::kReg16: return "reg16";
     }
     return "invalid";
 }

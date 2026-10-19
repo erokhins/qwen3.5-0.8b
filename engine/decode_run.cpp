@@ -207,12 +207,14 @@ struct Options {
     // `--gdn-scan collapse` carries an inert `inline` rather than a wrong one, and only a named
     // `--gdn-norm hoist` alongside collapse is the misreport worth refusing.
     bool gdn_norm_given = false;
-    // The BLOCK SHAPE of the looped body (`--gdn-geom`, bet G2, `engine/kernels.h:GdnGeom`). `block` —
-    // the shipped `<<<16,128>>>` looped walk — is the default and therefore the shipped behaviour;
-    // `wf4` is BET.md §10's pre-registered one-wavefront-per-block form and `wf2` its split leg
-    // (`engine/gdn_rec_wf_kernels.h`). Echoed on the NUMERICS line, and it reaches the span branch only:
-    // `--gdn-loop 1`, `--gdn-scan collapse` and `--gdn-norm hoist` are each refused below rather than
-    // echoed as a shape that did not run.
+    // The BLOCK SHAPE of the looped body (`--gdn-geom`, bets G2 and G4, `engine/kernels.h:GdnGeom`).
+    // `block` — the shipped `<<<16,128>>>` looped walk — is the default and therefore the shipped
+    // behaviour; `wf4` is BET.md §10's pre-registered one-wavefront-per-block form and `wf2` its split leg
+    // (`engine/gdn_rec_wf_kernels.h`, measured DEAD in §42); `reg16` is bet G4's register-resident map —
+    // 128 blocks of 128 threads, 8 lanes per state column, 16 state elements per thread held in registers
+    // for the whole span (`engine/gdn_rec_reg16_kernels.h`, `prototype/gdn_walk/BET.md` §12). Echoed on the
+    // NUMERICS line, and it reaches the span branch only: `--gdn-loop 1`, `--gdn-scan collapse` and
+    // `--gdn-norm hoist` are each refused below rather than echoed as a shape that did not run.
     engine::kernels::GdnGeom gdn_geom = engine::kernels::GdnGeom::kBlock;
     bool gdn_geom_given = false;
     // The chunk size. Only 64 is accepted, and the refusal prints the measured reason rather than
@@ -515,25 +517,27 @@ Options parse_args(int argc, char** argv) {
                                  " (the default) for this A/B");
     }
     if (o.gdn_geom != engine::kernels::GdnGeom::kBlock && o.gdn_loop <= 1) {
-        // `--gdn-loop 1` runs the per-token kernels, and the wavefront geometry is a re-spelling of the
-        // LOOPED body only. Refused at parse, like the `--gdn-norm hoist` pair above, rather than loading
-        // 1.55 GB of weights to say it.
+        // `--gdn-loop 1` runs the per-token kernels, and neither re-spelled geometry is a per-token body.
+        // Refused at parse, like the `--gdn-norm hoist` pair above, rather than loading 1.55 GB of weights
+        // to say it.
         throw std::runtime_error("--gdn-geom " + std::string(engine::kernels::gdn_geom_name(o.gdn_geom)) +
-                                 " re-spells the LOOPED body (engine/gdn_rec_wf_kernels.h) and"
-                                 " --gdn-loop " + std::to_string(o.gdn_loop) + " submits the per-token"
+                                 " re-spells the LOOPED body (engine/gdn_rec_wf_kernels.h for wf4/wf2,"
+                                 " engine/gdn_rec_reg16_kernels.h for reg16) and --gdn-loop " +
+                                 std::to_string(o.gdn_loop) + " submits the per-token"
                                  " kernels unchanged. Use --gdn-loop 512 (the default) or --gdn-geom"
                                  " block (the shipped form)");
     }
     if (o.gdn_geom != engine::kernels::GdnGeom::kBlock &&
         o.gdn_norm == engine::kernels::GdnNorm::kHoist) {
-        // The one refusal that is a fact about the arithmetic rather than about inertness: the wavefront
-        // form has no norm prologue to hoist (its norms are registers, which is the whole point of the
-        // geometry), and the launch site picks the geometry first. Two named flags, one kernel: refused.
+        // The one refusal that is a fact about the arithmetic rather than about inertness: both
+        // re-spelled geometries have no norm prologue to hoist (their norms are registers, which is the
+        // whole point of both maps), and the launch site picks the geometry first. Two named flags, one
+        // kernel: refused.
         throw std::runtime_error("--gdn-geom " + std::string(engine::kernels::gdn_geom_name(o.gdn_geom)) +
                                  " computes the k/q row norms in REGISTERS by warp butterfly, so"
                                  " --gdn-norm hoist has nothing left to hoist. Pick one: --gdn-geom block"
-                                 " --gdn-norm hoist (bet G1's form) or --gdn-geom wf4 with the default"
-                                 " --gdn-norm inline (bet G2's)");
+                                 " --gdn-norm hoist (bet G1's form) or --gdn-geom wf4/reg16 with the"
+                                 " default --gdn-norm inline (bets G2 and G4)");
     }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
@@ -720,7 +724,7 @@ void print_usage(FILE* out) {
                  " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
                  " [--gemm-pins all|none|<csv>] [--gemm-heur N] [--attn-touch 0|1]"
                  " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
-                 " [--gdn-geom block|wf4|wf2]"
+                 " [--gdn-geom block|wf4|wf2|reg16]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -834,8 +838,9 @@ void print_usage(FILE* out) {
                  " prologue, `--gdn-loop 1` is REFUSED with `hoist`, and so is `--gdn-scan collapse`,"
                  " whose kernel keeps its own prologue. Both forms are compiled in either way, so a"
                  " paired wave timing is one window.\n"
-                 "  --gdn-geom block|wf4|wf2  the BLOCK SHAPE of the looped recurrence (bet G2, "
-                 "engine/gdn_rec_wf_kernels.h, prototype/gdn_walk/BET.md §10). `block`, the DEFAULT, is"
+                 "  --gdn-geom block|wf4|wf2|reg16  the BLOCK SHAPE of the looped recurrence (bets G2 "
+                 "and G4, engine/gdn_rec_wf_kernels.h and engine/gdn_rec_reg16_kernels.h, "
+                 "prototype/gdn_walk/BET.md §10 and §12). `block`, the DEFAULT, is"
                  " the shipped `<<<16,128>>>` walk: four wavefronts per block, one state column per"
                  " thread, the row norms reduced by `block_sum_pair_f32` (3 barriers + an LDS round-trip"
                  " per token). `wf4` is one WAVEFRONT per block — `<<<16,32>>>`, 4 state columns per"
@@ -850,8 +855,19 @@ void print_usage(FILE* out) {
                  " 5 %% — through `engine/gate.py` on the pinned fixtures: no new band, no widening, no"
                  " --ack-spill (`prototype/gdn_walk/g2_mirror.py` is the CPU-side size of the move)."
                  " `wf2` is the same kernel at 2 columns per lane, `<<<32,32>>>`: the split leg, which"
-                 " prices the wavefronts-for-work-per-wavefront trade the header sizes. One launch per"
-                 " span on all three sides, billed on the SAME `gdn_rec` row (a win that moved the"
+                 " prices the wavefronts-for-work-per-wavefront trade the header sizes. `reg16` is llama's"
+                 " own thread map under this recurrence (G3 §6, §43 of the ledger):"
+                 " `<<<dim3(NH,D/16)=128 blocks, dim3(32,4)=128 threads>>>` = 512 wavefronts per launch ="
+                 " 6.40 wf/SIMD against the shipped 0.80, 8 lanes per state column and 16 state elements"
+                 " per thread HELD IN REGISTERS for the whole span, so the state is read once at span"
+                 " entry and written once at span exit and moves zero times per token. The identity"
+                 " wavefronts x 32 x elements == 262,144 is a static_assert in the header, and the"
+                 " compiled shape is checked by `walk_isa_diff.py --g4`: the token loop's only global"
+                 " store is `o`. The norms stay in the walk as 8-lane butterflies, so nothing is staged"
+                 " (where G1 paid +32 KB/token/layer). Same admission as `wf4` — the existing §10.1"
+                 " aggregates, no new band — and the state layout does NOT change, so every consumer of"
+                 " `engine/state.h`'s [i][j] block keeps working. One launch per"
+                 " span on every side, billed on the SAME `gdn_rec` row (a win that moved the"
                  " milliseconds to another row would not be one, which is what §40 is for). Wave-only: a"
                  " one-row body takes the per-token kernels whatever this says, and `--gdn-loop 1`,"
                  " `--gdn-scan collapse` and `--gdn-norm hoist` are each REFUSED with a non-block"
@@ -1529,9 +1545,19 @@ int main(int argc, char** argv) {
                     // A/B — both submit one launch per span on the same `gdn_rec` row, so the counted
                     // `launches=` line is IDENTICAL on the two sides — which is exactly why canary B of
                     // `prototype/gdn_walk/run_ab_g2.sh` greps this field and cannot grep a launch count.
+                    //
+                    // And a third inert case, which the default move to `reg16` created: `--gdn-loop 1`
+                    // submits the PER-TOKEN bodies (`resolve_gdn_loop`'s routing, and the decode pins were
+                    // pinned through it), so no geometry map runs there at all. Since `reg16` is now the
+                    // default, echoing `reg16` on a loop-1 log would claim a map that did not run — the same
+                    // misreport this field refuses everywhere else, and the reason the parse-level refusal
+                    // above keys on `gdn_geom_given` rather than on `!= block`. A named `--gdn-geom` at
+                    // loop 1 is refused outright; an unasked default says so here instead of lying.
                     o.gdn_scan == engine::kernels::GdnScan::kCollapse
                         ? "inert-under-collapse"
-                        : engine::kernels::gdn_geom_name(o.gdn_geom));
+                        : (o.gdn_loop <= 1
+                               ? "na-loop1-per-token-bodies"
+                               : engine::kernels::gdn_geom_name(o.gdn_geom)));
         if (o.sizes_only) {
             std::printf("RESULT mode=sizes-only tensors=%zu check_weights=PASS\n", stats.n_loaded);
             std::fflush(stdout);

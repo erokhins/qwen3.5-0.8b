@@ -303,6 +303,213 @@ def g2_report(text: str) -> bool:
     return ok
 
 
+# ----------------------------------------------------------------------------------------------------
+# bet G4's census: is the state really register-resident, and are the reductions really butterflies?
+#
+# WHY A MODE AND NOT A THIRD TOOL: `walk_isa_diff.py` already owns kernel slicing (the bare column-0
+# mangled label trap is written up at the top of this file) and `g3_isa_bill.py` already owns
+# "find the token loop by its backward branch rather than guessing". What G4 needs is those two, plus a
+# claim neither G1 nor G2 made: that the STATE MOVES ZERO TIMES PER TOKEN. `vgpr_spill_count = 0` is
+# necessary and not sufficient — a shard load *sunk* into the token loop leaves no spill trace and no LDS
+# trace, and the note block would read spotless while the kernel streamed the state like the shipped form
+# does. So the assertions are about WHERE the global accesses sit relative to the loop, not about how many
+# registers there are:
+#
+#   * ZERO `s_barrier` and ZERO LDS data accesses (G2's claims; with 8 lanes per column a butterfly is the
+#     whole cross-lane machinery and the norms need no staging), with permutes PRESENT (12 = four
+#     reductions x three levels: sk, sq, the `r` dot, the `o` dot).
+#   * the token loop contains exactly ONE `global_store`: the `o` store. A streamed state would put 16
+#     more there per token, so this one number IS the residency claim.
+#   * the token loop contains fewer than 16 global loads: k̂ needs 4 b128, q̂ 4 b128, v one b32 (g and beta
+#     go out as uniform `s_load`s), so ~9 is the shape and >= 16 is a state walk.
+#   * OUTSIDE the loop, 16 `global_load_b32` and 16 `global_store_b32`: the shard, once each way. The
+#     [i][j] layout makes those scalar (stride 512 B), so the widths are part of the claim — if they ever
+#     come out as `b128` the layout or the ownership changed shape and the reader has to be told.
+#   * zero scratch anywhere: the note block's `private_segment_fixed_size 0`, re-checked in the body.
+#
+# The reference side must show the machinery this removes, or the checks are decoration:
+# `rec_loop_kernel` streams the state, so its token loop must contain many stores.
+# ----------------------------------------------------------------------------------------------------
+G4_TARGETS = (("rec_reg16_kernel", "reg16"), ("rec_loop_kernel", "block(shipped)"))
+G4_BRANCH_RE = re.compile(r"^s_(?:branch|cbranch_[a-z0-9]+)\s+(\.L[A-Za-z0-9_]+)")
+
+
+def token_loop_span(lines: list) -> tuple:
+    """(start, end) of the widest BACKWARD branch — the token loop, found rather than guessed.
+
+    The same rule `prototype/gdn_walk/g3_isa_bill.py` uses to locate a kernel's per-token body without
+    hardcoding a label. Raises when there is no backward branch: a kernel with no loop has no per-token
+    path, so every assertion below would be vacuous and a vacuous census must not print PASS.
+    """
+    labels = {}
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\.L[A-Za-z0-9_]+):", line)
+        if m:
+            labels[m.group(1)] = i
+    best = None
+    for i, line in enumerate(lines):
+        m = G4_BRANCH_RE.match(line)
+        if not m:
+            continue
+        target = labels.get(m.group(1))
+        if target is None or target >= i:
+            continue
+        if best is None or (i - target) > (best[1] - best[0]):
+            best = (target, i)
+    if best is None:
+        raise SystemExit("G4 SLICE FAIL: no backward branch in this kernel, so there is no token loop to"
+                         " put accesses inside of. That is not a pass; it is a census of nothing.")
+    return best
+
+
+def g4_census(lines: list) -> dict:
+    """The loop and non-loop global-access census of one kernel, plus its reduction machinery."""
+    lo, hi = token_loop_span(lines)
+    inside, outside = lines[lo:hi + 1], lines[:lo] + lines[hi + 1:]
+    out = {"loop_lo": lo, "loop_hi": hi, "barrier": 0, "lds_data": 0, "perm": 0}
+    for tag, part in (("in", inside), ("out", outside)):
+        c = Counter()
+        for line in part:
+            if not line or line.startswith((".", ";", "/")):
+                continue
+            mn = line.split()[0].rstrip(":")
+            if mn.startswith("global_load"):
+                c[tag + "_gld"] += 1
+                c[tag + "_" + mn] += 1
+            elif mn.startswith("global_store"):
+                c[tag + "_gst"] += 1
+                c[tag + "_" + mn] += 1
+            elif mn.startswith("s_load"):
+                c[tag + "_sload"] += 1
+            elif mn.startswith("scratch_"):
+                c[tag + "_scratch"] += 1
+            if BARRIER_RE.match(mn):
+                out["barrier"] += 1
+            elif G2_LDS_DATA_RE.match(mn):
+                out["lds_data"] += 1
+            elif G2_PERM_RE.match(mn):
+                out["perm"] += 1
+        for key in ("gld", "gst", "sload", "scratch"):
+            out[f"{tag}_{key}"] = c[f"{tag}_{key}"]
+        out[f"{tag}_gld_b32"] = c[f"{tag}_global_load_b32"]
+        out[f"{tag}_gst_b32"] = c[f"{tag}_global_store_b32"]
+        out[f"{tag}_gld_wide"] = c[f"{tag}_global_load_b128"] + c[f"{tag}_global_load_b64"]
+    return out
+
+
+def g4_report(text: str) -> bool:
+    print("G4 STRUCTURAL CENSUS (state resident: zero state accesses inside the token loop; butterflies,"
+          " no barrier, no LDS, no scratch)")
+    cens = {label: g4_census(slice_symbol(text, needle)) for needle, label in G4_TARGETS}
+    print(f"{'kernel':16s} {'loop lines':>13s} {'in_gld':>7s} {'in_gst':>7s} {'in_wide':>8s}"
+          f" {'in_sload':>9s} {'out_gld':>8s} {'out_gst':>8s} {'barrier':>8s} {'lds_data':>9s}"
+          f" {'perm':>5s} {'scratch':>8s}")
+    for _needle, label in G4_TARGETS:
+        c = cens[label]
+        print(f"{label:16s} {str(c['loop_lo']) + '..' + str(c['loop_hi']):>13s} {c['in_gld']:7d}"
+              f" {c['in_gst']:7d} {c['in_gld_wide']:8d} {c['in_sload']:9d} {c['out_gld']:8d}"
+              f" {c['out_gst']:8d} {c['barrier']:8d} {c['lds_data']:9d} {c['perm']:5d}"
+              f" {c['in_scratch'] + c['out_scratch']:8d}")
+    ok = True
+    ref = cens["block(shipped)"]
+    if ref["in_gst"] < 16 or ref["barrier"] < 3:
+        ok = False
+        print(f"FAIL   the shipped walk reads in-loop stores={ref['in_gst']} barriers={ref['barrier']};"
+              " it streams the state and pays 3 barriers a token, so if the reference side does not show"
+              " that, every check below is decoration (the empty-check class in AGENTS.md)")
+    c = cens["reg16"]
+    if c["barrier"]:
+        ok = False
+        print(f"FAIL   reg16 issues {c['barrier']} `s_barrier`: 8 lanes per column means a butterfly is"
+              " the whole cross-lane story, so a barrier means a block reduction crept in")
+    if c["lds_data"]:
+        ok = False
+        print(f"FAIL   reg16 issues {c['lds_data']} LDS data accesses: the norms or the state are being"
+              " staged, which G3 §6 constraint 3 forbids (G1's +32 KB/token/layer is the failure it buys"
+              " off)")
+    if c["perm"] < 12:
+        ok = False
+        print(f"FAIL   reg16 has {c['perm']} cross-lane permutes; four reductions x three butterfly"
+              " levels = 12, so fewer means a reduction is missing, not cheaper")
+    if c["in_scratch"] + c["out_scratch"]:
+        ok = False
+        print(f"FAIL   reg16 touches scratch {c['in_scratch'] + c['out_scratch']} times despite"
+              " vgpr_spill_count 0 — a sunk shard load is exactly what the note block cannot see")
+    if c["in_gst"] != 1:
+        ok = False
+        print(f"FAIL   reg16's token loop contains {c['in_gst']} global STORES. Exactly 1 is the claim"
+              " (`o`); 17 means the state is written per token, i.e. it is NOT register-resident")
+    if c["in_gld"] >= 16:
+        ok = False
+        print(f"FAIL   reg16's token loop contains {c['in_gld']} global LOADS; k̂ (4x b128) + q̂ (4x b128)"
+              " + v (1) is ~9, so >= 16 is a per-token state walk")
+    if c["out_gld_b32"] != 16 or c["out_gst_b32"] != 16:
+        ok = False
+        print(f"FAIL   reg16 reads {c['out_gld_b32']} scalar loads / {c['out_gst_b32']} scalar stores"
+              " OUTSIDE the loop; 16 and 16 is one shard load and one shard store per span in the [i][j]"
+              " layout (stride 512 B, so scalar). Anything else means the shard is loaded elsewhere or the"
+              " ownership changed shape, and the number has to be re-derived, not re-asserted.")
+    if ok:
+        print("RESULT walk_isa_diff --g4 PASS — the shard is loaded once before the token loop and stored"
+              " once after it, the loop's only global store is `o`, and the reductions are 12 permutes"
+              " with no barrier, no LDS and no scratch.")
+    else:
+        print("RESULT walk_isa_diff --g4 FAIL")
+    return ok
+
+
+def g4_selftest() -> bool:
+    """The loop split must be real, and a state access moved into the loop must turn the census red."""
+    shard_ld = "".join(f"    global_load_b32 v{n}, v[2:3], off\n" for n in range(16))
+    shard_st = "".join(f"    global_store_b32 v[80:81], v{n}, off\n" for n in range(16))
+    kq_ld = "    global_load_b128 v20, v[4:5], off\n" * 8
+    perm = "    ds_bpermute_b32 v60, v61, v62\n" * 12
+    resident = ("_Z16rec_reg16_kernelPKfS0_S0_S0_S0_PfS1_ii:\n" + shard_ld +
+                ".LBB0_3:\n" + kq_ld +
+                "    global_load_b32 v52, v[8:9], off\n"
+                "    s_load_b32 s4, s[4:5], 0x0\n"
+                "    s_load_b32 s5, s[6:7], 0x0\n" + perm +
+                "    global_store_b32 v[70:71], v52, off\n"
+                "    s_cbranch_scc0 .LBB0_3\n" + shard_st +
+                "_Z9other_onei:\n    s_nop 0\n")
+    c = g4_census(slice_symbol(resident, "rec_reg16_kernel"))
+    checks = [
+        ("the loop is the backward branch", c["loop_lo"] == 16 and c["loop_hi"] == 41),
+        ("16 shard loads sit OUTSIDE the loop", c["out_gld_b32"] == 16),
+        ("16 shard stores sit OUTSIDE the loop", c["out_gst_b32"] == 16),
+        ("the loop's only store is o", c["in_gst"] == 1),
+        ("the loop's loads are k/q/v only (9 < 16)", c["in_gld"] == 9),
+        ("uniform g/beta arrive as s_loads", c["in_sload"] == 2),
+        ("12 permutes, 0 barriers, 0 LDS data, 0 scratch",
+         c["perm"] == 12 and not c["barrier"] and not c["lds_data"] and not c["in_scratch"]),
+    ]
+    for name, passed in checks:
+        print(f"  {'ok  ' if passed else 'FAIL'} {name}")
+    # MUST-CATCH x2: a store moved into the loop, and a load SUNK into the loop. A control that cannot
+    # fail is not a control (AGENTS.md, several rows).
+    moved = resident.replace("    global_store_b32 v[80:81], v15, off\n", "")
+    moved = moved.replace("    s_cbranch_scc0 .LBB0_3",
+                          "    global_store_b32 v[80:81], v15, off\n    s_cbranch_scc0 .LBB0_3")
+    cm = g4_census(slice_symbol(moved, "rec_reg16_kernel"))
+    caught = cm["in_gst"] == 2 and cm["out_gst_b32"] == 15
+    print(f"  {'ok  ' if caught else 'FAIL'} a state STORE moved into the loop is caught"
+          f" (in_gst={cm['in_gst']} out_gst_b32={cm['out_gst_b32']})")
+    sunk = resident.replace("    global_load_b32 v15, v[2:3], off\n", "")
+    sunk = sunk.replace("    s_load_b32 s4, s[4:5], 0x0",
+                        "    global_load_b32 v15, v[2:3], off\n    s_load_b32 s4, s[4:5], 0x0")
+    cs = g4_census(slice_symbol(sunk, "rec_reg16_kernel"))
+    caught_s = cs["out_gld_b32"] == 15 and cs["in_gld"] == 10
+    print(f"  {'ok  ' if caught_s else 'FAIL'} a shard LOAD sunk into the loop is caught"
+          f" (out_gld_b32={cs['out_gld_b32']} in_gld={cs['in_gld']})")
+    try:
+        token_loop_span(["    s_nop 0"])
+        raised = False
+    except SystemExit:
+        raised = True
+    print(f"  {'ok  ' if raised else 'FAIL'} a kernel with no loop raises rather than censusing nothing")
+    return all(p for _n, p in checks) and caught and caught_s and raised
+
+
 def g2_selftest() -> bool:
     """The G2 buckets must separate a permute from an LDS access, and count both ways."""
     fake = """
@@ -349,12 +556,17 @@ def main() -> int:
     ap.add_argument("--g2", action="store_true",
                     help="bet G2's structural census instead of G1's: the wavefront geometry must ship"
                          " 0 barriers and 0 LDS DATA accesses, and must still contain its butterfly")
+    ap.add_argument("--g4", action="store_true",
+                    help="bet G4's structural census: the state must be touched OUTSIDE the token loop"
+                         " only (one shard load, one shard store per span), the loop's only global store"
+                         " must be `o`, and the reductions must be butterflies")
     args = ap.parse_args()
 
     if args.selftest:
         print("SELFTEST walk_isa_diff")
         ok = selftest()
         ok = g2_selftest() and ok
+        ok = g4_selftest() and ok
         print("RESULT " + ("walk_isa_diff SELFTEST PASS" if ok else "walk_isa_diff SELFTEST FAIL"))
         return 0 if ok else 1
     if not args.asm or not args.asm.exists():
@@ -363,6 +575,8 @@ def main() -> int:
     text = args.asm.read_text()
     if args.g2:
         return 0 if g2_report(text) else 1
+    if args.g4:
+        return 0 if g4_report(text) else 1
     cen = census(text)
     shipped = cen[SHIPPED]
     print(f"LISTING {args.asm.name}")

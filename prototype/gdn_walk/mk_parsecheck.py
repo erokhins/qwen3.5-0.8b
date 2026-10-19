@@ -13,6 +13,7 @@ check is 0.2 s.
       SUMMARIZE=1 OUT=tmp/gdn_walk/parsecheck bash prototype/gdn_walk/run_ab_g2.sh
 """
 from pathlib import Path
+import os
 
 FAMS = ("gdn_rec gdn_conv gdn_gates gdn_gated_norm glue proj mlp_gateup mlp_down attn cast copy lm_head "
         "host_tail").split()
@@ -22,10 +23,25 @@ BASE_MS = {"gdn_rec": 266.60, "gdn_conv": 40.0, "gdn_gates": 12.0, "gdn_gated_no
 # wf4 moves gdn_rec past BOTH dead lines, wf2 lands between the live and dead lines: one side must read
 # DEAD and the other UNRESOLVED, or the verdict logic is not reading its own numbers.
 SCALE = {"base": 1.0, "block": 1.0, "wf4": 0.60, "wf2": 0.80}
+# The same fixture, re-labelled for another bet's side names and scales, because the check that matters is
+# "can the verdict change colour" and each A/B script adjudicates its own side names and its own lines.
+# `SIDES="reg16=0.60 reg16=0.95" OUT=tmp/gdn_walk/parsecheck_g4 python mk_parsecheck.py` — note the same name
+# twice is a mistake waiting to happen, so a duplicate name is refused below rather than last-write-wins
+# (AGENTS.md: bare dump names are last-writer-wins, and a fixture that silently overwrites itself prints a
+# verdict about one of the two cases while claiming both).
+SPEC = os.environ.get("SIDES", "").strip()
+if SPEC:
+    SCALE = {"base": 1.0, "block": 1.0}
+    for item in SPEC.split():
+        name, _, scale = item.partition("=")
+        if name in SCALE:
+            raise SystemExit(f"SIDES lists {name!r} twice; side names are file names here and the second"
+                             " one would overwrite the first (last-writer-wins). Use distinct names.")
+        SCALE[name] = float(scale)
 
 
 def main() -> int:
-    out = Path("tmp/gdn_walk/parsecheck")
+    out = Path(os.environ.get("OUT", "tmp/gdn_walk/parsecheck"))
     out.mkdir(parents=True, exist_ok=True)
     for rep in (1, 2, 3):
         for side, scale in SCALE.items():
@@ -40,8 +56,9 @@ def main() -> int:
             lines.append(f"RESULT decode_steps=0 prompt_tokens=4096 prefill_tokens=4096 "
                          f"ms_total={total:.2f} tok_per_s=1000")
             (out / f"{name}_{rep}.log").write_text("\n".join(lines) + "\n")
-    print(f"wrote {len(FAMS) * 4 * 3 + 8} synthetic log lines to {out}/ "
-          "(wf4 gdn_rec 160 ms = past both live lines; wf2 213 ms = between the lines)")
+    print(f"wrote {len(FAMS) * len(SCALE) * 3 + 8} synthetic log lines to {out}/ "
+          f"with sides {SCALE} — the gdn_rec ms each side lands at is "
+          + ", ".join(f"{k}={BASE_MS['gdn_rec'] * v:.2f}" for k, v in SCALE.items()))
     return 0
 
 

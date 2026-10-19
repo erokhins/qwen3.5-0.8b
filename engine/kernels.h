@@ -393,8 +393,8 @@ void gdn_rec_span_hoisted(const float* u, const float* g, const float* beta, flo
 
 // ---- bet G2: the geometry of the looped walk (`decode_run --gdn-geom`) ----------------------------
 //
-// One launch per SPAN in every case, which is what keeps the `gdn_rec` plan row identical across the
-// three sides; what differs is the block.
+// One launch per SPAN in every case, which is what keeps the `gdn_rec` plan row identical across every
+// side; what differs is the map.
 //
 //   kBlock  `<<<NH=16, D=128>>>`, one state column per thread, the two row norms reduced inside the
 //           walk by `block_sum_pair_f32` — the SHIPPED form and the default.
@@ -403,6 +403,12 @@ void gdn_rec_span_hoisted(const float* u, const float* g, const float* beta, flo
 //           (`engine/gdn_rec_wf_kernels.h`; the shape §38's trace shows llama.cpp running).
 //   kWf2    the same kernel at `<<<32, 32>>>`, 2 columns per lane — the split leg, which prices the
 //           wavefronts-for-work-per-wavefront trade named in that header.
+//   kReg16  `<<<dim3(NH, D/16)=16x8, dim3(32,4)>>>` = 128 blocks x 128 threads = 512 wavefronts = 6.40
+//           wf/SIMD against the shipped 0.80: llama's map (`gdn.cu:203-204`) under our recurrence, 8
+//           lanes per state column and 16 state elements per thread HELD IN REGISTERS for the whole span
+//           (`engine/gdn_rec_reg16_kernels.h`; bet G4, `prototype/gdn_walk/BET.md` §12). Like `wf4` it is
+//           NOT bit-identical and cannot be — the row norms and both state dots re-associate — and like
+//           every knob on this recurrence it reaches the `--gdn-loop` span branch only.
 //
 // NOT claimed bit-identical, and it cannot be: the state dot and the `o` dot re-associate (the header
 // names the three things that move). BET.md §10 constraint 2 fixes the admission as the EXISTING §10.1
@@ -412,7 +418,7 @@ void gdn_rec_span_hoisted(const float* u, const float* g, const float* beta, flo
 // the per-token kernels whatever this says (`resolve_gdn_loop`), so no decode bit can move under it, and
 // `parse_args` refuses the combinations where it would be inert (`--gdn-loop 1`, `--gdn-scan collapse`,
 // and `--gdn-norm hoist`, whose pre-pass has nothing left to hoist here).
-enum class GdnGeom { kBlock, kWf4, kWf2 };
+enum class GdnGeom { kBlock, kWf4, kWf2, kReg16 };
 
 // Parse-or-throw, for the standing reason: this names which side of an A/B the run is.
 GdnGeom parse_gdn_geom(const std::string& name);
@@ -424,6 +430,18 @@ const char* gdn_geom_name(GdnGeom g);
 // Refuses `tokens < 2` and any `spell` without a looped body, for `gdn_rec_span`'s two reasons.
 void gdn_rec_span_wf(const float* u, const float* g, const float* beta, float* S, float* o,
                      int tokens, GdnRecSpell spell, GdnGeom geom);
+
+// ---- bet G4: llama's thread map under the same recurrence (`decode_run --gdn-geom reg16`) ----------
+//
+// ONE launch per SPAN, on the same `gdn_rec` plan row with the same `launches=144` at the A/B shape,
+// because a win that moved its milliseconds to another row would not be a win (§40). What differs is
+// the map: `<<<dim3(NH, D/16), dim3(32, 4)>>>` = 128 blocks x 128 threads = 512 wavefronts, 8 lanes per
+// state column, and **16 state elements per thread held in registers for the whole span** — one state
+// load and one state store per (block, span) instead of three passes over 1 MiB per token.
+// `engine/gdn_rec_reg16_kernels.h` owns the map, its asserts and its numerics declaration; `kWf4`/`kWf2`
+// above are G2's dead one-wavefront form and keep their own launcher so a re-read of G2 stays routable.
+void gdn_rec_span_reg16(const float* u, const float* g, const float* beta, float* S, float* o,
+                        int tokens, GdnRecSpell spell);
 
 // One GDN layer, one BODY, route A: `kNumValueHeads * (d_v / 32)` blocks = 64, and the state stays
 // in LDS for the whole body. `u`/`g`/`beta`/`o` are the same tiles `gdn_rec` is fed one row at a

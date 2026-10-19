@@ -809,9 +809,26 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 // combinable — the wavefront form computes the norms in registers, so there is nothing for
                 // the pre-pass to hoist — and `decode_run` refuses the pair at parse time rather than
                 // letting this ordering quietly pick one of two flags the caller named.
+                //
+                // Bet G4's map (`--gdn-geom reg16`) rides the SAME branch for the SAME reasons and is
+                // routed first: same span loop, same one `stageclock::note(kGdnRec)` per span, same operand
+                // tiles, different block and different state residency. Routing it before `norm_hoist` is
+                // not a preference — its norms are registers too, so `--gdn-norm hoist` has nothing to
+                // hoist here and `decode_run` refuses that pair at parse.
+                const bool reg16_geom = sc.gdn_geom == kernels::GdnGeom::kReg16;
                 const bool wf_geom = sc.gdn_geom != kernels::GdnGeom::kBlock;
                 for (int t = 0; t < n; t += gdn_span) {
                     const int rows = gdn_span < n - t ? gdn_span : n - t;   // the ragged tail
+                    if (reg16_geom) {
+                        stageclock::note(stageclock::kGdnRec);              // one site, one launch
+                        kernels::gdn_rec_span_reg16(sc.g_u + (size_t)t * kQkvRows,
+                                                    sc.g_g + (size_t)t * kNumValueHeads,
+                                                    sc.g_beta + (size_t)t * kNumValueHeads,
+                                                    st.gdn_state_layer(layer),
+                                                    sc.g_o + (size_t)t * kValueDim,
+                                                    rows, sc.gdn_spell);
+                        continue;
+                    }
                     if (wf_geom) {
                         stageclock::note(stageclock::kGdnRec);              // one site, one launch
                         kernels::gdn_rec_span_wf(sc.g_u + (size_t)t * kQkvRows,
