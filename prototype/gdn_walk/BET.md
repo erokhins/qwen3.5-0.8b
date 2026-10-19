@@ -208,3 +208,58 @@ hoist *adds* ate most of it, which is what BET.md §3's own traffic correction (
 not +16) said would decide it. What this cannot see: whether a *cheaper walk* that does not add stage traffic —
 G2's geometry, one wavefront per block and no LDS at all — would keep the 5.9 % and drop the +6.06 ms. That is
 the question G2 is now funded to answer.
+
+## 9. A1 measured (2026-10-19): the attention residency axis closes at 6, and it closes on LDS
+
+E1 was the last rung the Q-staged family had, and it is a hand port (`6f59d7d`, note blocks re-derived by the
+main agent from fresh compiles of both sides). Shipped `attn_fattn_wave`: **178 VGPR, 0 spill, 32,768 B LDS** →
+2 blocks/CU → 6 wf/CU. Q un-staged: **184 VGPR, 0 spill, 32,768 B LDS** → 2 blocks/CU → 6 wf/CU. The register
+leg of the ladder's admission passes; the **LDS leg does not exist to pass**, because the Q stage was never
+extra — it is the epilogue's F32 transpose staging on loan (`FATTN_MROWS*FATTN_TROW*4 == FATTN_MROWS*DH*2`,
+8,192 B per warp either way). So no 8+ wf/CU zero-spill shape exists by this lever, **no device A/B is owed**,
+and the ladder's antecedent goes into the record as incomplete: `spill=0 ∧ VGPR≲190` was never sufficient,
+because the binding limit is `LDS`, and it was assumed to fall.
+
+Consequences, stated as decisions rather than as news:
+- **Attention occupancy is closed.** Further residency work means shrinking the epilogue to ≤ 21,845 B (3
+  blocks/CU) by staging the transpose 8 rows at a time or serialising the three through `s_kv`. Both are
+  structural changes to a shipping kernel's epilogue with no measurement behind them, and neither is approved
+  by this document.
+- **A0's loose end is closed and it removed a candidate.** `split = split_for(lanes_last)` alone explains the
+  traced 48/48/42/42 (`a0_work_split.py`, RECONCILED): body 0 of a 4,096-lane prompt has `lvalid = 1`, so
+  `lanes_last = 512 = MAXSC`, so `split = 1`, so that body pays no `attn_fattn_wave` and no `attn_combine`.
+  The WMMA form covers 87.5 % of rows and **98.4 % of the lane-work**. "Too many launches go through it" is
+  dead as a framing; the only attention bet left standing is **per-launch cost** — the §26 instruction/traffic
+  gap, sized there at 4.6×, at 2.92 ms per launch.
+
+## 10. G2 pre-registered (before any code, per this file's own rule): the barrier-free GDN geometry
+
+The lever: `rec_loop_kernel` runs 16 blocks × 128 threads (4 wavefronts each) with the per-token norm inside
+the block, which is what buys it three barriers and an LDS round-trip per token at 0.8 blocks/CU. G2 spells the
+same recurrence as **one wavefront per block, no LDS at all, no `__syncthreads()` by construction**, per-thread
+ownership of several state columns so a thread's chain carries ILP, and the row reductions as warp butterflies
+(legal: a head row is 128 elements = 4 per lane). That is the shape llama.cpp's `gated_delta_net` presents in
+§38's trace: 32 threads, `LDS = 0`, 16 blocks, 0.80 blocks/CU, and 5.76× faster on identical launch counts.
+
+**Both denominators are pre-registered, because §40 proved a one-row line can be fooled.** Medians of 3 at
+4,096 lanes, one lock hold, three sides (`base` / new-form-off / new-form-on), canaries first:
+
+| metric | base (§40 window) | live | dead |
+|---|---|---|---|
+| `gdn_rec` family ms | 266.60 | **≤ 180** | **> 230** |
+| wave `wall_ms` | 626.75 | **≤ 560** | **> 607** |
+
+Both must clear their live line to ship; either falling past its dead line kills the form; anything else is
+**unresolved and not shipped**. The `wall_ms` line is the ship gate — it is the only one of the two that can
+see cost that lands in another family, which is exactly how G1's −5.9 % turned into −2.2 %.
+
+Three constraints carried in from G1, as requirements not advice:
+1. **No new per-token staging.** G1's +32 KB/token/layer of normed copies ate most of its own win. If the
+   geometry needs the norms, it computes them in registers from data it already loads (which the warp-butterfly
+   shape does naturally), or it does not ship.
+2. **Bit-identity is not required here, and the band is already fixed.** The state dot re-associates, so `o`
+   moves: judged by the existing §10.1 aggregates (`cos ≥ 0.9995`, `meanrel ≤ 5 %`) through `engine/gate.py` on
+   the pinned fixtures, **no new band, no widening, no `--ack-spill`**. `STATEFP` must move in a way the change
+   explains, not in a way the change hopes nobody diffs.
+3. **Price it in cycles-per-dependency at realised occupancy** (AGENTS.md), which for this shape means
+   wavefronts-per-SIMD before and after, derived from the note block and KFD — not an instruction count.
