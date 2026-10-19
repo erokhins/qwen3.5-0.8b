@@ -306,9 +306,12 @@ if [ "${SUMMARIZE:-0}" != "1" ]; then
     for R in $(seq 1 "$REPS"); do
         for SIDE in base u8; do
             sleep 5
-            BX=$BIN_BASE; [ "$SIDE" = u8 ] && BX="$BIN_NEW$QSTAGE_ARG"
+            # The knob is a SEPARATE argv word, expanded unquoted like $TRACE_ARGS: folding it into "$BX"
+            # makes rocprofv3 exec a file called "decode_run --attn-fattn-qstage unstaged8", which is an
+            # argument-quoting bug wearing the costume of a traced-leg failure.
+            BX=$BIN_BASE; KX=""; [ "$SIDE" = u8 ] && { BX="$BIN_NEW"; KX="$QSTAGE_ARG"; }
             "$PY" tools/prefill_kernel_trace.py --waves 8 --out "$OUT/trace_${SIDE}_$R" -- \
-                "$BX" --model "$MODEL" --ids "$(cat "$OUT/ids$W.csv")" $TRACE_ARGS \
+                "$BX" --model "$MODEL" --ids "$(cat "$OUT/ids$W.csv")" $TRACE_ARGS $KX \
                 --out "$OUT/trace_${SIDE}_${R}_out" > "$OUT/trace_${SIDE}_$R.log" 2>&1 \
                 || fail "traced leg: the $SIDE rep=$R traced run did not finish"
             CSV=$(ls "$OUT/trace_${SIDE}_$R"/*_kernel_trace.csv 2>/dev/null | head -1)
