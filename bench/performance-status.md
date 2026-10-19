@@ -1721,3 +1721,73 @@ difference must exist catches it.
 **What this cannot see.** `--steps 0` means the decode path is not exercised here (that is §36's banner, which
 showed decode unchanged within spread); two fixtures are not the 18-fixture admission; and one width pair is
 not a sweep — a regression that appears only below 1,024 or above 4,096 lanes would walk straight past it.
+
+## §38. llama.cpp again, phase by phase: the gap is no longer attention, and launch structure is dead as an explanation (2026-10-19)
+
+The round-2 queue asked for the llama.cpp comparison to be re-taken **by phase** after the WMMA work, with the
+existing split as the null. Two legs, both inside one `tools/gpu_lock.sh` hold (`llama-phase`, main agent,
+blocking, zero subagents): throughput rows medians of 3, then a `rocprofv3` kernel trace of both engines at
+4,096 lanes. Harness `tools/llama_phase_compare.sh`, analysis `tools/trace_phase_split.py` (pass count
+**derived** from a kernel with a known per-pass site count — 288 `gated_delta_net` ÷ 144 = 2 passes for llama,
+144 `attn_prep` ÷ 48 = 3 for ours — which is the §W2 rule made executable rather than remembered), logs in
+`progress/bench/evidence/llamaphase-2026-10-19/`. llama.cpp is still `797de63`, same GGUF.
+
+**Throughput, matched row (`-ub 512 -fa on -t 32`, our side `--steps 0` so both compute prompt-only):**
+
+| lanes | ours (this window) | llama.cpp | llama/ours | §21's ratio, same widths |
+|---|---|---|---|---|
+| 512 | 168.019 ms = 3,047 tok/s | 8,025.84 | **2.63×** | 2.27× |
+| 1,024 | 235.736 ms = 4,344 | 8,142.83 | **1.87×** | 1.54× |
+| 4,096 | 710.661 ms = 5,764 | 10,380.79 | **1.80×** | 1.87× |
+
+Read the third column with care, because both halves moved. Ours improved (924.62 ms → 710.66 ms at 4,096 =
++30 %), and **so did llama's own matched row** (8,290 → 10,381 = +25 %) on the same build — the §21 window was
+a colder one, and their `fa off` row swung the other way (8,999 → 5,414). A cross-window ratio comparison is
+therefore worth nothing here (§"a ruler re-taken in a different window is not an A/B" applies to the *other*
+engine too); the two numbers inside each row of this table were taken in one hold, and that is what makes the
+4,096-lane **1.80×** honest. The WMMA round bought ~30 % of our prefill and the headline gap moved 1.87 → 1.80.
+Where the gap actually lives is the traced half of the item, and it is not where §21 left it:
+
+| phase | llama ms | llama launches | ours ms | ours launches | ours/llama |
+|---|---|---|---|---|---|
+| `gdn_recur` | 47.20 | 144 | **272.07** | **144** | **5.76×** |
+| `gemm` | 176.83 | 1,464 | **154.19** | 1,200 | **0.87×** |
+| `attention` | 51.65 | 48 | 136.83 | 180 | 2.65× |
+| `other` (dtype/concat glue) | 96.23 | **4,827** | 24.95 | 698 | 0.26× |
+| `norm` | 11.43 | 908 | 11.65 | 392 | 1.02× |
+| `silu_mlp` | 12.87 | 328 | 9.90 | 192 | 0.77× |
+| `copy`/cast | 0.21 | 99.5 | 1.84 | 350 | — |
+| **TOTAL traced** | **406.16** | **7,920** | **621.16** | **3,301** | **1.53×** |
+| launches/token | 1.93 | | **0.81** | | **0.42×** |
+
+**The pre-registered prediction (decision **L/C5**, written before the trace) is confirmed, and the launch
+count died first.** We launch **0.81 kernels/token against llama's 1.93** — we are the lean engine by 2.4× —
+so any remaining "maybe it's launch overhead" theory is dead on arrival. And the GDN line is the sharpest
+number in the table: **identical launch counts (144 each, both 8 per layer per 4,096 tokens) at 5.76× the
+time**, which leaves only one place for the difference to live: the per-token walk inside the kernel. The
+`--geom` census pins it further: llama runs `gated_delta_net` at 32 threads × 512 grid and ours at
+128 × 2,048, and **both land at 0.80 blocks/CU** — 16 workgroups on a 20-CU part, four CUs idle, in *both*
+engines. Neither engine is using the machine for the recurrence; llama just makes the serial step ~6× cheaper.
+
+**Two things this table says that were not the question.** First, **we now beat llama.cpp on GEMM** (154.19 ms
+vs 176.83 at 4,096 lanes, with 264 fewer launches) — §21 had us 3.5× *worse* there, so the hipBLASLt pinning
+work has flipped that phase, and GEMM is no longer a target. Second, llama pays **96 ms and 4,827 launches per
+pass** in `convert_unary_cont_vec4` / `concat_non_cont` — f16↔f32 conversion and concat glue its graph
+generator inserts — which is 24 % of its traced prefill and 61 % of its launch count. Our equivalent is 1.84 ms
+of `copy` and 2.6 ms of `cast`. That is a structural advantage of a hand-written engine and the reason its
+headline is worse than its phase sum suggests.
+
+**Honest limits.** Traced ms are upper bounds and the overstatement scales with launch count, so llama's
+96 ms of glue is an *inflated* number and its true total is below 406 ms (its untraced matched row is 394 ms —
+so the inflation here is small, ~3 %). Attention at 2.65× is still a real gap and a funded candidate, but it is
+now the second item, not the first: at 137 ms against llama's 52 ms it is worth 85 ms where GDN is worth 225.
+And the sum: ours traced 621 ms vs our untraced wave `wall_ms` 628 (§37) vs `RESULT` 710 — the 82 ms between
+kernel sum and RESULT is host-side/launch gap outside any kernel, i.e. **12 % of the prefill is not in any
+phase row above**, a lever this table can size but not explain.
+
+**What gets funded next, per the pre-registration.** The GDN inner walk, not a third attention pass. The
+ceiling of the one GDN form already measured is modest and known (route A's LDS-resident collapse: 112.04 ms
+against a 125.36 ms shipped form at the 1,024-lane shape, 10.6 %, dead on its own kill line), so this is not
+a "try the drawer again" item: it needs a cheaper *per-token* step at ~1 wavefront per block, or a form that
+fills the four idle CUs. That is a new campaign and it is the largest single number left in the engine:
+43.8 % of our traced prefill, and 5.76× from the only external yardstick we have.

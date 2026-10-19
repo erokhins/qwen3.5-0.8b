@@ -1,0 +1,1054 @@
+loaded 335 tensors, 1.5457 GB resident in 392.6 ms (335 allocations)
+check_weights: PASS
+state: cap=514 GDN state 18.000 MiB + conv window 1.266 MiB + KV 6.023 MiB = 25.289 MiB (KV 12288 B/token, constant 19.266 MiB/request)
+STATE cap=514 gdn=18874368 conv=1327104 kv=6316032 total=26517504 per_token=12288
+LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=97 other=20 total=406
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=lt hipblas=3.6.0 attn_tile=1 attn_touch=1 attn_fattn=1 gdn_scan=seq gdn_chunk=64 gdn_spell=fused gdn_loop=512
+GEMM route=hipblaslt handle=1 workspace_mib=128 version=10.4.1 algo_source=heuristic-rank-0-per-shape heur_width=8 pins=2/2 pin_names=down_proj,deep_gate_proj+up_proj cand=0/3 stream=default
+GEMM-LT shape=q_proj N=4096 K=1024 M=512 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=7a0400000000000000000000000000000000000800000000
+GEMM-LT shape=k_proj+v_proj N=512 K=1024 M=512 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=d40300000000000000000000000000000000000800000000
+GEMM-LT shape=o_proj+out_proj N=1024 K=2048 M=512 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=370400000000000000000000000000000000000800000000
+GEMM-LT shape=in_proj_qkv N=6144 K=1024 M=512 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=940400000000000000000000000000000000000800000000
+GEMM-LT shape=in_proj_z N=2048 K=1024 M=512 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=510300000000000000000000000000000000000800000000
+GEMM-LT shape=gate_proj+up_proj N=3584 K=1024 M=512 source=pin ws=134217728 waves=0 skipped_ws=0 skipped_state=0 heur_returned=0 algo=820400000000000000000000000000000000000800000000
+GEMM-LT shape=down_proj N=1024 K=3584 M=512 source=pin ws=134217728 waves=0 skipped_ws=0 skipped_state=0 heur_returned=0 algo=890300000000000000000000000000000000000800000000
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+PREFILL tokens=512 logits=last prefix_len=512 wave_rows=512 pos=0..511
+prefill 0 | fed       1 | sampled       - | top       - | P 0 -> 1
+STEP kind=prefill index=0 input=1 sampled=-1 top_logit=none pos_before=0 pos_after=1 stop=0
+prefill 1 | fed       2 | sampled       - | top       - | P 1 -> 2
+STEP kind=prefill index=1 input=2 sampled=-1 top_logit=none pos_before=1 pos_after=2 stop=0
+prefill 2 | fed       3 | sampled       - | top       - | P 2 -> 3
+STEP kind=prefill index=2 input=3 sampled=-1 top_logit=none pos_before=2 pos_after=3 stop=0
+prefill 3 | fed       4 | sampled       - | top       - | P 3 -> 4
+STEP kind=prefill index=3 input=4 sampled=-1 top_logit=none pos_before=3 pos_after=4 stop=0
+prefill 4 | fed       5 | sampled       - | top       - | P 4 -> 5
+STEP kind=prefill index=4 input=5 sampled=-1 top_logit=none pos_before=4 pos_after=5 stop=0
+prefill 5 | fed       6 | sampled       - | top       - | P 5 -> 6
+STEP kind=prefill index=5 input=6 sampled=-1 top_logit=none pos_before=5 pos_after=6 stop=0
+prefill 6 | fed       7 | sampled       - | top       - | P 6 -> 7
+STEP kind=prefill index=6 input=7 sampled=-1 top_logit=none pos_before=6 pos_after=7 stop=0
+prefill 7 | fed       8 | sampled       - | top       - | P 7 -> 8
+STEP kind=prefill index=7 input=8 sampled=-1 top_logit=none pos_before=7 pos_after=8 stop=0
+prefill 8 | fed       9 | sampled       - | top       - | P 8 -> 9
+STEP kind=prefill index=8 input=9 sampled=-1 top_logit=none pos_before=8 pos_after=9 stop=0
+prefill 9 | fed      10 | sampled       - | top       - | P 9 -> 10
+STEP kind=prefill index=9 input=10 sampled=-1 top_logit=none pos_before=9 pos_after=10 stop=0
+prefill 10 | fed      11 | sampled       - | top       - | P 10 -> 11
+STEP kind=prefill index=10 input=11 sampled=-1 top_logit=none pos_before=10 pos_after=11 stop=0
+prefill 11 | fed      12 | sampled       - | top       - | P 11 -> 12
+STEP kind=prefill index=11 input=12 sampled=-1 top_logit=none pos_before=11 pos_after=12 stop=0
+prefill 12 | fed      13 | sampled       - | top       - | P 12 -> 13
+STEP kind=prefill index=12 input=13 sampled=-1 top_logit=none pos_before=12 pos_after=13 stop=0
+prefill 13 | fed      14 | sampled       - | top       - | P 13 -> 14
+STEP kind=prefill index=13 input=14 sampled=-1 top_logit=none pos_before=13 pos_after=14 stop=0
+prefill 14 | fed      15 | sampled       - | top       - | P 14 -> 15
+STEP kind=prefill index=14 input=15 sampled=-1 top_logit=none pos_before=14 pos_after=15 stop=0
+prefill 15 | fed      16 | sampled       - | top       - | P 15 -> 16
+STEP kind=prefill index=15 input=16 sampled=-1 top_logit=none pos_before=15 pos_after=16 stop=0
+prefill 16 | fed      17 | sampled       - | top       - | P 16 -> 17
+STEP kind=prefill index=16 input=17 sampled=-1 top_logit=none pos_before=16 pos_after=17 stop=0
+prefill 17 | fed      18 | sampled       - | top       - | P 17 -> 18
+STEP kind=prefill index=17 input=18 sampled=-1 top_logit=none pos_before=17 pos_after=18 stop=0
+prefill 18 | fed      19 | sampled       - | top       - | P 18 -> 19
+STEP kind=prefill index=18 input=19 sampled=-1 top_logit=none pos_before=18 pos_after=19 stop=0
+prefill 19 | fed      20 | sampled       - | top       - | P 19 -> 20
+STEP kind=prefill index=19 input=20 sampled=-1 top_logit=none pos_before=19 pos_after=20 stop=0
+prefill 20 | fed      21 | sampled       - | top       - | P 20 -> 21
+STEP kind=prefill index=20 input=21 sampled=-1 top_logit=none pos_before=20 pos_after=21 stop=0
+prefill 21 | fed      22 | sampled       - | top       - | P 21 -> 22
+STEP kind=prefill index=21 input=22 sampled=-1 top_logit=none pos_before=21 pos_after=22 stop=0
+prefill 22 | fed      23 | sampled       - | top       - | P 22 -> 23
+STEP kind=prefill index=22 input=23 sampled=-1 top_logit=none pos_before=22 pos_after=23 stop=0
+prefill 23 | fed      24 | sampled       - | top       - | P 23 -> 24
+STEP kind=prefill index=23 input=24 sampled=-1 top_logit=none pos_before=23 pos_after=24 stop=0
+prefill 24 | fed      25 | sampled       - | top       - | P 24 -> 25
+STEP kind=prefill index=24 input=25 sampled=-1 top_logit=none pos_before=24 pos_after=25 stop=0
+prefill 25 | fed      26 | sampled       - | top       - | P 25 -> 26
+STEP kind=prefill index=25 input=26 sampled=-1 top_logit=none pos_before=25 pos_after=26 stop=0
+prefill 26 | fed      27 | sampled       - | top       - | P 26 -> 27
+STEP kind=prefill index=26 input=27 sampled=-1 top_logit=none pos_before=26 pos_after=27 stop=0
+prefill 27 | fed      28 | sampled       - | top       - | P 27 -> 28
+STEP kind=prefill index=27 input=28 sampled=-1 top_logit=none pos_before=27 pos_after=28 stop=0
+prefill 28 | fed      29 | sampled       - | top       - | P 28 -> 29
+STEP kind=prefill index=28 input=29 sampled=-1 top_logit=none pos_before=28 pos_after=29 stop=0
+prefill 29 | fed      30 | sampled       - | top       - | P 29 -> 30
+STEP kind=prefill index=29 input=30 sampled=-1 top_logit=none pos_before=29 pos_after=30 stop=0
+prefill 30 | fed      31 | sampled       - | top       - | P 30 -> 31
+STEP kind=prefill index=30 input=31 sampled=-1 top_logit=none pos_before=30 pos_after=31 stop=0
+prefill 31 | fed      32 | sampled       - | top       - | P 31 -> 32
+STEP kind=prefill index=31 input=32 sampled=-1 top_logit=none pos_before=31 pos_after=32 stop=0
+prefill 32 | fed      33 | sampled       - | top       - | P 32 -> 33
+STEP kind=prefill index=32 input=33 sampled=-1 top_logit=none pos_before=32 pos_after=33 stop=0
+prefill 33 | fed      34 | sampled       - | top       - | P 33 -> 34
+STEP kind=prefill index=33 input=34 sampled=-1 top_logit=none pos_before=33 pos_after=34 stop=0
+prefill 34 | fed      35 | sampled       - | top       - | P 34 -> 35
+STEP kind=prefill index=34 input=35 sampled=-1 top_logit=none pos_before=34 pos_after=35 stop=0
+prefill 35 | fed      36 | sampled       - | top       - | P 35 -> 36
+STEP kind=prefill index=35 input=36 sampled=-1 top_logit=none pos_before=35 pos_after=36 stop=0
+prefill 36 | fed      37 | sampled       - | top       - | P 36 -> 37
+STEP kind=prefill index=36 input=37 sampled=-1 top_logit=none pos_before=36 pos_after=37 stop=0
+prefill 37 | fed      38 | sampled       - | top       - | P 37 -> 38
+STEP kind=prefill index=37 input=38 sampled=-1 top_logit=none pos_before=37 pos_after=38 stop=0
+prefill 38 | fed      39 | sampled       - | top       - | P 38 -> 39
+STEP kind=prefill index=38 input=39 sampled=-1 top_logit=none pos_before=38 pos_after=39 stop=0
+prefill 39 | fed      40 | sampled       - | top       - | P 39 -> 40
+STEP kind=prefill index=39 input=40 sampled=-1 top_logit=none pos_before=39 pos_after=40 stop=0
+prefill 40 | fed      41 | sampled       - | top       - | P 40 -> 41
+STEP kind=prefill index=40 input=41 sampled=-1 top_logit=none pos_before=40 pos_after=41 stop=0
+prefill 41 | fed      42 | sampled       - | top       - | P 41 -> 42
+STEP kind=prefill index=41 input=42 sampled=-1 top_logit=none pos_before=41 pos_after=42 stop=0
+prefill 42 | fed      43 | sampled       - | top       - | P 42 -> 43
+STEP kind=prefill index=42 input=43 sampled=-1 top_logit=none pos_before=42 pos_after=43 stop=0
+prefill 43 | fed      44 | sampled       - | top       - | P 43 -> 44
+STEP kind=prefill index=43 input=44 sampled=-1 top_logit=none pos_before=43 pos_after=44 stop=0
+prefill 44 | fed      45 | sampled       - | top       - | P 44 -> 45
+STEP kind=prefill index=44 input=45 sampled=-1 top_logit=none pos_before=44 pos_after=45 stop=0
+prefill 45 | fed      46 | sampled       - | top       - | P 45 -> 46
+STEP kind=prefill index=45 input=46 sampled=-1 top_logit=none pos_before=45 pos_after=46 stop=0
+prefill 46 | fed      47 | sampled       - | top       - | P 46 -> 47
+STEP kind=prefill index=46 input=47 sampled=-1 top_logit=none pos_before=46 pos_after=47 stop=0
+prefill 47 | fed      48 | sampled       - | top       - | P 47 -> 48
+STEP kind=prefill index=47 input=48 sampled=-1 top_logit=none pos_before=47 pos_after=48 stop=0
+prefill 48 | fed      49 | sampled       - | top       - | P 48 -> 49
+STEP kind=prefill index=48 input=49 sampled=-1 top_logit=none pos_before=48 pos_after=49 stop=0
+prefill 49 | fed      50 | sampled       - | top       - | P 49 -> 50
+STEP kind=prefill index=49 input=50 sampled=-1 top_logit=none pos_before=49 pos_after=50 stop=0
+prefill 50 | fed      51 | sampled       - | top       - | P 50 -> 51
+STEP kind=prefill index=50 input=51 sampled=-1 top_logit=none pos_before=50 pos_after=51 stop=0
+prefill 51 | fed      52 | sampled       - | top       - | P 51 -> 52
+STEP kind=prefill index=51 input=52 sampled=-1 top_logit=none pos_before=51 pos_after=52 stop=0
+prefill 52 | fed      53 | sampled       - | top       - | P 52 -> 53
+STEP kind=prefill index=52 input=53 sampled=-1 top_logit=none pos_before=52 pos_after=53 stop=0
+prefill 53 | fed      54 | sampled       - | top       - | P 53 -> 54
+STEP kind=prefill index=53 input=54 sampled=-1 top_logit=none pos_before=53 pos_after=54 stop=0
+prefill 54 | fed      55 | sampled       - | top       - | P 54 -> 55
+STEP kind=prefill index=54 input=55 sampled=-1 top_logit=none pos_before=54 pos_after=55 stop=0
+prefill 55 | fed      56 | sampled       - | top       - | P 55 -> 56
+STEP kind=prefill index=55 input=56 sampled=-1 top_logit=none pos_before=55 pos_after=56 stop=0
+prefill 56 | fed      57 | sampled       - | top       - | P 56 -> 57
+STEP kind=prefill index=56 input=57 sampled=-1 top_logit=none pos_before=56 pos_after=57 stop=0
+prefill 57 | fed      58 | sampled       - | top       - | P 57 -> 58
+STEP kind=prefill index=57 input=58 sampled=-1 top_logit=none pos_before=57 pos_after=58 stop=0
+prefill 58 | fed      59 | sampled       - | top       - | P 58 -> 59
+STEP kind=prefill index=58 input=59 sampled=-1 top_logit=none pos_before=58 pos_after=59 stop=0
+prefill 59 | fed      60 | sampled       - | top       - | P 59 -> 60
+STEP kind=prefill index=59 input=60 sampled=-1 top_logit=none pos_before=59 pos_after=60 stop=0
+prefill 60 | fed      61 | sampled       - | top       - | P 60 -> 61
+STEP kind=prefill index=60 input=61 sampled=-1 top_logit=none pos_before=60 pos_after=61 stop=0
+prefill 61 | fed      62 | sampled       - | top       - | P 61 -> 62
+STEP kind=prefill index=61 input=62 sampled=-1 top_logit=none pos_before=61 pos_after=62 stop=0
+prefill 62 | fed      63 | sampled       - | top       - | P 62 -> 63
+STEP kind=prefill index=62 input=63 sampled=-1 top_logit=none pos_before=62 pos_after=63 stop=0
+prefill 63 | fed      64 | sampled       - | top       - | P 63 -> 64
+STEP kind=prefill index=63 input=64 sampled=-1 top_logit=none pos_before=63 pos_after=64 stop=0
+prefill 64 | fed      65 | sampled       - | top       - | P 64 -> 65
+STEP kind=prefill index=64 input=65 sampled=-1 top_logit=none pos_before=64 pos_after=65 stop=0
+prefill 65 | fed      66 | sampled       - | top       - | P 65 -> 66
+STEP kind=prefill index=65 input=66 sampled=-1 top_logit=none pos_before=65 pos_after=66 stop=0
+prefill 66 | fed      67 | sampled       - | top       - | P 66 -> 67
+STEP kind=prefill index=66 input=67 sampled=-1 top_logit=none pos_before=66 pos_after=67 stop=0
+prefill 67 | fed      68 | sampled       - | top       - | P 67 -> 68
+STEP kind=prefill index=67 input=68 sampled=-1 top_logit=none pos_before=67 pos_after=68 stop=0
+prefill 68 | fed      69 | sampled       - | top       - | P 68 -> 69
+STEP kind=prefill index=68 input=69 sampled=-1 top_logit=none pos_before=68 pos_after=69 stop=0
+prefill 69 | fed      70 | sampled       - | top       - | P 69 -> 70
+STEP kind=prefill index=69 input=70 sampled=-1 top_logit=none pos_before=69 pos_after=70 stop=0
+prefill 70 | fed      71 | sampled       - | top       - | P 70 -> 71
+STEP kind=prefill index=70 input=71 sampled=-1 top_logit=none pos_before=70 pos_after=71 stop=0
+prefill 71 | fed      72 | sampled       - | top       - | P 71 -> 72
+STEP kind=prefill index=71 input=72 sampled=-1 top_logit=none pos_before=71 pos_after=72 stop=0
+prefill 72 | fed      73 | sampled       - | top       - | P 72 -> 73
+STEP kind=prefill index=72 input=73 sampled=-1 top_logit=none pos_before=72 pos_after=73 stop=0
+prefill 73 | fed      74 | sampled       - | top       - | P 73 -> 74
+STEP kind=prefill index=73 input=74 sampled=-1 top_logit=none pos_before=73 pos_after=74 stop=0
+prefill 74 | fed      75 | sampled       - | top       - | P 74 -> 75
+STEP kind=prefill index=74 input=75 sampled=-1 top_logit=none pos_before=74 pos_after=75 stop=0
+prefill 75 | fed      76 | sampled       - | top       - | P 75 -> 76
+STEP kind=prefill index=75 input=76 sampled=-1 top_logit=none pos_before=75 pos_after=76 stop=0
+prefill 76 | fed      77 | sampled       - | top       - | P 76 -> 77
+STEP kind=prefill index=76 input=77 sampled=-1 top_logit=none pos_before=76 pos_after=77 stop=0
+prefill 77 | fed      78 | sampled       - | top       - | P 77 -> 78
+STEP kind=prefill index=77 input=78 sampled=-1 top_logit=none pos_before=77 pos_after=78 stop=0
+prefill 78 | fed      79 | sampled       - | top       - | P 78 -> 79
+STEP kind=prefill index=78 input=79 sampled=-1 top_logit=none pos_before=78 pos_after=79 stop=0
+prefill 79 | fed      80 | sampled       - | top       - | P 79 -> 80
+STEP kind=prefill index=79 input=80 sampled=-1 top_logit=none pos_before=79 pos_after=80 stop=0
+prefill 80 | fed      81 | sampled       - | top       - | P 80 -> 81
+STEP kind=prefill index=80 input=81 sampled=-1 top_logit=none pos_before=80 pos_after=81 stop=0
+prefill 81 | fed      82 | sampled       - | top       - | P 81 -> 82
+STEP kind=prefill index=81 input=82 sampled=-1 top_logit=none pos_before=81 pos_after=82 stop=0
+prefill 82 | fed      83 | sampled       - | top       - | P 82 -> 83
+STEP kind=prefill index=82 input=83 sampled=-1 top_logit=none pos_before=82 pos_after=83 stop=0
+prefill 83 | fed      84 | sampled       - | top       - | P 83 -> 84
+STEP kind=prefill index=83 input=84 sampled=-1 top_logit=none pos_before=83 pos_after=84 stop=0
+prefill 84 | fed      85 | sampled       - | top       - | P 84 -> 85
+STEP kind=prefill index=84 input=85 sampled=-1 top_logit=none pos_before=84 pos_after=85 stop=0
+prefill 85 | fed      86 | sampled       - | top       - | P 85 -> 86
+STEP kind=prefill index=85 input=86 sampled=-1 top_logit=none pos_before=85 pos_after=86 stop=0
+prefill 86 | fed      87 | sampled       - | top       - | P 86 -> 87
+STEP kind=prefill index=86 input=87 sampled=-1 top_logit=none pos_before=86 pos_after=87 stop=0
+prefill 87 | fed      88 | sampled       - | top       - | P 87 -> 88
+STEP kind=prefill index=87 input=88 sampled=-1 top_logit=none pos_before=87 pos_after=88 stop=0
+prefill 88 | fed      89 | sampled       - | top       - | P 88 -> 89
+STEP kind=prefill index=88 input=89 sampled=-1 top_logit=none pos_before=88 pos_after=89 stop=0
+prefill 89 | fed      90 | sampled       - | top       - | P 89 -> 90
+STEP kind=prefill index=89 input=90 sampled=-1 top_logit=none pos_before=89 pos_after=90 stop=0
+prefill 90 | fed      91 | sampled       - | top       - | P 90 -> 91
+STEP kind=prefill index=90 input=91 sampled=-1 top_logit=none pos_before=90 pos_after=91 stop=0
+prefill 91 | fed      92 | sampled       - | top       - | P 91 -> 92
+STEP kind=prefill index=91 input=92 sampled=-1 top_logit=none pos_before=91 pos_after=92 stop=0
+prefill 92 | fed      93 | sampled       - | top       - | P 92 -> 93
+STEP kind=prefill index=92 input=93 sampled=-1 top_logit=none pos_before=92 pos_after=93 stop=0
+prefill 93 | fed      94 | sampled       - | top       - | P 93 -> 94
+STEP kind=prefill index=93 input=94 sampled=-1 top_logit=none pos_before=93 pos_after=94 stop=0
+prefill 94 | fed      95 | sampled       - | top       - | P 94 -> 95
+STEP kind=prefill index=94 input=95 sampled=-1 top_logit=none pos_before=94 pos_after=95 stop=0
+prefill 95 | fed      96 | sampled       - | top       - | P 95 -> 96
+STEP kind=prefill index=95 input=96 sampled=-1 top_logit=none pos_before=95 pos_after=96 stop=0
+prefill 96 | fed      97 | sampled       - | top       - | P 96 -> 97
+STEP kind=prefill index=96 input=97 sampled=-1 top_logit=none pos_before=96 pos_after=97 stop=0
+prefill 97 | fed      98 | sampled       - | top       - | P 97 -> 98
+STEP kind=prefill index=97 input=98 sampled=-1 top_logit=none pos_before=97 pos_after=98 stop=0
+prefill 98 | fed      99 | sampled       - | top       - | P 98 -> 99
+STEP kind=prefill index=98 input=99 sampled=-1 top_logit=none pos_before=98 pos_after=99 stop=0
+prefill 99 | fed     100 | sampled       - | top       - | P 99 -> 100
+STEP kind=prefill index=99 input=100 sampled=-1 top_logit=none pos_before=99 pos_after=100 stop=0
+prefill 100 | fed     101 | sampled       - | top       - | P 100 -> 101
+STEP kind=prefill index=100 input=101 sampled=-1 top_logit=none pos_before=100 pos_after=101 stop=0
+prefill 101 | fed     102 | sampled       - | top       - | P 101 -> 102
+STEP kind=prefill index=101 input=102 sampled=-1 top_logit=none pos_before=101 pos_after=102 stop=0
+prefill 102 | fed     103 | sampled       - | top       - | P 102 -> 103
+STEP kind=prefill index=102 input=103 sampled=-1 top_logit=none pos_before=102 pos_after=103 stop=0
+prefill 103 | fed     104 | sampled       - | top       - | P 103 -> 104
+STEP kind=prefill index=103 input=104 sampled=-1 top_logit=none pos_before=103 pos_after=104 stop=0
+prefill 104 | fed     105 | sampled       - | top       - | P 104 -> 105
+STEP kind=prefill index=104 input=105 sampled=-1 top_logit=none pos_before=104 pos_after=105 stop=0
+prefill 105 | fed     106 | sampled       - | top       - | P 105 -> 106
+STEP kind=prefill index=105 input=106 sampled=-1 top_logit=none pos_before=105 pos_after=106 stop=0
+prefill 106 | fed     107 | sampled       - | top       - | P 106 -> 107
+STEP kind=prefill index=106 input=107 sampled=-1 top_logit=none pos_before=106 pos_after=107 stop=0
+prefill 107 | fed     108 | sampled       - | top       - | P 107 -> 108
+STEP kind=prefill index=107 input=108 sampled=-1 top_logit=none pos_before=107 pos_after=108 stop=0
+prefill 108 | fed     109 | sampled       - | top       - | P 108 -> 109
+STEP kind=prefill index=108 input=109 sampled=-1 top_logit=none pos_before=108 pos_after=109 stop=0
+prefill 109 | fed     110 | sampled       - | top       - | P 109 -> 110
+STEP kind=prefill index=109 input=110 sampled=-1 top_logit=none pos_before=109 pos_after=110 stop=0
+prefill 110 | fed     111 | sampled       - | top       - | P 110 -> 111
+STEP kind=prefill index=110 input=111 sampled=-1 top_logit=none pos_before=110 pos_after=111 stop=0
+prefill 111 | fed     112 | sampled       - | top       - | P 111 -> 112
+STEP kind=prefill index=111 input=112 sampled=-1 top_logit=none pos_before=111 pos_after=112 stop=0
+prefill 112 | fed     113 | sampled       - | top       - | P 112 -> 113
+STEP kind=prefill index=112 input=113 sampled=-1 top_logit=none pos_before=112 pos_after=113 stop=0
+prefill 113 | fed     114 | sampled       - | top       - | P 113 -> 114
+STEP kind=prefill index=113 input=114 sampled=-1 top_logit=none pos_before=113 pos_after=114 stop=0
+prefill 114 | fed     115 | sampled       - | top       - | P 114 -> 115
+STEP kind=prefill index=114 input=115 sampled=-1 top_logit=none pos_before=114 pos_after=115 stop=0
+prefill 115 | fed     116 | sampled       - | top       - | P 115 -> 116
+STEP kind=prefill index=115 input=116 sampled=-1 top_logit=none pos_before=115 pos_after=116 stop=0
+prefill 116 | fed     117 | sampled       - | top       - | P 116 -> 117
+STEP kind=prefill index=116 input=117 sampled=-1 top_logit=none pos_before=116 pos_after=117 stop=0
+prefill 117 | fed     118 | sampled       - | top       - | P 117 -> 118
+STEP kind=prefill index=117 input=118 sampled=-1 top_logit=none pos_before=117 pos_after=118 stop=0
+prefill 118 | fed     119 | sampled       - | top       - | P 118 -> 119
+STEP kind=prefill index=118 input=119 sampled=-1 top_logit=none pos_before=118 pos_after=119 stop=0
+prefill 119 | fed     120 | sampled       - | top       - | P 119 -> 120
+STEP kind=prefill index=119 input=120 sampled=-1 top_logit=none pos_before=119 pos_after=120 stop=0
+prefill 120 | fed     121 | sampled       - | top       - | P 120 -> 121
+STEP kind=prefill index=120 input=121 sampled=-1 top_logit=none pos_before=120 pos_after=121 stop=0
+prefill 121 | fed     122 | sampled       - | top       - | P 121 -> 122
+STEP kind=prefill index=121 input=122 sampled=-1 top_logit=none pos_before=121 pos_after=122 stop=0
+prefill 122 | fed     123 | sampled       - | top       - | P 122 -> 123
+STEP kind=prefill index=122 input=123 sampled=-1 top_logit=none pos_before=122 pos_after=123 stop=0
+prefill 123 | fed     124 | sampled       - | top       - | P 123 -> 124
+STEP kind=prefill index=123 input=124 sampled=-1 top_logit=none pos_before=123 pos_after=124 stop=0
+prefill 124 | fed     125 | sampled       - | top       - | P 124 -> 125
+STEP kind=prefill index=124 input=125 sampled=-1 top_logit=none pos_before=124 pos_after=125 stop=0
+prefill 125 | fed     126 | sampled       - | top       - | P 125 -> 126
+STEP kind=prefill index=125 input=126 sampled=-1 top_logit=none pos_before=125 pos_after=126 stop=0
+prefill 126 | fed     127 | sampled       - | top       - | P 126 -> 127
+STEP kind=prefill index=126 input=127 sampled=-1 top_logit=none pos_before=126 pos_after=127 stop=0
+prefill 127 | fed     128 | sampled       - | top       - | P 127 -> 128
+STEP kind=prefill index=127 input=128 sampled=-1 top_logit=none pos_before=127 pos_after=128 stop=0
+prefill 128 | fed     129 | sampled       - | top       - | P 128 -> 129
+STEP kind=prefill index=128 input=129 sampled=-1 top_logit=none pos_before=128 pos_after=129 stop=0
+prefill 129 | fed     130 | sampled       - | top       - | P 129 -> 130
+STEP kind=prefill index=129 input=130 sampled=-1 top_logit=none pos_before=129 pos_after=130 stop=0
+prefill 130 | fed     131 | sampled       - | top       - | P 130 -> 131
+STEP kind=prefill index=130 input=131 sampled=-1 top_logit=none pos_before=130 pos_after=131 stop=0
+prefill 131 | fed     132 | sampled       - | top       - | P 131 -> 132
+STEP kind=prefill index=131 input=132 sampled=-1 top_logit=none pos_before=131 pos_after=132 stop=0
+prefill 132 | fed     133 | sampled       - | top       - | P 132 -> 133
+STEP kind=prefill index=132 input=133 sampled=-1 top_logit=none pos_before=132 pos_after=133 stop=0
+prefill 133 | fed     134 | sampled       - | top       - | P 133 -> 134
+STEP kind=prefill index=133 input=134 sampled=-1 top_logit=none pos_before=133 pos_after=134 stop=0
+prefill 134 | fed     135 | sampled       - | top       - | P 134 -> 135
+STEP kind=prefill index=134 input=135 sampled=-1 top_logit=none pos_before=134 pos_after=135 stop=0
+prefill 135 | fed     136 | sampled       - | top       - | P 135 -> 136
+STEP kind=prefill index=135 input=136 sampled=-1 top_logit=none pos_before=135 pos_after=136 stop=0
+prefill 136 | fed     137 | sampled       - | top       - | P 136 -> 137
+STEP kind=prefill index=136 input=137 sampled=-1 top_logit=none pos_before=136 pos_after=137 stop=0
+prefill 137 | fed     138 | sampled       - | top       - | P 137 -> 138
+STEP kind=prefill index=137 input=138 sampled=-1 top_logit=none pos_before=137 pos_after=138 stop=0
+prefill 138 | fed     139 | sampled       - | top       - | P 138 -> 139
+STEP kind=prefill index=138 input=139 sampled=-1 top_logit=none pos_before=138 pos_after=139 stop=0
+prefill 139 | fed     140 | sampled       - | top       - | P 139 -> 140
+STEP kind=prefill index=139 input=140 sampled=-1 top_logit=none pos_before=139 pos_after=140 stop=0
+prefill 140 | fed     141 | sampled       - | top       - | P 140 -> 141
+STEP kind=prefill index=140 input=141 sampled=-1 top_logit=none pos_before=140 pos_after=141 stop=0
+prefill 141 | fed     142 | sampled       - | top       - | P 141 -> 142
+STEP kind=prefill index=141 input=142 sampled=-1 top_logit=none pos_before=141 pos_after=142 stop=0
+prefill 142 | fed     143 | sampled       - | top       - | P 142 -> 143
+STEP kind=prefill index=142 input=143 sampled=-1 top_logit=none pos_before=142 pos_after=143 stop=0
+prefill 143 | fed     144 | sampled       - | top       - | P 143 -> 144
+STEP kind=prefill index=143 input=144 sampled=-1 top_logit=none pos_before=143 pos_after=144 stop=0
+prefill 144 | fed     145 | sampled       - | top       - | P 144 -> 145
+STEP kind=prefill index=144 input=145 sampled=-1 top_logit=none pos_before=144 pos_after=145 stop=0
+prefill 145 | fed     146 | sampled       - | top       - | P 145 -> 146
+STEP kind=prefill index=145 input=146 sampled=-1 top_logit=none pos_before=145 pos_after=146 stop=0
+prefill 146 | fed     147 | sampled       - | top       - | P 146 -> 147
+STEP kind=prefill index=146 input=147 sampled=-1 top_logit=none pos_before=146 pos_after=147 stop=0
+prefill 147 | fed     148 | sampled       - | top       - | P 147 -> 148
+STEP kind=prefill index=147 input=148 sampled=-1 top_logit=none pos_before=147 pos_after=148 stop=0
+prefill 148 | fed     149 | sampled       - | top       - | P 148 -> 149
+STEP kind=prefill index=148 input=149 sampled=-1 top_logit=none pos_before=148 pos_after=149 stop=0
+prefill 149 | fed     150 | sampled       - | top       - | P 149 -> 150
+STEP kind=prefill index=149 input=150 sampled=-1 top_logit=none pos_before=149 pos_after=150 stop=0
+prefill 150 | fed     151 | sampled       - | top       - | P 150 -> 151
+STEP kind=prefill index=150 input=151 sampled=-1 top_logit=none pos_before=150 pos_after=151 stop=0
+prefill 151 | fed     152 | sampled       - | top       - | P 151 -> 152
+STEP kind=prefill index=151 input=152 sampled=-1 top_logit=none pos_before=151 pos_after=152 stop=0
+prefill 152 | fed     153 | sampled       - | top       - | P 152 -> 153
+STEP kind=prefill index=152 input=153 sampled=-1 top_logit=none pos_before=152 pos_after=153 stop=0
+prefill 153 | fed     154 | sampled       - | top       - | P 153 -> 154
+STEP kind=prefill index=153 input=154 sampled=-1 top_logit=none pos_before=153 pos_after=154 stop=0
+prefill 154 | fed     155 | sampled       - | top       - | P 154 -> 155
+STEP kind=prefill index=154 input=155 sampled=-1 top_logit=none pos_before=154 pos_after=155 stop=0
+prefill 155 | fed     156 | sampled       - | top       - | P 155 -> 156
+STEP kind=prefill index=155 input=156 sampled=-1 top_logit=none pos_before=155 pos_after=156 stop=0
+prefill 156 | fed     157 | sampled       - | top       - | P 156 -> 157
+STEP kind=prefill index=156 input=157 sampled=-1 top_logit=none pos_before=156 pos_after=157 stop=0
+prefill 157 | fed     158 | sampled       - | top       - | P 157 -> 158
+STEP kind=prefill index=157 input=158 sampled=-1 top_logit=none pos_before=157 pos_after=158 stop=0
+prefill 158 | fed     159 | sampled       - | top       - | P 158 -> 159
+STEP kind=prefill index=158 input=159 sampled=-1 top_logit=none pos_before=158 pos_after=159 stop=0
+prefill 159 | fed     160 | sampled       - | top       - | P 159 -> 160
+STEP kind=prefill index=159 input=160 sampled=-1 top_logit=none pos_before=159 pos_after=160 stop=0
+prefill 160 | fed     161 | sampled       - | top       - | P 160 -> 161
+STEP kind=prefill index=160 input=161 sampled=-1 top_logit=none pos_before=160 pos_after=161 stop=0
+prefill 161 | fed     162 | sampled       - | top       - | P 161 -> 162
+STEP kind=prefill index=161 input=162 sampled=-1 top_logit=none pos_before=161 pos_after=162 stop=0
+prefill 162 | fed     163 | sampled       - | top       - | P 162 -> 163
+STEP kind=prefill index=162 input=163 sampled=-1 top_logit=none pos_before=162 pos_after=163 stop=0
+prefill 163 | fed     164 | sampled       - | top       - | P 163 -> 164
+STEP kind=prefill index=163 input=164 sampled=-1 top_logit=none pos_before=163 pos_after=164 stop=0
+prefill 164 | fed     165 | sampled       - | top       - | P 164 -> 165
+STEP kind=prefill index=164 input=165 sampled=-1 top_logit=none pos_before=164 pos_after=165 stop=0
+prefill 165 | fed     166 | sampled       - | top       - | P 165 -> 166
+STEP kind=prefill index=165 input=166 sampled=-1 top_logit=none pos_before=165 pos_after=166 stop=0
+prefill 166 | fed     167 | sampled       - | top       - | P 166 -> 167
+STEP kind=prefill index=166 input=167 sampled=-1 top_logit=none pos_before=166 pos_after=167 stop=0
+prefill 167 | fed     168 | sampled       - | top       - | P 167 -> 168
+STEP kind=prefill index=167 input=168 sampled=-1 top_logit=none pos_before=167 pos_after=168 stop=0
+prefill 168 | fed     169 | sampled       - | top       - | P 168 -> 169
+STEP kind=prefill index=168 input=169 sampled=-1 top_logit=none pos_before=168 pos_after=169 stop=0
+prefill 169 | fed     170 | sampled       - | top       - | P 169 -> 170
+STEP kind=prefill index=169 input=170 sampled=-1 top_logit=none pos_before=169 pos_after=170 stop=0
+prefill 170 | fed     171 | sampled       - | top       - | P 170 -> 171
+STEP kind=prefill index=170 input=171 sampled=-1 top_logit=none pos_before=170 pos_after=171 stop=0
+prefill 171 | fed     172 | sampled       - | top       - | P 171 -> 172
+STEP kind=prefill index=171 input=172 sampled=-1 top_logit=none pos_before=171 pos_after=172 stop=0
+prefill 172 | fed     173 | sampled       - | top       - | P 172 -> 173
+STEP kind=prefill index=172 input=173 sampled=-1 top_logit=none pos_before=172 pos_after=173 stop=0
+prefill 173 | fed     174 | sampled       - | top       - | P 173 -> 174
+STEP kind=prefill index=173 input=174 sampled=-1 top_logit=none pos_before=173 pos_after=174 stop=0
+prefill 174 | fed     175 | sampled       - | top       - | P 174 -> 175
+STEP kind=prefill index=174 input=175 sampled=-1 top_logit=none pos_before=174 pos_after=175 stop=0
+prefill 175 | fed     176 | sampled       - | top       - | P 175 -> 176
+STEP kind=prefill index=175 input=176 sampled=-1 top_logit=none pos_before=175 pos_after=176 stop=0
+prefill 176 | fed     177 | sampled       - | top       - | P 176 -> 177
+STEP kind=prefill index=176 input=177 sampled=-1 top_logit=none pos_before=176 pos_after=177 stop=0
+prefill 177 | fed     178 | sampled       - | top       - | P 177 -> 178
+STEP kind=prefill index=177 input=178 sampled=-1 top_logit=none pos_before=177 pos_after=178 stop=0
+prefill 178 | fed     179 | sampled       - | top       - | P 178 -> 179
+STEP kind=prefill index=178 input=179 sampled=-1 top_logit=none pos_before=178 pos_after=179 stop=0
+prefill 179 | fed     180 | sampled       - | top       - | P 179 -> 180
+STEP kind=prefill index=179 input=180 sampled=-1 top_logit=none pos_before=179 pos_after=180 stop=0
+prefill 180 | fed     181 | sampled       - | top       - | P 180 -> 181
+STEP kind=prefill index=180 input=181 sampled=-1 top_logit=none pos_before=180 pos_after=181 stop=0
+prefill 181 | fed     182 | sampled       - | top       - | P 181 -> 182
+STEP kind=prefill index=181 input=182 sampled=-1 top_logit=none pos_before=181 pos_after=182 stop=0
+prefill 182 | fed     183 | sampled       - | top       - | P 182 -> 183
+STEP kind=prefill index=182 input=183 sampled=-1 top_logit=none pos_before=182 pos_after=183 stop=0
+prefill 183 | fed     184 | sampled       - | top       - | P 183 -> 184
+STEP kind=prefill index=183 input=184 sampled=-1 top_logit=none pos_before=183 pos_after=184 stop=0
+prefill 184 | fed     185 | sampled       - | top       - | P 184 -> 185
+STEP kind=prefill index=184 input=185 sampled=-1 top_logit=none pos_before=184 pos_after=185 stop=0
+prefill 185 | fed     186 | sampled       - | top       - | P 185 -> 186
+STEP kind=prefill index=185 input=186 sampled=-1 top_logit=none pos_before=185 pos_after=186 stop=0
+prefill 186 | fed     187 | sampled       - | top       - | P 186 -> 187
+STEP kind=prefill index=186 input=187 sampled=-1 top_logit=none pos_before=186 pos_after=187 stop=0
+prefill 187 | fed     188 | sampled       - | top       - | P 187 -> 188
+STEP kind=prefill index=187 input=188 sampled=-1 top_logit=none pos_before=187 pos_after=188 stop=0
+prefill 188 | fed     189 | sampled       - | top       - | P 188 -> 189
+STEP kind=prefill index=188 input=189 sampled=-1 top_logit=none pos_before=188 pos_after=189 stop=0
+prefill 189 | fed     190 | sampled       - | top       - | P 189 -> 190
+STEP kind=prefill index=189 input=190 sampled=-1 top_logit=none pos_before=189 pos_after=190 stop=0
+prefill 190 | fed     191 | sampled       - | top       - | P 190 -> 191
+STEP kind=prefill index=190 input=191 sampled=-1 top_logit=none pos_before=190 pos_after=191 stop=0
+prefill 191 | fed     192 | sampled       - | top       - | P 191 -> 192
+STEP kind=prefill index=191 input=192 sampled=-1 top_logit=none pos_before=191 pos_after=192 stop=0
+prefill 192 | fed     193 | sampled       - | top       - | P 192 -> 193
+STEP kind=prefill index=192 input=193 sampled=-1 top_logit=none pos_before=192 pos_after=193 stop=0
+prefill 193 | fed     194 | sampled       - | top       - | P 193 -> 194
+STEP kind=prefill index=193 input=194 sampled=-1 top_logit=none pos_before=193 pos_after=194 stop=0
+prefill 194 | fed     195 | sampled       - | top       - | P 194 -> 195
+STEP kind=prefill index=194 input=195 sampled=-1 top_logit=none pos_before=194 pos_after=195 stop=0
+prefill 195 | fed     196 | sampled       - | top       - | P 195 -> 196
+STEP kind=prefill index=195 input=196 sampled=-1 top_logit=none pos_before=195 pos_after=196 stop=0
+prefill 196 | fed     197 | sampled       - | top       - | P 196 -> 197
+STEP kind=prefill index=196 input=197 sampled=-1 top_logit=none pos_before=196 pos_after=197 stop=0
+prefill 197 | fed     198 | sampled       - | top       - | P 197 -> 198
+STEP kind=prefill index=197 input=198 sampled=-1 top_logit=none pos_before=197 pos_after=198 stop=0
+prefill 198 | fed     199 | sampled       - | top       - | P 198 -> 199
+STEP kind=prefill index=198 input=199 sampled=-1 top_logit=none pos_before=198 pos_after=199 stop=0
+prefill 199 | fed     200 | sampled       - | top       - | P 199 -> 200
+STEP kind=prefill index=199 input=200 sampled=-1 top_logit=none pos_before=199 pos_after=200 stop=0
+prefill 200 | fed     201 | sampled       - | top       - | P 200 -> 201
+STEP kind=prefill index=200 input=201 sampled=-1 top_logit=none pos_before=200 pos_after=201 stop=0
+prefill 201 | fed     202 | sampled       - | top       - | P 201 -> 202
+STEP kind=prefill index=201 input=202 sampled=-1 top_logit=none pos_before=201 pos_after=202 stop=0
+prefill 202 | fed     203 | sampled       - | top       - | P 202 -> 203
+STEP kind=prefill index=202 input=203 sampled=-1 top_logit=none pos_before=202 pos_after=203 stop=0
+prefill 203 | fed     204 | sampled       - | top       - | P 203 -> 204
+STEP kind=prefill index=203 input=204 sampled=-1 top_logit=none pos_before=203 pos_after=204 stop=0
+prefill 204 | fed     205 | sampled       - | top       - | P 204 -> 205
+STEP kind=prefill index=204 input=205 sampled=-1 top_logit=none pos_before=204 pos_after=205 stop=0
+prefill 205 | fed     206 | sampled       - | top       - | P 205 -> 206
+STEP kind=prefill index=205 input=206 sampled=-1 top_logit=none pos_before=205 pos_after=206 stop=0
+prefill 206 | fed     207 | sampled       - | top       - | P 206 -> 207
+STEP kind=prefill index=206 input=207 sampled=-1 top_logit=none pos_before=206 pos_after=207 stop=0
+prefill 207 | fed     208 | sampled       - | top       - | P 207 -> 208
+STEP kind=prefill index=207 input=208 sampled=-1 top_logit=none pos_before=207 pos_after=208 stop=0
+prefill 208 | fed     209 | sampled       - | top       - | P 208 -> 209
+STEP kind=prefill index=208 input=209 sampled=-1 top_logit=none pos_before=208 pos_after=209 stop=0
+prefill 209 | fed     210 | sampled       - | top       - | P 209 -> 210
+STEP kind=prefill index=209 input=210 sampled=-1 top_logit=none pos_before=209 pos_after=210 stop=0
+prefill 210 | fed     211 | sampled       - | top       - | P 210 -> 211
+STEP kind=prefill index=210 input=211 sampled=-1 top_logit=none pos_before=210 pos_after=211 stop=0
+prefill 211 | fed     212 | sampled       - | top       - | P 211 -> 212
+STEP kind=prefill index=211 input=212 sampled=-1 top_logit=none pos_before=211 pos_after=212 stop=0
+prefill 212 | fed     213 | sampled       - | top       - | P 212 -> 213
+STEP kind=prefill index=212 input=213 sampled=-1 top_logit=none pos_before=212 pos_after=213 stop=0
+prefill 213 | fed     214 | sampled       - | top       - | P 213 -> 214
+STEP kind=prefill index=213 input=214 sampled=-1 top_logit=none pos_before=213 pos_after=214 stop=0
+prefill 214 | fed     215 | sampled       - | top       - | P 214 -> 215
+STEP kind=prefill index=214 input=215 sampled=-1 top_logit=none pos_before=214 pos_after=215 stop=0
+prefill 215 | fed     216 | sampled       - | top       - | P 215 -> 216
+STEP kind=prefill index=215 input=216 sampled=-1 top_logit=none pos_before=215 pos_after=216 stop=0
+prefill 216 | fed     217 | sampled       - | top       - | P 216 -> 217
+STEP kind=prefill index=216 input=217 sampled=-1 top_logit=none pos_before=216 pos_after=217 stop=0
+prefill 217 | fed     218 | sampled       - | top       - | P 217 -> 218
+STEP kind=prefill index=217 input=218 sampled=-1 top_logit=none pos_before=217 pos_after=218 stop=0
+prefill 218 | fed     219 | sampled       - | top       - | P 218 -> 219
+STEP kind=prefill index=218 input=219 sampled=-1 top_logit=none pos_before=218 pos_after=219 stop=0
+prefill 219 | fed     220 | sampled       - | top       - | P 219 -> 220
+STEP kind=prefill index=219 input=220 sampled=-1 top_logit=none pos_before=219 pos_after=220 stop=0
+prefill 220 | fed     221 | sampled       - | top       - | P 220 -> 221
+STEP kind=prefill index=220 input=221 sampled=-1 top_logit=none pos_before=220 pos_after=221 stop=0
+prefill 221 | fed     222 | sampled       - | top       - | P 221 -> 222
+STEP kind=prefill index=221 input=222 sampled=-1 top_logit=none pos_before=221 pos_after=222 stop=0
+prefill 222 | fed     223 | sampled       - | top       - | P 222 -> 223
+STEP kind=prefill index=222 input=223 sampled=-1 top_logit=none pos_before=222 pos_after=223 stop=0
+prefill 223 | fed     224 | sampled       - | top       - | P 223 -> 224
+STEP kind=prefill index=223 input=224 sampled=-1 top_logit=none pos_before=223 pos_after=224 stop=0
+prefill 224 | fed     225 | sampled       - | top       - | P 224 -> 225
+STEP kind=prefill index=224 input=225 sampled=-1 top_logit=none pos_before=224 pos_after=225 stop=0
+prefill 225 | fed     226 | sampled       - | top       - | P 225 -> 226
+STEP kind=prefill index=225 input=226 sampled=-1 top_logit=none pos_before=225 pos_after=226 stop=0
+prefill 226 | fed     227 | sampled       - | top       - | P 226 -> 227
+STEP kind=prefill index=226 input=227 sampled=-1 top_logit=none pos_before=226 pos_after=227 stop=0
+prefill 227 | fed     228 | sampled       - | top       - | P 227 -> 228
+STEP kind=prefill index=227 input=228 sampled=-1 top_logit=none pos_before=227 pos_after=228 stop=0
+prefill 228 | fed     229 | sampled       - | top       - | P 228 -> 229
+STEP kind=prefill index=228 input=229 sampled=-1 top_logit=none pos_before=228 pos_after=229 stop=0
+prefill 229 | fed     230 | sampled       - | top       - | P 229 -> 230
+STEP kind=prefill index=229 input=230 sampled=-1 top_logit=none pos_before=229 pos_after=230 stop=0
+prefill 230 | fed     231 | sampled       - | top       - | P 230 -> 231
+STEP kind=prefill index=230 input=231 sampled=-1 top_logit=none pos_before=230 pos_after=231 stop=0
+prefill 231 | fed     232 | sampled       - | top       - | P 231 -> 232
+STEP kind=prefill index=231 input=232 sampled=-1 top_logit=none pos_before=231 pos_after=232 stop=0
+prefill 232 | fed     233 | sampled       - | top       - | P 232 -> 233
+STEP kind=prefill index=232 input=233 sampled=-1 top_logit=none pos_before=232 pos_after=233 stop=0
+prefill 233 | fed     234 | sampled       - | top       - | P 233 -> 234
+STEP kind=prefill index=233 input=234 sampled=-1 top_logit=none pos_before=233 pos_after=234 stop=0
+prefill 234 | fed     235 | sampled       - | top       - | P 234 -> 235
+STEP kind=prefill index=234 input=235 sampled=-1 top_logit=none pos_before=234 pos_after=235 stop=0
+prefill 235 | fed     236 | sampled       - | top       - | P 235 -> 236
+STEP kind=prefill index=235 input=236 sampled=-1 top_logit=none pos_before=235 pos_after=236 stop=0
+prefill 236 | fed     237 | sampled       - | top       - | P 236 -> 237
+STEP kind=prefill index=236 input=237 sampled=-1 top_logit=none pos_before=236 pos_after=237 stop=0
+prefill 237 | fed     238 | sampled       - | top       - | P 237 -> 238
+STEP kind=prefill index=237 input=238 sampled=-1 top_logit=none pos_before=237 pos_after=238 stop=0
+prefill 238 | fed     239 | sampled       - | top       - | P 238 -> 239
+STEP kind=prefill index=238 input=239 sampled=-1 top_logit=none pos_before=238 pos_after=239 stop=0
+prefill 239 | fed     240 | sampled       - | top       - | P 239 -> 240
+STEP kind=prefill index=239 input=240 sampled=-1 top_logit=none pos_before=239 pos_after=240 stop=0
+prefill 240 | fed     241 | sampled       - | top       - | P 240 -> 241
+STEP kind=prefill index=240 input=241 sampled=-1 top_logit=none pos_before=240 pos_after=241 stop=0
+prefill 241 | fed     242 | sampled       - | top       - | P 241 -> 242
+STEP kind=prefill index=241 input=242 sampled=-1 top_logit=none pos_before=241 pos_after=242 stop=0
+prefill 242 | fed     243 | sampled       - | top       - | P 242 -> 243
+STEP kind=prefill index=242 input=243 sampled=-1 top_logit=none pos_before=242 pos_after=243 stop=0
+prefill 243 | fed     244 | sampled       - | top       - | P 243 -> 244
+STEP kind=prefill index=243 input=244 sampled=-1 top_logit=none pos_before=243 pos_after=244 stop=0
+prefill 244 | fed     245 | sampled       - | top       - | P 244 -> 245
+STEP kind=prefill index=244 input=245 sampled=-1 top_logit=none pos_before=244 pos_after=245 stop=0
+prefill 245 | fed     246 | sampled       - | top       - | P 245 -> 246
+STEP kind=prefill index=245 input=246 sampled=-1 top_logit=none pos_before=245 pos_after=246 stop=0
+prefill 246 | fed     247 | sampled       - | top       - | P 246 -> 247
+STEP kind=prefill index=246 input=247 sampled=-1 top_logit=none pos_before=246 pos_after=247 stop=0
+prefill 247 | fed     248 | sampled       - | top       - | P 247 -> 248
+STEP kind=prefill index=247 input=248 sampled=-1 top_logit=none pos_before=247 pos_after=248 stop=0
+prefill 248 | fed     249 | sampled       - | top       - | P 248 -> 249
+STEP kind=prefill index=248 input=249 sampled=-1 top_logit=none pos_before=248 pos_after=249 stop=0
+prefill 249 | fed     250 | sampled       - | top       - | P 249 -> 250
+STEP kind=prefill index=249 input=250 sampled=-1 top_logit=none pos_before=249 pos_after=250 stop=0
+prefill 250 | fed     251 | sampled       - | top       - | P 250 -> 251
+STEP kind=prefill index=250 input=251 sampled=-1 top_logit=none pos_before=250 pos_after=251 stop=0
+prefill 251 | fed     252 | sampled       - | top       - | P 251 -> 252
+STEP kind=prefill index=251 input=252 sampled=-1 top_logit=none pos_before=251 pos_after=252 stop=0
+prefill 252 | fed     253 | sampled       - | top       - | P 252 -> 253
+STEP kind=prefill index=252 input=253 sampled=-1 top_logit=none pos_before=252 pos_after=253 stop=0
+prefill 253 | fed     254 | sampled       - | top       - | P 253 -> 254
+STEP kind=prefill index=253 input=254 sampled=-1 top_logit=none pos_before=253 pos_after=254 stop=0
+prefill 254 | fed     255 | sampled       - | top       - | P 254 -> 255
+STEP kind=prefill index=254 input=255 sampled=-1 top_logit=none pos_before=254 pos_after=255 stop=0
+prefill 255 | fed     256 | sampled       - | top       - | P 255 -> 256
+STEP kind=prefill index=255 input=256 sampled=-1 top_logit=none pos_before=255 pos_after=256 stop=0
+prefill 256 | fed     257 | sampled       - | top       - | P 256 -> 257
+STEP kind=prefill index=256 input=257 sampled=-1 top_logit=none pos_before=256 pos_after=257 stop=0
+prefill 257 | fed     258 | sampled       - | top       - | P 257 -> 258
+STEP kind=prefill index=257 input=258 sampled=-1 top_logit=none pos_before=257 pos_after=258 stop=0
+prefill 258 | fed     259 | sampled       - | top       - | P 258 -> 259
+STEP kind=prefill index=258 input=259 sampled=-1 top_logit=none pos_before=258 pos_after=259 stop=0
+prefill 259 | fed     260 | sampled       - | top       - | P 259 -> 260
+STEP kind=prefill index=259 input=260 sampled=-1 top_logit=none pos_before=259 pos_after=260 stop=0
+prefill 260 | fed     261 | sampled       - | top       - | P 260 -> 261
+STEP kind=prefill index=260 input=261 sampled=-1 top_logit=none pos_before=260 pos_after=261 stop=0
+prefill 261 | fed     262 | sampled       - | top       - | P 261 -> 262
+STEP kind=prefill index=261 input=262 sampled=-1 top_logit=none pos_before=261 pos_after=262 stop=0
+prefill 262 | fed     263 | sampled       - | top       - | P 262 -> 263
+STEP kind=prefill index=262 input=263 sampled=-1 top_logit=none pos_before=262 pos_after=263 stop=0
+prefill 263 | fed     264 | sampled       - | top       - | P 263 -> 264
+STEP kind=prefill index=263 input=264 sampled=-1 top_logit=none pos_before=263 pos_after=264 stop=0
+prefill 264 | fed     265 | sampled       - | top       - | P 264 -> 265
+STEP kind=prefill index=264 input=265 sampled=-1 top_logit=none pos_before=264 pos_after=265 stop=0
+prefill 265 | fed     266 | sampled       - | top       - | P 265 -> 266
+STEP kind=prefill index=265 input=266 sampled=-1 top_logit=none pos_before=265 pos_after=266 stop=0
+prefill 266 | fed     267 | sampled       - | top       - | P 266 -> 267
+STEP kind=prefill index=266 input=267 sampled=-1 top_logit=none pos_before=266 pos_after=267 stop=0
+prefill 267 | fed     268 | sampled       - | top       - | P 267 -> 268
+STEP kind=prefill index=267 input=268 sampled=-1 top_logit=none pos_before=267 pos_after=268 stop=0
+prefill 268 | fed     269 | sampled       - | top       - | P 268 -> 269
+STEP kind=prefill index=268 input=269 sampled=-1 top_logit=none pos_before=268 pos_after=269 stop=0
+prefill 269 | fed     270 | sampled       - | top       - | P 269 -> 270
+STEP kind=prefill index=269 input=270 sampled=-1 top_logit=none pos_before=269 pos_after=270 stop=0
+prefill 270 | fed     271 | sampled       - | top       - | P 270 -> 271
+STEP kind=prefill index=270 input=271 sampled=-1 top_logit=none pos_before=270 pos_after=271 stop=0
+prefill 271 | fed     272 | sampled       - | top       - | P 271 -> 272
+STEP kind=prefill index=271 input=272 sampled=-1 top_logit=none pos_before=271 pos_after=272 stop=0
+prefill 272 | fed     273 | sampled       - | top       - | P 272 -> 273
+STEP kind=prefill index=272 input=273 sampled=-1 top_logit=none pos_before=272 pos_after=273 stop=0
+prefill 273 | fed     274 | sampled       - | top       - | P 273 -> 274
+STEP kind=prefill index=273 input=274 sampled=-1 top_logit=none pos_before=273 pos_after=274 stop=0
+prefill 274 | fed     275 | sampled       - | top       - | P 274 -> 275
+STEP kind=prefill index=274 input=275 sampled=-1 top_logit=none pos_before=274 pos_after=275 stop=0
+prefill 275 | fed     276 | sampled       - | top       - | P 275 -> 276
+STEP kind=prefill index=275 input=276 sampled=-1 top_logit=none pos_before=275 pos_after=276 stop=0
+prefill 276 | fed     277 | sampled       - | top       - | P 276 -> 277
+STEP kind=prefill index=276 input=277 sampled=-1 top_logit=none pos_before=276 pos_after=277 stop=0
+prefill 277 | fed     278 | sampled       - | top       - | P 277 -> 278
+STEP kind=prefill index=277 input=278 sampled=-1 top_logit=none pos_before=277 pos_after=278 stop=0
+prefill 278 | fed     279 | sampled       - | top       - | P 278 -> 279
+STEP kind=prefill index=278 input=279 sampled=-1 top_logit=none pos_before=278 pos_after=279 stop=0
+prefill 279 | fed     280 | sampled       - | top       - | P 279 -> 280
+STEP kind=prefill index=279 input=280 sampled=-1 top_logit=none pos_before=279 pos_after=280 stop=0
+prefill 280 | fed     281 | sampled       - | top       - | P 280 -> 281
+STEP kind=prefill index=280 input=281 sampled=-1 top_logit=none pos_before=280 pos_after=281 stop=0
+prefill 281 | fed     282 | sampled       - | top       - | P 281 -> 282
+STEP kind=prefill index=281 input=282 sampled=-1 top_logit=none pos_before=281 pos_after=282 stop=0
+prefill 282 | fed     283 | sampled       - | top       - | P 282 -> 283
+STEP kind=prefill index=282 input=283 sampled=-1 top_logit=none pos_before=282 pos_after=283 stop=0
+prefill 283 | fed     284 | sampled       - | top       - | P 283 -> 284
+STEP kind=prefill index=283 input=284 sampled=-1 top_logit=none pos_before=283 pos_after=284 stop=0
+prefill 284 | fed     285 | sampled       - | top       - | P 284 -> 285
+STEP kind=prefill index=284 input=285 sampled=-1 top_logit=none pos_before=284 pos_after=285 stop=0
+prefill 285 | fed     286 | sampled       - | top       - | P 285 -> 286
+STEP kind=prefill index=285 input=286 sampled=-1 top_logit=none pos_before=285 pos_after=286 stop=0
+prefill 286 | fed     287 | sampled       - | top       - | P 286 -> 287
+STEP kind=prefill index=286 input=287 sampled=-1 top_logit=none pos_before=286 pos_after=287 stop=0
+prefill 287 | fed     288 | sampled       - | top       - | P 287 -> 288
+STEP kind=prefill index=287 input=288 sampled=-1 top_logit=none pos_before=287 pos_after=288 stop=0
+prefill 288 | fed     289 | sampled       - | top       - | P 288 -> 289
+STEP kind=prefill index=288 input=289 sampled=-1 top_logit=none pos_before=288 pos_after=289 stop=0
+prefill 289 | fed     290 | sampled       - | top       - | P 289 -> 290
+STEP kind=prefill index=289 input=290 sampled=-1 top_logit=none pos_before=289 pos_after=290 stop=0
+prefill 290 | fed     291 | sampled       - | top       - | P 290 -> 291
+STEP kind=prefill index=290 input=291 sampled=-1 top_logit=none pos_before=290 pos_after=291 stop=0
+prefill 291 | fed     292 | sampled       - | top       - | P 291 -> 292
+STEP kind=prefill index=291 input=292 sampled=-1 top_logit=none pos_before=291 pos_after=292 stop=0
+prefill 292 | fed     293 | sampled       - | top       - | P 292 -> 293
+STEP kind=prefill index=292 input=293 sampled=-1 top_logit=none pos_before=292 pos_after=293 stop=0
+prefill 293 | fed     294 | sampled       - | top       - | P 293 -> 294
+STEP kind=prefill index=293 input=294 sampled=-1 top_logit=none pos_before=293 pos_after=294 stop=0
+prefill 294 | fed     295 | sampled       - | top       - | P 294 -> 295
+STEP kind=prefill index=294 input=295 sampled=-1 top_logit=none pos_before=294 pos_after=295 stop=0
+prefill 295 | fed     296 | sampled       - | top       - | P 295 -> 296
+STEP kind=prefill index=295 input=296 sampled=-1 top_logit=none pos_before=295 pos_after=296 stop=0
+prefill 296 | fed     297 | sampled       - | top       - | P 296 -> 297
+STEP kind=prefill index=296 input=297 sampled=-1 top_logit=none pos_before=296 pos_after=297 stop=0
+prefill 297 | fed     298 | sampled       - | top       - | P 297 -> 298
+STEP kind=prefill index=297 input=298 sampled=-1 top_logit=none pos_before=297 pos_after=298 stop=0
+prefill 298 | fed     299 | sampled       - | top       - | P 298 -> 299
+STEP kind=prefill index=298 input=299 sampled=-1 top_logit=none pos_before=298 pos_after=299 stop=0
+prefill 299 | fed     300 | sampled       - | top       - | P 299 -> 300
+STEP kind=prefill index=299 input=300 sampled=-1 top_logit=none pos_before=299 pos_after=300 stop=0
+prefill 300 | fed     301 | sampled       - | top       - | P 300 -> 301
+STEP kind=prefill index=300 input=301 sampled=-1 top_logit=none pos_before=300 pos_after=301 stop=0
+prefill 301 | fed     302 | sampled       - | top       - | P 301 -> 302
+STEP kind=prefill index=301 input=302 sampled=-1 top_logit=none pos_before=301 pos_after=302 stop=0
+prefill 302 | fed     303 | sampled       - | top       - | P 302 -> 303
+STEP kind=prefill index=302 input=303 sampled=-1 top_logit=none pos_before=302 pos_after=303 stop=0
+prefill 303 | fed     304 | sampled       - | top       - | P 303 -> 304
+STEP kind=prefill index=303 input=304 sampled=-1 top_logit=none pos_before=303 pos_after=304 stop=0
+prefill 304 | fed     305 | sampled       - | top       - | P 304 -> 305
+STEP kind=prefill index=304 input=305 sampled=-1 top_logit=none pos_before=304 pos_after=305 stop=0
+prefill 305 | fed     306 | sampled       - | top       - | P 305 -> 306
+STEP kind=prefill index=305 input=306 sampled=-1 top_logit=none pos_before=305 pos_after=306 stop=0
+prefill 306 | fed     307 | sampled       - | top       - | P 306 -> 307
+STEP kind=prefill index=306 input=307 sampled=-1 top_logit=none pos_before=306 pos_after=307 stop=0
+prefill 307 | fed     308 | sampled       - | top       - | P 307 -> 308
+STEP kind=prefill index=307 input=308 sampled=-1 top_logit=none pos_before=307 pos_after=308 stop=0
+prefill 308 | fed     309 | sampled       - | top       - | P 308 -> 309
+STEP kind=prefill index=308 input=309 sampled=-1 top_logit=none pos_before=308 pos_after=309 stop=0
+prefill 309 | fed     310 | sampled       - | top       - | P 309 -> 310
+STEP kind=prefill index=309 input=310 sampled=-1 top_logit=none pos_before=309 pos_after=310 stop=0
+prefill 310 | fed     311 | sampled       - | top       - | P 310 -> 311
+STEP kind=prefill index=310 input=311 sampled=-1 top_logit=none pos_before=310 pos_after=311 stop=0
+prefill 311 | fed     312 | sampled       - | top       - | P 311 -> 312
+STEP kind=prefill index=311 input=312 sampled=-1 top_logit=none pos_before=311 pos_after=312 stop=0
+prefill 312 | fed     313 | sampled       - | top       - | P 312 -> 313
+STEP kind=prefill index=312 input=313 sampled=-1 top_logit=none pos_before=312 pos_after=313 stop=0
+prefill 313 | fed     314 | sampled       - | top       - | P 313 -> 314
+STEP kind=prefill index=313 input=314 sampled=-1 top_logit=none pos_before=313 pos_after=314 stop=0
+prefill 314 | fed     315 | sampled       - | top       - | P 314 -> 315
+STEP kind=prefill index=314 input=315 sampled=-1 top_logit=none pos_before=314 pos_after=315 stop=0
+prefill 315 | fed     316 | sampled       - | top       - | P 315 -> 316
+STEP kind=prefill index=315 input=316 sampled=-1 top_logit=none pos_before=315 pos_after=316 stop=0
+prefill 316 | fed     317 | sampled       - | top       - | P 316 -> 317
+STEP kind=prefill index=316 input=317 sampled=-1 top_logit=none pos_before=316 pos_after=317 stop=0
+prefill 317 | fed     318 | sampled       - | top       - | P 317 -> 318
+STEP kind=prefill index=317 input=318 sampled=-1 top_logit=none pos_before=317 pos_after=318 stop=0
+prefill 318 | fed     319 | sampled       - | top       - | P 318 -> 319
+STEP kind=prefill index=318 input=319 sampled=-1 top_logit=none pos_before=318 pos_after=319 stop=0
+prefill 319 | fed     320 | sampled       - | top       - | P 319 -> 320
+STEP kind=prefill index=319 input=320 sampled=-1 top_logit=none pos_before=319 pos_after=320 stop=0
+prefill 320 | fed     321 | sampled       - | top       - | P 320 -> 321
+STEP kind=prefill index=320 input=321 sampled=-1 top_logit=none pos_before=320 pos_after=321 stop=0
+prefill 321 | fed     322 | sampled       - | top       - | P 321 -> 322
+STEP kind=prefill index=321 input=322 sampled=-1 top_logit=none pos_before=321 pos_after=322 stop=0
+prefill 322 | fed     323 | sampled       - | top       - | P 322 -> 323
+STEP kind=prefill index=322 input=323 sampled=-1 top_logit=none pos_before=322 pos_after=323 stop=0
+prefill 323 | fed     324 | sampled       - | top       - | P 323 -> 324
+STEP kind=prefill index=323 input=324 sampled=-1 top_logit=none pos_before=323 pos_after=324 stop=0
+prefill 324 | fed     325 | sampled       - | top       - | P 324 -> 325
+STEP kind=prefill index=324 input=325 sampled=-1 top_logit=none pos_before=324 pos_after=325 stop=0
+prefill 325 | fed     326 | sampled       - | top       - | P 325 -> 326
+STEP kind=prefill index=325 input=326 sampled=-1 top_logit=none pos_before=325 pos_after=326 stop=0
+prefill 326 | fed     327 | sampled       - | top       - | P 326 -> 327
+STEP kind=prefill index=326 input=327 sampled=-1 top_logit=none pos_before=326 pos_after=327 stop=0
+prefill 327 | fed     328 | sampled       - | top       - | P 327 -> 328
+STEP kind=prefill index=327 input=328 sampled=-1 top_logit=none pos_before=327 pos_after=328 stop=0
+prefill 328 | fed     329 | sampled       - | top       - | P 328 -> 329
+STEP kind=prefill index=328 input=329 sampled=-1 top_logit=none pos_before=328 pos_after=329 stop=0
+prefill 329 | fed     330 | sampled       - | top       - | P 329 -> 330
+STEP kind=prefill index=329 input=330 sampled=-1 top_logit=none pos_before=329 pos_after=330 stop=0
+prefill 330 | fed     331 | sampled       - | top       - | P 330 -> 331
+STEP kind=prefill index=330 input=331 sampled=-1 top_logit=none pos_before=330 pos_after=331 stop=0
+prefill 331 | fed     332 | sampled       - | top       - | P 331 -> 332
+STEP kind=prefill index=331 input=332 sampled=-1 top_logit=none pos_before=331 pos_after=332 stop=0
+prefill 332 | fed     333 | sampled       - | top       - | P 332 -> 333
+STEP kind=prefill index=332 input=333 sampled=-1 top_logit=none pos_before=332 pos_after=333 stop=0
+prefill 333 | fed     334 | sampled       - | top       - | P 333 -> 334
+STEP kind=prefill index=333 input=334 sampled=-1 top_logit=none pos_before=333 pos_after=334 stop=0
+prefill 334 | fed     335 | sampled       - | top       - | P 334 -> 335
+STEP kind=prefill index=334 input=335 sampled=-1 top_logit=none pos_before=334 pos_after=335 stop=0
+prefill 335 | fed     336 | sampled       - | top       - | P 335 -> 336
+STEP kind=prefill index=335 input=336 sampled=-1 top_logit=none pos_before=335 pos_after=336 stop=0
+prefill 336 | fed     337 | sampled       - | top       - | P 336 -> 337
+STEP kind=prefill index=336 input=337 sampled=-1 top_logit=none pos_before=336 pos_after=337 stop=0
+prefill 337 | fed     338 | sampled       - | top       - | P 337 -> 338
+STEP kind=prefill index=337 input=338 sampled=-1 top_logit=none pos_before=337 pos_after=338 stop=0
+prefill 338 | fed     339 | sampled       - | top       - | P 338 -> 339
+STEP kind=prefill index=338 input=339 sampled=-1 top_logit=none pos_before=338 pos_after=339 stop=0
+prefill 339 | fed     340 | sampled       - | top       - | P 339 -> 340
+STEP kind=prefill index=339 input=340 sampled=-1 top_logit=none pos_before=339 pos_after=340 stop=0
+prefill 340 | fed     341 | sampled       - | top       - | P 340 -> 341
+STEP kind=prefill index=340 input=341 sampled=-1 top_logit=none pos_before=340 pos_after=341 stop=0
+prefill 341 | fed     342 | sampled       - | top       - | P 341 -> 342
+STEP kind=prefill index=341 input=342 sampled=-1 top_logit=none pos_before=341 pos_after=342 stop=0
+prefill 342 | fed     343 | sampled       - | top       - | P 342 -> 343
+STEP kind=prefill index=342 input=343 sampled=-1 top_logit=none pos_before=342 pos_after=343 stop=0
+prefill 343 | fed     344 | sampled       - | top       - | P 343 -> 344
+STEP kind=prefill index=343 input=344 sampled=-1 top_logit=none pos_before=343 pos_after=344 stop=0
+prefill 344 | fed     345 | sampled       - | top       - | P 344 -> 345
+STEP kind=prefill index=344 input=345 sampled=-1 top_logit=none pos_before=344 pos_after=345 stop=0
+prefill 345 | fed     346 | sampled       - | top       - | P 345 -> 346
+STEP kind=prefill index=345 input=346 sampled=-1 top_logit=none pos_before=345 pos_after=346 stop=0
+prefill 346 | fed     347 | sampled       - | top       - | P 346 -> 347
+STEP kind=prefill index=346 input=347 sampled=-1 top_logit=none pos_before=346 pos_after=347 stop=0
+prefill 347 | fed     348 | sampled       - | top       - | P 347 -> 348
+STEP kind=prefill index=347 input=348 sampled=-1 top_logit=none pos_before=347 pos_after=348 stop=0
+prefill 348 | fed     349 | sampled       - | top       - | P 348 -> 349
+STEP kind=prefill index=348 input=349 sampled=-1 top_logit=none pos_before=348 pos_after=349 stop=0
+prefill 349 | fed     350 | sampled       - | top       - | P 349 -> 350
+STEP kind=prefill index=349 input=350 sampled=-1 top_logit=none pos_before=349 pos_after=350 stop=0
+prefill 350 | fed     351 | sampled       - | top       - | P 350 -> 351
+STEP kind=prefill index=350 input=351 sampled=-1 top_logit=none pos_before=350 pos_after=351 stop=0
+prefill 351 | fed     352 | sampled       - | top       - | P 351 -> 352
+STEP kind=prefill index=351 input=352 sampled=-1 top_logit=none pos_before=351 pos_after=352 stop=0
+prefill 352 | fed     353 | sampled       - | top       - | P 352 -> 353
+STEP kind=prefill index=352 input=353 sampled=-1 top_logit=none pos_before=352 pos_after=353 stop=0
+prefill 353 | fed     354 | sampled       - | top       - | P 353 -> 354
+STEP kind=prefill index=353 input=354 sampled=-1 top_logit=none pos_before=353 pos_after=354 stop=0
+prefill 354 | fed     355 | sampled       - | top       - | P 354 -> 355
+STEP kind=prefill index=354 input=355 sampled=-1 top_logit=none pos_before=354 pos_after=355 stop=0
+prefill 355 | fed     356 | sampled       - | top       - | P 355 -> 356
+STEP kind=prefill index=355 input=356 sampled=-1 top_logit=none pos_before=355 pos_after=356 stop=0
+prefill 356 | fed     357 | sampled       - | top       - | P 356 -> 357
+STEP kind=prefill index=356 input=357 sampled=-1 top_logit=none pos_before=356 pos_after=357 stop=0
+prefill 357 | fed     358 | sampled       - | top       - | P 357 -> 358
+STEP kind=prefill index=357 input=358 sampled=-1 top_logit=none pos_before=357 pos_after=358 stop=0
+prefill 358 | fed     359 | sampled       - | top       - | P 358 -> 359
+STEP kind=prefill index=358 input=359 sampled=-1 top_logit=none pos_before=358 pos_after=359 stop=0
+prefill 359 | fed     360 | sampled       - | top       - | P 359 -> 360
+STEP kind=prefill index=359 input=360 sampled=-1 top_logit=none pos_before=359 pos_after=360 stop=0
+prefill 360 | fed     361 | sampled       - | top       - | P 360 -> 361
+STEP kind=prefill index=360 input=361 sampled=-1 top_logit=none pos_before=360 pos_after=361 stop=0
+prefill 361 | fed     362 | sampled       - | top       - | P 361 -> 362
+STEP kind=prefill index=361 input=362 sampled=-1 top_logit=none pos_before=361 pos_after=362 stop=0
+prefill 362 | fed     363 | sampled       - | top       - | P 362 -> 363
+STEP kind=prefill index=362 input=363 sampled=-1 top_logit=none pos_before=362 pos_after=363 stop=0
+prefill 363 | fed     364 | sampled       - | top       - | P 363 -> 364
+STEP kind=prefill index=363 input=364 sampled=-1 top_logit=none pos_before=363 pos_after=364 stop=0
+prefill 364 | fed     365 | sampled       - | top       - | P 364 -> 365
+STEP kind=prefill index=364 input=365 sampled=-1 top_logit=none pos_before=364 pos_after=365 stop=0
+prefill 365 | fed     366 | sampled       - | top       - | P 365 -> 366
+STEP kind=prefill index=365 input=366 sampled=-1 top_logit=none pos_before=365 pos_after=366 stop=0
+prefill 366 | fed     367 | sampled       - | top       - | P 366 -> 367
+STEP kind=prefill index=366 input=367 sampled=-1 top_logit=none pos_before=366 pos_after=367 stop=0
+prefill 367 | fed     368 | sampled       - | top       - | P 367 -> 368
+STEP kind=prefill index=367 input=368 sampled=-1 top_logit=none pos_before=367 pos_after=368 stop=0
+prefill 368 | fed     369 | sampled       - | top       - | P 368 -> 369
+STEP kind=prefill index=368 input=369 sampled=-1 top_logit=none pos_before=368 pos_after=369 stop=0
+prefill 369 | fed     370 | sampled       - | top       - | P 369 -> 370
+STEP kind=prefill index=369 input=370 sampled=-1 top_logit=none pos_before=369 pos_after=370 stop=0
+prefill 370 | fed     371 | sampled       - | top       - | P 370 -> 371
+STEP kind=prefill index=370 input=371 sampled=-1 top_logit=none pos_before=370 pos_after=371 stop=0
+prefill 371 | fed     372 | sampled       - | top       - | P 371 -> 372
+STEP kind=prefill index=371 input=372 sampled=-1 top_logit=none pos_before=371 pos_after=372 stop=0
+prefill 372 | fed     373 | sampled       - | top       - | P 372 -> 373
+STEP kind=prefill index=372 input=373 sampled=-1 top_logit=none pos_before=372 pos_after=373 stop=0
+prefill 373 | fed     374 | sampled       - | top       - | P 373 -> 374
+STEP kind=prefill index=373 input=374 sampled=-1 top_logit=none pos_before=373 pos_after=374 stop=0
+prefill 374 | fed     375 | sampled       - | top       - | P 374 -> 375
+STEP kind=prefill index=374 input=375 sampled=-1 top_logit=none pos_before=374 pos_after=375 stop=0
+prefill 375 | fed     376 | sampled       - | top       - | P 375 -> 376
+STEP kind=prefill index=375 input=376 sampled=-1 top_logit=none pos_before=375 pos_after=376 stop=0
+prefill 376 | fed     377 | sampled       - | top       - | P 376 -> 377
+STEP kind=prefill index=376 input=377 sampled=-1 top_logit=none pos_before=376 pos_after=377 stop=0
+prefill 377 | fed     378 | sampled       - | top       - | P 377 -> 378
+STEP kind=prefill index=377 input=378 sampled=-1 top_logit=none pos_before=377 pos_after=378 stop=0
+prefill 378 | fed     379 | sampled       - | top       - | P 378 -> 379
+STEP kind=prefill index=378 input=379 sampled=-1 top_logit=none pos_before=378 pos_after=379 stop=0
+prefill 379 | fed     380 | sampled       - | top       - | P 379 -> 380
+STEP kind=prefill index=379 input=380 sampled=-1 top_logit=none pos_before=379 pos_after=380 stop=0
+prefill 380 | fed     381 | sampled       - | top       - | P 380 -> 381
+STEP kind=prefill index=380 input=381 sampled=-1 top_logit=none pos_before=380 pos_after=381 stop=0
+prefill 381 | fed     382 | sampled       - | top       - | P 381 -> 382
+STEP kind=prefill index=381 input=382 sampled=-1 top_logit=none pos_before=381 pos_after=382 stop=0
+prefill 382 | fed     383 | sampled       - | top       - | P 382 -> 383
+STEP kind=prefill index=382 input=383 sampled=-1 top_logit=none pos_before=382 pos_after=383 stop=0
+prefill 383 | fed     384 | sampled       - | top       - | P 383 -> 384
+STEP kind=prefill index=383 input=384 sampled=-1 top_logit=none pos_before=383 pos_after=384 stop=0
+prefill 384 | fed     385 | sampled       - | top       - | P 384 -> 385
+STEP kind=prefill index=384 input=385 sampled=-1 top_logit=none pos_before=384 pos_after=385 stop=0
+prefill 385 | fed     386 | sampled       - | top       - | P 385 -> 386
+STEP kind=prefill index=385 input=386 sampled=-1 top_logit=none pos_before=385 pos_after=386 stop=0
+prefill 386 | fed     387 | sampled       - | top       - | P 386 -> 387
+STEP kind=prefill index=386 input=387 sampled=-1 top_logit=none pos_before=386 pos_after=387 stop=0
+prefill 387 | fed     388 | sampled       - | top       - | P 387 -> 388
+STEP kind=prefill index=387 input=388 sampled=-1 top_logit=none pos_before=387 pos_after=388 stop=0
+prefill 388 | fed     389 | sampled       - | top       - | P 388 -> 389
+STEP kind=prefill index=388 input=389 sampled=-1 top_logit=none pos_before=388 pos_after=389 stop=0
+prefill 389 | fed     390 | sampled       - | top       - | P 389 -> 390
+STEP kind=prefill index=389 input=390 sampled=-1 top_logit=none pos_before=389 pos_after=390 stop=0
+prefill 390 | fed     391 | sampled       - | top       - | P 390 -> 391
+STEP kind=prefill index=390 input=391 sampled=-1 top_logit=none pos_before=390 pos_after=391 stop=0
+prefill 391 | fed     392 | sampled       - | top       - | P 391 -> 392
+STEP kind=prefill index=391 input=392 sampled=-1 top_logit=none pos_before=391 pos_after=392 stop=0
+prefill 392 | fed     393 | sampled       - | top       - | P 392 -> 393
+STEP kind=prefill index=392 input=393 sampled=-1 top_logit=none pos_before=392 pos_after=393 stop=0
+prefill 393 | fed     394 | sampled       - | top       - | P 393 -> 394
+STEP kind=prefill index=393 input=394 sampled=-1 top_logit=none pos_before=393 pos_after=394 stop=0
+prefill 394 | fed     395 | sampled       - | top       - | P 394 -> 395
+STEP kind=prefill index=394 input=395 sampled=-1 top_logit=none pos_before=394 pos_after=395 stop=0
+prefill 395 | fed     396 | sampled       - | top       - | P 395 -> 396
+STEP kind=prefill index=395 input=396 sampled=-1 top_logit=none pos_before=395 pos_after=396 stop=0
+prefill 396 | fed     397 | sampled       - | top       - | P 396 -> 397
+STEP kind=prefill index=396 input=397 sampled=-1 top_logit=none pos_before=396 pos_after=397 stop=0
+prefill 397 | fed     398 | sampled       - | top       - | P 397 -> 398
+STEP kind=prefill index=397 input=398 sampled=-1 top_logit=none pos_before=397 pos_after=398 stop=0
+prefill 398 | fed     399 | sampled       - | top       - | P 398 -> 399
+STEP kind=prefill index=398 input=399 sampled=-1 top_logit=none pos_before=398 pos_after=399 stop=0
+prefill 399 | fed     400 | sampled       - | top       - | P 399 -> 400
+STEP kind=prefill index=399 input=400 sampled=-1 top_logit=none pos_before=399 pos_after=400 stop=0
+prefill 400 | fed     401 | sampled       - | top       - | P 400 -> 401
+STEP kind=prefill index=400 input=401 sampled=-1 top_logit=none pos_before=400 pos_after=401 stop=0
+prefill 401 | fed     402 | sampled       - | top       - | P 401 -> 402
+STEP kind=prefill index=401 input=402 sampled=-1 top_logit=none pos_before=401 pos_after=402 stop=0
+prefill 402 | fed     403 | sampled       - | top       - | P 402 -> 403
+STEP kind=prefill index=402 input=403 sampled=-1 top_logit=none pos_before=402 pos_after=403 stop=0
+prefill 403 | fed     404 | sampled       - | top       - | P 403 -> 404
+STEP kind=prefill index=403 input=404 sampled=-1 top_logit=none pos_before=403 pos_after=404 stop=0
+prefill 404 | fed     405 | sampled       - | top       - | P 404 -> 405
+STEP kind=prefill index=404 input=405 sampled=-1 top_logit=none pos_before=404 pos_after=405 stop=0
+prefill 405 | fed     406 | sampled       - | top       - | P 405 -> 406
+STEP kind=prefill index=405 input=406 sampled=-1 top_logit=none pos_before=405 pos_after=406 stop=0
+prefill 406 | fed     407 | sampled       - | top       - | P 406 -> 407
+STEP kind=prefill index=406 input=407 sampled=-1 top_logit=none pos_before=406 pos_after=407 stop=0
+prefill 407 | fed     408 | sampled       - | top       - | P 407 -> 408
+STEP kind=prefill index=407 input=408 sampled=-1 top_logit=none pos_before=407 pos_after=408 stop=0
+prefill 408 | fed     409 | sampled       - | top       - | P 408 -> 409
+STEP kind=prefill index=408 input=409 sampled=-1 top_logit=none pos_before=408 pos_after=409 stop=0
+prefill 409 | fed     410 | sampled       - | top       - | P 409 -> 410
+STEP kind=prefill index=409 input=410 sampled=-1 top_logit=none pos_before=409 pos_after=410 stop=0
+prefill 410 | fed     411 | sampled       - | top       - | P 410 -> 411
+STEP kind=prefill index=410 input=411 sampled=-1 top_logit=none pos_before=410 pos_after=411 stop=0
+prefill 411 | fed     412 | sampled       - | top       - | P 411 -> 412
+STEP kind=prefill index=411 input=412 sampled=-1 top_logit=none pos_before=411 pos_after=412 stop=0
+prefill 412 | fed     413 | sampled       - | top       - | P 412 -> 413
+STEP kind=prefill index=412 input=413 sampled=-1 top_logit=none pos_before=412 pos_after=413 stop=0
+prefill 413 | fed     414 | sampled       - | top       - | P 413 -> 414
+STEP kind=prefill index=413 input=414 sampled=-1 top_logit=none pos_before=413 pos_after=414 stop=0
+prefill 414 | fed     415 | sampled       - | top       - | P 414 -> 415
+STEP kind=prefill index=414 input=415 sampled=-1 top_logit=none pos_before=414 pos_after=415 stop=0
+prefill 415 | fed     416 | sampled       - | top       - | P 415 -> 416
+STEP kind=prefill index=415 input=416 sampled=-1 top_logit=none pos_before=415 pos_after=416 stop=0
+prefill 416 | fed     417 | sampled       - | top       - | P 416 -> 417
+STEP kind=prefill index=416 input=417 sampled=-1 top_logit=none pos_before=416 pos_after=417 stop=0
+prefill 417 | fed     418 | sampled       - | top       - | P 417 -> 418
+STEP kind=prefill index=417 input=418 sampled=-1 top_logit=none pos_before=417 pos_after=418 stop=0
+prefill 418 | fed     419 | sampled       - | top       - | P 418 -> 419
+STEP kind=prefill index=418 input=419 sampled=-1 top_logit=none pos_before=418 pos_after=419 stop=0
+prefill 419 | fed     420 | sampled       - | top       - | P 419 -> 420
+STEP kind=prefill index=419 input=420 sampled=-1 top_logit=none pos_before=419 pos_after=420 stop=0
+prefill 420 | fed     421 | sampled       - | top       - | P 420 -> 421
+STEP kind=prefill index=420 input=421 sampled=-1 top_logit=none pos_before=420 pos_after=421 stop=0
+prefill 421 | fed     422 | sampled       - | top       - | P 421 -> 422
+STEP kind=prefill index=421 input=422 sampled=-1 top_logit=none pos_before=421 pos_after=422 stop=0
+prefill 422 | fed     423 | sampled       - | top       - | P 422 -> 423
+STEP kind=prefill index=422 input=423 sampled=-1 top_logit=none pos_before=422 pos_after=423 stop=0
+prefill 423 | fed     424 | sampled       - | top       - | P 423 -> 424
+STEP kind=prefill index=423 input=424 sampled=-1 top_logit=none pos_before=423 pos_after=424 stop=0
+prefill 424 | fed     425 | sampled       - | top       - | P 424 -> 425
+STEP kind=prefill index=424 input=425 sampled=-1 top_logit=none pos_before=424 pos_after=425 stop=0
+prefill 425 | fed     426 | sampled       - | top       - | P 425 -> 426
+STEP kind=prefill index=425 input=426 sampled=-1 top_logit=none pos_before=425 pos_after=426 stop=0
+prefill 426 | fed     427 | sampled       - | top       - | P 426 -> 427
+STEP kind=prefill index=426 input=427 sampled=-1 top_logit=none pos_before=426 pos_after=427 stop=0
+prefill 427 | fed     428 | sampled       - | top       - | P 427 -> 428
+STEP kind=prefill index=427 input=428 sampled=-1 top_logit=none pos_before=427 pos_after=428 stop=0
+prefill 428 | fed     429 | sampled       - | top       - | P 428 -> 429
+STEP kind=prefill index=428 input=429 sampled=-1 top_logit=none pos_before=428 pos_after=429 stop=0
+prefill 429 | fed     430 | sampled       - | top       - | P 429 -> 430
+STEP kind=prefill index=429 input=430 sampled=-1 top_logit=none pos_before=429 pos_after=430 stop=0
+prefill 430 | fed     431 | sampled       - | top       - | P 430 -> 431
+STEP kind=prefill index=430 input=431 sampled=-1 top_logit=none pos_before=430 pos_after=431 stop=0
+prefill 431 | fed     432 | sampled       - | top       - | P 431 -> 432
+STEP kind=prefill index=431 input=432 sampled=-1 top_logit=none pos_before=431 pos_after=432 stop=0
+prefill 432 | fed     433 | sampled       - | top       - | P 432 -> 433
+STEP kind=prefill index=432 input=433 sampled=-1 top_logit=none pos_before=432 pos_after=433 stop=0
+prefill 433 | fed     434 | sampled       - | top       - | P 433 -> 434
+STEP kind=prefill index=433 input=434 sampled=-1 top_logit=none pos_before=433 pos_after=434 stop=0
+prefill 434 | fed     435 | sampled       - | top       - | P 434 -> 435
+STEP kind=prefill index=434 input=435 sampled=-1 top_logit=none pos_before=434 pos_after=435 stop=0
+prefill 435 | fed     436 | sampled       - | top       - | P 435 -> 436
+STEP kind=prefill index=435 input=436 sampled=-1 top_logit=none pos_before=435 pos_after=436 stop=0
+prefill 436 | fed     437 | sampled       - | top       - | P 436 -> 437
+STEP kind=prefill index=436 input=437 sampled=-1 top_logit=none pos_before=436 pos_after=437 stop=0
+prefill 437 | fed     438 | sampled       - | top       - | P 437 -> 438
+STEP kind=prefill index=437 input=438 sampled=-1 top_logit=none pos_before=437 pos_after=438 stop=0
+prefill 438 | fed     439 | sampled       - | top       - | P 438 -> 439
+STEP kind=prefill index=438 input=439 sampled=-1 top_logit=none pos_before=438 pos_after=439 stop=0
+prefill 439 | fed     440 | sampled       - | top       - | P 439 -> 440
+STEP kind=prefill index=439 input=440 sampled=-1 top_logit=none pos_before=439 pos_after=440 stop=0
+prefill 440 | fed     441 | sampled       - | top       - | P 440 -> 441
+STEP kind=prefill index=440 input=441 sampled=-1 top_logit=none pos_before=440 pos_after=441 stop=0
+prefill 441 | fed     442 | sampled       - | top       - | P 441 -> 442
+STEP kind=prefill index=441 input=442 sampled=-1 top_logit=none pos_before=441 pos_after=442 stop=0
+prefill 442 | fed     443 | sampled       - | top       - | P 442 -> 443
+STEP kind=prefill index=442 input=443 sampled=-1 top_logit=none pos_before=442 pos_after=443 stop=0
+prefill 443 | fed     444 | sampled       - | top       - | P 443 -> 444
+STEP kind=prefill index=443 input=444 sampled=-1 top_logit=none pos_before=443 pos_after=444 stop=0
+prefill 444 | fed     445 | sampled       - | top       - | P 444 -> 445
+STEP kind=prefill index=444 input=445 sampled=-1 top_logit=none pos_before=444 pos_after=445 stop=0
+prefill 445 | fed     446 | sampled       - | top       - | P 445 -> 446
+STEP kind=prefill index=445 input=446 sampled=-1 top_logit=none pos_before=445 pos_after=446 stop=0
+prefill 446 | fed     447 | sampled       - | top       - | P 446 -> 447
+STEP kind=prefill index=446 input=447 sampled=-1 top_logit=none pos_before=446 pos_after=447 stop=0
+prefill 447 | fed     448 | sampled       - | top       - | P 447 -> 448
+STEP kind=prefill index=447 input=448 sampled=-1 top_logit=none pos_before=447 pos_after=448 stop=0
+prefill 448 | fed     449 | sampled       - | top       - | P 448 -> 449
+STEP kind=prefill index=448 input=449 sampled=-1 top_logit=none pos_before=448 pos_after=449 stop=0
+prefill 449 | fed     450 | sampled       - | top       - | P 449 -> 450
+STEP kind=prefill index=449 input=450 sampled=-1 top_logit=none pos_before=449 pos_after=450 stop=0
+prefill 450 | fed     451 | sampled       - | top       - | P 450 -> 451
+STEP kind=prefill index=450 input=451 sampled=-1 top_logit=none pos_before=450 pos_after=451 stop=0
+prefill 451 | fed     452 | sampled       - | top       - | P 451 -> 452
+STEP kind=prefill index=451 input=452 sampled=-1 top_logit=none pos_before=451 pos_after=452 stop=0
+prefill 452 | fed     453 | sampled       - | top       - | P 452 -> 453
+STEP kind=prefill index=452 input=453 sampled=-1 top_logit=none pos_before=452 pos_after=453 stop=0
+prefill 453 | fed     454 | sampled       - | top       - | P 453 -> 454
+STEP kind=prefill index=453 input=454 sampled=-1 top_logit=none pos_before=453 pos_after=454 stop=0
+prefill 454 | fed     455 | sampled       - | top       - | P 454 -> 455
+STEP kind=prefill index=454 input=455 sampled=-1 top_logit=none pos_before=454 pos_after=455 stop=0
+prefill 455 | fed     456 | sampled       - | top       - | P 455 -> 456
+STEP kind=prefill index=455 input=456 sampled=-1 top_logit=none pos_before=455 pos_after=456 stop=0
+prefill 456 | fed     457 | sampled       - | top       - | P 456 -> 457
+STEP kind=prefill index=456 input=457 sampled=-1 top_logit=none pos_before=456 pos_after=457 stop=0
+prefill 457 | fed     458 | sampled       - | top       - | P 457 -> 458
+STEP kind=prefill index=457 input=458 sampled=-1 top_logit=none pos_before=457 pos_after=458 stop=0
+prefill 458 | fed     459 | sampled       - | top       - | P 458 -> 459
+STEP kind=prefill index=458 input=459 sampled=-1 top_logit=none pos_before=458 pos_after=459 stop=0
+prefill 459 | fed     460 | sampled       - | top       - | P 459 -> 460
+STEP kind=prefill index=459 input=460 sampled=-1 top_logit=none pos_before=459 pos_after=460 stop=0
+prefill 460 | fed     461 | sampled       - | top       - | P 460 -> 461
+STEP kind=prefill index=460 input=461 sampled=-1 top_logit=none pos_before=460 pos_after=461 stop=0
+prefill 461 | fed     462 | sampled       - | top       - | P 461 -> 462
+STEP kind=prefill index=461 input=462 sampled=-1 top_logit=none pos_before=461 pos_after=462 stop=0
+prefill 462 | fed     463 | sampled       - | top       - | P 462 -> 463
+STEP kind=prefill index=462 input=463 sampled=-1 top_logit=none pos_before=462 pos_after=463 stop=0
+prefill 463 | fed     464 | sampled       - | top       - | P 463 -> 464
+STEP kind=prefill index=463 input=464 sampled=-1 top_logit=none pos_before=463 pos_after=464 stop=0
+prefill 464 | fed     465 | sampled       - | top       - | P 464 -> 465
+STEP kind=prefill index=464 input=465 sampled=-1 top_logit=none pos_before=464 pos_after=465 stop=0
+prefill 465 | fed     466 | sampled       - | top       - | P 465 -> 466
+STEP kind=prefill index=465 input=466 sampled=-1 top_logit=none pos_before=465 pos_after=466 stop=0
+prefill 466 | fed     467 | sampled       - | top       - | P 466 -> 467
+STEP kind=prefill index=466 input=467 sampled=-1 top_logit=none pos_before=466 pos_after=467 stop=0
+prefill 467 | fed     468 | sampled       - | top       - | P 467 -> 468
+STEP kind=prefill index=467 input=468 sampled=-1 top_logit=none pos_before=467 pos_after=468 stop=0
+prefill 468 | fed     469 | sampled       - | top       - | P 468 -> 469
+STEP kind=prefill index=468 input=469 sampled=-1 top_logit=none pos_before=468 pos_after=469 stop=0
+prefill 469 | fed     470 | sampled       - | top       - | P 469 -> 470
+STEP kind=prefill index=469 input=470 sampled=-1 top_logit=none pos_before=469 pos_after=470 stop=0
+prefill 470 | fed     471 | sampled       - | top       - | P 470 -> 471
+STEP kind=prefill index=470 input=471 sampled=-1 top_logit=none pos_before=470 pos_after=471 stop=0
+prefill 471 | fed     472 | sampled       - | top       - | P 471 -> 472
+STEP kind=prefill index=471 input=472 sampled=-1 top_logit=none pos_before=471 pos_after=472 stop=0
+prefill 472 | fed     473 | sampled       - | top       - | P 472 -> 473
+STEP kind=prefill index=472 input=473 sampled=-1 top_logit=none pos_before=472 pos_after=473 stop=0
+prefill 473 | fed     474 | sampled       - | top       - | P 473 -> 474
+STEP kind=prefill index=473 input=474 sampled=-1 top_logit=none pos_before=473 pos_after=474 stop=0
+prefill 474 | fed     475 | sampled       - | top       - | P 474 -> 475
+STEP kind=prefill index=474 input=475 sampled=-1 top_logit=none pos_before=474 pos_after=475 stop=0
+prefill 475 | fed     476 | sampled       - | top       - | P 475 -> 476
+STEP kind=prefill index=475 input=476 sampled=-1 top_logit=none pos_before=475 pos_after=476 stop=0
+prefill 476 | fed     477 | sampled       - | top       - | P 476 -> 477
+STEP kind=prefill index=476 input=477 sampled=-1 top_logit=none pos_before=476 pos_after=477 stop=0
+prefill 477 | fed     478 | sampled       - | top       - | P 477 -> 478
+STEP kind=prefill index=477 input=478 sampled=-1 top_logit=none pos_before=477 pos_after=478 stop=0
+prefill 478 | fed     479 | sampled       - | top       - | P 478 -> 479
+STEP kind=prefill index=478 input=479 sampled=-1 top_logit=none pos_before=478 pos_after=479 stop=0
+prefill 479 | fed     480 | sampled       - | top       - | P 479 -> 480
+STEP kind=prefill index=479 input=480 sampled=-1 top_logit=none pos_before=479 pos_after=480 stop=0
+prefill 480 | fed     481 | sampled       - | top       - | P 480 -> 481
+STEP kind=prefill index=480 input=481 sampled=-1 top_logit=none pos_before=480 pos_after=481 stop=0
+prefill 481 | fed     482 | sampled       - | top       - | P 481 -> 482
+STEP kind=prefill index=481 input=482 sampled=-1 top_logit=none pos_before=481 pos_after=482 stop=0
+prefill 482 | fed     483 | sampled       - | top       - | P 482 -> 483
+STEP kind=prefill index=482 input=483 sampled=-1 top_logit=none pos_before=482 pos_after=483 stop=0
+prefill 483 | fed     484 | sampled       - | top       - | P 483 -> 484
+STEP kind=prefill index=483 input=484 sampled=-1 top_logit=none pos_before=483 pos_after=484 stop=0
+prefill 484 | fed     485 | sampled       - | top       - | P 484 -> 485
+STEP kind=prefill index=484 input=485 sampled=-1 top_logit=none pos_before=484 pos_after=485 stop=0
+prefill 485 | fed     486 | sampled       - | top       - | P 485 -> 486
+STEP kind=prefill index=485 input=486 sampled=-1 top_logit=none pos_before=485 pos_after=486 stop=0
+prefill 486 | fed     487 | sampled       - | top       - | P 486 -> 487
+STEP kind=prefill index=486 input=487 sampled=-1 top_logit=none pos_before=486 pos_after=487 stop=0
+prefill 487 | fed     488 | sampled       - | top       - | P 487 -> 488
+STEP kind=prefill index=487 input=488 sampled=-1 top_logit=none pos_before=487 pos_after=488 stop=0
+prefill 488 | fed     489 | sampled       - | top       - | P 488 -> 489
+STEP kind=prefill index=488 input=489 sampled=-1 top_logit=none pos_before=488 pos_after=489 stop=0
+prefill 489 | fed     490 | sampled       - | top       - | P 489 -> 490
+STEP kind=prefill index=489 input=490 sampled=-1 top_logit=none pos_before=489 pos_after=490 stop=0
+prefill 490 | fed     491 | sampled       - | top       - | P 490 -> 491
+STEP kind=prefill index=490 input=491 sampled=-1 top_logit=none pos_before=490 pos_after=491 stop=0
+prefill 491 | fed     492 | sampled       - | top       - | P 491 -> 492
+STEP kind=prefill index=491 input=492 sampled=-1 top_logit=none pos_before=491 pos_after=492 stop=0
+prefill 492 | fed     493 | sampled       - | top       - | P 492 -> 493
+STEP kind=prefill index=492 input=493 sampled=-1 top_logit=none pos_before=492 pos_after=493 stop=0
+prefill 493 | fed     494 | sampled       - | top       - | P 493 -> 494
+STEP kind=prefill index=493 input=494 sampled=-1 top_logit=none pos_before=493 pos_after=494 stop=0
+prefill 494 | fed     495 | sampled       - | top       - | P 494 -> 495
+STEP kind=prefill index=494 input=495 sampled=-1 top_logit=none pos_before=494 pos_after=495 stop=0
+prefill 495 | fed     496 | sampled       - | top       - | P 495 -> 496
+STEP kind=prefill index=495 input=496 sampled=-1 top_logit=none pos_before=495 pos_after=496 stop=0
+prefill 496 | fed     497 | sampled       - | top       - | P 496 -> 497
+STEP kind=prefill index=496 input=497 sampled=-1 top_logit=none pos_before=496 pos_after=497 stop=0
+prefill 497 | fed     498 | sampled       - | top       - | P 497 -> 498
+STEP kind=prefill index=497 input=498 sampled=-1 top_logit=none pos_before=497 pos_after=498 stop=0
+prefill 498 | fed     499 | sampled       - | top       - | P 498 -> 499
+STEP kind=prefill index=498 input=499 sampled=-1 top_logit=none pos_before=498 pos_after=499 stop=0
+prefill 499 | fed     500 | sampled       - | top       - | P 499 -> 500
+STEP kind=prefill index=499 input=500 sampled=-1 top_logit=none pos_before=499 pos_after=500 stop=0
+prefill 500 | fed     501 | sampled       - | top       - | P 500 -> 501
+STEP kind=prefill index=500 input=501 sampled=-1 top_logit=none pos_before=500 pos_after=501 stop=0
+prefill 501 | fed     502 | sampled       - | top       - | P 501 -> 502
+STEP kind=prefill index=501 input=502 sampled=-1 top_logit=none pos_before=501 pos_after=502 stop=0
+prefill 502 | fed     503 | sampled       - | top       - | P 502 -> 503
+STEP kind=prefill index=502 input=503 sampled=-1 top_logit=none pos_before=502 pos_after=503 stop=0
+prefill 503 | fed     504 | sampled       - | top       - | P 503 -> 504
+STEP kind=prefill index=503 input=504 sampled=-1 top_logit=none pos_before=503 pos_after=504 stop=0
+prefill 504 | fed     505 | sampled       - | top       - | P 504 -> 505
+STEP kind=prefill index=504 input=505 sampled=-1 top_logit=none pos_before=504 pos_after=505 stop=0
+prefill 505 | fed     506 | sampled       - | top       - | P 505 -> 506
+STEP kind=prefill index=505 input=506 sampled=-1 top_logit=none pos_before=505 pos_after=506 stop=0
+prefill 506 | fed     507 | sampled       - | top       - | P 506 -> 507
+STEP kind=prefill index=506 input=507 sampled=-1 top_logit=none pos_before=506 pos_after=507 stop=0
+prefill 507 | fed     508 | sampled       - | top       - | P 507 -> 508
+STEP kind=prefill index=507 input=508 sampled=-1 top_logit=none pos_before=507 pos_after=508 stop=0
+prefill 508 | fed     509 | sampled       - | top       - | P 508 -> 509
+STEP kind=prefill index=508 input=509 sampled=-1 top_logit=none pos_before=508 pos_after=509 stop=0
+prefill 509 | fed     510 | sampled       - | top       - | P 509 -> 510
+STEP kind=prefill index=509 input=510 sampled=-1 top_logit=none pos_before=509 pos_after=510 stop=0
+prefill 510 | fed     511 | sampled       - | top       - | P 510 -> 511
+STEP kind=prefill index=510 input=511 sampled=-1 top_logit=none pos_before=510 pos_after=511 stop=0
+prefill 511 | fed     512 | sampled      75 | top 13.283018 | P 511 -> 512
+STEP kind=prefill index=511 input=512 sampled=75 top_logit=13.2830181 pos_before=511 pos_after=512 stop=0
+LAUNCHSTAT family=glue calls=49 calls_batched=49 rows_total=25088 rows_max=512
+LAUNCHSTAT family=proj calls=114 calls_batched=114 rows_total=58368 rows_max=512
+LAUNCHSTAT family=mlp_gateup calls=24 calls_batched=24 rows_total=12288 rows_max=512
+LAUNCHSTAT family=mlp_down calls=24 calls_batched=24 rows_total=12288 rows_max=512
+LAUNCHSTAT family=gdn_conv calls=18 calls_batched=18 rows_total=9216 rows_max=512
+LAUNCHSTAT family=gdn_gates calls=18 calls_batched=18 rows_total=9216 rows_max=512
+LAUNCHSTAT family=gdn_gated_norm calls=18 calls_batched=18 rows_total=9216 rows_max=512
+LAUNCHSTAT family=attn calls=6 calls_batched=6 rows_total=3072 rows_max=512
+RESULT mode=run steps=512 ms_total=175.014 ms_per_step=0.342 last_sampled=75 prefix_len=512 stopped=0

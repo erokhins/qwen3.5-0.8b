@@ -28,6 +28,7 @@ cd "$(dirname "$0")/.."
 LB=${LB:-engines/llama.cpp/build-hip/bin/llama-bench}
 LM=${LM:-models/gguf/Qwen3.5-0.8B.f16.gguf}
 BIN=engine/build/decode_run
+PY=${PY:-.venv/bin/python}
 MODEL=models/Qwen3.5-0.8B
 IDS=$(cat progress/bench/evidence/prefill-occupancy-2026-10-16/ids4096.txt)
 OURWIDTHS=${OURWIDTHS:-"512 1024 4096"}
@@ -64,12 +65,16 @@ if [[ " $LEGS " == *" bench "* ]]; then
       done
     done
   done
-  # ours, same window, untraced
+  # ours, same window, untraced, and PROMPT-ONLY: llama's row is `-n 0`, so ours must be `--steps 0`.
+  # (`tools/prefill_sweep.py` was tried here and is the wrong instrument: its ms_total carries one priced
+  # generation step, ~20 % more time at these widths, and every ratio would have inherited that.)
+  # Ids: 4,096 uses the pinned ids4096.txt as §21 did; 512/1,024 use synthetic 1..W, which is CLOSER to
+  # what llama-bench feeds than the pinned prose is, and §21's own non-comparable note is honoured.
   for W in $OURWIDTHS; do
-    IDS_W=$( [ "$W" = "4096" ] && printf '%s' "$IDS" || seq 1 "$W" | tr '\n' ' ' )
+    IDS_W=$( [ "$W" = "4096" ] && printf '%s' "$IDS" || seq -s, 1 "$W" )
     for R in $(seq 1 "$REPS"); do
-      "$BIN" --model "$MODEL" --ids "$IDS_W" --steps 0 --time-waves --gemm lt --gemm-pins all \
-          --gdn-loop 512 --out "$OUT/our_${W}_$R" > "$OUT/our_${W}_$R.log" 2>&1 || fail "ours W=$W rep $R"
+      "$BIN" --model "$MODEL" --ids "$IDS_W" --steps 0 --gemm lt --gemm-pins all --gdn-loop 512 \
+          --out "$OUT/our_${W}_$R" > "$OUT/our_${W}_$R.log" 2>&1 || fail "ours W=$W rep $R"
       sleep 3
     done
   done
@@ -79,16 +84,23 @@ if [[ " $LEGS " == *" bench "* ]]; then
   for ROW in "-ub 512 -fa on -t 32" "-ub 512 -fa off -t 32" "-ub 128 -fa on -t 32" "-ub 512 -fa on -t 4"; do
     line="llama $ROW:"
     for PP in 512 1024 4096; do
-      V=$(grep -hoE "[0-9]+\.[0-9]+" "$OUT/llama_${ROW// /_}_${PP}.txt" | tail -1)
+      # llama-bench prints "<tok/s> ± <spread>" in the test column; reading the last float grabs the
+      # ± spread, which is how a comparison harness reports 0.00 tok/s for a perfectly healthy engine.
+      V=$(sed -n "s/.*| *pp[0-9]* *| *\([0-9][0-9.]*\) ±.*/\1/p" "$OUT/llama_${ROW// /_}_${PP}.txt" | tail -1)
+      [ -n "$V" ] || fail "could not parse a throughput out of llama pp$PP row '$ROW' - read the log, do not guess"
       line="$line pp$PP=$V"
     done
     echo "$line"
   done
-  echo "-- ours (untraced), and the ratio at 4096 --"
+  echo "-- ours (prompt-only, --steps 0, same hold) and the matched ratio --"
   for W in $OURWIDTHS; do
     M=$(for R in $(seq 1 "$REPS"); do res "$OUT/our_${W}_${R}.log"; done | median -)
-    echo "ours W=$W median ${M} ms = $(awk -v m="$M" -v w="$W" 'BEGIN{printf "%.0f", w*1000/m}') tok/s"
+    OUR_TOKS=$(awk -v m="$M" -v w="$W" 'BEGIN{printf "%.0f", w*1000/m}')
+    LM=$(sed -n "s/.*| *pp[0-9]* *| *\([0-9][0-9.]*\) ±.*/\1/p" "$OUT/llama_-ub_512_-fa_on_-t_32_${W}.txt" | tail -1)
+    echo "  W=$W ours ${M} ms = ${OUR_TOKS} tok/s ; llama(-ub512 fa-on t32) ${LM} tok/s ; llama/ours = "\
+        "$(awk -v l="$LM" -v o="$OUR_TOKS" 'BEGIN{printf "%.2f", l/o}')"x
   done
+  echo
 fi
 
 if [[ " $LEGS " == *" trace "* ]]; then

@@ -1,0 +1,33 @@
+# engine=llama trace=tmp/gcc/llamaphase/llama_pp4096/pp4096_kernel_trace.csv
+# calibration: 'gated_delta_net' seen 288x, 144/pass => passes = 2  (derived, not typed)
+# total (per pass): 406.16 ms, 7920 launches, 1.93 launches/token
+# NOTE: traced ms are UPPER BOUNDS (trace overhead scales with launch count, the axis under study)
+phase           ms/pass   share  launches/pass
+gemm             176.83   43.5%         1464.0
+other             96.23   23.7%         4827.0
+attention         51.65   12.7%           48.0
+gdn_recur         47.20   11.6%          144.0
+silu_mlp          12.87    3.2%          328.0
+norm              11.43    2.8%          908.0
+sampler            6.11    1.5%            6.0
+rope               3.64    0.9%           96.0
+copy               0.21    0.1%           99.5
+TOTAL            406.16  100.0%           7920
+
+# top kernels by traced ms/pass
+      89.70 ms    560.0/pass  gemm        Cijk_Alik_Bljk_HB_MT128x128x32_MI16x16x16x1_SN_1LDSB0_AMAS3_BL1_BS1_EPS1_GLVWA8_GLVWB8_GRVW8_GSU
+      51.65 ms     48.0/pass  attention   void flash_attn_ext_f16<256, 256, 16, 4, false, false, false>(char const*, char const*, char con
+      47.20 ms    144.0/pass  gdn_recur   void gated_delta_net_cuda<128, false, false, 4>(float const*, float const*, float const*, float 
+      30.42 ms    144.0/pass  other       void concat_non_cont<unsigned int, 0>(char const*, char const*, char*, long, long, long, long, u
+      26.67 ms    144.0/pass  gemm        Cijk_Alik_Bljk_HB_MT128x128x32_MI16x16x16x1_SN_1LDSB0_AMAS3_BL1_BS1_EPS1_GLVWA8_GLVWB8_GRVW8_GSU
+      26.16 ms    184.0/pass  gemm        Cijk_Alik_Bljk_HB_MT128x128x32_MI16x16x16x1_SN_1LDSB0_AMAS3_BL1_BS1_EPS1_GLVWA4_GLVWB4_GRVW4_GSU
+      23.83 ms   1464.0/pass  other       void convert_unary_cont_vec4<__half, float>(void const*, float*, long)
+      20.50 ms    192.0/pass  gemm        Cijk_Alik_Bljk_HB_MT128x128x32_MI16x16x16x1_SN_1LDSB0_AMAS3_BL1_BS1_EPS1_GLVWA8_GLVWB8_GRVW8_GSU
+      12.87 ms    328.0/pass  silu_mlp    void unary_gated_op_kernel<&(op_silu(float)), float>(float const*, float const*, float*, long, l
+      12.80 ms   1464.0/pass  other       void convert_unary_cont_vec4<float, __half>(void const*, __half*, long)
+      11.16 ms    144.0/pass  other       void ssm_conv_long_token_f32<true, 128ul, 4ul, 32l>(float const*, float const*, float const*, in
+       9.34 ms    288.0/pass  gemm        Cijk_Alik_Bljk_HB_MT128x128x32_MI16x16x16x1_SN_1LDSB0_AMAS3_BL1_BS1_EPS1_GLVWA4_GLVWB4_GRVW4_GSU
+
+# geometry census for kernels matching 'gated_delta_net' (20 CUs on this SKU, per device_facts)
+   wgsize    grid  vgpr   lds_B  launches  us/launch  blocks/CU
+       32     512    80       0     144.0      327.8       0.80

@@ -1,0 +1,33 @@
+# engine=ours trace=tmp/gcc/llamaphase/our_pp4096/pp4096_kernel_trace.csv
+# calibration: 'attn_prep' seen 144x, 48/pass => passes = 3  (derived, not typed)
+# total (per pass): 621.16 ms, 3301 launches, 0.81 launches/token
+# NOTE: traced ms are UPPER BOUNDS (trace overhead scales with launch count, the axis under study)
+phase           ms/pass   share  launches/pass
+gdn_recur        272.07   43.8%          144.0
+gemm             154.19   24.8%         1200.0
+attention        136.83   22.0%          180.0
+other             24.95    4.0%          698.3
+norm              11.65    1.9%          392.0
+silu_mlp           9.90    1.6%          192.0
+gdn_other          7.49    1.2%          144.0
+sampler            2.24    0.4%            1.0
+copy               1.84    0.3%          350.0
+TOTAL            621.16  100.0%           3301
+
+# top kernels by traced ms/pass
+     272.07 ms    144.0/pass  gdn_recur   rec_loop_kernel(float const*, float const*, float const*, float const*, float const*, float*, fl
+     122.72 ms     42.0/pass  attention   engine::kernels::attn_fattn_wave(CoreArgs)
+      44.71 ms    384.0/pass  gemm        Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT96x128x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGN
+      30.86 ms    144.0/pass  gemm        Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT96x128x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGN
+      25.46 ms    192.0/pass  gemm        Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x128x64_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGN
+      23.06 ms    144.0/pass  gemm        Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x128x32_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGN
+      21.42 ms    192.0/pass  gemm        Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x32x64_MI16x16x1_SN_LDSB0_AFC1_AG0_AGGSUA0_AGNT
+      15.22 ms    144.0/pass  other       conv_kernel(hip_bfloat16 const*, float const*, float const*, float*, float*, int, int)
+      11.65 ms    392.0/pass  norm        void glue_add_norm<256>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloa
+       9.90 ms    192.0/pass  silu_mlp    engine::kernels::(anonymous namespace)::mlp_silu_mul_kernel(hip_bfloat16 const*, hip_bfloat16 co
+       7.49 ms    144.0/pass  gdn_other   gdn_gated_norm(float const*, hip_bfloat16 const*, float const*, hip_bfloat16*, hip_bfloat16*, in
+       6.77 ms    288.0/pass  other       void proj_gemv_tokens<1024, 4, false>(hip_bfloat16 const*, void const*, hip_bfloat16*, int, int,
+
+# geometry census for kernels matching 'rec_loop_kernel' (20 CUs on this SKU, per device_facts)
+   wgsize    grid  vgpr   lds_B  launches  us/launch  blocks/CU
+      128    2048    80    1536     144.0     1889.4       0.80
