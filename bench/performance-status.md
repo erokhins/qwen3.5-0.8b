@@ -1959,3 +1959,40 @@ llama.cpp's actual kernel source, which has been readable in this repo the whole
 Shipping default is unchanged (`--gdn-geom block`, proved byte-identical to HEAD: 46/46 logit rows, 44/44
 `STATEFP` lines). Engine headline today: **5,764 prompt tok/s at 4,096 lanes** (`RESULT ms_total` 708–713 ms
 across §37/§40/§42 windows), 2,794 tok/s at 32,768 lanes from §39, decode unchanged.
+
+## §43. Correction to §38: llama's GDN kernel runs **8× our wavefronts** — and GDN's gap is elements-per-thread, not shape (2026-10-19)
+
+**What §38 got wrong.** Its geometry rows read `Workgroup_Size_X` and `Grid_Size_X` and nothing else, so
+llama's `gated_delta_net` — launched `dim3(32,4)` blocks over a `dim3(512,4,8)` thread grid — was recorded as
+*"wg 32, grid 512 → 16 workgroups, 0.80 blocks/CU, the same shape we run, and `LDS = 0`"*. Read on all three
+axes it is **128 blocks × 128 threads = 512 wavefronts per launch = 6.40 wf/SIMD, 3.20 blocks/CU**: eight
+times our 0.8 wf/SIMD, no idle CU. `rocprofv3`'s `Grid_Size_*` is in **threads**, not blocks — that is the
+whole bug, and it was silent because 16 and 128 both look like plausible GDN grids. §38's *phase times* stand
+(GDN 272.07 vs 47.20 ms, GEMM ours ahead, attention 136.83 vs 51.65); its geometry comparison does not. The
+tool now derives blocks as `grid_threads / workgroup`, **refuses** a non-whole division instead of mis-stating
+it, and takes CUs/SIMDs from KFD rather than a hardcoded 20 (`879ef31`); the claim was re-read independently
+from the CSVs on disk (`prototype/gdn_walk/g3_geom_recheck.py`) rather than taken from the worker who found it.
+
+**Why it cost a cycle.** G2 was briefed on the X-axis reading: §38 appeared to show that llama's advantage was
+barrier-free one-wavefront blocks, so G2 built exactly that, took wf/SIMD from 0.8 to 0.20–0.40, and lost
+**122 %**. G2 therefore flips meaning — it is not evidence against shape, it is evidence *for* wavefront count
+with the sign flipped. A wrong premise did not just waste time; it inverted the sign of a real measurement.
+
+**What the gap actually is.** G3's census (`prototype/gdn_walk/G3-llama-kernel.md`, source provenance pinned
+to `797de63` and to the object §38 traced) closes instruction count too: both engines perform the same 4
+FMA-class ops per state element (7.73×10¹⁰ MAC/pass), and llama issues **1.28× more** slots per token while
+finishing **5.76× faster**. The surviving difference is **state elements per thread — 128 ours, 16 theirs**.
+At 16 the shard lives in registers (`vgpr 78, spill 0, LDS 0`), so llama moves no state per token, reduces
+rows with 8-lane butterflies needing no barrier, and fielded 8× the wavefronts. Adjudicated against measured
+ceilings: we issue at 9.9 % of the 231.5 G-slot roof, llama at 73.6 %; their 3.28 TFLOP/s is 45 % of the
+scalar `v_fma_f32` roof (§26's ladder) with no matrix or dot instruction in their object; their LSU demand
+coincidentally matches ours (864 vs 861 GB/s ≈ 94 % of the 918 GB/s cache roof) and is recorded then rejected,
+because route A already falsified a traffic reading of this kernel. **Nothing in llama's number requires a
+capability this part lacks** — which is the sentence that makes the next bet worth funding.
+
+**Funded: G4** — llama's thread map under our recurrence: 128 blocks × 128 threads, 8 lanes per column, 16
+elements per thread in registers across the span, the map forced by `wavefronts × 32 × el/thread = 262,144`.
+Lines pre-registered in `prototype/gdn_walk/BET.md` §12 on both denominators before code exists: `gdn_rec`
+≤170 live / >225 dead, `wall_ms` ≤540 live / >607 dead, `wall_ms` the ship gate. Engine headline while it
+runs: **5,764 prompt tok/s at 4,096 lanes** (unchanged — §42's default is inert and §39's long-context ladder
+is unaffected).
