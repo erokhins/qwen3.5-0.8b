@@ -292,7 +292,13 @@ def geometry(text=None, op=None):
     epilogue = epilogue[:epilogue.index("warp-wide min and max")]
     stage_row = src[src.index("void fattn_stage_row("):]
     stage_row = stage_row[:stage_row.index("struct FattnRow")]
-    g["score_rolled"] = bool(re.search(r"#pragma unroll 1\s*$", body, re.M))
+    # WHICH ROLL THE CENSUS PRICES: the SHIPPED one. Two spellings live in this body now (`single` and bet
+    # A4-L1's `two`, selected by `--attn-fattn-roll`), both under their own `#pragma unroll 1`, so asking the
+    # body "is there a rolled loop anywhere" no longer identifies the shipped leg -- it would stay true even if
+    # the shipped roll stopped being rolled, which is a check that cannot fail. The shipped roll is the loop
+    # that steps `++t`; the two-accumulator loop steps `t += 2`.
+    g["score_rolled"] = bool(re.search(
+        r"#pragma unroll 1\s*\n\s*for \(int t = 0; t < FATTN_KTILES; \+\+t\)", body))
     # THE HALVES LOOP: the epilogue stages F32 through the dead K/V stage in this many passes, and every
     # publish-side count below is a multiple of it.
     g["transpose_halves"] = for_bound(epilogue, "half", g)
@@ -616,11 +622,17 @@ Q_FILL_LOOP = """    for (int qr = 0; qr < FATTN_MROWS; ++qr) {           // eve
         fattn_stage_row(&s_q[w * FATTN_MROWS * DH + fattn_q_addr(qrs, 0)],
                         a.qrope + (size_t)ROW_H * (rb * FATTN_MROWS + qrs) + (size_t)head0 * DH, lane);
     }"""
-Q_OPERAND = ("            const fattn_ARegs second =\n"
-             "                fattn_load_tile(&s_q[w * FATTN_MROWS * DH + fattn_q_addr(fattn_ab_row(lane), 16 * t)]);")
-Q_OPERAND_GLOBAL = ("            const fattn_ARegs second =\n"
-                    "                fattn_load_tile(a.qrope + (size_t)ROW_H * (rb * FATTN_MROWS "
-                    "+ fattn_ab_row(lane)) + (size_t)head0 * DH + 16 * t);")
+Q_OPERAND = ("                const fattn_ARegs first = fattn_score_k_tile(s_kv, lane, t);\n"
+             "                const fattn_ARegs second = fattn_score_q_tile(s_q, w, lane, t);")
+Q_OPERAND_GLOBAL = ("                const fattn_ARegs first = fattn_score_k_tile(s_kv, lane, t);\n"
+                    "                const fattn_ARegs second = fattn_load_tile(a.qrope + (size_t)ROW_H "
+                    "* (rb * FATTN_MROWS + fattn_ab_row(lane)) + (size_t)head0 * DH + 16 * t);")
+# WHY BOTH SPELLINGS OF THE OPERAND NOW CALL A HELPER: `--attn-fattn-roll` put a second roll loop beside this
+# one, and two roll spellings each writing their own `&s_q[...]` is §20.1's aliasing shape. `fattn_score_k_tile`
+# and `fattn_score_q_tile` are the one spelling of the two staged operands, so the classifier still reads the
+# Q operand's source off its own call site -- the helper's ARGUMENT is what names (or fails to name) a
+# `__shared__` array, and the flip below replaces that call site with a global row exactly as it did before.
+
 
 
 def q_unstaged_operand_text(src):
@@ -817,8 +829,9 @@ def selftest(asm_text):
         ("a third stage fill appearing", [(K_FILL, K_FILL + "\n                            a.kcache, lane);\n"
                                            + K_FILL)], [],
          ("lds_write_B", "global_read_B"), ()),
-        ("the score leg's roll pragma", [("#pragma unroll 1", "#pragma unroll 16")], [],
-         ("v_wmma", "lds_read_B"), ()),
+        ("the score leg's roll pragma", [("#pragma unroll 1\n            for (int t = 0; t < FATTN_KTILES; ++t)",
+                                         "#pragma unroll 16\n            for (int t = 0; t < FATTN_KTILES; ++t)")],
+         [], ("v_wmma", "lds_read_B"), ()),
         # THE WARP COUNT, both headers at once. `lds_B` must move (one fewer 8 KiB Q stage) and `lds_read_B` must
         # move (the fold has one fewer warp's span to read back). The MUST-NOT list is the other half of the
         # witness: three warps execute one kernel body, so the per-warp site counts and the per-row publish are
