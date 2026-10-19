@@ -207,3 +207,29 @@ run; the command is above. The 1,024-lane run does exercise the streaming path (
 5. Uncommitted: `engine/kernels_attn.cpp`, `engine/decode_step.cpp`, `engine/decode_run.cpp`,
    `tools/attn_ceiling_proof.py`, `tools/longctx_check.sh`, this file. One topic: raise the attention
    lane ceiling to 32,768 lanes, with the tool and the retargeted CPU proof that follow it.
+
+## 5. The device pass, run by the main agent, and the three harness bugs it found
+
+The five checks passed at 8,192 / 16,384 / 32,768 lanes and 32,769 was refused naming `kAttnMaxSplit=64`
+(ledger **§39** carries the table and the cost curve). Getting there took three fixes to *this* check and one
+to the engine's argument parsing, and none of them was visible by reading the script:
+
+1. **`--ids` cannot carry a 32,768-token prompt.** Linux caps a single argv slot at `MAX_ARG_STRLEN = 131,072 B`
+   regardless of `getconf ARG_MAX` (2 MiB, which misleads everyone); 32,768 ids is 191,588 B, so `exec` returned
+   E2BIG — shell **exit 126**, "Argument list too long", in 0 s — which presented as "the engine crashes at
+   32k". `decode_run` gained `--ids-file PATH` (same parser, same list) and the check uses it. 16,384 ids is
+   95,796 B, which is why the same bug let every narrower width through.
+2. **The refusal case was vacuous.** The id pool was generated to `max(requested widths)`, and the refusal
+   width is `ceiling + 1`, so it was fed 32,768 ids, ran a *legal* prompt, and reported "the ceiling moved
+   somewhere other than the launcher's refusal" — a must-catch case that could not fire, the `partalias`
+   lesson one layer over. Pool now covers `max(widths, ceiling+1)`, **and** `ids_file_of` asserts the field
+   count it wrote, because a silently short prompt is the actual failure mode.
+3. **`--selftest` and a real run shared one work directory.** The selftest writes a synthetic 1,024-id pool
+   into `$WORK/ids.csv`; a real run cutting its ids from the same file after a selftest is fed **1,024 ids**
+   while claiming a wider width. The first 8k/16k timing set taken against these logs was three reps of a
+   1,024-token run wearing an 8,192 label — every field in its `RESULT` line looked plausible. Discarded and
+   re-taken from a pool with its field count asserted. A selftest that writes into the directory real runs
+   read from is the trap, not the timing.
+
+**No timing in this file.** The §39 cost curve is the main agent's, taken in its own locked window; nothing
+here quotes a millisecond figure.

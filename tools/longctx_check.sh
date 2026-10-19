@@ -94,6 +94,15 @@ fi
 # promise: the prefix run's ids are literally the deep run's ids minus the last field. Fixed seed, so a
 # rerun is the same run; ids stay in the normal text range, away from the special ids at the top.
 MAXW=$(echo "$WIDTHS" | tr ',' ' ' | tr ' ' '\n' | sort -n | tail -1)
+if [ "$WITH_REFUSAL" -eq 1 ] && [ "$((CEILING + 1))" -gt "$MAXW" ]; then
+    # The refusal case asks for ceiling+1 lanes, so the id pool must reach that far. It did not, and the
+    # first run of this check therefore fed the REFUSAL case 32,768 ids, ran a perfectly legal prompt and
+    # reported "the ceiling moved" — a vacuous case wearing a real failure (AGENTS.md: a negative control
+    # whose geometry cannot fire is not a control). Generating to max(widths, ceiling+1) is the fix; the
+    # field count assertion in ids_file_of() is the second one, because a silently short prompt is the
+    # failure mode, not the missing width per se.
+    MAXW=$((CEILING + 1))
+fi
 IDS="$WORK/ids.csv"
 "$PY" - "$MAXW" "$IDS" <<'PYIDS'
 import random, sys
@@ -113,6 +122,18 @@ echo "longctx: widths requested: $WIDTHS"
 FAILED=0
 RESULTS=""
 ids_of() { cut -d, -f"1-$1" "$IDS"; }     # the first N ids, comma separated
+ids_file_of() {                           # the first N ids, in a FILE — and this is not a style choice:
+    local N=$1 OUT=$2
+    cut -d, -f"1-$N" "$IDS" > "$OUT"
+    local have; have=$(awk -F, '{print NF}' "$OUT")
+    if [ "$have" != "$N" ]; then
+        echo "longctx: BUG: width $N needs $N ids and $OUT holds $have — refusing to judge a run whose" \
+             "prompt is not the width under test" >&2
+        return 1
+    fi
+}                                         # an argv slot is capped at MAX_ARG_STRLEN 131,072 B, so a
+                                          # 32,768-id prompt (191,588 B) cannot be passed at all. See
+                                          # `--ids-file` in engine/decode_run.cpp.
 id_at()  { cut -d, -f"$1"  "$IDS"; }      # the Nth id, 1-based
 run_engine() { local LOG=$1; shift; "$BIN" "$@" > "$LOG" 2>&1; }
 
@@ -228,9 +249,11 @@ for W in $(echo "$WIDTHS" | tr ',' ' '); do
         echo "longctx: --fixture — judging the logs and dumps already in $D; the engine was not run"
     else
         t_start=$(date +%s)
-        run_engine "$D/deep.log" --model "$MODEL" --ids "$(ids_of "$W")" --cap "$W" --steps 0 \
+        ids_file_of "$W" "$D/ids_deep.csv"
+        ids_file_of "$((W - 1))" "$D/ids_prefix.csv"
+        run_engine "$D/deep.log" --model "$MODEL" --ids-file "$D/ids_deep.csv" --cap "$W" --steps 0 \
             --wave-rows "$WAVE" --out "$D/deep"; RC_DEEP=$?
-        run_engine "$D/prefix.log" --model "$MODEL" --ids "$(ids_of "$((W - 1))")" --cap "$W" \
+        run_engine "$D/prefix.log" --model "$MODEL" --ids-file "$D/ids_prefix.csv" --cap "$W" \
             --steps 1 --replay "$(id_at "$W")" --wave-rows "$WAVE" --out "$D/prefix"; RC_PRE=$?
         t_end=$(date +%s)
         echo "longctx: two deep runs finished (exit $RC_DEEP / $RC_PRE) after $((t_end - t_start))s of wall"
@@ -414,7 +437,8 @@ if [ "$WITH_REFUSAL" -eq 1 ]; then
     echo "======== REFUSAL at $R lanes (opt-in: the refusal happens in the last wave, so it costs"
     echo "         one full deep prefill to see) ========"
     D="$WORK/refuse"; rm -rf "$D"; mkdir -p "$D"
-    run_engine "$D/refuse.log" --model "$MODEL" --ids "$(ids_of "$R")" --cap "$R" --steps 0 \
+    ids_file_of "$R" "$D/ids_refuse.csv"
+    run_engine "$D/refuse.log" --model "$MODEL" --ids-file "$D/ids_refuse.csv" --cap "$R" --steps 0 \
         --wave-rows "$WAVE" --out "$D/out"
     RC=$?
     if [ "$RC" -ne 0 ] && grep -q "kAttnMaxSplit" "$D/refuse.log"; then
