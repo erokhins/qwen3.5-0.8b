@@ -191,3 +191,12 @@ logits, `span=576 > MAXSC`).
 * Whether the partial scratch must be re-sized: **no** — it is sized from the ceiling, so a shallower split only
   leaves the tail of each row's slab unwritten (Gate 0 [B]).
 * Whether L-b or L-a are implicated: **no** — different resources, and A9 §4 killed L-b on declared bytes.
+
+---
+
+## Verdict (appended after measurement; the lines above are unchanged, as pre-registration requires)
+
+**DISPLACED** — LINE 1 cleared (attn family −4.61 %), LINE 2 missed (wave wall −2.38 %). Not shipped as a wave
+lever; the knob stays inert and its inertness is witnessed byte-for-byte on device. Full record, including why the
+apparent 70 ms `gdn_rec` externality is *unattributed* rather than a displacement:
+`prototype/attn_percost/A9-LC-verdict.md`.

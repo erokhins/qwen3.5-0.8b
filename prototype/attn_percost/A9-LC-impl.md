@@ -19,7 +19,9 @@ Predictions: A9 §2(c)/§4.2 of `prototype/attn_percost/A9-LONGCTX-CENSUS.md`.
 | the A/B harness `run_ab_a9lc.sh` | **done**, `bash -n` clean, `SELFTEST=1` passes all five scenarios (incl. the canary-abort) |
 | `A9-BET.md` | **done** |
 | numerics at the candidate cap (`engine/gate.py` etc.) | **handed over**, §6 — they are device gates longer than a worker's minute |
-| the paired window | **handed over**, §6 — a worker never takes timings |
+| the paired window | **RUN by the main agent — verdict DISPLACED**, see `A9-LC-verdict.md`: family −4.61 % (line cleared), wave wall −2.38 % (line missed). Not shipped. |
+| inertness of the shipping default | **PASS on device** (`tmp/a9lc/inert2.sh`): committed binary with no flag vs `8b0a3b4` at 4,608 lanes → `logits4607.bin` + `sampled.txt` byte-identical, identical geometry line, `SPLITCAP cap=0 span=512`. No timing taken. |
+| gate-forwarding of the flag into `engine/gate.py` | **not applied** — moot while the default stays inert, and the rule (§4) is that a shipping default and the gate's default move in one commit. |
 | commits | **not made**, by division of labour; proposed split at §8 |
 
 ## 1. The question the brief asked first, answered: **(i) for the shipping form, (ii) for the two VALU tiled spellings**
@@ -243,8 +245,10 @@ engine/gate.py ... --attn-split-cap 8          # after §4's diff is applied, if
 # 3 — the paired window (the bet's verdict). Everything inside one gpu_lock hold; prints SHIP / FALSIFIED /
 #     DISPLACED / UNPAIRED plus the externality sum and the canary line.
 bash prototype/attn_percost/run_ab_a9lc.sh
-#     env: CAP=16 to re-point at another candidate, REPS=3 for a third rep, CANARY_ONLY=1 for the three
-#     fast canary legs without any timing, SKIP_DEVICE=1 to re-parse saved logs.
+#     env: CAP=16 to re-point at another candidate, REPS=3 for a third rep, SKIP_DEVICE=1 to re-parse saved
+#     logs. NOTE, corrected after the window: CANARY_ONLY=1 is NOT a pre-flight — it re-judges the canary over
+#     logs already in $OUT and, on an empty $OUT, its empty-parse guard aborts (correctly) instead of running the
+#     device. Run the window plainly; CANARY_ONLY is for re-checking a window already taken.
 ```
 
 ## 7. Side effects on the tree and the box, disclosed
