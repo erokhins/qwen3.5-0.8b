@@ -1925,3 +1925,37 @@ Where the money is, restated with today's numbers: `gdn_rec` is 41.3 % of the wa
 closed. So the next funded implementation is **G2**, the barrier-free one-wavefront GDN geometry, whose lines
 (including the `wall_ms` denominator §40 made necessary) are pre-registered in `prototype/gdn_walk/BET.md` §10
 before any code exists.
+
+## §42. G2: removing every barrier and all LDS from the GDN walk makes it **2.2× slower** — the GDN gap is not shape (2026-10-19)
+
+§38 read llama.cpp's `gated_delta_net` as *same launch counts, same 0.80 blocks/CU, `LDS = 0`, 32-thread
+blocks, 5.76× faster*, and the obvious inference was that our barriers and block shape were the gap. **G2**
+(`prototype/gdn_walk/BET.md` §10 pre-registered it, `8b65fb0` implements it) removes all of it — one wavefront
+per block, 4 or 2 state columns per lane, row norms by a 5-level `__shfl_xor` butterfly, no LDS at all, state
+still streamed from global — and it is **2.2× slower**. At 4,096 lanes, medians of 3 in one hold (window
+`g2-ab`, util 5 %→73 %, clocks discounted):
+
+| side | `gdn_rec` ms (live ≤180, dead >230) | wave `wall_ms` (≤560 / >607) | externality | verdict |
+|---|---|---|---|---|
+| `wf4` (4 cols/lane) | 264.00 → **585.79** (+121.9 %) | 626.44 → 951.13 (+51.8 %) | +2.69 ms | **DEAD** |
+| `wf2` (2 cols/lane) | 264.00 → **380.73** (+44.2 %) | 626.44 → 742.32 (+18.5 %) | +1.89 ms | **DEAD** |
+
+The §40 discipline paid for itself on the first use: both denominators were pre-registered, the **externality**
+was printed (+2.7 / +1.9 ms over all other families), and so this window says plainly that the walk itself got
+slower rather than that a cost moved next door. The null held at **−0.33 %** (same new binary at its own
+default), both forms move the state fingerprint so neither is a no-op flag, and the structure was re-derived
+by the main agent on an independent compile: `walk_isa_diff.py --g2` PASS — 0 barriers, 0 LDS data ops, 15
+permutes, all state traffic `b128`, against the shipped 5 barriers and 19 LDS ops. The geometry did exactly
+what it claimed at 0.20–0.40 wf/SIMD against the shipped 0.8, which is where the cost comes from: with 4×
+fewer wavefronts there is nothing on the SIMD to hide a per-token dependency chain, and the barriers deleted
+were worth 5.9 % (G1), not the chain.
+
+**Consequence for the ledger's biggest remaining gap.** Every structural hypothesis about GDN's 5.76× is now
+measured dead, and the five numbers are in `prototype/gdn_walk/BET.md` §11: norms hoisted −5.9 %, geometry
+rewritten +121.9 %, state LDS-resident +10.6 %, parallel scan +493 %, unrolled +0.5 %. What survives is
+per-token work itself — §26's 4.6× instruction/traffic axis — and the next funded item is a census of
+llama.cpp's actual kernel source, which has been readable in this repo the whole time
+(`engines/llama.cpp/ggml/src/ggml-cuda/gated_delta_net.cu`) while we inferred its shape from a profiler.
+Shipping default is unchanged (`--gdn-geom block`, proved byte-identical to HEAD: 46/46 logit rows, 44/44
+`STATEFP` lines). Engine headline today: **5,764 prompt tok/s at 4,096 lanes** (`RESULT ms_total` 708–713 ms
+across §37/§40/§42 windows), 2,794 tok/s at 32,768 lanes from §39, decode unchanged.
