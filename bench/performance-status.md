@@ -2543,7 +2543,7 @@ is a hidden dependency worth remembering before any change that streams more K/V
 
 **Direction, recorded as the user's decision.** The targeted-lever space is exhausted (§53) and the census does not
 point away from the geometry explanation, so **the llama-shaped geometry becomes the funded main line** — starting
-at R1 of `prototype/attn_percost/A10-REWRITE-BRIEF.md` (256 threads / 8 warps / 8 query rows per warp), because R2
+at R1 of `prototype/attn_percost/A10-REWRITE-BRIEF.md` (256 threads / 8 warps / 16 query rows per wave = 128 rows/block, per A10 §6's R1 correction), because R2
 (Q in registers) is impossible before it. Instruments are reused, not rebuilt; no further side prototypes. The
 abort line stays: **below 6.5 TFLOP/s at 32k, the geometry route is dead and gets recorded as dead**, and short
 context (warm 10,637 tok/s at 512 lanes, 9,790 at 4,096) is a non-regression line, not collateral.
