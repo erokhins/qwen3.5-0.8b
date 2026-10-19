@@ -5250,6 +5250,10 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
                # is the only place the two spellings are allowed to differ, and it differs them alone.
                "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk),
                "--gdn-spell", args.gdn_spell,
+               # The SHAPE, forwarded with the other form flags for the standing reason: a batched-vs-carried
+               # pair whose two sides ran different maps compares two things at once, and this section is a
+               # byte-identity claim about width alone.
+               "--gdn-geom", args.gdn_geom,
                # The recurrence's launch SPAN, for the identical reason: a width A/B whose two sides
                # silently ran different submission shapes for the recurrence compares two things at
                # once. Named as `1` by default, so this line is byte-stable against the logs taken
@@ -5350,6 +5354,13 @@ def run_gdn_spell_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay
     # sides is the honest reading of what the section claims, and the note says so rather than leaving
     # it to the reader.
     base_loop = 1 if args.gdn_loop > 1 else args.gdn_loop
+    if getattr(args, "gdn_geom", "block") != "block":
+        notes.append(f"gdn-spell A/B: the gate was run at --gdn-geom {args.gdn_geom}, but section (j) is a"
+                     " matrix of SPELLINGS at a per-token body plus ONE looped side, and only the shipped"
+                     " `block` map has bodies for all four spellings (`reg16` is the looped body's map and"
+                     " `ship`/`unroll4` have no looped body, so the engine refuses those pairings). The"
+                     " four sides here therefore ran `--gdn-geom block` and adjudicate spellings only; the"
+                     f" geometry claim is the main run's, made at --gdn-geom {args.gdn_geom}")
     if args.gdn_loop > 1:
         notes.append(f"gdn-spell A/B: the gate was run at --gdn-loop {args.gdn_loop}, but section (j)"
                      " is a matrix of spellings at a per-token body plus ONE looped side, so its"
@@ -5374,6 +5385,12 @@ def run_gdn_spell_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay
                # default on one of them: a side that got its spelling from a default is a side whose
                # spelling the log cannot prove.
                "--gdn-spell", spell,
+               # Section (j) is a matrix of SPELLINGS and nothing else, so the SHAPE is HELD at the shipped
+               # `block` here rather than forwarded: `reg16` is the looped body's map and the `ship` /
+               # `unroll4` sides have no looped body at all, so forwarding the run's geometry would have the
+               # engine refuse two of the four sides. The note below says so whenever the run's own geometry
+               # differs, because a silently held form is the thing this file keeps refusing.
+               "--gdn-geom", "block",
                # Same rule one knob over: the span is named on every side, and the looped side is the
                # only one that names a span > 1. `args.gdn_loop` (1 by default) keeps the three
                # spelling sides byte-stable against the logs taken before `--gdn-loop` existed.
@@ -7090,6 +7107,24 @@ def main() -> int:
                          " run that cannot say which scan it ran is evidence about neither, and a"
                          " silent fall back to `seq` would price the shipped form twice and report it"
                          " as the other one")
+    ap.add_argument("--gdn-geom", choices=("block", "wf4", "wf2", "reg16"), default="block",
+                    help="which SHAPE the sequential recurrence's state walks run in: forwarded to"
+                         " `decode_run --gdn-geom` and asserted against the run's own NUMERICS echo,"
+                         " exactly like --gdn-spell and --gdn-loop. `block` is what ships while this is the"
+                         " default (the 16 blocks of 128 threads in `engine/gdn_rec_loop_kernels.h`), so a"
+                         " gate run that does not name the knob judges the shipping path; this default and"
+                         " `decode_run`'s own MUST move in the same commit, or the gate silently judges a"
+                         " different binary than the engine ships (the standing trap). `wf4`/`wf2` are bet"
+                         " G2's wavefront-per-block shapes (`engine/gdn_rec_wf_kernels.h`, measured DEAD at"
+                         " bench §42) and `reg16` is bet G4's register-resident map"
+                         " (`engine/gdn_rec_reg16_kernels.h`: 128 blocks of 128 threads, 16 state elements"
+                         " per thread held in registers across the span, prototype/gdn_walk/G4-result.md)."
+                         " Why the flag lives HERE: BET §10 constraint 2 names this file the band authority"
+                         " for the recurrence-geometry bets, and until now it could not name a geometry —"
+                         " every run judged the engine's default while a bet-local script carried the claim,"
+                         " which is a requirement written after the object it constrains. The engine's own"
+                         " two refusals come with it and are not duplicated here: `reg16` is a looped-body"
+                         " map, so it needs --gdn-loop >= 2 and --gdn-spell fused.")
     ap.add_argument("--gdn-spell", choices=("ship", "unroll4", "fused"), default="fused",
                     help="which SPELLING of the sequential recurrence's state walks a `gdn_rec` launch"
                          " runs, passed straight to `decode_run --gdn-spell`"
@@ -7414,6 +7449,11 @@ def main() -> int:
            # direction — and section (j) is the A/B this line makes attributable to a spelling rather
            # than to whichever default the binary happened to carry.
            "--gdn-spell", args.gdn_spell,
+           # The recurrence's SHAPE (`--gdn-geom`), named on the run and asserted against the NUMERICS echo
+           # below like the six above. Without it this gate could not exercise BET §10 constraint 2 at all:
+           # the band authority for a geometry bet had no way to say which geometry it was adjudicating, so
+           # every run silently judged the engine's default while a bet-local script carried the claim.
+           "--gdn-geom", args.gdn_geom,
            # The recurrence's launch SPAN (`--gdn-loop`, D54), named and asserted like the five above.
            # It is claimed bit-identical to the per-token form at every span, so a log that cannot say
            # which shape produced its rows witnesses neither side — and a run that took the span from
@@ -7619,6 +7659,13 @@ def main() -> int:
                else
                f"NUMERICS echoed gdn_loop={echoed_loop}, this gate was run with --gdn-loop"
                f" {args.gdn_loop}"))
+        echoed_geom = run.get("numerics", {}).get("gdn_geom")
+        check(str(echoed_geom) == str(args.gdn_geom),
+              "the run ran the gdn_rec map this gate is judging it under",
+              ("its NUMERICS line carried no `gdn_geom=` — the binary predates --gdn-geom, so no claim"
+               " about any recurrence shape can be made from this log" if echoed_geom is None else
+               f"NUMERICS echoed gdn_geom={echoed_geom}, this gate was run with --gdn-geom"
+               f" {args.gdn_geom}"))
     check(bool(run["steps"]), "one STEP line per token", f"{len(run['steps'])} lines")
     if not run["steps"]:
         notes.append("no STEP lines at all: decode_run printed nothing the gate could parse — read"
@@ -8412,6 +8459,9 @@ def teacher_forced_checks(args, man: dict, prompt_ids: list, dec_logits: list, g
                "--attn-fattn", args.attn_fattn,
                "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk),
                "--gdn-spell", args.gdn_spell,
+               # Forwarded so this section's two runs differ in NOTHING but the fed token, and the echoed
+               # value is asserted the same way as the main run's.
+               "--gdn-geom", args.gdn_geom,
                "--gdn-loop", str(args.gdn_loop),
                # THE ONE DIFFERENCE FROM THE MAIN RUN, and it is the whole section: the fed token at step
                # j is the reference's own, so the engine's sample is never fed back and every row is
