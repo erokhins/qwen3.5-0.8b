@@ -2117,3 +2117,49 @@ drift measurement above needs no model at all.
 work has to be priced against `b`, not against the 4,096 headline: a change that improves `a` by 5 % while
 leaving `b` alone buys +5 % at short context and about nothing at 32k. §39's ladder (§45's re-take) and this fit
 are the two together: absolute capacity, and the shape of its decay.
+
+## §47. The attention round is not latency-bound on its accumulator either: A3 dies at the source, A4-L1 measures **−1.67 %** and is DEAD (2026-10-19)
+
+Two bets on the largest traced phase (attention, 150.16 ms/pass of a 446 ms wave at 4,096 lanes) and neither
+reached a ship. Both are recorded because each closes a category rather than a tweak.
+
+**A3 — buying a third resident block by staging Q in 8-row half-tiles — died at the source, before a line of
+kernel code or a second of device time.** The WMMA B-operand consumes all 16 query rows × all 256 dims from
+`s_q` *every round* (`engine/attn_fattn_kernels.h:581`) and the epilogue's F32 transpose rides that same per-warp
+buffer (`:710` via `:216`), so `3×8,192 + 8,192 = 32,768 B` is the LDS floor of the shipped arithmetic with Q
+staged at all. 4,096 B/warp is physically 8 rows and a 16×16×16 WMMA cannot be fed an 8-row M tile, so "half-tile
+staging" is a work-split change, not a staging change: either two 8-row half-passes (+379 KB/token/layer of K/V
+staging, ~12× the externality that made G1 a non-win) or a per-round Q re-fill (+150 % per-round global load
+demand on the kernel whose LSU slack A2 measured at 13.5 % of roof). Second, independent kill: even at 20,480 B,
+3 blocks/CU is undecidable on this part — clang grants 178 VGPR where rocprofv3 reports 248 for the same kernel
+and no register file size is reported at all. Detail: `prototype/attn_percost/A3-result.md`.
+
+**A4-L1 — give the score roll a second accumulator so its 16 WMMA ops form two chains — was measured and is
+DEAD.** Gate 0 proved from the emitted code that the shipped roll really is one chained site in a rolled 16-trip
+loop with no independent work in the body (and corrected A2's polarity: the 17 sites are 1 rolled score site +
+16 unrolled P·V sites, the reverse of the census's guess). Gate 1 compiled the two-accumulator spelling at
+**spill 0, private 0, LDS unchanged 32,768 B, VGPR 178 → 200**, with two sites on two distinct accumulator tuples.
+Then one paired window (`util` 26 %, `sclk` 1420 MHz, NULL base-vs-`single` **−0.06 %**) measured, against
+A4-BET's pre-registered lines: `attn` family **136.2548 → 133.9760 ms (−1.67 %)**, traced `attention`
+**−0.28 %**, wave `wall_ms` **+0.27 %**, 16,384 lanes **−0.01 %**, 32,768 lanes **−0.42 %**. Every row dead,
+externality +2.18 / −13.23 / −43.62 ms inside its band, default stays `single`. Admission stayed green
+(`--attn-fattn-roll two`: 289 PASS / 0 FAIL, worst 1-cos 2.406e-04 against the 2.75e-03 line, nothing widened).
+Detail: `prototype/attn_percost/A4-L1-verdict.md`.
+
+**What that leaves, stated as a map.** The shipping attention wave is at **5.56 % of the WMMA roof** and ≤ 8.8 %
+of the issue roof (A2), cannot buy a third resident block through staging (A3), and does not care about its
+accumulator dependency (A4-L1). L2's whole budget (128 of ≥ 1,654 round slots = 7.7 %) is below the −10.5 % the
+live line demanded, and L3's 10–13 % of the excess quadratic fails the 4,096-lane lines by construction — so the
+remaining hypothesis is the **tile geometry itself**: 16-row M tiles, 3 warps/block, 2 blocks/CU, 6 wavefronts/CU,
+against llama's `flash_attn_ext_f16<256,256,16,4,…>` at 256 threads with 900 B/thread of deliberate scratch.
+Headline unchanged at **7,655 prompt tok/s**; attention's share of the wave is 30.37 %.
+
+**Harness discipline, from three defects found in the A/B before it produced a number.** The baseline was `HEAD`
+(which by then *had* the knob, so canary A correctly refused to time anything); the traced leg execed `./$BIN`
+against an absolute path and could never run; and the header carried a "re-based" line set attributed to the
+supervisor that the supervisor never fixed — its 1,196.89 ms wave base is 2.6× the ~460 ms the same fixture
+produces. Lines are now A4-BET's ratios × the in-window base, externality prints but decides nothing (it was
+never pre-registered), and the colour fixtures are generated from the harness's own ratio constants instead of
+hand-typed — the stale hand-typed dict survived as a second assignment and overrode the derived one, caught only
+because the colour test runs before any measurement. A pre-registered line is only pre-registered if the file
+that carries it is the file the harness reads.
