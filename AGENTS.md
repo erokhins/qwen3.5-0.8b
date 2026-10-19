@@ -428,3 +428,17 @@ inserting a row at line 78 silently moved four of them by one.
 | trap (appended 2026-10-19, same reason) | where it is written up |
 |---|---|
 | **`getconf ARG_MAX` is not the limit you will hit: ONE argv slot caps at `MAX_ARG_STRLEN` = 131,072 B.** A 32,768-token prompt passed as `--ids "$(…)"` is 191,588 B in a single field, so `exec` fails with `E2BIG` — shell **exit 126**, "Argument list too long", **in 0 s** — before the binary is reached, which presents exactly like "the engine crashes at 32k". 16,384 ids (95,796 B) passes, so the bug only bites the widest case a check exists to test, and the two-second wall time is the tell that nothing ran. Correct: any tool that must ingest a long list takes it by file (`decode_run --ids-file PATH`), and a harness asserts the field count it wrote rather than trusting `cut`. Companion trap, same run: **a `--selftest` that writes fixtures into the work directory a real run reads from silently feeds the real run the fixture input** — here 1,024 ids to a run labelled 8,192, producing three reps of a plausible fake table. | `bench/performance-status.md` §39; `prototype/attn_wmma/evidence/longctx.md` §5 |
+
+## A `rocprofv3` counter that reads exactly 0 is **vacuous**, not clean (2026-10-19)
+
+Appended at the end for the standing line-citation reason. An A11 counter pass at 32,768 lanes summed
+`DRAM_REQ_PER_CLIGRP` and `TCP_BACK_PRESSURE` to **exactly 0.0 over a whole run** — and both are counters that
+*must* fire on any run that touches DRAM, which a 32k prefill provably does. Reading those as "no DRAM pressure" /
+"no L1 back-pressure" would have been a false negative with a number attached, which is the same failure class as
+a parser that matches zero records and prints PASS (see the `gdn_collapse` row above). Correct: before quoting a
+counter's zero, **witness it non-zero on a run where it must fire** (for DRAM requests: any run whose working set
+is provably above the ~32 MiB big tier — see `devices/strix-halo-memory-bandwidth.md` §"The size–bandwidth curve,
+measured"); if it still reads 0, report it as *unusable on this part*, not as a result. Related and cheaper to
+forget: the same part's `SQ_WAVE_CYCLES/SQ_BUSY_CYCLES` ratio has been measured above the architectural wave ceiling
+(41 against 32), so **relative shares of one counter are usable and absolute meanings are not** unless the
+denominator's set size has been established.
