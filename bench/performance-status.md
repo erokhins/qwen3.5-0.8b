@@ -1591,3 +1591,29 @@ git worktree remove "$worktree" --force   # or: hipcc -fsyntax-only -I. -Iengine
 This is the same failure family as the two `--attn-tile`-default rows in the traps index (a geometry fact that
 lives in two files must move in one commit) plus a new half: **moving it in one commit is not enough if only
 one of the two files is staged.** The gate for that is a build, and the build is 17 s.
+
+## §35. The next lever is not a geometry search, it is one compile: the residency ladder, priced (2026-10-19)
+
+§34's last line asked whether an 8+ wf/CU zero-spill shape exists. `prototype/attn_wmma/fattn_regfile_ladder.md`
+answers it on paper, compile-only and driver-only, and the answer has three parts.
+
+1. **The Q-staged family is LDS-bound and its ceiling is 7, not 8+.** `LDS(block) = 8192·(NW+1)` gives
+   `wf/CU = NW·floor(8/(NW+1))` = 4, 4, 6, 4, 5, 6, **7** for NW = 1…7 — which reproduces every skeleton row §4
+   of `tmp/gcc/fattn_residency.md` measured, so its interpolation is safe. The shipped NW=3 at 6 wf/CU is
+   LDS-bound at 178 VGPR, so **no register cut moves residency in the shipping geometry**; the only rung that
+   family still has is NW=7 at the full 64 KiB.
+2. **The handover mis-attributes the 178 VGPR.** Un-staging Q costs +2 spilled registers (Bet 1's own table:
+   48 → 50 spills), so the −128 VGPR and all of the spill relief came from the **widening**, not from a stage.
+   Which means the register demand of the *3-warp body with Q un-staged* — the one shape that reaches 8 blocks/CU
+   of LDS headroom — **has never been compiled**: V6 is the skeleton's version of it and §4 forbids carrying a
+   spill claim from the skeleton, whose control undercuts the real body's demand by ~100 registers.
+3. **The register file per CU is unmeasured on this part**, and every rung above 8 wf/CU is model until it is.
+   The usual AMD per-SIMD figure is contradicted by the one driver answer that could test it (§4's V6: 8
+   blocks/CU at 3 warps × 256 VGPR = 24 wavefronts, needing 3× that file), and `rocminfo` prints no register
+   size here — after two retirements of HIP's own numbers on this SKU, a third cannot be assumed.
+
+So the queue's next bet is one transient patch and one read: **re-apply `tmp/gcc/fattn_unstage_q.patch` to the
+shipped 3-warp body and read its note block.** `spill = 0` at ≲190 VGPR opens an 8+ zero-spill rung worth a
+device A/B; spill > 0 closes the residency axis at 6 and moves the money to the instruction/traffic gap of §26.
+No number in this section is a timing, and none of it predicts one — §31 and §33 together are the proof that
+residency and speed are not the same axis on this kernel.
