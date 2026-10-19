@@ -1,0 +1,21 @@
+=== WMMA latency leg — RAW rows, no verdict arithmetic here
+# util at start: gpu use: 86%
+# sclk at start: sclk clock level: 1: (2502Mhz)
+# occupancy default: 160 blocks x 128 threads = 640 wavefronts over the KFD 40 CUs =
+#   -> 16 wavefronts/CU, 8 wavefronts/SIMD (KFD simd_per_cu 2). The cross-check below uses
+#   --blocks 320 for 32 wavefronts/CU, which is the rate probe's saturation geometry.
+# clocks: --clock-mhz 2894 (the divisor prototype/issue_rate_probe/README.md books (a MAX clock; sclk is printed with the rows)), same divisor as prototype/issue_rate_probe/results.md §1
+=== 1. loop-overhead baseline (subtract this from every row below)
+=== 2. F32 accumulator, the ILP curve (i1 is the latency, i8 approaches the roof)
+=== 3. F16 accumulator, same geometry (exact range caps --iters at 512 with --scale 0.5)
+=== 4. slope stability: the same legs at two DIFFERENT pairs. The bill is the slope between
+===    iters-lo and iters-hi, so two pairs must agree; if they do not, the leg is not latency-shaped
+===    and neither number can be quoted (the recorded reason --iters is never divided into itself).
+=== 5. cross-check against the ledger's own WMMA roof: 32 wavefronts/CU (= 320 blocks), ILP 4
+# wl_f32_i4 here should reproduce the 52.63 TFLOP/s row in prototype/issue_rate_probe/results.md §1; if it does not, these
+# rows and that row are not the same measurement and none of this is comparable.
+# util at end: gpu use: 8%
+# sclk at end: sclk clock level: 1: (1019Mhz)
+=== rows: 0 WL, 0 REFUSED (18 rows expected: 1 baseline + 8 curve + 6 pair-stability + 3 cross-check)
+FATAL: window produced 0 of 15 expected WL rows. A short log is a red result, not a quiet one:
+       read the REFUSED lines before drawing anything from the rows that did print.

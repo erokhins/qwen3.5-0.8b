@@ -183,3 +183,13 @@ tools/gpu_lock.sh release
 Cross-check built into the window: `wl_f32_i4` at 32 wavefronts/CU must land near the existing
 52.63 TFLOP/s row of §1 of `prototype/issue_rate_probe/results.md`. If it does not, this tool and that row are not measuring the same
 instruction stream and none of its numbers are comparable to the ledger.
+
+**Status of the first attempt (2026-10-18): attempted once, refused, and still unrun.**
+`evidence/wmma-latency.txt` is that window verbatim: `rows: 0 WL, 0 REFUSED (18 rows expected)`, i.e. not one
+leg printed and none printed a reason either, with `sclk` read at 2502 MHz at the start and 1019 MHz at the end
+and `gpu use 86 %` at the start — a contended window in an idle-clock state, not a silent success. The refusal
+line is the harness's own (`Refuses to call the window good if fewer than 18 rows printed`), so the tool did
+its job and there is nothing to fix in it; what is missing is a clean window. **No latency number for a dependent
+WMMA exists on this box**, so `WMMA_CLK = 32` remains derived from the class roof and every dependent-chain
+census that spends it (including `m16_fattn_score`) is spending an unmeasured constant, which is the reason this
+leg is queued and the reason the log is kept rather than deleted.
