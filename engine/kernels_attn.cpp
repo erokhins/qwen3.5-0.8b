@@ -59,13 +59,27 @@ namespace {
 // engine's lane ceiling: `MAXSC × kAttnMaxSplit`. It is what makes that ceiling a bounded,
 // allocatable number rather than "as much shared memory as the row happens to need", and going past
 // it is a refusal, never an overrun: `attn_decode_layer` throws rather than write past the staging or
-// past the `part` scratch. 9 admits the widest PINNED plan — `wide4096f`'s 4096 prompt + 8 generated
-// = 4104 lanes, which 8's 4096 refused — on `wide4096p`'s 4096 judged rows (D44); nothing above 4104
-// is pinned. No address reads this cap, so a plan 8 ran is bit-identical, and only the scratch grows.
+// past the `part` scratch. 64 admits 64 full waves of `MAXSC` = 32,768 lanes, which is the ceiling
+// item L asked for; it is `ceil(32768 / MAXSC)`, not a taste number, and the ONLY thing the raise
+// costs is the scratch named below. Nothing in `data/refs/` reaches it: `wide4096f`'s 4096 prompt + 8
+// generated = 4104 lanes is still the widest PINNED plan (D44), so the whole band between 4,608 and
+// 32,768 is funded but unpinned, and `tools/longctx_check.sh` is what exercises it. No address reads
+// this cap — `tools/attn_ceiling_proof.py` [A]/[B3] is the witness — so every plan the old 9 ran is
+// bit-identical after the raise, and only the scratch and the refusal boundary move.
+//
+// The bytes, stated because they are the whole admission: `attn_part_floats(kMaxWaveRows)` moves
+// 38,043,648 B -> 270,532,608 B (36.28 MiB -> 258 MiB), ~0.78% of this box's ~34 GiB device pool per
+// scratch instance. That charge is PER SCRATCH, because `allocate_scratch()` sizes from this constant
+// and not from the run's cap, so a 20-token request pays 258 MiB of partials exactly as a 32k one
+// does. For one request, or eight concurrent 32k requests (~5.2 GiB of state+scratch between them),
+// that is free at this model's scale; a many-request server is where it stops being free, and the fix
+// there is to size by `split_for(cap)` instead of by this constant — a separate decision with its own
+// memory argument, deliberately NOT taken here, because one constant that the gate can read is what
+// keeps the refusal and the allocation from disagreeing (§20.1's aliasing class).
 //
 // `engine/gate.py::lane_ceiling()` READS both halves of that product out of the files that enforce
 // them, so neither constant can be retyped into the gate.
-constexpr int kAttnMaxSplit = 9;
+constexpr int kAttnMaxSplit = 64;
 
 // The split a row of `lanes` needs: `split = ceil(lanes / staging)`, so no block is handed more lanes
 // than the staging width the split was derived from (`ceil(n / ceil(n/s)) <= s`).
@@ -181,8 +195,11 @@ std::size_t attn_part_floats(int rows) {
     // block), F32 — `a.part + ((qrow*N_Q + head)*split + blockIdx.y)*(DH + 2)` in the kernel. The
     // slot index never exceeds `rows*N_Q*split - 1`, and the throw in `attn_decode_layer` is what
     // keeps `split <= kAttnMaxSplit`, so sizing for the cap cannot overrun. At `kMaxWaveRows` = 512
-    // it is 512*8*9*258 F32 = 38,043,648 B (33,816,576 B at cap 8), ~2.5 % of the 1.5457 GB
-    // checkpoint; cap 40 (20480 lanes) would be 169,082,880 B — cheap, unfunded, no pin reaches it.
+    // it is 512*8*258 = 1,056,768 F32 = 4,227,072 B PER UNIT OF SPLIT, so the shipped 64 sizes
+    // 270,532,608 B (516 KiB/token) where the old 9 sized 38,043,648 B (72.5625 KiB/token): ~0.78 %
+    // of this box's ~34 GiB pool per scratch instance, and still 31x below the point where a kernel's
+    // int32 element index is the question (67,633,152 elements at split 64) — and the widest buffer
+    // one request touches is not this anyway, it is one KV cache pair, 2*cap*DH = 201 MB at 32,768.
     // It is written only by rows above the staging, so a request under 512 lanes never touches it.
     return static_cast<size_t>(rows) * N_Q * kAttnMaxSplit * (DH + 2);
 }

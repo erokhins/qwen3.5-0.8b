@@ -59,8 +59,10 @@
 namespace {
 
 // Slot count a `--session` allocates when `--cap` is not given. Not a limit the engine enforces, and
-// after the 2.5 ceiling raise it is no longer the first bound either: attention now serves 512 x 9 =
-// 4608 lanes, so a session hits this cap first and `--cap` is how it reaches the wider geometry.
+// it is not the lane ceiling either: attention's ceiling is `MAXSC × kAttnMaxSplit`, which lives in
+// `kernels_attn.cpp` and is read (never retyped) by `engine/gate.py::lane_ceiling()`; it now sits well
+// above this default, so a session hits this cap first and `--cap` is how it reaches the wider
+// geometry.
 constexpr int64_t kSessionDefaultCap = 4096;
 
 struct Options {

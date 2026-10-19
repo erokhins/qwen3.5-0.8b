@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""ceiling_proof.py — CPU witness for the 2.5 lane-ceiling raise (`kAttnMaxSplit` 8 -> 9).
+"""ceiling_proof.py — CPU witness for a lane-ceiling raise (`kAttnMaxSplit`), currently 9 -> 64.
 
-Usage:  .venv/bin/python tmp/gcc/ceiling_proof.py [repo-root]     (default root = cwd)
+Usage:  .venv/bin/python tools/attn_ceiling_proof.py [repo-root]     (default root = cwd)
 
 WHY THIS EXISTS. The admission for raising `kAttnMaxSplit` is that every plan the OLD ceiling already
-admitted must come out BIT-IDENTICAL, because the raise only enlarges buffers (`wide4096f`, at 4104
-lanes, is new ground and cannot witness it). The small device gates can only show that some rows are
-unchanged; the general claim is cheaper and stronger on the CPU, as a statement about which quantities
-the constant is allowed to reach. Nothing here touches the GPU and no timing is taken.
+admitted must come out BIT-IDENTICAL, because the raise only enlarges buffers (the first newly admitted
+plan, `wide4096f` at 4104 lanes, is new ground and cannot witness it). The small device gates can only
+show that some rows are unchanged; the general claim is cheaper and stronger on the CPU, as a statement
+about which quantities the constant is allowed to reach. Nothing here touches the GPU and no timing is
+taken. The constants below are the raise THIS revision witnesses (CAP_OLD 9 = the shipped 4,608-lane
+ceiling, CAP_NEW 64 = 32,768 lanes); retargeting them is the whole of what moves between raises.
 
 WHAT IS CHECKED. Constants are READ out of the files that enforce them, with `engine/gate.py`'s own
 two regexes, and each check is paired with an injection that must make it go red — a check that cannot
@@ -21,12 +23,13 @@ fail is decoration (AGENTS.md, three times over).
                    "one address expression, shared" turned from a quoted claim into a check.
   [B2] WRITE=READ   for a streaming plan the union of the writer slot offsets equals the reader's
                    offset set. Must-catch: §20.1's group-collapsed writer (head-in-group).
-  [B3] CAP-FREE     the PARSED writer expression, evaluated with cap 8 and cap 9, gives identical
+  [B3] CAP-FREE     the PARSED writer expression, evaluated with CAP_OLD and CAP_NEW, gives identical
                    offsets for every plan the old ceiling admitted. Must-catch: the same text with
                    `* kAttnMaxSplit` injected, which makes the two caps differ.
   [C] BOUNDARY     legality is monotone in the cap, `split` never changes, the newly admitted band is
-                   exactly MAXSC*8+1 .. MAXSC*9, and 4608 passes while 4609 is refused.
-  [D] SIZING       `attn_part_floats(kMaxWaveRows)` at caps 8, 9 and the unfunded 40.
+                   exactly MAXSC*CAP_OLD+1 .. MAXSC*CAP_NEW, and MAXSC*CAP_NEW passes while
+                   MAXSC*CAP_NEW+1 is refused.
+  [D] SIZING       `attn_part_floats(kMaxWaveRows)` at CAP_OLD, CAP_NEW and the unfunded CAP_TARGET.
 """
 import ast
 import re
@@ -41,7 +44,7 @@ MIRROR = ROOT / "prototype" / "attn_tile_model.py"
 N_Q, GQA, DH = 8, 4, 256
 SLOT = (DH + 2) * 4                       # bytes per (max, sum, acc[DH]) F32 slot
 WAVE_ROWS = 512                           # `kMaxWaveRows` — a different knob, NOT touched by this
-CAP_OLD, CAP_NEW, CAP_TARGET = 8, 9, 40
+CAP_OLD, CAP_NEW, CAP_TARGET = 9, 64, 128
 CHECKPOINT_B = 1_545_700_000              # AGENTS.md budget table: 1.5457 GB bf16 checkpoint
 
 
@@ -216,7 +219,8 @@ def main():
           f"at rows 1/8/{WAVE_ROWS} "
           f"x caps {CAP_OLD}/{CAP_NEW}/{CAP_TARGET}: checked, no overrun")
 
-    print("\n[B3] cap-independence — the PARSED writer expression evaluated at cap 8 and cap 9:")
+    print("\n[B3] cap-independence — the PARSED writer expression evaluated at cap "
+          f"{CAP_OLD} and cap {CAP_NEW}:")
     moved = 0
     checked = 0
     for sp in range(1, CAP_OLD + 1):
@@ -249,14 +253,16 @@ def main():
     print("\n[C] plan legality (split = ceil(lanes / MAXSC); legal iff split <= cap):")
     newly = [n for n in range(1, staging * CAP_NEW + 1) if CAP_OLD < split_of_n(n) <= CAP_NEW]
     lost = [n for n in range(1, staging * CAP_OLD + 1) if split_of_n(n) > CAP_NEW]
-    print(f"    newly admitted: {newly[0]}..{newly[-1]} ({len(newly)} widths), all at split 9")
-    print(f"    legal at 8 and refused at 9: {len(lost)} (must be 0)")
+    print(f"    newly admitted: {newly[0]}..{newly[-1]} ({len(newly)} widths), all at splits "
+          f"{CAP_OLD + 1}..{CAP_NEW}")
+    print(f"    legal at {CAP_OLD} and refused at {CAP_NEW}: {len(lost)} (must be 0)")
     if lost:
         bad.append("the raise made a previously legal plan illegal")
     if newly[0] != staging * CAP_OLD + 1 or newly[-1] != staging * CAP_NEW:
-        bad.append("the newly admitted band is not exactly MAXSC*8+1 .. MAXSC*9")
+        bad.append(f"the newly admitted band is not exactly MAXSC*{CAP_OLD}+1 .. MAXSC*{CAP_NEW}")
     for lanes, want in ((staging * CAP_OLD, True), (staging * CAP_OLD + 1, True), (4104, True),
-                        (staging * CAP_NEW, True), (staging * CAP_NEW + 1, False), (20480, False)):
+                        (staging * CAP_NEW, True), (staging * CAP_NEW + 1, False),
+                        (staging * CAP_TARGET, False)):
         ok = split_of_n(lanes) <= CAP_NEW
         if ok != want:
             bad.append(f"boundary {lanes} lanes reads the wrong way")
@@ -265,9 +271,10 @@ def main():
               f"[expected {'legal' if want else 'refused'}]")
 
     print("\n[D] `attn_part_floats(kMaxWaveRows = 512)` in bytes:")
-    for cap, note in ((CAP_OLD, "old ceiling, 512 x 8 = 4096 lanes"),
-                      (CAP_NEW, "AS SHIPPED NOW, ceiling 512 x 9 = 4608 lanes"),
-                      (CAP_TARGET, "UNFUNDED 20480-lane target; no pin reaches it")):
+    for cap, note in ((CAP_OLD, f"old ceiling, {staging} x {CAP_OLD} = {staging*CAP_OLD} lanes"),
+                      (CAP_NEW, f"AS SHIPPED NOW, ceiling {staging} x {CAP_NEW} = "
+                                f"{staging*CAP_NEW} lanes"),
+                      (CAP_TARGET, f"UNFUNDED {staging*CAP_TARGET}-lane target; no pin reaches it")):
         b = WAVE_ROWS * N_Q * cap * (DH + 2) * 4
         print(f"    split {cap:2d}: 512*8*{cap}*258*4 B = {b:>12,} B = {b/1e6:7.2f} MB = "
               f"{b/1048576:7.2f} MiB = {100*b/CHECKPOINT_B:5.2f} % of checkpoint   {note}")

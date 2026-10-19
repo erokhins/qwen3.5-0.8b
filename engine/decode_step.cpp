@@ -282,9 +282,10 @@ DecodeScratch allocate_scratch(int wave_rows) {
     sc.a_gated = alloc<uint16_t>((size_t)wave_rows * kNumQueryHeads * kHeadDim);
     // The split-K online softmax's partial staging (§07.3, P7). One buffer per request, sized by the
     // attention launcher itself — it owns the head width and the split cap, and this file should not
-    // have to. With P8 it is sized for a whole wave of rows, which is 33.8 MB at the full ceiling
-    // instead of 64.5 KiB: AGENTS.md is right about the budget (this model uses 4 % of the pool), and
-    // a wave whose widest row is over the staging has nowhere else to put `rows x 8 x split` partials.
+    // have to. With P8 it is sized for a whole wave of rows, which is 258 MB at the lane ceiling
+    // (32,768 lanes) instead of the 516 KiB one row needs: AGENTS.md is right about the budget (this
+    // model uses 4 % of the pool), and a wave whose widest row is over the staging has nowhere else
+    // to put `rows x 8 x split` partials.
     sc.a_part = alloc<float>(kernels::attn_part_floats(wave_rows));
 
     sc.mlp_act = alloc<uint16_t>(i);
