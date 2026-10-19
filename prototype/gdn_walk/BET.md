@@ -304,3 +304,56 @@ inferring its shape from `hipGetDeviceProperties`-shaped traces when we could ha
 funded as a census of that source, not as an implementation** — decomposition, state layout, vector width,
 reduction strategy, per-token work volume, diffed against `rec_loop_kernel`, with one bet pre-registered from
 what it finds. No further GDN implementation is funded before G3 reports.
+
+## 12. G3 measured (2026-10-19): §38's geometry was wrong, and GDN's gap is **elements per thread**, not shape
+
+A census of `engines/llama.cpp/ggml/src/ggml-cuda/gated_delta_net.cu` (`G3-llama-kernel.md`), done because
+four bets had been spent inferring that kernel's shape from a profiler while its source sat readable in this
+repo. Two things retired, and the first is mine.
+
+**§38's geometry rows are wrong and they were load-bearing.** `tools/trace_phase_split.py --geom` keyed on
+`Workgroup_Size_X`/`Grid_Size_X` only, so llama's `gated_delta_net` — launched `dim3(32,4)` blocks over a
+`dim3(512,4,8)` thread grid — read as "32 threads × 512 grid = 16 blocks, 0.80 blocks/CU, same as us". On all
+three axes it is **128 blocks × 128 threads = 512 wavefronts/launch = 6.40 wf/SIMD, 8× our 0.8, no idle CU**.
+Re-read independently by the main agent from the CSVs already on disk (`g3_geom_recheck.py`, and the fixed
+`--geom` at `879ef31`), not inherited. Provenance first: tree `797de63` clean, `<128,false,false,4>` present
+in the very object §38 traced, `gdn.cu:203-204` reproducing the traced shape — the census is reading the
+kernel that ran. §38's *phase times* (GDN 272.07 vs 47.20 ms) are untouched by this; only its geometry rows.
+
+**Instruction count is dead on sign.** Both engines do the same 4 FMA-class ops per state element (7.73×10¹⁰
+MAC/pass); llama issues **1.28× more** slots per token than we do and finishes 5.76× faster. So §26's
+instruction/traffic axis — the last one standing after §11 — is also not the story. What is: **state elements
+per thread, 128 → 16.** At 16 the shard fits in registers (`vgpr 78, spill 0, LDS 0`), so their per-token
+state traffic is zero, their row reductions are 8-lane butterflies needing no barrier, and they run 8× the
+wavefronts. Checked against measured ceilings, not hoped: we issue at 9.9 % of the 231.5 G-slot roof, llama at
+73.6 %; their 3.28 TFLOP/s is 45 % of the scalar `v_fma_f32` roof with no matrix or dot instruction anywhere
+in their object; their LSU demand coincidentally equals ours (864 vs 861 GB/s ≈ 94 % of the 918 GB/s cache
+roof) and is recorded then **rejected**, because route A already falsified the traffic reading. Nothing in
+llama's number asks for a capability we lack.
+
+**And G2 changes meaning.** It is not evidence against shape — it is evidence *for* wavefront count with the
+sign flipped: G2 took wf/SIMD from 0.8 to 0.20–0.40 and lost 122 %. So G4's premise has two independent
+measurements behind it plus a source census, which is more than any earlier GDN bet had.
+
+### G4 adopted, with the lines set here
+
+**G4: llama's thread map under our recurrence** — 128 blocks × 128 threads, 8 lanes per state column, **16
+state elements per thread held in registers for the whole span**. The map is forced by arithmetic, not taste:
+`wavefronts × 32 × elements_per_thread = 262,144`, so raising wavefronts *means* lowering elements, and 16 is
+what fits in a register file that also holds k̂ and q̂. Full constraint set in `G3-llama-kernel.md` §6 —
+notably: assert the identity in source, one address expression for load/update/store (§20.1's aliasing trap),
+norms as 8-lane butterflies so nothing has to be staged (G1's +32 KB/token externality is the failure this
+avoids by construction), state layout unchanged so every consumer keeps working, and re-associated numerics
+judged by the existing §10.1 aggregates with no new band.
+
+Bases from §42's window (`gdn_rec` 264.00 ms, `wall_ms` 626.44 ms); lines chosen so either §40's or §42's base
+gives the same verdict. Medians of 3 at 4,096 lanes, one hold, three sides, canaries before any timing
+(including a `--geom` read in the same hold — which is only possible because `879ef31` fixed the axis bug).
+
+| metric | base | live | dead | why |
+|---|---|---|---|---|
+| `gdn_rec` family ms | 264.00 | **≤ 170** | **> 225** | model says a faithful port lands 47–167 ms; 170 is just inside the pessimistic end and is a 1.55× family win; 225 = <1.17×, which does not justify rewriting the shipping walk and taking its numerics risk |
+| wave `wall_ms` | 626.44 | **≤ 540** | **> 607** | row −94 ms puts the wave at 532; 540 allows ≤20 ms externality (3× G1's, 7× G2's); dead = base −3 %, §10's convention |
+
+Both must clear live to ship; either past dead kills; anything else is unresolved and not shipped. **`wall_ms`
+is the ship gate.**
