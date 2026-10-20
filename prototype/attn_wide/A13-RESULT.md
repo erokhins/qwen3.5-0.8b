@@ -1,7 +1,8 @@
 # A13 result — the llama-shaped round lands: **−27.4 % warm at 16k, −35.7 % at 32k**, 18/18 gate PASS, no band moved (2026-10-20)
 
 `LLAMA-PORT-PLAN.md` was the funding note; this is what came of it. Knob `--attn-fattn-wide 2`
-(`engine/attn_wide_llama_kernels.h`, 486 lines, default still **0**). Instruments: `a13_byte_identity.py`,
+(`engine/attn_wide_llama_kernels.h`, 486 lines — **the shipping default** as of 2026-10-20, see "State" below).
+Instruments: `a13_byte_identity.py`,
 `a13_longctx_identity.sh`, `a13_identity_metrics.py`, `a13_ab_timing.sh`, `a13_warm_headline.sh`; evidence
 in `evidence/a13_*`. Main agent ran every device number in this file, blocking, zero subagents, one
 `gpu_lock` hold per leg, canaries asserted on every single run.
@@ -82,9 +83,31 @@ The worker's spec-check found the plan had read the source but not the preproces
 
 ## State and what is left
 
-Default remains `--attn-fattn-wide 0`. Flipping it to 2 is one line in `engine/decode_step.h` /
-`decode_run.cpp` plus a warm re-take of the headline at every published width, and it is a **user decision**
-by the precedent set when A12 passed and was still left off. What A13 changes relative to that precedent is
-the size: A12 was worth ~1 %, this is worth 27 % at 16k. Also open and untouched by this work: `chunk64b`
-red on the shipping path, and the `smoke` wide-scoped margin (measured 2.028e-04 against 2.500e-04 — the two
-wide forms are 4 % of a band below their ceiling, so any future wide-form change has very little headroom).
+**The default is now 2.** Shipped 2026-10-20 in the same commit across `decode_run.cpp`'s option struct and
+`gate.py`'s `--attn-fattn-wide` default, because a half-flipped pair makes the gate silently judge a kernel
+the engine does not ship (the trap this repo already records). `AttnLayerArgs`' **struct** default stays 0 on
+purpose and says why in its comment: it is the library default that only reaches callers which leave the
+field unset — the standalone rigs, whose published baselines were all taken on the inert form — while
+`decode_run` assigns the field unconditionally.
+
+Witnessed as the default, not as a knob (`a13_default_admission.sh`, `a13_default_warm_headline.sh`, both
+passing **no form flags** and asserting the run's own `attn_fattn_wide=`/`form=`):
+
+| width | warm ms (median of 3) | **prompt tok/s as shipped** | §51 published | Δ |
+|---|---|---|---|---|
+| 512 | 44 ms `[44.31, 44.61]` | **11,636** | 10,637 | **+9.4 %** |
+| 1,024 | 85 ms `[85.09, 86.16]` | **12,047** | 11,276 | +6.8 % |
+| 4,096 | 370 ms `[361.8, 373.5]` | **11,070** | 9,790 | **+13.1 %** |
+| 16,384 | 1,918 ms `[1894.3, 1922.7]` | **8,542** | 6,125 | **+39.5 %** |
+| 32,000 | 5,200 ms `[5158, 5295]` | **6,154** | 3,924 @ 32,768 | ~+57 % |
+
+**Default admission: 18/18 PASS, zero no-verdicts** — and one of those 18 is `chunk64b`, the red the shipping
+path carried since before A12 (a batched-vs-one-row token flip at 2.925 BF16 ULP of room, `A12-ADMISSION.md`).
+It passes on this form, which is worth saying out loud: the flip did not merely avoid the old red, it removed
+one. The gate's own echo cross-check is what proves the routing on every one of those runs, so a default that
+had landed in only one of the two binaries could not have produced this table.
+
+Still open, untouched by this work: the `smoke` wide-scoped margin (measured 2.028e-04 against the 2.500e-04
+line — the two wide forms sit 19 % under their ceiling, so any future wide-form change has very little
+headroom), and the question of whether §51's llama-facing attribution table should now be re-traced, since the
+attention row it records (ours 1,518.91 ms/pass at 16k) is no longer what the engine does.

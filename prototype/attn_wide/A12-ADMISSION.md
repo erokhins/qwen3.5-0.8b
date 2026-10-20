@@ -61,3 +61,10 @@ including the shipper**, so the D40-class invocation gap that produced its red d
 current binary; `EXPECTED_RED` in `engine/gate.py` is empty (`{}` at :8707), i.e. nothing is being excused —
 the run is green, not waived. The table above is left as it was run on 2026-10-20 morning for the record;
 this addendum is the current state.
+
+**One more supersession, same date.** Line 40's "`--attn-fattn-wide` default remains **0**" is history: the
+engine and the gate both default to **2** now (A13, shipped the same day as the addendum above), so a bare
+`engine/gate.py --fixture X` run from here on judges the A13 form — which is what
+`prototype/attn_wide/a13_default_admission.sh` exists to re-prove over the same derived population (18/18,
+`chunk64b` included; `evidence/a13_default_admission.txt`). Nothing in this file's own tables has been
+edited; the two addenda above and this line are the corrections.
