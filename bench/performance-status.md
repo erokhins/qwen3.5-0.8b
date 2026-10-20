@@ -2744,3 +2744,53 @@ causation. Both kernels are stall-bound in wall-clock terms (A2: ≤ 8.8 % issue
 whose mechanism is inferred — the residency alternative that would have explained the gap differently is
 what §57 R1b killed. **Headlines stay warm 10,637 tok/s at 512 and 9,790 at 4,096** — R2 ships no code and
 moves no default.
+
+## §59. **A13 lands: attention is at llama's rate.** Warm −10.4 % at 512, −14.9 % at 4,096, −27.4 % at 16,384 and −35.7 % at 32,000 lanes; gate 18/18 with no band moved (2026-10-20)
+
+`prototype/attn_wide/A13-RESULT.md` (instruments `a13_byte_identity.py`, `a13_longctx_identity.sh`,
+`a13_identity_metrics.py`, `a13_ab_timing.sh`, `a13_warm_headline.sh`; evidence `evidence/a13_*`). Form:
+`--attn-fattn-wide 2`, `engine/attn_wide_llama_kernels.h`, **default still 0**. Every number below is
+main-agent, blocking, zero subagents, one lock per leg, canaries (`attn_fattn_wide=`, `form=`, `tokens=`,
+and the required-to-move `scratch=` field) asserted on every run.
+
+**Warm headline (§51 convention, `WAVEPASS gran=burst wall_ms`, median of 3).** knob 0 → knob 2:
+512 48→43 ms (**10,667 → 11,907 tok/s**); 1,024 94→87 (**10,894 → 11,770**); 4,096 422→359
+(**9,706 → 11,409**); 16,384 2,674→1,942 (**6,127 → 8,437**); 32,000 7,960→5,116 (**4,020 → 6,255**). The
+knob-0 column reproduces §51's published figures within 0.3 % / 0.9 % / 0.03 % at 512 / 4,096 / 16,384, so
+the baseline is the same instrument. Cold moved alike (16,384: 2,782→2,032 ms, `[2782,2855]` vs
+`[2032,2094]`, disjoint; 32,000: 7,957→5,112, disjoint), while knob 1 (A12) stayed at its −1.0…−1.6 %.
+
+**Against §51's attribution, which is the whole point of this section.** §51 recorded our attention excess
+as **+751 ms/pass at 16k** against a total gap of +596 ms, and **+2,815 ms at 32,768** against +2,489 ms.
+A13 removes **−732 ms at 16,384** and **−2,844 ms at 32,000** warm — 97.5 % and ~100 % of that named excess
+(widths differ slightly at 32k, so read the second as ±5 %). Against llama's own traced totals this now
+reads **8.7 % faster at 16k** (1,942 vs their 2,126.23 ms) and **12.4 % faster at 32k** (5,116 vs their
+5,839.50 taken at 32,768 lanes, so if anything understated) — cross-window against §51's llama figures, not
+a paired A/B, and labelled as such per §57. GEMM was already 0.88–0.90× in our favour, so **the attention
+question is now closed and any remaining long-context difference is not attention.**
+
+**§58's model predicted the size from the other side.** The ported round bills **20.56** non-matrix slots
+per matrix slot against A12's **24.05** (round-scoped; the mandated widest-span instrument reads 110.91 →
+67.09 but encloses both round instantiations plus the epilogue, so the round-scoped figure is the quotable
+one). The worker's flagged price — spilled VGPRs 163→920, private segment 176→720 B/thread — is paid for
+many times over at every width, and `scratch=` is exactly the behavioural canary §57's D30 rule asks for.
+
+**Correctness, and the wrinkle that mattered.** Byte-identical to knob 1 across the five pinned geometries
+(1,960 files, 0 differing) **and** bit-identical at 4,096 lanes including all 4,099 free-run decisions. At
+16k/32k it is **not** bit-identical: **1−cos 1.41e-05 and 6.43e-05**, argmax SAME, top-5 SAME, and the
+**entire 16,385 / 31,826-token greedy continuation agrees token for token**; all 32 wave lines carry
+identical `grid`/`wide_rows`/`lanes_last`/`split`, so coverage is unchanged and this is re-association, not
+skipped work. Gate over the derived 18-fixture population: **knob 2 18/18 PASS, knob 1 18/18, knob 0
+(ships) 17/18** — the red is `chunk64b`, pre-existing per `A12-ADMISSION.md`. **No band was widened**; the
+user's pre-authorisation was not spent. The only gate edit is knob admission itself: `choices` gains `"2"`,
+the echo map becomes an explicit dict `{"0":fattn,"1":wide,"2":wide_llama}` so a fourth form cannot fall
+into an `else` and be judged as the shipper, and `_is_wide_side` treats `wide_llama` as wide, routing it
+onto the already-adopted wide-scoped pooled line (measured 2.028e-04 against the 2.500e-04 line, 19 % inside).
+
+Two instruments died and were replaced in the making, both worth the rows in `AGENTS.md`: `--ids-file`
+splits on **commas**, so a space-joined fixture read as one token and a whole window of "16k" numbers came
+out as 23 ms until the `form=` canary aborted it; and a logits dump read as BF16 when it is F32 yields NaN
+for every aggregate while still printing a confident `ndiff`. **Headlines stay as §51 published until the
+default decision is made** — knob 2 is admitted and one line from becoming the shipper, and the precedent
+when A12 passed at ~1 % was that this call is the user's. What changed is the size of what is on the table:
+27 % of the 16k wave, not 1 %.
