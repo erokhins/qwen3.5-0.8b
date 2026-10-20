@@ -1,5 +1,14 @@
 # A13 — port llama.cpp's attention structure onto our wide form (funded 2026-10-20: "do as they did; fast and numerically sound; near-band numerics are fine")
 
+> **CORRECTION, written after the work landed (`A13-RESULT.md`).** This plan read the source but not the
+> preprocessor: llama's swizzled `ldmatrix` path and its `cp.async` multi-stage pipeline are both
+> **CUDA-only** (`TURING_MMA_AVAILABLE` / `CP_ASYNC_AVAILABLE` require `!GGML_USE_HIP`), so on RDNA3 llama
+> **pads rather than swizzles and stages synchronously**. Items 1 and 2 below are therefore **our**
+> engineering wearing llama's hat, not ports — and they are the two that won (warm 16k −27.4 %). Item 3 was
+> already done by LLVM; item 4's add-a-sentinel mask is a pessimisation against our single scalar causal
+> bound and landed instead as a `template <bool kMasked>` full/tail split. Read `A13-RESULT.md` for what
+> actually shipped and what each item was worth.
+
 Source read this session: `engines/llama.cpp/ggml/src/ggml-cuda/fattn-mma-f16.cuh` (2,175 lines) plus
 `fattn-common.cuh`, and the actual compiled instance for this model,
 `flash_attn_ext_f16<DKQ=256, DV=256, ncols1=16, ncols2=4>` — which is our shape exactly (`head_dim` 256,
