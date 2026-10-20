@@ -1,0 +1,67 @@
+SPLITCAP split=1 cap=0 lanes=512 natural=1 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=512 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+SPLITCAP split=2 cap=0 lanes=1024 natural=2 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=1024 slim_wave=0 fattn_wave=0 combine=0 split=2 split_used=0
+SPLITCAP split=3 cap=0 lanes=1536 natural=3 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=1536 slim_wave=0 fattn_wave=0 combine=0 split=3 split_used=0
+SPLITCAP split=4 cap=0 lanes=2048 natural=4 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=2048 slim_wave=0 fattn_wave=0 combine=0 split=4 split_used=0
+SPLITCAP split=5 cap=0 lanes=2560 natural=5 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=2560 slim_wave=0 fattn_wave=0 combine=0 split=5 split_used=0
+SPLITCAP split=6 cap=0 lanes=3072 natural=6 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=3072 slim_wave=0 fattn_wave=0 combine=0 split=6 split_used=0
+SPLITCAP split=7 cap=0 lanes=3584 natural=7 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=3584 slim_wave=0 fattn_wave=0 combine=0 split=7 split_used=0
+SPLITCAP split=8 cap=0 lanes=4096 natural=8 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=4096 slim_wave=0 fattn_wave=0 combine=0 split=8 split_used=0
+SPLITCAP split=9 cap=0 lanes=4608 natural=9 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=4608 slim_wave=0 fattn_wave=0 combine=0 split=9 split_used=0
+SPLITCAP split=10 cap=0 lanes=5120 natural=10 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=5120 slim_wave=0 fattn_wave=0 combine=0 split=10 split_used=0
+SPLITCAP split=11 cap=0 lanes=5632 natural=11 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=5632 slim_wave=0 fattn_wave=0 combine=0 split=11 split_used=0
+SPLITCAP split=12 cap=0 lanes=6144 natural=12 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=6144 slim_wave=0 fattn_wave=0 combine=0 split=12 split_used=0
+SPLITCAP split=13 cap=0 lanes=6656 natural=13 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=6656 slim_wave=0 fattn_wave=0 combine=0 split=13 split_used=0
+SPLITCAP split=14 cap=0 lanes=7168 natural=14 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=7168 slim_wave=0 fattn_wave=0 combine=0 split=14 split_used=0
+SPLITCAP split=15 cap=0 lanes=7680 natural=15 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=7680 slim_wave=0 fattn_wave=0 combine=0 split=15 split_used=0
+SPLITCAP split=16 cap=0 lanes=8192 natural=16 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=8192 slim_wave=0 fattn_wave=0 combine=0 split=16 split_used=0
+SPLITCAP split=17 cap=0 lanes=8704 natural=17 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=8704 slim_wave=0 fattn_wave=0 combine=0 split=17 split_used=0
+SPLITCAP split=18 cap=0 lanes=9216 natural=18 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=9216 slim_wave=0 fattn_wave=0 combine=0 split=18 split_used=0
+SPLITCAP split=19 cap=0 lanes=9728 natural=19 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=9728 slim_wave=0 fattn_wave=0 combine=0 split=19 split_used=0
+SPLITCAP split=20 cap=0 lanes=10240 natural=20 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=10240 slim_wave=0 fattn_wave=0 combine=0 split=20 split_used=0
+SPLITCAP split=21 cap=0 lanes=10752 natural=21 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=10752 slim_wave=0 fattn_wave=0 combine=0 split=21 split_used=0
+SPLITCAP split=22 cap=0 lanes=11264 natural=22 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=11264 slim_wave=0 fattn_wave=0 combine=0 split=22 split_used=0
+SPLITCAP split=23 cap=0 lanes=11776 natural=23 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=11776 slim_wave=0 fattn_wave=0 combine=0 split=23 split_used=0
+SPLITCAP split=24 cap=0 lanes=12288 natural=24 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=12288 slim_wave=0 fattn_wave=0 combine=0 split=24 split_used=0
+SPLITCAP split=25 cap=0 lanes=12800 natural=25 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=12800 slim_wave=0 fattn_wave=0 combine=0 split=25 split_used=0
+SPLITCAP split=26 cap=0 lanes=13312 natural=26 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=13312 slim_wave=0 fattn_wave=0 combine=0 split=26 split_used=0
+SPLITCAP split=27 cap=0 lanes=13824 natural=27 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=13824 slim_wave=0 fattn_wave=0 combine=0 split=27 split_used=0
+SPLITCAP split=28 cap=0 lanes=14336 natural=28 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=14336 slim_wave=0 fattn_wave=0 combine=0 split=28 split_used=0
+SPLITCAP split=29 cap=0 lanes=14848 natural=29 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=14848 slim_wave=0 fattn_wave=0 combine=0 split=29 split_used=0
+SPLITCAP split=30 cap=0 lanes=15360 natural=30 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=15360 slim_wave=0 fattn_wave=0 combine=0 split=30 split_used=0
+SPLITCAP split=31 cap=0 lanes=15872 natural=31 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=15872 slim_wave=0 fattn_wave=0 combine=0 split=31 split_used=0
+SPLITCAP split=32 cap=0 lanes=16384 natural=32 rows=512 span=512
+ATTN_WIDE form=wide128 warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=176 wf_per_cu=16 SPILL grid=(2,1,16) wide_rows=512/512 wave_rows=512 lanes_last=16384 slim_wave=0 fattn_wave=0 combine=0 split=32 split_used=0
+PREFILL tokens=16384 logits=last prefix_len=16384 wave_rows=512 pos=0..16383
+SPLITCAP split=33 cap=0 lanes=16385 natural=33 rows=1 span=497
+RESULT mode=run steps=16385 ms_total=2807.892 ms_per_step=0.171 last_sampled=6784 prefix_len=16385 stopped=0

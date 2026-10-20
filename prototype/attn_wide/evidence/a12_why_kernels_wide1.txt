@@ -1,0 +1,74 @@
+---- prefill_kernel_trace ----
+trace files: tmp/a12why/kt16384_wide1/prefill_kernel_trace.csv
+CU count: 40  [agent_info Cu_Count=40 (the trace's own machine row; HIP would say 20 — devices/strix-halo-compute.md says use this one)]
+kernel records          13104
+span of kernel activity 3096.2243 ms   (first start .. last end)   <- includes model load and hipBLAS init: read the BY-WAVE table for the wave itself
+Σ kernel duration       2717.7138 ms
+Σ busy (merged)         2717.7138 ms
+
+DEVICE-BUSY COVERAGE    87.78 %  (Σ busy / span; Σdur/span would say 87.78 %)
+Σ idle inside span      378.5105 ms
+launch rate             4.2 k launches/s
+launches < 5 µs   1710 of 13104 (13.0 % of launches) totalling 3.6596 ms = 0.1 % of Σ duration
+
+DISPATCH BUBBLES: 13103 gaps, Σ 378.5105 ms (12.22 % of span)
+  gap µs: p50=2.044 p90=2.344 p99=17.062 max=100883.801    (nearest-rank percentiles)
+  Σ gap attributed to the kernel that preceded each gap:
+      173.1945 ms  n=750     __amd_rocclr_copyBuffer
+      103.0629 ms  n=710     cast_bf16_to_f32_kernel
+       62.0874 ms  n=4       __amd_rocclr_fillBufferUnAligned
+        9.6299 ms  n=1       lm_head_gemv_full
+        3.6643 ms  n=1536    Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT96x128x…053d1e
+        3.6056 ms  n=1152    void proj_gemv_tokens<1024, 4, false>
+        3.4581 ms  n=1617    void glue_add_norm<256>
+        2.2501 ms  n=576     rec_reg16_kernel
+        2.1661 ms  n=576     Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x128x…488d9b
+        1.9100 ms  n=768     Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x32x6…8a8c28
+        1.6133 ms  n=768     Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x128x…c7f789
+        1.6058 ms  n=768     mlp_silu_mul_kernel
+  ten largest gaps:
+    100883.801 µs  after cast_bf16_to_f32_kernel
+     46650.057 µs  after __amd_rocclr_fillBufferUnAligned
+     45289.946 µs  after __amd_rocclr_copyBuffer
+     33579.669 µs  after __amd_rocclr_copyBuffer
+     14639.752 µs  after __amd_rocclr_fillBufferUnAligned
+      9629.934 µs  after lm_head_gemv_full
+      4775.872 µs  after __amd_rocclr_copyBuffer
+      4418.211 µs  after __amd_rocclr_copyBuffer
+      3706.702 µs  after __amd_rocclr_copyBuffer
+      3666.798 µs  after __amd_rocclr_copyBuffer
+
+PER-KERNEL (Σ duration descending, 29 distinct names, shares of Σ dur)  wgs = workgroups per launch, wgs/CU = wgs / CU count
+          ms   share   count   mean µs    max µs        wgs            wg  wgs/CU   wf/CU     lds  vgpr  name
+   1476.0506  54.31%     192  7687.764 14603.709         32       256x1x1    0.80 *    3.20   32768   256  attn_wide_wave
+    349.9071  12.88%     576   607.478  1779.387        128        32x4x1    3.20    6.40       0    80  rec_reg16_kernel
+    186.8422   6.87%    1536   121.642   719.633        152       128x1x1    3.80    7.60   32256   256  Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT96x128x…053d1e
+    122.6988   4.51%     576   213.019   246.303        256       128x1x1    6.40   12.80   32256   256  Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT96x128x…ed7bcc
+    103.8166   3.82%     768   135.178   478.620         64       128x1x1    1.60    3.20   60416   256  Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x128x…c7f789
+     92.3098   3.40%     576   160.260   225.023        128       128x1x1    3.20    6.40   13824   128  Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x128x…488d9b
+     85.9328   3.16%     768   111.892   434.057        256        64x1x1    6.40    6.40   29696   256  Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x32x6…8a8c28
+     58.4460   2.15%     594    98.394  1050.657       3072       256x1x1   76.80  307.20       0    48  conv_kernel  <-geometry varies
+     45.1233   1.66%    1617    27.906   352.423        512       256x1x1   12.80   51.20     512    16  void glue_add_norm<256>  <-geometry varies
+     41.6342   1.53%     768    54.211  1312.108       7168       256x1x1  179.20  716.80       0    16  mlp_silu_mul_kernel
+     34.6775   1.28%     594    58.380   875.607       8192       128x1x1  204.80  409.60     512    16  gdn_gated_norm  <-geometry varies
+     27.4781   1.01%    1152    23.852   349.137        128      1024x1x1    3.20   51.20   16384    32  void proj_gemv_tokens<1024, 4, false>
+     27.2626   1.00%     192   141.993   689.898        384       128x1x1    9.60   19.20   28160   256  Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT64x96x3…a124ae
+     16.7200   0.62%     192    87.083  1081.154       5120       256x1x1  128.00  512.00    2560    32  attn_prep
+     11.0539   0.41%     384    28.786   237.807         32       128x1x1    0.80 *    1.60   30208   256  Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT128x64x…23a64e
+      8.4390   0.31%       6  1406.506  2341.404        264       256x1x1    6.60   26.40   39424    56  attn_core
+      7.2717   0.27%     335    21.707  2251.555          1       256x1x1    0.03 *    0.10    2048    16  warm_read_kernel  <-geometry varies
+      6.0390   0.22%     710     8.506   290.707          1       256x1x1    0.03 *    0.10       0     8  cast_bf16_to_f32_kernel  <-geometry varies
+      4.4516   0.16%       2  2225.807  2280.129      31040       256x1x1  776.00 3104.00    4096    32  lm_head_gemv_full
+      3.1672   0.12%      90    35.191   575.001        192      1024x1x1    4.80   76.80    4096    24  void proj_gemv_tokens<1024, 1, false>  <-geometry varies
+      2.0802   0.08%      24    86.675   107.763        448       256x1x1   11.20   44.80    4096    40  void mlp_gateup<1024, 1>
+      1.7403   0.06%     750     2.320   112.411          1       512x1x1    0.03 *    0.20       0    16  __amd_rocclr_copyBuffer  <-geometry varies
+      1.5819   0.06%      24    65.914   459.784         32      1024x1x1    0.80 *   12.80    8192    24  void proj_gemv_tokens<2048, 1, false>
+      1.4754   0.05%     594     2.484     7.615        512        16x1x1   12.80   12.80       0    24  gates_kernel  <-geometry varies
+      0.9214   0.03%      24    38.392    58.310        128       256x1x1    3.20   12.80   14336    40  void mlp_down<3584>
+      0.2101   0.01%       4    52.519   113.815          1       256x1x1    0.03 *    0.10       0     8  __amd_rocclr_fillBufferUnAligned  <-geometry varies
+      0.1937   0.01%      18    10.760    35.948         16       128x1x1    0.40 *    0.80    1536    64  rec_fused_kernel
+      0.1391   0.01%      32     4.346     6.893        512       256x1x1   12.80   51.20       0     8  embed_gather_kernel
+      0.0498   0.00%       6     8.296    13.144          8       256x1x1    0.20 *    0.80       0    16  attn_combine
+  (*) fewer workgroups in the launch than there are CUs: that kernel cannot fill the machine however long it runs; wf/CU is the machine-average wavefronts per CU (Wave_Front_Size 64).
+
+BY WAVE (32 equal launch-index chunks — the wave boundary is a launch count, not a time; the last chunk is ragged and also holds the priced step)

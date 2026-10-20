@@ -1,0 +1,72 @@
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+SPLITCAP split=1 cap=0 lanes=512 natural=1 rows=512 span=512
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+ATTN_FATTN_SKIP rows=0/512: a one-pass wave (lanes <= MAXSC 512) allocates no streaming partials, so the WMMA form owns nothing and is not launched
+SPLITCAP split=2 cap=0 lanes=1024 natural=2 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=2 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=3 cap=0 lanes=1536 natural=3 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=3 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=4 cap=0 lanes=2048 natural=4 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=4 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=5 cap=0 lanes=2560 natural=5 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=5 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=6 cap=0 lanes=3072 natural=6 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=6 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=7 cap=0 lanes=3584 natural=7 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=7 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=8 cap=0 lanes=4096 natural=8 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=8 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=9 cap=0 lanes=4608 natural=9 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=9 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=10 cap=0 lanes=5120 natural=10 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=10 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=11 cap=0 lanes=5632 natural=11 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=11 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=12 cap=0 lanes=6144 natural=12 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=12 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=13 cap=0 lanes=6656 natural=13 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=13 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=14 cap=0 lanes=7168 natural=14 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=14 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=15 cap=0 lanes=7680 natural=15 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=15 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=16 cap=0 lanes=8192 natural=16 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=16 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=17 cap=0 lanes=8704 natural=17 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=17 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=18 cap=0 lanes=9216 natural=18 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=18 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=19 cap=0 lanes=9728 natural=19 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=19 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=20 cap=0 lanes=10240 natural=20 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=20 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=21 cap=0 lanes=10752 natural=21 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=21 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=22 cap=0 lanes=11264 natural=22 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=22 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=23 cap=0 lanes=11776 natural=23 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=23 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=24 cap=0 lanes=12288 natural=24 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=24 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=25 cap=0 lanes=12800 natural=25 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=25 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=26 cap=0 lanes=13312 natural=26 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=26 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=27 cap=0 lanes=13824 natural=27 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=27 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=28 cap=0 lanes=14336 natural=28 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=28 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=29 cap=0 lanes=14848 natural=29 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=29 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=30 cap=0 lanes=15360 natural=30 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=30 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=31 cap=0 lanes=15872 natural=31 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=31 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+SPLITCAP split=32 cap=0 lanes=16384 natural=32 rows=512 span=512
+ATTN_FATTN form=fattn16 q=unstaged8 roll=single pv=f32 warps=3 vgpr=185 lds=20480 scratch=0 vtiles=16 wf_per_cu=9 wave_rows=512 split=32 fattn_rows=512/512 fallback_rows=0 covered_rows_pct=100.0 covered_work_pct=100.0
+PREFILL tokens=16384 logits=last prefix_len=16384 wave_rows=512 pos=0..16383
+SPLITCAP split=33 cap=0 lanes=16385 natural=33 rows=1 span=497
+RESULT mode=run steps=16385 ms_total=2785.241 ms_per_step=0.170 last_sampled=6784 prefix_len=16385 stopped=0
