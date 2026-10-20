@@ -1,0 +1,18 @@
+=== lanes=4096 ===
+logits4095.bin: n=248320 ndiff=0 (0.000 %)  1-cos=1.110e-16  max_abs=0  max_rel=0  meanrel=0.000e+00  |a|max=30.17
+   argmax: knob1=4886 knob2=4886 SAME  |  top-5 k1=[4886, 23163, 44487, 1105, 4607] k2=[4886, 23163, 44487, 1105, 4607]
+logits4096.bin: n=248320 ndiff=0 (0.000 %)  1-cos=0.000e+00  max_abs=0  max_rel=0  meanrel=0.000e+00  |a|max=30
+   argmax: knob1=998 knob2=998 SAME  |  top-5 k1=[998, 513, 557, 37680, 271] k2=[998, 513, 557, 37680, 271]
+  sampled.txt: 4099 lines, 4099 equal (100.00 %), first difference at index None
+=== lanes=16384 ===
+logits16383.bin: n=248320 ndiff=248320 (100.000 %)  1-cos=1.413e-05  max_abs=0.129345  max_rel=346.853  meanrel=4.636e-03  |a|max=32.4
+   argmax: knob1=279 knob2=279 SAME  |  top-5 k1=[279, 271, 1719, 561, 248044] k2=[279, 271, 1719, 561, 248044]
+logits16384.bin: n=248320 ndiff=248317 (99.999 %)  1-cos=1.038e-05  max_abs=0.147163  max_rel=679.397  meanrel=4.663e-03  |a|max=29.78
+   argmax: knob1=6784 knob2=6784 SAME  |  top-5 k1=[6784, 271, 9447, 13876, 97751] k2=[6784, 271, 9447, 13876, 97751]
+  sampled.txt: 16387 lines, 16385 equal (99.99 %), first difference at index 16384  (k1='16383 506 279 32.3972702 16383' vs k2='16383 506 279 32.4103394 16383', 3 lines after it)
+=== lanes=32000 ===
+logits31824.bin: n=248320 ndiff=248320 (100.000 %)  1-cos=6.434e-05  max_abs=0.130611  max_rel=1418.17  meanrel=1.190e-02  |a|max=14.95
+   argmax: knob1=561 knob2=561 SAME  |  top-5 k1=[561, 248044, 16, 17, 19] k2=[561, 248044, 16, 17, 19]
+logits31825.bin: n=248320 ndiff=248316 (99.998 %)  1-cos=1.987e-05  max_abs=0.108909  max_rel=510.933  meanrel=5.848e-03  |a|max=20.94
+   argmax: knob1=25744 knob2=25744 SAME  |  top-5 k1=[25744, 9775, 30066, 220, 67300] k2=[25744, 9775, 30066, 220, 67300]
+  sampled.txt: 31828 lines, 31826 equal (99.99 %), first difference at index 31825  (k1='31824 220 561 14.9487762 31824' vs k2='31824 220 561 14.9710007 31824', 3 lines after it)

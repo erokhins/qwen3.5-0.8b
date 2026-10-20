@@ -14,8 +14,10 @@ echo "derived population: $N fixtures"
 tools/gpu_lock.sh acquire a12-admit || { echo "LOCK FAILED"; exit 1; }
 echo "util at acquire: $(tools/gpu_lock.sh util 2>/dev/null)"
 for f in $FIXLIST; do
-  for arm in 0 1; do
-    if [ "$arm" = "1" ]; then out=$($PY engine/gate.py --fixture "$f" --binary "$BIN" --attn-fattn-wide 1 2>&1); else out=$($PY engine/gate.py --fixture "$f" --binary "$BIN" 2>&1); fi
+  # A13 reuses this harness rather than forking a second one: run it as `ARMS="0 1 2"` to judge the
+  # llama-ported form beside the shipper and A12 in one lock hold, from one derived population.
+  for arm in ${ARMS:-0 1}; do
+    if [ "$arm" = "0" ]; then out=$($PY engine/gate.py --fixture "$f" --binary "$BIN" 2>&1); else out=$($PY engine/gate.py --fixture "$f" --binary "$BIN" --attn-fattn-wide "$arm" 2>&1); fi
     rc=$?
     # The exit code is the verdict; a substring match on the report text is not. This line was a live false
     # positive in its first version: gate.py's long census paragraph contains the literal words

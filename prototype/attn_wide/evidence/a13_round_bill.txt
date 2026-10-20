@@ -1,0 +1,297 @@
+A13 ROUND BILL — `--attn-fattn-wide 2` (llama-ported wide block) measured against `--attn-fattn-wide 1`
+=====================================================================================================
+
+CPU-only ISA census. No device, no timing, no ms figure appears here (AGENTS.md: a worker runs correctness
+device gates, never measurements). Method is §58's method, unchanged: `tools/carve_codeobjects.py` on the
+built binary, `llvm-readelf --symbols` to find the code object that holds the symbol, `llvm-objdump -d`,
+then `prototype/gdn_walk/g3_isa_bill.py` to locate the backward branches and
+`prototype/attn_percost/a2_round_bill.py` to histogram a span.
+
+HEAD at measurement: `8a729d9` + this change, one build (`engine/build.sh`, 22.5 s wall for both binaries).
+**Both wide forms are in the SAME code object of the SAME build** (`tmp/a13/new/co_352256.co`), which is what
+makes this an A/B in one window instead of a ruler re-taken in a different one.
+
+Commands, verbatim:
+
+    engine/build.sh
+    python3 tools/carve_codeobjects.py engine/build/decode_run tmp/a13/new --target gfx1151
+      # -> CANARY PASS: 9 code object(s), 110 kernel symbols, target id gfx1151 present in each
+    for f in tmp/a13/new/*.co; do llvm-readelf --symbols "$f" | grep -q attn_wide_llama && echo "$f"; done
+      # -> tmp/a13/new/co_352256.co
+    /opt/rocm/llvm/bin/llvm-objdump -d tmp/a13/new/co_352256.co > tmp/a13/new/k.s
+    python3 prototype/gdn_walk/g3_isa_bill.py tmp/a13/new/k.s tmp/a13/new/co_352256.co attn_wide_wave
+    python3 prototype/gdn_walk/g3_isa_bill.py tmp/a13/new/k.s tmp/a13/new/co_352256.co attn_wide_llama
+    python3 prototype/attn_percost/a2_round_bill.py tmp/a13/new/k.s 2afc0 3f56c   # knob 1, widest span
+    python3 prototype/attn_percost/a2_round_bill.py tmp/a13/new/k.s 2c3cc 30e44   # knob 1, round
+    python3 prototype/attn_percost/a2_round_bill.py tmp/a13/new/k.s 3f6b4 58ad4   # knob 2, widest span
+    python3 prototype/attn_percost/a2_round_bill.py tmp/a13/new/k.s 4142c 457f0   # knob 2, full round
+    python3 prototype/attn_percost/a2_round_bill.py tmp/a13/new/k.s 45d48 4a3f0   # knob 2, tail round
+    python3 tmp/a13/loops.py tmp/a13/new/k.s attn_wide_llama                      # every backward branch
+
+(`tmp/a13/loops.py` is a scratch enumerator, not a fourth census tool — see the note at the bottom.)
+
+1. THE HEADLINE NUMBER, AND WHAT IT IS MEASURING
+------------------------------------------------
+
+    arm                                    span              insns   matrix   NON-MATRIX PER MATRIX SLOT
+    knob 1  attn_wide_wave                 widest 2afc0..3f56c   14,324   128    110.91   (== §58's 110.9)
+    knob 2  attn_wide_llama_wave           widest 3f6b4..58ad4   17,431   256     67.09
+    knob 1  attn_wide_wave                 round   2c3cc..30e44    3,206   128     24.05
+    knob 2  attn_wide_llama_wave           full    4142c..457f0    2,760   128     20.56
+    knob 2  attn_wide_llama_wave           tail    45d48..4a3f0    3,000   128     22.44
+
+**The mandated canary passes: 67.09 against the stated bars (>90 = failed, ≤ ~70 = target, llama 51.9, wide
+today 110.9).** It passes for two reasons and only one of them is the port, so both are named:
+
+  * **The port.** Round-scoped — which is the denominator that actually repeats at run time, since the round
+    loop is what runs 16 times at 1,024 lanes and the epilogue runs once — the bill went **24.05 → 20.56**,
+    −14.5 % of non-matrix slots for identical matrix work (128 wmma both sides: 64 score + 64 P*V).
+  * **The measurement artifact.** `g3_isa_bill.py` reports the *widest* backward branch, and in this kernel
+    that latch spans 17,431 of the function's 17,610 instructions and therefore contains BOTH template
+    instantiations of the round (2 × 128 = 256 matrix slots) plus the whole epilogue (188 output stores, 960
+    divide-class slots). The denominator doubled without the epilogue growing, so the epilogue's
+    contamination is halved by the split rather than removed. Read 67.09 as "the canary, on §58's own
+    instrument", and 20.56/22.44 as "what a round costs". The same contamination inflates knob 1's §58
+    number; both arms are measured the same way, which is the only reason the pair means anything.
+
+§58's falsifiable bar — "any candidate kernel billing > ~70 non-matrix slots per matrix slot cannot reach
+llama's rate" — is met by 67.09 and by 20.56 on the round metric. §58's *target* (≤ 52) is met on the round
+metric and missed on the widest-span metric; the gap between those two readings is the epilogue, which this
+change deliberately did not touch (see the notes file §3, "the epilogue is carried, not shared").
+
+2. PER-BUCKET TABLE, PER MATRIX SLOT
+------------------------------------
+
+Column 1 is §58's published wide-form column (its buckets divided by its 128 matrix slots); columns 2–4 are
+this build, from the same tool on the spans above; column 5 is §58's llama column.
+
+    bucket          §58 wide      A13 widest    A13 full round    A13 tail round    §58 llama
+    int_vec           29.97           18.17           4.70              4.92          18.1
+    salu              21.78           12.06           2.25              3.27           3.7
+    delay             18.91            9.63           2.39              3.04           4.5
+    select_mask        9.60            5.46           2.05              2.55           2.6
+    move               2.91            2.40           1.55              0.67           2.9
+    fmul               2.81            1.43           0.25              0.24           0.5
+    fma32              8.73            4.52           0.27              0.41            —
+    cvt                4.39            2.33           1.33              1.33            —
+    lds                3.57            2.91           2.13              2.13            —
+    wait               2.45            2.18           1.33              1.42           4.2
+    vmem_load          0.77            0.48           0.07              0.07            —
+    vmem_store         1.47            0.73            —                 —              —
+    exp                0.76            0.51           0.26              0.26            —
+    NON-MATRIX       110.91           67.09          20.56             22.44          51.9
+
+The four buckets §58 named as the difference, per round (knob 1 → knob 2 full round):
+
+    int_vec      674 → 601    −10.8 %   (item 1: template stride + hoisted per-lane swizzle base)
+    salu         509 → 288    −43.4 %   (items 1 and 4: constant strides, and no bounds chain)
+    delay        529 → 306    −42.2 %   (fewer dependent chains to schedule around)
+    select_mask  424 → 263    −38.0 %   (item 4: the per-cell `j < rlanes` and its cndmask are gone)
+
+and the two that moved the wrong way, which is the honest half:
+
+    move          63 → 199   (+216 %)   the prefetch's register copies: `v_dual_mov_b32` 128 + `v_mov_b32` 71
+    cvt          114 → 170   (+49 %)    the K stage's bf16→f16 conversion no longer shares a block with the
+                                        score roll (it sits after the roll and before the barrier)
+    fma32         61 →  35   (−43 %)    item 5: 32 fewer per-score `* SCALE` multiplies per round
+
+Against §58's stated work list for the wide round — "`int_vec` 3,836 → ~2,300, `salu` 2,789 → ~600, `delay`
+2,420 → ~600" — read out of the *contaminated* widest span: A13 delivers `int_vec` 4,651 over two rounds =
+**2,326/round** (target ~2,300), `salu` **1,543/round** against a ~600 target, `delay` **1,541/round**
+against ~600. Item 1 landed on `int_vec`; the `salu`/`delay` targets were not reached, and per round they are
+288/306 against what a 128-slot round would need — §58's own targets were sized against the contaminated
+span, so they are not directly comparable, and this line says so rather than claiming the target.
+
+3. REGISTER AND SCRATCH COST — the port is not free
+---------------------------------------------------
+
+Same tool, metadata block of each kernel in the same code object:
+
+    kernel                        vgpr  spill   private_segment  group_segment  max_flat_wg
+    attn_wide_wave (knob 1)        256    163          176 B         32,768 B       256
+    attn_wide_llama_wave (knob 2)  256    920          720 B         32,768 B       256
+
+Declared LDS is unchanged at 32,768 B, as intended (the swizzle is a permutation, not a pad), so the residency
+claim and `wide_echo`'s `lds=32768` are untouched and read back that way on device. But the 32 VGPR/lane
+in-flight K tile pushed `vgpr_spill_count` from 163 to **920** and the private segment from 176 B to **720 B**
+per thread. That is inside A12's declared budget ("≤ 1,024 B/thread of private scratch is a budget here, not
+a taboo — llama's own kernel is at 900 B/thread"), and it is visible on the engine's own echo line
+(`scratch=720`, `SPILL`), which is why the field exists. Inside the full round the spill is legible:
+`scratch_store_b128` 72 + `scratch_load_b128` 64 slots. Whether 720 B of spill costs more than the −14.5 %
+of slots saves is a device-timing question this worker does not answer.
+
+4. CODE-OBJECT METADATA CANARY ON THE NEW KERNEL
+------------------------------------------------
+
+    _ZN6engine7kernels20attn_wide_llama_waveE8CoreArgs
+      17,610 instructions; salu=6288 vother=5105 xlane_logic=1944 fma=1158 lds=744 cvt=724 other=501
+      fmul=367 fadd=255 vmem_store=188 exp=130 vmem_load=122 xlane_permute=67 barrier=17
+      load/store widths: ds_load_b128=512 ds_store_b128=24 ds_store_b16=8 ds_store_b16_d16_hi=8
+                         ds_bpermute_b32=67 ds_load_b32=64 ds_store_2addr_b32=128
+                         global_load_b128=58 global_load_u16=64 global_store_d16_hi_b16=188
+
+Three things worth noting in that line. `v_pk_mul_f16` is still emitted at 64 per round — plan item 3 was
+already done by LLVM before this change. `v_and_b32_e32` 938 kernel-wide (123 in a round) is the bf16
+round-trip ladder inside `fattn_score_round`/the staging conversions, which is the shipped rounding and was
+not ours to remove. And `ds_load_b128` 512 = the 16-wide `fattn_load_tile` reads, which stayed 16-byte wide
+even after the swizzle — the swizzle moves whole 32-B tiles, so both the reader's `b128` loads and the K
+writer's `uint4` store stayed wide stores at a swizzled, still-16-B-aligned address. A swizzle that had
+broken the store width would show up here as `ds_store_b64`×2 and would be a bug, not a trade.
+
+5. DEVICE WITNESS RUN ALONGSIDE THIS BILL (correctness only, no timing)
+-----------------------------------------------------------------------
+
+Committed as `prototype/attn_wide/a13_byte_identity.py`. One binary, one window, one variable: the same prefill fed to
+`--attn-fattn-wide 1` and `--attn-fattn-wide 2`, `--steps 0 --prefill-logits all`, and every output file
+byte-compared. Five geometries (8 / 128 / 295 / 500 / 1,024 rows), **1,960 files compared, 0 differing**:
+
+    p8 9/9 · p128 129/129 · dec300f 296/296 · wide520f 501/501 · wide1024f 1025/1025 — all BYTE-IDENTICAL
+
+The canary fields on each pair, from the runs' own logs: `attn_fattn_wide=wide` + `form=wide128` on one side,
+`attn_fattn_wide=wide_llama` + `form=wide128llama` on the other, `scratch=176` vs `scratch=720`, `lds=32768`
+on both. Wall 23 s for all ten runs, `gpu_lock.sh util` at start 24–31 % per pair, lock held and released by
+the script per pair. **No timing was taken and none of these wall figures is a measurement** — they are here
+only to show the check stayed inside the worker's ~60 s budget. See `a13_worker_notes.md` §5 for the commands.
+
+NOTE ON `tmp/a13/loops.py`
+--------------------------
+It is not a fourth ISA census tool and it does not re-derive one: `g3_isa_bill.py` does the span finding and
+`a2_round_bill.py` does the bucketing. `loops.py` exists because for these two kernels the WIDEST backward
+branch is not the round — knob 1's is 14,324 of 14,403 instructions and knob 2's is 17,431 of 17,610, both
+swallowing the epilogue — so naming the round needed every backward branch listed with what it holds. It
+prints the same buckets as `a2_round_bill.py` and no new classes. If this bill is kept, promote it into
+`prototype/attn_percost/` beside `a2_round_bill.py` rather than leaving it in `tmp/`.
+
+==========================================================================
+6. RAW TOOL OUTPUT (appended verbatim, so the tables above are checkable without a re-run)
+==========================================================================
+
+$ python3 prototype/gdn_walk/g3_isa_bill.py tmp/a13/new/k.s tmp/a13/new/co_352256.co attn_wide_wave
+==== _ZN6engine7kernels14attn_wide_waveE8CoreArgs
+     metadata: {'vgpr_count': 256, 'sgpr_count': 32, 'vgpr_spill_count': 163, 'sgpr_spill_count': 0, 'group_segment_fixed_size': 32768, 'private_segment_fixed_size': 176, 'max_flat_workgroup_size': 256, 'wavefront_size': 32, 'kernarg_segment_size': 456}
+     14403 instructions; classes: salu=5600  vother=3821  xlane_logic=1681  fma=1118  cvt=626  lds=457  fmul=360  fadd=193  vmem_store=188  other=117  vmem_load=98  exp=97  xlane_permute=34  barrier=13
+     top mnemonics: s_delay_alu=2423  v_and_b32_e32=831  v_fma_f32=673  v_cndmask_b32_e32=451  v_fmac_f32_e32=445  s_mov_b32=393  v_div_scale_f32=384  s_or_b32=364  v_mul_f32_e32=360  s_and_not1_saveexec_b32=316  v_dual_mov_b32=309  s_waitcnt=307  v_or_b32_e32=297  v_bfe_u32=258
+     load/store widths: ds_bpermute_b32=34  ds_load_b128=256  ds_load_b32=64  ds_store_2addr_b32=128  ds_store_b128=1  ds_store_b16=4  ds_store_b16_d16_hi=4  global_load_b128=34  global_load_u16=64  global_store_d16_hi_b16=188
+     loop 0x2afc0..0x3f570  span=83372 B  per-iteration ISA: {'total': 14324, 'load': 98, 'lds': 491, 'fma': 1118, 'exp': 97, 'barrier': 13, 'store': 188}
+     loop 0x30e78..0x3f590  span=59156 B  per-iteration ISA: {'total': 10283, 'lds': 193, 'fma': 1057, 'store': 188, 'barrier': 9, 'load': 64, 'exp': 64}
+
+$ python3 prototype/gdn_walk/g3_isa_bill.py tmp/a13/new/k.s tmp/a13/new/co_352256.co attn_wide_llama
+==== _ZN6engine7kernels20attn_wide_llama_waveE8CoreArgs
+     metadata: {'vgpr_count': 256, 'sgpr_count': 46, 'vgpr_spill_count': 920, 'sgpr_spill_count': 0, 'group_segment_fixed_size': 32768, 'private_segment_fixed_size': 720, 'max_flat_workgroup_size': 256, 'wavefront_size': 32, 'kernarg_segment_size': 456}
+     17610 instructions; classes: salu=6288  vother=5105  xlane_logic=1944  fma=1158  lds=744  cvt=724  other=501  fmul=367  fadd=255  vmem_store=188  exp=130  vmem_load=122  xlane_permute=67  barrier=17
+     top mnemonics: s_delay_alu=2468  v_and_b32_e32=938  v_fma_f32=706  s_waitcnt=548  v_cndmask_b32_e32=519  ds_load_b128=512  s_mov_b32=466  v_dual_mov_b32=463  v_fmac_f32_e32=452  v_div_scale_f32=384  v_mul_f32_e32=367  s_or_b32=364  s_and_not1_saveexec_b32=317  v_or_b32_e32=309
+     load/store widths: ds_bpermute_b32=67  ds_load_b128=512  ds_load_b32=64  ds_store_2addr_b32=128  ds_store_b128=24  ds_store_b16=8  ds_store_b16_d16_hi=8  global_load_b128=58  global_load_u16=64  global_store_d16_hi_b16=188
+     loop 0x3f6b4..0x58ad4  span=103452 B  per-iteration ISA: {'total': 17430, 'load': 122, 'lds': 811, 'fma': 1158, 'exp': 130, 'barrier': 17, 'store': 188}
+     loop 0x4a5c8..0x58b14  span=58696 B  per-iteration ISA: {'total': 10181, 'lds': 193, 'fma': 1071, 'store': 188, 'barrier': 9, 'load': 64, 'exp': 64}
+
+$ python3 prototype/attn_percost/a2_round_bill.py tmp/a13/new/k.s 2afc0 3f56c   # K1-widest
+# loop 2afc0..3f56c: 14324 instructions
+#   wmma            128  (0.9 %)
+#   fma32          1118  (7.8 %)
+#   fmul            360  (2.5 %)
+#   fadd            193  (1.3 %)
+#   exp              97  (0.7 %)
+#   cvt             562  (3.9 %)
+#   permute_xlane    34  (0.2 %)
+#   lds             457  (3.2 %)
+#   vmem_load        98  (0.7 %)
+#   vmem_store      188  (1.3 %)
+#   barrier          13  (0.1 %)
+#   wait            313  (2.2 %)
+#   delay          2420  (16.9 %)
+#   salu           2788  (19.5 %)
+#   move            373  (2.6 %)
+#   select_mask    1229  (8.6 %)
+#   int_vec        3836  (26.8 %)
+#   other           117  (0.8 %)
+#   top mnemonics: s_delay_alu=2420  v_and_b32_e32=831  v_fma_f32=673  v_cndmask_b32_e32=451  v_fmac_f32_e32=445  s_mov_b32=387  v_div_scale_f32=384  s_or_b32=364  v_mul_f32_e32=360  s_and_not1_saveexec_b32=316  v_dual_mov_b32=309  s_waitcnt=305
+# matrix-class issue slots 128 of 14324 = 0.9 %; non-matrix slots per matrix slot = 110.91
+
+$ python3 prototype/attn_percost/a2_round_bill.py tmp/a13/new/k.s 2c3cc 30e44   # K1-round
+# loop 2c3cc..30e44: 3206 instructions
+#   wmma            128  (4.0 %)
+#   fma32            61  (1.9 %)
+#   fmul             65  (2.0 %)
+#   fadd             64  (2.0 %)
+#   exp              33  (1.0 %)
+#   cvt             114  (3.6 %)
+#   permute_xlane    33  (1.0 %)
+#   lds             265  (8.3 %)
+#   vmem_load         2  (0.1 %)
+#   barrier           4  (0.1 %)
+#   wait            159  (5.0 %)
+#   delay           529  (16.5 %)
+#   salu            509  (15.9 %)
+#   move             63  (2.0 %)
+#   select_mask     424  (13.2 %)
+#   int_vec         674  (21.0 %)
+#   other            79  (2.5 %)
+#   top mnemonics: s_delay_alu=529  ds_load_b128=256  v_and_b32_e32=200  s_waitcnt=156  v_cndmask_b32_e32=131  s_or_b32=100  v_or_b32_e32=96  s_and_saveexec_b32=96  v_mul_f32_e32=65  v_cmp_ne_u32_e32=64  s_xor_b32=64  v_bfe_u32=64
+# matrix-class issue slots 128 of 3206 = 4.0 %; non-matrix slots per matrix slot = 24.05
+
+$ python3 prototype/attn_percost/a2_round_bill.py tmp/a13/new/k.s 3f6b4 58ad4   # K2-widest
+# loop 3f6b4..58ad4: 17431 instructions
+#   wmma            256  (1.5 %)
+#   fma32          1158  (6.6 %)
+#   fmul            367  (2.1 %)
+#   fadd            511  (2.9 %)
+#   exp             130  (0.7 %)
+#   cvt             596  (3.4 %)
+#   permute_xlane    67  (0.4 %)
+#   lds             744  (4.3 %)
+#   vmem_load       122  (0.7 %)
+#   vmem_store      188  (1.1 %)
+#   barrier          17  (0.1 %)
+#   wait            557  (3.2 %)
+#   delay          2466  (14.1 %)
+#   salu           3087  (17.7 %)
+#   move            615  (3.5 %)
+#   select_mask    1398  (8.0 %)
+#   int_vec        4651  (26.7 %)
+#   other           501  (2.9 %)
+#   top mnemonics: s_delay_alu=2466  v_and_b32_e32=938  v_fma_f32=706  s_waitcnt=546  v_cndmask_b32_e32=519  ds_load_b128=512  v_dual_mov_b32=463  s_mov_b32=458  v_fmac_f32_e32=452  v_div_scale_f32=384  v_mul_f32_e32=367  s_or_b32=364
+# matrix-class issue slots 256 of 17431 = 1.5 %; non-matrix slots per matrix slot = 67.09
+
+$ python3 prototype/attn_percost/a2_round_bill.py tmp/a13/new/k.s 4142c 457f0   # K2-fullround
+# loop 4142c..457f0: 2760 instructions
+#   wmma            128  (4.6 %)
+#   fma32            35  (1.3 %)
+#   fmul             32  (1.2 %)
+#   fadd             63  (2.3 %)
+#   exp              33  (1.2 %)
+#   cvt             170  (6.2 %)
+#   permute_xlane    33  (1.2 %)
+#   lds             272  (9.9 %)
+#   vmem_load         9  (0.3 %)
+#   barrier           4  (0.1 %)
+#   wait            170  (6.2 %)
+#   delay           306  (11.1 %)
+#   salu            288  (10.4 %)
+#   move            199  (7.2 %)
+#   select_mask     263  (9.5 %)
+#   int_vec         601  (21.8 %)
+#   other           154  (5.6 %)
+#   top mnemonics: s_delay_alu=306  ds_load_b128=256  s_waitcnt=167  v_dual_mov_b32=128  v_and_b32_e32=123  v_cndmask_b32_e32=99  v_cvt_f16_f32_e32=80  scratch_store_b128=72  v_mov_b32_e32=71  scratch_load_b128=64  v_cndmask_b32_e64=64  v_pk_mul_f16=64
+# matrix-class issue slots 128 of 2760 = 4.6 %; non-matrix slots per matrix slot = 20.56
+
+$ python3 prototype/attn_percost/a2_round_bill.py tmp/a13/new/k.s 45d48 4a3f0   # K2-tailround
+# loop 45d48..4a3f0: 3000 instructions
+#   wmma            128  (4.3 %)
+#   fma32            52  (1.7 %)
+#   fmul             31  (1.0 %)
+#   fadd             63  (2.1 %)
+#   exp              33  (1.1 %)
+#   cvt             170  (5.7 %)
+#   permute_xlane    33  (1.1 %)
+#   lds             272  (9.1 %)
+#   vmem_load         9  (0.3 %)
+#   barrier           4  (0.1 %)
+#   wait            182  (6.1 %)
+#   delay           389  (13.0 %)
+#   salu            418  (13.9 %)
+#   move             86  (2.9 %)
+#   select_mask     327  (10.9 %)
+#   int_vec         630  (21.0 %)
+#   other           173  (5.8 %)
+#   top mnemonics: s_delay_alu=389  ds_load_b128=256  s_waitcnt=179  v_and_b32_e32=134  v_cndmask_b32_e32=99  v_cvt_f16_f32_e32=81  s_clause=74  scratch_load_b128=70  v_or_b32_e32=66  s_or_b32=66  v_wmma_f32_16x16x16_f16=64  s_and_saveexec_b32=64
+# matrix-class issue slots 128 of 3000 = 4.3 %; non-matrix slots per matrix slot = 22.44
