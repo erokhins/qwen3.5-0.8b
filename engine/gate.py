@@ -7465,7 +7465,14 @@ def main() -> int:
             " engine against it: sections (a)/(b)/(e) judge EVERY pinned step against that step's"
             " pin, and quietly judging fewer steps is how a gate goes vacuous. `--no-engine` is the"
             " mode a gapped fixture can be checked in (pairing, state integrity, fingerprints); a"
-            " device run needs those steps pinned — see `tools/reference_dump.py --logit-steps`.")
+            " device run needs those steps pinned — see `tools/reference_dump.py --logit-steps`."
+            # This refusal is a SystemExit, so it walks past `report()` and would print no verdict line
+            # at all — which is indistinguishable in a harness table from a crash, and is exactly how a
+            # fixture that has never judged a step reads as a numerics result. If this fixture's red is
+            # already recorded, say so HERE, where the reader actually is.
+            + (f"\n  [expected-red] {REFS.name} is on the recorded list: "
+               + EXPECTED_RED[REFS.name]["why"]
+               if REFS.name in EXPECTED_RED else ""))
 
     section("(run) decode_run — one prefill wave (§06.1), then one decode_step per generated token")
     work = Path(args.work)
@@ -8516,7 +8523,47 @@ def decision_margin(ref: np.ndarray, eng, m: dict) -> str:
 # The mechanism stays for that reason even with nothing on it: a recorded red that heals should still print
 # `healed` when somebody removes its entry after seeing it, and a NEW failure on a fixture that goes red
 # for a reason this list has not been told about still has to say so.
-EXPECTED_RED: dict = {}
+#
+# ONE ENTRY since 2026-10-20, and it is a different class from the two the history above describes. Those
+# two were red because the ENGINE could not hold a pinned token (`chunk64b`) or could not be run at the
+# pinned width (`wide520f`). `zz` is red because its OWN DIRECTORY contradicts its OWN manifest, so the
+# gate refuses before `decode_run` starts and not one step of it has ever been judged — on any arm, by any
+# caller, ever. A12's admission found it while deriving the fixture population
+# (`prototype/attn_wide/A12-FIXES.md` item 3): rc=1 at 0 s wall on both `--attn-fattn-wide` arms and at
+# `--no-engine`, one failure, and — because the refusal is a `SystemExit` before `report()` — no verdict
+# line at all, which is how a red that judges nothing reads as a numerics result.
+#
+# THE NUMBERS. `data/refs/zz/manifest.json` declares `logits_declared_absent: [decode2, decode3]` and its
+# 524-entry `pins` map carries logits for exactly three names (`logits_last`, `decode0.logits_last`,
+# `decode1.logits_last`), but the directory holds 2500 `.npy` files, among them `decode2.logits_last.npy`
+# and `decode3.logits_last.npy` — F32, argmaxes 760 and 6511, which are precisely
+# `greedy_continuation[3]` and `[4]`. So they are real logits the manifest no longer claims, and their
+# mtimes (13:32:38) predate the manifest and `decode1`'s logits (13:33:12) by 34 s: the full dump's files,
+# left in place when the lean pin policy was written over them. The check that fires is therefore correct
+# and stays exactly as it is — a declared gap the disk contradicts is how a re-pin quietly loses a step.
+#
+# WHY IT IS RECORDED RATHER THAN FIXED HERE. Both remedies belong to the fixture owner, not to this file:
+# re-dump zz with `tools/reference_dump.py --logit-steps all` (a device pass, and A7 declined zz's re-dump
+# because its `state_fp` re-dump would break the fingerprint re-admission of the other eight), or delete
+# the 1976 undeclared files (irreversible — `data/` is gitignored at `.gitignore:65` and
+# `git ls-files data/refs/zz` lists nothing, so there is no git copy to come back from). Clearing the
+# declaration by hand is the third way and the worst: it would be a manifest edit that makes a gate agree
+# with the very disagreement it exists to catch. Until one of the two real remedies lands, zz judges ZERO
+# steps on either arm, and a `zz` row in any table is a provenance row, not engine evidence.
+EXPECTED_RED: dict = {
+    "zz": {
+        "checks": [
+            "every declared logit gap is actually absent from the fixture (the declaration and the disk "
+            "agree, in both directions)",
+        ],
+        "why": "the fixture contradicts itself, not the engine: manifest declares decode2/decode3 logits "
+               "absent while the full dump's two logits files are still in the directory (their argmaxes "
+               "760/6511 are greedy_continuation[3]/[4], so they are real tensors the manifest stopped "
+               "claiming); the declared-gap refusal then aborts before the binary starts, so zz has never "
+               "judged a step on any arm. Remedy is a re-pin or a fixture-directory prune by the pin owner "
+               "— see the block above this dict for why neither is a gate edit.",
+    },
+}
 
 
 def admitted_divergences(n_decode: int, got_ids: list, greedy: list, eng_logits: list,

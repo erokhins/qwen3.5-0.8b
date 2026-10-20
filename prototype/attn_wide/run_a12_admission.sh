@@ -25,6 +25,16 @@ for f in $FIXLIST; do
     if [ "$rc" -eq 0 ]; then v=PASS
     elif echo "$out" | grep -qE "^ENGINE GATE FAIL"; then v=FAIL
     else v="EXIT $rc (no verdict line)"; fi
+    # A `no verdict line` row is the one this table used to make unreadable: gate.py refused the fixture
+    # before starting the binary, so the row said only `EXIT 1` and a reader had to open the log to learn
+    # that not one step was judged. Carry the refusal's own first line (and the recorded reason, when the
+    # fixture is on gate.py's expected-red list) into the row, so a provenance gap cannot be mistaken for a
+    # numerics result. The rc is still the verdict; this only adds the reason beside it.
+    if [ "$v" != "PASS" ] && [ "$v" != "FAIL" ]; then
+      reason=$(echo "$out" | grep -E "^  \[expected-red\]" | head -1)
+      if [ -z "$reason" ]; then reason=$(echo "$out" | grep -E "^gate:" | head -1); fi
+      v="$v: $(echo "$reason" | cut -c1-200)"
+    fi
     echo "$f wide=$arm -> $v (rc=$rc)"
   done
 done

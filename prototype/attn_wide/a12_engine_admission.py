@@ -276,17 +276,34 @@ def main() -> int:
     print("   tensors exist, not about the wide form, and the SKIP list is printed by the mirror itself.")
     if args.check:
         print("\n6. ADJUDICABILITY PRE-FLIGHT (`gate.py --no-engine`, CPU-only)")
-        bad = []
+        bad, declared = [], []
+        expected_red = getattr(gate_mod, "EXPECTED_RED", {})
         for d in pop:
             r = subprocess.run([sys.executable, str(GATE), "--no-engine", "--fixture", d.name],
                                cwd=ROOT, capture_output=True, text=True)
             tail = (r.stdout.strip().splitlines() or ["<no output>"])[-1]
             status = {0: "PASS", 3: "SKIP(carried)"}.get(r.returncode, f"EXIT {r.returncode}")
+            rec = expected_red.get(d.name)
             if r.returncode not in (0, 3):
-                bad.append((d.name, r.returncode, tail))
+                if rec is None:
+                    bad.append((d.name, r.returncode, tail))
+                else:
+                    declared.append((d.name, r.returncode))
+            elif rec is not None:
+                # gate.py's own rule, applied here: a red that was recorded and is now green is a HEAL, and
+                # a heal nobody looks at is indistinguishable from a declaration nobody read.
+                print(f"   {d.name:18s} PASS           [DECLARED-RED DID NOT FIRE — healed] {rec['why'][:72]}")
+                declared.append((d.name, 0))
+                continue
             print(f"   {d.name:18s} {status:14s} {tail[:64]}")
+            if rec is not None:
+                # The reason is printed FROM the gate's list, not retyped here: a second copy of a reason is
+                # the two-authorities failure this tree keeps recording, and this one has to stay true when
+                # the fixture is re-pinned.
+                print(f"       [DECLARED] {rec['why']}")
         if bad:
-            print(f"   {len(bad)} fixture(s) the harness itself cannot adjudicate. Two things before any of")
+            print(f"   {len(bad)} fixture(s) the harness itself cannot adjudicate AND NOTHING DECLARES IT.")
+            print("   Two things before any of")
             print("   it is read as a wide-knob result: `--no-engine` starts NO binary, so a failure here")
             print("   cannot have been caused by the kernel under test — it is a pin-side or harness gap; and")
             print("   the base witness is HEAD's own gate.py, which costs one command:")
@@ -296,6 +313,15 @@ def main() -> int:
             print("   Same failure at HEAD means pre-existing, and it gets reported as an invocation gap")
             print("   (D40), not dropped and not counted as a numerics verdict.")
             return 1
+        if declared:
+            # Not a green: a declared red still exits 1 in gate.py, on purpose. What this line buys is that
+            # the population is UNDERSTOOD — every red names itself and its reason — which is the difference
+            # between an invocation gap that is carried and one that is silently absorbed into a count.
+            print(f"   {len(declared)} of {len(pop)} fixture(s) red at --no-engine and DECLARED above, so"
+                  " the population is understood. A declaration is a label, not a pardon: gate.py exits 1"
+                  " for each of them by design, and the device table must carry the reason rather than"
+                  " absorb the count — a `zz` row on either A12 arm is exactly that row.")
+            return 0
         print(f"   all {len(pop)} adjudicable by the harness at --no-engine")
     print("\nRISK STATEMENT, for whoever reads the result: knob 1 re-associates the softmax at EVERY width")
     print("   (a 64-position round against the shipping 16, and the accumulated weight is an un-normalised")
