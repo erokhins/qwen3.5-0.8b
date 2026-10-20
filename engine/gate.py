@@ -182,6 +182,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tools import band_history    # the band ledger this gate refuses to run against otherwise
+from tools import fixture_census  # the shared "directory vs its own manifest" check (section (0))
 
 REFS = ROOT / "data" / "refs" / "dec8"   # replaced by main() from --fixture; see `set_fixture`
 SHALLOW_REFS = ROOT / "data" / "refs" / "dec8"   # the cross-check target for a deep fixture
@@ -754,7 +755,7 @@ SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller 
 # while the stage ladder stays flat (×8.8 end to end, `embed` bit-identical) — the band, not the engine.
 # So what is priced here is not a tighter op-level bound but the measured size of a legal cascade.
 #
-# THE FIVE NUMBERS, and what each one is a ceiling ON:
+# THE SIX NUMBERS, and what each one is a ceiling ON:
 #
 #   row_1cos_max   2e-3   one LOGITS ROW against another row of the same prompt, on the hand<->hipBLAS
 #                         pairing. A2 measured the hand route against the library route over 1694
@@ -802,6 +803,40 @@ SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller 
 #                         band cannot quietly grow until it cannot fail, which is the property
 #                         `prototype/gdn_collapse/results.md` §1 demands of any driver that judges by a
 #                         threshold it did not measure.
+#   stage_cos_min_wide 0.99975  the SAME pooled statistic as `stage_cos_min`, and the ONLY thing
+#                         that distinguishes them: it is in force when — and only when — the A12 wide
+#                         attention block (`decode_run --attn-fattn-wide 1`) is one side of the
+#                         pairing. `pooled_cos_band()` is where that scope is decided and
+#                         `STAGE_COS_WIDE_SOURCE` is the sentence that prints it.
+#                         WHERE 0.99975 COMES FROM, and its stated margin. MEASURED on the wide arm:
+#                         `smoke`'s batched-vs-carry pooling reads 2.028112e-04 of 1-cos
+#                         (`prototype/attn_wide/A12-FIXES.md` §0.2 and §1 — four repair experiments
+#                         were tried, three refuted on device, and the excess is the wide form not
+#                         being the pinned rounding: F16 `P`, F16 accumulator, one 64-position round
+#                         for every row that fixture has). Against the ordinary line that is 1.4 %
+#                         OUTSIDE. The ordinary line's own worst known-good is 1.5625e-04 (dec8, on
+#                         both legs of `engine/wave_band_floor_probe.py` 2026-10-16 as recorded in
+#                         `tmp/wave_band_floor/probe_full.log`; the 1.2446e-04 `wide640f` figure this
+#                         file's `WAVE_ROW_BAND_SOURCE` quotes is a PER-ROW max and cannot size a
+#                         pooled line), i.e. the ordinary line sat 1.28x above the widest legal
+#                         pooled figure the pre-wide corpus had ever produced. This line is that
+#                         probe's stated 1.25 margin applied to the WIDE measurement — 1.25 x
+#                         2.028112e-04 = 2.535e-04 — kept at the tighter round 2.5e-04 below it,
+#                         exactly as `row_1cos_max_lt` keeps 2.75e-03 under its own 2.755e-03. So the
+#                         margin over the measured wide figure is 1.2326x, and over the corpus's old
+#                         worst known-good it is 1.60x. No round number for its own sake: 2.5e-04 is
+#                         the tighter neighbour of a product of the two measured figures.
+#                         WHAT IT COSTS, and why it was paid: the wide shape is +25 % at 32,768 lanes
+#                         (734.82 ms = 5.985 TFLOP/s against the shipping 919.06 ms = 4.786), a trade
+#                         the user authorised on 2026-10-20; `prototype/attn_wide/A12-FIXES.md` §5
+#                         carries the before/after, the injection evidence and the cost.
+#                         DOES IT STILL BITE? Yes, and the witness is a command rather than an
+#                         argument: `prototype/attn_wide/a12_wide_band_witness.py` prices pooled
+#                         figures that straddle BOTH lines and requires 2.028e-04 to be admitted by
+#                         the wide line while every figure at or above 2.5e-04 is still refused by it,
+#                         and `--selftest`'s `--break-ab-logits` — which aims the pooled cosine on the
+#                         stand-in corpus — still goes RED, because a stand-in never starts a binary,
+#                         never echoes `attn_fattn_wide=wide`, and so is judged by the ordinary line.
 #   stage_meanrel  3e-2   one STAGE TILE (a `DecodeScratch` tile, not a logits row) against the same
 #                         tile on the other route. A3's ladder spans meanrel 1.92e-3..1.70e-2 over 56
 #                         comparisons; 3e-2 is that ladder's top with 1.8x of headroom, and A4's bugs
@@ -894,8 +929,24 @@ CASCADE_BAND = {
     "row_1cos_max_lt": 2.75e-3,   # per logits row, hand<->hipBLASLt — section (h) under `--gemm lt`
     "stage_meanrel_max": 3.0e-2,   # per stage tile (a3), NOT per logits row
     "stage_cos_min": 0.9998,       # ditto
+    "stage_cos_min_wide": 0.99975,  # ditto, but ONLY where the A12 wide block is one side of the
+                                    # pairing — `pooled_cos_band()`, and the sizing/margin/evidence
+                                    # block above this dict for what it is and what it was paid in
     "flip_room_max_ulp": 1.5,    # top-1/top-2 room, IN BF16 STEPS AT THE ROW'S OWN top-1, a flip may have
 }
+
+# The sentence `pooled_cos_band()` prints when the wide-scoped line is the one in force, so a reader of
+# a gate log never has to open this file to find out which of the two pooled lines judged a number.
+# A band that does not name its denominator is a band nobody can re-check (`WAVE_ROW_BAND_SOURCE` and
+# `FLIP_ROOM_SOURCE` exist for the same reason), and a widening that does not name its SCOPE is worse.
+STAGE_COS_WIDE_SOURCE = (
+    "the WIDE-SCOPED pooled line: the A12 wide block is one side of this pairing, so the ceiling is"
+    " 1-cos 2.500e-04 (floor 0.99975) — measured 2.028112e-04 on smoke's wide batched-vs-carry"
+    " (prototype/attn_wide/A12-FIXES.md §0.2, §1, §5: four repair experiments, none of which moved"
+    " it) x the floor probe's stated 1.25 margin = 2.535e-04, kept at the tighter round 2.500e-04"
+    " below it, i.e. 1.2326x over the measured wide figure and 1.60x over the ordinary line's worst"
+    " known-good 1.5625e-04 (dec8, engine/wave_band_floor_probe.py 2026-10-16). Every pairing without"
+    " a wide side is still judged by 2.000e-04 — this line moved for nothing else")
 CASCADE_RULE = ("a reassociating route is judged by the step's own band floored at the measured cascade"
                 " (cos deficit >= 2e-3, meanrel >= 3e-2), and a flipped token is admissible only where"
                 " the side that owns the decision — the reference in a pin-vs-engine pairing, the closer"
@@ -993,6 +1044,51 @@ def wave_row_1cos_band() -> tuple[float, str]:
     if GEMM_ROUTE == "lt":
         return CASCADE_BAND["row_1cos_max_lt"], WAVE_ROW_BAND_SOURCE["lt"]
     return CASCADE_BAND["row_1cos_max"], WAVE_ROW_BAND_SOURCE["library"]
+
+
+def side_owns_wide_form(side: dict) -> bool:
+    """Did this side of a width pairing run the A12 wide attention block?
+
+    Read off the side's OWN NUMERICS echo (`attn_fattn_wide=wide`), not off the gate's
+    `--attn-fattn-wide` flag: the flag is what was asked for and the echo is what ran, and section (a)
+    already refuses a main run whose echo disagrees with its flag. Same reason the sides echo
+    `--wave-rows`, `--attn-tile` and the pin set.
+
+    A side with no echo is NOT wide, and that is the safe direction on purpose: every `--dry-run`
+    stand-in writes synthetic `STEP`/`RESULT` lines and starts no binary, so it has no form to name —
+    falling back to the ORDINARY line means a missing echo can only make this check stricter, never
+    softer. That is also what keeps `--selftest`'s `--break-ab-logits` aimed at the pooled cosine
+    under the line it was sized against.
+    """
+    return str(side["run"].get("numerics", {}).get("attn_fattn_wide")) == "wide"
+
+
+def pooled_cos_band(wide_pairing: bool) -> tuple[float, str]:
+    """(the pooled `1-cos` ceiling for THIS pairing, the sentence naming where it came from).
+
+    This is the only place the wide-scoped line is reachable, and the scope is the whole design: the
+    ordinary `stage_cos_min` is untouched, so every pairing in the tree that does not have the A12 wide
+    block on one of its sides — every other fixture, every other form knob, the pin-vs-engine pairings,
+    `engine/attn_form_band.py`, which reads `stage_cos_min` directly — is judged by exactly the number
+    it was judged by yesterday. What the scope DOES also cover, stated plainly: at
+    `--attn-fattn-wide 1` BOTH of section (h)'s pairings have a wide side (the batched side is wide in
+    both, and `--wave-rows 1` never enters the wide block, so the one-row side is the fused form and
+    the pairing is wide-vs-fused), so the wider line applies to batched-vs-one-row as well as to
+    batched-vs-carry. That is the narrowest scope the code can express without pretending to know more
+    than it does, and it is honest about the geometry: `attn_wide_kernels.h` is selected per body by
+    `wave_wide = fattn_wide != 0 && rows > 1`, so "the wide form is one side of this comparison" is a
+    fact about the pair, not about the fixture. On `smoke` the pairing this also covers measured
+    1.622e-04, i.e. it was inside the ordinary line by 1.23x and is inside this one by 1.54x.
+
+    Returns the CEILING ON `1 - cos`, derived from a FLOOR key so the dict keeps one spelling per
+    concept (`stage_cos_min` and `stage_cos_min_wide` are both floors) while the log line, which
+    prints and gates a deficit, stays in deficit units.
+    """
+    if wide_pairing:
+        return 1.0 - CASCADE_BAND["stage_cos_min_wide"], STAGE_COS_WIDE_SOURCE
+    return (1.0 - CASCADE_BAND["stage_cos_min"],
+            f"the ordinary stage cosine floor {CASCADE_BAND['stage_cos_min']}, which judges every"
+            " pairing that has no A12 wide side")
 
 # Which GEMM route the run being judged used (`decode_run --gemm`). Module state for the same reason
 # `REFS` is: five sections need it and none of them owns it. `library` is the default because it is the
@@ -3123,6 +3219,25 @@ def pairing_checks(man: dict) -> tuple[list, list, np.ndarray]:
           " agree, in both directions)",
           "declares a step whose logits are present: "
           + ", ".join(f"decode{s}" for s in lying) if lying else "no gaps declared")
+    # The OTHER half of "the directory agrees with the manifest", and the half that made `zz` unreadable
+    # for a whole admission pass: a `.npy` the pins do not claim is invisible to every check above, and
+    # a fixture whose file set contradicts its pin list cannot yield an engine verdict at all — the
+    # `zz` case (prototype/attn_wide/A12-FIXES.md §3) came out rc=1 with no verdict line and read as a
+    # numerics result.
+    # So this is labelled as a FIXTURE mismatch, in the section that runs before the binary starts, and
+    # it is the same function `tools/fixture_census.py` runs over the whole population, not a second
+    # copy of the rule. `--selftest`'s scratch fixtures copy a SUBSET of a real manifest's files, which
+    # is why only the unclaimed direction is asserted here; the vanished-file direction is
+    # `load_pin`'s, one line below.
+    unclaimed = fixture_census.undeclared_files(REFS, man.get("pins") or {})
+    check(not unclaimed,
+          "no .npy file sits in the fixture directory unclaimed by manifest.pins — a directory that"
+          " contradicts its own pin list is a FIXTURE mismatch, not an engine numerics result"
+          " (see tools/fixture_census.py)",
+          (f"{len(unclaimed)} unclaimed file(s), e.g. " + ", ".join(unclaimed[:6])
+           + (" …" if len(unclaimed) > 6 else "")) if unclaimed else
+          f"{len(man.get('pins') or {})} pinned names, {len(list(REFS.glob('*.npy')))} files, the two"
+          " sets agree")
     dec_logits = [None if s in gapset else load_pin(f"decode{s}.logits_last.npy").reshape(-1)
                   for s in range(n_steps)]
     dec_inputs = [load_pin(f"decode{s}.input_ids.npy").reshape(-1) for s in range(n_steps)]
@@ -4814,7 +4929,8 @@ def corpus_drift(a_dir: Path, b_dir: Path) -> dict | None:
     }
 
 
-def wave_band_checks(a_dir: Path, b_dir: Path, a_label: str, b_label: str, what: str) -> None:
+def wave_band_checks(a_dir: Path, b_dir: Path, a_label: str, b_label: str, what: str,
+                     *, wide_pairing: bool = False) -> None:
     """The library route's replacement for bit-identity between two widths (D-11).
 
     Two GEMMs of the same weights do not produce the same bits at different widths, and demanding they
@@ -4834,6 +4950,12 @@ def wave_band_checks(a_dir: Path, b_dir: Path, a_label: str, b_label: str, what:
     comparison, so the window is now proven only to within the band. It is still a real test (a window
     read from the wrong rows moves logits by orders more than 2e-03 of 1-cos), but it is a weaker one,
     and on a `--gemm hand` run the old byte-exact check is what runs.
+
+    WHICH POOLED LINE BINDS, and when: `pooled_cos_band(wide_pairing)`. The per-row line is a property
+    of the pairing (hand-vs-whichever-library, `wave_row_1cos_band()`) and so is the pooled one when
+    the A12 wide block sits on one side — the caller passes `wide_pairing` from the sides' own
+    `attn_fattn_wide` echo, and the line it prints names which ceiling is in force and where it came
+    from. `wide_pairing=False`, the default, is the ordinary line every other pairing is judged by.
     """
     drift = corpus_drift(a_dir, b_dir)
     if drift is None:
@@ -4845,14 +4967,15 @@ def wave_band_checks(a_dir: Path, b_dir: Path, a_label: str, b_label: str, what:
               drift["mismatch"])
         return
     row_band, row_source = wave_row_1cos_band()
+    cos_band, cos_source = pooled_cos_band(wide_pairing)
     ok_1cos = drift["worst_1cos"] <= row_band
     ok_rel = drift["meanrel"] <= CASCADE_BAND["stage_meanrel_max"]
-    ok_cos = drift["one_cos"] <= 1.0 - CASCADE_BAND["stage_cos_min"]
+    ok_cos = drift["one_cos"] <= cos_band
     line = (f"{drift['rows']} rows, {drift['identical']} of them still bit-identical;"
             f" pooled meanrel {drift['meanrel']:.3e} (band {CASCADE_BAND['stage_meanrel_max']:.0e})"
             f" [route-independent: a stage tile is the same tile whichever library made it],"
             f" pooled 1-cos {drift['one_cos']:.3e}"
-            f" (band {1.0 - CASCADE_BAND['stage_cos_min']:.0e}); worst per-row 1-cos"
+            f" (band {cos_band:.3e} — {cos_source}); worst per-row 1-cos"
             f" {drift['worst_1cos']:.3e} at logits{drift['worst_1cos_row']}.bin"
             f" (band {row_band:.2e} — {row_source}); worst per-row meanrel"
             f" {drift['worst_row_rel']:.3e} at logits{drift['worst_rel_row']}.bin, which is printed"
@@ -4865,7 +4988,7 @@ def wave_band_checks(a_dir: Path, b_dir: Path, a_label: str, b_label: str, what:
     check(ok_rel, f"{a_label} and {b_label} pool to a stage meanrel inside the cascade band"
                   f" (<= {CASCADE_BAND['stage_meanrel_max']:.0%})", line)
     check(ok_cos, f"{a_label} and {b_label} pool to a cosine inside the cascade band"
-                  f" (>= {CASCADE_BAND['stage_cos_min']})", line)
+                  f" (>= {1.0 - cos_band})", line)
     check(drift["only_a"] == 0 and drift["only_b"] == 0,
           f"{a_label} and {b_label} wrote the same set of rows",
           f"only in {a_label}: {drift['only_a']}, only in {b_label}: {drift['only_b']}"
@@ -5112,13 +5235,18 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
     # `wave_carry_deferred.json`) was chosen over re-running the same form on both sides.
     keys = lambda s: [(st.get("kind"), st.get("index"), st.get("input"), st.get("sampled"),
                        st.get("pos_before"), st.get("pos_after")) for st in s["run"]["steps"]]
+    # Which pooled cosine line each pairing is judged by is a property of the PAIR, so it is read off
+    # the sides' own echoes rather than assumed from the gate's flag — see `side_owns_wide_form` and
+    # `pooled_cos_band` for why that is the narrowest scope that works and what it also covers.
+    wide_side = {label: side_owns_wide_form(side) for label, side in judged}
     with defer(WAVE_CARRY_REASON, on=SCOPE == "form"):
         if route_is_library():
             cross_width_ids([("batched", batched), ("one-row", perrow)]
                             + ([("carry", sides["carry"])] if "carry" in sides else []),
                             "D-11, from the 24 flips in 1694 rows, all thin-room, that §A2 of progress/2026-10-14/route-c-audit-2026-10-14.md counted")
             wave_band_checks(batched["dir"], perrow["dir"], "batched", "one-row",
-                             "the route (c) wave-width band (D-11)")
+                             "the route (c) wave-width band (D-11)",
+                             wide_pairing=wide_side["batched"] or wide_side["one-row"])
         else:
             check(keys(batched) == keys(perrow) and bool(keys(batched)),
                   "both sides sample the same token ids",
@@ -5161,7 +5289,8 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
         if route_is_library():
             with defer(WAVE_CARRY_REASON, on=SCOPE == "form"):
                 wave_band_checks(batched["dir"], carry["dir"], "batched", "carry",
-                                 "the carried conv window, A-04's T>1 end condition (D-11)")
+                                 "the carried conv window, A-04's T>1 end condition (D-11)",
+                                 wide_pairing=wide_side["batched"] or wide_side["carry"])
             notes.append(f"conv window carried across {len(sizes) - 1} interior wave boundary(ies) at"
                          f" --wave-rows {c_rows}, logits inside the cascade band rather than"
                          " byte-identical to the single-wave run. That is a WEAKER claim than the"
@@ -8343,7 +8472,19 @@ def main() -> int:
     # force that on every shipped fixture and is not a divisor of any of their lengths (64, 27, 46,
     # 128, 300) — a side that divided evenly would put the prompt end on a boundary and test the case
     # the wide run already tests.
-    carry_rows = 5
+    #
+    # DERIVED FOR A SHORT PROMPT, because the list above does not cover every fixture the gate can be
+    # pointed at. `zz`'s raw prompt is 5 ids ("The capital of France is"), so at `carry_rows = 5` its
+    # carry side is ONE wave — and the check twelve lines below (`the carried-window side really splits
+    # the prompt into several waves`) exists precisely to refuse a vacuous carry side. So the gate was
+    # asserting a premise that fixture cannot meet, and once zz's own provenance was repaired
+    # (item 3 / §6 of prototype/attn_wide/A12-FIXES.md) that stale premise was the ONLY thing between
+    # `gate --fixture zz` and a verdict: rc=1, one failure, 238 passes, on both arms. Taking HALF the
+    # prompt keeps both properties the constant was chosen for — it splits (5 ids become 2+2+1, three
+    # waves, two interior boundaries) and it does not divide evenly — and it gives zz a carry verdict it
+    # has never had rather than a skipped section. A prompt of 1-2 ids cannot be split at all and stays
+    # a refusal, not a silent pass: a carry side that cannot exist is a fact the operator should see.
+    carry_rows = 5 if len(prompt_ids) > 5 else 2
     # BOTH RUN-VS-RUN SECTIONS ARE TEACHER-FORCED WHENEVER THE FIXTURE HAS A DECODE PHASE, and the reason
     # is the same in (h) and (j): their independent variable is a width or a spelling, and on a
     # free-running fixture the two sides can each take their own thin-margin token and fork — after which
@@ -8524,46 +8665,39 @@ def decision_margin(ref: np.ndarray, eng, m: dict) -> str:
 # `healed` when somebody removes its entry after seeing it, and a NEW failure on a fixture that goes red
 # for a reason this list has not been told about still has to say so.
 #
-# ONE ENTRY since 2026-10-20, and it is a different class from the two the history above describes. Those
-# two were red because the ENGINE could not hold a pinned token (`chunk64b`) or could not be run at the
-# pinned width (`wide520f`). `zz` is red because its OWN DIRECTORY contradicts its OWN manifest, so the
-# gate refuses before `decode_run` starts and not one step of it has ever been judged — on any arm, by any
-# caller, ever. A12's admission found it while deriving the fixture population
-# (`prototype/attn_wide/A12-FIXES.md` item 3): rc=1 at 0 s wall on both `--attn-fattn-wide` arms and at
-# `--no-engine`, one failure, and — because the refusal is a `SystemExit` before `report()` — no verdict
-# line at all, which is how a red that judges nothing reads as a numerics result.
+# ONE ENTRY existed from 2026-10-20 and was REMOVED the same day, and it was a different class from the
+# two the history above describes. Those two were red because the ENGINE could not hold a pinned token
+# (`chunk64b`) or could not be run at the pinned width (`wide520f`). `zz` was red because its OWN
+# DIRECTORY contradicted its OWN manifest, so the gate refused before `decode_run` started and not one
+# step of it had ever been judged — on any arm, by any caller, ever. A12's admission found it while
+# deriving the fixture population (`prototype/attn_wide/A12-FIXES.md` item 3): rc=1 at 0 s wall on both
+# `--attn-fattn-wide` arms and at `--no-engine`, one failure, and — because the refusal is a
+# `SystemExit` before `report()` — no verdict line at all, which is how a red that judges nothing reads
+# as a numerics result.
 #
-# THE NUMBERS. `data/refs/zz/manifest.json` declares `logits_declared_absent: [decode2, decode3]` and its
-# 524-entry `pins` map carries logits for exactly three names (`logits_last`, `decode0.logits_last`,
-# `decode1.logits_last`), but the directory holds 2500 `.npy` files, among them `decode2.logits_last.npy`
-# and `decode3.logits_last.npy` — F32, argmaxes 760 and 6511, which are precisely
-# `greedy_continuation[3]` and `[4]`. So they are real logits the manifest no longer claims, and their
-# mtimes (13:32:38) predate the manifest and `decode1`'s logits (13:33:12) by 34 s: the full dump's files,
-# left in place when the lean pin policy was written over them. The check that fires is therefore correct
-# and stays exactly as it is — a declared gap the disk contradicts is how a re-pin quietly loses a step.
+# THE NUMBERS, as diagnosed. `data/refs/zz/manifest.json` declared `logits_declared_absent:
+# [decode2, decode3]` and its 524-entry `pins` map carried logits for exactly three names
+# (`logits_last`, `decode0.logits_last`, `decode1.logits_last`), while the directory held 2500 `.npy`
+# files, among them `decode2.logits_last.npy` and `decode3.logits_last.npy` — F32, argmaxes 760 and
+# 6511, which are precisely `greedy_continuation[3]` and `[4]`. So they were real logits the manifest
+# no longer claimed, and their mtimes (13:32:38) predated the manifest and `decode1`'s logits
+# (13:33:12) by 34 s: a FULL dump's files, left in place when the lean pin policy was written over them
+# in the same directory (`tools/reference_dump.py` mkdirs `--out`, it does not clear it, and
+# `tools/dump_fixtures.sh` installs with `cp`). The check that fired was correct as written; what was
+# missing was attribution, and that is now `tools/fixture_census.py`'s job rather than a reader's.
 #
-# WHY IT IS RECORDED RATHER THAN FIXED HERE. Both remedies belong to the fixture owner, not to this file:
-# re-dump zz with `tools/reference_dump.py --logit-steps all` (a device pass, and A7 declined zz's re-dump
-# because its `state_fp` re-dump would break the fingerprint re-admission of the other eight), or delete
-# the 1976 undeclared files (irreversible — `data/` is gitignored at `.gitignore:65` and
-# `git ls-files data/refs/zz` lists nothing, so there is no git copy to come back from). Clearing the
-# declaration by hand is the third way and the worst: it would be a manifest edit that makes a gate agree
-# with the very disagreement it exists to catch. Until one of the two real remedies lands, zz judges ZERO
-# steps on either arm, and a `zz` row in any table is a provenance row, not engine evidence.
-EXPECTED_RED: dict = {
-    "zz": {
-        "checks": [
-            "every declared logit gap is actually absent from the fixture (the declaration and the disk "
-            "agree, in both directions)",
-        ],
-        "why": "the fixture contradicts itself, not the engine: manifest declares decode2/decode3 logits "
-               "absent while the full dump's two logits files are still in the directory (their argmaxes "
-               "760/6511 are greedy_continuation[3]/[4], so they are real tensors the manifest stopped "
-               "claiming); the declared-gap refusal then aborts before the binary starts, so zz has never "
-               "judged a step on any arm. Remedy is a re-pin or a fixture-directory prune by the pin owner "
-               "— see the block above this dict for why neither is a gate edit.",
-    },
-}
+# WHAT FIXED IT, and why it was never the gate edit it was first called. The stale side was the
+# DIRECTORY: the pins were the newer artifact. `tools/reference_dump.py --decode 4 --lean --deep-steps 1
+# --logit-steps all` — the manifest's own recipe with the logits step-list widened so no step is
+# declared absent — writes 526 tensors, and `tools/check_dump_reproduction.py` proves every one of the
+# 524 previously pinned tensors AND the two orphan logits byte-identical, so the re-pin adds nothing the
+# checkpoint did not already pin; it only stops disowning two tensors that reproduce exactly. With
+# `logits_declared_absent: []` the declared-gap check has nothing to refuse, `zz` adjudicates all four
+# steps on both arms, and the entry above it healed (printed, as designed: `[expected-red] zz: all 1
+# recorded line(s) did NOT fail this run — healed`) before being removed here. Clearing the declaration
+# by hand would still have been the worst of the three options — a manifest edit that makes a gate agree
+# with the very disagreement it exists to catch — and that is why it waited for a re-dump.
+EXPECTED_RED: dict = {}
 
 
 def admitted_divergences(n_decode: int, got_ids: list, greedy: list, eng_logits: list,

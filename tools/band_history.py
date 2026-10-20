@@ -93,10 +93,12 @@ ALLOWANCE_GLOB = "data/refs/*/route_allowance.json"
 PLAN_REL = "progress/2026-10-12/plan-2026-10-12.md"
 
 # Keys where a LOWER number is the looser band. `BAND.cos_hard`/`BAND.cos_report` and
-# `CASCADE_BAND.stage_cos_min` are cos FLOORS (a deficit ceiling like `CASCADE_BAND.row_1cos_max` goes
+# `CASCADE_BAND.stage_cos_min`/`stage_cos_min_wide` are cos FLOORS (a deficit ceiling like
+# `CASCADE_BAND.row_1cos_max` goes
 # the other way); every other policed key is a ceiling or a multiplier, where higher is looser. Without
 # this the tool can say a number moved but not that it was widened.
-LOWER_IS_LOOSER = {"BAND.cos_hard", "BAND.cos_report", "CASCADE_BAND.stage_cos_min"}
+LOWER_IS_LOOSER = {"BAND.cos_hard", "BAND.cos_report", "CASCADE_BAND.stage_cos_min",
+                   "CASCADE_BAND.stage_cos_min_wide"}
 
 
 class BandHistoryError(Exception):
