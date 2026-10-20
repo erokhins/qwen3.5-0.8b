@@ -113,6 +113,13 @@ struct DecodeScratch {
     // byte-compare. 1 is the F16 accumulator: 64 registers, the same 256 dims, and NOT owed byte identity (a
     // different format), so it is judged by the bands already in `engine/gate.py` (`prototype/attn_percost/A10-F16-IMPL.md`).
     int attn_fattn_pvf16 = 0;
+    // Whether a wave body's core is the A12 wide block instead of the 16-row WMMA one (`--attn-fattn-wide`,
+    // bet A12; see `kernels.h:AttnLayerArgs::fattn_wide`). Same riding reason and the same one-row immunity as
+    // the four above — a one-row body is `attn_core`, so no decode bit moves under it — and one difference
+    // worth naming: the knobs above it choose a SPELLING of the form that ships, this one replaces the whole
+    // wave core and drops the split/combine route for that body. Default 0, inert, and inertness at 0 is a
+    // byte-compare rather than an argument, because the wide kernel is a separate code object.
+    int attn_fattn_wide = 0;
     // How deep the split path may cut a wide row (`--attn-split-cap`, bet A9-L-c;
     // `kernels.h:AttnLayerArgs::split_cap`). Same riding reason as the five above — it has to reach the one
     // call site in `submit_wave_body` — with one difference worth naming: unlike them it is NOT wave-only. A

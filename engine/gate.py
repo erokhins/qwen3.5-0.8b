@@ -5262,6 +5262,11 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
                # it is NOT owed byte identity -- a half-width accumulator is a different format -- so the echo
                # below names it to make the numerics sections attributable, not to witness a byte-compare.
                "--attn-fattn-pvf16", args.attn_fattn_pvf16,
+               # And WHICH WAVE CORE at all (`--attn-fattn-wide`, bet A12), forwarded for the identical reason as
+               # the four above and with a sharper one: at 1 this is not a spelling of the shipping wave but a
+               # different core that owns every row of the body, so a side run that dropped the flag and silently
+               # took the default would price the shipping wave and be tabled as the wide block's result.
+               "--attn-fattn-wide", args.attn_fattn_wide,
                # The GDN scan too, for the identical reason: the two sides of a width A/B must differ
                # in width and nothing else. And its SPELLING for the same reason again — section (j)
                # is the only place the two spellings are allowed to differ, and it differs them alone.
@@ -7156,6 +7161,29 @@ def main() -> int:
                          " changes for it: no band, no floor, no admission edit, only the argv and the echoed"
                          " field. Wave-only like the flags around it, and the engine refuses `--attn-fattn 0`"
                          " with this knob named rather than echoing a kernel that did not run.")
+    ap.add_argument("--attn-fattn-wide", choices=("0", "1"), default="0",
+                    help="whether the wave's WMMA core is the A12 wide block, passed straight to"
+                         " `decode_run --attn-fattn-wide` and asserted against the run's own NUMERICS echo"
+                         " (`attn_fattn_wide=fattn|wide`), exactly like --attn-fattn, --attn-fattn-roll,"
+                         " --attn-fattn-qstage and --attn-fattn-pvf16 (bet A12,"
+                         " engine/attn_wide_kernels.h, prototype/attn_percost/A12-WIDE-BET.md). `0` is what"
+                         " SHIPS and what HEAD's machine code is: the 16-row WMMA block on the streaming rows,"
+                         " attn_slim_wave on the one-pass rows, attn_combine merging them. `1` is NOT a spelling"
+                         " of that wave but a different core -- 32 query positions x the 4 heads of one KV group"
+                         " per block (128 row-slots), a 64-position stage, Q resident in F16, an F16 P*V"
+                         " accumulator -- which owns EVERY row of the body and takes the split/combine route away"
+                         " with it, so attn_slim_wave and attn_combine are not launched for that body and the"
+                         " one-pass rows that are bit-exact against the pins today move onto the wide form. THAT is"
+                         " what a red here would mean, and it is why the knob is plumbed before it is admitted:"
+                         " like --attn-fattn-roll and --attn-fattn-pvf16 it is NOT owed byte identity (a"
+                         " 64-position round re-associates the softmax and the accumulated weight is an"
+                         " un-normalised F16 exp divided at the end), so the judge is the existing §10.1"
+                         " cos/meanrel aggregates with NO new band, NO widened band and NO edited must-catch set"
+                         " -- and if the wide form cannot pass them that is a result to report, not a threshold to"
+                         " move. THE DEFAULT HERE AND IN decode_run.cpp MUST MOVE TOGETHER: one committed half of"
+                         " the pair makes the gate silently judge a different kernel than the engine ships, and"
+                         " the NUMERICS echo cross-check below is what catches that. Refused with --attn-fattn 0,"
+                         " which has already decided the VALU form owns the wave's rows.")
     ap.add_argument("--gdn-scan", choices=("seq", "collapse"), default="seq",
                     help="which §04.4 scan a GDN body runs, passed straight to `decode_run"
                          " --gdn-scan` (P9, §04.7, route A is progress/2026-10-14/p9-phase1-2026-10-14.md D-12):"
@@ -7522,6 +7550,10 @@ def main() -> int:
            # run whose log cannot say which accumulator wrote its rows cannot witness the register claim or the
            # numerics claim, and a side that silently took the default would price the F32 form twice.
            "--attn-fattn-pvf16", args.attn_fattn_pvf16,
+           # And the WAVE CORE (`--attn-fattn-wide`, bet A12), forwarded and asserted for the same reason as the
+           # four above -- and this one changes which kernels run at all, so the echo below is the only thing that
+           # can tell a wide run from a shipping run that was merely asked about a wide flag.
+           "--attn-fattn-wide", args.attn_fattn_wide,
            # The GDN scan, named on every run and asserted below: P9's matrix is this flag twice over
            # the ten fixtures, and a judged run that cannot say which scan produced its rows is
            # evidence about neither.
@@ -7738,6 +7770,21 @@ def main() -> int:
                " claim about either accumulator can be made from this log" if echoed_pvf16 is None else
                f"NUMERICS echoed attn_fattn_pvf16={echoed_pvf16}, this gate was run with --attn-fattn-pvf16"
                f" {args.attn_fattn_pvf16}. A gate default and an engine default that moved apart produce exactly"
+               " this failure, which is why the two are documented as one commit"))
+        # WHICH WAVE CORE ran (`--attn-fattn-wide`, bet A12), read off the same line and MANDATORY for the same
+        # reason the four above are: the two sides are not bit-identical, so a run that silently took the default
+        # would price the shipping wave twice, read green, and be tabled as the wide block's numerics result.
+        # This one is sharper than the accumulator width above it, because at 1 the wide core owns EVERY row of the
+        # body: `attn_slim_wave` and `attn_combine` are not launched at all, so no other field in this log says
+        # whether the one-pass rows rode the bit-exact route or the wide one. A binary that predates the field
+        # echoes nothing, which is its own failure (`--attn-touch`'s rule).
+        echoed_wide = run.get("numerics", {}).get("attn_fattn_wide")
+        check(str(echoed_wide) == ("wide" if args.attn_fattn_wide == "1" else "fattn"),
+              "the run ran the wave core this gate is judging it under",
+              ("its NUMERICS line carried no `attn_fattn_wide=` — the binary predates --attn-fattn-wide, so no"
+               " claim about either wave core can be made from this log" if echoed_wide is None else
+               f"NUMERICS echoed attn_fattn_wide={echoed_wide}, this gate was run with --attn-fattn-wide"
+               f" {args.attn_fattn_wide}. A gate default and an engine default that moved apart produce exactly"
                " this failure, which is why the two are documented as one commit"))
         # The GDN scan, read off the same line for the same reason (P9). This is also the check that
         # catches a silent fall back: a `--gdn-scan chunk` run whose launcher decided to run `seq`
@@ -8592,6 +8639,11 @@ def teacher_forced_checks(args, man: dict, prompt_ids: list, dec_logits: list, g
                # engine's default and silently turn a like-for-like comparison into a comparison of two accumulator
                # formats -- which, since the formats are not bit-identical, would read as a numerics result.
                "--attn-fattn-pvf16", args.attn_fattn_pvf16,
+               # And the wave core, forwarded for the identical reason: this section's two runs must differ in the
+               # fed tokens and nothing else, and a `--attn-fattn-wide` left out here would take the engine's
+               # default and silently turn a like-for-like comparison into a comparison of two different wave
+               # cores -- one of which owns rows the other leaves to attn_slim_wave and attn_combine.
+               "--attn-fattn-wide", args.attn_fattn_wide,
                "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk),
                "--gdn-spell", args.gdn_spell,
                # Forwarded so this section's two runs differ in NOTHING but the fed token, and the echoed

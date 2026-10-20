@@ -186,9 +186,27 @@ struct Options {
     // byte identity — a narrower accumulator is a different format — so its judge is the bands already in
     // `engine/gate.py`, with no new band and no widening. Parse-or-throw like its siblings; echoed on NUMERICS.
     int attn_fattn_pvf16 = 0;
+    // Whether the WMMA wave is the A12 WIDE block at all (`--attn-fattn-wide`, bet A12). 0 — the 16-row WMMA
+    // wave that ships, with `attn_slim_wave` keeping the one-pass rows and `attn_combine` merging the streaming
+    // ones — is the default and is HEAD's own machine code, so the default side of its A/B is a byte-compare
+    // rather than an argument. 1 hands EVERY row of a wave body to `engine/attn_wide_kernels.h`'s 128-row block
+    // and launches neither `attn_slim_wave` nor `attn_combine`; the consequence, including the fact that the
+    // pinned bit-exact one-pass rows move, is at `kernels.h:AttnLayerArgs::fattn_wide` and at the routing site.
+    // Parse-or-throw like its siblings and echoed on the same NUMERICS line, because it names which kernel
+    // produced a log's wave rows and a silently-defaulted side would price the shipping wave twice and report
+    // the second price as the wide block's.
+    int attn_fattn_wide = 0;
+    // Whether the knob was NAMED, for the identical reason: 0 IS the default, so a guard keyed on its value
+    // would manufacture a refusal for every bare run the day the default moved.
     // Whether the knob was NAMED, for the identical reason: 0 IS the default, so a guard keyed on its value
     // would manufacture a refusal for every bare run the day the default moved.
     bool attn_fattn_pvf16_given = false;
+    // Whether the knob was NAMED is NOT what the refusal below keys on, and that is a real difference from the
+    // three above it: each of those is inert at its default value, so only `given` can separate "asked for and
+    // contradictory" from "forwarded by a driver that always forwards every form flag". `--attn-fattn-wide 1`
+    // is never inert — it replaces the wave core — so the value itself is the whole question, and a
+    // `given`-keyed refusal would reject `--attn-fattn 0 --attn-fattn-wide 0`, which asks for nothing and which
+    // `engine/gate.py` forwards as a matter of course.
     // How deep the split path may cut a wide query row (`--attn-split-cap`, bet A9-L-c). Where the lane geometry
     // forces `split_for(lanes_last)` lane blocks per wide row (§07.3), this is an UPPER bound on that count:
     // the launch runs `min(split_for(lanes_last), N)`, so a block's lane slice gets WIDER and the split's
@@ -423,6 +441,26 @@ Options parse_args(int argc, char** argv) {
             }
             o.attn_fattn_pvf16 = v == "1";
             o.attn_fattn_pvf16_given = true;
+        } else if (a == "--attn-fattn-wide") {
+            // Parsed or thrown, 0|1 like `--attn-fattn` and `--attn-fattn-pvf16` beside it, and for the same
+            // reason: this names which kernel produced a wave's rows, and a value that silently fell back to the
+            // default would price the shipping WMMA wave twice and report the second price as the wide block's.
+            // Unlike the two above it it is not a SPELLING of the shipping form: at 1 it replaces the wave core
+            // and takes the split/combine route away with it, so the two sides of this A/B differ in which
+            // kernels ran at all, which is precisely what an echoed 0/1 cannot be allowed to hide.
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--attn-fattn-wide takes 0 (the WMMA wave that ships: the 16-row block"
+                                         " on the streaming rows, attn_slim_wave on the one-pass rows,"
+                                         " attn_combine merging them — THE DEFAULT and HEAD's own machine code)"
+                                         " or 1 (bet A12: the wide block, 32 query positions x the 4 heads of"
+                                         " one KV group per block, a 64-position stage, Q resident in F16 and"
+                                         " an F16 P*V accumulator, owning every row of the body with no lane"
+                                         " split and no combine; engine/attn_wide_kernels.h). Got '" + v +
+                                         "'. Refusing rather than guessing, because this names which wave core"
+                                         " produced the bits in this log and the gate asserts the echo");
+            }
+            o.attn_fattn_wide = v == "1";
         } else if (a == "--attn-split-cap") {
             // Parsed AND validated here rather than clamped: a value that silently became the default would
             // price the uncapped run twice and report the second price as the cap's win (the standing reason
@@ -706,6 +744,22 @@ Options parse_args(int argc, char** argv) {
                                  " wave at all, so there is nothing here for it to spell. Use --attn-fattn 1"
                                  " (the default) with this flag, or drop it for the shipped VALU wave");
     }
+    if (o.attn_fattn_wide && !o.attn_fattn) {
+        // The wide block is a spelling of the WMMA family (`engine/attn_wide_kernels.h`), and `--attn-fattn 0`
+        // has just said the VALU form owns this wave's rows. The other three sub-knobs refuse because naming a
+        // spelling of a form that does not run would echo a kernel that did not exist; this one refuses for the
+        // stronger reason that it would OVERRIDE a routing decision rather than spell within it — `attn_slim_wave`
+        // and `attn_combine` would be skipped by a knob whose name says it only changes the WMMA form. Refusing
+        // is the only answer that cannot silently move the engine's routing. Keyed on the VALUE, not on
+        // `_given`, because unlike those three this knob has no inert non-default value to excuse: 1 always
+        // means the wide block ran, and `engine/gate.py` forwards the flag on every run, so a `given`-keyed
+        // refusal would reject `--attn-fattn 0 --attn-fattn-wide 0`, which asks for nothing.
+        throw std::runtime_error("--attn-fattn-wide 1 asks for the wide WMMA wave block and --attn-fattn 0"
+                                 " launches no WMMA wave at all: the wide block replaces that wave core"
+                                 " outright, taking attn_slim_wave and attn_combine off the wave with it, so"
+                                 " there is nothing here for it to spell. Use --attn-fattn 1 (the default)"
+                                 " with this flag, or --attn-fattn-wide 0 for the shipping wave");
+    }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
         // caller's, and a resident process cannot know which one a gate wants — and --sizes-only
@@ -891,6 +945,7 @@ void print_usage(FILE* out) {
                  " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
                  " [--gemm-pins all|none|<csv>] [--gemm-heur N] [--attn-touch 0|1]"
                  " [--attn-fattn-roll single|two] [--attn-fattn-qstage stage|unstaged8]"
+                 " [--attn-fattn-wide 0|1]"
                  " [--attn-split-cap N]"
                  " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
                  " [--gdn-geom block|wf4|wf2|reg16]"
@@ -1018,6 +1073,30 @@ void print_usage(FILE* out) {
                  " grid either way, all eight roll×qstage×pv combinations are real kernels in the binary, and"
                  " the launcher's ATTN_FATTN line reports `pv=`/`vgpr=` from the kernel that actually ran."
                  " `--attn-fattn 0` REFUSES it, for the same reason as the roll\n"
+                 "  --attn-fattn-wide 0|1  whether that wave is the 16-row WMMA block or the A12 WIDE one"
+                 " (bet A12, engine/attn_wide_kernels.h, prototype/attn_percost/A12-WIDE-BET.md). `0` is what"
+                 " SHIPS and is HEAD's own machine code: the WMMA block takes the rows §07.3 already streams"
+                 " (blocks_for_row > 1), attn_slim_wave keeps the one-pass rows, attn_combine merges the"
+                 " partials. `1` is not a spelling of that wave but a DIFFERENT CORE: one block covers 32 query"
+                 " positions x the 4 heads of ONE KV group — 128 row-slots, 8 wavefronts — stages 64 KV"
+                 " positions a round, converts Q to F16 once per block and keeps it in registers, and"
+                 " accumulates P*V in F16 (the accumulator halving that makes the shape possible at all). It"
+                 " has NO coverage rule and NO lane split, so it owns EVERY row of the body — the rows at or"
+                 " below MAXSC included, which is exactly where the shipping route is bit-exact against the"
+                 " dumps — and neither attn_slim_wave nor attn_combine is launched for that body, because the"
+                 " block normalises and applies §05.6 itself through finish_head. NOT bit-identical at any row"
+                 " width and not owed byte identity: a 64-position round re-associates the softmax and the"
+                 " weight reaching the accumulator is an un-normalised F16 exp divided at the end, where the"
+                 " one-pass route rounds the NORMALISED weight to BF16 before the P*V (§05.5 rule 4). Its judge"
+                 " is therefore the existing §10.1 cos/meanrel bands through A4-BET.md — no new band, no"
+                 " widening, no loosened check — and the per-round accumulator rescale is mandatory, not"
+                 " tidiness: with the fold removed the worst head-row drops its FIRST add at round 1 and the"
+                 " accumulator is no longer finite in fp16 by round 1721 of a 64-position round"
+                 " (prototype/attn_wide/a12_wide_mirror.py §4; the shipping 16-position arm's own counterfactual"
+                 " is round 1 / 13 / 99 worst-median-best, A10-PVF16.md §4). WAVE-ONLY"
+                 " like the flags above it, so no decode bit moves under it; `--attn-fattn 0` REFUSES it, and"
+                 " the run's own ATTN_WIDE line reports vgpr=/lds=/scratch=/wf_per_cu= from the kernel that"
+                 " actually ran, spill included (A12 spends the spill budget on purpose)\n"
                  "  --attn-split-cap N  an UPPER BOUND on how many lane blocks a wide query row may be cut"
                  " into (bet A9-L-c, prototype/attn_percost/A9-LONGCTX-CENSUS.md §4.2). The lane geometry"
                  " forces `split = ceil(lanes/MAXSC)` blocks per wide row (§07.3); N caps that count, so a"
@@ -1748,7 +1827,7 @@ int main(int argc, char** argv) {
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
         std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d"
                     " attn_touch=%d attn_fattn=%d attn_fattn_roll=%s attn_fattn_qstage=%s"
-                    " attn_fattn_pvf16=%s gdn_scan=%s"
+                    " attn_fattn_pvf16=%s attn_fattn_wide=%s gdn_scan=%s"
                     " gdn_chunk=%d gdn_spell=%s gdn_loop=%d"
                     " gdn_norm=%s gdn_geom=%s\n",
                     engine::kMaxWaveRows, o.wave_rows,
@@ -1777,6 +1856,17 @@ int main(int argc, char** argv) {
                     // like the enabler had failed. Same blind spot as the two fields above it: a wave of all
                     // one-pass rows launches no WMMA kernel and says so on its own `ATTN_FATTN_SKIP` line.
                     o.attn_fattn_pvf16 ? "f16" : "f32",
+                    // WHICH WAVE CORE RAN, spelled as the two things it is rather than as the 0/1 the flag
+                    // takes: `fattn` is the shipping wave — the 16-row WMMA block on the streaming rows,
+                    // attn_slim_wave on the one-pass rows, attn_combine merging them — and `wide` is A12's
+                    // 128-row block owning every row of the body with no split and no merge. The echo is
+                    // mandatory in `engine/gate.py` for the standing reason: a log that cannot say which wave
+                    // core produced its rows cannot be compared against a pinned dump at all, and a side that
+                    // silently took the default would price the shipping wave twice and report the second price
+                    // as the wide block's. Unlike the three fields above it this one is not blind to an all
+                    // one-pass wave: the wide block owns those rows too, so `wide` is true of the run whatever
+                    // a later `ATTN_FATTN_SKIP` line says about a kernel this route does not launch.
+                    o.attn_fattn_wide ? "wide" : "fattn",
                     engine::kernels::gdn_scan_name(o.gdn_scan), o.gdn_chunk,
                     // Truthful, not decorative. `collapse` submits `gdn_rc::rec_collapse_kernel`, which
                     // never reads this flag, so an echo naming a spelling here would report a kernel that
@@ -1835,6 +1925,7 @@ int main(int argc, char** argv) {
         sc.attn_fattn_roll = o.attn_fattn_roll;
         sc.attn_fattn_qstage = o.attn_fattn_qstage;
         sc.attn_fattn_pvf16 = o.attn_fattn_pvf16;
+        sc.attn_fattn_wide = o.attn_fattn_wide;
         sc.attn_split_cap = o.attn_split_cap;
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;

@@ -678,6 +678,30 @@ struct AttnLayerArgs {
     // which is what makes the paired timing one window instead of two builds.
     int fattn_pvf16 = 0;
 
+    // Whether the wave's WMMA core is the A12 WIDE block instead of the 16-row one (`--attn-fattn-wide`, bet
+    // A12). Wave-only like every knob above it — a one-row body is `attn_core`, so no decode bit moves under
+    // it — and, unlike the three above, it does not re-spell the form that ships: at 1 it REPLACES this body's
+    // whole wave core. `engine/attn_wide_kernels.h`'s block covers 32 query positions x the 4 heads of one KV
+    // group (128 row-slots) per block, stages 64 KV positions a round, holds Q in F16 registers, and
+    // accumulates P*V in F16; it has NO lane split and NO coverage rule, so it owns EVERY row of the body —
+    // the rows at or below MAXSC included, which is where the shipping route is bit-exact against the dumps.
+    // `attn_slim_wave`, the eight `attn_fattn_wave*` spellings and `attn_combine` are then not launched at all;
+    // the whole argument is at the routing site (`engine/kernels_attn.cpp`) and in that header's file comment.
+    //
+    // NOT bit-identical to either spelling, at any row width, and not owed byte identity: a 64-position round
+    // re-associates the softmax and the weight that reaches the accumulator is an un-normalised F16 `exp`
+    // divided at the end, where the one-pass route rounds the normalised weight to BF16 before the P*V
+    // (§05.5's rule 4). So the judge is `engine/gate.py`'s existing §10.1 cos/meanrel aggregates — no new
+    // band, no widening, no loosened check — exactly as `--attn-fattn-roll two` and `--attn-fattn-pvf16` were
+    // judged through `prototype/attn_percost/A4-BET.md`.
+    //
+    // DEFAULT 0, which is the whole point of the knob as it stands: the form has cleared a CPU mirror
+    // (`prototype/attn_wide/a12_wide_mirror.py`) and a standalone timing rig, but the engine route has not been
+    // admitted on device, and a form that has not been admitted does not become the engine's default by having
+    // been written. At 0 nothing here is consulted and the shipped machine code is untouched — the wide kernel
+    // is a second code object in the binary, not a branch inside the shipped one.
+    int fattn_wide = 0;
+
     // How deep the split path may cut a wide query row (`--attn-split-cap`, bet A9-L-c). The lane geometry
     // FORCES `split_for(lanes_last)` lane blocks (§07.3); this is an upper bound on that count, and the
     // launch uses `min(split_for(lanes_last), split_cap)`. `kAttnSplitCapOff` (0) leaves the bound inert,

@@ -43,6 +43,9 @@
 // below selects a LAUNCH and never a build.
 #include "engine/attn_slim_kernels.h"
 #include "engine/attn_fattn_kernels.h"
+// The A12 wide block (`--attn-fattn-wide`, default 0), which reuses the fattn header's fragment laws and
+// register shapes rather than restating them, so it must be included after it and in this TU only.
+#include "engine/attn_wide_kernels.h"
 
 namespace engine::kernels {
 namespace {
@@ -237,6 +240,61 @@ void splitcap_echo(int rows, int lanes_last, int split_natural, int split_eff, i
     std::printf("%s\n", line.c_str());
     std::fflush(stdout);
 }
+
+// THE WIDE FORM'S GEOMETRY LINE (`--attn-fattn-wide 1`), one line per DISTINCT launch geometry like the two
+// above it, and for the two reasons they exist rather than new ones.
+//
+// (1) IT IS THE CANARY. A paired A/B on this box owes a behavioural canary because `engine/build.sh` is not
+// bit-reproducible and a check compiled into the binary under test is blind to a stale binary (AGENTS.md,
+// the 2026-10-17 row: the first D30 A/B timed a pre-change binary as its `new` side and reported a clean null
+// while every in-binary self-check stayed green). So the canary must be a field the change is REQUIRED to
+// move, read in the same breath as the number, and ABSENT from the pre-change binary. A new line prefix gives
+// a harness exactly that: `grep ATTN_WIDE` on a pre-change log reads nothing at all, and the fields below it
+// (threads=256, pos_per_block=32, stage=64, lds=32768) belong to no kernel this tree already has —
+// `attn_fattn_wave_u8` cannot print them, because `hipFuncGetAttributes` answers about the function pointer
+// THIS LAUNCH submitted, which is what `launched=` below is for.
+//
+// (2) THE SPILL IS THE POINT, SO IT MUST BE PRINTED. A12 spends the spill budget on purpose (<= 1,024 B a
+// thread; llama's own kernel is at 900), so a build that spilled more is not a red gate but it IS a
+// different kernel, and `scratch=`/`SPILL`/`wf_per_cu=` are read off the loaded code object rather than from
+// a comment or from clang's `-Rpass-analysis` note, which prints a constant occupancy for every kernel in
+// the TU (AGENTS.md, the counter-and-census row).
+void wide_echo(int rows, int lanes_last, int split_eff, int combine, const void* launched,
+               unsigned rtiles) {
+    static std::string last;
+    hipFuncAttributes at{};
+    const bool have_attrs = hipFuncGetAttributes(&at, launched) == hipSuccess;
+    int blocks_per_cu = -1;
+    if (hipOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_cu, launched, WIDE_THREADS,
+                                                    0) != hipSuccess) {
+        blocks_per_cu = -1;
+    }
+    // The rows the GRID covers, computed from the same grid expression the launch was built from rather than
+    // asserted beside it. Wide has no coverage predicate, so unlike `fattn_echo` there is no share to divide
+    // by — and that is exactly why this field is computed: if the row rule and the grid ever disagreed, the
+    // numerator would come out short of the denominator instead of the line being unable to be wrong.
+    const int covered = rows < (int)(rtiles * WIDE_POS_PER_BLOCK) ? rows
+                                                                  : (int)(rtiles * WIDE_POS_PER_BLOCK);
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+                  "ATTN_WIDE form=wide128 warps=%d threads=%d pos_per_block=%d rows_per_block=%d"
+                  " stage=%d ktiles=%d lgroups=%d acc=f16 vgpr=%d lds=%d scratch=%d wf_per_cu=%d%s"
+                  " grid=(%d,1,%d) wide_rows=%d/%d wave_rows=%d lanes_last=%d"
+                  " slim_wave=0 fattn_wave=0 combine=%d split=%d split_used=0",
+                  WIDE_WARPS, WIDE_THREADS, WIDE_POS_PER_BLOCK, WIDE_ROWS_PER_BLOCK,
+                  WIDE_STAGE, FATTN_KTILES, WIDE_LGROUPS,
+                  have_attrs ? at.numRegs : -1,
+                  have_attrs ? (int)at.sharedSizeBytes : -1,
+                  have_attrs ? (int)at.localSizeBytes : -1,
+                  blocks_per_cu * WIDE_WARPS,
+                  (have_attrs && at.localSizeBytes > 0) ? " SPILL" : "",
+                  N_KV, rtiles, covered, rows, rows, lanes_last, combine, split_eff);
+    const std::string line(buf);
+    if (line == last) return;
+    last = line;
+    std::printf("%s\n", line.c_str());
+    std::fflush(stdout);
+}
 }  // namespace
 
 std::size_t attn_part_floats(int rows) {    // `attn_core`'s own partial layout: one `(max, sum, acc[DH])` tuple per (query head, split
@@ -410,8 +468,37 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     // form. The coverage split itself — WMMA gets the rows §07.3 already streams, the VALU wave keeps the
     // one-pass rows — is `fattn_covers`'s, called from both kernels, so the two sides cannot disagree
     // about who owns a row and no partial slot is ever dropped or double-written.
+    // WHICH FORM OWNS THE WHOLE WAVE (`--attn-fattn-wide`, bet A12, `engine/attn_wide_kernels.h`). Like every
+    // knob in this family it is WAVE-ONLY — a one-row body is the fused `attn_core` whatever it says, so no
+    // decode bit moves under it — and unlike `wave_fattn` above it it has NO COVERAGE RULE, which is the
+    // single most important thing about this branch and is therefore spelled out in all three of its
+    // consequences:
+    //
+    //   * EVERY row of the body belongs to the wide block, INCLUDING the rows at or below MAXSC. Those rows
+    //     ride `attn_slim_wave`'s one-pass route today and are bit-exact against the pinned dumps; under this
+    //     knob they are scored by a 64-position WMMA round with an F16 accumulator and an un-normalised F16
+    //     weight, so their bits move — with no band, floor or must-catch set edited to accommodate it. That
+    //     is the risk this knob newly carries and it is what `engine/gate.py`'s existing §10.1 aggregates are
+    //     asked to adjudicate (`prototype/attn_wide/a12_engine_admission.py`).
+    //   * `attn_slim_wave` and the eight `attn_fattn_wave*` spellings are NOT LAUNCHED. It is not an
+    //     early-out: the wide block owns every row, so a second core would either double-write a row it owns
+    //     or write nothing, and `core.fattn_cover` stays 0 because there is no split for it to describe.
+    //   * `attn_combine` is NOT LAUNCHED either, even when `split_eff > 1`. The wide block keeps a row's whole
+    //     `(m, l, acc)` in its own registers, normalises and applies §05.6 through `finish_head`, and writes
+    //     `aout`/`gout` directly; there is no partial for a merge to read. That is also the honest limit of
+    //     the pre-engine timing evidence: the rig priced a wide arm with no combine at all
+    //     (`prototype/attn_wide/time_wide.cpp`), so nothing here may claim it made the combine path faster or
+    //     slower — the path is gone in this route, not accelerated.
+    //
+    // It requires the WMMA family to be on (`--attn-fattn 1`, refused below) and it requires the tiled wave
+    // (`--attn-tile 1`, refused below): under `wave_tile = 0` the per-(row,head) `attn_core` owns the wave and
+    // there is nothing here for the wide block to replace. It also leaves the lane geometry ALONE: `split_eff`
+    // is still computed, the `kAttnMaxSplit` ceiling still refuses above `MAXSC x kAttnMaxSplit` lanes, and
+    // the `part` scratch is still allocated — the wide form uses none of it, and relaxing the ceiling for one
+    // route while the other routes still need it is a lane-ceiling change, not a plumbing one.
+    const bool wave_wide = a.fattn_wide != 0 && rows > 1;
     const bool wave_fattn = a.wave_fattn != 0 && rows > 1 && a.wave_tile != 0 && split_eff >= 2;
-    if (a.wave_fattn != 0 && rows > 1 && split_eff < 2) {
+    if (a.wave_fattn != 0 && rows > 1 && split_eff < 2 && !wave_wide) {
         // Route (A)'s inert case, and it is structural rather than a choice: a one-pass wave allocates
         // NO streaming partials (`split == 1`), so the form has nowhere to write. Skipping it and saying
         // so is the inertness the split promised; launching it would dereference a null `part`, and
@@ -426,6 +513,19 @@ void attn_decode_layer(const AttnLayerArgs& a) {
             "wave's streaming rows; under wave_tile=0 the per-(row,head) attn_core owns the whole wave and "
             "there is nothing here for it to replace, so refusing is the only honest answer.");
     }
+    if (wave_wide && a.wave_fattn == 0) {
+        throw std::runtime_error(
+            "attn_decode_layer: --attn-fattn-wide 1 requires --attn-fattn 1. The wide block is a spelling of"
+            " the WMMA family; --attn-fattn 0 says the VALU form owns this wave's rows, and a knob that "
+            "overrode that decision instead of spelling within it would change the engine's routing, not add "
+            "a variant to it. Run --attn-fattn 1 (the shipping default) with this flag, or leave it at 0.");
+    }
+    // There is deliberately NO `wave_wide && a.wave_tile == 0` refusal here, even though the wide block
+    // replaces the tiled wave's core and would collide with `attn_core` under `--attn-tile 0`. It cannot be
+    // reached: wide implies --attn-fattn 1 (the refusal just above, and the CLI refuses the pair by value),
+    // and the throw just above this point already refuses --attn-fattn 1 with --attn-tile 0 — witnessed, not
+    // assumed: `--attn-tile 0 --attn-fattn-wide 1` exits 2 with THAT message, not a new one. A second
+    // refusal for the same combination would be a branch no caller can reach.
     // THE CAP'S OWN REFUSAL (`--attn-split-cap`, bet A9-L-c) — an error, never a fallback, and never silent.
     // A cap makes a block's lane slice WIDER: `span = ceil(lanes_last / split_eff)`, which is <= MAXSC exactly
     // when the split is the geometry's own and > MAXSC whenever this cap binds. That is safe for the WMMA wave
@@ -525,7 +625,33 @@ void attn_decode_layer(const AttnLayerArgs& a) {
         core.qrope_out = nullptr;       // no staging, no gate dump, no append from this launch
         core.krope_out = nullptr;
         core.gate_out = nullptr;
-        if (wave_tile) {
+        if (wave_wide) {
+            // THE WIDE BLOCK, one launch, and the ONLY core this body submits. The guard reads `core`, the
+            // struct the launch actually dereferences, for the reason `fattn_plan_ok`'s note gives: a guard on
+            // `c` refused every fattn run as "fused plan" no matter which plan was real. An error, never a
+            // fallback — a wide form that silently did not run would price `attn_slim_wave` and report the
+            // result as A12's.
+            std::string wwhy;
+            if (!wide_plan_ok(core, &wwhy)) {
+                throw std::runtime_error(
+                    "attn_decode_layer: the wide wave form is unavailable: " + wwhy +
+                    ". Pass --attn-fattn-wide 0 for the shipping form.");
+            }
+            // `tile_kernel` is bookkeeping for the negative controls and for which CORE ran; it must not
+            // decide an address (`prototype/attn_decode/results.md` §20.1), and under this route nothing reads
+            // it, because `attn_combine` is not launched. It is set for the one thing it does mean: this is a
+            // wave form, not the per-(row,head) `attn_core`.
+            core.tile_kernel = 1;
+            // ONE LAUNCH, one grid: (KV group, 1, row tiles of WIDE_POS_PER_BLOCK positions). `wide_rtiles_of`
+            // is the SAME expression the kernel reads `blockIdx.z` through, which is why there is no assert
+            // here to keep the two in step — there is only one spelling of the row rule (the
+            // `FATTN_ROWS_PER_BLOCK` two-header trap, `AGENTS.md`). `blockIdx.y` is 1 deep because the wide
+            // block splits no lanes: no `split_eff`, no partials, no merge.
+            const dim3 wide_grid(N_KV, 1, wide_rtiles_of(rows));
+            attn_wide_wave<<<wide_grid, WIDE_THREADS>>>(core);
+            wide_echo(rows, lanes_last, split_eff, /*combine=*/0,
+                      reinterpret_cast<const void*>(attn_wide_wave), wide_grid.z);
+        } else if (wave_tile) {
             // Phase 2: the grid is (KV group, lane slice, query row) and `split` already IS the slice
             // count — `split_for(lanes_last)` here and `tile_split_of(lanes_last)` in the op header are
             // the same expression, so the two forms cannot promise different partial counts from this
@@ -634,7 +760,7 @@ void attn_decode_layer(const AttnLayerArgs& a) {
             attn_core<<<dim3(N_Q, split_eff, rows), THREADS>>>(core);
         }
     }
-    if (split_eff > 1) {
+    if (split_eff > 1 && !wave_wide) {
         // The merge: `(max,sum,acc)` per (row, lane block) → one row, then §05.6's gate. Same algebra
         // as the tile loop, same lifetime (A-17: it never leaves this launch). A row the staging fits
         // is skipped here — its single core block already finished it — which is what lets a wave carry
