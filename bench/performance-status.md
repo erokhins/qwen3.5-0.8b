@@ -2658,3 +2658,43 @@ form — the one thing `engine/attn_wide_kernels.h` states it does not have (`sp
 Neither is funded here. **Headlines unchanged: warm 10,637 tok/s at 512 lanes, 9,790 at 4,096**, because
 nothing shipped; the honest long-context statement is now *attention is 56 % of a 16,384-lane wave and the
 wide shape cannot move it, but the split's partial traffic is worth ~1.1 % and is already a knob.*
+
+## §57. `kMaxWaveRows` is at its optimum at 512, and the residency A12 asked for does not pay — both closed in one session (2026-10-20)
+
+§56 left a precondition standing: the wide shape needs ~80 workgroups in flight, which a 512-row body
+cannot emit, and §56's LEG B showed a convex body-cost curve that made a *bigger* body look cheap. Two
+legs priced it (`prototype/wave_rows/README.md`, `TAG=r1-wavewidth` and `TAG=r1b-wide-residency`, one
+lock each, blocking, zero subagents, canaries asserted per run): three builds of one source line
+(`kMaxWaveRows` ∈ 512/1024/2048) with a fourth arm — the 2048 build run at `--wave-rows 512` — that
+isolates the constant from the plan.
+
+**R1: the shipping body is right where it should be.** Best of 3, `RESULT ms_total`: at 16,384 lanes
+1,024 rows is **+0.54 %** (ranges overlap the shipping ranges), 2,048 rows is **+2.79 %** with every rep
+slower than every shipping rep (min 2,840.3 against max 2,808.5 ms); at 4,096 lanes 2,048 rows is
+**+3.76 %**, disjoint. The curve is asymmetric, and that is the answer §56 could only extrapolate:
+halving the body costs **+10.8 %**, doubling costs **+2.8 %**. The `w2048c` arm is recorded as a hint and
+labelled as one — same plan, same launches, only 4× the `part` scratch (258 MiB → 1.03 GiB per scratch
+instance, the bytes stated in `engine/kernels_attn.cpp`) read **+1.98 %** at 4,096 and **+0.90 %** at
+16,384 on 3 reps, overlapping at 16k. So `kAttnMaxSplit`'s "the ONLY thing the raise costs is the scratch
+named below" has an unmeasured time side; price the build, not just the bytes.
+
+**R1b: the residency premise is falsified, and with it A12.** A 2,048-row body gives the wide launch
+`2 × ceil(2048/32) = 128` workgroups — asserted from the run's own `ATTN_WIDE grid=(2,1,64)` — which is
+3.2 blocks/CU asked against an LDS bound of 2, i.e. the rig's exact **2 blocks/CU = 16 wavefronts/CU**,
+inside the engine. The wide kernel with that population is **+2.45 % slower at 16,384 and +1.01 % slower
+at 32,000 than the same kernel at 32 workgroups**, and no better than the shipping form at either width
+(16,384: wide@128 wgs 2,804.8 ms against wide@32 wgs 2,737.8 against shipping 2,762.9; 32,000:
+7,987.5 / 7,907.5 / 8,055.9). So the rig's +25.1 % was neither coverage nor block population: it is a
+property of the rig's own workload — one kernel, no `attn_prep`, no combine, no §05.6 epilogue, one
+uniform pass over the triangle — and it does not transfer in any launch shape the engine can emit.
+**A12 is closed on all three axes**, each by a measurement: coverage (§56), rate at engine geometry (§56),
+rate at the rig's residency (this section).
+
+Also confirmed as a side effect, and still unshipped: `--attn-fattn-wide` at the default body is
+**−0.91 % at 16,384** (just-disjoint ranges) and **−1.84 % at 32,000** (disjoint), which is the launch
+elimination of §56 and ~78 % of which `--attn-split-cap 8` already buys without a numerics risk.
+Neither leg ran numerics — a wider body is not bit-identical and the wide form still owes `smoke` — so
+nothing here is admitted, and **headlines stay warm 10,637 tok/s at 512 and 9,790 at 4,096**. What these
+two legs buy for the queue is a clean field: the geometry axis is empty, so the only remaining account of
+llama's 1.9× is the per-wavefront one (`attn_fattn_wave` issues 17 `v_wmma` sites where their kernel
+issues 2,592, `A2-census` §2), which is R2's job to price before anyone funds R3.
