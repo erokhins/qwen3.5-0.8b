@@ -660,6 +660,24 @@ struct AttnLayerArgs {
     // the binary whatever this says, which is what makes the paired timing one window instead of two builds.
     FattnQStage fattn_qstage = FattnQStage::kStaged;
 
+    // What width the WMMA wave's P*V accumulator is (`--attn-fattn-pvf16`, bet A10-F16). Wave-only like every
+    // knob above it — a one-row body is `attn_core`, so no decode bit moves under it — and consulted only when
+    // `wave_fattn` picked the WMMA form for at least one row. `0` is the shipped F32 accumulator, 16 tiles of 8
+    // F32 = 128 registers a lane, and the code path this header carried before the knob existed, so the default
+    // side of its A/B is HEAD's own machine code and "the default is inert" is a machine-code compare. `1` is
+    // 8 tiles of 16 F16 halves = 64 registers a lane: the same 256 output dims, half the registers, filled by
+    // two `v_wmma_f16_16x16x16_f16` issues per 32 dims (`op_sel` 0 then 1, two A fragments, the same P — llama's
+    // shape, `mma.cuh:1553-1566`) instead of one `v_wmma_f32_16x16x16_f16` per 16.
+    //
+    // IT IS AN ENABLER, NOT A SPEED. 16 `v_wmma` issues per round either way (`prototype/attn_percost/A10-F16-IMPL.md`
+    // D1), the two atoms time the same per unit of coverage (`A10-RF-LADDER.md` §7), and the expected throughput
+    // effect is ~0; what it buys is the 64 registers a later Q-in-registers spelling has to fit through (D7:
+    // 128 acc + 128 Q is impossible, 64 + 128 fits). And unlike `fattn_qstage` above it it is NOT owed byte
+    // identity — an F16 accumulator is a different format — so its judge is the existing §10.1 cos/meanrel bands
+    // through `A4-BET.md`, no new band and no widening. Both spellings are in the binary whatever this says,
+    // which is what makes the paired timing one window instead of two builds.
+    int fattn_pvf16 = 0;
+
     // How deep the split path may cut a wide query row (`--attn-split-cap`, bet A9-L-c). The lane geometry
     // FORCES `split_for(lanes_last)` lane blocks (§07.3); this is an upper bound on that count, and the
     // launch uses `min(split_for(lanes_last), split_cap)`. `kAttnSplitCapOff` (0) leaves the bound inert,

@@ -723,6 +723,10 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // Same riding reason, same one-row immunity, and the same consequence for the A/B: the knob reaches
             // the launcher, which picks a KERNEL, so nothing else in the launch plan can drift with it.
             a.fattn_qstage = sc.attn_fattn_qstage;
+            // And what width that form's P*V accumulator is (`--attn-fattn-pvf16`, bet A10-F16). Same riding
+            // reason, same one-row immunity, same consequence: the knob reaches the launcher, which picks a
+            // KERNEL, so nothing else in the launch plan can drift with it.
+            a.fattn_pvf16 = sc.attn_fattn_pvf16;
             // And how deep the split path may cut a wide row (`--attn-split-cap`, bet A9-L-c). Riding reason
             // as above; the NOT-wave-only difference is stated at `DecodeScratch::attn_split_cap` — a one-row
             // body reads it too, because the fused core streams long rows through the same partial layout.

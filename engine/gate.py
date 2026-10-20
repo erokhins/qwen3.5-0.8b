@@ -5255,6 +5255,13 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
                # once. Unlike the roll it is claimed byte-identical, so the echo below has to name it for the
                # byte-compare to mean anything at all.
                "--attn-fattn-qstage", args.attn_fattn_qstage,
+               # And the ACCUMULATOR WIDTH inside that form (`--attn-fattn-pvf16`, bet A10-F16), forwarded for the
+               # identical reason: the two sides of a width A/B must differ in width and nothing else, and this
+               # knob picks a KERNEL rather than a branch, so a run that silently took the default would price the
+               # F32 accumulator twice and report the second price as the F16 side's. Unlike the qstage above it
+               # it is NOT owed byte identity -- a half-width accumulator is a different format -- so the echo
+               # below names it to make the numerics sections attributable, not to witness a byte-compare.
+               "--attn-fattn-pvf16", args.attn_fattn_pvf16,
                # The GDN scan too, for the identical reason: the two sides of a width A/B must differ
                # in width and nothing else. And its SPELLING for the same reason again — section (j)
                # is the only place the two spellings are allowed to differ, and it differs them alone.
@@ -7117,6 +7124,22 @@ def main() -> int:
                          " to move. Wave-only like the flags around it (a one-row body is `attn_core`), and"
                          " the engine refuses `--attn-fattn 0 --attn-fattn-roll two` rather than echoing a"
                          " kernel that did not run.")
+    ap.add_argument("--attn-fattn-pvf16", choices=("0", "1"), default="0",
+                    help="what WIDTH of P*V accumulator the WMMA form runs, passed straight to"
+                         " `decode_run --attn-fattn-pvf16` and asserted against the run's own NUMERICS echo"
+                         " (`attn_fattn_pvf16=f32|f16`), exactly like --attn-fattn, --attn-fattn-roll and"
+                         " --attn-fattn-qstage (bet A10-F16, engine/attn_fattn_kernels.h,"
+                         " prototype/attn_percost/A10-F16-IMPL.md). `0` is what SHIPS: the F32 accumulator, 16"
+                         " tiles of 8 F32 = 128 registers a lane, and HEAD's own machine code, so the default"
+                         " side of its A/B is a machine-code compare. `1` is the F16 accumulator: 8 tiles of 16"
+                         " halves = 64 registers for the same 256 output dims, two v_wmma_f16 issues per 32 dims"
+                         " (op_sel 0 then 1, two A fragments, the same P). THE DEFAULT HERE AND IN decode_run.cpp"
+                         " MUST MOVE TOGETHER -- one committed half of the pair makes the gate silently judge a"
+                         " different kernel than the engine ships, and the NUMERICS echo cross-check below is"
+                         " what catches that. Unlike --attn-fattn-qstage this knob is NOT owed byte identity (a"
+                         " narrower accumulator is a different format), so a red here is a band question judged"
+                         " by the existing §10.1 aggregates through A4-BET.md, with no new band and no widening"
+                         " available to it.")
     ap.add_argument("--attn-fattn-qstage", choices=("stage", "unstaged8"), default="unstaged8",
                     help="which SPELLING of the WMMA form's staging plan runs, passed straight to"
                          " `decode_run --attn-fattn-qstage` and asserted against the run's own NUMERICS echo,"
@@ -7494,6 +7517,11 @@ def main() -> int:
            # direction -- and a side that silently took the default would reproduce the shipped bits exactly,
            # look perfectly green, and be reported as the un-stage's residency win.
            "--attn-fattn-qstage", args.attn_fattn_qstage,
+           # And the ACCUMULATOR WIDTH (`--attn-fattn-pvf16`, bet A10-F16), forwarded and asserted for the same
+           # reason and with the same blind spot named: it picks which of the eight WMMA spellings ran, so a judged
+           # run whose log cannot say which accumulator wrote its rows cannot witness the register claim or the
+           # numerics claim, and a side that silently took the default would price the F32 form twice.
+           "--attn-fattn-pvf16", args.attn_fattn_pvf16,
            # The GDN scan, named on every run and asserted below: P9's matrix is this flag twice over
            # the ten fixtures, and a judged run that cannot say which scan produced its rows is
            # evidence about neither.
@@ -7697,6 +7725,20 @@ def main() -> int:
                " no claim about either staging plan can be made from this log" if echoed_qstage is None else
                f"NUMERICS echoed attn_fattn_qstage={echoed_qstage}, this gate was run with --attn-fattn-qstage"
                f" {args.attn_fattn_qstage}"))
+        # The ACCUMULATOR WIDTH the WMMA form ran (`--attn-fattn-pvf16`, bet A10-F16), read off the same line.
+        # The gate speaks 0/1 because that is what `decode_run` takes; the echo spells the same choice f32/f16
+        # because that is the format, not the flag, and a reader comparing a log to a `--attn-fattn-pvf16` line
+        # should see which is which rather than decode a number. Same once-per-run blind spot as the three fields
+        # above it: a wave whose rows are all one-pass launches no WMMA kernel at all and says so on its own
+        # `ATTN_FATTN_SKIP` line.
+        echoed_pvf16 = run.get("numerics", {}).get("attn_fattn_pvf16")
+        check(str(echoed_pvf16) == ("f16" if args.attn_fattn_pvf16 == "1" else "f32"),
+              "the run ran the WMMA accumulator width this gate is judging it under",
+              ("its NUMERICS line carried no `attn_fattn_pvf16=` — the binary predates --attn-fattn-pvf16, so no"
+               " claim about either accumulator can be made from this log" if echoed_pvf16 is None else
+               f"NUMERICS echoed attn_fattn_pvf16={echoed_pvf16}, this gate was run with --attn-fattn-pvf16"
+               f" {args.attn_fattn_pvf16}. A gate default and an engine default that moved apart produce exactly"
+               " this failure, which is why the two are documented as one commit"))
         # The GDN scan, read off the same line for the same reason (P9). This is also the check that
         # catches a silent fall back: a `--gdn-scan chunk` run whose launcher decided to run `seq`
         # after all would echo `seq` here and fail, rather than pricing the shipped form twice.
@@ -8545,6 +8587,11 @@ def teacher_forced_checks(args, man: dict, prompt_ids: list, dec_logits: list, g
                # engine's default and silently turn a byte-identity section into a comparison of two staging
                # plans -- which, because the claim is byte identity, would look like a PASS.
                "--attn-fattn-qstage", args.attn_fattn_qstage,
+               # And the accumulator width, forwarded for the identical reason: this section's two runs must
+               # differ in the fed tokens and nothing else, and a `--attn-fattn-pvf16` left out here would take the
+               # engine's default and silently turn a like-for-like comparison into a comparison of two accumulator
+               # formats -- which, since the formats are not bit-identical, would read as a numerics result.
+               "--attn-fattn-pvf16", args.attn_fattn_pvf16,
                "--gdn-scan", args.gdn_scan, "--gdn-chunk", str(args.gdn_chunk),
                "--gdn-spell", args.gdn_spell,
                # Forwarded so this section's two runs differ in NOTHING but the fed token, and the echoed

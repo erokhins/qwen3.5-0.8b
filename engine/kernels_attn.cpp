@@ -135,7 +135,7 @@ hip_bfloat16* bf16(const uint16_t* p) {
 // ~99 %, and a burst that divides by the wrong one is wrong by 1.14x. Both are printed so the reader cannot
 // pick the flattering one by accident.
 void fattn_echo(int rows, int split, int lvalid, int nrows, const void* launched,
-                const char* roll_name, const char* qstage_name) {
+                const char* roll_name, const char* qstage_name, const char* pv_name) {
     static std::string last;
     // `launched` is the function pointer of the kernel THIS LAUNCH submitted, not a name typed beside the
     // banner. With four spellings in one binary that distinction is the whole value of `vgpr=`/`lds=`/
@@ -187,12 +187,13 @@ void fattn_echo(int rows, int split, int lvalid, int nrows, const void* launched
     }
     char buf[400];
     std::snprintf(buf, sizeof(buf),
-                  "ATTN_FATTN form=fattn16 q=%s roll=%s warps=%d vgpr=%d lds=%d scratch=%d vtiles=%d"
+                  "ATTN_FATTN form=fattn16 q=%s roll=%s pv=%s warps=%d vgpr=%d lds=%d scratch=%d vtiles=%d"
                   " wf_per_cu=%d"
                   " wave_rows=%d split=%d fattn_rows=%d/%d fallback_rows=%d"
                   " covered_rows_pct=%.1f covered_work_pct=%.1f%s",
                   qstage_name,
                   roll_name,
+                  pv_name,
                   FATTN_WARPS,
                   have_attrs ? at.numRegs : -1,
                   have_attrs ? (int)(at.sharedSizeBytes) : -1,
@@ -570,9 +571,10 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                     // A wave whose rows are ALL one-pass still launches it and every block returns at its
                     // first ballot: an inert launch is a cheap, visible cost, a silently-skipped one is not.
                     //
-                    // WHICH SPELLING THAT LAUNCH RUNS. Two knobs pick one of four kernels here:
-                    // `--attn-fattn-roll` (the score roll, bet A4-L1) and `--attn-fattn-qstage` (where Q lives
-                    // and how deep the epilogue stages, bet A6-G1). The four spellings are four `__global__`s in
+                    // WHICH SPELLING THAT LAUNCH RUNS. Three knobs pick one of eight kernels here:
+                    // `--attn-fattn-roll` (the score roll, bet A4-L1), `--attn-fattn-qstage` (where Q lives
+                    // and how deep the epilogue stages, bet A6-G1) and `--attn-fattn-pvf16` (the width of the
+                    // P*V accumulator, bet A10-F16). The eight spellings are eight `__global__`s in
                     // this TU and this is the only place one is picked, so a knob moves a FUNCTION and nothing
                     // else: same grid expression, same block extent, same `CoreArgs`, ONE launch either way, and
                     // the only thing that differs between `stage` and `unstaged8` is what that kernel declares as
@@ -587,9 +589,28 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                     // banner cannot describe a kernel other than the one this launch submitted.
                     const bool roll_two = a.fattn_roll == FattnRoll::kTwo;
                     const bool q_unstaged = a.fattn_qstage == FattnQStage::kUnstaged8;
+                    const bool pv_f16 = a.fattn_pvf16 != 0;
                     const dim3 fattn_grid(N_Q, split_eff, fattn_rtiles_of(rows));
                     const void* fattn_kernel = nullptr;
-                    if (q_unstaged && roll_two) {
+                    // THREE ORTHOGONAL KNOBS, eight spellings, one rule: each branch names its kernel exactly
+                    // once and records the same pointer it launched, so the banner cannot describe a kernel
+                    // other than the one this launch submitted. `pvf16` is the third axis for the same reason as
+                    // the other two — a runtime branch on the accumulator width inside one kernel would raise
+                    // the register budget of the DEFAULT side, and the default's inertness is only a fact
+                    // because it is a machine-code compare (`engine/attn_fattn_kernels.h`).
+                    if (pv_f16 && q_unstaged && roll_two) {
+                        attn_fattn_wave_two_u8_pvf16<<<fattn_grid, FATTN_THREADS>>>(core);
+                        fattn_kernel = reinterpret_cast<const void*>(attn_fattn_wave_two_u8_pvf16);
+                    } else if (pv_f16 && q_unstaged) {
+                        attn_fattn_wave_u8_pvf16<<<fattn_grid, FATTN_THREADS>>>(core);
+                        fattn_kernel = reinterpret_cast<const void*>(attn_fattn_wave_u8_pvf16);
+                    } else if (pv_f16 && roll_two) {
+                        attn_fattn_wave_two_pvf16<<<fattn_grid, FATTN_THREADS>>>(core);
+                        fattn_kernel = reinterpret_cast<const void*>(attn_fattn_wave_two_pvf16);
+                    } else if (pv_f16) {
+                        attn_fattn_wave_pvf16<<<fattn_grid, FATTN_THREADS>>>(core);
+                        fattn_kernel = reinterpret_cast<const void*>(attn_fattn_wave_pvf16);
+                    } else if (q_unstaged && roll_two) {
                         attn_fattn_wave_two_u8<<<fattn_grid, FATTN_THREADS>>>(core);
                         fattn_kernel = reinterpret_cast<const void*>(attn_fattn_wave_two_u8);
                     } else if (q_unstaged) {
@@ -603,7 +624,8 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                         fattn_kernel = reinterpret_cast<const void*>(attn_fattn_wave);
                     }
                     fattn_echo(rows, split_eff, c.lvalid, c.nrows, fattn_kernel,
-                               fattn_roll_name(a.fattn_roll), fattn_qstage_name(a.fattn_qstage));
+                               fattn_roll_name(a.fattn_roll), fattn_qstage_name(a.fattn_qstage),
+                               pv_f16 ? "f16" : "f32");
                 }
             } else {
                 attn_tile_wave<<<dim3(N_KV, split_eff, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);

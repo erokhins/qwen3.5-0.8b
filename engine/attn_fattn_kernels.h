@@ -183,11 +183,24 @@ namespace {
 
 using fattn_ARegs = short __attribute__((ext_vector_type(16)));   // one 16x16 F16 operand tile
 using fattn_CRegs = float __attribute__((ext_vector_type(8)));    // one 16x16 F32 accumulator tile
+// One 16x32 F16 ACCUMULATOR tile (`--attn-fattn-pvf16 1`): 16 halves per lane = 8 VGPRs, the same register
+// shape as an operand tuple but covering TWICE the output dims, because a half2 slot holds two dims. It is
+// filled by TWO `v_wmma_f16_16x16x16_f16` issues — `op_sel` 0 then 1, two different A fragments, the same P —
+// and the two halves interleave BY HALF OF EACH VGPR (element 2l is op_sel 0's column, 2l+1 is op_sel 1's).
+// That sentence is not a transcription: it is what `a10_pvf16_map_probe.cpp` MEASURED on this device, and
+// `check_a10_pvf16_map.py` is the permanent witness (`q = t%16, d = 16*(e&1) + 2*(e>>1) + t/16`).
+using fattn_HRegs = short __attribute__((ext_vector_type(16)));   // one 16x32 F16 accumulator tile
+// The SAME 32 bytes read as numbers rather than as a WMMA operand shape: the rescale fold below is the only
+// place that needs it, and keeping the two spellings separate is what stops a `short` multiply (a bit-pattern
+// multiply, off by an exponent) from ever appearing.
+using fattn_H2Regs = _Float16 __attribute__((ext_vector_type(16)));
 
 #define FATTN_MROWS 16     // query rows per block: the WMMA M dimension. Not a tuning knob.
 #define FATTN_MLANES 16    // KV lanes per round: the C tile is 16 wide. Not a tuning knob.
 #define FATTN_KTILES (DH / 16)   // 16-dim steps of the score dot: DH/16 = 16
 #define FATTN_VTILES (DH / 16)   // output tiles over DH: the >= 8 independent chains §4.2 change (3) asked
+#define FATTN_VT16 (DH / 32)     // F16 accumulator tiles over DH: 8, each 32 dims, two `v_wmma` issues each
+#define FATTN_HELEMS 16          // halves per lane in one F16 accumulator tile (8 VGPRs, two dims per slot)
 
 // EXPERIMENT KNOB, compile-time only, 0 in every shipping build: extra LDS appended to the aliased K/V stage
 // so that ONE paired window can decide which resource binds the shipping kernel. The two machine-side
@@ -207,9 +220,20 @@ static_assert(FATTN_MROWS == 16 && FATTN_MLANES == 16,
               "the WMMA tile is 16x16x16: MROWS below 16 cannot build an A operand and MLANES below 16 "
               "cannot build a C tile");
 static_assert(FATTN_VTILES >= 8, "P*V needs >= 8 independent accumulator chains");
-static_assert(sizeof(fattn_ARegs) == 32 && sizeof(fattn_CRegs) == 32,
-              "one operand tile and one accumulator tile are both 8 VGPRs (measured: the F16 accumulator "
-              "would not be smaller — see prototype/issue_rate_probe/wmma_latency.cpp)");
+static_assert(FATTN_VT16 * 32 == DH && FATTN_VT16 == FATTN_VTILES / 2,
+              "an F16 accumulator tile covers 32 output dims, so the F16 form needs exactly half as many "
+              "tiles as the F32 one and they must tile DH the same way");
+static_assert(sizeof(fattn_ARegs) == 32 && sizeof(fattn_CRegs) == 32 && sizeof(fattn_HRegs) == 32,
+              "one operand tuple, one F32 accumulator tile and one F16 accumulator tile are each 8 VGPRs. "
+              "The equality of the LAST two is the whole economy of the F16 accumulator: equal per-tile cost, "
+              "twice the dims per tile, so 8 tiles x 8 = 64 VGPR/lane against the F32 form's 16 x 8 = 128 "
+              "(`prototype/attn_percost/A10-RF-LADDER.md` §6 measured 219 -> 155 with Q resident, 177 -> 113 "
+              "without: 64 both times). This corrects `prototype/issue_rate_probe/wmma_latency.cpp`'s header "
+              "claim that the F16 accumulator saves no registers, which held the TILE COUNT fixed instead of "
+              "the output coverage and is retired by that §6 measurement.");
+static_assert(FATTN_HELEMS == 2 * (sizeof(fattn_CRegs) / sizeof(float)),
+              "an F16 accumulator tile is two C-tile halves interleaved by half of each VGPR — the map the "
+              "probe measured, and the reason the drain index is `e>>1` with a `16*(e&1)` dim offset");
 
 // The two register-resident arrays, as STRUCTS passed by reference rather than as array parameters. The
 // first port passed `const float pexp[8]` and `const fattn_CRegs out[16]` as pointers and the compiler put
@@ -224,6 +248,30 @@ static_assert(sizeof(fattn_ARegs) == 32 && sizeof(fattn_CRegs) == 32,
 // `prototype/attn_wmma/fattn_ship_results.md` §1). `FattnQ` therefore names a STAGE here.
 
 struct FattnO { fattn_CRegs t[FATTN_VTILES]; };   // the P*V accumulators over DH: 128 VGPR/lane
+
+// The F16 accumulator's sibling (`--attn-fattn-pvf16 1`, `prototype/attn_percost/A10-F16-IMPL.md` D1/D3):
+// the SAME DH of output in HALF the accumulator registers — 8 tiles x 8 VGPRs = 64 a lane, against 16 x 8 =
+// 128. It is not a faster form: D1 counts 16 `v_wmma` issues per round either way and
+// `A10-RF-LADDER.md` §7 times the two atoms at the same ~34 clk. And the register saving it was bought for
+// does NOT appear at this placement, measured: the shipped F32 spelling reserves 241 VGPR, this one reserves
+// 244, and halving the accumulator AGAIN (4 tiles, 32 registers) still reserves 241 — the reservation is set
+// by the rest of the round, not by the accumulator, so the freed registers are absorbed rather than freed.
+// `prototype/attn_percost/a10_pvf16_isa_notes.py` is that reading and `A10-PVF16.md` is the write-up. It
+// qualifies, without refuting on its own, D7's arithmetic that a Q-in-registers spelling needs a half-width
+// accumulator first: at 244 the per-thread 256 ceiling has 12 registers free, and 128 registers of resident Q
+// does not fit into 12.
+struct FattnO16 { fattn_HRegs t[FATTN_VT16]; };   // the P*V accumulators over DH: 64 VGPR/lane
+
+// ONE accumulator type per knob side, so a knob cannot make BOTH accumulators live in the default build —
+// the same reason the roll and the Q placement are template parameters rather than runtime branches. A
+// runtime branch would move the default's register budget and stop "the default is inert" from being a
+// machine-code compare.
+template <bool kPvF16> struct FattnAccOf { using type = FattnO; };
+template <> struct FattnAccOf<true> { using type = FattnO16; };
+template <bool kPvF16> using FattnAcc = typename FattnAccOf<kPvF16>::type;
+
+// THE D-BLOCK MAP of the F16 atom is spelled once, beside `fattn_c_col`, which it extends: see
+// `fattn_h_dim` below the C-tile row/column laws.
 
 // The staged objects, one expression each (§20.1: two self-consistent layouts joined by a branch are
 // invisible to both sides — that is §19's aliasing bug). `s_kv` carries TWO layouts (K row-major for the
@@ -342,8 +390,41 @@ static_assert((FATTN_TRG - 1) * FATTN_TROW + (16 * (FATTN_VTILES / 2 - 1) + 15) 
 static_assert(2 + (DH - FATTN_TBLK) + (FATTN_TBLK - 1) + 1 == DH + 2,
               "the widest partial write, the last block of the last dim, is the slot's last float");
 
+// THE SAME TWO INDEX BOUNDS, RE-DERIVED for the F16 accumulator's layout (D3 site 4 says re-derive, not
+// inherit). Both spellings publish the same destination set — 16 rows x 128 dims per half of DH into the
+// same stage — so the widest within-half dim must be the SAME `FATTN_TROW - 1`, and it is:
+//   F32: 16*(VTILES/2 - 1) + 15              = 16*7 + 15 = 127
+//   F16: 32*(VT16/2 - 1) + 16 + 14 + 1       = 32*3 + 31 = 127    (last pair, op_sel-1 half, top column,
+//                                                                 the +1 is the second lane of a pair)
+// and the per-lane write COUNT is 64 both ways (8 tiles x 8 C elements = 4 pairs x 16 halves), which is the
+// COVERAGE claim re-derived rather than assumed: 32 lanes x 64 writes = 16 rows x 128 dims, each exactly
+// once, because each lane owns one parity class of one row (see `fattn_h_dim`'s derivation above). A relaxed
+// coverage assert is how half of every streaming row's denominator once got published (`a6_g1_bits.sh`, and
+// §18.1's all-NaN signature), so these are compile-time facts on the F16 spelling too.
+static_assert(32 * (FATTN_VT16 / 2 - 1) + 16 + 14 + 1 == 16 * (FATTN_VTILES / 2 - 1) + 15,
+              "the F16 drain's widest within-half dim is the F32 drain's widest dim: same destination set, "
+              "different order, and the stage bound cannot relax just because the accumulator got narrower");
+static_assert((FATTN_VT16 / 2) * FATTN_HELEMS == (FATTN_VTILES / 2) * 8,
+              "both accumulator spellings stage the same number of dims per lane per half of DH (64), which "
+              "is what makes 32 lanes x 64 = 16 rows x 128 dims coverage hold for the F16 form for the same "
+              "reason it holds for the shipped one");
+static_assert((FATTN_MROWS - 1) * FATTN_TROW + (32 * (FATTN_VT16 / 2 - 1) + 16 + 14 + 1) + 1
+                  == FATTN_MROWS * FATTN_TROW,
+              "the widest transpose stage write under the F16 accumulator is the last float of the stage");
+static_assert((FATTN_TRG - 1) * FATTN_TROW + (32 * (FATTN_VT16 / 2 - 1) + 16 + 14 + 1) + 1
+                  == FATTN_TRG * FATTN_TROW,
+              "the same F16-layout bound on the narrower (G1) staging area");
+
 __device__ __forceinline__ float fattn_bf(hip_bfloat16 b) { return float(b); }
 __device__ __forceinline__ hip_bfloat16 fattn_fb(float f) { return hip_bfloat16(f); }
+// An F16 accumulator element as a float, and a float as an F16 accumulator element. The `short`-typed
+// register tuple is the WMMA operand/accumulator SHAPE the builtin wants; these two are the only places the
+// bits become numbers, and `__builtin_bit_cast` (not a C cast, which would CONVERT rather than reinterpret) is
+// what keeps it a register move. `prototype/gdn_gated_norm/results.md` §8 is the caution this obeys: a `.to()`
+// where a `.view()` was meant writes garbage that looks like unwritten memory.
+__device__ __forceinline__ float fattn_h_get(short h) {
+    return __half2float(__builtin_bit_cast(__half, h));
+}
 // The shipped score round: the dot's F32 result is rounded through BF16, scaled (2^-4, so the scale is
 // exact and the staging can stay 2 bytes), and rounded again. Same expression, same association, as
 // `attn_slim_wave`'s `fb(bf(fb(dot)) * SCALE)` — association is load-bearing on this device.
@@ -371,6 +452,19 @@ __device__ __forceinline__ fattn_ARegs fattn_load_tile(const __half* p) {
 // used by every consumer (drain, mask, fold, epilogue) instead of being re-derived at each site.
 __device__ __forceinline__ int fattn_c_row(int lane) { return lane & 15; }
 __device__ __forceinline__ int fattn_c_col(int lane, int l) { return 2 * l + (lane >> 4); }
+// THE D-BLOCK MAP of the F16 atom, the one spelling of it, MEASURED not transcribed. Element `e` of tile
+// `tau` of lane `t` holds query row `t%16`'s output at dim
+//
+//     32*tau + 16*(e&1) + 2*(e>>1) + t/16     ==  32*tau + 16*(e&1) + fattn_c_col(t, e>>1)
+//
+// i.e. the F32 C-tile law above applied to each op_sel half with `l = e>>1`, plus the half-of-the-pair
+// offset `16*(e&1)`. The witness is `prototype/attn_percost/check_a10_pvf16_map.py` over
+// `a10_pvf16_map_probe.cpp`'s dump in BOTH op_sel orders (0 disagreements over 32 lanes x 16 elements in
+// each); a relabelled map is a permuted row of the output, which is the class of defect that once came back
+// as all-NaN (§29 of `bench/performance-status.md`), so it is measured and pinned rather than reasoned about.
+__device__ __forceinline__ int fattn_h_dim(int lane, int tau, int e) {
+    return 32 * tau + 16 * (e & 1) + fattn_c_col(lane, e >> 1);
+}
 // The operand map: lane t holds the 16 contiguous halves of row t%16, the run along the dot index.
 __device__ __forceinline__ int fattn_ab_row(int lane) { return lane & 15; }
 
@@ -549,8 +643,39 @@ __device__ __forceinline__ int fattn_tr_addr(int row_in_pass, int d) { return ro
 // WHY TEMPLATED AND NOT BRANCHED: same reason as the score roll and the Q placement. A runtime branch would make
 // both staging geometries live in every instantiation and move the default's declared LDS, and `lds=` is the
 // field the residency claim and the A/B's canary are read from.
-template <bool kNarrow>
-__device__ __forceinline__ void fattn_transpose_out(float* stage, const FattnO& out,
+// WHICH ACCUMULATOR ELEMENT CARRIES WHICH DIM, spelled once per accumulator width (D3 site 4). This is the
+// ONLY epilogue difference between the two forms. The PUBLISH side of `fattn_transpose_out` below is shared
+// deliberately: that side carries the coverage constraint (§18.1's all-NaN was a publish loop that covered 16
+// of every row's dims while satisfying every bound assert), and a second spelling of it is the drift the A9
+// Q-placement note warns about. Both spellings write the same destination set — 16 rows x 128 dims per half of
+// DH — and disagree only about which dim an element carries: `fattn_c_col` for the F32 tile, and the MEASURED
+// `fattn_h_dim` for the F16 one.
+template <bool kPvF16>
+__device__ __forceinline__ void fattn_stage_half(float* stage, int row, const FattnAcc<kPvF16>& out,
+                                                int half, int lane) {
+    if constexpr (kPvF16) {
+#pragma unroll
+        for (int tau = half * (FATTN_VT16 / 2); tau < (half + 1) * (FATTN_VT16 / 2); ++tau) {
+#pragma unroll
+            for (int e = 0; e < FATTN_HELEMS; ++e) {
+                stage[fattn_tr_addr(row, fattn_h_dim(lane, tau, e) - half * FATTN_TROW)]
+                    = fattn_h_get(out.t[tau][e]);
+            }
+        }
+    } else {
+#pragma unroll
+        for (int t = half * (FATTN_VTILES / 2); t < (half + 1) * (FATTN_VTILES / 2); ++t) {
+#pragma unroll
+            for (int l = 0; l < 8; ++l) {
+                const int d = 16 * t + fattn_c_col(lane, l) - half * FATTN_TROW;  // always in [0, 128)
+                stage[fattn_tr_addr(row, d)] = out.t[t][l];
+            }
+        }
+    }
+}
+
+template <bool kNarrow, bool kPvF16>
+__device__ __forceinline__ void fattn_transpose_out(float* stage, const FattnAcc<kPvF16>& out,
                                                     const CoreArgs& a, int rt, int head0,
                                                     unsigned row_mask, int lane) {
     if constexpr (kNarrow) {
@@ -568,14 +693,7 @@ __device__ __forceinline__ void fattn_transpose_out(float* stage, const FattnO& 
             // half the warp's lanes hold rows this pass does not stage and write nothing — a guarded store, not
             // a divergent barrier: the barriers are above and below it, and every lane takes both.
             if (fattn_c_row(lane) >= row0 && fattn_c_row(lane) < row0 + FATTN_TRG) {
-#pragma unroll
-                for (int t = half * (FATTN_VTILES / 2); t < (half + 1) * (FATTN_VTILES / 2); ++t) {
-#pragma unroll
-                    for (int l = 0; l < 8; ++l) {
-                        const int d = 16 * t + fattn_c_col(lane, l) - half * FATTN_TROW;  // always in [0, 128)
-                        stage[fattn_tr_addr(fattn_c_row(lane) - row0, d)] = out.t[t][l];
-                    }
-                }
+                fattn_stage_half<kPvF16>(stage, fattn_c_row(lane) - row0, out, half, lane);
             }
             __syncthreads();
             // PUBLISH: FATTN_LBLK blocks of FATTN_TBLK per lane, four lanes per staged row where the shipped
@@ -604,14 +722,7 @@ __device__ __forceinline__ void fattn_transpose_out(float* stage, const FattnO& 
 #pragma unroll
         for (int half = 0; half < 2; ++half) {
             __syncthreads();         // the previous half's reads (and the last P*V read of V) are done
-#pragma unroll
-            for (int t = half * (FATTN_VTILES / 2); t < (half + 1) * (FATTN_VTILES / 2); ++t) {
-#pragma unroll
-                for (int l = 0; l < 8; ++l) {
-                    const int d = 16 * t + fattn_c_col(lane, l) - half * FATTN_TROW;  // always in [0, 128)
-                    stage[fattn_tr_addr(fattn_c_row(lane), d)] = out.t[t][l];
-                }
-            }
+            fattn_stage_half<kPvF16>(stage, fattn_c_row(lane), out, half, lane);
             __syncthreads();
             if (mine) {    // NO barrier below this line inside the loop, so a guarded store cannot diverge one
                 float* pp = fattn_part_slot(a, rt * FATTN_MROWS + srow, head0);
@@ -661,7 +772,7 @@ __device__ __forceinline__ int fattn_warp_max(int v) {
 // use site and that same stage given over to the epilogue at FATTN_TRG rows a pass. The two are ONE candidate
 // — un-staging Q alone moves no byte of LDS, and narrowing the epilogue alone would shrink the buffer Q lives
 // in — which is why one knob names the pair.
-template <bool kTwoAcc, bool kQUnstaged8>
+template <bool kTwoAcc, bool kQUnstaged8, bool kPvF16>
 __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
     // ONE PER-WARP STAGE, sized by the spelling (see `fattn_warp_stage_halves`: one array, not two, because
     // `__shared__` arrays SUM and would move the default's declared LDS). In the SHIPPED spelling this is the
@@ -788,9 +899,14 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
     // `prototype/attn_wmma/fattn_ship_census.py` cannot see (it counts static sites, not rounds).
 
     float m = -1e30f, l = 0.f;
-    FattnO out;
+    FattnAcc<kPvF16> out;
+    if constexpr (kPvF16) {
 #pragma unroll
-    for (int t = 0; t < FATTN_VTILES; ++t) out.t[t] = fattn_CRegs{};
+        for (int tau = 0; tau < FATTN_VT16; ++tau) out.t[tau] = fattn_HRegs{};
+    } else {
+#pragma unroll
+        for (int t = 0; t < FATTN_VTILES; ++t) out.t[t] = fattn_CRegs{};
+    }
 
     for (int base = lo_all; base < hi_all; base += FATTN_MLANES) {
         // ---- K for this round. `j` is the ABSOLUTE lane index and the stage slot is ROUND-relative
@@ -899,10 +1015,36 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
         }
         l = l * rescale + ls;
         m = mn;
+        // THE RESCALE, on the accumulator's critical path in BOTH forms (D3 site 3). The F32 form is the
+        // shipped one, 128 `v_mul_f32_e32` per round. The F16 form folds the SAME factor into the SAME live
+        // range, on 128 halves held in 64 registers: `rh` is the same `expf(m - mn)`, rounded to F16 once per
+        // round, and each product rounds to F16 — so it is the fold's FORMAT that moved, not its math.
+        // What the compiler actually emits was read out of the listing rather than assumed, and D1's "half the
+        // VALU of that loop" survives the reading: the fold comes out as 64 `v_pk_mul_f16` (two halves per
+        // instruction, so the target does have a packed F16 multiply) against the shipped arm's 128
+        // `v_mul_f32_e32`, per `prototype/attn_percost/a10_pvf16_isa_notes.py`. What D1 did not count is the
+        // drain: 128 `v_cvt_f32_f16_e32` appear per launch to widen the halves back to the F32 transpose stage,
+        // so the trade is -64 VALU slots per ROUND against +129 conversion slots per LAUNCH, and a round loop
+        // of R rounds pays -64R + 129. The register half of the claim did NOT survive; see the header note and
+        // `prototype/attn_percost/A10-PVF16.md`.
+        if constexpr (kPvF16) {
+            // The SAME factor the F32 form multiplies by, rounded F32->F16 once per round (round to nearest,
+            // the rounding `__float2half_rn` performs — and `_Float16` rather than `__half` because only the
+            // former is a valid `ext_vector_type` element on this target).
+            const _Float16 rh = rescale;
 #pragma unroll
-        for (int t = 0; t < FATTN_VTILES; ++t) {
+            for (int tau = 0; tau < FATTN_VT16; ++tau) {
+                fattn_H2Regs v = __builtin_bit_cast(fattn_H2Regs, out.t[tau]);
 #pragma unroll
-            for (int l2 = 0; l2 < 8; ++l2) out.t[t][l2] *= rescale;   // the 128 F32 multiplies per round
+                for (int e = 0; e < FATTN_HELEMS; ++e) v[e] = v[e] * rh;
+                out.t[tau] = __builtin_bit_cast(fattn_HRegs, v);
+            }
+        } else {
+#pragma unroll
+            for (int t = 0; t < FATTN_VTILES; ++t) {
+#pragma unroll
+                for (int l2 = 0; l2 < 8; ++l2) out.t[t][l2] *= rescale;   // the 128 F32 multiplies per round
+            }
         }
 
         // ---- V stage, ALIASED over the K stage, and — new at three warps — aliased across THREE readers. Every
@@ -940,11 +1082,36 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
         // shape; the fix is to shorten the accumulator's live range (drain each half of DH as it completes, or
         // the two half-DH passes of handover §5(e)), not to retune this pragma. The census re-derives the
         // v_wmma site count from the pragmas, so a retune is census-visible instead of silent.
+        if constexpr (kPvF16) {
+            // THE TWO-ISSUE SHAPE, llama's `mma.cuh:1553-1566` exactly: two `v_wmma_f16_16x16x16_f16` issues
+            // per 32-dim tile, `op_sel` 0 then 1, TWO DIFFERENT A fragments (the low 16 dims of the pair, then
+            // the high 16) and the SAME P, accumulating into the SAME D block. The price of the F16 atom is the
+            // second issue — the two atoms cost the same per unit of coverage (`~34 clk` each at llama's shape,
+            // `prototype/issue_rate_probe/results.md` §2b), so one wide F32 atom is not a cheaper spelling of
+            // the same 32 dims and the pair is not overhead. And an F16 accumulator DISCARDS an add once the
+            // addend falls below half a ULP of the running value (`issue_rate_probe/results.md` §6, restated as
+            // the magnitude risk in `A10-F16-IMPL.md` D5), which is why the rescale above stays exactly where it
+            // is instead of being deferred to the epilogue.
+            //
+            // The A fragments are the same two LDS tiles the F32 leg reads for tiles 2*tau and 2*tau+1: the V
+            // stage is addressed by output dim either way, so the stage, its address expression and its two
+            // barriers are untouched by this knob.
 #pragma unroll
-        for (int t = 0; t < FATTN_VTILES; ++t) {
-            const fattn_ARegs first =
-                fattn_load_tile(&s_kv[fattn_v_addr(16 * t + fattn_ab_row(lane), 0)]);
-            out.t[t] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(first, p, out.t[t]);
+            for (int tau = 0; tau < FATTN_VT16; ++tau) {
+                const fattn_ARegs vlo =
+                    fattn_load_tile(&s_kv[fattn_v_addr(32 * tau + fattn_ab_row(lane), 0)]);
+                const fattn_ARegs vhi =
+                    fattn_load_tile(&s_kv[fattn_v_addr(32 * tau + 16 + fattn_ab_row(lane), 0)]);
+                out.t[tau] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(vlo, p, out.t[tau], 0);
+                out.t[tau] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(vhi, p, out.t[tau], 1);
+            }
+        } else {
+#pragma unroll
+            for (int t = 0; t < FATTN_VTILES; ++t) {
+                const fattn_ARegs first =
+                    fattn_load_tile(&s_kv[fattn_v_addr(16 * t + fattn_ab_row(lane), 0)]);
+                out.t[t] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(first, p, out.t[t]);
+            }
         }
         // ---- THE ROUND'S FOURTH BARRIER, and the reason this bet is not a free lunch. At ONE warp per block
         // the three barriers above are the whole protocol, because there is no other wavefront to race: the
@@ -990,7 +1157,7 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
     // be correct. Per warp it costs nothing extra (the Q stage is dead the moment the round loop ends) and the
     // three transposes run independently. The barriers inside stay block-wide because they are cheaper to reason
     // about than to re-derive per warp, and every warp executes the same sequence of them.
-    fattn_transpose_out<kQUnstaged8>(reinterpret_cast<float*>(s_warp + w * warp_stage_halves),
+    fattn_transpose_out<kQUnstaged8, kPvF16>(reinterpret_cast<float*>(s_warp + w * warp_stage_halves),
                                      out, a, rb, head0, row_mask, lane);
 }
 
@@ -1030,7 +1197,7 @@ __device__ __host__ inline bool fattn_plan_ok(const CoreArgs a, std::string* why
 // widening the block from 32 to 96 threads does NOT buy any register headroom. That is the arithmetic Bet 2
 // had to check before believing the skeleton's zero-spill claim.
 __global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave(CoreArgs a) {
-    attn_fattn_body<false, false>(a);
+    attn_fattn_body<false, false, false>(a);
 }
 
 // The A4-L1 side of the roll knob: the SAME body, the SAME grid, the SAME declared LDS, the second score-roll
@@ -1040,7 +1207,7 @@ __global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave(CoreArgs a) {
 // (`prototype/attn_percost/a4_l1_note_read.py`); `engine/build.sh` is not bit-reproducible on this box and a
 // canary that lives inside the binary under test is blind to a stale binary (AGENTS, 2026-10-17).
 __global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_two(CoreArgs a) {
-    attn_fattn_body<true, false>(a);
+    attn_fattn_body<true, false, false>(a);
 }
 
 // THE G1 SIDES of the qstage knob (bet A6-G1, `--attn-fattn-qstage unstaged8`): Q read from global, the
@@ -1052,10 +1219,35 @@ __global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_two(CoreArgs a)
 // the two-accumulator roll: the two knobs are orthogonal, every combination is a real kernel, and no combination
 // is a route no gate can reach.
 __global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_u8(CoreArgs a) {
-    attn_fattn_body<false, true>(a);
+    attn_fattn_body<false, true, false>(a);
 }
 __global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_two_u8(CoreArgs a) {
-    attn_fattn_body<true, true>(a);
+    attn_fattn_body<true, true, false>(a);
+}
+
+// THE F16 P*V ACCUMULATOR SIDES of the third `--attn-fattn` knob (`--attn-fattn-pvf16`,
+// `prototype/attn_percost/A10-F16-IMPL.md` D1–D7). Same body, same grid, same block, same declared LDS, same
+// score leg and same P; the accumulator is 64 registers instead of 128 and the P*V leg issues two
+// `v_wmma_f16_16x16x16_f16` per 32 output dims instead of one `v_wmma_f32_16x16x16_f16` per 16. It is NOT a
+// faster form — A10-RF-LADDER §7 times the two atoms at the same ~34 clk for the same coverage, and D1 prices
+// 16 issues per round either way — so the expected throughput effect of the knob is ~0 and its purpose is the
+// 64 registers it frees for the Q-in-registers spelling D7 says cannot fit today. One `__global__` per
+// combination for the same reason as the two knobs above it: a runtime branch inside one kernel would raise
+// the register count of the DEFAULT side, and "the default is inert" has to remain a machine-code compare
+// rather than a promise. Unlike the qstage/roll pair this knob carries no bit-identity claim: an F16
+// accumulator is a different format, and the judge is `engine/gate.py`'s existing cos/meanrel bands through
+// `A4-BET.md` — no new band, no widening, no `--ack-spill`.
+__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_pvf16(CoreArgs a) {
+    attn_fattn_body<false, false, true>(a);
+}
+__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_two_pvf16(CoreArgs a) {
+    attn_fattn_body<true, false, true>(a);
+}
+__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_u8_pvf16(CoreArgs a) {
+    attn_fattn_body<false, true, true>(a);
+}
+__global__ void __launch_bounds__(FATTN_THREADS) attn_fattn_wave_two_u8_pvf16(CoreArgs a) {
+    attn_fattn_body<true, true, true>(a);
 }
 
 // The launcher's two host helpers live in the op header beside `tile_rtiles_of`: `fattn_rtiles_of` (this

@@ -176,6 +176,19 @@ struct Options {
     // Whether the knob was NAMED, for the identical reason as the one above: `stage` IS the default, so a guard
     // keyed on its value would manufacture a refusal for every bare run.
     bool attn_fattn_qstage_given = false;
+    // What width the WMMA wave's P*V accumulator is (`--attn-fattn-pvf16`, bet A10-F16). 0 — the shipped F32
+    // accumulator, 16 tiles of 8 F32 = 128 registers a lane — is the default and is HEAD's own machine code, so
+    // the default side of the A/B is a machine-code compare rather than an argument. 1 is 8 tiles of 16 F16
+    // halves = 64 registers for the same 256 output dims, filled by two `v_wmma_f16_16x16x16_f16` issues per 32
+    // dims (`engine/attn_fattn_kernels.h`, `prototype/attn_percost/A10-F16-IMPL.md`). It is an ENABLER: 16
+    // `v_wmma` issues per round either way, so the expected throughput effect is ~0 and what it buys is the 64
+    // registers a later Q-in-registers spelling needs (D7). Unlike `--attn-fattn-qstage` above it it is not owed
+    // byte identity — a narrower accumulator is a different format — so its judge is the bands already in
+    // `engine/gate.py`, with no new band and no widening. Parse-or-throw like its siblings; echoed on NUMERICS.
+    int attn_fattn_pvf16 = 0;
+    // Whether the knob was NAMED, for the identical reason: 0 IS the default, so a guard keyed on its value
+    // would manufacture a refusal for every bare run the day the default moved.
+    bool attn_fattn_pvf16_given = false;
     // How deep the split path may cut a wide query row (`--attn-split-cap`, bet A9-L-c). Where the lane geometry
     // forces `split_for(lanes_last)` lane blocks per wide row (§07.3), this is an UPPER bound on that count:
     // the launch runs `min(split_for(lanes_last), N)`, so a block's lane slice gets WIDER and the split's
@@ -394,6 +407,22 @@ Options parse_args(int argc, char** argv) {
             // perfectly green, and be priced as the un-stage's residency win.
             o.attn_fattn_qstage = engine::kernels::parse_fattn_qstage(next());
             o.attn_fattn_qstage_given = true;
+        } else if (a == "--attn-fattn-pvf16") {
+            // Parsed or thrown, 0|1 like `--attn-fattn` itself, and for the same reason as `--attn-fattn-qstage`
+            // beside it: this names which of the eight WMMA spellings ran, and a value that silently fell back to
+            // the default would price the F32 accumulator twice and report the second price as the F16 side's.
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--attn-fattn-pvf16 takes 0 (the shipped F32 P*V accumulator, 16 tiles"
+                                         " of 8 F32 = 128 registers a lane — THE DEFAULT and HEAD's own machine"
+                                         " code) or 1 (bet A10-F16: the F16 accumulator, 8 tiles of 16 halves ="
+                                         " 64 registers for the same 256 output dims, two v_wmma_f16 issues per"
+                                         " 32 dims; engine/attn_fattn_kernels.h). Got '" + v + "'. Refusing"
+                                         " rather than guessing, because this names which accumulator produced"
+                                         " the bits in this log and the register claim is read off its `pv=`");
+            }
+            o.attn_fattn_pvf16 = v == "1";
+            o.attn_fattn_pvf16_given = true;
         } else if (a == "--attn-split-cap") {
             // Parsed AND validated here rather than clamped: a value that silently became the default would
             // price the uncapped run twice and report the second price as the cap's win (the standing reason
@@ -664,6 +693,16 @@ Options parse_args(int argc, char** argv) {
         throw std::runtime_error("--attn-fattn-qstage " +
                                  std::string(engine::kernels::fattn_qstage_name(o.attn_fattn_qstage)) +
                                  " re-spells where the WMMA wave keeps Q and --attn-fattn 0 launches no WMMA"
+                                 " wave at all, so there is nothing here for it to spell. Use --attn-fattn 1"
+                                 " (the default) with this flag, or drop it for the shipped VALU wave");
+    }
+    if (o.attn_fattn_pvf16_given && !o.attn_fattn) {
+        // The refusal above, one more knob in, and it is the same argument: naming an accumulator width for a
+        // form that does not run would echo a kernel that did not exist in this run and price one launch twice.
+        // Keyed on `attn_fattn_pvf16_given`, NOT on the value, because 0 IS the default and a default must not
+        // manufacture a refusal.
+        throw std::runtime_error("--attn-fattn-pvf16 " + std::to_string(o.attn_fattn_pvf16) +
+                                 " re-spells the WMMA wave's P*V accumulator and --attn-fattn 0 launches no WMMA"
                                  " wave at all, so there is nothing here for it to spell. Use --attn-fattn 1"
                                  " (the default) with this flag, or drop it for the shipped VALU wave");
     }
@@ -959,6 +998,26 @@ void print_usage(FILE* out) {
                  " same grid either way, all four roll×qstage combinations are real kernels in the binary, and"
                  " the launcher's ATTN_FATTN line reports `q=`/`lds=`/`wf_per_cu=`/`vgpr=` from the kernel that"
                  " actually ran. `--attn-fattn 0` REFUSES it, for the same reason as the roll\n"
+                 "  --attn-fattn-pvf16 0|1  what WIDTH of P*V accumulator that form runs (bet A10-F16,"
+                 " engine/attn_fattn_kernels.h, prototype/attn_percost/A10-F16-IMPL.md). `0` is the SHIPPED"
+                 " accumulator and the default: 16 tiles of 8 F32 = 128 registers a lane, one"
+                 " v_wmma_f32_16x16x16_f16 per 16 output dims, and it is HEAD's own machine code, so the"
+                 " default side of its A/B is a machine-code compare rather than an argument. `1` is 8 tiles"
+                 " of 16 F16 halves = 64 registers a lane for the SAME 256 output dims — half the registers"
+                 " for the same coverage, because a half slot holds two dims — filled in llama's exact"
+                 " two-issue shape: two v_wmma_f16_16x16x16_f16 per 32 dims, op_sel 0 then 1, two different A"
+                 " fragments (the low and high 16 dims of the pair), the same P, the same D block"
+                 " (mma.cuh:1553-1566). ENABLER, NOT SPEED: 16 v_wmma issues per round either way and the two"
+                 " atoms time the same per unit of coverage (A10-RF-LADDER.md §7), so the expected throughput"
+                 " effect is ~0; what it buys is the 64 registers a Q-in-registers-as-F16 spelling has to fit"
+                 " through, which cannot be booked at 128+128 registers (D7). NOT owed byte identity — a"
+                 " narrower accumulator is a different format — so its judge is the existing §10.1 cos/meanrel"
+                 " bands through A4-BET.md, no new band and no widening, and the per-round rescale stays where"
+                 " it is because an F16 accumulator discards an add once the addend falls below half a ULP"
+                 " (issue_rate_probe/results.md §6). Wave-only like the flags above, one launch and the same"
+                 " grid either way, all eight roll×qstage×pv combinations are real kernels in the binary, and"
+                 " the launcher's ATTN_FATTN line reports `pv=`/`vgpr=` from the kernel that actually ran."
+                 " `--attn-fattn 0` REFUSES it, for the same reason as the roll\n"
                  "  --attn-split-cap N  an UPPER BOUND on how many lane blocks a wide query row may be cut"
                  " into (bet A9-L-c, prototype/attn_percost/A9-LONGCTX-CENSUS.md §4.2). The lane geometry"
                  " forces `split = ceil(lanes/MAXSC)` blocks per wide row (§07.3); N caps that count, so a"
@@ -1688,7 +1747,8 @@ int main(int argc, char** argv) {
         // the library it is linked against, not about the run — and read by `gate.py`'s
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
         std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d"
-                    " attn_touch=%d attn_fattn=%d attn_fattn_roll=%s attn_fattn_qstage=%s gdn_scan=%s"
+                    " attn_touch=%d attn_fattn=%d attn_fattn_roll=%s attn_fattn_qstage=%s"
+                    " attn_fattn_pvf16=%s gdn_scan=%s"
                     " gdn_chunk=%d gdn_spell=%s gdn_loop=%d"
                     " gdn_norm=%s gdn_geom=%s\n",
                     engine::kMaxWaveRows, o.wave_rows,
@@ -1710,6 +1770,13 @@ int main(int argc, char** argv) {
                     // `attn_fattn=`/`attn_fattn_roll=`: a wave of all one-pass rows launches no WMMA kernel and
                     // says so on its own `ATTN_FATTN_SKIP` line.
                     engine::kernels::fattn_qstage_name(o.attn_fattn_qstage),
+                    // The accumulator width, echoed on the same line for the same reason. This one carries the
+                    // register claim rather than a numerics claim: the whole point of the F16 side is 64 VGPR
+                    // instead of 128, so a log that cannot say which accumulator ran cannot witness the freeing,
+                    // and a side that silently took the default would print the F32 kernel's `vgpr=` and look
+                    // like the enabler had failed. Same blind spot as the two fields above it: a wave of all
+                    // one-pass rows launches no WMMA kernel and says so on its own `ATTN_FATTN_SKIP` line.
+                    o.attn_fattn_pvf16 ? "f16" : "f32",
                     engine::kernels::gdn_scan_name(o.gdn_scan), o.gdn_chunk,
                     // Truthful, not decorative. `collapse` submits `gdn_rc::rec_collapse_kernel`, which
                     // never reads this flag, so an echo naming a spelling here would report a kernel that
@@ -1767,6 +1834,7 @@ int main(int argc, char** argv) {
         sc.attn_fattn = o.attn_fattn;
         sc.attn_fattn_roll = o.attn_fattn_roll;
         sc.attn_fattn_qstage = o.attn_fattn_qstage;
+        sc.attn_fattn_pvf16 = o.attn_fattn_pvf16;
         sc.attn_split_cap = o.attn_split_cap;
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;

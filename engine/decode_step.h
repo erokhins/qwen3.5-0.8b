@@ -106,6 +106,13 @@ struct DecodeScratch {
     // selectable and stays byte-identical to the pre-A6-G1 engine — which is why the default here carries no
     // numerics negotiation at all. Both sides are byte-compares, not bands.
     kernels::FattnQStage attn_fattn_qstage = kernels::FattnQStage::kUnstaged8;
+    // What width that form's P*V accumulator is (`--attn-fattn-pvf16`, bet A10-F16; see
+    // `kernels.h:AttnLayerArgs::fattn_pvf16`). Same riding reason and same one-row immunity as the two above: a
+    // one-row body is `attn_core`, so no decode bit moves under it. 0 — the shipped F32 accumulator, 128
+    // registers a lane — is the default and is HEAD's own machine code, so the default side of its A/B is a
+    // byte-compare. 1 is the F16 accumulator: 64 registers, the same 256 dims, and NOT owed byte identity (a
+    // different format), so it is judged by the bands already in `engine/gate.py` (`prototype/attn_percost/A10-F16-IMPL.md`).
+    int attn_fattn_pvf16 = 0;
     // How deep the split path may cut a wide row (`--attn-split-cap`, bet A9-L-c;
     // `kernels.h:AttnLayerArgs::split_cap`). Same riding reason as the five above — it has to reach the one
     // call site in `submit_wave_body` — with one difference worth naming: unlike them it is NOT wave-only. A
