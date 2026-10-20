@@ -2610,3 +2610,51 @@ for A10's queue: **R2 is measured dead, R3's 5.2 % and R1's residency give-up st
 window corroborates is reducing LDS per block, since that moves residency in both directions it was tested.**
 Headline numbers are unchanged by all of it — warm 10,637 tok/s at 512 and 9,790 at 4,096 — because neither
 arm is the shipping build.
+
+## §56. Why A12's 25 % never reaches the wave: the wide launch gets 32 workgroups on a 40-CU machine, and the ~2 % it does deliver is the split round-trip (2026-10-20)
+
+The tip before this, `6b857d2`, reported wide=1 at −0.69 % against the rig's 1.2507× and asked the right
+question: *"the question is coverage, not speed: which rows at 16,384 lanes does the wide kernel actually
+own"*. Four legs in four `gpu_lock` holds (TAGs `a12-why-census` / `-trace` / `-wall` / `-cap`, blocking,
+zero subagents, `util` 89–92 % at acquire and discounted per §6) answer it, and the answer is neither the
+coverage hypothesis nor a diluted rate win. Evidence, commands and tables:
+`prototype/attn_wide/A12-WHY-NOT-FASTER.md` and `prototype/attn_wide/evidence/`.
+
+1. **Coverage is total, so the hypothesis is refuted.** The engine's own `ATTN_WIDE` echo reads
+   `wide_rows=512/512 grid=(2,1,16)` at **all 32** distinct geometries of a 16,384-lane prefill — the wide
+   block owns every row of every body, exactly as its header says it must. What does not change with
+   context is the **grid**: `2 × ceil(wave_rows/32)` workgroups, fixed at 32 by `kMaxWaveRows` in
+   `engine/decode_step.h`, while the shipping launch it replaces grows on its `split` axis from 176
+   workgroups on average to **2,816** at the last body.
+2. **The rate win is absent, not diluted.** Paired per-body from rocprofv3 dispatch timestamps
+   (`tools/prefill_kernel_trace.py`, one prefill per arm): the wide core is **1,476.05 ms** against the
+   shipping core's **1,473.15 ms** — **+0.20 %** — and the ratio per body stays inside 0.937–1.122 with no
+   trend, so the widest body (the shape the BET priced) reads **1.0210**, not 1.25. The attention
+   *family* is −5.1 %, but every ms of that is `attn_combine` (71.58 ms) and the inert `attn_slim_wave`
+   (13.42 ms), which the wide route does not launch.
+3. **The mechanism is residency the body cannot fund, measured in the engine rather than argued from the
+   rig.** The rig ran the wide kernel at 2 blocks/CU × 40 CUs = **16 wavefronts/CU** in one 2,048-workgroup
+   launch; the engine hands the same kernel **32 workgroups**, so it hosts at most 1 block/CU on 32 of 40
+   CUs — **8 wavefronts/CU with 8 CUs idle, below the 9 the form it replaces sustains**. Sweeping
+   `--wave-rows` at fixed total lanes (same work, only the launch population moves) turns that into a
+   curve: ratio wide/shipping **0.9785** at 32 wgs, **1.0867** at 16, **1.5582** at 8, **2.0080** at 4.
+   The shipping arm does not track its own block count; the wide arm tracks nothing else.
+4. **Correction to the row before this one.** With 5 interleaved reps at 16,384 the wide arm is
+   **−2.03 % best / −1.76 % median** (2,753/2,778 against 2,810/2,829, ranges **disjoint**: wide0 min
+   2,810 > wide1 max 2,789) and **−1.96 %** at 4,096. So the wide route is a real ~2 %, roughly 3× what
+   `6b857d2` recorded — and still ~12× short of the rig's 25 %, which is a fact about a grid depth the
+   engine never issues. Same class as the `gemm_algo_sweep` row: *price the geometry the engine emits.*
+5. **And ~78 % of that 2 % is not the shape's at all.** Since the whole engine win is the skipped partial
+   round-trip, `--attn-split-cap 8` on the **shipping** kernel reproduces **−1.14 %** of the wide arm's
+   **−1.46 %** at 16,384 (best of 3, canary `SPLITCAP` line per run; cap 4 is +1.60 % and cap 2 +5.31 %, so
+   the cap over-binds below 8). A knob that moves no format, no band and no route buys most of what the wide
+   form buys — while the wide form still owes a `smoke` cosine (`A12-ADMISSION.md`) and moves every row at
+   or below `MAXSC` off the bit-exact one-pass route.
+
+**State of the bet.** A12's default stays `--attn-fattn-wide 0` and its BET verdict stands as recorded
+(NOT CLEARED at 6.5 TFLOP/s). What this window adds is the requirement the shape would have to be met:
+80 blocks in flight, which in the engine means either `kMaxWaveRows` ≥ 1,280 or a lane split in the wide
+form — the one thing `engine/attn_wide_kernels.h` states it does not have (`split_used=0` on its own echo).
+Neither is funded here. **Headlines unchanged: warm 10,637 tok/s at 512 lanes, 9,790 at 4,096**, because
+nothing shipped; the honest long-context statement is now *attention is 56 % of a 16,384-lane wave and the
+wide shape cannot move it, but the split's partial traffic is worth ~1.1 % and is already a knob.*
