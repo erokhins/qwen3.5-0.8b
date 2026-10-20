@@ -2547,3 +2547,52 @@ at R1 of `prototype/attn_percost/A10-REWRITE-BRIEF.md` (256 threads / 8 warps / 
 (Q in registers) is impossible before it. Instruments are reused, not rebuilt; no further side prototypes. The
 abort line stays: **below 6.5 TFLOP/s at 32k, the geometry route is dead and gets recorded as dead**, and short
 context (warm 10,637 tok/s at 512 lanes, 9,790 at 4,096) is a non-regression line, not collateral.
+
+## §55. The pad A/B settles which resource binds `attn_fattn_wave_u8`: **LDS, at 3 blocks/CU — so 248 VGPR does not bind, and a register saving cannot buy residency** (2026-10-20)
+
+§54's rewrite decision needed one thing no counter could give: whether the shipping kernel is resident at 3
+blocks/CU (LDS-bound, as the driver's occupancy query said and §53 recorded) or at 2 (register-bound, because
+a dispatch reserves 248 VGPR/thread and 3 x 96 x 248 = 71,424 looked impossible against the 65,536/CU this
+ledger has been using). A11's attribution (`prototype/attn_percost/A11-attribution.md` §6) named the cheap
+measurement; it is now run, and it answers both halves.
+
+The instrument is a compile-time pad, `FATTN_LDS_PAD_HALVES` in `engine/attn_fattn_kernels.h` (0 in every
+shipping build, so the default is untouched): 6,144 extra halves appended to the aliased K/V stage take
+declared LDS 20,480 → 32,768 while the kernel's work stays byte-identical, because no index the kernel can
+produce reaches the pad. Both arms compile to the same `next_free_vgpr 241` → 248 allocated, so the single
+variable is the LDS bound: 3 blocks/CU allowed versus 2. First attempt at the pad used a second `__shared__`
+array with a store under a condition the compiler could not prove false — the allocation was eliminated and
+both arms read 20,480 B, which is how a null nearly got reported as a finding.
+
+One `gpu_lock` hold (TAG=a11pad), blocking, zero subagents, arms interleaved per rep, `tools/prefill_sweep.py`
+with `--runs 1` per invocation and best-of-3 taken across reps; full table in
+`prototype/attn_percost/evidence/a11_pad_ab.txt`:
+
+| lanes | BASE best | PAD best | PAD cost |
+|---|---|---|---|
+| 3,072 | 387.3 ms (7,931.7 tok/s) | 400.3 ms (7,674.8 tok/s) | **+3.36 %** |
+| 16,384 | 2,773.8 ms (5,906.6 tok/s) | 2,896.5 ms (5,612.2 tok/s) | **+4.42 %** |
+
+Every PAD rep is slower than every BASE rep at both widths — the per-rep ranges are disjoint (16,384:
+2,773.8–2,802.5 against 2,896.5–2,913.2), so this is a shift, not a spread. Three things follow, and they
+point the same way:
+
+1. **The LDS bound is live at 3 blocks/CU**, so the kernel really runs 3 blocks = 9 wavefronts/CU. §53's
+   witness stands; the field it was read from stands with it.
+2. **The 248 VGPR a dispatch reserves is not the residency binder.** 3 blocks at 248/thread needs 71,424
+   registers, so the per-CU vector register file on this part is *not* 65,536: it is at least 71,424, most
+   plausibly 65,536 **per SIMD** (the `256 threads × 256 VGPR ⇒ 1 block/CU` arithmetic in
+   `prototype/attn_percost/A10-RF-LADDER.md` §2 divided the per-SIMD file by a per-CU thread count). The
+   per-thread ceiling of 256 is unaffected, and with it A10 step 2's source kill: the kernel now uses 241 of
+   those 256, which is a tighter place to add Q residency than the 185 the note block reported.
+3. **A register saving cannot buy residency on this geometry** — LDS binds first. That was `A10-F16-IMPL.md`
+   D2's conclusion, but D2 reached it with the wrong baseline (185) and it is now carried by a measurement
+   instead: the f16 accumulator's 64 VGPR/lane buys headroom under the per-thread ceiling (241 → ~177, which
+   is what makes a partial Q residency imaginable at all) and buys nothing in wavefronts. Conversely **LDS
+   reductions are the residency lever**, and G1's +3.01 % for 6 → 9 wf/CU is corroborated from the other
+   direction by the 3.4–4.4 % this pad costs for 9 → 6.
+
+Headline unchanged, as this section changed no shipping code: warm **10,637 tok/s at 512 lanes**, **9,790 at
+4,096**, and no attention number moved — the pad exists only behind a compile-time macro that no build
+defines. What moved is that the rewrite's residency premise is now measured rather than assumed: R1 gives up
+an LDS-bound residency it currently has, which is the shape of A11's verdict that R1 costs 7.5–9.1 %.
