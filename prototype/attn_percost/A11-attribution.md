@@ -218,3 +218,41 @@ self-tested 1,115.24 with the grid count as an independent cross-check.
    `VGPR_Count` (248) disagree and the register-file binder is not knowable from the CSV.
 5. **The premise's 119.69 ms / 4.33 TFLOP/s pair** could not be reproduced or traced to a table; the window used
    here is the pmc-measured 5,598.220 ms, which A9 §2.5 independently confirms to 0.26 %.
+
+---
+
+## 6-RESULT. The owed measurement was run (main agent, 2026-10-20), and the Q channel came back **negative**
+
+Two arms were owed by this file. Both are now measured in held windows; the numbers live in
+`evidence/a11_pad_ab.txt` and are booked as ledger §55.
+
+**(a) Which resource binds — the pad A/B.** `FATTN_LDS_PAD_HALVES` (compile-time, 0 in shipping builds) takes
+declared LDS 20,480 → 32,768 with the work byte-identical and `next_free_vgpr` unchanged at 241 → 248 on both
+arms, so the single variable is the LDS-allowed blocks/CU: 3 versus 2. Cost of the pad: **+3.36 %** at 3,072
+lanes and **+4.42 %** at 16,384, with per-rep ranges disjoint (16,384: base 2,773.8–2,802.5 vs pad
+2,896.5–2,913.2 ms). A pad that only tightened a non-binding bound would have been free, so the LDS bound is
+live at 3 blocks/CU — the kernel really is at 9 wavefronts/CU, §53's witness stands, and the per-CU register
+file is *not* 65,536 (3 blocks × 96 threads × 248 = 71,424 fits anyway), which retires the per-CU division in
+`A10-RF-LADDER.md` §2 while leaving the per-thread 256 ceiling, and with it this file's arithmetic, intact.
+
+**(b) The BET itself — Q from LDS versus Q from global at equal residency.** Arm A = the padded unstaged8
+build (LDS 32,768, Q re-read from global); arm B = the shipping build with `--attn-fattn-qstage stage` (LDS
+32,768, Q staged, zero Q global traffic per round). Same LDS, same 248 VGPR, so residency is held fixed and
+only the Q delivery channel differs. At 16,384 lanes, 3 interleaved reps:
+
+| arm | ms_total (reps) | best |
+|---|---|---|
+| pad_unstaged (Q from global) | 2921.5 / 2911.6 / 2914.8 | **2,911.6** |
+| stage (Q from LDS) | 3289.9 / 3342.3 / 3311.2 | **3,289.9** |
+
+**The LDS-fed arm is 12.99 % SLOWER, ranges disjoint.** The bet — falsified only at ≥ +25 % for the LDS-fed
+arm — is therefore not merely un-falsified: the measured value of deleting the Q re-read at fixed residency is
+**negative**, against the ≤ 12 % this file predicted from three independent bounds.
+
+What that means for A10, stated as plainly as the number: **R2 is not a small win that the arithmetic
+overweighted, it is a loss in the direction that was tested.** Q-from-LDS spends LDS, and (a) just showed LDS
+is the binding resource, so the trade is regressive by construction — it buys a channel worth a few percent at
+most and pays in the one resource that gates residency. R3's round-fixed mass (5.2 %) and R1's residency
+give-up (+7.5–9.1 %) are unaffected by this measurement, so the verdict of this file stands and is now
+backed by an arm rather than only by bounds: **DO NOT FUND.** The lever this window actually corroborates is
+the one that reduces LDS per block, since that is what moves residency in both directions it was tested.
