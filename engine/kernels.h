@@ -700,6 +700,20 @@ struct AttnLayerArgs {
     // admitted on device, and a form that has not been admitted does not become the engine's default by having
     // been written. At 0 nothing here is consulted and the shipped machine code is untouched — the wide kernel
     // is a second code object in the binary, not a branch inside the shipped one.
+    //
+    // AT 2 it is the SAME block with llama.cpp's round structure ported into it (bet A13,
+    // `engine/attn_wide_llama_kernels.h`, `prototype/attn_wide/LLAMA-PORT-PLAN.md` items 1, 2, 4 and 5): a
+    // template-stride XOR swizzle inside each staged row, the next round's K tile issued from global into
+    // registers in the middle of the current round and committed to the stage only after that round's V has
+    // been read, a steady-state round carrying NO per-cell bounds or mask test (the tail rounds, which a wide
+    // block can reach at most two of because its causal spread is `WIDE_POS_PER_BLOCK - 1 = 31` lanes and a
+    // round is 64, are a second instantiation of the same inlined body), and the softmax scale folded into Q
+    // at staging. The routing difference is ONE branch choosing a function pointer on the same grid — nothing
+    // about knob 0 or knob 1 moves when this is 2 — and the numbers difference is NONE: every ported item is
+    // value-preserving, so 2 owes BYTE identity to 1 (`SCALE` is 2^-4, a swizzle permutes bytes within a stage
+    // row, a prefetch moves when a load happens, a specialised predicate that cannot fire computes the same
+    // value). `wide_echo` prints `form=wide128llama` and the NUMERICS echo prints `wide_llama` so that claim
+    // can be witnessed against the right binary.
     int fattn_wide = 0;
 
     // How deep the split path may cut a wide query row (`--attn-split-cap`, bet A9-L-c). The lane geometry

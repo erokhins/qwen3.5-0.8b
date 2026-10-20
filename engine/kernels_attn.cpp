@@ -46,6 +46,9 @@
 // The A12 wide block (`--attn-fattn-wide`, default 0), which reuses the fattn header's fragment laws and
 // register shapes rather than restating them, so it must be included after it and in this TU only.
 #include "engine/attn_wide_kernels.h"
+// The A13 llama-ported wide block (`--attn-fattn-wide 2`, default off), which includes the header above for
+// its geometry laws and its epilogue shape and therefore must come after it, in the same single TU.
+#include "engine/attn_wide_llama_kernels.h"
 
 namespace engine::kernels {
 namespace {
@@ -241,7 +244,7 @@ void splitcap_echo(int rows, int lanes_last, int split_natural, int split_eff, i
     std::fflush(stdout);
 }
 
-// THE WIDE FORM'S GEOMETRY LINE (`--attn-fattn-wide 1`), one line per DISTINCT launch geometry like the two
+// THE WIDE FORM'S GEOMETRY LINE (`--attn-fattn-wide 1|2`), one line per DISTINCT launch geometry like the two
 // above it, and for the two reasons they exist rather than new ones.
 //
 // (1) IT IS THE CANARY. A paired A/B on this box owes a behavioural canary because `engine/build.sh` is not
@@ -260,7 +263,7 @@ void splitcap_echo(int rows, int lanes_last, int split_natural, int split_eff, i
 // a comment or from clang's `-Rpass-analysis` note, which prints a constant occupancy for every kernel in
 // the TU (AGENTS.md, the counter-and-census row).
 void wide_echo(int rows, int lanes_last, int split_eff, int combine, const void* launched,
-               unsigned rtiles) {
+               unsigned rtiles, int form) {
     static std::string last;
     hipFuncAttributes at{};
     const bool have_attrs = hipFuncGetAttributes(&at, launched) == hipSuccess;
@@ -276,11 +279,18 @@ void wide_echo(int rows, int lanes_last, int split_eff, int combine, const void*
     const int covered = rows < (int)(rtiles * WIDE_POS_PER_BLOCK) ? rows
                                                                   : (int)(rtiles * WIDE_POS_PER_BLOCK);
     char buf[512];
+    // `form=` is the field a paired A/B reads to know which wide spelling ran, and it is the behavioural canary
+    // for `--attn-fattn-wide 2` in the sense AGENTS' 2026-10-17 row asks for: the two wide forms agree with
+    // themselves, so only a field named after the form — read off the function pointer THIS launch submitted,
+    // which is what `launched=` is for — can tell a stale binary from a fresh one. `wide128` is unchanged text
+    // for knob 1 so every log line the A12 harness already greps still reads the same.
+    const char* form_name = form == 2 ? "wide128llama" : "wide128";
     std::snprintf(buf, sizeof(buf),
-                  "ATTN_WIDE form=wide128 warps=%d threads=%d pos_per_block=%d rows_per_block=%d"
+                  "ATTN_WIDE form=%s warps=%d threads=%d pos_per_block=%d rows_per_block=%d"
                   " stage=%d ktiles=%d lgroups=%d acc=f16 vgpr=%d lds=%d scratch=%d wf_per_cu=%d%s"
                   " grid=(%d,1,%d) wide_rows=%d/%d wave_rows=%d lanes_last=%d"
                   " slim_wave=0 fattn_wave=0 combine=%d split=%d split_used=0",
+                  form_name,
                   WIDE_WARPS, WIDE_THREADS, WIDE_POS_PER_BLOCK, WIDE_ROWS_PER_BLOCK,
                   WIDE_STAGE, FATTN_KTILES, WIDE_LGROUPS,
                   have_attrs ? at.numRegs : -1,
@@ -515,8 +525,8 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     }
     if (wave_wide && a.wave_fattn == 0) {
         throw std::runtime_error(
-            "attn_decode_layer: --attn-fattn-wide 1 requires --attn-fattn 1. The wide block is a spelling of"
-            " the WMMA family; --attn-fattn 0 says the VALU form owns this wave's rows, and a knob that "
+            "attn_decode_layer: --attn-fattn-wide 1 or 2 requires --attn-fattn 1. The wide block is a spelling"
+            " of the WMMA family; --attn-fattn 0 says the VALU form owns this wave's rows, and a knob that "
             "overrode that decision instead of spelling within it would change the engine's routing, not add "
             "a variant to it. Run --attn-fattn 1 (the shipping default) with this flag, or leave it at 0.");
     }
@@ -648,9 +658,21 @@ void attn_decode_layer(const AttnLayerArgs& a) {
             // `FATTN_ROWS_PER_BLOCK` two-header trap, `AGENTS.md`). `blockIdx.y` is 1 deep because the wide
             // block splits no lanes: no `split_eff`, no partials, no merge.
             const dim3 wide_grid(N_KV, 1, wide_rtiles_of(rows));
-            attn_wide_wave<<<wide_grid, WIDE_THREADS>>>(core);
-            wide_echo(rows, lanes_last, split_eff, /*combine=*/0,
-                      reinterpret_cast<const void*>(attn_wide_wave), wide_grid.z);
+            // WHICH WIDE SPELLING (`--attn-fattn-wide 2`, bet A13). Both kernels are in this binary whatever
+            // this says, which is what makes the paired A/B one window instead of two builds, and both take
+            // the same `CoreArgs` on the same grid: the port changed how a round is addressed, staged and
+            // masked, not what a block owns, so there is exactly one branch here and it selects a LAUNCH.
+            // `wide_plan_ok` above is shared because its two refusals are properties of the plan and of the
+            // score rounding, not of the spelling.
+            if (a.fattn_wide == 2) {
+                attn_wide_llama_wave<<<wide_grid, WIDE_THREADS>>>(core);
+                wide_echo(rows, lanes_last, split_eff, /*combine=*/0,
+                          reinterpret_cast<const void*>(attn_wide_llama_wave), wide_grid.z, /*form=*/2);
+            } else {
+                attn_wide_wave<<<wide_grid, WIDE_THREADS>>>(core);
+                wide_echo(rows, lanes_last, split_eff, /*combine=*/0,
+                          reinterpret_cast<const void*>(attn_wide_wave), wide_grid.z, /*form=*/1);
+            }
         } else if (wave_tile) {
             // Phase 2: the grid is (KV group, lane slice, query row) and `split` already IS the slice
             // count — `split_for(lanes_last)` here and `tile_split_of(lanes_last)` in the op header are

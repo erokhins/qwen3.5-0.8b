@@ -442,25 +442,38 @@ Options parse_args(int argc, char** argv) {
             o.attn_fattn_pvf16 = v == "1";
             o.attn_fattn_pvf16_given = true;
         } else if (a == "--attn-fattn-wide") {
-            // Parsed or thrown, 0|1 like `--attn-fattn` and `--attn-fattn-pvf16` beside it, and for the same
+            // Parsed or thrown, 0|1|2 like `--attn-fattn` and `--attn-fattn-pvf16` beside it, and for the same
             // reason: this names which kernel produced a wave's rows, and a value that silently fell back to the
             // default would price the shipping WMMA wave twice and report the second price as the wide block's.
             // Unlike the two above it it is not a SPELLING of the shipping form: at 1 it replaces the wave core
             // and takes the split/combine route away with it, so the two sides of this A/B differ in which
-            // kernels ran at all, which is precisely what an echoed 0/1 cannot be allowed to hide.
+            // kernels ran at all, which is precisely what an echoed 0/1 cannot be allowed to hide. `2` is the
+            // SAME core with llama's structure ported into it (A13), so it inherits all of that and adds a
+            // byte-identity claim against `1`; it is a value and not a separate flag precisely so that a driver
+            // forwarding every form flag cannot ask for two wave cores at once.
             const std::string v = next();
-            if (v != "0" && v != "1") {
+            if (v != "0" && v != "1" && v != "2") {
                 throw std::runtime_error("--attn-fattn-wide takes 0 (the WMMA wave that ships: the 16-row block"
                                          " on the streaming rows, attn_slim_wave on the one-pass rows,"
                                          " attn_combine merging them — THE DEFAULT and HEAD's own machine code)"
                                          " or 1 (bet A12: the wide block, 32 query positions x the 4 heads of"
                                          " one KV group per block, a 64-position stage, Q resident in F16 and"
                                          " an F16 P*V accumulator, owning every row of the body with no lane"
-                                         " split and no combine; engine/attn_wide_kernels.h). Got '" + v +
+                                         " split and no combine; engine/attn_wide_kernels.h) or 2 (bet A13:"
+                                         " that same wide block with llama.cpp's swizzled addressing, mid-round"
+                                         " K prefetch, specialised tail round and scale folded into Q; owed"
+                                         " byte-identical to 1; engine/attn_wide_llama_kernels.h). Got '" + v +
                                          "'. Refusing rather than guessing, because this names which wave core"
                                          " produced the bits in this log and the gate asserts the echo");
             }
-            o.attn_fattn_wide = v == "1";
+            o.attn_fattn_wide = std::stoi(v);
+            if (o.attn_fattn_wide < 0 || o.attn_fattn_wide > 2) {
+                // Unreachable through the test above, and stated anyway because `std::stoi` accepts things the
+                // comparison above rejected as strings: the value that reaches `AttnLayerArgs::fattn_wide` must
+                // be one of the three the launcher can route, and a wider integer would silently mean "not 2",
+                // i.e. knob 1, which is the silently-the-default failure this whole parse exists to prevent.
+                throw std::runtime_error("--attn-fattn-wide out of range: " + v);
+            }
         } else if (a == "--attn-split-cap") {
             // Parsed AND validated here rather than clamped: a value that silently became the default would
             // price the uncapped run twice and report the second price as the cap's win (the standing reason
@@ -754,7 +767,7 @@ Options parse_args(int argc, char** argv) {
         // `_given`, because unlike those three this knob has no inert non-default value to excuse: 1 always
         // means the wide block ran, and `engine/gate.py` forwards the flag on every run, so a `given`-keyed
         // refusal would reject `--attn-fattn 0 --attn-fattn-wide 0`, which asks for nothing.
-        throw std::runtime_error("--attn-fattn-wide 1 asks for the wide WMMA wave block and --attn-fattn 0"
+        throw std::runtime_error("--attn-fattn-wide 1 or 2 asks for the wide WMMA wave block and --attn-fattn 0"
                                  " launches no WMMA wave at all: the wide block replaces that wave core"
                                  " outright, taking attn_slim_wave and attn_combine off the wave with it, so"
                                  " there is nothing here for it to spell. Use --attn-fattn 1 (the default)"
@@ -945,7 +958,7 @@ void print_usage(FILE* out) {
                  " [--mlp-map auto|interleave|contig] [--gemm library|legacy|lt|hand] [--attn-tile 0|1]"
                  " [--gemm-pins all|none|<csv>] [--gemm-heur N] [--attn-touch 0|1]"
                  " [--attn-fattn-roll single|two] [--attn-fattn-qstage stage|unstaged8]"
-                 " [--attn-fattn-wide 0|1]"
+                 " [--attn-fattn-wide 0|1|2]"
                  " [--attn-split-cap N]"
                  " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
                  " [--gdn-geom block|wf4|wf2|reg16]"
@@ -1073,7 +1086,7 @@ void print_usage(FILE* out) {
                  " grid either way, all eight roll×qstage×pv combinations are real kernels in the binary, and"
                  " the launcher's ATTN_FATTN line reports `pv=`/`vgpr=` from the kernel that actually ran."
                  " `--attn-fattn 0` REFUSES it, for the same reason as the roll\n"
-                 "  --attn-fattn-wide 0|1  whether that wave is the 16-row WMMA block or the A12 WIDE one"
+                 "  --attn-fattn-wide 0|1|2  whether that wave is the 16-row WMMA block or the A12 WIDE one"
                  " (bet A12, engine/attn_wide_kernels.h, prototype/attn_percost/A12-WIDE-BET.md). `0` is what"
                  " SHIPS and is HEAD's own machine code: the WMMA block takes the rows §07.3 already streams"
                  " (blocks_for_row > 1), attn_slim_wave keeps the one-pass rows, attn_combine merges the"
@@ -1096,7 +1109,21 @@ void print_usage(FILE* out) {
                  " is round 1 / 13 / 99 worst-median-best, A10-PVF16.md §4). WAVE-ONLY"
                  " like the flags above it, so no decode bit moves under it; `--attn-fattn 0` REFUSES it, and"
                  " the run's own ATTN_WIDE line reports vgpr=/lds=/scratch=/wf_per_cu= from the kernel that"
-                 " actually ran, spill included (A12 spends the spill budget on purpose)\n"
+                 " actually ran, spill included (A12 spends the spill budget on purpose). `2` is the A13 PORT"
+                 " of llama.cpp's structure onto that same block (engine/attn_wide_llama_kernels.h,"
+                 " prototype/attn_wide/LLAMA-PORT-PLAN.md): a template-stride XOR-swizzled LDS layout, the next"
+                 " round's K tile loaded into registers in the middle of the current round and committed to the"
+                 " stage only after that round's V is consumed, a steady-state round with NO per-cell bounds or"
+                 " mask test in it at all and the comparisons specialised into the one or two tail rounds a"
+                 " block can reach (a block spans 32 query positions and lanes_of advances by 1 per row, so its"
+                 " causal spread is 31 lanes — under one 64-position round), and the softmax scale folded into"
+                 " Q at staging instead of applied to every score element. Unlike `1` against `0`, `2` against"
+                 " `1` IS owed byte identity: a swizzle permutes bytes inside a stage row, a prefetch moves"
+                 " WHEN a load is issued and not what it loads, a specialised predicate that provably cannot"
+                 " fire computes the same value, and SCALE is 2^-4, which is exact. So its adjudicator is a"
+                 " byte-compare against `1`, not a band. The ATTN_WIDE line prints form=wide128llama for it,"
+                 " which is the behavioural canary: a stale binary cannot price `1` and be tabled as `2`. Still"
+                 " WAVE-ONLY and still default-off; passing it moves nothing about `0` or `1`.\n"
                  "  --attn-split-cap N  an UPPER BOUND on how many lane blocks a wide query row may be cut"
                  " into (bet A9-L-c, prototype/attn_percost/A9-LONGCTX-CENSUS.md §4.2). The lane geometry"
                  " forces `split = ceil(lanes/MAXSC)` blocks per wide row (§07.3); N caps that count, so a"
@@ -1865,8 +1892,12 @@ int main(int argc, char** argv) {
                     // silently took the default would price the shipping wave twice and report the second price
                     // as the wide block's. Unlike the three fields above it this one is not blind to an all
                     // one-pass wave: the wide block owns those rows too, so `wide` is true of the run whatever
-                    // a later `ATTN_FATTN_SKIP` line says about a kernel this route does not launch.
-                    o.attn_fattn_wide ? "wide" : "fattn",
+                    // a later `ATTN_FATTN_SKIP` line says about a kernel this route does not launch. `2` gets
+                    // its OWN name rather than riding on `wide`, because the two wide spellings are a
+                    // byte-identity pair and a log that cannot tell them apart cannot witness that claim; a
+                    // gate that only knows 0 and 1 reading `wide_llama` is a gate being told about a form it
+                    // never asked for, which is the failure the echo exists to catch, not a name to shorten.
+                    o.attn_fattn_wide == 2 ? "wide_llama" : (o.attn_fattn_wide ? "wide" : "fattn"),
                     engine::kernels::gdn_scan_name(o.gdn_scan), o.gdn_chunk,
                     // Truthful, not decorative. `collapse` submits `gdn_rc::rec_collapse_kernel`, which
                     // never reads this flag, so an echo naming a spelling here would report a kernel that
