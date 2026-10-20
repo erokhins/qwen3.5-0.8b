@@ -1,0 +1,97 @@
+# R2 amortization bills, taken 2026-10-20 with prototype/attn_percost/a2_round_bill.py on listings carved by tools/carve_codeobjects.py
+# ours: engine/build/decode_run -> carve/co_352256.co -> llvm-objdump -d (span = widest backward branch of each kernel)
+# llama: tmp/a2census/llama/fattn.s + co_102400.co (A2's carving), instance <256,256,16,4> = this model's head_dim
+
+## ours shipping attn_fattn_wave_u8 (3 warps, 16-row M tile)
+# loop 1995c..1c354: 1858 instructions
+#   wmma             17  (0.9 %)
+#   fma32            17  (0.9 %)
+#   fmul            145  (7.8 %)
+#   fadd             17  (0.9 %)
+#   exp               9  (0.5 %)
+#   cvt              57  (3.1 %)
+#   permute_xlane    12  (0.6 %)
+#   lds             208  (11.2 %)
+#   vmem_load         4  (0.2 %)
+#   vmem_store       33  (1.8 %)
+#   barrier          15  (0.8 %)
+#   wait             72  (3.9 %)
+#   delay           180  (9.7 %)
+#   salu            269  (14.5 %)
+#   move            336  (18.1 %)
+#   select_mask     128  (6.9 %)
+#   int_vec         324  (17.4 %)
+#   other            15  (0.8 %)
+#   top mnemonics: v_mov_b32_e32=241  s_delay_alu=180  v_mul_f32_e32=145  ds_store_2addr_b32=129  v_dual_mov_b32=95  v_and_b32_e32=69  ds_load_b128=68  s_waitcnt=67  v_cvt_f16_f32_e64=48  s_or_b32=39  s_and_saveexec_b32=35  v_cndmask_b32_e32=33
+# matrix-class issue slots 17 of 1858 = 0.9 %; non-matrix slots per matrix slot = 108.29
+
+## ours wide attn_wide_wave (8 warps, 32 pos x 4 heads, 64-wide stage)
+# loop 2a9c0..3ef70: 14325 instructions
+#   wmma            128  (0.9 %)
+#   fma32          1118  (7.8 %)
+#   fmul            360  (2.5 %)
+#   fadd            193  (1.3 %)
+#   exp              97  (0.7 %)
+#   cvt             562  (3.9 %)
+#   permute_xlane    34  (0.2 %)
+#   lds             457  (3.2 %)
+#   vmem_load        98  (0.7 %)
+#   vmem_store      188  (1.3 %)
+#   barrier          13  (0.1 %)
+#   wait            313  (2.2 %)
+#   delay          2420  (16.9 %)
+#   salu           2789  (19.5 %)
+#   move            373  (2.6 %)
+#   select_mask    1229  (8.6 %)
+#   int_vec        3836  (26.8 %)
+#   other           117  (0.8 %)
+#   top mnemonics: s_delay_alu=2420  v_and_b32_e32=831  v_fma_f32=673  v_cndmask_b32_e32=451  v_fmac_f32_e32=445  s_mov_b32=387  v_div_scale_f32=384  s_or_b32=364  v_mul_f32_e32=360  s_and_not1_saveexec_b32=316  v_dual_mov_b32=309  s_waitcnt=305
+# matrix-class issue slots 128 of 14325 = 0.9 %; non-matrix slots per matrix slot = 110.91
+
+## llama flash_attn_ext_f16<256,256,16,4> (8 warps, nbatch_fa=64)
+# loop d45b0..e9168: 13537 instructions
+#   wmma            256  (1.9 %)
+#   fma32           696  (5.1 %)
+#   fmul            134  (1.0 %)
+#   fadd            671  (5.0 %)
+#   fmax             14  (0.1 %)
+#   exp              74  (0.5 %)
+#   cvt             336  (2.5 %)
+#   permute_xlane    79  (0.6 %)
+#   lds            1326  (9.8 %)
+#   vmem_load       139  (1.0 %)
+#   vmem_store      129  (1.0 %)
+#   barrier          32  (0.2 %)
+#   wait           1068  (7.9 %)
+#   delay          1160  (8.6 %)
+#   salu            951  (7.0 %)
+#   move            693  (5.1 %)
+#   select_mask     670  (4.9 %)
+#   int_vec        4643  (34.3 %)
+#   other           466  (3.4 %)
+#   top mnemonics: s_delay_alu=1160  s_waitcnt=1055  v_mov_b16_e32=781  v_mov_b16_e64=759  ds_load_2addr_b32=672  v_fma_mix_f32=576  v_mov_b32_e32=515  v_add_nc_u32_e32=460  v_fma_f32=458  v_pk_mul_f16=448  ds_load_b128=320  v_div_scale_f32=256
+# matrix-class issue slots 256 of 13537 = 1.9 %; non-matrix slots per matrix slot = 51.88
+
+## CONTROL: the WRONG llama instance, flash_attn_ext_f16<64,64,16,4> — do not use this one
+# loop 1d3d8..2b5d4: 9398 instructions
+#   wmma            128  (1.4 %)
+#   fma32           361  (3.8 %)
+#   fmul            139  (1.5 %)
+#   fadd            405  (4.3 %)
+#   fmax             12  (0.1 %)
+#   exp             136  (1.4 %)
+#   cvt             462  (4.9 %)
+#   permute_xlane   139  (1.5 %)
+#   lds             697  (7.4 %)
+#   vmem_load        83  (0.9 %)
+#   vmem_store       32  (0.3 %)
+#   barrier          24  (0.3 %)
+#   wait            651  (6.9 %)
+#   delay          1206  (12.8 %)
+#   salu            728  (7.7 %)
+#   move            265  (2.8 %)
+#   select_mask    1140  (12.1 %)
+#   int_vec        2766  (29.4 %)
+#   other            24  (0.3 %)
+#   top mnemonics: s_delay_alu=1206  s_waitcnt=649  v_cndmask_b32_e64=638  v_mov_b16_e32=481  v_cvt_f16_f32_e32=324  v_mov_b16_e64=291  ds_load_2addr_b32=256  v_fma_f32=232  v_add_f32_e32=213  v_add_nc_u32_e32=207  v_mov_b32_e32=206  v_sub_f32_e32=194
+# matrix-class issue slots 128 of 9398 = 1.4 %; non-matrix slots per matrix slot = 72.42
