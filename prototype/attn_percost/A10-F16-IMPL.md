@@ -152,6 +152,16 @@ issue port runs at 18 %. **Expect ~0 from the accumulator change alone; the poin
 make the Q-in-registers spelling buildable at all.** If the user wants the f16 accumulator only, the honest
 answer from these numbers is that it is worth measuring, not shipping.
 
+**D7-correction (2026-10-20, measured — the premise above is false).** The shipped kernel reserves **241** VGPR
+and the f16-accumulator spelling reserves **244**: accumulator registers are not the binding live-set, because
+halving the accumulator a second time (4 tiles, 32 registers) still reads 241. The live allocator spends what
+the accumulator gives back on the round's other live values, so the "~244 of 256, fits with ~12 spare" line
+above describes an isolated probe, not the kernel, and **Q-in-registers-as-F16 does not become buildable by
+flipping the accumulator**. What the change turned out to be, measured in `A10-PVF16.md`: register-neutral, numerics
+tolerated with argmax stable on every step and no token flipped, best-of-3 about 3.4 % faster with overlapping
+ranges (unresolved), and byte-identical at default. Any future Q-residency attempt must price its registers from
+the live kernel, not from D7.
+
 
 ## D6 — sequencing, as it now stands after A11 (2026-10-20)
 
