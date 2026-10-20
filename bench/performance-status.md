@@ -2794,3 +2794,35 @@ for every aggregate while still printing a confident `ndiff`. **Headlines stay a
 default decision is made** — knob 2 is admitted and one line from becoming the shipper, and the precedent
 when A12 passed at ~1 % was that this call is the user's. What changed is the size of what is on the table:
 27 % of the 16k wave, not 1 %.
+
+## §60. The default flips to the A13 form: **18/18 on the default admission, `chunk64b` among them**, and the published warm headline moves to 11,070 tok/s at 4,096 and 8,542 at 16,384 (2026-10-20)
+
+`prototype/attn_wide/A13-RESULT.md` §"State and what is left"; instruments
+`a13_default_admission.sh` and `a13_default_warm_headline.sh`, both of which pass **no form flags** — that is
+the entire point of them, since after a default flip an explicit-flag run proves nothing about what ships.
+`decode_run.cpp`'s option struct and `gate.py`'s `--attn-fattn-wide` default moved in **one commit**, because
+the half-flipped pair is the failure this file already records (the gate silently judging a kernel the engine
+does not ship); `AttnLayerArgs`' struct default deliberately stays 0, which is not a missed half but the
+library default that only reaches callers leaving the field unset — the standalone rigs, whose baselines were
+all taken on the inert form. `decode_run` assigns the field unconditionally, and the flip is asserted per run
+by each run's own `attn_fattn_wide=wide_llama` / `form=wide128llama` echo, not inferred from a flag.
+
+**Default admission: 18 PASS, 0 FAIL, 0 NO-VERDICT over the derived 18-fixture population.** Among them is
+`chunk64b`, the red the shipping path has carried since before A12 — a batched-vs-one-row token flip with
+2.925 BF16 ULP of room against a 1.50 flip line, witnessed in `A12-ADMISSION.md` against a pre-change binary
+as pre-existing. **The flip did not inherit that red, it removed it**: the A13 form passes the same check.
+That is reported as a fact of this admission, not as an explanation, and the old red stays on the record as
+what knob 0 does.
+
+**Warm headline as shipped (§51 convention, medians of 3, one process per width, no flags):** 512 →
+**11,636 tok/s** (`[44.31, 44.61]` ms); 1,024 → **12,047** (`[85.09, 86.16]`); 4,096 → **11,070**
+(`[361.8, 373.5]`); 16,384 → **8,542** (`[1894.3, 1922.7]`); 32,000 → **6,154** (`[5158, 5295]`). Against
+§51's published figures that is **+9.4 % at 512, +6.8 % at 1,024, +13.1 % at 4,096, +39.5 % at 16,384**, and
+~+57 % at 32k against its 3,924 (published at 32,768 lanes). §51's table stands as its own record and is not
+edited; **this section is the headline from here.** §59's cross-window note still applies to any comparison
+against llama's traced totals — ours is now the faster of the two at both 16k and 32k on those numbers.
+
+What the flip does *not* settle: the `smoke` wide-scoped margin is unchanged (measured 2.028e-04 against the
+2.500e-04 line, so the wide forms have ~19 % headroom and the next wide-form change will find it tight), and
+§51's phase-attribution table now records an attention row (1,518.91 ms/pass at 16k) that the engine no
+longer produces — re-tracing it is a separate piece of work, not a bookkeeping fix.
