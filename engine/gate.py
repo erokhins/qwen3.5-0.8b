@@ -1059,8 +1059,12 @@ def side_owns_wide_form(side: dict) -> bool:
     falling back to the ORDINARY line means a missing echo can only make this check stricter, never
     softer. That is also what keeps `--selftest`'s `--break-ab-logits` aimed at the pooled cosine
     under the line it was sized against.
+
+    `wide_llama` (A13, `--attn-fattn-wide 2`) counts as wide here: it is the same wave route with a
+    ported round structure, so every pairing rule that keys off "this side ran a wide core" applies to
+    it unchanged. A side that names neither is not wide, which stays the strict direction.
     """
-    return str(side["run"].get("numerics", {}).get("attn_fattn_wide")) == "wide"
+    return str(side["run"].get("numerics", {}).get("attn_fattn_wide")) in ("wide", "wide_llama")
 
 
 def pooled_cos_band(wide_pairing: bool) -> tuple[float, str]:
@@ -7290,7 +7294,7 @@ def main() -> int:
                          " changes for it: no band, no floor, no admission edit, only the argv and the echoed"
                          " field. Wave-only like the flags around it, and the engine refuses `--attn-fattn 0`"
                          " with this knob named rather than echoing a kernel that did not run.")
-    ap.add_argument("--attn-fattn-wide", choices=("0", "1"), default="0",
+    ap.add_argument("--attn-fattn-wide", choices=("0", "1", "2"), default="0",
                     help="whether the wave's WMMA core is the A12 wide block, passed straight to"
                          " `decode_run --attn-fattn-wide` and asserted against the run's own NUMERICS echo"
                          " (`attn_fattn_wide=fattn|wide`), exactly like --attn-fattn, --attn-fattn-roll,"
@@ -7915,7 +7919,10 @@ def main() -> int:
         # whether the one-pass rows rode the bit-exact route or the wide one. A binary that predates the field
         # echoes nothing, which is its own failure (`--attn-touch`'s rule).
         echoed_wide = run.get("numerics", {}).get("attn_fattn_wide")
-        check(str(echoed_wide) == ("wide" if args.attn_fattn_wide == "1" else "fattn"),
+        # A13 adds a third form, and the map is written out rather than as a ternary so that a fourth
+        # form cannot silently fall into the `else` branch and be judged as the shipper.
+        want_echoed_wide = {"0": "fattn", "1": "wide", "2": "wide_llama"}[args.attn_fattn_wide]
+        check(str(echoed_wide) == want_echoed_wide,
               "the run ran the wave core this gate is judging it under",
               ("its NUMERICS line carried no `attn_fattn_wide=` — the binary predates --attn-fattn-wide, so no"
                " claim about either wave core can be made from this log" if echoed_wide is None else
