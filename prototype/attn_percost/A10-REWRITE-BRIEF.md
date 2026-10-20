@@ -7,9 +7,21 @@ VGPR per lane, not 64, so on the atom this engine ships R2 cannot be honoured at
 together want the whole 256-VGPR budget, and clang satisfies that by re-issuing the Q loads — handing back the very
 traffic R2 exists to delete (`A10-RF-LADDER.md` §2, §6).
 The only shape that fits is llama's, which needs the f16-accumulating atom — and **its rate is now measured: it
-issues at the same rate as the f32 atom (`A10-RF-LADDER.md` §7), so the register saving is unopposed and the f16
-form is the funded path.** This file exists so the arithmetic behind that decision can be read, questioned and attacked
-instead of being re-derived from memory each time.
+issues at the same rate as the f32 atom (`A10-RF-LADDER.md` §7), so the register saving is unopposed.**
+
+**Status 2026-10-20, after A11 and ledger §55: the geometry route this brief was written to fund is DEAD, and
+the f16 accumulator survives only as an inert enabler.** `A11-attribution.md` bounded R2's channel at ≤ 12 %
+three independent ways, R3's removable round-fixed mass at 5.2 %, and R1's residency give-up at +7.5–9.1 %, and
+its verdict is DO NOT FUND; the measurement that was owed then ran and came back worse — Q fed from LDS loses
+**12.99 %** against Q fed from global with residency held equal (§55), and the pad A/B in the same section shows
+**LDS, not registers, binds the shipping kernel at 3 blocks/CU**, so a register saving cannot buy residency at
+all. What is left, and it is why the accumulator change is still being built: `A10-F16-IMPL.md` **D7** — Q
+converted once per block and held in registers as F16, which deletes both the re-read and the per-round
+re-conversion (672 of 2,123 slots per round, `A11-attribution.md` §2) and which fits only under a 64-register
+accumulator. Expect nothing from the accumulator by itself.
+
+This file exists so the arithmetic behind those decisions can be read, questioned and attacked instead of being
+re-derived from memory each time.
 
 Evidence it rests on: §51 (long-context phase attribution, warm convention) and §53 (L-c measured DISPLACED) of
 `bench/performance-status.md`; `A9-LONGCTX-CENSUS.md` (traffic, waste, levers, verdict); `A3-result.md` (the LDS
