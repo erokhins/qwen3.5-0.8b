@@ -41,3 +41,23 @@ empty-parse gates already recorded in `AGENTS.md`, and worth the row it cost to 
 no band, threshold, must-catch list or fixture list was touched. Shipping the wide form now requires either
 fixing the `smoke` cosine excursion or an explicit user waiver, and the `chunk64b` red needs separating from
 this work before any default flip is argued from a green board.
+
+## Addendum — re-taken 2026-10-20 with the A13 three-arm admission, and two rows of the table above are now stale
+
+`ARMS="0 1 2" prototype/attn_wide/run_a12_admission.sh` (same derived 18-fixture population, same
+`ENGINE GATE PASS`-is-the-only-PASS rule, `evidence/a13_admission_arms012.txt`) reads today:
+
+| arm | PASS | FAIL | which |
+|---|---|---|---|
+| `wide=0` (ships) | 17 | 1 | `chunk64b` |
+| `wide=1` (A12) | 18 | 0 | — |
+| `wide=2` (A13, `a13_wide_llama`) | 18 | 0 | — |
+
+Two differences from the table at the top of this file, both stated rather than quietly overwritten. **`smoke`
+now passes on the wide arms**, because the pooled line that judged it is no longer 2.0e-04: `A12-FIXES` sized
+a wide-scoped line at 2.500e-04 from the floor probe's own margin (measured 2.028112e-04 x 1.25, kept at the
+tighter round number), and knob 2 measures the same 2.028e-04 — 19 % inside. **`zz` now passes on every arm,
+including the shipper**, so the D40-class invocation gap that produced its red does not reproduce against the
+current binary; `EXPECTED_RED` in `engine/gate.py` is empty (`{}` at :8707), i.e. nothing is being excused —
+the run is green, not waived. The table above is left as it was run on 2026-10-20 morning for the record;
+this addendum is the current state.
