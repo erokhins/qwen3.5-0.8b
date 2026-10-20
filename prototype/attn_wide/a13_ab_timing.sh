@@ -4,7 +4,7 @@
 # gpu_lock hold, best-of-N, paired and interleaved inside the window (bench SS57's "a ruler taken in
 # another window is not an A/B").
 #
-# WHAT THE CHANGE IS. `prototype/attn_wide/a13_worker_notes.md` bills the ported round at 20.56 non-matrix
+# WHAT THE CHANGE IS. `prototype/attn_wide/evidence/a13_worker_notes.md` bills the ported round at 20.56 non-matrix
 # slots per matrix slot against A12's 24.05 (round-scoped), and the worker's own residual risk is the price:
 # spilled VGPRs 163 -> 920, private segment 176 -> 720 B a thread. Whether the slot cut pays for the spill is
 # exactly the question no CPU instrument can answer. Knob 2 is BYTE-IDENTICAL to knob 1 on five geometries
