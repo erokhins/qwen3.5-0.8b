@@ -1,0 +1,45 @@
+# A13 default admission + default warm headline, transcribed from the 2026-10-20 main-agent run.
+# Reproduce with:  bash prototype/attn_wide/a13_default_admission.sh
+#                 bash prototype/attn_wide/a13_default_warm_headline.sh
+# Both pass NO form flags; the per-fixture full gate reports land in tmp/a13ab/default_gate_<fixture>.txt.
+
+=== a13_default_admission.sh ===
+default admission (no form flags): 18 fixtures, binary /home/erokhins/erokhins_projects/qwen3.5-0.8b/engine/build/decode_run
+util at acquire: gpu use: 81%
+chunk64b -> PASS (form-name lines in gate report: 4)
+dec300f -> PASS (form-name lines in gate report: 4)
+dec64f -> PASS (form-name lines in gate report: 4)
+dec64t -> PASS (form-name lines in gate report: 4)
+dec8 -> PASS (form-name lines in gate report: 6)
+mt32f -> PASS (form-name lines in gate report: 4)
+p128 -> PASS (form-name lines in gate report: 6)
+p300 -> PASS (form-name lines in gate report: 4)
+p64 -> PASS (form-name lines in gate report: 4)
+p8 -> PASS (form-name lines in gate report: 4)
+prefix24dec8 -> PASS (form-name lines in gate report: 6)
+smoke -> PASS (form-name lines in gate report: 6)
+wide1024f -> PASS (form-name lines in gate report: 8)
+wide4096f -> PASS (form-name lines in gate report: 20)
+wide4096p -> PASS (form-name lines in gate report: 11)
+wide520f -> PASS (form-name lines in gate report: 4)
+wide640f -> PASS (form-name lines in gate report: 8)
+zz -> PASS (form-name lines in gate report: 6)
+util at release: gpu use: 18%
+DEFAULT ADMISSION DONE: PASS=18 FAIL=0 NO-VERDICT=0 of 18
+
+# "form-name lines" counts the `wide_llama` / `wide128llama` names gate.py surfaced for that fixture; the
+# routing proof itself is gate.py's own NUMERICS-echo cross-check, which refuses a run whose echo disagrees
+# with the flag its driver passed -- so a default that landed in only one of the two binaries could not have
+# produced an all-PASS table.
+
+=== default echo, one bare run at 1,024 lanes (no flags at all) ===
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 ...
+NUMERICS ... attn_fattn_wide=wide_llama ...
+
+=== a13_default_warm_headline.sh  (WAVEPASS gran=burst wall_ms, median of 3, one process per width) ===
+util at acquire: gpu use: 17%
+width 512    warm    44,000 ms  [44.3101, 44.6148]     11636 prompt tok/s
+width 1024   warm    85,000 ms  [85.0908, 86.1608]     12047 prompt tok/s
+width 4096   warm   370,000 ms  [361.7699, 373.5314]    11070 prompt tok/s
+width 16384  warm  1918,000 ms  [1894.3015, 1922.6727]  8542 prompt tok/s
+width 32000  warm  5200,000 ms  [5158.4389, 5294.8542]  6154 prompt tok/s
