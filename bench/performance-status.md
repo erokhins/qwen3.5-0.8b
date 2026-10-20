@@ -2698,3 +2698,49 @@ nothing here is admitted, and **headlines stay warm 10,637 tok/s at 512 and 9,79
 two legs buy for the queue is a clean field: the geometry axis is empty, so the only remaining account of
 llama's 1.9× is the per-wavefront one (`attn_fattn_wave` issues 17 `v_wmma` sites where their kernel
 issues 2,592, `A2-census` §2), which is R2's job to price before anyone funds R3.
+
+## §58. R2: the gap is amortization, not ILP — 108 / 111 / 52 non-matrix issue slots per matrix slot, and the ratio closes the gap arithmetically (CPU-only, 2026-10-20)
+
+`prototype/attn_percost/R2-amortization-spec.md`, `evidence/r2_round_bills.txt`. Same tool as A2 §2
+(`g3_isa_bill.py` finds each kernel's widest backward branch, `a2_round_bill.py` histograms it), run now on
+all three kernels from carved code objects — ours out of `engine/build/decode_run`, theirs out of the llama
+build. No device, no timing.
+
+**First, the ILP framing is dead on arrival and was closed by numbers already on file**: §26's probe
+sustains 32.4 clk per WMMA per SIMD with **one** independent accumulator chain (33.9 at four), so a single
+chain already fills the matrix pipe's 32-cycle acceptance interval, and `A3-wmma-accumulator-form.md` found
+four chains plus four dependent LDS loads *degrade* 8.5× on one load port. Accumulator ILP is not the
+missing quantity, so the only ISA question left is **how many non-matrix slots a wavefront spends per matrix
+slot**: shipping `attn_fattn_wave_u8` **108.3** (17 of 1,858), wide `attn_wide_wave` **110.9** (128 of
+14,325), llama `flash_attn_ext_f16<256,256,16,4>` **51.9** (256 of 13,537). Their head-dim instance must be
+selected explicitly — the carve holds eight instantiations and the bare-symbol match `<64,64,…>` bills at
+72.4, which would have reported their advantage as 1.5× instead of 2.09×.
+
+**The arithmetic closes.** llama's amortization is **2.09× better**; their measured rate on this family is
+**1.9× ours** (A2 §3). Nothing else is needed to account for the gap. And the number explains the thing this
+session could not otherwise explain: **A12 moved the ratio the wrong way** — 7.5× the matrix work per round,
+8.2× the non-matrix bill, 108 → 111 — so there was never an amortization win for the engine to inherit from
+the rig's +25.1 %, which is consistent with §56 (coverage), §57 (residency) and the paired per-body ratio of
+1.0001.
+
+Per matrix slot, the buckets that differ: `salu` 15.8/21.8 against their 3.7, `move` **19.8** (shipping's
+`v_mov_b32`×241; the wide kernel already fixed this at 2.9), `delay` 10.6/18.9 against 4.5, `select_mask`
+7.5/9.6 against 2.6, `fmul` 8.5 (the 128-slot accumulator rescale) against 0.5. **Already at their level:**
+`int_vec` address arithmetic (19.1 vs 18.1) and `s_waitcnt` (4.2 vs 4.2) — so neither memory-wait behaviour
+nor index arithmetic is the difference, a guess this census kills before anyone funds it.
+
+**The spec R3 must satisfy: ≤ 52 non-matrix slots per matrix slot**, reachable only two ways. (a) Shrink the
+non-matrix bill at fixed matrix work: −52 % at 17 matrix slots, more than `move`+`salu`+`delay` combined —
+not credible, and it retroactively explains why A4-L1's −41 % cut of the rescale measured **−1.67 %, dead**
+(7 % of a quantity that had to fall 52 %). (b) Widen the matrix work per round **while holding the non-matrix
+bill flat** — A12's direction with its violated constraint made explicit, and it names the work list: at 64
+matrix slots and today's shipping bill the ratio would be **29, better than llama**; to get there from A12's
+wide round, `int_vec` 3,836 → ~2,300, `salu` 2,789 → ~600, `delay` 2,420 → ~600.
+
+Falsifiable, and stated as a gate on future work: any candidate kernel billing > ~70 non-matrix slots per
+matrix slot **cannot** reach llama's rate, and this census says so before it is written. Not established:
+causation. Both kernels are stall-bound in wall-clock terms (A2: ≤ 8.8 % issue slots, 5.6 % matrix pipe; A11:
+65–74 % "waiting"), llama's stall profile was never instrumented, so the ratio is a serialised-work proxy
+whose mechanism is inferred — the residency alternative that would have explained the gap differently is
+what §57 R1b killed. **Headlines stay warm 10,637 tok/s at 512 and 9,790 at 4,096** — R2 ships no code and
+moves no default.
