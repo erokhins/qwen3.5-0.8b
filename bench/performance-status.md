@@ -2596,3 +2596,17 @@ Headline unchanged, as this section changed no shipping code: warm **10,637 tok/
 4,096**, and no attention number moved — the pad exists only behind a compile-time macro that no build
 defines. What moved is that the rewrite's residency premise is now measured rather than assumed: R1 gives up
 an LDS-bound residency it currently has, which is the shape of A11's verdict that R1 costs 7.5–9.1 %.
+The same window ran the arm §54's rewrite decision actually turned on, at equal residency: the padded
+unstaged8 build (LDS 32,768, Q re-read from global every round) against the shipping build with
+`--attn-fattn-qstage stage` (LDS 32,768, Q staged, zero Q global traffic). Same declared LDS, same 248 VGPR
+on both arms, so only the Q delivery channel differs. At 16,384 lanes, 3 interleaved reps
+(`prototype/attn_percost/run_a11_qstage_ab.py`): Q-from-global best **2,911.6 ms** (2,911.6/2,914.8/2,921.5),
+Q-from-LDS best **3,289.9 ms** (3,289.9/3,311.2/3,342.3) — the LDS-fed arm is **12.99 % slower**, ranges
+disjoint. A11's BET asked for ≥ +25 % to keep R2 alive; what was measured is negative, against the ≤ 12 % its
+three independent bounds predicted. So the Q channel is not a small win the attribution overweighted: at the
+resource that binds, feeding Q from LDS is a regression, which is also why `unstaged8` shipped as the default
+and why G1's +3.01 % must be read as an LDS/eligibility effect rather than as Q-traffic savings. Consequence
+for A10's queue: **R2 is measured dead, R3's 5.2 % and R1's residency give-up stand, and the only lever this
+window corroborates is reducing LDS per block, since that moves residency in both directions it was tested.**
+Headline numbers are unchanged by all of it — warm 10,637 tok/s at 512 and 9,790 at 4,096 — because neither
+arm is the shipping build.
