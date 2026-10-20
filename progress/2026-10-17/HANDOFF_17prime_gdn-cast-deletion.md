@@ -209,7 +209,7 @@ What is NOT done, and is the parent's to sequence (all of it is a live claim tha
 that no longer exists, and the supervisor wants it in its own cleanly-revertible commit):
 
 1. `engine/gate.py` — DONE (see above).
-2. `engine/README.md:10,372,484,486` and `engine/results.md:135,140,142,147,153,217,259,320,323,327,
+2. `engine/README.md:10,372,496,498` and `engine/results.md:135,140,142,147,153,217,259,320,323,327,
    518,523,543,571` carry 424/115. Most are historical (the gap-accounting table at :518-526 priced a
    115-cast step and wants a marker, not a rewrite). **:571 is the one that must be marked rather than
    edited out**: it books "the 115 cast launches — upper bound −0.43 ms" as an open item, and this
@@ -251,7 +251,7 @@ still testable.
    that emitted the widening again would read 98 vs 97 and fail. If the parent wants a witness that the
    check still bites, that is the must-catch case to state: re-add one `cast_bf16_to_f32_3` call, see
    section (d) go red on `cast` alone.
-3. **Engine docs** (main-agent call, one docs commit): `engine/README.md:10,372,484,486` and
+3. **Engine docs** (main-agent call, one docs commit): `engine/README.md:10,372,496,498` and
    `engine/results.md:135,140,142,147,153,217,259,320,323,327,518,523,543,571` all carry 424/115 as
    live claims; some are historical (the gap-accounting table at :518-526 prices a 115-cast step and
    should be marked as such rather than rewritten).

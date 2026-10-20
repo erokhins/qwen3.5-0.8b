@@ -16,12 +16,30 @@ in that one process between turns. Resident is the whole point: the load is 1.55
 process boundary, so a process per turn would pay the load again and re-feed the whole
 transcript. `decode_run --session`'s header comment is the protocol this speaks.
 
+THE TWO PHASES ARE PRINTED SEPARATELY, because they are two different questions.
+
+  * the LOAD phase — one line per process: wall time split into tokenizer build and engine
+    start, and within the engine, what the loader itself reported (tensors, resident GB, ms,
+    allocations) versus what the rest of start-up cost (HIP context, state allocation, route
+    planning). It used to be visible only under `--verbose`; it is on by default now.
+  * the WARM rates — prefill tok/s and decode tok/s of the steady state, which is what "how
+    fast is this box" means. A process's FIRST prefill is not steady state: it pays each
+    kernel's code-object load on its first launch, and measured 0.09s for a 21-token turn
+    against 0.01s for a same-sized second one — a factor of ~6 about the process, not the
+    prompt. That turn is bucketed COLD and kept out of the warm figure. A later turn that
+    introduces a width no earlier turn used pays hipBLASLt route pricing mid-turn (the
+    `GEMM-LT` lines), is labelled `+N priced`, and STAYS in the warm bucket: the same
+    measurement read 1,438 tok/s on a turn with seven routes priced inside it, so pricing
+    is milliseconds next to the launch cost. `--warmup` (default 512 tokens, one full
+    `kMaxWaveRows` wave) buys the cold cost before the first turn you care about and prints
+    it as its own line; the state is reset straight after, so nothing of it survives.
+
 OUTPUT IS QUIET BY DEFAULT. The engine narrates itself: the loader banner, `STATE`,
 `LAUNCH`, `NUMERICS`, `GEMM`, and one `GEMM-LT` line per (shape, M) the hipBLASLt route
 prices for the first time — including *mid-turn*, when a turn introduces a width no
 earlier turn used. Only `--verbose` echoes any of that. The default view is the answer
-plus one rate line per turn, and `--summary` prints the summary plus a two-line
-prefill/generation rate block.
+plus one rate line per turn, and `--summary` prints the summary plus a prefill/generation
+rate block.
 
 WHAT THE NUMBERS MEAN. The tok/s and TTFT printed here are the engine's own wall clock on
 a box that is not provably exclusive — `flash_serve`, the server generating this session's
@@ -44,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import re
 import subprocess
 import sys
 import time
@@ -71,6 +90,11 @@ MASKED = (textio.THINK_START_ID, textio.THINK_END_ID, textio.EOS_PRIMARY_ID,
 # A driver that takes the first non-GEN line for the reply gets an algo hex back instead of `FED`,
 # generates zero tokens, and reports `prefix -1`. Anything not in this list is a diagnostic.
 TERMINAL = ("FED", "END", "RESET", "PREFIX", "ERROR", "BYE", "READY")
+# The loader's own report line, printed before `READY` (`engine/decode_run.cpp`, right after
+# `WeightStore::load`). Parsed rather than eyeballed so the load phase can be split into
+# "what loading 1.55 GB cost" and "what everything else about start-up cost" without
+# `--verbose`, and so a change to the line prints nothing new instead of a silent zero.
+LOAD_RE = re.compile(r"loaded (\d+) tensors, ([\d.]+) GB resident in ([\d.]+) ms \((\d+) allocations\)")
 
 # The summarisation ask. Phrased for a 0.8B model: one instruction, an explicit shape, and
 # no options it has to make a judgement call about. `--instruction` overrides it.
@@ -83,6 +107,11 @@ SUMMARY_INSTRUCTION = (
 
 def rate(n: int, secs: float) -> str:
     return "%.1f tok/s" % (n / secs) if secs > 0 and n > 0 else "-"
+
+
+def rate_line(label: str, n: int, secs: float, extra: str = "") -> str:
+    """One aligned `label  N tok in T.TTs  =  R tok/s  (extra)` row."""
+    return f"  {label:<15}{n:>9,} tok in {secs:6.2f}s  =  {rate(n, secs)}{extra}"
 
 
 def read_document(spec: str) -> str:
@@ -115,6 +144,11 @@ class EngineSession:
         self.verbose = verbose
         self.diag: list[str] = []
         self.banner: list[str] = []
+        # What the loader reported about itself, None if its line ever changes shape.
+        self.load_ms: float | None = None
+        self.load_gb: str = "?"
+        self.load_tensors: str = "?"
+        self.load_allocs: str = "?"
         self.p = subprocess.Popen(
             [binary, "--model", model, "--session", "--cap", str(cap)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
@@ -144,6 +178,9 @@ class EngineSession:
             if word == "READY":
                 return int(dict(kv.split("=", 1) for kv in rest.split() if "=" in kv)["cap"])
             self.banner.append(raw)
+            if m := LOAD_RE.search(raw):
+                self.load_tensors, self.load_gb = m.group(1), m.group(2)
+                self.load_ms, self.load_allocs = float(m.group(3)), m.group(4)
 
     def _send(self, line: str, on_token=None) -> dict:
         assert self.p.stdin is not None and self.p.stdout is not None
@@ -197,18 +234,31 @@ class EngineSession:
 
 
 def rates_block(label: str, pre_n: int, pre_t: float, dec_n: int, dec_t: float,
-                ttft: float = None, stop: str = None) -> str:
-    """The two-line prefill/generation rate block, in the vocabulary of the engine's own
-    `RESULT` line. Same shape for one turn, one document, and a whole session, so the three
-    are comparable by eye."""
+                ttft: float = None, stop: str = None, cold=None) -> str:
+    """The prefill/generation rate block, in the vocabulary of the engine's own `RESULT` line.
+    Same shape for one turn, one document, and a whole session, so the three are comparable
+    by eye.
+
+    `cold` is the (tokens, seconds) of `pre_*` that the process's first-launch cost was paid
+    on. It is already INSIDE `pre_n`/`pre_t`; when it is non-zero it gets its own row and the
+    prefill row is restated as the warm remainder, because the warm rate is the one that
+    describes the machine. `cold=None` (or zero) means there was nothing cold in the bucket.
+    """
     head = f"{label}\n" if label else ""
     t_tf = f"  (ttft {ttft:.2f}s)" if ttft is not None else ""
     t_stop = f"  (stop={stop})" if stop else ""
-    return (head
-            + "  prefill    %s tok in %6.2fs  =  %s%s\n"
-            % (f"{pre_n:,}", pre_t, rate(pre_n, pre_t), t_tf)
-            + "  generation %s tok in %6.2fs  =  %s%s"
-            % (f"{dec_n:,}", dec_t, rate(dec_n, dec_t), t_stop))
+    cn, ct = cold if cold else (0, 0)
+    wn, wt = pre_n - cn, pre_t - ct
+    if cn and wn:
+        rows = [rate_line("prefill (warm)", wn, wt, t_tf),
+                rate_line("  + cold", cn, ct, "  (process's first launches)")]
+    elif cn:
+        rows = [rate_line("prefill (cold)", cn, ct,
+                          t_tf + "  — nothing warm measured; pass --warmup")]
+    else:
+        rows = [rate_line("prefill (warm)", pre_n, pre_t, t_tf)]
+    rows.append(rate_line("generation", dec_n, dec_t, t_stop))
+    return head + "\n".join(rows)
 
 
 def main() -> int:
@@ -234,6 +284,13 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true",
                     help="echo the engine's own banner and mid-turn diagnostics (GEMM-LT,"
                          " STATE, LAUNCH, NUMERICS), and use the detailed per-turn line")
+    ap.add_argument("--warmup", type=int, default=512, metavar="N",
+                    help="before the first real turn, prefill N throwaway tokens and generate"
+                         " 2, then reset — so every turn you read is a WARM prefill. The"
+                         " process's first prefill pays each kernel's code-object load on its"
+                         " first launch (default 512 = one full wave of kMaxWaveRows rows;"
+                         " 0 disables it, and then the first turn is the cold one and is"
+                         " labelled and bucketed as such)")
     ap.add_argument("--ignore-lock", action="store_true",
                     help="start even if tools/gpu_lock.sh says the GPU is held (you will be"
                          " contending with someone's measurement)")
@@ -295,7 +352,9 @@ def main() -> int:
             subprocess.run([str(lock), "release", tag])
     atexit.register(release)
 
+    t_tok = time.perf_counter()
     tok = Tokenizer(args.model)
+    tok_s = time.perf_counter() - t_tok
 
     # Now the cap. An explicit --cap wins; otherwise a chat session keeps the engine's own
     # 4096 default and a summary sizes itself to the document it was handed.
@@ -330,26 +389,75 @@ def main() -> int:
     else:
         cap = args.cap or 4096
 
-    t0 = time.time()
+    t0 = time.perf_counter()
     try:
         eng = EngineSession(str(binary), args.model, cap, verbose=verbose)
     except (RuntimeError, ValueError) as exc:
         print(f"engine chat: the engine did not come up: {exc}", file=sys.stderr)
         return 1
-    load = time.time() - t0
+    eng_s = time.perf_counter() - t0
+    load = tok_s + eng_s
     if verbose:
         for banner in eng.banner:
             print("  " + banner)
-        print(f"  engine up in {load:.1f}s | {len(eng.diag)} diagnostic lines so far")
+        print(f"  engine up in {eng_s:.1f}s | {len(eng.diag)} diagnostic lines so far")
     print(f"Qwen3.5-0.8B on the HIP engine | bf16, greedy | weights and state GPU-resident"
           f" (cap {eng.cap} slots, stop id {textio.EOS_PRIMARY_ID}, max_new {max_new})",
           flush=True)
+    # The load phase, always: it is a different quantity from a turn rate (one charge per
+    # process, not per token) and it used to hide behind --verbose.
+    if eng.load_ms is not None:
+        rest = eng_s - eng.load_ms / 1000.0
+        print(f"  load      {load:.1f}s wall = tokenizer {tok_s:.1f}s + engine {eng_s:.1f}s"
+              f" — weights {eng.load_gb} GB / {eng.load_tensors} tensors"
+              f" ({eng.load_allocs} allocs) in {eng.load_ms / 1000.0:.2f}s,"
+              f" hip init + state + routes {rest:.2f}s", flush=True)
+    else:
+        print(f"  load      {load:.1f}s wall = tokenizer {tok_s:.1f}s + engine {eng_s:.1f}s"
+              f" (loader line not recognised, so the split inside the engine is unknown)",
+              flush=True)
     print("  rates here are this box's wall clock, not a ledger number"
           " (bench/performance-status.md §6).", flush=True)
 
     messages: list[dict] = []
     last_stop = ""
-    agg = dict(pre_n=0, pre_t=0.0, dec_n=0, dec_t=0.0, ttft=[], turns=0)
+    agg = dict(pre_n=0, pre_t=0.0, dec_n=0, dec_t=0.0, ttft=[], turns=0,
+               cold_n=0, cold_t=0.0, warm_n=0, warm_t=0.0, priced=0)
+
+    # ---- the warmup: buy the cold costs before any turn you care about. ----------------------
+    # The one-time cost on a process's first prefill is each kernel's code object loading on its
+    # first launch: measured 0.09s for a first 21-token turn against 0.01s for a same-sized
+    # second one, and 1,767 tok/s against 11,306 tok/s on a 173-token document. hipBLASLt route
+    # pricing is the other first-time cost (the GEMM-LT lines), but it is solved per (shape, M)
+    # so a fixed-width warmup could not buy it for an arbitrary prompt anyway — and it measures
+    # at milliseconds next to the launch cost, so a turn that pays it is labelled `+N priced`
+    # and stays in the warm bucket. 512 tokens is one full kMaxWaveRows wave, the width the
+    # engine actually emits; the state is reset straight after, so nothing of the warmup is
+    # left in it.
+    warmed = False
+    if args.warmup > 0:
+        if args.warmup + 8 > cap:
+            print(f"  warmup    skipped: {args.warmup} tokens plus generation does not fit a"
+                  f" {cap}-slot state (--cap, or lower --warmup)", flush=True)
+        else:
+            word = tok.encode(" the quick brown fox jumps over the lazy dog")
+            ids = (word * (args.warmup // max(len(word), 1) + 2))[:args.warmup]
+            t_w = time.perf_counter()
+            try:
+                eng.feed(ids)
+                t_w_pre = time.perf_counter() - t_w
+                eng.gen(2)
+            except RuntimeError as exc:
+                print(f"  warmup    FAILED: {exc}", flush=True)
+                return 1
+            t_w_all = time.perf_counter() - t_w
+            eng.reset()
+            warmed = True
+            n_price = sum(1 for l in eng.diag if l.startswith("GEMM-LT"))
+            print(f"  warmup    {len(ids):,} tok in {t_w_pre:.2f}s  =  {rate(len(ids), t_w_pre)}"
+                  f"  (COLD: first kernel launches"
+                  f"{f', {n_price} routes priced' if n_price else ''}; 2 decode steps"
+                  f" {t_w_all - t_w_pre:.2f}s) — state reset, every turn below is warm", flush=True)
 
     def show(text: str):
         sys.stdout.write(text)
@@ -386,6 +494,7 @@ def main() -> int:
                     + textio.THINK_END + "\n\n")
             delta, mode = tok.encode(cont), "resume"
         t_start = time.perf_counter()
+        n_diag0 = len(eng.diag)
         try:
             fed = eng.feed(delta)
             t_first = time.perf_counter()
@@ -454,37 +563,63 @@ def main() -> int:
         # consumes it first. Printing both makes the transcript accounting checkable by eye.
         n_pre = len(delta)
         t_pre = t_first - t_start
+        # Which bucket this turn's prefill belongs in, and why. The process's FIRST prefill is
+        # COLD: it pays each kernel's code-object load on its first launch. Measured on this
+        # box with --warmup 0, a 21-token first turn took 0.09s (232 tok/s) and the same-sized
+        # second turn 0.01s (1,438 tok/s) — a factor of ~6 that is a property of the process,
+        # not the prompt, so it does not belong in a rate that claims to describe the machine.
+        # A later turn that introduces a width no earlier turn used makes hipBLASLt price new
+        # routes mid-turn (the `GEMM-LT` lines, counted here) and is labelled `+N priced`, but
+        # stays in the warm bucket: the same measurement says 18 tok at 1,438 tok/s WITH seven
+        # routes priced inside it, so pricing is milliseconds next to the launch cost.
+        n_price = sum(1 for l in eng.diag[n_diag0:] if l.startswith("GEMM-LT"))
+        first_prefill = agg["turns"] == 0 and not warmed
+        cold = first_prefill
+        tag = ("cold" if first_prefill else "") + (f" +{n_price} priced" if n_price else
+                                                  ("" if first_prefill else "warm"))
         if verbose:
-            print("  [prompt %d tok (fed %d) %.2fs | ttft %.2fs | generated %d tok | decode %d tok"
+            print("  [prompt %d tok (fed %d) %.2fs %s%s | ttft %.2fs | generated %d tok | decode %d tok"
                   " %.2fs %s | stop=%s | mode=%s | prefix %d/%d | turn %.1fs]"
-                  % (n_pre, int(fed.get("n", -1)), t_pre, ttft, len(out), n_dec, dec_t,
+                  % (n_pre, int(fed.get("n", -1)), t_pre, rate(n_pre, t_pre),
+                     " [" + tag.strip() + "]", ttft, len(out), n_dec, dec_t,
                      rate(n_dec, dec_t), stop, mode, prefix, eng.cap,
                      time.perf_counter() - t_start), flush=True)
         elif stats_line:
             # One line per turn in the REPL; --summary skips it and prints the full rate block
             # instead, so the same figures are never on screen twice.
-            print("  [%s tok prompt %.2fs %s | %s tok answer %.2fs %s | ttft %.2fs | %s]"
-                  % (f"{n_pre:,}", t_pre, rate(n_pre, t_pre), f"{len(out):,}", dec_t,
+            print("  [%s tok prompt %.2fs %s %-11s | %s tok answer %.2fs %s | ttft %.2fs | %s]"
+                  % (f"{n_pre:,}", t_pre, rate(n_pre, t_pre), tag.strip(), f"{len(out):,}", dec_t,
                      rate(n_dec, dec_t), ttft, stop), flush=True)
         if prefix < 0:
             print(f"  [state] the END line carried no prefix_len: {end}")
         agg.update(pre_n=agg["pre_n"] + n_pre, pre_t=agg["pre_t"] + t_pre,
                    dec_n=agg["dec_n"] + n_dec, dec_t=agg["dec_t"] + dec_t,
-                   ttft=agg["ttft"] + [ttft], turns=agg["turns"] + 1)
+                   ttft=agg["ttft"] + [ttft], turns=agg["turns"] + 1, priced=agg["priced"] + n_price)
+        if cold:
+            agg.update(cold_n=agg["cold_n"] + n_pre, cold_t=agg["cold_t"] + t_pre)
+        else:
+            agg.update(warm_n=agg["warm_n"] + n_pre, warm_t=agg["warm_t"] + t_pre)
         return dict(pre_n=n_pre, pre_t=t_pre, dec_n=n_dec, dec_t=dec_t, ttft=ttft,
+                    cold=(n_pre, t_pre) if cold else None,
                     text=tok.tok.decode(out, skip_special_tokens=True), stop=stop)
 
     def summary(prefix="bye"):
         tt = (" | ttft %.2fs avg, %.2fs worst" % (sum(agg["ttft"]) / len(agg["ttft"]),
                                                   max(agg["ttft"]))) if agg["ttft"] else ""
-        return ("%s — %d turns | prompt %d tok @ %s | decode %d tok @ %s%s"
+        warm = (f" (warm {agg['warm_n']:,} tok @ {rate(agg['warm_n'], agg['warm_t'])})"
+                if agg["cold_n"] and agg["warm_n"] else "")
+        cold = (f" | cold {agg['cold_n']:,} tok @ {rate(agg['cold_n'], agg['cold_t'])}"
+                if agg["cold_n"] else "")
+        return ("%s — %d turns | prompt %d tok @ %s%s%s | decode %d tok @ %s%s"
                 % (prefix, agg["turns"], agg["pre_n"], rate(agg["pre_n"], agg["pre_t"]),
-                   agg["dec_n"], rate(agg["dec_n"], agg["dec_t"]), tt))
+                   warm, cold, agg["dec_n"], rate(agg["dec_n"], agg["dec_t"]), tt))
 
     def end_rates(label=""):
         tt = sum(agg["ttft"]) / len(agg["ttft"]) if agg["ttft"] else None
-        return rates_block(label, agg["pre_n"], agg["pre_t"], agg["dec_n"], agg["dec_t"],
-                           ttft=tt, stop=None)
+        cold = (agg["cold_n"], agg["cold_t"]) if agg["cold_n"] else None
+        hint = "" if agg["turns"] else "  (no turn ran)"
+        return rates_block(label + hint, agg["pre_n"], agg["pre_t"], agg["dec_n"],
+                           agg["dec_t"], ttft=tt, stop=None, cold=cold)
 
     # ---- --summary: one fresh request per document, then the rates. -------------------------
     # Each document gets a `reset`: §08.4's fresh request, so nothing from the previous one is
@@ -502,7 +637,7 @@ def main() -> int:
                 continue
             print()
             print(rates_block("", r["pre_n"], r["pre_t"], r["dec_n"], r["dec_t"],
-                              ttft=r["ttft"], stop=r["stop"]))
+                              ttft=r["ttft"], stop=r["stop"], cold=r["cold"]))
         print()
         print(end_rates(f"total — {len(doc_ids)} document(s), {agg['turns']} request(s)"))
         eng.close()

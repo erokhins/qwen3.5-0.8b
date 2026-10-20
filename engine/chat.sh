@@ -7,6 +7,7 @@
 #   engine/chat.sh --summary a.md b.md --max-new 400
 #   engine/chat.sh --verbose            # also echo the engine's own diagnostic lines
 #   engine/chat.sh --max-new 32         # cap generation length
+#   engine/chat.sh --warmup 0           # no throwaway prefill: turn 1 is then the cold one
 #   engine/chat.sh --ignore-lock        # start even while the GPU lock is held
 #
 # This drives the COMPILED ENGINE — `engine/build/decode_run --session` — not the torch
@@ -21,6 +22,16 @@
 # position — see the `TERMINAL` note there. By default you see the answer and one rate line
 # per turn; `--summary` prints the summary and then the prefill and generation rates, and
 # `--verbose` puts the engine's own lines back.
+#
+# TWO PHASES, PRINTED APART (see the module docstring of `chat.py` for the whole argument).
+# The `load` line is the one-time cost per process — tokenizer build, then engine start, and
+# inside the engine what loading 1.55 GB cost versus everything else about start-up. The rate
+# lines are the steady state, and they are WARM by default: `--warmup N` (512 = one full wave
+# of kMaxWaveRows rows) prefills N throwaway tokens, generates 2 and resets before the first
+# turn you care about, and prints its own cold rate on the way. Without it the first turn is
+# labelled `cold` and excluded from the warm figure — on this box a first prefill measured
+# 0.09s for a 21-token turn against 0.01s for a same-sized second one, and a 173-token
+# document 1,767 tok/s against 11,306 tok/s warm.
 #
 # The tok/s and TTFT this prints are the engine's own wall clock on a box that is also
 # serving this session's tokens. They are NOT ledger numbers: bench/performance-status.md

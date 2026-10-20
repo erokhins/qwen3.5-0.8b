@@ -453,6 +453,7 @@ engine/chat.sh --prompt "Name two prime numbers bigger than 90." --max-new 24
 engine/chat.sh --summary notes.md                     # summarize a document, then the rates
 engine/chat.sh --summary a.md b.md --max-new 400      # several, each as its own fresh request
 engine/chat.sh --summary - < notes.md                 # document on stdin
+engine/chat.sh --prompt "..." --warmup 0             # no throwaway prefill: turn 1 is the cold one
 # Drives `decode_run --session`, so weights and RequestState stay resident between turns and a turn is
 # one decode_step per token with no reload and no re-prefill. Its tok/s and TTFT are NOT ledger numbers
 # (bench/performance-status.md §6 owns clean windows); the header says so on every start. It refuses to
@@ -467,6 +468,17 @@ engine/chat.sh --summary - < notes.md                 # document on stdin
 # --summary sizes the state from the document before the engine starts (a `feed` past the cap throws and
 # poisons the session, so the cap cannot be decided afterwards): cap = largest prompt + --max-new, rounded
 # up to 512, floor 4096, ceiling --max-auto-cap; an oversized document is refused with its token count.
+# LOAD AND RATES ARE PRINTED APART, because they are two different quantities. The `load` line is one charge
+# per process (tokenizer build + engine start, and inside the engine what loading 1.55 GB cost versus hip
+# init + state + route planning — measured 2.7s total here, and it is the TOKENIZER at 2.1s that dominates,
+# not the 0.47s of weights). The rate lines are the steady state and are WARM by default: `--warmup N`
+# (default 512 = one full kMaxWaveRows wave) prefills N throwaway tokens, generates 2 and resets before the
+# first real turn, printing its own rate as the cold number. A process's first prefill pays each kernel's
+# code-object load on first launch — 0.09s for a 21-token turn against 0.01s for a same-sized second one,
+# and 1,767 tok/s against 11,306 tok/s on a 173-token document — so it is labelled `cold` and kept out of
+# the warm figure whenever `--warmup 0` leaves it in the measurement. A turn that introduces a width no
+# earlier turn used prints `+N priced` (hipBLASLt solves a plan per (shape, M)) and stays warm: seven routes
+# priced inside a turn measured 1,393 tok/s, so pricing is milliseconds next to the launch cost.
 ```
 
 ## What the next worker owes W5b
