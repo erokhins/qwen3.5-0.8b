@@ -1,5 +1,5 @@
 /*
- * attn_wide_llama_kernels.h — the A13 llama-ported wide block, behind `--attn-fattn-wide 2` (default 0).
+ * attn_wide_llama_kernels.h — the A13 llama-ported wide block, behind `--attn-fattn-wide 2`, the shipping default.
  *
  * WHAT THIS FILE IS. `engine/attn_wide_kernels.h`'s block with four structural features of llama.cpp's
  * `flash_attn_ext_f16` ported onto it — `prototype/attn_wide/LLAMA-PORT-PLAN.md` items 1, 2, 4 and 5. It is

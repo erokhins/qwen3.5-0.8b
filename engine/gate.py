@@ -7294,13 +7294,16 @@ def main() -> int:
                          " changes for it: no band, no floor, no admission edit, only the argv and the echoed"
                          " field. Wave-only like the flags around it, and the engine refuses `--attn-fattn 0`"
                          " with this knob named rather than echoing a kernel that did not run.")
-    ap.add_argument("--attn-fattn-wide", choices=("0", "1", "2"), default="0",
+    ap.add_argument("--attn-fattn-wide", choices=("0", "1", "2"), default="2",
                     help="whether the wave's WMMA core is the A12 wide block, passed straight to"
                          " `decode_run --attn-fattn-wide` and asserted against the run's own NUMERICS echo"
-                         " (`attn_fattn_wide=fattn|wide`), exactly like --attn-fattn, --attn-fattn-roll,"
+                         " (`attn_fattn_wide=fattn|wide|wide_llama`), exactly like --attn-fattn, --attn-fattn-roll,"
                          " --attn-fattn-qstage and --attn-fattn-pvf16 (bet A12,"
-                         " engine/attn_wide_kernels.h, prototype/attn_percost/A12-WIDE-BET.md). `0` is what"
-                         " SHIPS and what HEAD's machine code is: the 16-row WMMA block on the streaming rows,"
+                         " engine/attn_wide_kernels.h, prototype/attn_percost/A12-WIDE-BET.md). `2` is what"
+                         " SHIPS and what HEAD's machine code is since A13: the wide block with llama.cpp's"
+                         " swizzled addressing, a mid-round K prefetch, a specialised tail round and the softmax"
+                         " scale folded into Q at staging (engine/attn_wide_llama_kernels.h). `0` is the wave"
+                         " that shipped until then: the 16-row WMMA block on the streaming rows,"
                          " attn_slim_wave on the one-pass rows, attn_combine merging them. `1` is NOT a spelling"
                          " of that wave but a different core -- 32 query positions x the 4 heads of one KV group"
                          " per block (128 row-slots), a 64-position stage, Q resident in F16, an F16 P*V"

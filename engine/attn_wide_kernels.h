@@ -1,6 +1,7 @@
 /*
  * attn_wide_kernels.h — the A12 WIDE attention wave block, moved into the engine behind
- * `--attn-fattn-wide` (default 0). One block = 32 query positions x the 4 heads of ONE KV group = 128
+ * `--attn-fattn-wide` (0 = the 16-row wave that shipped before A13, 1 = this block, 2 = the A13 port of it,
+ * which is the default). One block = 32 query positions x the 4 heads of ONE KV group = 128
  * query row-slots = 8 waves, a 64-position K/V stage, Q converted to F16 once per block and held in
  * registers, and an F16 P*V accumulator.
  *

@@ -117,8 +117,12 @@ struct DecodeScratch {
     // bet A12; see `kernels.h:AttnLayerArgs::fattn_wide`). Same riding reason and the same one-row immunity as
     // the four above — a one-row body is `attn_core`, so no decode bit moves under it — and one difference
     // worth naming: the knobs above it choose a SPELLING of the form that ships, this one replaces the whole
-    // wave core and drops the split/combine route for that body. Default 0, inert, and inertness at 0 is a
-    // byte-compare rather than an argument, because the wide kernel is a separate code object.
+    // wave core and drops the split/combine route for that body. This STRUCT default stays 0 on purpose and is
+    // NOT the shipping default: `decode_run`'s own option struct carries 2 since A13 shipped, and it assigns
+    // this field unconditionally, so the library default only reaches callers that leave it unset — the
+    // standalone rigs, whose published baselines were all taken on the inert form and would otherwise move
+    // under a flag nobody passed. Inertness at 0 is a byte-compare rather than an argument, because the wide
+    // kernel is a separate code object.
     int attn_fattn_wide = 0;
     // How deep the split path may cut a wide row (`--attn-split-cap`, bet A9-L-c;
     // `kernels.h:AttnLayerArgs::split_cap`). Same riding reason as the five above — it has to reach the one

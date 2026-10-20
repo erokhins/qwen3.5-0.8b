@@ -195,7 +195,9 @@ struct Options {
     // Parse-or-throw like its siblings and echoed on the same NUMERICS line, because it names which kernel
     // produced a log's wave rows and a silently-defaulted side would price the shipping wave twice and report
     // the second price as the wide block's.
-    int attn_fattn_wide = 0;
+    int attn_fattn_wide = 2;   // A13 ships: the wide block with the ported round (engine/attn_wide_llama_kernels.h).
+                               // MUST match `--attn-fattn-wide`'s default in engine/gate.py — one committed half
+                               // of the pair makes the gate judge a kernel the engine does not ship.
     // Whether the knob was NAMED, for the identical reason: 0 IS the default, so a guard keyed on its value
     // would manufacture a refusal for every bare run the day the default moved.
     // Whether the knob was NAMED, for the identical reason: 0 IS the default, so a guard keyed on its value
@@ -453,16 +455,17 @@ Options parse_args(int argc, char** argv) {
             // forwarding every form flag cannot ask for two wave cores at once.
             const std::string v = next();
             if (v != "0" && v != "1" && v != "2") {
-                throw std::runtime_error("--attn-fattn-wide takes 0 (the WMMA wave that ships: the 16-row block"
-                                         " on the streaming rows, attn_slim_wave on the one-pass rows,"
-                                         " attn_combine merging them — THE DEFAULT and HEAD's own machine code)"
+                throw std::runtime_error("--attn-fattn-wide takes 0 (the WMMA wave that shipped until A13:"
+                                         " the 16-row block on the streaming rows, attn_slim_wave on the"
+                                         " one-pass rows, attn_combine merging them)"
                                          " or 1 (bet A12: the wide block, 32 query positions x the 4 heads of"
                                          " one KV group per block, a 64-position stage, Q resident in F16 and"
                                          " an F16 P*V accumulator, owning every row of the body with no lane"
                                          " split and no combine; engine/attn_wide_kernels.h) or 2 (bet A13:"
                                          " that same wide block with llama.cpp's swizzled addressing, mid-round"
                                          " K prefetch, specialised tail round and scale folded into Q; owed"
-                                         " byte-identical to 1; engine/attn_wide_llama_kernels.h). Got '" + v +
+                                         " byte-identical to 1; engine/attn_wide_llama_kernels.h — THE DEFAULT"
+                                         " and HEAD's own machine code). Got '" + v +
                                          "'. Refusing rather than guessing, because this names which wave core"
                                          " produced the bits in this log and the gate asserts the echo");
             }
