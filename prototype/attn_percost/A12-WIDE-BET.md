@@ -58,3 +58,28 @@ buys, and it is worth running even though the prior is not favourable.
   shape was source-killed rather than built.
 - If A12 lands between "faster" and "the abort line", the kickoff's rule applies: **DISPLACED, not shipped**,
   and reported as a trade by width rather than averaged away.
+
+## 5. The deciding window, run 2026-10-20 (main agent, `run_a12_window.sh`, one lock, blocking, zero subagents)
+
+32,768 lanes, best-of-3, reps interleaved, canary asserted before any timing, correctness pre-flight green
+(coverage `COVERAGE OK`; 19 derived-edge rows, worst cos 0.9999255, argmax moved 2/152, inside the calibrated
+band 0.9995 / 2e-02). Per-rep ranges are **disjoint**: wide 734.82 / 738.70 / 744.85 ms versus
+`attn_fattn_wave_u8` 919.06 / 919.06 / 933.19 ms.
+
+| form | best ms | TFLOP/s | blocks/CU | wf/CU | LDS | regs / scratch |
+|---|---|---|---|---|---|---|
+| `attn_wide_wave` (128 rows, staged K/V, f16 acc, Q in registers) | **734.82** | **5.985** | 2 | 16 | 32,768 | 256 / 156 B |
+| `attn_fattn_wave_u8` (shipping) | 919.06 | 4.786 | 3 | 9 | 20,480 | 241 / 0 B |
+
+**Verdict against the pre-registered line: NOT CLEARED.** The abort line is **6.5 TFLOP/s** and the wide shape
+reads **5.985** — a 7.8 % miss. The A10/A12 thesis ("geometry closes the gap to llama's attention rate") is
+therefore recorded dead at the widest shape the relaxed policy admits, which is the outcome the BET said to
+record rather than renegotiate.
+
+**The relaxation nonetheless bought a real win:** **+25.1 %** kernel throughput at the deciding width
+(1.2507× wall), at 16 wf/CU and 2 blocks/CU where the shipping form has 9. Operand re-use moved the rate even
+though A11 found no saturated pipe — which is the mechanistic answer the BET was bought to get, and it says the
+wall is latency on re-fetched operands, not LSU issue. Honest caveats, all printed by the rig: kernel-only on
+both sides (`attn_prep`/`attn_combine`/append unpriced, which flatters the baseline); the shipping arm is inert
+on 512 of 32,768 rows; and numerics admission remains `a12_wide_mirror.py`'s and `gate.py`'s, not this
+window's. The +25 % is a shipping decision (route by width) that the abort line does not authorise by itself.
