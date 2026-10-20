@@ -1,0 +1,42 @@
+A11 §6's owed measurement: the equal-traffic LDS pad A/B. One gpu_lock hold (TAG=a11pad), blocking, zero
+subagents, arms interleaved per repetition. util read 91 % at acquire and 46 % at release — recorded and
+discounted per the ledger's own rule (identical clean runs have read 24-91 %).
+
+Instrument identity (compile-side, `a11_read_vgpr.py`, same source both arms):
+  BASE (no -D)              attn_fattn_wave_u8  next_free_vgpr 241 -> 248 allocated, LDS 20,480
+  PAD  (-DFATTN_LDS_PAD_HALVES=6144)  same kernel, same 241 -> 248,  LDS 32,768
+So the ONLY difference between the binaries is the declared LDS: 20,480 (LDS allows 3 blocks/CU) versus
+32,768 (LDS allows 2). Byte-identical work: no index reaches the pad.
+
+`python3 tools/prefill_sweep.py --binary <arm> --lanes <L> --runs 1`, one invocation per row, best-of-3 taken
+over the interleaved reps by hand:
+
+lanes 3072   base: 396.1  391.7  387.3  (best 387.3 =  7931.7 tok/s)
+             pad : 400.3  405.5  402.0  (best 400.3 =  7674.8 tok/s)   pad +3.36 % slower
+lanes 16384  base: 2802.5 2773.8 2787.9 (best 2773.8 = 5906.6 tok/s)
+             pad : 2913.2 2919.3 2896.5 (best 2896.5 = 5612.2 tok/s)   pad +4.42 % slower
+
+Every pad rep beats no base rep at either width — the ranges are disjoint (3072: 387.3-396.1 vs 400.3-405.5;
+16384: 2773.8-2802.5 vs 2896.5-2913.2), so this is not a spread artifact, and it is the expected sign: the
+pad takes the LDS-allowed blocks/CU from 3 to 2.
+
+VERDICT: the LDS bound is LIVE at 3 blocks/CU, i.e. the shipping kernel really is resident at 3 blocks
+(9 wavefronts/CU), which is what §53's driver-query witness said. Therefore the 248 VGPR a dispatch reserves
+is NOT the residency binder — three blocks at 248/thread is 71,424 registers, above the 65,536/CU that
+`a11_read_vgpr.py` had assumed, and the measurement says the reservation fits anyway. The per-CU vector
+register file on gfx1151 is therefore at least 71,424 registers (most likely 2 x 65,536, one per SIMD), and
+the arithmetic "256 threads x 256 VGPR = 65,536 => 1 block/CU" in `A10-RF-LADDER.md` §2 and in the commit
+before this one is an assumption about the per-SIMD file that was applied to the per-CU file.
+
+Cross-check that had already been sitting in the ledger: G1's measured +3.01 % for the LDS cut that took
+residency 6 -> 9 wavefronts/CU. The reverse direction measured here (9 -> 6, costing 3.4-4.4 %) is the same
+elasticity with the sign flipped, so the two independent windows agree.
+
+Consequences, all recorded in the files they touch:
+  * A register saving does NOT buy residency on this geometry (LDS binds first). The f16 accumulator's
+    64 VGPR/lane therefore cannot be paid for in wavefronts today -- `A10-F16-IMPL.md` D2's conclusion,
+    which had been reached by bad arithmetic, is now reached by measurement.
+  * LDS is the binding resource for the shipping kernel, so LDS reductions are the residency lever, and
+    the pad direction is a pure cost.
+  * The register file being ~2x what was assumed changes the headroom arithmetic in A10 step 2 (it does not
+    overturn its source kill: the ceiling is still 256 VGPR/thread, and the kernel now uses 241 of them).

@@ -189,6 +189,20 @@ using fattn_CRegs = float __attribute__((ext_vector_type(8)));    // one 16x16 F
 #define FATTN_KTILES (DH / 16)   // 16-dim steps of the score dot: DH/16 = 16
 #define FATTN_VTILES (DH / 16)   // output tiles over DH: the >= 8 independent chains §4.2 change (3) asked
 
+// EXPERIMENT KNOB, compile-time only, 0 in every shipping build: extra LDS appended to the aliased K/V stage
+// so that ONE paired window can decide which resource binds the shipping kernel. The two machine-side
+// readings disagree — the driver's occupancy query grants 3 blocks/CU (9 wf/CU, the triple §53 carries) while
+// the dispatch record reserves 248 VGPR per thread (`a11_read_vgpr.py` reads `.amdhsa_next_free_vgpr 241`, the
+// driver rounds to 248, and `a11_alloc_check.py` confirms `Accum_VGPR_Count = 0`), whose arithmetic allows 2
+// blocks/CU. Padding declared LDS past 65,536/3 = 21,845 B makes the LDS bound allow 2 too: if registers
+// already bind at 2 the pad is free and the answer is registers; if the kernel was really resident at 3 the
+// loss shows up here. Byte-identical output by construction, because no index reaches the pad.
+#ifndef FATTN_LDS_PAD_HALVES
+#define FATTN_LDS_PAD_HALVES 0
+#endif
+static_assert(FATTN_LDS_PAD_HALVES % 8 == 0,
+              "pad the stage in halves, a multiple of 8 so the 16 B LDS accesses stay 16 B aligned");
+
 static_assert(FATTN_MROWS == 16 && FATTN_MLANES == 16,
               "the WMMA tile is 16x16x16: MROWS below 16 cannot build an A operand and MLANES below 16 "
               "cannot build a C tile");
@@ -662,7 +676,17 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
     // runs once for three row-blocks instead of once per row-block. ALIASED uses (K row-major for the score leg,
     // then V transposed for P*V) with a barrier between the two users, and its first ints double as the
     // block-range fold below before the first K fill touches it. Two layouts, one buffer, three readers.
-    __shared__ __align__(16) __half s_kv[FATTN_MLANES * DH];              // [lane][dim], then [dim][lane]
+    __shared__ __align__(16) __half s_kv[FATTN_MLANES * DH + FATTN_LDS_PAD_HALVES];  // [lane][dim], then [dim][lane]
+    // The pad is spelled as a GROWTH of `s_kv`, not as a second `__shared__` array, and that is an instrument
+    // lesson worth keeping: the first attempt declared `s_pad[N]` with a store under `a.cap == 0`, and the
+    // declared LDS did not move at all — a write into a shared array nothing ever reads is dead, so the
+    // allocation was eliminated and both arms read 20,480 B, which is how a null result nearly got reported as
+    // a finding. Growing an array the kernel provably uses cannot be eliminated. The appended tail is
+    // unreachable: every index into `s_kv` comes from `fattn_kv_addr`/`fattn_v_addr`, whose widest value the
+    // `static_assert`s above pin against the UNPADDED extent, and no code memsets or copies the array
+    // wholesale (there is no `sizeof(s_kv)` anywhere in this file).
+    static_assert(FATTN_MLANES * DH + FATTN_LDS_PAD_HALVES >= FATTN_MLANES * DH,
+                  "the pad only ever grows the stage");
     const int lane = threadIdx.x & 31;
     const int w = (int)(threadIdx.x >> 5);
     const int nw = (int)(blockDim.x / warpSize);              // == FATTN_WARPS: the two s_kv fills stride on it
