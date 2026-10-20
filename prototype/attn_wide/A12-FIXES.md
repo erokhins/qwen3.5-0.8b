@@ -379,3 +379,250 @@ being judged against a 2026-10-16 margin. (c) `zz` still adjudicates nothing —
 legible, not judged. (d) E4 showed the CPU mirror cannot price the gate's quantity; any A12 rounding claim
 made from it should be treated as unpriced until a gate run backs it.
 
+---
+
+## 5. Task A — the pooled cosine line, widened for wide pairings only (2026-10-20, authorized)
+
+**What was authorized.** The standing numeric-format rule in `AGENTS.md`: a format switch needs no new band if
+the gates stay green, and where one goes red the widening is admissible only if it still catches every
+injection in the geometry-derived must-catch set. §1 proved the wide arm's `smoke` batched-vs-carry deficit of
+**2.028112e-04** is not a fixable defect (four repair experiments, none moved it, because the excess is the
+wide form's F16 `P` and F16 accumulator at one 64-position round), and the direction handed here was: widen
+the line **for the wide form**, not for the shipping path. That is what this section records.
+
+**Before → after, in one table.**
+
+| line | before | after |
+|---|---|---|
+| pooled `1-cos` ceiling, a pairing with **no** wide side | 2.000e-04 (floor 0.9998) | **2.000e-04 — untouched** |
+| pooled `1-cos` ceiling, a pairing where **one side is the wide form** | 2.000e-04 | **2.500e-04** (floor 0.99975, new key `CASCADE_BAND.stage_cos_min_wide`) |
+| per-row `1-cos` (2.75e-03), pooled meanrel (3e-02), flip line (1.50 ULP), every step band, every other fixture | — | untouched |
+
+**The scope, and why it is the narrowest that works.** Two functions in `engine/gate.py`:
+`side_owns_wide_form(side)` reads one side's own `NUMERICS attn_fattn_wide=` echo, and `pooled_cos_band(wide_pairing)`
+returns the ceiling *and the sentence that names where it came from*, which every judging line now prints. Scope
+facts, all three of which are load-bearing:
+
+- It keys off the **side's echo**, not the gate's `--attn-fattn-wide` flag. A side that did not start a binary —
+  every `--dry-run` stand-in — has no echo, so it falls to the **tighter** line. That is what keeps
+  `--selftest`'s `--break-ab-logits` being judged by 2.000e-04 after this change, and it means an unknown or
+  missing form can never inherit the looser number by accident.
+- It is per **pairing**, computed at the two `wave_band_checks` call sites in section (h) (batched-vs-one-row
+  and batched-vs-carry), so nothing outside those two comparisons can see it. It is not a pooled-line
+  relaxation, and no other fixture's line moved.
+- One consequence is wider than the red strictly demanded, and it is named rather than silent: on the wide arm,
+  **wide-vs-one-row** also gets the wide line (smoke reads 1.622e-04 there). That comparison carries the same
+  wide-form rounding on one side against a different reference, so a line that admitted it there but not at
+  carry would be an artefact of which side was called the reference. The two calls share the decision for that
+  reason.
+
+**The number, and its stated margin.** Measured `2.028112e-04` × the floor probe's own stated margin of 1.25
+= `2.535e-04`, kept **down** at the tighter round `2.500e-04` (the same trim convention that put the row line at
+2.75e-03 where the margin would have owed 2.755e-03). So: **1.2326× over the measured wide figure**, and
+**1.60× over the ordinary line's worst known-good `1.5625e-04`** (dec8, library leg, `engine/wave_band_floor_probe.py`
+as re-taken in `tmp/wave_band_floor/probe_full.log`; the shipping line sits 1.28× over the same figure). The honest
+price: a wide-form pairing may now sit 1.25× further from the reference than any pairing the shipping path is
+held to — that is what the +25 % below buys, and `prototype/attn_wide/a12_wide_band_witness.py` is the witness
+that nothing larger slips through. One anchor named in the old band text turned out not to be an anchor at all:
+the `1.2446e-04` on `wide640f` is a **per-row** figure in the row-band provenance, not a pooled one, so it
+bounds the row line and not this one; the code comment now says so instead of leaning on it.
+
+**Injection evidence — every injection still fires.** `engine/gate.py --selftest`, before and after, with the
+before taken from HEAD (`41d1cb7`) in a scratch `git worktree` so the two are the same tree but for this change:
+
+```
+HEAD (before)   gate.py --selftest   rc=0   84 [PASS] lines, 0 [FAIL]
+working (after) gate.py --selftest   rc=0   84 [PASS] lines, 0 [FAIL]
+diff of the [PASS]/[FAIL] line sets: identical except the worktree path prefix and one RuntimeWarning's
+line number inside a case description (gate.py:1837 → gate.py:1933, which is this edit's own line delta)
+```
+
+That set includes the six declared-gap cases (§3's `selftest_declared_gaps`) and every `--break-*`. But those
+injections all run `--dry-run`, so by construction they cannot exercise a line scoped to an echoed wide side —
+which is why the new line needed its own geometry-derived case list rather than a claim of inheritance:
+
+```
+prototype/attn_wide/a12_wide_band_witness.py   rc=0   WITNESS PASS — 19 cases run (0 wrong)
+```
+
+It builds `a = [1,0,…]` against `b = [1,x,0,…]`, for which pooled `1-cos` = per-row `1-cos` = `1 − 1/sqrt(1+x²)`
+exactly, so one knob sets the injected deficit and the other three statistics are computable rather than hoped
+about — which is what lets each case require **locality** (which line refused) and not merely a red. It canary
+asserts `|corpus_drift − target| <= 1e-9` before judging, and it refuses to run if its stdout parse finds
+anything other than exactly four checks (a witness whose parse can come back empty cannot fail). Cases, each
+run at both lines: the ordinary line's worst known-good `1.5625e-04` (both admit — if this ever stopped passing,
+a band would have been tightened by accident); `1.900e-04` (both admit); **the measured `2.028112e-04`
+(ordinary REFUSES, wide admits)**; one part in 1000 either side of each line; above the wide line at
+`2.550e-04` (**both refuse**, which is the case that keeps the wide line from being a band that cannot fail);
+and `4.300e-03`, the size of the smallest defect `--break-ab-logits` injects here (both refuse). Plus three
+cases on the scope predicate itself (`wide` / `fattn` / no NUMERICS line). Two failures surfaced while writing
+it and both are in the file's design now: `1 − 0.99975` is not exactly 2.5e-04, so an exactly-on-the-line case
+is a bug report about a float and the boundary cases straddle at 1e-3 instead; and at `4.3e-3` the same
+construction necessarily trips the per-row and pooled-meanrel lines too (`x` grows as `sqrt(2d)`), which is
+printed as a declared companion rather than hidden.
+
+**The ledger.** `CASCADE_BAND.stage_cos_min_wide` recorded in `bench/band-history.jsonl` as a **new key**, so the
+ordinary key's history stays readable and the pair reads as two lines; `tools/band_history.py`'s
+`LOWER_IS_LOOSER` gained the key (a cosine floor moves looser when it goes **down**, and without that entry the
+checker would have called the tighter 0.9998 a loosening against it). `band_history.py check` rc=0 over 21
+values. `band_history.py --selftest` rc=1 — **pre-existing and byte-identical at HEAD**: its `justify` case
+symlinks the plan into `bench/` instead of `progress/2026-10-12/` and dies with
+`decision D-2 cannot be checked: … plan-2026-10-12.md is missing`. Reported, not fixed — different topic.
+
+**Device A/B, same binary, same lock window, numerics only — no timing taken.** HEAD's gate from the scratch
+worktree against the working gate, one fixture at a time inside one `tools/gpu_lock.sh` hold:
+
+| run | gate | rc | wall | the line that decided it |
+|---|---|---|---|---|
+| `--fixture smoke --attn-fattn-wide 1` | HEAD | **1** | 7 s | `[FAIL] batched and carry … pooled 1-cos 2.028e-04 (band 2e-04)` |
+| `--fixture smoke --attn-fattn-wide 1` | working | **0** | 8 s | `[PASS] … pooled 1-cos 2.028e-04 (band 2.500e-04 — the WIDE-SCOPED pooled line …)` |
+| `--fixture smoke --attn-fattn-wide 0` | HEAD | 0 | 7 s | control: `1.790e-04` inside an unchanged `2e-04` line |
+| `--fixture smoke --attn-fattn-wide 0` | working | 0 | 9 s | same `1.790e-04`, same ordinary line, same source sentence |
+| `--fixture chunk64b --attn-fattn-wide {0,1}` | HEAD | **1 / 0** | 14 / 15 s | see the dividend below |
+| `--fixture chunk64b --attn-fattn-wide {0,1}` | working | **1 / 0** | 16 / 17 s | unchanged, same reasons |
+| `--fixture wide520f --scope form --attn-fattn-wide {0,1}` | working | 0 / 0 | 29 / 28 s | form scope defers the wave-width lines |
+| `--fixture zz --attn-fattn-wide {0,1}` | working | **0 / 0** | 9 / 9 s | §6 |
+
+`util` readings, recorded as required and then discounted: **hold 1** (working gate: smoke×2, zz×2, chunk64b×2,
+wide520f×2) acquired at 93 %, read 14 % / 37 % / 7 % at its three checkpoints and was then released; **hold 2**
+(HEAD gate: smoke×2, zz×1) 90 % → 15 %; **hold 3** (HEAD gate: chunk64b×2) 91 %; **hold 4** (HEAD gate: the
+smoke wide0 control) 90 %. Every wall above is a gate run's own elapsed seconds, printed to show it fits a
+worker's correctness budget: **no timing was taken and none of these numbers may enter a timing doc.** Note
+that the per-call PID behind each `bash` call dies immediately, so `gpu_lock` protected these runs by TAG and
+not by PID liveness — `release` on a dead holder says so out loud. The second line of defence held, and none of
+these runs is a timing anyway.
+
+**The control that matters.** `smoke` under `--attn-fattn-wide 0` reads rc=0 under **both** gates in this window,
+at `1.790e-04` inside a line this change did not touch. So the default arm's green is the chaos window §0.2 and
+§1 already documented (it read `2.23e-04` in another window and is above the line there), not an artefact of
+Task A. The wide arm went 1 → 0 on the same build in the same window at the same `2.028e-04`, and nothing else
+moved. **Item 1 and item 2 are therefore still open**: the fattn arm's own excursion is unadmitted by design,
+and `smoke` on the default arm remains at ~10 % of headroom and can go red again in a colder window.
+
+**Why this does not make the wide form ship.** The deciding 32,768-lane window in `41d1cb7` measured wide
+**734.82 ms = 5.985 TFLOP/s** against the shipping fattn form's **919.06 ms = 4.786 TFLOP/s — +25.1 %**, against
+a pre-registered abort line of 6.5 TFLOP/s, so the verdict there is **NOT CLEARED** and the geometry route is
+recorded dead at the widest shape the relaxed policy admits. What this admission buys is the ability to gate and
+measure the wide form honestly, not a default switch: the engine's default and `gate.py --attn-fattn-wide` both
+still read `fattn`/0. The numerics cost paid for that +25.1 % is exactly the widening in the table above.
+
+**The dividend, reproduced in this window (unchanged from §2).** `chunk64b`'s only RED row on the default arm is
+`decode row 120: 8337 vs 20619 with room 2.925 BF16 ULP (both sides' own gaps 0.182802 / 0.18446)` — outside the
+1.50 ULP line, so rc=1. On the wide arm the same row flips the **other** direction, `batched 20619 / carry
+8337, room 0.812 BF16 ULP (< 1.50)`, i.e. thin-room and admitted, and the pin-vs-engine difference at step 0 is
+admitted by quantization slack (top1 8337 at 15.625 over top2 20619 at 15.5, one BF16 step): **FAIL → PASS**,
+rc 1 → 0. Both gates reproduce both colours, so the flip is the wide form's, not this band change's.
+
+**Residual risks.** (a) The wide line is calibrated to one fixture's one pairing (`smoke`, 19 rows) — the only
+wide excursion measured so far; a second fixture comes into the band it should be re-derived, not inherited.
+(b) 1.60× over the ordinary line's worst known-good is a real loosening for anything that ever routes through a
+wide side, and the only thing standing between that and a silent miss is the witness, which is CPU-only and is
+not run by `--selftest` (it is a separate command, cited in the band text so a reader is sent to it).
+(c) `tools/band_history.py --selftest` remains broken at HEAD, so the ledger's own self-check witnesses nothing
+about a bad ledger line until that is fixed.
+
+## 6. Task B — `zz` re-pinned until it judges steps, and the census guard that found it
+
+**Which side was stale: the directory, not the pins.** `data/refs/zz` held 2500 `.npy` files against a manifest
+claiming 524, and the two extra logit files (`decode2.logits_last.npy`, `decode3.logits_last.npy`, argmaxes 760
+and 6511 = `greedy_continuation[3]`/`[4]`) were the **older** artifacts: mtime 13:32:38 against 13:33:12 for
+the manifest and `decode1`'s logits, 34 s apart. Two dumper runs into one directory — a full dump, then a lean
+one written over it — because `tools/reference_dump.py` mkdirs `--out` without clearing it and
+`tools/dump_fixtures.sh` installs with `cp`. So the manifest was current and 1976 files were orphans; §3's
+declared-gap refusal was correct all along, and what was missing was attribution.
+
+**What was regenerated, and what proves it is the same fixture.** `tools/reference_dump.py --decode 4 --lean
+--deep-steps 1 --logit-steps all` — the manifest's own recipe with the logits step-list widened so **no step is
+disowned** (the whole contradiction was born from `--logit-steps 0,1` declaring steps 2 and 3 absent while their
+files were still on disk). Two reproductions were taken and compared against the carried pins with
+`tools/check_dump_reproduction.py`: the lean-shaped one (524 pins, **all 524 byte-identical**, which is what
+shows the re-pin changed nothing that was already pinned) and the shipped one (526 pins, **all 526 byte-identical
+including the two orphan logits**, which is what shows the two ex-orphans are real tensors the checkpoint
+reproduces exactly and not convenient inventions). Only `logits_declared_absent: []`, `prefill_logit_rows` and
+`provenance` differ in the manifest — and `provenance.recipe` now records the exact command, which is the piece
+`f35d948` added to the dumper and which did not exist when zz was first cut. The superseded directory was
+**moved, not deleted**, to `tmp/zz_superseded-2026-10-20/zz` (2501 files, 142 M); `data/refs/zz` is now 526
+`.npy` + manifest (31 M). The `--verify` run below is the post-install reproduction; the carried
+`route_allowance.json` is named and skipped rather than making an otherwise-clean fixture exit 1.
+
+**`--verify` re-run, after the install, with the recipe the manifest now carries.** This is the check the
+`CARRIED_NOT_PINNED` rule exists for — a carried file is named and skipped, never silently compared:
+
+```
+.venv/bin/python tools/reference_dump.py --verify data/refs/zz --decode 4 --lean --deep-steps 1 \
+        --logit-steps all
+REPRODUCE zz: 527 pinned files vs 527 from the fresh run
+REPRODUCE PASS — every pinned byte and every pinned manifest value came back identical     rc=0, 4 s, torch CPU
+```
+
+527 = the 526 `.npy` plus `manifest.json`; `route_allowance.json` is neither compared nor complained about, and
+`logits_declared_absent: []` means no check in the gate has a gap to refuse any more. One warning the dumper
+prints and one honest note beside it: `a lean (deep) fixture with no recorded --first-stop` — zz carries no
+recorded stop, as it did before (its old manifest was the same), and `--decode 4` bounds the chain to four steps,
+so nothing here can run past the pins. Recording a `stop_probe` answer for zz would be its own small task.
+
+**`EXPECTED_RED["zz"]` is gone.** The protocol in the block above that dict was followed: the entry was kept
+while the fixture was still red, the repair was run and **printed** `[expected-red] zz: all 1 recorded line(s)
+did NOT fail this run — healed`, and only then was the entry removed. The mechanism stays (the dict is empty and
+the refusal message still appends a recorded reason whenever a fixture carries one), and the comment block above
+the dict now holds the diagnosis in past tense, including the numbers, so a reader of `git log -S` finds the
+reason where the entry was.
+
+**The census guard, and where it lives.** Two places, deliberately:
+
+- `tools/fixture_census.py` — the population-level guard. It **enumerates** `data/refs/*/manifest.json` rather
+  than typing a list (the trap this repo recorded three times: an admission over a fixture list typed from
+  memory), asserts `population = adjudicated + carried + unadjudicable`, and for each fixture checks
+  (1) no `.npy` unclaimed by `manifest.pins`, (2) no pin with no file, (3) no step declared absent whose file
+  exists, (4) every pinned logits file's argmax resolving to `greedy_continuation[s+1]` for `decode{s}` and to
+  `[0]` for the prefill row — i.e. the pairing index the §10.5 pins are actually written against. Corpus records
+  are counted as carried, with the reason read from `gate.py`. `--selftest` (rc=0, five cases on a **synthetic**
+  fixture in `tmp`, so no real fixture is read) is the guard for the guard, with its must-catch and
+  must-not-catch sets derived from that geometry: `paired` (every argmax on its §10.5 index — must NOT fire, or
+  the witness is broken), `swapped` (decode0/decode1 exchange contents — fires **twice**, so locality is
+  required and not merely a red), `shifted_by_one` (every decode file aligned on `greedy[s]` instead of
+  `[s+1]` — fires three times; this is the trap the whole file exists to keep anyone from re-making),
+  `declared_gap` (a step declared absent and actually absent — must not fire at the *pairing* check, because an
+  absent step is `check_declared_gaps`' business), and `unclaimed_file` (one extra `.npy`, asserted through
+  `undeclared_files` — the same function the gate's new line calls, so the gate's line has a witness too).
+  Against the real population the must-not-catch side is the 17 clean fixtures. Currently:
+  `CENSUS population=21 adjudicated=18 carried=3 unadjudicable=0 mismatches=0` (before the repair: zz alone,
+  1976 undeclared + two contradicted gaps; 17 others clean).
+- `engine/gate.py` section (0), `pairing_checks` — one `check()` sharing `fixture_census.undeclared_files()`
+  with the tool (one rule, one home, not a second copy). **Why the gate is the right host:** every device run in
+  this tree goes through `gate.py`, the failure mode is fixture provenance rather than numerics, and section (0)
+  runs before `decode_run` starts — so an unclaimed file is now named as a FIXTURE mismatch instead of arriving
+  as a numerics red or, as it did for zz, as a `SystemExit` with no verdict line at all. Only the unclaimed
+  direction is shared: `--selftest` builds scratch fixtures by copying a *subset* of a real manifest's files,
+  so a missing-file assertion would fire on the copy and adjudicate nothing. `gate --fixture {zz,smoke,dec64f,wide520f}
+  --no-engine` all rc=0 with the new line reading e.g. `526 pinned names, 526 files, the two sets agree`.
+
+**A second blocker, found only because the first one was fixed.** With its provenance repaired, `zz` reached
+section (h) for the first time ever and failed exactly one line: `the carried-window side really splits the
+prompt into several waves — --wave-rows 5 on a 5-token prompt gives 1 wave(s)`. `carry_rows` was a hardcoded 5
+whose comment justified 5 by not dividing any shipped prompt length (64, 27, 46, 128, 300) — a list that never
+contained zz's 5 ids, so the constant silently produced a vacuous carry side for the one fixture short enough to
+hit it. The fix derives it: `carry_rows = 5 if len(prompt_ids) > 5 else 2`, which for zz gives 2+2+1 (three
+waves, two interior boundaries, still not a divisor) instead of skipping P6 or declaring it. Effect on the rest
+of the population is provably nil — every other adjudicated fixture has > 5 prompt ids, so 17 keep 5 and only zz
+changes. This was the only thing between `gate --fixture zz` and a verdict: rc=1, **one** failure, 238 passes.
+After it: **`zz` rc=0 on both `--attn-fattn-wide` arms**, device, first time in the tree's history.
+
+**Device runs for this section** (same lock discipline as §5, `no timing taken`):
+
+| command | rc | wall |
+|---|---|---|
+| `gate.py --fixture zz --attn-fattn-wide 0` (before the repair) | 1 | 0 s (declared-gap refusal, no binary) |
+| `gate.py --fixture zz --attn-fattn-wide 1` (after repair, before the carry fix) | 1 | 8 s |
+| `gate.py --fixture zz --attn-fattn-wide {0,1}` (final) | **0 / 0** | 9 / 9 s |
+| `gate.py --fixture zz --attn-fattn-wide 1`, HEAD's gate against the repaired fixture | 1 | 7 s (carry line, and the healed `[expected-red]` printed) |
+
+**Residual risks.** (a) `data/` is gitignored, so zz's re-pin exists only on this box; a fresh clone cannot
+reproduce it except by running the recipe `manifest.provenance.recipe` now records. (b) The census reads
+`CARRIED_NOT_PINNED` out of `tools/reference_dump.py` by regex and the gate's row coverage rule out of
+`gate.py`'s source for the same reason (one spelling, no drift) — a rewrite of either source text turns a
+census check into a `SystemExit` naming its own fragility, which is loud but is a maintenance coupling. (c) The
+census is not wired into any CI wrapper; it runs when a person or a gate run invokes it. (d) zz is now a
+four-step fixture with every step's logits pinned, which makes it the most pinned small fixture here — worth
+knowing before it is used as a cheap smoke substitute.
+
