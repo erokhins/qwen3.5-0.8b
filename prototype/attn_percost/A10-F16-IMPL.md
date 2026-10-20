@@ -43,6 +43,18 @@ So the f16 accumulator does **not** raise residency on the current 3-warp/16-pos
 the limit at 3 blocks/CU, exactly the conclusion `A10-RF-LADDER.md` §3 reached for the other geometry ("after
 R1 the binding resource is registers, not LDS" — here it is the mirror image, and both are worth knowing).
 
+**D2-correction (2026-10-20, measured).** Two numbers in the table above were wrong and one conclusion survived,
+now for a better reason. (i) The shipped kernel reserves **241 → 248 VGPR per thread**, not 185: the note-block
+field the tree had been reading is not the reservation (`a11_read_vgpr.py` reads `.amdhsa_next_free_vgpr`, which
+reproduces the pmc dispatch records exactly for `attn_prep`/`attn_combine`/`attn_slim_wave`). Only 15 registers
+sit under the per-thread ceiling, so every "budget" line here starts from 241, not 185. (ii) The register file
+is **not** 65,536 per CU — padding declared LDS 20,480 → 32,768 costs +3.36 % at 3,072 lanes and +4.42 % at
+16,384 with disjoint per-rep ranges, which is only possible at 3 resident blocks (ledger §55), and 3 × 96 × 248
+= 71,424 fits, so the file is ~65,536 *per SIMD*. (iii) The conclusion therefore holds, but as measurement
+rather than arithmetic: **LDS is the binding resource at 3 blocks/CU, so a register saving cannot buy
+residency** — the pad A/B is the witness, and the reverse direction corroborates G1's +3.01 % from the other
+side.
+
 **Consequence, stated bluntly: the f16 accumulator alone is not a performance change on today's kernel.** It
 is the *precondition* for the two levers that are supposed to pay — R1 (8 waves × 16 rows = 128 rows/block,
 which needs 1 block/CU and 256 VGPR/thread) and R2 (Q resident, which costs 128 VGPR/lane and only fits
@@ -114,11 +126,42 @@ claim, gates re-run and not loosened. So:
   derived fixture while the per-round rescale is in place, the format change is reported, not routed around —
   no per-fixture exception, no band widening, no `--ack-spill`-style override.
 
-## D6 — sequencing, and what is still unknown
+## D7 — what this change is a precondition for, now that one Q lever has been measured dead (2026-10-20)
 
-1. **Do not build this before `A11-attribution.md` lands.** D2 says the standalone win is ~0; the whole value
-   is in R1+R2+R3, and whether *that* can clear the 6.5 TFLOP/s abort line is exactly what A11 is being asked.
-   If A11 attributes the window to something R2/R3 do not touch, this file is shelved and the week is saved.
+Ledger §55 measured `--attn-fattn-qstage stage` (Q staged in **LDS**, re-read per round) at **−12.99 %** against
+the global-fed arm with residency held equal. That kills *that* spelling: it pays in LDS, which §55 shows is the
+binding resource. It does **not** measure the other spelling of Q-residency, and the distinction is the whole
+reason to still do this change.
+
+`A11-attribution.md` §2 prices the Q work in the score roll at **672 of 2,123 slots per wavefront-round (31.7 %
+of the issue bill)**, of which the delivery is a minority and the **per-round re-conversion of Q from BF16 to
+F16 is the bulk** (the roll's own trip: `2 × global_load_b128 → bf16 unpack → 16 × v_cvt_f16_f32_e64 → v_wmma`,
+16 trips, no software pipelining, and 16 of the round's 26.7 exposed-return sites). Converting Q **once per
+block and keeping it in registers as F16** deletes both halves of that — the re-read *and* the re-conversion —
+and it is the only Q spelling the register arithmetic admits:
+
+| spelling | Q cost | accumulator cost | total with scores+addressing | verdict |
+|---|---|---|---|---|
+| Q in registers, **f32** accumulator (shipped atom) | 128 | 128 | ≥ 308 vs **241 already used, 15 spare** | impossible |
+| Q in registers, **f16** accumulator (this change) | 128 | 64 | ~244 vs 256 | **fits, with ~12 spare** |
+
+So the f16 accumulator is not the lever itself and D2 says it buys no residency; it is the **only door through
+which the one remaining large-mass Q lever can pass**, and its own direct yield is small and honestly priced:
+the 128-multiply rescale is 128 of 2,123 slots (6.0 %) and packed-half form halves that, in a kernel whose
+issue port runs at 18 %. **Expect ~0 from the accumulator change alone; the point of shipping it inert is to
+make the Q-in-registers spelling buildable at all.** If the user wants the f16 accumulator only, the honest
+answer from these numbers is that it is worth measuring, not shipping.
+
+
+## D6 — sequencing, as it now stands after A11 (2026-10-20)
+
+1. **The geometry trio is not funded.** `A11-attribution.md` answered the question this file deferred to: R2's
+   channel is worth ≤ 12 % on three independent bounds, R3's round-fixed mass is 5.2 %, R1 gives up 7.5–9.1 %,
+   and the verdict is **DO NOT FUND**; ledger §55 then measured the LDS-fed Q arm at −12.99 % at equal
+   residency. So R1+R2+R3 do not land as a bundle, and the abort line (6.5 TFLOP/s at 32k) is not chased by a
+   geometry rewrite. What survives is D7: the f16 accumulator as an inert enabler for the one Q spelling whose
+   mass is still big enough to matter, plus the LDS-side lever (reduce LDS per block) that §55 corroborated in
+   both directions it was tested.
 2. If it is funded: R3 (64-position stage) and R1 (8 waves) and D1's f16 accumulator land **together**, because
    the register arithmetic only closes with all three (acc 64 + Q 128 + scores 32 + ~20 ≤ 256 — see
    `A10-RF-LADDER.md` §2's measured 155 VGPR in isolation), and any pair of them is worse than the trio.
