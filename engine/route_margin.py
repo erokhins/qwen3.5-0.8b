@@ -578,7 +578,7 @@ def price_fixture(w: Weights, fixture: str, engine_log: Path | None, chunk_alts:
     out["provenance"] = {
         "command": " ".join([Path(sys.argv[0]).name] + sys.argv[1:]),
         "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "specimpl_sha256": hashlib.sha256((ROOT / "speccheck" / "specimpl.py").read_bytes()).hexdigest(),
+        "specimpl_sha256": __import__("provenance", fromlist=["specimpl_digest"]).specimpl_digest(),
         "engine_log": str(engine_log) if engine_log else None,
         "note": "reads data/refs/<fixture>/route_allowance.json and never writes it; no band moved",
     }

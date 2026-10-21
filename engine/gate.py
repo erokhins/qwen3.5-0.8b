@@ -2160,8 +2160,8 @@ def allowance_inputs(n_steps: int) -> dict:
     return {"prefill_ids": _ids_sha(man["prefill_ids"]),
             "feed_ids": _ids_sha(man["greedy_continuation"][:-1]),
             "n_steps": n_steps,
-            "specimpl_sha256": hashlib.sha256(
-                (ROOT / "speccheck" / "specimpl.py").read_bytes()).hexdigest()}
+            "specimpl_sha256": __import__("provenance", fromlist=["specimpl_digest"]).specimpl_digest(),
+            }
 
 
 def allowance_margins(doc) -> tuple[float, float, str]:
