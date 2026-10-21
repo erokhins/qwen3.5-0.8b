@@ -145,3 +145,6 @@ prototype/mlp_insitu/mlp_insitu
 # gdn_insitu (D4 diagnosis rig): binary named after its directory, so the path is written in
 # full — a `prototype/**/gdn_insitu` pattern would match the directory and hide the sources.
 prototype/gdn_insitu/gdn_insitu
+# s1_launch_price (route S1 gate-zero rig): same trap as above — the binary is named after its
+# directory, so the ignore line is the full path, never `prototype/**/s1_launch_price`.
+prototype/launch_price/s1_launch_price
