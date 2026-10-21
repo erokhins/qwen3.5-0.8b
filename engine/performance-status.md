@@ -69,19 +69,19 @@ is a cross-window comparison, not a paired A/B, and is quoted as such (§57's ru
 
 **Decode — marginal cost of one generated token** (`tools/context_sweep.py --lanes 96,128,512,1024,2048,4096
 --steps 32 --runs 3`; differential by construction: two runs differing only in `--steps`, so the prompt wave
-cancels). **These rows are the 2026-10-21 window on the D1 tree** — the projection shape+plan flip (§5 below)
-on top of G4 `reg16` (§44), G1 residency (§48) and A13 (§60). 96 lanes reads **9.619 ms = 104.0 tok/s** (3.04 %)
-and is the cleanest point in the set; 512 carries an 11.36 % spread, which is §6's dispatch bimodality and not a
-regression. The paired A/B moved the step −13.0 % (stage-clock, `proj` 4.1946 → 2.7284 ms/step,
-seven of seven reps separating); this differential agrees at +13.3 %.
+cancels). **The headline decode row is the 4k one** (user, 2026-10-21): report decode at 4,032 lanes and quote
+shorter widths beside it, not instead — a short-context row hides the KV term, where most of the remaining headroom
+sits; at 4k it comes from the stage-clock burst, never `context_sweep.py` (§6). **Rows below are the 2026-10-21
+window on the D1 tree** (projection flip, §5; on G4 §44 / G1 §48 / A13 §60); 96 lanes reads 9.619 ms = 104.0 tok/s,
+and 512's 11.36 % spread is §6's dispatch bimodality, not a regression. Paired, the step moved −13.0 % at 128 and −11.0 % at 4,032 (`proj` 4.1946 → 2.7284 and 4.177 → 2.745 ms/step, 7/7 reps separating).
 
 | lanes at last step | marginal ms/token, best of 3 | spread | tok/s |
 |---|---|---|---|
-| 128 | **9.876** | 0.43 % | 101.3 |
-| 512 | **10.609** | 11.36 % | 94.3 |
-| 1,024 | **11.028** | 3.98 % | 90.7 |
-| 2,048 | **10.929** | 7.20 % | 91.5 |
-| 4,032 | **12.680** (stage-clock burst, never `context_sweep.py` — §6; the sweep's own 4,096 row reads 12.556, 2.81 %) | 0.70 % | 78.9 |
+| **4,032** | **12.680** (stage-clock burst, never `context_sweep.py` — §6; the sweep's own 4,096 row reads 12.556, 2.81 %) | 0.70 % | **78.9** |
+| 128 | 9.876 | 0.43 % | 101.3 |
+| 512 | 10.609 | 11.36 % | 94.3 |
+| 1,024 | 11.028 | 3.98 % | 90.7 |
+| 2,048 | 10.929 | 7.20 % | 91.5 |
 
 **Cold start** (`tools/cold_restore.sh --runs 5` → `engine/build/loader_test --no-verify`,
 2026-10-16): text weights made resident in a fresh process, device pool empty, host page cache warm —
