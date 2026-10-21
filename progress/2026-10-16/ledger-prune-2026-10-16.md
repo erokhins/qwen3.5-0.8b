@@ -1,14 +1,14 @@
 # The 2026-10-16 ledger prune — what moved, what stayed, what the re-take changed
 
 Written 2026-10-16 alongside the prune itself. This is the decision record for the split of
-`bench/performance-status.md`; the numbers it quotes are the ones now in the live ledger, and every
+`engine/performance-status.md`; the numbers it quotes are the ones now in the live ledger, and every
 file:line it names was checked at HEAD `bb7246d`.
 
 ## A. The two files, and the evidence dir
 
 | file | lines | role |
 |---|---|---|
-| `bench/performance-status.md` | **326** (was 1,149) | the live ledger. Current measured state, re-taken 2026-10-16, §1–§6 |
+| `engine/performance-status.md` | **326** (was 1,149) | the live ledger. Current measured state, re-taken 2026-10-16, §1–§6 |
 | `progress/2026-10-16/performance-status-2026-10-16.md` | **1,160** = 1,149 frozen + 11 provenance footer | the frozen previous state, byte-identical |
 | `progress/bench/evidence/ledger-2026-10-16/commands-and-provenance.md` | 151 | every command, lock tag, `util` pair and spread behind today's rows, plus §4's basis clause and its correction note |
 | `progress/bench/evidence/ledger-2026-10-16/stage-wave.txt` | 300 | the filtered `STAGE*`/`WAVE*`/`STAGEPARITY`/`GROUP` rows behind §2 and §3 |
@@ -57,7 +57,7 @@ floors, and leaving them under a live-looking number is exactly the failure the 
 and it was verified with `cmp` rather than by eye:
 
 ```
-cmp <(head -1149 progress/2026-10-16/performance-status-2026-10-16.md) <(git show HEAD:bench/performance-status.md)
+cmp <(head -1149 progress/2026-10-16/performance-status-2026-10-16.md) <(git show HEAD:engine/performance-status.md)
 → identical (rc=1 only because the second stream is the git blob; the 1149-line prefix matches byte for byte)
 ```
 
@@ -135,7 +135,7 @@ Every cite changed by this pass, what it asserted, and where it now points. **L*
 | P `progress/2026-10-12/plan-prefill-2026-10-12.md:462` | `performance-status.md §6` | snapshot `:431` | the slope line that named MAXSC as the blocker |
 | P `progress/2026-10-14/plan-p9-chunked-scan-2026-10-14.md:5-6` | `performance-status.md §"Wave-path attribution"`, `§"Headline tables after the route (c) flip"` | snapshot, same §labels | the 40 %-non-matmul funding threshold and the pre-P9 headline tables |
 | P `progress/2026-10-14/speedup-routes-2026-10-14.md:5-6` | "now 1,100+ lines of append-only ledger" | "1,149 lines frozen as the snapshot, appended to ever since" | what the route index points at |
-| P `progress/2026-10-16/journal-chronology-2026-10-16.md:272`, `:279` | `bench/performance-status.md §6` (×2) | snapshot `:269`, `:244` | extracts of `engine/results.md` that named the §6 rows |
+| P `progress/2026-10-16/journal-chronology-2026-10-16.md:272`, `:279` | `engine/performance-status.md §6` (×2) | snapshot `:269`, `:244` | extracts of `engine/results.md` that named the §6 rows |
 
 Deliberately **not** re-pointed, because live §6 still carries the fact they cite (the clean-window
 protocol, the bimodality warning, the `util` rule, "timings are the main agent's"):
@@ -172,7 +172,7 @@ is the ledger itself.
 | `progress/2026-10-12/plan-prefill-2026-10-12.md` | 584 | 584 | `prototype/attn_decode/results.md` | 1509 | 1509 |
 | `progress/2026-10-14/plan-p9-chunked-scan-2026-10-14.md` | 51 | 51 | `tools/instep_family_budget.py` | 241 | 241 |
 | `progress/2026-10-14/speedup-routes-2026-10-14.md` | 337 | 337 | `progress/2026-10-16/cleanup-audit-2026-10-16.md` | 266 | 266 |
-| `progress/2026-10-16/journal-chronology-2026-10-16.md` | 1307 | 1307 | `bench/performance-status.md` | **1149** | **337** |
+| `progress/2026-10-16/journal-chronology-2026-10-16.md` | 1307 | 1307 | `engine/performance-status.md` | **1149** | **337** |
 
 `engine/results.md` — the other append-only journal — was edited under the same rule for the sake of
 the same argument: **4,498 lines before, 4,498 after**, seven changed lines, all of them prose inside
@@ -217,13 +217,13 @@ reachable for this shape, so 84 % was never this box's ceiling.
 ## G. Verification actually run
 
 ```
-cmp <(head -1149 progress/2026-10-16/performance-status-2026-10-16.md) <(git show HEAD:bench/performance-status.md)   # byte-identical prefix
-wc -l bench/performance-status.md                                                     # 337 (317 as first written; 20 lines added by the §2/§3 corrections in §I)
+cmp <(head -1149 progress/2026-10-16/performance-status-2026-10-16.md) <(git show HEAD:engine/performance-status.md)   # byte-identical prefix
+wc -l engine/performance-status.md                                                     # 337 (317 as first written; 20 lines added by the §2/§3 corrections in §I)
 python3 tools/citation_rot_check.py --selftest       # SELFTEST PASS — planted shift caught; quiet corpus and below-only edit quiet
 python3 tools/citation_rot_check.py                  # scanned 282 tracked files against HEAD; checked 419 line-anchor(s); 0 rotted line-citation(s)
 python3 tools/doc_ref_check.py --list-broken         # byte-identical to the pre-edit baseline: 0 new broken paths/anchors
 python3 tools/citation_census.py --check             # CHECK PASS — F1 101/101, F2 171/171, F4 16/16, F5 24/24, F5b 95/95, F6 66/66; live-origin F1 expected 5, counted 5
-python3 tools/citation_census.py --anchors bench/performance-status.md                # 32 citations parsed, 0 broken
+python3 tools/citation_census.py --anchors engine/performance-status.md                # 32 citations parsed, 0 broken
 # falsifiability witness on the real tree, not the synthetic one: insert one line at
 # devices/strix-halo-mixed-traffic.md:30 and `citation_rot_check` immediately reports
 # `ROTTED devices/strix-halo-mixed-traffic.md:175 | cited by progress/README.md:135` (and the two

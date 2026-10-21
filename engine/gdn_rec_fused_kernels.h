@@ -4,7 +4,7 @@
  * memory, on top of the `#pragma unroll 4` state walks that already ship. This is the engine's copy of
  * `prototype/gdn_rec_isa/gdn_rec_isa_kernels.h::rec2c4_kernel` (MODE 2c4), the merged form that
  * cleared D46's compile-only census gate and then D50's device admission
- * (`prototype/gdn_rec_isa/results.md` §11, `bench/performance-status.md` §19, decision log D50 of
+ * (`prototype/gdn_rec_isa/results.md` §11, `progress/2026-10-21/performance-status-2026-10-21.md` §19, decision log D50 of
  * `progress/2026-10-16/prefill-decision-log-2026-10-16.md`).
  *
  * WHAT IS TRANSCRIBED FROM WHERE, and the rule that comes with it. Bit-identity is owed to the shipped
@@ -56,7 +56,7 @@
  * very binary being timed, is the build-time half.
  *
  * ADMISSION, and where it is re-proved. On device the merged form is bit-identical to the reference
- * spelling (`ndiff_o_vs0=0 ndiff_state_vs0=0`, 4/4 harness cases, `bench/performance-status.md` §19),
+ * spelling (`ndiff_o_vs0=0 ndiff_state_vs0=0`, 4/4 harness cases, `progress/2026-10-21/performance-status-2026-10-21.md` §19),
  * and `engine/gate.py` section (j) re-runs that claim per fixture through the SHIPPING launch path by
  * dumping every logits row from a run of each spelling and byte-comparing them. A per-fixture green at
  * `--gdn-spell fused` is not that proof — the pins are judged inside bands wide enough to admit a

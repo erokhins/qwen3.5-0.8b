@@ -317,7 +317,7 @@ as the route-width sensitivity — see README §2 before quoting either.
 1. `results.md` — the `RESULT`/`SWEEP`/`VERDICT` lines verbatim, with the window name, `util` at
    acquire, `--rows`, and the spread across reps runs (AGENTS.md: absolute ms moves a few %, the
    ratio vs the engine call is the stable number).
-2. A note in `bench/performance-status.md` **only if** a ratio changes a route decision — that file
+2. A note in `engine/performance-status.md` **only if** a ratio changes a route decision — that file
    is main-agent-owned.
 3. If enumeration turns out to be `getAllAlgos`-only-empty, README §3's fallback sentence gets a
    pointer to the actual `ENUM` line instead of the static `nm` evidence.
@@ -385,7 +385,7 @@ with the same argmax at every step. `lt` is marginally closer to HF here, which 
 ### 7b. The timing pass (main agent only)
 
 Both sides in **one** lock hold, alternating, medians of 3 — the §1 row of
-`bench/performance-status.md` §6 and the "a ruler re-taken in a different window is not an A/B" rule
+`engine/performance-status.md` §6 and the "a ruler re-taken in a different window is not an A/B" rule
 make an unpaired pair of runs worthless here.
 
 ```bash

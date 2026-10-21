@@ -7,7 +7,7 @@
             --steps 1 --out tmp/occ_out
     tools/gpu_lock.sh release <tag>
 
-WHAT THIS IS FOR. The ledger attributes a prefill wave to kernel families (`bench/performance-status.md`
+WHAT THIS IS FOR. The ledger attributes a prefill wave to kernel families (`engine/performance-status.md`
 §3) with the engine's OWN stage clock, whose markers are family-scoped: a gap between two kernels lands
 inside whichever family's window contains it, so the clock cannot see an idle GPU at all (its completeness
 account — `ungaged_ms=0.0228` of 243.17 — is a statement about the gages, not about the machine). This tool
@@ -401,7 +401,7 @@ class Recorder:
         add("")
         add("no timing claim here: wall/cpu are the child's own, taken in whatever window this ran,"
             " and this tool never takes best-of-N. A number for the ledger comes from the main agent"
-            " blocking in a clean window (bench/performance-status.md §6).")
+            " blocking in a clean window (engine/performance-status.md §6).")
         return lines
 
 

@@ -473,8 +473,8 @@ ms/token**, which is 0.66 % of the ~8.0 ms measured token — and it is pure lau
 traffic is ~0.37 MB/token, i.e. ~1.6 µs of roofline. It sits in the same family as glue's 49 launches: the
 lever is a packed launch over the 18 layers or fusion into `rec_kernel`'s epilogue, not a better
 reduction. The 1.4 % burst spread is what makes 2.936 µs quotable at all — this is a launch-bound
-number, the class `bench/performance-status.md` §6 found bimodal for glue, so it needed its own spread.
-Ledger rows: `bench/performance-status.md` §4 and §6.
+number, the class `engine/performance-status.md` §6 found bimodal for glue, so it needed its own spread.
+Ledger rows: `engine/performance-status.md` §4 and §6.
 
 **Open after this run, all of them inherited rather than new.** The §04.5/A-01 wording correction in
 `specification/` is still the spec owner's call (§6). And the fact that the first two attempts at this

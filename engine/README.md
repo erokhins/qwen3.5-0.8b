@@ -7,7 +7,7 @@ What exists now is **W5's first half: weight residency** (`progress/2026-10-15/b
 token loop**: per-request state, one launcher per graduated kernel, and `decode_step`, which runs one
 token through all of it. `engine/decode_run.cpp` drives it and `engine/gate.py` gates it against the
 pinned `dec8` fixture. **Two device passes have run** (`engine/results.md`, last section): the loader
-loads, `check_weights` passes, the state sizes and the 424-launch plan verify against §07 *(424 then; the bill is 406 since `62b73e9` — `engine/results.md` and `bench/performance-status.md` §13 carry the move)*, and the loop
+loads, `check_weights` passes, the state sizes and the 424-launch plan verify against §07 *(424 then; the bill is 406 since `62b73e9` — `engine/results.md` and `progress/2026-10-21/performance-status-2026-10-21.md` §13 carry the move)*, and the loop
 executes — but **no generation token has come out of this engine yet.** **Retired 2026-10-16: the engine free-runs the corpus — `engine/results.md` §"the engine free-runs the corpus" is the live statement, and what follows this sentence is the record of those first two device passes.** The first two runs ended inside
 the prompt because §07.5's stop check was armed during it; that is fixed in `5e7114b`, and the token
 result is what the next device pass is for.
@@ -311,7 +311,7 @@ tools/gpu_lock.sh acquire "engine W5b GPU pass" && tools/gpu_lock.sh util
 # 0.4227 ms per 144-job plan = 2.936 us/launch at spread 1.4 %. A LARGE ndiff here (not 1/2048) means the
 # kernel's per-head reduction or its cast order is wrong on device, NOT that the pins moved. History:
 # the first two runs failed on the gate's own fixture writer, not the kernel — (the §6 cite on the next line names the frozen era's row, progress/2026-10-16/performance-status-2026-10-16.md:267; live §4 carries today's 2.967 µs/launch re-take)
-# prototype/gdn_gated_norm/results.md §7-§9, and the timing is bench/performance-status.md §6.
+# prototype/gdn_gated_norm/results.md §7-§9, and the timing is engine/performance-status.md §6.
 
 tools/gpu_lock.sh release "engine W5b GPU pass"
 ```
@@ -456,7 +456,7 @@ engine/chat.sh --summary - < notes.md                 # document on stdin
 engine/chat.sh --prompt "..." --warmup 0             # no throwaway prefill: turn 1 is the cold one
 # Drives `decode_run --session`, so weights and RequestState stay resident between turns and a turn is
 # one decode_step per token with no reload and no re-prefill. Its tok/s and TTFT are NOT ledger numbers
-# (bench/performance-status.md §6 owns clean windows); the header says so on every start. It refuses to
+# (engine/performance-status.md §6 owns clean windows); the header says so on every start. It refuses to
 # start if engine/build/decode_run is missing or tools/gpu_lock.sh is held, and it never prints a chat
 # template special as literal text — special ids come out as [248046] markers, per AGENTS.md.
 # QUIET BY DEFAULT, AND THAT IS A PROTOCOL FIX NOT A COSMETIC ONE: `session_loop` shares stdout with the
@@ -487,8 +487,8 @@ Nothing on the code side — the loop, the driver and the gate exist. What is le
 the two named deferrals:
 
 1. **Run the device pass above**, in a quiescent window, and land the result in `results.md` and
-   `bench/performance-status.md` §6 (including the first ms/token figure, which the ledger has never
-   had for the engine). **Retired 2026-10-16: device passes have run many times since, and the ledger carries the engine's ms/token rows — `bench/performance-status.md` §6 is the live statement.**
+   `engine/performance-status.md` §6 (including the first ms/token figure, which the ledger has never
+   had for the engine). **Retired 2026-10-16: device passes have run many times since, and the ledger carries the engine's ms/token rows — `engine/performance-status.md` §6 is the live statement.**
 2. `prefill.{h,cpp}` — token-at-a-time through `decode_step` is already what `gate.py` does, so this
    is a chunked/parallel prefill and nothing else. It is a throughput item, not a correctness one. **Retired 2026-10-16: `engine/prefill.{h,cpp}` exists — `engine/results.md` §P2 is the live statement.**
 3. The two levers `results.md` defers: packed projections (merges the 16-row `in_proj_a`/`in_proj_b`

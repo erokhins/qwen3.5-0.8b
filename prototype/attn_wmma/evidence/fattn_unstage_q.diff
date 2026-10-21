@@ -174,7 +174,7 @@ index 569141c..ce0e8f0 100644
 -    // `for (qr = w; qr < FATTN_MROWS; qr += nw)` — the shape the two K/V fills below use — stages 6/5/5
 -    // slots for warps 0/1/2 and leaves the other 11 slots of every stage unwritten; the score leg then
 -    // reads them as whatever LDS held, `live` is true so nothing masks them, and every such row's `l` and
--    // accumulator go non-finite (`bench/performance-status.md` §32's all-NaN red). Note what that means for
+-    // accumulator go non-finite (`progress/2026-10-21/performance-status-2026-10-21.md` §32's all-NaN red). Note what that means for
 -    // a bisect: at `FATTN_WARPS = 1` the strided loop and this loop are THE SAME LOOP, so a `WARPS=1` probe
 -    // cannot see this defect, and its green result is not evidence about the per-warp Q stage.
 -    //

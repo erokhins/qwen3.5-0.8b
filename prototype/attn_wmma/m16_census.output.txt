@@ -136,10 +136,10 @@ CTRL_OB    15323       59.86       40.84   VALU=2841  WAIT.encode-only=2770  SAL
 
 ## 6. The cost side, from measured rows only — a model with named inputs, not a measurement
   inputs, every one measured somewhere else in this tree:
-    whole-kernel bill        89.9 warp-inst/touch  (bench/performance-status.md §26 W2, counter-calibrated)
+    whole-kernel bill        89.9 warp-inst/touch  (progress/2026-10-21/performance-status-2026-10-21.md §26 W2, counter-calibrated)
     shipped pass-1 window    45 slots/touch     (prototype/attn_valu_slim/results.md §2; --calib re-reads it)
     slot->time elasticity    time ∝ slots^0.39–0.44      (D21/D22; the exponent prototype/attn_m2/results.md §8.4 also used)
-    attn / wave              264.71 ms / 763.49 ms   (bench/performance-status.md §25 and §26; attn = 34.7 % of the wave)
+    attn / wave              264.71 ms / 763.49 ms   (progress/2026-10-21/performance-status-2026-10-21.md §25 and §26; attn = 34.7 % of the wave)
     matrix headroom          ~36 µs of matrix work per wave against 257 ms of attn (D34): the
                              matrix PIPE is never the constraint here; only the geometry tax can be
   the occupiable spelling is m16_bf16gq: the score leg goes 45 -> 1.98 issue slots/touch plus 2.25

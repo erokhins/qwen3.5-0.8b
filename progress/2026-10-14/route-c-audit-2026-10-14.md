@@ -29,7 +29,7 @@ Apparatus added by this audit (both committed):
 
 Commands, exactly, with the GPU lock protocol (correctness only, **no timing taken** in this
 document — the `ms_total`/`ms_per_step` fields `decode_run` prints into its own stdout were ignored,
-per `bench/performance-status.md` §6):
+per `engine/performance-status.md` §6):
 
 ```bash
 .venv/bin/python prototype/bf16_ulp.py                     # selftest, passed

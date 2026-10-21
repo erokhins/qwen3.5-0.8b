@@ -2831,7 +2831,7 @@ longer produces — re-tracing it is a separate piece of work, not a bookkeeping
 
 **Frozen 2026-10-21: this is the ledger exactly as it stood at the moment of the 2026-10-21 prune.**
 The frozen part is the **2,828** lines above this marker, taken at HEAD `2bdea89`, byte-identical to
-`bench/performance-status.md` as it was then — a whole-file copy rather than an excerpt precisely so
+the file in `bench/` it was pruned from — a whole-file copy rather than an excerpt precisely so
 that every `path:NNN` line cite and every `§label` in `progress/` still resolves at the same
 coordinates. It contains §1–§6 as they stood on 2026-10-16 plus §7 through §60, the append-only
 record of the sixteen days of rounds that followed (the GEMM flip, the F32-seam and cast deletions,

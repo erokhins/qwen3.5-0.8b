@@ -114,7 +114,7 @@ the row/column feeder sets. `--wmma-dump` prints the derived map.
 
 The binary times nothing unless asked, and never takes `tools/gpu_lock.sh`. Every number in
 `results.md` comes from a main-agent window with zero subagents, blocking, best-of-N; the rows here
-are exactly the kind (bandwidth-bound or dispatch-bound) that `bench/performance-status.md` §6 says
+are exactly the kind (bandwidth-bound or dispatch-bound) that `engine/performance-status.md` §6 says
 do not repeat across windows. Quote a pair measured in one window, never two runs from two windows.
 
 ## Known open item
@@ -144,7 +144,7 @@ reason:
 
 - **The bill is a slope, never a division.** Each leg is timed at `--iters-lo` and `--iters-hi` and the
   clocks-per-instruction figure comes from the difference, which cancels dispatch (~2-6 us and bimodal per
-  §6 of `bench/performance-status.md`), the fragment loads, the store and first touch. The cancelled
+  §6 of `engine/performance-status.md`), the fragment loads, the store and first touch. The cancelled
   residue prints as `fixed_us_per_launch` instead of being assumed small. This is the sibling of the flat
   ISA census that billed once-per-launch addressing overhead once per token (decision D60 in
   `progress/2026-10-16/prefill-decision-log-2026-10-16.md`: flat +156 slots/token, true per-token -47).

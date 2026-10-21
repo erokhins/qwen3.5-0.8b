@@ -336,7 +336,7 @@ int resolve_gdn_loop(int want, int rows) {
 // the run is. `unroll4` is the shipping default (D33); `ship` is kept so that claim stays A/B-able from
 // one binary; `fused` is D50's knob — the fused prologue on the unroll4 walks, bit-identical, and NOT a
 // default until its in-situ A/B is read (`prototype/gdn_rec_isa/results.md` §11,
-// `bench/performance-status.md` §19).
+// `progress/2026-10-21/performance-status-2026-10-21.md` §19).
 GdnRecSpell parse_gdn_rec_spell(const std::string& name) {
     if (name == "ship") return GdnRecSpell::kShip;
     if (name == "unroll4") return GdnRecSpell::kUnroll4;

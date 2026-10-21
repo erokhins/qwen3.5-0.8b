@@ -8,7 +8,7 @@ SECTION 1  the SHIPPING engine TU (`engine/kernels_gdn.cpp`), the two forms the 
   command: .venv/bin/python prototype/gdn_rec_isa/token_bill.py \
              --asm tmp/gcc/gdn_addr/kernels_gdn-hip-amdgcn-amd-amdhsa-gfx1151.s \
              --kernels rec_fused_kernel,rec_loop_kernel --selftest --dump-addr
-  reading: flat 1374 -> 1530 (+156) is the §24 of `bench/performance-status.md` delta; per-token
+  reading: flat 1374 -> 1530 (+156) is the §24 of `progress/2026-10-21/performance-status-2026-10-21.md` delta; per-token
   1374 -> 1327 (-47) is what the loop actually costs per token once the 203 once-per-launch slots are
   taken out; the address-arithmetic column moves -3, so the +156 contains none of it.
 
@@ -154,7 +154,7 @@ unit     one token-step = one iteration of the token loop (or one launch, for a 
   per-LAUNCH straight   :   0 blocks,    0 slots   (nothing sits outside the token loop: flat == per-token)
   per-TOKEN straight    :  59 blocks,  294 slots
   walks per token       : loopA 44x8=352,  loopB 91x8=728
-  FLAT token-step bill  : 1374 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  FLAT token-step bill  : 1374 slots/wavefront     <- comparable with isa_census.py and §24 of progress/2026-10-21/performance-status-2026-10-21.md
   PER-TOKEN bill        : 1374 slots/wavefront
   ADDRESS ARITHMETIC    : 16 straight-line + 80 in walks = 96 slots = 7.0% of the per-token bill, 7.0% of the flat bill
   category rollup       : per-launch | per-token-straight | per trip of the walks
@@ -204,7 +204,7 @@ unit     one token-step = one iteration of the token loop (or one launch, for a 
   per-LAUNCH straight   :  80 blocks,  203 slots
   per-TOKEN straight    :  33 blocks,  255 slots
   walks per token       : loopA 44x8=352,  loopB 90x8=720
-  FLAT token-step bill  : 1530 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  FLAT token-step bill  : 1530 slots/wavefront     <- comparable with isa_census.py and §24 of progress/2026-10-21/performance-status-2026-10-21.md
   PER-TOKEN bill        : 1327 slots/wavefront   (flat - 203 per-launch slots)
   ADDRESS ARITHMETIC    : 13 straight-line + 80 in walks = 93 slots = 7.0% of the per-token bill, 6.1% of the flat bill
   category rollup       : per-launch | per-token-straight | per trip of the walks
@@ -252,7 +252,7 @@ unit     one token-step = one iteration of the token loop (or one launch, for a 
   per-LAUNCH straight   :  80 blocks,  190 slots
   per-TOKEN straight    :  33 blocks,  264 slots
   walks per token       : loopA 44x8=352,  loopB 90x8=720
-  FLAT token-step bill  : 1526 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  FLAT token-step bill  : 1526 slots/wavefront     <- comparable with isa_census.py and §24 of progress/2026-10-21/performance-status-2026-10-21.md
   PER-TOKEN bill        : 1336 slots/wavefront   (flat - 190 per-launch slots)
   ADDRESS ARITHMETIC    : 24 straight-line + 80 in walks = 104 slots = 7.8% of the per-token bill, 6.8% of the flat bill
   category rollup       : per-launch | per-token-straight | per trip of the walks

@@ -2,7 +2,7 @@
 
 **What this file is.** One index of every route this project has tried to make the engine faster, each with
 the mechanism it claimed, the line it had to clear, the number that decided it, and where the full write-up
-lives. It exists because the primary record — `bench/performance-status.md`, 1,149 lines frozen as
+lives. It exists because the primary record — `engine/performance-status.md`, 1,149 lines frozen as
 `progress/2026-10-16/performance-status-2026-10-16.md`, appended to ever since — records each measurement in the order it happened, so "what have we already tried, and
 why did it not work?" currently requires reading all of it. Nothing here is a new measurement: every number
 is copied from the ledger, a `results.md`, or a `bench/p9-*.md`, and every row points at its source.

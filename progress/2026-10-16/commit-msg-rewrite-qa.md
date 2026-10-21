@@ -54,7 +54,7 @@ Three deliberate, recorded deviations (no silent scope change):
 |---|---|---|
 | d903bd6d28, 58580fd61d, 07976d90cc, ac248fd47f, 7883c09963, bab9766ff0, b9e065ae8a | `performance ledger:` → `ledger:` | `ledger:` is the prefix in the brief's list, and the earlier authored rows (de5252de19, ccafece307, 9ccad93c48, 3af685fa68) already use `ledger:` for the same file. Mechanical SPLIT rows keep `performance ledger:` verbatim, so both spellings exist in the set — aligning them all one way is a one-line call for the reviewer, not mine to make silently. |
 | 32dce1e47c | `AGENTS:` added (subject said "two traps from §18 for the index") | diff-informed: `git show --stat` = `AGENTS.md` only |
-| bbec27f7fb | `bench:` added (subject said "handoff note for the next session") | diff-informed: `bench/HANDOFF-2026-10-14.md`, `bench/performance-status.md` |
+| bbec27f7fb | `bench:` added (subject said "handoff note for the next session") | diff-informed: `bench/HANDOFF-2026-10-14.md`, `engine/performance-status.md` |
 
 Nothing was marked diff-informed for reading the diff: every subject in this batch was
 self-describing; `git show --stat` was used only to confirm the area of the two rows above and to

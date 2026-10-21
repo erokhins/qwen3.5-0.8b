@@ -4,7 +4,7 @@
 Start the A10 attention geometry rewrite in /home/erokhins/erokhins_projects/qwen3.5-0.8b.
 
 Read first: prototype/attn_percost/A10-REWRITE-BRIEF.md (the plan: R1..R8 with dependencies, the R1 correction,
-and the "what would make this the wrong call" section), bench/performance-status.md §52-§54 (funding line, L-c
+and the "what would make this the wrong call" section), progress/2026-10-21/performance-status-2026-10-21.md §52-§54 (funding line, L-c
 DISPLACED, the A11 census and the abort line), A9-LONGCTX-CENSUS.md §3/§5 (traffic + wasted work), AGENTS.md.
 Confirm the current tip and engine defaults first — the ledger moves.
 

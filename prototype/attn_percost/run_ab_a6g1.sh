@@ -19,7 +19,7 @@
 #   LIVE        family <= live line AND all three ship gates <= their live lines AND the traced row improves
 #   DEAD        family > dead line OR any ship gate > its dead line
 #   UNRESOLVED  anything in between. Not shipped, not narrated (A4-BET's words, and the §47 precedent of
-#               bench/performance-status.md).
+#               engine/performance-status.md).
 # Unlike G0, G1 HAS an inert side, so A4's NULL leg is restored: `stage` (the new binary, knob unnamed) against
 # `base` must read the same milliseconds within NULL_TOL on the family row and on every ship gate, or the window
 # is unpaired and the harness refuses to print a verdict at all. Bit-identity of that side is a separate,
@@ -30,22 +30,22 @@
 # kernels are in it, so the comparison is one window, not two rulers re-taken in different weather (AGENTS: a
 # ruler re-taken in a different window is not an A/B).
 #
-# WHAT IT REFUSES TO DO (each refusal is a lesson from bench/performance-status.md §47 / §37 / §44):
+# WHAT IT REFUSES TO DO (each refusal is a lesson from progress/2026-10-21/performance-status-2026-10-21.md §47 / §37 / §44):
 #   * it does not time a binary it has not identified. CANARY A reads the NOTE BLOCKS of both LINKED binaries
 #     (base `attn_fattn_wave` 178/0/0/32768; new `attn_fattn_wave` the same and `attn_fattn_wave_u8`
 #     185/0/0/20480 — `A6-result.md` §1, re-read on the built tree in `A6-G1-impl.md` §2). CANARY B reads the
 #     launcher's own `q= lds= wf_per_cu= vgpr=` from the run that produced the milliseconds and requires them to
 #     agree with those note blocks: `lds=32768 wf_per_cu=6` on base and stage, `lds=20480 wf_per_cu=9` on u8.
-#     A side whose banner disagrees with its note block is the wrong binary (bench/performance-status.md §44's
+#     A side whose banner disagrees with its note block is the wrong binary (progress/2026-10-21/performance-status-2026-10-21.md §44's
 #     stale-build trap, and
 #     `engine/build.sh` is not bit-reproducible).
-#   * it does not time a run whose launch counts or coverage fields differ (bench/performance-status.md §41 closed
+#   * it does not time a run whose launch counts or coverage fields differ (progress/2026-10-21/performance-status-2026-10-21.md §41 closed
 #     launch count as a variable and this bet must not reopen it; `fattn_covers` does not read a staging plan).
 #   * it does not pass an empty parse: every field is `need`-checked, and PARSE_CHECK=1 colour-tests the verdict
 #     parser against fixtures GENERATED from the ratio constants in this file (`mk_a6g1_parsecheck.py`), never
 #     hand-typed — `mk_a4l1_parsecheck.py`'s history is the reason.
 #   * it does not take the wide legs through argv: one argv slot caps at MAX_ARG_STRLEN = 131,072 B, so a
-#     32,768-id prompt cannot be passed at all (bench/performance-status.md §39: shell exit 126 in 0 s, read as
+#     32,768-id prompt cannot be passed at all (progress/2026-10-21/performance-status-2026-10-21.md §39: shell exit 126 in 0 s, read as
 #     "the engine crashes at 32k").
 #     Wide legs go via --ids-file and the field count is asserted.
 #   * it does not print a verdict from an unpaired window (the NULL leg), nor from reps that disagree by more than
@@ -177,7 +177,7 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "  traced    : tools/prefill_kernel_trace.py --waves 8 -- $TRACE_ARGS   (base and u8, REPS=$REPS)"
     echo "              then tools/trace_phase_split.py --calibrate attn_prep --per-pass 48 --tokens $W"
     echo "  wide      : REPS_WIDE=$REPS_WIDE widths [$WIDE_WIDTHS] via --ids-file (never argv: one argv slot caps at"
-    echo "              131072 B — bench/performance-status.md §39)"
+    echo "              131072 B — progress/2026-10-21/performance-status-2026-10-21.md §39)"
     for WID in $WIDE_WIDTHS; do echo "    $WID: $BIN_NEW --model $MODEL --ids-file $OUT/ids$WID.csv --cap $WID $ARGS$QSTAGE_ARG --out $OUT/wide${WID}_u8_R"; done
     echo "  verdict   : LIVE needs family<=$RAT_A_LIVE and walls<=$RAT_W_LIVE/$RAT_16_LIVE/$RAT_32_LIVE and traced<=$RAT_AT_LIVE;"
     echo "              DEAD if family>$RAT_A_DEAD or a ship gate > its dead line; otherwise UNRESOLVED (not shipped)."
@@ -276,7 +276,7 @@ if [ "${SUMMARIZE:-0}" != "1" ]; then
         echo "$BU" | grep -q "q=unstaged8 $(echo "$BAN_U8_WANT" | cut -d' ' -f1) $(echo "$BAN_U8_WANT" | cut -d' ' -f2) vgpr=$(echo "$NU" | cut -d' ' -f1)" \
             || fail "canary B: rep=$R u8 banner [$BU], want q=unstaged8 $BAN_U8_WANT vgpr=$(echo "$NU" | cut -d' ' -f1) (A6-result.md §1's compile reading). Either the build is stale or the driver refused 20,480 B; in both cases the ms below is not a residency measurement."
         # --- CANARY C: observed launches and the plan agree, and are the SAME on all three sides -----------
-        #   (bench/performance-status.md §41 closed launch count as a variable; this bet may not reopen it)
+        #   (progress/2026-10-21/performance-status-2026-10-21.md §41 closed launch count as a variable; this bet may not reopen it)
         for SIDE in base stage u8; do
             LOG="$OUT/${SIDE}_$R.log"
             GOT=$(grep -h "WAVE gran=stage family=attn " "$LOG" | sed -E 's/.* launches=([0-9]+).*/\1/' | tail -1)
@@ -296,7 +296,7 @@ if [ "${SUMMARIZE:-0}" != "1" ]; then
         done
         for SIDE in stage u8; do
             cmp -s "$OUT/base_$R.launches" "$OUT/${SIDE}_$R.launches" \
-                || fail "canary C: rep=$R $SIDE submits $(cat "$OUT/${SIDE}_$R.launches") attn launches against base's $(cat "$OUT/base_$R.launches"). G1 changes which LDS buffer an operand lives in, not how many launches a layer submits; a launch-count move means something else changed too, and this bet may not move launches (bench/performance-status.md §41)."
+                || fail "canary C: rep=$R $SIDE submits $(cat "$OUT/${SIDE}_$R.launches") attn launches against base's $(cat "$OUT/base_$R.launches"). G1 changes which LDS buffer an operand lives in, not how many launches a layer submits; a launch-count move means something else changed too, and this bet may not move launches (progress/2026-10-21/performance-status-2026-10-21.md §41)."
             cmp -s "$OUT/base_$R.fields" "$OUT/${SIDE}_$R.fields" \
                 || fail "canary C: rep=$R $SIDE differs from base in the form's coverage fields: $(paste -d'/' "$OUT/base_$R.fields" "$OUT/${SIDE}_$R.fields" | tr '\n' ' '). The coverage predicate does not read a staging plan, so this is a ROUTING change and the milliseconds below would be comparing different rows."
         done
@@ -326,7 +326,7 @@ if [ "${SUMMARIZE:-0}" != "1" ]; then
         done
     done
 
-    # --- the wide legs, through --ids-file (bench/performance-status.md §39) -------------------------------
+    # --- the wide legs, through --ids-file (progress/2026-10-21/performance-status-2026-10-21.md §39) -------------------------------
     for WID in $WIDE_WIDTHS; do
         ids_file_of "$WID" "$OUT/ids$WID.csv"
         for R in $(seq 1 "$REPS_WIDE"); do

@@ -73,7 +73,7 @@
 //
 // WHY THE BILL IS A SLOPE, NOT A DIVISION
 // There is no single-point mode in this tool. A launch carries a fixed residue the leg is not about —
-// dispatch (~2-6 us here, and bimodal: `bench/performance-status.md` §6), the fragment loads, the store,
+// dispatch (~2-6 us here, and bimodal: `engine/performance-status.md` §6), the fragment loads, the store,
 // and first touch (`devices/strix-halo-unified-memory.md`: the first GPU pass over fresh pages runs ~35
 // GB/s, 7x slow) — and none of it depends on `--iters`. Dividing one burst by its iteration count charges
 // all of that residue to the instruction, which is the same mistake as the flat per-kernel ISA census that
@@ -455,7 +455,7 @@ int main(int argc, char** argv) {
         // ---- the two-point burst, which is the whole measurement.
         //
         // WHY TWO POINTS AND NEVER ONE. A launch carries a fixed residue the leg is not about: dispatch
-        // (~2-6 us on this box, and bimodal — `bench/performance-status.md` §6), the A/B fragment loads,
+        // (~2-6 us on this box, and bimodal — `engine/performance-status.md` §6), the A/B fragment loads,
         // the store, and the first-touch penalty (`devices/strix-halo-unified-memory.md`: the first GPU
         // pass over fresh pages runs ~35 GB/s, 7x slow). At `iters = 128` the timed body is a few
         // microseconds, so a single-point `ms / iters` would be dominated by exactly that residue and
@@ -475,7 +475,7 @@ int main(int argc, char** argv) {
             double best = 1e30;
             for (int r = 0; r < c.reps; ++r) {
                 // steady_clock over a burst of launches: `hipEventElapsedTime` returns exactly 0.000 ms
-                // at these sizes (bench/performance-status.md §6), and best-of-N because the box is not
+                // at these sizes (engine/performance-status.md §6), and best-of-N because the box is not
                 // pinned (prototype/README.md).
                 const auto t0 = std::chrono::steady_clock::now();
                 for (int L = 0; L < c.launches; ++L) leg.launch(dfrag, dout, iters, c.blocks, c.threads);

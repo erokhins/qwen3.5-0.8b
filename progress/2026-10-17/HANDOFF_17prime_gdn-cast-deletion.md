@@ -214,7 +214,7 @@ that no longer exists, and the supervisor wants it in its own cleanly-revertible
    115-cast step and wants a marker, not a rewrite). **:571 is the one that must be marked rather than
    edited out**: it books "the 115 cast launches — upper bound −0.43 ms" as an open item, and this
    commit takes 18 launches/token and 144/wave-body of it. Say so there, with the commit id.
-3. `bench/performance-status.md:92,618,659`, `devices/strix-halo-mixed-traffic.md:12,45,384,490` —
+3. `progress/2026-10-21/performance-status-2026-10-21.md:92,618,659`, `devices/strix-halo-mixed-traffic.md:12,45,384,490` —
    ledger/device docs; supervisor said those are his, with a dated correction line naming the commit.
 4. `tools/step_traffic_model.py:64,107-109,126-128,277` — the `LAUNCHES` dict and the two cast byte
    rows (the packed term is `ng * (qkv + 2*vh)`, read at 2 B and written at 4 B — it drops out
@@ -255,7 +255,7 @@ still testable.
    `engine/results.md:135,140,142,147,153,217,259,320,323,327,518,523,543,571` all carry 424/115 as
    live claims; some are historical (the gap-accounting table at :518-526 prices a 115-cast step and
    should be marked as such rather than rewritten).
-4. **`bench/performance-status.md:618` ("The per-token cast bill stays **115 on both routes**") and
+4. **`progress/2026-10-21/performance-status-2026-10-21.md:618` ("The per-token cast bill stays **115 on both routes**") and
    :659 ("a decode step's bill is **424 on both routes**")**, plus `:92`'s `launches_per_step = 424`:
    ledger lines. Not mine to touch, and per AGENTS the ledger's frozen sections need the user's words.
    :618 is a 4.1-a claim that is now false-for-a-good-reason, so it wants a correction line, not a
@@ -367,7 +367,7 @@ in one window). `tools/gpu_lock.sh status` = **free**; no timing taken; nothing 
    `tmp/gcc/w-new-dec64f-lt`, `tmp/gcc/g2-old-lt`, `tmp/gcc/g2-old-hand` (commands in §6), plus the
    `prototype/gdn_decode/check.py` re-gate and the `gdn_conv`/`cast` paired A/B that decides §5-B.
 2. If that A/B is a win: the doc commits in §5's list — README/results.md (mark :571's open item as
-   partly taken, with the commit id), `bench/performance-status.md:92,618,659` and
+   partly taken, with the commit id), `progress/2026-10-21/performance-status-2026-10-21.md:92,618,659` and
    `devices/strix-halo-mixed-traffic.md:12,45,384,490` (dated correction lines, parent's words),
    `tools/step_traffic_model.py` byte rows, `tools/instep_family_budget.py:14,214`,
    `tools/prefill_gemm_shapes.py:206`. None of it is done.

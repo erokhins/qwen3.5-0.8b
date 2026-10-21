@@ -169,7 +169,7 @@ print, in its own log:
   submitted** (`fattn_echo`’s `launched` pointer, `engine/kernels_attn.cpp`), not off a name typed beside the
   print. If those two fields agreed, the identity below would be one run compared with itself;
 - `vgpr=185` on the u8 side and `vgpr=178` on the staged sides, each agreeing with the **note block of the linked
-  binary** (CANARY 1) — the stale-build guard recorded in `bench/performance-status.md` §44, since
+  binary** (CANARY 1) — the stale-build guard recorded in `progress/2026-10-21/performance-status-2026-10-21.md` §44, since
   `engine/build.sh` is not bit-reproducible and every check compiled into a binary agrees with itself;
 - `fattn_rows=` **strictly greater than zero** on every side (128/128, 512/512, 512/512): a wave of only one-pass
   rows launches no WMMA kernel, and byte identity over rows this kernel never wrote would prove nothing;

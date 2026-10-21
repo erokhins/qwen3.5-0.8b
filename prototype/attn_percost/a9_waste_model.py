@@ -247,7 +247,7 @@ def split_caps(width, caps):
     contiguous slices and every lane is visited once (`span = ceil(nrow / s_row)` grows as `s_row` shrinks,
     engine/attn_fattn_kernels.h:475-479). What moves is (a) the partial round-trip, one 1,032 B slot per
     (row, head, lane block) less, and (b) the block count `8 x s_row x rtiles` against the machine's
-    resident-block capacity (40 CU x 3 blocks at the shipped 20,480 B LDS, `bench/performance-status.md` §48),
+    resident-block capacity (40 CU x 3 blocks at the shipped 20,480 B LDS, `progress/2026-10-21/performance-status-2026-10-21.md` §48),
     which is what sets how many independent block-rounds the scheduler has to overlap.
 
     `wall_rounds` is the widest body's `ceil(blocks / capacity) x rounds_per_block`: the coarse model of how
@@ -316,7 +316,7 @@ def residency_ladder(warps, threads_per_warp=32, qstage_bytes_per_warp=4096, kv_
     """LDS-bound blocks/CU and wf/CU for a warps-per-block choice, POST-G1 (Q un-staged).
 
     The ladder in `prototype/attn_wmma/fattn_regfile_ladder.md` §1 (`wf/CU(NW) = NW*floor(8/(NW+1))`, ceiling
-    7) was derived while Q was staged at 8,192 B/warp. G1 moved Q to global (`bench/performance-status.md`
+    7) was derived while Q was staged at 8,192 B/warp. G1 moved Q to global (`engine/performance-status.md`
     §48), so the per-warp stage is now the 4,096 B epilogue transpose and the ladder is a different function.
     LDS/CU 65,536 B and 40 CU / 80 SIMD are KFD facts (same §, and tools/trace_phase_split.py:kfd_topology).
     Never hipGetDeviceProperties, never clang's constant `Occupancy [waves/SIMD]` (AGENTS trap row).

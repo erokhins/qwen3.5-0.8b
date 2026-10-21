@@ -8,7 +8,7 @@
     tools/prefill_kernel_trace.py --csv tmp/kt4096/*_kernel_trace.csv --waves 8   # re-read, no device
     tools/gpu_lock.sh release <tag>
 
-WHY THIS EXISTS AND WHAT ONLY IT CAN SEE. `bench/performance-status.md` §3 splits a prefill wave into
+WHY THIS EXISTS AND WHAT ONLY IT CAN SEE. `engine/performance-status.md` §3 splits a prefill wave into
 families with the engine's own stage clock, and that clock is family-scoped: the time between two kernels
 lands inside whichever family's window contains it, which is why its completeness account
 (`ungaged_ms=0.0228` of 243.17 ms) says nothing about whether the GPU was ever idle. `gpu_busy_percent`

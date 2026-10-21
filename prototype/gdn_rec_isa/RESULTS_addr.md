@@ -1,7 +1,7 @@
 # Address arithmetic in the looped GDN kernel — what the bill actually contains
 
 Compile-only package. Nothing in this file came from a timing run, and no number here belongs in
-`bench/performance-status.md`. Device commands are handed over in `run_screen_recptr.sh`, which its author
+`engine/performance-status.md`. Device commands are handed over in `run_screen_recptr.sh`, which its author
 did not run.
 
 Scope: the looped GDN recurrence at `211eb95` HEAD — `engine/gdn_rec_loop_kernels.h::rec_loop_kernel` and
@@ -11,7 +11,7 @@ new `recptr_kernel` this package adds. Inputs are the `--save-temps` device list
 
 ## 1. The shipped per-token bill, re-derived
 
-From the engine's own TU listing, with `prototype/gdn_rec_isa/isa_census.py` (the census `bench/performance-status.md` §24
+From the engine's own TU listing, with `prototype/gdn_rec_isa/isa_census.py` (the census `progress/2026-10-21/performance-status-2026-10-21.md` §24
 rows were taken with):
 
 | kernel | form | flat slots / token-step |
@@ -19,7 +19,7 @@ rows were taken with):
 | `rec_fused_kernel` | one token per launch | **1,374** |
 | `rec_loop_kernel` | `--gdn-loop` span inside one launch | **1,530** |
 
-Flat delta **+156 slots/token-step**, which reproduces the §24 of `bench/performance-status.md`/D55 figure. The brief's line
+Flat delta **+156 slots/token-step**, which reproduces the §24 of `progress/2026-10-21/performance-status-2026-10-21.md`/D55 figure. The brief's line
 `cast=97 other=20 total=406` is **not** this census and cannot be reconciled with it: that triple is the
 `LaunchCounts` launch-plan bill printed by `decode_run` (`LaunchCounts::describe()`), whose units are
 *kernels launched per decode step*, classified cast/non-cast. The two instruments count different things
@@ -41,7 +41,7 @@ dominator computation, and keeps `isa_census.py`'s walk finder so the flat total
 So the looped form is **47 slots/token cheaper** than the per-token form on the honest per-token
 accounting: the +156 is an artifact of billing the loop's 203 once-per-launch slots (kernarg loads, the
 shuffle exit-guard chain, the `tokens<=0` path) at ×1 per token. The instruction-stream half of the loop was
-never a cost. That is arithmetic on the listing, not a measurement, and it does not contradict §24 of `bench/performance-status.md` '*time*'
+never a cost. That is arithmetic on the listing, not a measurement, and it does not contradict §24 of `progress/2026-10-21/performance-status-2026-10-21.md` '*time*'
 result — the looped form's measured win came from submission count, which is what D53/D55 measured.
 
 ## 3. How much of the bill is address arithmetic: 93 slots, not 156
@@ -132,7 +132,7 @@ does not authorise.
 
 ## 5. Verdict, and what would change it
 
-Against §24 of `bench/performance-status.md` 's own elasticity (−156 slots/token bought 6.7 pp of wave time, i.e. ≈0.043 pp per slot-step),
+Against §24 of `progress/2026-10-21/performance-status-2026-10-21.md` 's own elasticity (−156 slots/token bought 6.7 pp of wave time, i.e. ≈0.043 pp per slot-step),
 −4 slots/token is ≈0.17 pp of wave time ≈ 0.5% of `gdn_rec` — under any refusal bar, and the per-token
 component went the wrong way. The address spelling is therefore **not a funded lever**: the premise that
 ~156 slots/token of the looped kernel is address arithmetic does not survive the listing, and the residual

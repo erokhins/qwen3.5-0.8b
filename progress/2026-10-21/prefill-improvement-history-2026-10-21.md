@@ -4,7 +4,7 @@
 prefill improvement** on this engine (`Qwen/Qwen3.5-0.8B`, text-only, Strix Halo `gfx1151`), with the
 mechanism that made each one fast, the numbers that measured it, the admission that made it shippable, and
 the pointer to the raw evidence. It is a synthesis, not a new measurement: every figure below is copied from
-`bench/performance-status.md` (the live ledger), its frozen predecessor
+`engine/performance-status.md` (the live ledger), its frozen predecessor
 `progress/2026-10-16/performance-status-2026-10-16.md`, the decision log
 `progress/2026-10-16/prefill-decision-log-2026-10-16.md`, a `prototype/<op>/results.md`, or a commit message,
 and each entry names which.
@@ -879,7 +879,7 @@ work, not bookkeeping.
 
 | topic | where the raw record lives |
 |---|---|
-| the live measurement ledger, §1–§60 | `bench/performance-status.md` (each section named above by number) |
+| the live measurement ledger, §1–§60 | `engine/performance-status.md` (each section named above by number) |
 | the frozen pre-2026-10-16 ledger (P8, Q6, Q10, route (c), route A, tile flip) | `progress/2026-10-16/performance-status-2026-10-16.md` |
 | route index with verdicts, kill lines and the 2026-10-14 ladder | `progress/2026-10-14/speedup-routes-2026-10-14.md` |
 | the prefill decision log D1–D64 | `progress/2026-10-16/prefill-decision-log-2026-10-16.md` |

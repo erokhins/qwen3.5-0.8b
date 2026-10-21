@@ -173,7 +173,7 @@ __global__ void proj_gemv(const hip_bfloat16* __restrict__ W, const void* __rest
  * (4 x 4 KiB at IN=1024, 2 x 8 KiB at IN=2048; the device reports 64 KiB of LDS, and staying at
  * 16 KiB keeps several blocks resident per CU). The launcher picks TPB; the kernel sees one.
  * TPB is unmeasured — same as the MLP's — and `--tpb` exists so the main agent's timing pass can
- * sweep it without a rebuild (bench/performance-status.md §6: measurements are the main agent's).
+ * sweep it without a rebuild (engine/performance-status.md §6: measurements are the main agent's).
  */
 template <int IN, int TPB, bool PACK_X>
 __global__ void proj_gemv_tokens(const hip_bfloat16* __restrict__ W, const void* __restrict__ x,

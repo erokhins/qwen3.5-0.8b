@@ -1,6 +1,6 @@
 # HANDOFF — conv read: give `conv_kernel` a coalesced read of its BF16 operands
 
-Task: recover the ~6.5 ms that `62b73e9` gave back (§13 of `bench/performance-status.md`: `gdn_conv`
+Task: recover the ~6.5 ms that `62b73e9` gave back (§13 of `progress/2026-10-21/performance-status-2026-10-21.md`: `gdn_conv`
 19.9876 → 26.4833 ms at 4096 lanes, +32.5 %, against a predicted −22 %). Base `9e2d19e`. **No commit
 made, nothing staged.** Three source files modified; everything else is scratch under `tmp/conv_isa/`.
 

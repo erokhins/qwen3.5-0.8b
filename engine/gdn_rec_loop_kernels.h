@@ -7,7 +7,7 @@
  * addresses, same per-token arithmetic in the same order. The ONLY thing this form changes is how many
  * token-steps one submission carries, which is what makes it a launch-structure item and not a
  * numerics one (D53, `progress/2026-10-16/prefill-decision-log-2026-10-16.md`; the screen is
- * `bench/performance-status.md` §23; the port order — knob first, `--gdn-loop`, default 1 — is D54).
+ * `progress/2026-10-21/performance-status-2026-10-21.md` §23; the port order — knob first, `--gdn-loop`, default 1 — is D54).
  *
  * WHAT IS TRANSCRIBED FROM WHERE, and the rule that comes with it. Bit-identity is owed to the shipped
  * SOURCE TEXT, not to the algebra, so the loop body is `engine/gdn_rec_fused_kernels.h::rec_fused_kernel`
@@ -25,7 +25,7 @@
  * THE CENSUS AND SCREEN FIGURES, recorded so a future LLVM bump that quietly changes the loop is caught
  * against numbers and not against impressions (`prototype/gdn_rec_isa/isa_census.py` and
  * `-Rpass-analysis=kernel-resource-usage` on the listing of the binary that was timed; the screen ran
- * `prototype/gdn_rec_isa/gdn_rec_isa --modes rec2c4,recloop`, `bench/performance-status.md` §23):
+ * `prototype/gdn_rec_isa/gdn_rec_isa --modes rec2c4,recloop`, `progress/2026-10-21/performance-status-2026-10-21.md` §23):
  *
  *   bill            1,530 slots/token-step against `rec_fused_kernel`'s 1,374 — +156, +11.4 %. It is
  *                   NOT state math: both kernels show the same walk shapes 16x8 / 16x8 (the unroll

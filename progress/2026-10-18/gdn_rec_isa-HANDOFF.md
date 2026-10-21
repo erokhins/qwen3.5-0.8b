@@ -148,7 +148,7 @@ Both CONTROL lines must read IDENTICAL at 1523 vs 1523, and the DELTA section mu
 
 **3.4 The falsifier — MODE 0 vs MODE 2 in one window, still inside the same lock hold.** This is a
 timing; the main agent takes it, and only the main agent may put a number from it into
-`bench/performance-status.md`.
+`engine/performance-status.md`.
 
 ```bash
 ./prototype/gdn_rec_isa/gdn_rec_isa --modes rec0,rec2 --burst 16 --reps 5 \
@@ -165,7 +165,7 @@ whole 128-token sequence (2,048 launches per timed sample), steady_clock, one sy
 restored before each sample so every MODE walks the trajectory that was gated; `ms_per_launch` is the
 number the ledger bills the family at (6.8-6.9 µs today), so a reader can check the harness's own MODE
 0 against it. Quote the pair (`best_rec0_ms`, `best_rec2_ms`), state the spread across reps, and record
-`util` — the ledger's rule (`bench/performance-status.md` §6) is that a short-prompt row means nothing
+`util` — the ledger's rule (`engine/performance-status.md` §6) is that a short-prompt row means nothing
 unless both sides were measured in one window, which is why the burst alternates MODEs inside each rep
 rather than looping one MODE and then the other.
 

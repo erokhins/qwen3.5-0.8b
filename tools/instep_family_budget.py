@@ -4,7 +4,7 @@
 CPU-only arithmetic. It takes NO timing and touches no device: every number it reads is already
 committed — the stage-clock family rows come from a `decode_run --stage-clock` log that someone
 else ran under the GPU lock, the shapes come from `engine/state.h`, and the isolated-burst and
-probe figures are the ones `bench/performance-status.md` already carries. What this file adds is
+probe figures are the ones `engine/performance-status.md` already carries. What this file adds is
 the *comparison* of those three sources, which is what Q7 needs to decide between three candidate
 explanations for the residue:
 
@@ -30,7 +30,7 @@ The tests it prints, and the shape of the answer each one gives:
 
 Usage:
     tools/instep_family_budget.py tmp/q61/stage128_1.log [more logs...]
-Multiple logs of the same geometry are median-merged, which is how `bench/performance-status.md`
+Multiple logs of the same geometry are median-merged, which is how `engine/performance-status.md`
 takes its stage rows (three runs, median).
 """
 
@@ -44,7 +44,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # The measured LPDDR5x ceiling of this box (`devices/strix-halo-memory-bandwidth.md`, quoted by
-# `bench/performance-status.md` as "the 237 GB/s probe"). Every roofline here is bytes/this.
+# `engine/performance-status.md` as "the 237 GB/s probe"). Every roofline here is bytes/this.
 PROBE_GBS = 237.0
 
 # Isolated-burst cost per token per family, as committed in the frozen ledger's Q6.1 table

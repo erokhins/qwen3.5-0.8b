@@ -5,7 +5,7 @@
  * NOTHING moves state between them.
  *
  * WHY THIS MAP AND NOT ANOTHER. `prototype/gdn_walk/G3-llama-kernel.md` read the kernel §38 of
- * `bench/performance-status.md` had only ever inferred from a profiler
+ * `engine/performance-status.md` had only ever inferred from a profiler
  * (`engines/llama.cpp/ggml/src/ggml-cuda/gated_delta_net.cu`, `gdn.cu:203-204`), and found that the one
  * axis no earlier bet had touched is state elements per thread: llama runs 128 blocks x 128 threads =
  * 512 wavefronts per launch = 6.40 wf/SIMD against our 0.80, at 16 elements per thread, and its shard

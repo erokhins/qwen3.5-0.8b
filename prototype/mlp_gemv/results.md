@@ -11,7 +11,7 @@ F4's aggregate bands were re-set from measurement since the first version of thi
 re-run after the band moved; all six are still rejected where they are declared.
 
 This is the second third of the token's bytes: the MLP streams 24 × 22.02 MiB = **0.5285 GB per
-token** (§03 / `bench/performance-status.md`), second only to `lm_head` (0.5085 GB) and well
+token** (§03 / `engine/performance-status.md`), second only to `lm_head` (0.5085 GB) and well
 ahead of the GDN state traffic.
 
 ## What runs
@@ -328,7 +328,7 @@ consistent with `down_proj` issuing only 128 blocks (1024 rows / 8) across 40 CU
 `lm_head_gemv`'s 31040 blocks. Candidate follow-ups, in the order I would try them: keep `x`
 packed in shared as BF16 instead of unpacked F32 (halves the LDS read to global ratio, which is
 2:1 for `down`), split long rows across two wavefronts, or fold the residual add in. Not
-measured, recorded as candidates. The frozen ledger's §5 item 5 (progress/2026-10-16/performance-status-2026-10-16.md:240) owned the follow-up; the live `bench/performance-status.md` §4 now carries its answer — at the 528 MB window and the `contig` walk the same kernels reach 98 % of probe, so 84 % was never this box's ceiling for the shape.
+measured, recorded as candidates. The frozen ledger's §5 item 5 (progress/2026-10-16/performance-status-2026-10-16.md:240) owned the follow-up; the live `engine/performance-status.md` §4 now carries its answer — at the 528 MB window and the `contig` walk the same kernels reach 98 % of probe, so 84 % was never this box's ceiling for the shape.
 
 Launch cost, for the ledger: 2 launches per layer × 24 = 48/token ≈ 0.089 ms at the 1.85 µs
 floor, 3.4 % of this op's time. A split gate/up/down version would pay 72.
@@ -444,7 +444,7 @@ caught where the bug lives and nowhere else, at `rows=1`, unchanged from §"Nega
 What this does **not** claim: that the batched form is fast. The weight-traffic argument is
 arithmetic (22 MiB per layer ÷ `TPB` instead of × 1), the x/L2 traffic is the same shape as the
 per-token path's, and whether the GPU turns the first into time is a measurement — and a measurement
-of a kernel this wide needs the box to itself, which is bench/performance-status.md §6's to take,
+of a kernel this wide needs the box to itself, which is engine/performance-status.md §6's to take,
 not a worker's.
 
 ## Q10: the gate/up weight walk, spelled twice — `--mapping interleave|contig`
@@ -531,4 +531,4 @@ indistinguishable from a mis-typed one. `run.py` enforces the same rule.
 What this does **not** claim: that `contig` is faster. Every number above is a comparison of bits, and the
 warm table under §Performance is a cache ranking that this change cannot be judged with. The A/B rows,
 their thresholds and their null bands are pre-registered in `engine/results.md` §Q10 and belong to the
-main agent's exclusive window (`bench/performance-status.md` §6).
+main agent's exclusive window (`engine/performance-status.md` §6).

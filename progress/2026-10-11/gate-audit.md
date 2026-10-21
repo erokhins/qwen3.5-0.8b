@@ -223,7 +223,7 @@ verdict has a history worth knowing before trusting it: the first two attempts f
 gate's own fixture writer numeric-cast `z` instead of bitcasting it — which is why the writer now
 self-verifies, and why this PASS is quoted with its provenance. Write-up:
 `prototype/gdn_gated_norm/results.md` §9 (the pass), §7–§8 (the failures). Timing
-(`2.936 µs/launch`, spread 1.4 %, ≈0.053 ms/token) is the frozen ledger's, progress/2026-10-16/performance-status-2026-10-16.md:267; `bench/performance-status.md` §4 carries the 2026-10-16 re-take at 2.967 µs/launch, spread 0.8 %.
+(`2.936 µs/launch`, spread 1.4 %, ≈0.053 ms/token) is the frozen ledger's, progress/2026-10-16/performance-status-2026-10-16.md:267; `engine/performance-status.md` §4 carries the 2026-10-16 re-take at 2.967 µs/launch, spread 0.8 %.
 
 ## `engine/weights_contract.py` — the engine's shape claims, audited against the shard (CPU)
 

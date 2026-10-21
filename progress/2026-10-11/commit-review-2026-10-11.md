@@ -295,6 +295,6 @@ after a PASS, so the doc and the tool cannot drift. Run row 8 (or row 5, which s
 | 11 | `prototype/lm_head_gemv/build.sh && .venv/bin/python prototype/lm_head_gemv/run.py` | PASS, ≈2.105 ms / 242.1 GB/s (102 % of the 237 GB/s read probe) | untouched by this scrub, but it is the biggest single line in the token budget. `run.py` fails an impossible bandwidth number by design, and the fixture trap in §10.5 (the bare `pre_final_hidden.npy`/`logits_last.npy` names do **not** pair) is why the run takes its pins by path |
 | 12 | `prototype/attn_decode/build.sh && .venv/bin/python prototype/attn_decode/run.py` | PASS | untouched by this scrub; run only to keep the ledger current |
 
-After 3–11, the rows to update from the results — not before: `bench/performance-status.md`'s two
+After 3–11, the rows to update from the results — not before: `engine/performance-status.md`'s two
 `gdn_decode` rows (0.062 ms/918 GB/s, 1.344 ms/255 GB/s), `progress/2026-10-11/gate-audit.md` G2's device-gate line,
 and `engine/results.md`'s E1/E2 blocks (written in `88193ef`, still `NOT RUN AS OF THIS COMMIT`).

@@ -11,7 +11,7 @@
 # `engine/attn_fattn_kernels.h`, `prototype/attn_decode/attn_decode_kernels.h`) in its own scratch directory,
 # with `-I$side` ahead of `-I$REPO` so the quote-includes resolve to the copies. `engine/` is never written to.
 # The `base` side is an unpatched copy and doubles as the behavioural canary: if `base` does not reproduce the
-# shipped note block (178 / 0 / 0 / 32,768 — `bench/performance-status.md` §33's banner, read back by
+# shipped note block (178 / 0 / 0 / 32,768 — `progress/2026-10-21/performance-status-2026-10-21.md` §33's banner, read back by
 # `prototype/attn_wmma/E1-result.md` §1), then the harness changed the code and every delta below is a harness
 # artefact rather than a result.
 #

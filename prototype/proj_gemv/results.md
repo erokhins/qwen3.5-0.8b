@@ -250,7 +250,7 @@ tile instead of once per token — the family's only bandwidth lever, since the 
 shape-limited (`k_proj`/`v_proj` 39–40 % of the probe at 64 blocks, `in_proj_a`/`b` at 5 %, the table
 above). `TPB` is bounded by shared memory, not registers: the launcher picks 4 at `IN = 1024` and 2 at
 `IN = 2048`, both 16 KiB/block, the same budget `mlp_gemv` settled on. **`TPB` is not measured** —
-`--tpb` exists so the main agent's timing pass can sweep it (bench/performance-status.md §6), and no
+`--tpb` exists so the main agent's timing pass can sweep it (engine/performance-status.md §6), and no
 duration appears anywhere in this section.
 
 One kernel, not two. `engine/kernels_proj.cpp` instantiates the tile form at **every** width,

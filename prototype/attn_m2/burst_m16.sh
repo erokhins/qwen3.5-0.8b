@@ -22,7 +22,7 @@
 #   3. admit first:  .venv/bin/python prototype/attn_m2/gate_m16.py device   # 2 s, no timing
 #      The harness itself also refuses to time a red admission ("NO-TIMING: admission is red"), but it
 #      cannot check what it was never asked to check, so run the gate anyway.
-#   4. a short-prompt row is dispatch-bimodal on this box (bench/performance-status.md §6): quote a PAIR,
+#   4. a short-prompt row is dispatch-bimodal on this box (engine/performance-status.md §6): quote a PAIR,
 #      state the spread, and let the long-context row carry the headline.
 #
 # USAGE

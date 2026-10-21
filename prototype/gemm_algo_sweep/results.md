@@ -208,7 +208,7 @@ per-shape algo table. **No hand WMMA GEMM is required to collect it**, and none 
 strength of the 1.4–1.6× ceiling while this 1.17× sits unbuilt.
 
 **One gap left open on purpose.** The ledger's `GROUP matmul_ms` is 70.30 ms at a 1024-lane wave
-(`bench/performance-status.md` §3, 28.6 % of 245.73 ms), while this 150-call mix predicts 2 × 18.67 =
+(`engine/performance-status.md` §3, 28.6 % of 245.73 ms), while this 150-call mix predicts 2 × 18.67 =
 37.3 ms at that width. The ledger's `GROUP` therefore contains library time beyond these 150 calls —
 draft-layer projections, or a family attribution difference — and until that is reconciled the honest
 statement is that the algo route is **worth at least 0.9–2.0 % of a 4096-lane wave and possibly closer to

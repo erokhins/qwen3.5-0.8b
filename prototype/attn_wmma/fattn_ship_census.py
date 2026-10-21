@@ -258,7 +258,7 @@ def geometry(text=None, op=None):
         g[name] = define_value(src, name, g)
     # THE WAVEFRONT WIDTH, out of the header's own `static_assert(FATTN_THREADS == 32 * FATTN_WARPS)` rather
     # than typed here: that line is the source stating that threads and warps are one fact, so the census
-    # reads the statement instead of restating it, and mirrors the assert (bench/performance-status.md 34).
+    # reads the statement instead of restating it, and mirrors the assert (engine/performance-status.md 34).
     m = re.search(r"static_assert\(FATTN_THREADS == (\d+) \* FATTN_WARPS", src)
     assert m, ("no `static_assert(FATTN_THREADS == <lanes> * FATTN_WARPS)` in %s: the census prices warps, "
                "so it has to read the wavefront width from the source that asserts it rather than assume 32"
@@ -270,7 +270,7 @@ def geometry(text=None, op=None):
         "static_assert would refuse this source too)"
         % (g["FATTN_THREADS"], g["FATTN_WARPS"], g["warp_lanes"]))
     g["one_warp_per_block"] = g["FATTN_THREADS"] == g["warp_lanes"]
-    # THE LAUNCHER AND THE KERNEL, ONE FACT (bench/performance-status.md 34: a geometry fact in two headers can
+    # THE LAUNCHER AND THE KERNEL, ONE FACT (engine/performance-status.md 34: a geometry fact in two headers can
     # be committed in one of them, and no single-file review sees the missing half). `fattn_rtiles_of` counts
     # blocks of FATTN_ROWS_PER_BLOCK rows in the OP header; the kernel carries FATTN_WARPS row-blocks of
     # FATTN_MROWS rows. The kernel static_asserts the two are equal; so does this census, because the census is
@@ -383,7 +383,7 @@ def geometry(text=None, op=None):
     g["stage_row_sites"] = len(re.findall(r"^\s*fattn_stage_row\(", body, re.M))
     g["global_stage_fills"] = g["stage_row_sites"] + 1
     # THE Q OPERAND'S SOURCE — the one geometric fact about this form that is not a loop bound, and the reason
-    # this census was left red by the Q un-staging (bench/performance-status.md §31). The two spellings move two
+    # this census was left red by the Q un-staging (progress/2026-10-21/performance-status-2026-10-21.md §31). The two spellings move two
     # traffic classes in OPPOSITE directions:
     #   staged (placement (B)) — `fattn_load_tile(&s_q[...])`: the operand's bytes are LDS reads, and a
     #                            `fattn_stage_row` fills the stage once per launch (16 B global + 16 B LDS).
@@ -794,7 +794,7 @@ def selftest(asm_text):
     base = derive(g)
     # Each case is a list of edits to the kernel header and, where the fact is shared, to the op header. The warp
     # count IS a two-header fact now (`FATTN_WARPS` here, `FATTN_WARPS_PER_BLOCK` there, and 34 of
-    # bench/performance-status.md is what happens when one half moves alone), so the cases below move both halves
+    # engine/performance-status.md is what happens when one half moves alone), so the cases below move both halves
     # the way a real change would — and one case keeps the asymmetry on purpose to check the census refuses it.
     K_FILL = "            fattn_stage_row(&s_kv[fattn_kv_addr(slot, 0)],"
     # (what, edits to engine header, edits to op header, terms that MUST move, terms that MUST NOT move)
@@ -944,7 +944,7 @@ WHY = {
                   "means a staged object is being re-read from somewhere (the 20.5 traffic error); less means a "
                   "publish loop that stopped covering the stage it is "
                   "publishing, which is the defect that made every covered row of a wide wave NaN "
-                  "(bench/performance-status.md 29's correction)",
+                  "(engine/performance-status.md 29's correction)",
     "lds_write_B": "the Q and K stage fills, the transposed V fill, the F32 transpose stage and the cross-warp "
                    "fold: four loops, each with a shape this census reads out of the source. More than the "
                    "source spells means either a staged object is being written from somewhere new, or LLVM "
@@ -988,7 +988,7 @@ def compare(g, note, obs, ack_spill=""):
     for k, limit in (("vgpr_spill_count", 0), ("private_segment_fixed_size", 0)):
         if note[k] != limit:
             spill.append("%s=%d, must be %d. That is the spill gate: scratch lands on the same dependent "
-                         "chain bench/performance-status.md 28 identifies as the mechanism, so --attn-fattn "
+                         "chain engine/performance-status.md 28 identifies as the mechanism, so --attn-fattn "
                          "stays default 0 until this is 0" % (k, note[k], limit))
     lds_wanted = exp_of(g)["lds_B"]
     if note["group_segment_fixed_size"] != lds_wanted:

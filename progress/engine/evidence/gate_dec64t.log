@@ -832,5 +832,5 @@
 == summary
   [note] 28 of 64 steps sit under G6's decode-logits figure 0.9999 (step:cos — 0:0.999863, 1:0.999892, 2:0.999759, 4:0.999893, 6:0.999869, 8:0.999852, 14:0.999895, 16:0.999900, 17:0.999860, 18:0.999883, 20:0.999868, 21:0.999824 …). G6 is ADVISORY here by decision, not an open question: an end-to-end token carries the whole 24-layer cascade, so it is not judged by a figure belonging to a narrower comparison — see the BAND comment above and the two measured floors in engine/results.md: last-op reassociation 0.99999862 (engine/logits_floor.py) and end-to-end two-legal-routes 1-cos 4.7e-5..1.9e-4 (engine/route_price.py).
   [note] dec64t has a different prompt from dec8, so the overlap check does not apply.
-  [note] decode_run reported 11.559 ms/step. Timing from a gate run is a by-product, not a measurement: see bench/performance-status.md §6 for what a clean window takes.
+  [note] decode_run reported 11.559 ms/step. Timing from a gate run is a by-product, not a measurement: see engine/performance-status.md §6 for what a clean window takes.
 ENGINE GATE PASS

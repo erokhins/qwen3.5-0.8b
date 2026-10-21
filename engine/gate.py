@@ -5332,7 +5332,7 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
         f" batchable launches vs {r_wave} with --wave-rows 1 ({wave_ratio:.0f}x fewer);"
         " the whole run, " f"{b_calls} vs {r_calls}, because {decode_steps} generation steps are one"
         " token wide either way. Counts, never durations — the timing pass is the main agent's"
-        " (bench/performance-status.md §6) and the command is in engine/results.md.")
+        " (engine/performance-status.md §6) and the command is in engine/results.md.")
 
 
 
@@ -7044,7 +7044,7 @@ def smoke_run(n_steps: int, args) -> int:
         p.unlink()
     notes.append(f"smoke run dumped and then deleted {written / (1024 * 1024):.0f} MiB of logits."
                  " decode_run also printed its own ms line: a smoke run's timing is NOT a"
-                 " measurement and is deliberately not quoted here (bench/performance-status.md"
+                 " measurement and is deliberately not quoted here (engine/performance-status.md"
                  " §6 owns what a clean window takes).")
     return report()
 
@@ -8453,7 +8453,7 @@ def main() -> int:
           "layer routing read from the manifest matches §03.5", f"{n_gdn}+{n_attn} of {n_layers}")
     if "ms_per_step" in run["result"]:
         notes.append(f"decode_run reported {run['result']['ms_per_step']} ms/step. Timing from a"
-                     " gate run is a by-product, not a measurement: see bench/performance-status.md"
+                     " gate run is a by-product, not a measurement: see engine/performance-status.md"
                      " §6 for what a clean window takes.")
 
     # ---- (h) the batched-path proof --------------------------------------------------------------

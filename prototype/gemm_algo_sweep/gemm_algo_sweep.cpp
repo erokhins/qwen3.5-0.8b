@@ -108,7 +108,7 @@ const EngineShape kShapes[] = {
 //       they stay in the hand GEMV at every width (§7 W4: 12-22x the dispatch floor there).
 //   lm_head (248320 x 1024) — not a library call at all. `lm_head_full` (engine/kernels_lmhead.cpp:25)
 //       is a hand GEMV over an F32 activation and runs once per request, not once per wave row.
-//       bench/performance-status.md §3 lists `lm_head` as a wave FAMILY, which is true of the hand
+//       engine/performance-status.md §3 lists `lm_head` as a wave FAMILY, which is true of the hand
 //       kernel; nothing routes it to hipBLAS, so sweeping it here would price a call not made.
 //   a body of one row — `resolve_wave_gemm` sends M=1 to the hand GEMV whatever the run asked for
 //       (engine/kernels_gemm.cpp:844-850), so M>=2 is the library's domain and --rows refuses 1.

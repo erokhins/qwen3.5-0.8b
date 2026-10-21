@@ -3,7 +3,7 @@
 //
 // Why this exists: devices/strix-halo-memory-bandwidth.md recorded "hipGetDeviceProperties
 // reports 20 CUs" from an ad-hoc print in bw_probe_hip.cpp, while `rocminfo` reports
-// 40 Compute Units for gfx1151. The MLP results.md and bench/performance-status.md both
+// 40 Compute Units for gfx1151. The MLP results.md and engine/performance-status.md both
 // explain a 16% bandwidth gap with "N blocks across 40 CUs", i.e. an argument whose input
 // the repo contradicts itself on. Numbers quoted in this repo need a tool behind them
 // (AGENTS.md), so query them directly instead of arguing from whichever doc is open.

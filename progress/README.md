@@ -13,7 +13,7 @@ evidence **do** move here. This file is the index, the naming rule, and the cros
 1. **A document moves here when it stops being a live instruction.** A plan, audit, review,
    diagnosis or handoff that has produced its verdict is a record, not a command list any
    more, so it stops sitting next to the live files (`bench/` keeps exactly one ledger,
-   `bench/performance-status.md`, plus the two undated docs and the runner — see below).
+   `engine/performance-status.md`, plus the two undated docs and the runner — see below).
 2. **Nothing in `progress/` is ever edited afterwards, except to fix a broken path.**
    A verdict is not re-litigated here and a dated document is not silently updated: if a
    conclusion changes, the new decision is written as a new dated document (or in the
@@ -38,7 +38,7 @@ evidence **do** move here. This file is the index, the naming rule, and the cros
 
 | path | why it is live |
 |---|---|
-| `bench/performance-status.md` | the ledger: appended to, 82 doc lines cite it |
+| `engine/performance-status.md` | the ledger: appended to, 82 doc lines cite it |
 | `progress/2026-10-15/build-queue.md`, `progress/2026-10-11/gate-audit.md` | undated and still open on 2026-10-16, so they stayed in `bench/` then; both moved here on 2026-10-21 when their content closed — see "The 2026-10-21 pass" below |
 | `testdata/run.py`, `bench.sh`, `testdata/` | the CPU speed harness, untouched by this pass (the runner moved out of `bench/` on 2026-10-16) |
 | `bench/band-history.jsonl` | data file, default of `tools/band_history.py --check` |
@@ -205,3 +205,46 @@ Two rows are worth reading twice:
   and `tools/doc_ref_check.py:102`'s `bench/plan-2026-10-12` shorthand example — was left as
   written: rewriting an account of the past would make the account false.
 
+
+## The 2026-10-21 pass — strays, the `bench/` bundle, and the ledger
+
+Appended at the end deliberately, so nothing above this line moves and the `path:NNN` cites into this
+file keep their coordinates. The 2026-10-16 pass above left three kinds of document still sitting where
+they had been useful and were no longer instructions, and it left the ledger growing again. This pass
+archived all of it; `progress/2026-10-21/ledger-prune-2026-10-21.md` is the record of the ledger half
+and the counts.
+
+Moves, filename kept where that is possible (rule 3), and every citation naming an old path rewritten in
+the same commit by `tools/archive_doc.py`:
+
+| old | new | why it is a record now |
+|---|---|---|
+| `bench/performance-status.md` §7+ | `progress/2026-10-21/performance-status-2026-10-21.md` | the whole pre-prune ledger, frozen byte-for-byte; §1–§6 live on as `engine/performance-status.md` |
+| `bench/performance-status.md` §1–§6 | `engine/performance-status.md` | **moved and rewritten**, not archived: it is the live ledger, and it now sits with the engine it measures |
+| `bench/gate-audit.md` | `progress/2026-10-11/gate-audit.md` | the 2026-10-11 audit; every finding it raised is closed or superseded |
+| `bench/build-queue.md` | `progress/2026-10-15/build-queue.md` | the 2026-08 work list between three kernels and an engine; W1–W8 and D-11 all DONE, filed under the date it was last true |
+| `bench/corpus-freerun-2026-10-12.json` | `progress/engine/evidence/corpus-freerun-2026-10-12.json` | a pinned free-run result nothing regenerates, read by `engine/results.md`; rule 4, owner `engine` |
+| `progress/queue2-2026-10-19.md` | `progress/2026-10-19/queue2-outcomes-2026-10-19.md` | the only document loose at the top of `progress/`, and it shared a name with the plan half it answers — rule 3's collision carve-out applies to the filename too |
+| `engine/HANDOFF-attn-touch.md` | `progress/2026-10-16/HANDOFF-attn-touch.md` | a device handoff for a port that shipped, sitting next to the headers it described |
+| `prototype/attn_m2/HANDOFF.md` | `progress/2026-10-16/attn_m2-HANDOFF.md` | seven op handoffs in all: the pass they briefed was run and its verdict is in that op's `results.md`. The op name enters the filename because a dated folder holds several ops at once |
+| `prototype/attn_m2/HANDOFF-slim.md` | `progress/2026-10-16/attn_m2-HANDOFF-slim.md` | ditto |
+| `prototype/attn_score_dot2/HANDOFF.md` | `progress/2026-10-16/attn_score_dot2-HANDOFF.md` | ditto |
+| `prototype/attn_valu_slim/HANDOFF.md` | `progress/2026-10-16/attn_valu_slim-HANDOFF.md` | ditto |
+| `prototype/gemm_algo_sweep/HANDOFF.md` | `progress/2026-10-16/gemm_algo_sweep-HANDOFF.md` | ditto |
+| `prototype/issue_rate_probe/HANDOFF.md` | `progress/2026-10-16/issue_rate_probe-HANDOFF.md` | ditto |
+| `prototype/gdn_rec_isa/HANDOFF.md` | `progress/2026-10-18/gdn_rec_isa-HANDOFF.md` | ditto, dated to its own round |
+
+**What is left in `bench/` is one file**: `band-history.jsonl`, a live data file read and appended to by
+`engine/gate.py`, `engine/route_allowance.py` and `tools/band_history.py`. It is data, not a document, and
+moving it would be a code change in the gate rather than a tidy-up.
+
+Two consequences worth writing down rather than discovering later:
+
+- **The checkers had to be told about the moves.** `tools/citation_census.py` reads each tracked file's
+  census-era text from the commit that carried the census, keyed by *path*; a moved file read as empty and
+  its citations left the population, which showed up as an undercount against a PASS-shaped verdict. It now
+  carries `RENAMES_AT_CENSUS`, and with it `--check` reproduces the 2026-10-16 census exactly on all six
+  forms — which is the witness that this pass lost no citation.
+- **Every archived document here carries a footer naming the path it moved from.** Those 13 path
+  citations point at nothing on purpose; they are why `doc_ref_check.py`'s MISSING-STALE count went from 54
+  to 67, and they are the same kind of row its crosswalk tables have always had.

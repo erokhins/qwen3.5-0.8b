@@ -2,7 +2,7 @@
  * prototype/gdn_rec_isa/gdn_rec_isa_kernels.h — the shipped §04.4 recurrence plus MODEs that re-spell
  * one named part of it, so an ISA census can bill one TOKEN-STEP of `gdn_rec` and price each re-spelling.
  *
- * WHY THIS DIRECTORY EXISTS. `bench/performance-status.md` §(the hipBLAS ledger) bills `gdn_rec` at
+ * WHY THIS DIRECTORY EXISTS. `engine/performance-status.md` §(the hipBLAS ledger) bills `gdn_rec` at
  * 126.83 ms of a 245.7 ms wave at 1024 lanes (51.2 %) and ~509 ms of ~1,105 ms at 4096 lanes — the
  * biggest family in the wave, 18,432 launches of 6.8 µs each. Every route that has attacked it (P9
  * chunked scan, D-12 route A) was priced bottom-up from an instruction or rate model and missed by
@@ -32,7 +32,7 @@
  *                     extra launch per token.
  *  2c4 `rec2c4_kernel` MODE 2c's fused prologue MERGED with the shipping unroll4 walks
  *                     (`engine/gdn_rec_unroll4_kernels.h`). It exists to be CENSUSED, not to be timed:
- *                     `bench/performance-status.md` §18 / D46 make a compile-only census of this exact
+ *                     `progress/2026-10-21/performance-status-2026-10-21.md` §18 / D46 make a compile-only census of this exact
  *                     listing the gate in front of any `rec2c` port, because a merge that loses the
  *                     unroll to register pressure is invisible to a burst of the two unmerged forms.
  *  loop `recloop_kernel` the SHIPPING form (MODE 2c4, which is `engine/gdn_rec_fused_kernels.h`)
@@ -358,7 +358,7 @@ __global__ void rec2c_kernel(const float* __restrict__ q, const float* __restric
 
 /* ---- MODE 2c4: MODE 2c's fused prologue MERGED with the SHIPPING unroll4 walks -------------------
  *
- * WHY THIS KERNEL EXISTS, AND WHY IT IS NEVER LAUNCHED. `rec2c`'s burst screen (`bench/performance-status.md`
+ * WHY THIS KERNEL EXISTS, AND WHY IT IS NEVER LAUNCHED. `rec2c`'s burst screen (`engine/performance-status.md`
  * §18: median 1.0268 against D25's 1.02 kill line, one case below it) compared the fused prologue against
  * a PRE-unroll4 base, while the shipped kernel is `engine/gdn_rec_unroll4_kernels.h::rec_unroll4_kernel`
  * (D33). The merge has therefore never existed, and its failure mode is silent: the unroll-4 walks hold
@@ -433,7 +433,7 @@ __global__ void rec2c4_kernel(const float* __restrict__ q, const float* __restri
 
 /* ---- MODE loop: the shipped form, with the TOKEN index inside the launch (D53) -------------------
  *
- * THE ITEM. `bench/performance-status.md` §22 counts 73,728 `rec_*` launches for a 4096-token prompt
+ * THE ITEM. `progress/2026-10-21/performance-status-2026-10-21.md` §22 counts 73,728 `rec_*` launches for a 4096-token prompt
  * (18 GDN layers x 4,096 tokens) at ~5.8 µs each against a measured 1.72 µs empty-launch floor
  * (§11, `tools/submission_probe.cpp`), and §11 established the premise that makes a launch-count item
  * legal at all: submissions are NOT absorbed by a busy stream, which is why deleting 4,080 `copy`
@@ -550,7 +550,7 @@ __global__ void recloop_kernel(const float* __restrict__ qtile, const float* __r
 
 /* ---- MODE recptr: `recloop` with this token's rows CARRIED AS POINTERS (the D55 follow-up) --------
  *
- * THE ITEM, AND ITS PRICE TAG. `bench/performance-status.md` §24 closed the token-loop port with the
+ * THE ITEM, AND ITS PRICE TAG. `progress/2026-10-21/performance-status-2026-10-21.md` §24 closed the token-loop port with the
  * loop's own cost still on the books — "the loop bills +156 slots/token-step (1,530 vs 1,374) from
  * recomputing `t*CH`" — and named the addressing-spelling variant as the follow-up: carry six row
  * pointers and step them, instead of rebuilding each row address from the token index every iteration.

@@ -41,7 +41,7 @@ void glue_add_norm_rows(const uint16_t* s, const uint16_t* delta, const uint16_t
     // PREFERENCE, not a requirement — `engine/results.md` E1, now closed. 1024 measures faster
     // (~2.78 vs 3.75 µs/launch, `results.md` §4 — ≈0.05 ms/token over the 49 glue launches) and is
     // admissible; switching is a performance decision for the timing pass, and it inherits the
-    // bimodality caveat `bench/performance-status.md` §6 attaches to launch-bound numbers.
+    // bimodality caveat `engine/performance-status.md` §6 attaches to launch-bound numbers.
     ::glue_add_norm<256><<<rows, 256>>>((const hip_bfloat16*)s, (const hip_bfloat16*)delta,
                                         (const hip_bfloat16*)w, (hip_bfloat16*)s_out,
                                         (hip_bfloat16*)n_out, NEG_NONE);

@@ -160,7 +160,7 @@ Wall: **4 s for all four runs**, on the tree as it now stands (the two bug-fix r
 repeated after the last rebuild so the verdict matches the handed-over tree). `tools/gpu_lock.sh util`
 read **90 %** at acquire and **29 %** just before release — a prior attempt read 89–90 % at acquire and
 still returned a deterministic verdict, as expected for gates with no atomics. Nothing from these runs is
-a timing, and no number here belongs in `bench/performance-status.md`.
+a timing, and no number here belongs in `engine/performance-status.md`.
 
 **Four** short gate invocations were used rather than the one the brief allowed, because two of them found
 real bugs (§2) and a green verdict on a tree that no longer matched the build would have been worthless; all

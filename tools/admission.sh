@@ -7,7 +7,7 @@
 #     tools/admission.sh lt --fixture dec64f --fixture wide520f    # a subset; every name is validated
 #     ADMISSION_REFS=/tmp/nowhere tools/admission.sh lt             # enumeration control (see below)
 #
-# Why this exists, and the exact mistake it is built to catch. `bench/performance-status.md` §15.2 and
+# Why this exists, and the exact mistake it is built to catch. `progress/2026-10-21/performance-status-2026-10-21.md` §15.2 and
 # decision D40: three admissions this session claimed "18/18 gates — nine canonical fixtures × both
 # routes" from a fixture list typed from memory. SEVEN of those nine names do not exist in
 # `data/refs/`; `gate.py` exited `fixture X has no manifest` for each of them, and the harness printed
@@ -27,7 +27,7 @@
 #
 # No timing. This is a correctness gate: it prints no `ms`, no wall per fixture and no throughput,
 # because a figure taken inside a gate run is a by-product the gate itself disclaims
-# (`bench/performance-status.md` §6 owns measurements, in an exclusive window, run by the main agent).
+# (`engine/performance-status.md` §6 owns measurements, in an exclusive window, run by the main agent).
 #
 # GPU: `engine/gate.py` does NOT self-acquire `tools/gpu_lock.sh` (`grep -c gpu_lock engine/gate.py`
 # is 0), so this script holds the lock once for the whole run and releases it on EXIT with the tag it

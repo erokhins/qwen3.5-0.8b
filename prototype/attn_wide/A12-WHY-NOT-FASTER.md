@@ -4,7 +4,7 @@ The question came from `6b857d2` (the non-regression window): the rig says the w
 the shipping WMMA kernel, the engine says **−0.69 %**, and the commit said the next question is
 *"coverage, not speed: which rows at 16,384 lanes does the wide kernel actually own"*. It was run by the
 main agent in four legs, each inside one `tools/gpu_lock.sh` hold, blocking, zero subagents, `util` read
-at acquire (89 / 91 / 92 %) and then discounted per `bench/performance-status.md` §6.
+at acquire (89 / 91 / 92 %) and then discounted per `engine/performance-status.md` §6.
 
 ## 0. The answer, in four lines
 
@@ -157,7 +157,7 @@ wavefronts than the one it replaces.
   32k and displaced it there; here it is −1.14 % at 16k). This window did not adjudicate it and nothing
   about its numerics changed.
 * The honest headline is unchanged: warm **10,637 tok/s at 512 lanes**, **9,790 at 4,096**
-  (`bench/performance-status.md` §51 and §55). The long-context rows are where either lever would show,
+  (`progress/2026-10-21/performance-status-2026-10-21.md` §51 and §55). The long-context rows are where either lever would show,
   and neither is shipped.
 
 ## 7. Files

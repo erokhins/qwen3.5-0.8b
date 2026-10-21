@@ -5,7 +5,7 @@ someone else — the point of putting it in a script is that the inputs are name
 figures cannot then drift from them. It measures nothing.
 
 Inputs and where each comes from:
-  * §38 traced times           bench/performance-status.md:1750  (gdn_recur: ours 272.07 ms,
+  * §38 traced times           progress/2026-10-21/performance-status-2026-10-21.md:1750  (gdn_recur: ours 272.07 ms,
                                llama 47.20 ms per pass of 4,096 lanes; 144 launches each)
   * our per-token bill         prototype/gdn_walk/evidence-tokenbill-2026-10-19.txt (token_bill.py:
                                1,327 slots/token-step/wavefront for rec_loop_kernel; BET.md §2)

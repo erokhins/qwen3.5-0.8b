@@ -2,13 +2,13 @@
 
 Analysis-only. **No timing was taken and no device measurement made here**: every number is (a) read
 out of a built artifact on disk (`engines/llama.cpp/build-hip/bin/…`, carved and disassembled on the
-CPU), (b) read out of the §22 trace of llama.cpp in `bench/performance-status.md`, already on disk
+CPU), (b) read out of the §22 trace of llama.cpp in `engine/performance-status.md`, already on disk
 (`tmp/d52/llama_pp4096/pp4096_kernel_trace.csv`, host-side reuse), (c) quoted from
 `engines/llama.cpp/ggml/src/ggml-cuda/`, or (d) arithmetic on those. The one host-side driver query
 is disclosed in §0.3. Nothing under `engine/`, `bench/`, `tools/` or `engines/` was modified; scripts
 live in `tmp/gcc/fattn/`.
 
-Why it exists: §22 of `bench/performance-status.md` measured llama.cpp's attention family at
+Why it exists: §22 of `progress/2026-10-21/performance-status-2026-10-21.md` measured llama.cpp's attention family at
 **≤ 52.5 ms** against our **263.2 ms** at matched conditioning — "we are ≥ 5.0× slower" — and named
 that gap queue item 2.6 with external evidence. The precondition for funding 2.6 was that their path
 first become a *priceable design*. This is that price sheet, in the order asked: what class their
@@ -31,7 +31,7 @@ amdhsa note `target: amdgcn-amd-amdhsa--gfx1151` with **no** `wavefrontsize64` s
 object), and its symbol demangles to
 `void flash_attn_ext_f16<256, 256, 16, 4, false, false, false>(char const*, … )`
 (raw note block `tmp/gcc/fattn/meta_notes.txt:3205`; the `Kernel_Name` field of the §22 trace in
-`bench/performance-status.md` carries the
+`engine/performance-status.md` carries the
 same demangled text, so trace and object name the same function — the template arguments are read
 from the trace, not inferred).
 
@@ -58,9 +58,9 @@ traced durations us: min 244.7 med 1091.1 max 3080.0 sum 104.976 ms; /2 pass = 5
   (`tmp/gcc/fattn/trace_calib*.py`: our `rec_fused_kernel` reports `Grid_Size_X = 2048` for a
   16-block × 128-thread launch). So their launch is `gridDim = (64, 1)`: **64 workgroups of 256
   threads**, 1.6 blocks per CU on 40 CUs — a thin grid, not a saturated one.
-* Σ/2 = **52.488 ms/pass** matches the "≤ 52.5 ms" of §22 in `bench/performance-status.md`, to the last
+* Σ/2 = **52.488 ms/pass** matches the "≤ 52.5 ms" of §22 in `engine/performance-status.md`, to the last
   digit: at that conditioning the attention family *is* this one kernel, 48 launches/pass (§26 W4 of
-  `bench/performance-status.md` counts 138/pass across the family, so the other 90 are auxiliaries). The
+  `engine/performance-status.md` counts 138/pass across the family, so the other 90 are auxiliaries). The
   ÷2 is §22's own convention (the trace holds warmup + timed).
 * `LDS_Block_Size = 0` does **not** mean no LDS: their LDS is dynamic (`extern __shared__ half2
   tile_Q[]`, `fattn-mma-f16.cuh:1250`) and the code object's `group_segment_fixed_size` is likewise 0,
@@ -102,7 +102,7 @@ kernel — this is a fragment-staging kernel as much as a matmul kernel); VMEM 4
 
 So: **they run on the RDNA3 WMMA tensor pipes, f16 operands, in two accumulator widths** —
 `…_f32_16x16x16_f16` for the score product and `…_f16_16x16x16_f16` for P·V, i.e. **the P·V
-accumulator is f16** (§2.3). Our side for contrast: §26 of `bench/performance-status.md` counted
+accumulator is f16** (§2.3). Our side for contrast: §26 of `progress/2026-10-21/performance-status-2026-10-21.md` counted
 **zero matrix instructions in all 40 of our kernels**, so the class difference is total, not partial.
 
 ### 1.2 What a round is, read out of the loop structure
@@ -341,8 +341,8 @@ Our facts as the ledger holds them: `DH = 256`, GQA `G = 4`, `MAXSC = 512` lanes
 SIMDs/CU, 64 KiB LDS/CU, `max_waves_per_simd = 16` (⇒ 32 wavefronts/CU real, not HIP's 64);
 `attn_slim_wave` at 47 VGPR / 12,288 B LDS / 5 blocks / 20 wf/CU
 (`prototype/attn_wmma/evidence/occupancy.txt`), **1,983 instructions with 130 f32-FMA-class and zero
-matrix instructions** (`bench/performance-status.md:1184`), and **89.9 warp-instructions
-per touch** measured (§26 W2 of `bench/performance-status.md`), 116 static slots/touch
+matrix instructions** (`progress/2026-10-21/performance-status-2026-10-21.md:1184`), and **89.9 warp-instructions
+per touch** measured (§26 W2 of `engine/performance-status.md`), 116 static slots/touch
 (`prototype/attn_valu_slim/results.md` §2).
 
 A "touch" is one `(row, lane, head)` score (`prototype/attn_valu_slim/results.md` §2; 8 MACs/lane
@@ -353,7 +353,7 @@ because the 256-dim dot is spread across 32 lanes), which is the same unit as th
 
 | | warp-inst per touch | of which matrix | of which cross-lane |
 |---|---|---|---|
-| ours, shipped, measured (§26 W2 of `bench/performance-status.md`) | **89.9** | 0 | 5 |
+| ours, shipped, measured (§26 W2 of `engine/performance-status.md`) | **89.9** | 0 | 5 |
 | theirs, steady-state round body (§1.2), raw | **3.29** | 0.125 | 0.033 |
 | theirs, same body with a WMMA billed at its pipe time (32 clk, `m16_census.output.txt:91`) | **7.16** | 4.0 clk of matrix pipe | 0.033 |
 
@@ -364,7 +364,7 @@ slot figure which denominator it divided by" applies in full: a raw count bills 
 Now through the one elasticity this repo has actually measured. AGENTS.md records the datum: the
 bit-identical cut of **116 → 45 issue slots per touch** made `attn` **1.521× faster**, so
 time ∝ slots^α with α = ln 1.521 / ln(116/45) = **0.44**. Applying it to `attn` = 264.71 ms of a
-763.49 ms wave (§26 of `bench/performance-status.md`):
+763.49 ms wave (§26 of `progress/2026-10-21/performance-status-2026-10-21.md`):
 
 | instruction cut | predicted `attn` cut | `attn` becomes | wave becomes | prefill gain |
 |---|---|---|---|---|
@@ -372,7 +372,7 @@ time ∝ slots^α with α = ln 1.521 / ln(116/45) = **0.44**. Applying it to `at
 | 2.37× — D57's dot-only price (pass-1 45 → 19) | 1.46× | 181 ms | 680 ms | **+12 %** |
 | 12.6× — pipe-weighted copy of their round | 3.05× | 87 ms | 586 ms | **+30 %** |
 | 27× — raw instruction count | 4.28× | 62 ms | 561 ms | **+36 %** |
-| their measured ratio ≥ 5.04× (§22 of `bench/performance-status.md`) | 5.04× | 52.5 ms | 551 ms | **+39 %** (ceiling) |
+| their measured ratio ≥ 5.04× (§22 of `progress/2026-10-21/performance-status-2026-10-21.md`) | 5.04× | 52.5 ms | 551 ms | **+39 %** (ceiling) |
 
 The model's second row **reproduces the +5 % to +12 % D57 booked** for the dot-only substitution, which
 is the witness that α = 0.44 is the right bridge and not a fitted free parameter. Three honest caveats
@@ -397,7 +397,7 @@ Method: `tools/kernel_occupancy_probe.cpp`'s host-side calculator (driver-author
 
 What this says, and it is the finding: **their win is not occupancy — they have a quarter of ours and
 half the interleave, and still run ≥ 5× faster.** The GRP2 parity result of §28 in
-`bench/performance-status.md` ("+66 % wavefronts moved time by ≤ 5 %") already said occupancy is not the
+`engine/performance-status.md` ("+66 % wavefronts moved time by ≤ 5 %") already said occupancy is not the
 axis; this is the external witness from the other direction. The axis is what D61 named: a per-score
 dependent chain with a 5-step cross-lane fold in it, versus a round whose chain is short (one fold op per
 row per 32 KV rows) and whose 10 accumulator chains are software-pipelined by the fragment layout.
@@ -452,7 +452,7 @@ driver disagrees with that constant in two places already on disk:
   (`prototype/attn_wmma/evidence/occupancy.txt`). A 512-lane-slot file would cap a 47-VGPR, 128-thread
   block at 2 blocks/CU, so 5 was never reachable by registers; the 5 is the **LDS** bound (65,536 /
   12,288); the note "the two caps are independent … 47 VGPR allows 10 waves/SIMD" in §26 of
-  `bench/performance-status.md` attributes the coincidence to the wrong cap.
+  `engine/performance-status.md` attributes the coincidence to the wrong cap.
 * `m16_bf16rt` returned **3 blocks/CU** at 235 VGPR × 128 threads
   (`prototype/attn_wmma/evidence/occupancy-m16.txt`) = 90,240 lane-VGPR per CU, which a 32,768-slot
   (512 × 32 × 2) file cannot hold; and HIP reports `MaxRegistersPerMultiprocessor = 196,608`
@@ -470,7 +470,7 @@ shape (§2.5). Those are different objections and the repo has been mixing them.
    which becomes **12.6×** once a `v_wmma` is billed at its 32-clk pipe time. Through our own measured
    elasticity that is **3.0–4.2×**, and their observed ratio is **≥ 5.04×** — so instruction count
    accounts for essentially the whole gap, and the residual runs the right way (their 52.5 ms is a traced
-   upper bound per §22 of `bench/performance-status.md`).
+   upper bound per §22 of `progress/2026-10-21/performance-status-2026-10-21.md`).
 2. The instruction count falls for four separable reasons, only the first of which is the matrix pipe:
    (a) both 256-dim dots retire on the tensor pipes, 0.125 WMMA per score instead of 16 VALU FMA slots;
    (b) **the softmax fold is one cross-lane op per row per round instead of a 5-step butterfly per
@@ -479,10 +479,10 @@ shape (§2.5). Those are different objections and the repo has been mixing them.
    instead of per live pair (`nbatch_fa`, `:13`, and the `v_pk_mul_f16` block at `:936-941`).
 3. What the 5× is **not**: not occupancy (8 wf/CU vs our 20); not the matrix roof (they run at
    ~8.8 TFLOP/s ≈ 17 % of this box's measured 52.63 TFLOP/s WMMA rate and ~60 % of the theoretical
-   scalar `v_fma_f32` roof — **derived arithmetic** on §22's ms in `bench/performance-status.md` and the
+   scalar `v_fma_f32` roof — **derived arithmetic** on §22's ms in `engine/performance-status.md` and the
    head census at `specification/00-notation-and-hyperparameters.md:38-40`, not a measurement, and it must
    be re-derived before any of it enters `bench/`); not launch count (1 kernel vs our 3 is worth ~0.15 ms
-   per §26 W4 of `bench/performance-status.md`); not async copy or TMA (they have neither on HIP).
+   per §26 W4 of `engine/performance-status.md`); not async copy or TMA (they have neither on HIP).
 4. Therefore a copy lands at **their** distance from the roofs, not at the roofs. Their round spends
    18 % of its instructions on `s_waitcnt`/`s_delay_alu` and 2.1 % on spill loads: they are
    mix-and-stall-limited too, just from a far better shape. Any claim of the form "matrix pipes ⇒
@@ -492,7 +492,7 @@ shape (§2.5). Those are different objections and the repo has been mixing them.
 
 ### 4.1 Which instrument first: the matrix-op-score tile, not the 512-row fixture
 
-The two candidate instruments §28 of `bench/performance-status.md` offers are (i) a 512-row × 4096-lane
+The two candidate instruments §28 of `progress/2026-10-21/performance-status-2026-10-21.md` offers are (i) a 512-row × 4096-lane
 fixture and (ii) a tile whose score comes from a matrix op (D58's `m16_bf16gq`, 1.98 slots/touch,
 census-only, never timed).
 

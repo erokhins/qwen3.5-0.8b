@@ -144,12 +144,12 @@ from ~254/481, −6 in 333–478); `engine/gate.py` moved **+60 net**. Tools wri
 > reader. The row's per-launch figures stand; the family byte totals move to 0.371 MB read / 0.741 MB
 > written per token (−0.222 / −0.445), and `G_step`'s read:write denominator moves 61.7:1 → 62.8:1.)*
 
-`bench/performance-status.md` (L618 "115 on both routes", L659 "424 on both routes"):
+`engine/performance-status.md` (L618 "115 on both routes", L659 "424 on both routes"):
 > *(2026-10-17: both route-symmetric counts moved with `62b73e9` — cast 97, per-token bill 406. §13
 > carries the re-take; the §6/§12 rows above are the plan as measured on their own dates.)*
 
 Note the ledger's §1–§5 are banner-marked rather than edited for line-citation reasons (AGENTS.md
-citation hygiene), so these belong as appended dated lines, and `bench/performance-status.md` line
+citation hygiene), so these belong as appended dated lines, and `engine/performance-status.md` line
 numbers are cited from `progress/` — any append there needs the user's explicit words.
 
 ## 6. Job 3b — `tools/cite_quote_check.py` false-positive patterns (531 cites checked, 22 suspects)

@@ -12,7 +12,7 @@
 // scheduled.
 //
 // NOTHING IS LAUNCHED, ALLOCATED, OR TIMED. The query is host-side: no kernel runs, no buffer is allocated,
-// no counter is read. It produces no number that belongs in `bench/performance-status.md` and no number
+// no counter is read. It produces no number that belongs in `engine/performance-status.md` and no number
 // that a contended window could corrupt — it is a census of the code object, the same class of thing as
 // reading the `.s`, which is why a worker may run it (AGENTS.md: short, correctness-shaped, no timing).
 //

@@ -2,7 +2,7 @@
 
 **CPU-only.** Source + static ISA + three published paired-window measurements. No timing taken here, no
 correctness gate, no `rocprofv3`, no `gpu_lock`, no HIP launch. Stall counters are *not* re-litigated: §54 of
-`bench/performance-status.md` establishes they are unattributable on this part (`DRAM_REQ_PER_CLIGRP` and
+`engine/performance-status.md` establishes they are unattributable on this part (`DRAM_REQ_PER_CLIGRP` and
 `TCP_BACK_PRESSURE` read exactly 0.0 = vacuous; `SQ_WAVE_CYCLES/SQ_BUSY_CYCLES` reads above the architectural
 ceiling), so this file prices **cycles-per-dependency at the realised occupancy** and never instructions per token.
 
@@ -194,7 +194,7 @@ the unattributed residual must be attacked as queue/barrier cost, not operand co
 `hipcc -c --save-temps`, ~3.3 s, emits `kernels_attn-hip-amdgcn-amd-amdhsa-gfx1151.s`);
 `python3 /tmp/a11att/model.py --json /tmp/a11att/model.json`; `python3 /tmp/a11att/bet.py`;
 `python3 /tmp/a11att/final.py`; `python3 /tmp/a11att/dumploop.py --loop BB8_73 --out /tmp/a11att/roll.txt` (and
-`--loop BB8_71`); plus read-only greps of `bench/performance-status.md`, `A9-LONGCTX-CENSUS.md`,
+`--loop BB8_71`); plus read-only greps of `engine/performance-status.md`, `A9-LONGCTX-CENSUS.md`,
 `A10-REWRITE-BRIEF.md`, `A4-L1-verdict.md`, `A6-G1-verdict.md`, `issue_rate_probe/evidence/wmma-latency.txt` and
 the pmc CSV `tmp/a11/pmc2/a32k_counter_collection.csv`. **No timing taken, no device run, no `gpu_lock`.**
 All analysis scripts are scratch in `/tmp/a11att/` and import the existing census machinery

@@ -1,7 +1,7 @@
 # A10 — the attention geometry rewrite: what it is, what it costs, and what would make it the wrong call
 
 **Status: the funded main line (§54), with R1+R2 source-killed on step 2 — see `A10-RF-LADDER.md`.** Nothing here is
-built. §52 of `bench/performance-status.md` pre-gated it (stall census first, prototype must clear **6.5 TFLOP/s**),
+built. §52 of `progress/2026-10-21/performance-status-2026-10-21.md` pre-gated it (stall census first, prototype must clear **6.5 TFLOP/s**),
 §54 made it the main line, and A10 step 2's compile-only register ladder then found that **Q in registers costs 128
 VGPR per lane, not 64, so on the atom this engine ships R2 cannot be honoured at all**: the accumulator and Q
 together want the whole 256-VGPR budget, and clang satisfies that by re-issuing the Q loads — handing back the very
@@ -24,7 +24,7 @@ This file exists so the arithmetic behind those decisions can be read, questione
 re-derived from memory each time.
 
 Evidence it rests on: §51 (long-context phase attribution, warm convention) and §53 (L-c measured DISPLACED) of
-`bench/performance-status.md`; `A9-LONGCTX-CENSUS.md` (traffic, waste, levers, verdict); `A3-result.md` (the LDS
+`engine/performance-status.md`; `A9-LONGCTX-CENSUS.md` (traffic, waste, levers, verdict); `A3-result.md` (the LDS
 floor); `A4-L1-verdict.md` (instruction cuts convert at ~0.217); `A6-G1-impl.md` / §48 (residency, shipped);
 `A9-LC-verdict.md` (the last targeted lever spent). Source claims are cited `path:line` and were read, not recalled.
 
@@ -225,7 +225,7 @@ The traffic table behind it (A9 §3, derived from these constants):
 Which is why the Q re-read is described as *"free in bytes, expensive in queue slots"*: the LSU and VMEM issue
 slots spent fetching it are real, and no wavefront count pays them back.
 
-> **MEASURED REFINEMENT, same day — §54 of `bench/performance-status.md`.** "Provably cache-served" is right; "from
+> **MEASURED REFINEMENT, same day — §54 of `progress/2026-10-21/performance-status-2026-10-21.md`.** "Provably cache-served" is right; "from
 > L1" was not checked and is only partly true. Counters on the shipped kernel at 32k give **TCP_REQ 3.17e10 with a
 > 26.8 % L1 miss rate** — L1 absorbs ~73 % of its traffic, not all of it — and Q's own footprint is **24,576 B per
 > block × 3 blocks/CU = 73,728 B, above the 32 KB L1**, so a meaningful share of the re-read comes from the deeper

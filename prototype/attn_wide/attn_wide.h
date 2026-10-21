@@ -50,7 +50,7 @@
  *     32τ + 16(e&1) + 2(e>>1) + t/16 — measured by `prototype/attn_percost/a10_pvf16_map_probe.cpp` and pinned
  *     by `check_a10_pvf16_map.py` in BOTH op_sel orders.
  * A relabelled map is a permuted row of the output, which is the class of defect that once came back as all-NaN
- * (§29 of `bench/performance-status.md`), so nothing below re-derives either law at a use site.
+ * (§29 of `progress/2026-10-21/performance-status-2026-10-21.md`), so nothing below re-derives either law at a use site.
  *
  * WHY THE ROWS ARE 32 POSITIONS × 4 HEADS (llama's `R5` packing, `A10-REWRITE-BRIEF.md` §3): one staged K/V
  * tile then serves the four query heads of ONE KV group, and — the part that only shows up in the index

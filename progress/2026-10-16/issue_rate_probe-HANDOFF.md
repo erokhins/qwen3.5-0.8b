@@ -132,8 +132,8 @@ fake MAC column); `run.py`; `README.md`; `results.md` skeleton; `build.sh` passi
    side. `irp_wmma_frag` already accepts raw per-lane fragments, so the probe is host-side work in
    `wmma_check` and needs no new kernel.
 3. **`results.md` is empty** and must be filled by a main-agent window, together with
-   `bench/performance-status.md` if any of these numbers become ledger rows. Quote pairs from one
-   window: these legs are the dispatch-bound kind that `bench/performance-status.md` §6 shows
+   `engine/performance-status.md` if any of these numbers become ledger rows. Quote pairs from one
+   window: these legs are the dispatch-bound kind that `engine/performance-status.md` §6 shows
    spreading 5–10 % across windows.
 4. **Per-leg grid is the default 320 × 128 everywhere.** That is right for the scalar legs and probably
    wrong for WMMA (4 D accumulators × 8 f32 = 32 registers/lane of accumulator, so occupancy will be

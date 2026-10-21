@@ -30,7 +30,7 @@ Working on the branch is intentional: a gated re-port can either split `d7057c4`
 - **D59 overturned by D61**: the "+112 % geometry tax" and "the register file refuses it" were both refuted.
   `attn_m16_grp2` (96 VGPR → **5 blocks/CU, shipped parity**) moves the time **≤5 %** vs GRP4 while giving
   up half the traffic win. Mechanism is **serial-round latency at low interleave**: the wall tracks *lanes*
-  and is **flat in rows and flat in block count**. §28 of `bench/performance-status.md`.
+  and is **flat in rows and flat in block count**. §28 of `progress/2026-10-21/performance-status-2026-10-21.md`.
 - **D62 funded at ROUND scope**: llama.cpp's traced kernel is **384 `v_wmma`** (zero `v_mfma`, zero `v_dot`),
   **1 cross-lane op per softmax row per round** against our **5-step butterfly per score**, **10 independent
   accumulator chains**, one rescale per 64 KV rows; **3.29 warp-inst/touch raw, 7.16 pipe-weighted** vs our
@@ -146,7 +146,7 @@ measured.
 Device work is the main agent's only, **blocking, zero subagents, one lock hold**; workers write commands and
 run correctness-only gates under ~60 s with command + wall + `util` + "no timing taken". `--ids` is
 **comma-separated** (a space-separated list silently prices a 1-token wave). Never print the chat-template
-end-of-turn token literally (refer to id 248046). `bench/performance-status.md` §1–§5 are line-cited:
+end-of-turn token literally (refer to id 248046). `engine/performance-status.md` §1–§5 are line-cited:
 **edits there must be line-count neutral**, append new sections at the end. A canary must be able to detect a
 **stale binary**; a paired A/B against a stale build reads as a clean null. A check whose input list can be
 empty cannot fail; a must-catch set must be **derived**, not hand-listed. Do not chain a python stdin heredoc

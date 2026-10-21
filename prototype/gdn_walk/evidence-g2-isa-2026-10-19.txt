@@ -78,14 +78,14 @@ device facts (must be re-read to re-take this):
 derived blocks/CU        : 32   (LDS=None  threads=32  wavefronts=32)
 
 == token_bill.py per-token-step bills, per wavefront (three listings: the shipped kernel, then one instantiation per file because token_bill keys templates by the unmangled name)
-  FLAT token-step bill  : 1530 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  FLAT token-step bill  : 1530 slots/wavefront     <- comparable with isa_census.py and §24 of progress/2026-10-21/performance-status-2026-10-21.md
   PER-TOKEN bill        : 1327 slots/wavefront   (flat - 203 per-launch slots)
   ADDRESS ARITHMETIC    : 13 straight-line + 80 in walks = 93 slots = 7.0% of the per-token bill, 6.1% of the flat bill
   walks                 : loopA x32 (4 state-accesses/trip), loopB x32 (4/trip)
-  FLAT token-step bill  : 2860 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  FLAT token-step bill  : 2860 slots/wavefront     <- comparable with isa_census.py and §24 of progress/2026-10-21/performance-status-2026-10-21.md
   PER-TOKEN bill        : 2767 slots/wavefront   (flat - 93 per-launch slots)
   ADDRESS ARITHMETIC    : 15 straight-line + 320 in walks = 335 slots = 12.1% of the per-token bill, 11.7% of the flat bill
   walks                 : loopA x16 (8 state-accesses/trip), loopB x16 (8/trip)
-  FLAT token-step bill  : 1885 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  FLAT token-step bill  : 1885 slots/wavefront     <- comparable with isa_census.py and §24 of progress/2026-10-21/performance-status-2026-10-21.md
   PER-TOKEN bill        : 1794 slots/wavefront   (flat - 91 per-launch slots)
   ADDRESS ARITHMETIC    : 12 straight-line + 128 in walks = 140 slots = 7.8% of the per-token bill, 7.4% of the flat bill

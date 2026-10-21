@@ -29,7 +29,7 @@
 // stop check on the wrong side of that flag. The flag is gone: the phase is now which loop a step came
 // out of.
 //
-// Every number it prints about *time* is provisional by construction: see `bench/performance-status.md`
+// Every number it prints about *time* is provisional by construction: see `engine/performance-status.md`
 // §6 for what a clean window takes to arrange, and `AGENTS.md` for why a worker must not arrange one.
 #include <algorithm>
 #include <chrono>
@@ -1157,7 +1157,7 @@ void print_usage(FILE* out) {
                  " (D50) is the unroll4 walks with the q/k norm prologue FUSED into one pass over"
                  " shared memory — 3 barriers instead of 8, −32 of 1,406 slots/token-step at UNCHANGED"
                  " registers (59 VGPRs, zero spill) and +128 B of LDS (engine/gdn_rec_fused_kernels.h,"
-                 " prototype/gdn_rec_isa/results.md §11, bench/performance-status.md §19). It is"
+                 " prototype/gdn_rec_isa/results.md §11, progress/2026-10-21/performance-status-2026-10-21.md §19). It is"
                  " BIT-identical too (ndiff 0 on `o` and on the state, 4/4 cases) and it is a KNOB,"
                  " NOT a default: the paired in-situ A/B on the `gdn_rec` family row decides whether"
                  " the default moves. Inert under `--gdn-scan collapse`, which launches a different"
@@ -1227,7 +1227,7 @@ void print_usage(FILE* out) {
                  " inside it, transcribed and checked by check_recloop_transcription.py in"
                  " prototype/gdn_rec_isa), the same grid `<<<16,128>>>` and the same state"
                  " addresses, so it is a launch-structure change and not a numerics one: spans"
-                 " 0/1/3/16 came back `ndiff_o_vs0=0 ndiff_state_vs0=0` (bench/performance-status.md"
+                 " 0/1/3/16 came back `ndiff_o_vs0=0 ndiff_state_vs0=0` (engine/performance-status.md"
                  " §23). It is a KNOB, NOT a default — the loop bills +156 of 1,374 slots/token-step"
                  " for recomputing its row addresses, and the paired in-situ A/B on the `gdn_rec`"
                  " family row decides whether the default moves (D54, in D32 → D50's order). A span"

@@ -11,7 +11,7 @@ count is a sum printed beside it, every ratio is arithmetic on quoted numbers. L
 (a `path:line`), **derived** (the formula is shown), **quoted** (a § of the ledger or of an `A*-result.md`).
 
 Citation conventions, so that no cite resolves only in a reader's memory (AGENTS' citation-hygiene section):
-**bare `§N`** means §N of `bench/performance-status.md`; **bare `:NNN`** means
+**bare `§N`** means §N of `engine/performance-status.md`; **bare `:NNN`** means
 `engine/attn_fattn_kernels.h:NNN` at tip `cbadeca` (line numbers in that file moved when the
 `--attn-fattn-roll` knob landed, which is why `prototype/attn_percost/A3-result.md`'s cites of it read differently); a section of
 another prototype document is always written with its path. `§0`–`§7` and the Appendices are this file. The two
@@ -474,4 +474,4 @@ bash prototype/attn_wmma/run_fattn_admission.sh              # §1 is the one-pa
 ```
 
 A worker must **not** run step 5, must not take a single `ms`, and must not write into
-`bench/performance-status.md` or `progress/`. Nothing in this file was measured on a device by its author.
+`engine/performance-status.md` or `progress/`. Nothing in this file was measured on a device by its author.

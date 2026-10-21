@@ -292,7 +292,7 @@ void gdn_gates(const uint16_t* a_raw, const uint16_t* b_raw, const float* a_log,
 //              4/4 harness cases, and re-proved per fixture by `engine/gate.py` section (j). **THE
 //              DEFAULT since D51**: D50 shipped it as a knob and the paired in-situ A/B on the
 //              `gdn_rec` family row read 1.0645 at 4096 lanes (3/3 reps, worst rep 1.0200), flat at
-//              1024 lanes and flat on decode — `bench/performance-status.md` §20.
+//              1024 lanes and flat on decode — `progress/2026-10-21/performance-status-2026-10-21.md` §20.
 // All three are inert under `--gdn-scan collapse`, which launches a different kernel; `parse_args`
 // refuses that combination rather than letting a timing run price one kernel twice and call the second
 // price the spelling's win.
@@ -318,7 +318,7 @@ void gdn_rec(const float* q, const float* k, const float* v, const float* g, con
 // it, so a span of `n` replaces `n` per-token launches and nothing else: same grid `<<<NH, D>>>`,
 // same thread map, same state buffer at the same addresses, same per-token expression trees in the
 // same order. Admitted by BIT-identity, not by a band — spans 0/1/3/16 came back
-// `ndiff_o_vs0=0 ndiff_state_vs0=0` on the harness (`bench/performance-status.md` §23) — and
+// `ndiff_o_vs0=0 ndiff_state_vs0=0` on the harness (`progress/2026-10-21/performance-status-2026-10-21.md` §23) — and
 // `engine/gate.py` section (j) re-proves the claim through this launch path per fixture.
 //
 // `u`/`g`/`beta`/`o` are the whole BODY tiles, the same ones `gdn_rec_collapse` is fed, and the

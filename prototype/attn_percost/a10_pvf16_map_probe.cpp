@@ -10,7 +10,7 @@
 // lane instead of 8 F32, and the builtin carries a fourth `op_sel` argument with no F32 counterpart. Nothing
 // in this tree has ever emitted it against known operands, so the epilogue's `(lane, element) -> (row, dim)`
 // law is UNMEASURED, and the epilogue is the site where a half-published row once produced NaN for every
-// covered row (`bench/performance-status.md` §29). This file measures it instead of assuming it.
+// covered row (`progress/2026-10-21/performance-status-2026-10-21.md` §29). This file measures it instead of assuming it.
 //
 // THE PATTERN (same design rule as `fattn_map_probe.cpp`: every cell holds a number that ENCODES ITS OWN
 // COORDINATES, so any relabelling of (row, dim) shows up as a wrong integer rather than as a plausible sum)

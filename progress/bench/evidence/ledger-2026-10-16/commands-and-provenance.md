@@ -128,7 +128,7 @@ the median of the three runs on the basis named at the head of this section (`gd
 2.76+1.07 = 3.83 → 3.8 %; `lm_head`+`host_tail` 2.2940+0.7455 = 3.0395 → 3.04 and 0.93+0.31 = 1.24 → 1.2 %;
 `attn` share median of 11.00/10.90/10.81 = 10.9 %; `matmul_pct` median of 28.91/28.55/28.29 = 28.6 %),
 recomputed from the three committed logs. Nothing else in the section moved; the same cells in
-`bench/performance-status.md` §3 were corrected with these.
+`engine/performance-status.md` §3 were corrected with these.
 
 ## 5. Cold weight-restore — `tools/cold_restore.sh --runs 5`
 

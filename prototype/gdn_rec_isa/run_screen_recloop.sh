@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Harness screen for D53 MODE `recloop` (N token-steps inside ONE launch) against `rec2c4`, the per-token
-# spelling the engine actually runs (`bench/performance-status.md` §22, decision log D53).
+# spelling the engine actually runs (`progress/2026-10-21/performance-status-2026-10-21.md` §22, decision log D53).
 #
 # WRITTEN, NOT RUN. No device run in this file has been executed by the worker who wrote it: no launch,
 # no burst, no ms. Everything below is for the main agent, blocking, zero subagents, inside ONE
@@ -168,4 +168,4 @@ PY
 
 echo
 echo "NOT TIMED BY THIS SCRIPT'S AUTHOR: no device run in this window was read by the worker who wrote"
-echo "it. Numbers from here belong in bench/performance-status.md only if the main agent took them."
+echo "it. Numbers from here belong in engine/performance-status.md only if the main agent took them."

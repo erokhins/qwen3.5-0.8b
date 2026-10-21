@@ -25,7 +25,7 @@ of the ~7.8 ms token budget. What it actually costs is **0.137 ms/token**, ~65×
 because all of it is dispatch and single-block latency. Every GB/s figure for this op is therefore
 meaningless (~2–4 GB/s, and the working set is cache-resident anyway); the numbers that matter are
 **launches/token** and **µs/launch against the measured 1.85 µs floor**
-(`bench/performance-status.md` §4). `run.py` prints GB/s only to label it as not the finding.
+(`engine/performance-status.md` §4). `run.py` prints GB/s only to label it as not the finding.
 
 Note the queue's estimate (~0.005 GB/token for W4) is ~10× this: measured traffic is 0.498 MB/token
 fused, 0.596 MB/token unfused. The launch argument gets stronger, not weaker.
@@ -283,4 +283,4 @@ fail verifies nothing: `--neg plainw --scope 1` on the tile plan moved `g1_n` an
 `g1_s`/`g2_s`/`g2_n` alone, exactly as it does at rows=1.
 
 `--rows` also multiplies the burst's byte accounting (the `--time` path is unchanged in shape and
-still main-agent-only, bench/performance-status.md §6).
+still main-agent-only, engine/performance-status.md §6).

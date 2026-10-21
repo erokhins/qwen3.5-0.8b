@@ -817,6 +817,6 @@
 == summary
   [note] all 64 of 64 steps judged by the route allowance; the allowance is TIGHTER than the flat §10.1 G5 floor at 54 of them. Worst step 32: deficit = 3.037x its own measured route spread (this fixture's margin in force 3.50, derived as the max ratio inside dec64f alone — engine/route_allowance.py; no other fixture can move it, and no step of this fixture sits outside it by construction).
   [note] 16 of 64 steps sit under G6's decode-logits figure 0.9999 (step:cos — 1:0.999886, 25:0.999876, 26:0.999637, 27:0.998987, 28:0.998155, 29:0.998735, 30:0.999032, 31:0.999158, 32:0.997844, 33:0.999706, 34:0.998847, 35:0.999829 …). G6 is ADVISORY here by decision, not an open question: an end-to-end token carries the whole 24-layer cascade, so it is not judged by a figure belonging to a narrower comparison — see the BAND comment above and the two measured floors in engine/results.md: last-op reassociation 0.99999862 (engine/logits_floor.py) and end-to-end two-legal-routes 1-cos 4.7e-5..1.9e-4 (engine/route_price.py).
-  [note] decode_run reported 11.668 ms/step. Timing from a gate run is a by-product, not a measurement: see bench/performance-status.md §6 for what a clean window takes.
+  [note] decode_run reported 11.668 ms/step. Timing from a gate run is a by-product, not a measurement: see engine/performance-status.md §6 for what a clean window takes.
   [TIE] 2 generation step(s) were exact ties in the pin and were decided by the tie policy: step 17 -> 10407, step 18 -> 64704
 ENGINE GATE PASS — with 2 step(s) reported TIE

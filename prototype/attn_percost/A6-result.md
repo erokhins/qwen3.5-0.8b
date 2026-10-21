@@ -5,13 +5,13 @@ order, lines, numerics policy) and `prototype/attn_percost/A5-GEOMETRY.md` §3.1
 
 **Compile-only and driver-fact-only. No kernel of the engine was launched by anyone in this file, and no timing
 was taken by anyone in this file: there is not one `ms` figure here, and none may be copied from here into
-`bench/performance-status.md`.** The one step that touches a device is Step 3's occupancy *query*
+`engine/performance-status.md`.** The one step that touches a device is Step 3's occupancy *query*
 (`hipOccupancyMaxActiveBlocksPerMultiprocessor`), which submits no work; its command, wall, `util` and the words
 "no timing taken" are in §3.
 
 Citation legend (AGENTS' citation-hygiene rule: a `§N` that names no file resolves only in a reader's memory):
 a bare `§N` below means §N **of this file**; `§19/§20.1` mean `prototype/attn_decode/results.md`; `§28/§31/§33/§34/§37/§47`
-mean `bench/performance-status.md`; `A6-BET`, `A5`, `A3-result.md` and `E1` mean
+mean `engine/performance-status.md`; `A6-BET`, `A5`, `A3-result.md` and `E1` mean
 `prototype/attn_percost/A6-BET.md`, `prototype/attn_percost/A5-GEOMETRY.md`,
 `prototype/attn_percost/A3-result.md` and `prototype/attn_wmma/E1-result.md`, and a `§` after one of those names is
 that file's section. Every number is labelled **read** (a `path:line` or a note-block field, with

@@ -659,7 +659,7 @@ number near 40 ms is the model being right, not the kernel being slow. Falsifier
 `attn` does not fall at all ⇒ §4's verdict was wrong and the redundant pass-2 loops are the wall.
 Falsifier B: `attn` lands 40–80 ms ⇒ traffic fell and something else (issue, LDS, or the 4x-pair staging)
 binds ⇒ report PARTIAL and price the block-level stage. `SQ_INSTS_VALU` must not *rise* on the tile form.
-No number from a worker run belongs in `bench/performance-status.md`; none was taken here, and the two
+No number from a worker run belongs in `engine/performance-status.md`; none was taken here, and the two
 `hipcc -c` calls and the Python gate above touched no device.
 
 ## 13. §12's device pass, run by the parent (2026-10-14, lock `ATTN-P2`): **RED — the flip is refused**
@@ -1408,7 +1408,7 @@ the arithmetic: re-take `isa` and diff the descriptor.
 
 All numbers below were taken by the main agent in the foreground with `tools/gpu_lock.sh` held and **no
 subagent active**, in the window 15:32–16:10 UTC. `gpu_lock.sh util` read 91–93 % throughout, which per
-`bench/performance-status.md` §6 is not a usable gate for this box (identical clean runs read 24–91 %); the
+`engine/performance-status.md` §6 is not a usable gate for this box (identical clean runs read 24–91 %); the
 guarantee being relied on is the zero-subagent foreground shape, not the util figure.
 
 ### 21.1 Correctness first, on both fixtures §19 used, both forms

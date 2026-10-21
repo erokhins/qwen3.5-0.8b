@@ -39,10 +39,10 @@
 #   * it does not pass an empty parse. Every field is `need`-checked, the family table must parse one row per name
 #     in `$FAMS`, and a missing `SPLITCAP` record is an abort — a check over a list that can be empty cannot fail.
 #   * it does not take a wide prompt through argv. One argv slot caps at MAX_ARG_STRLEN = 131,072 B, so 32,768 ids
-#     cannot be passed at all (bench/performance-status.md §39: shell exit 126 in 0 s, read as "the engine crashes
+#     cannot be passed at all (progress/2026-10-21/performance-status-2026-10-21.md §39: shell exit 126 in 0 s, read as "the engine crashes
 #     at 32k"). Wide legs go via `--ids-file`, and the file's field count is asserted to equal the width.
 #   * it does not print a verdict from an unpaired window, nor from reps that disagree by more than SPREAD_TOL,
-#     nor from a run whose attention launch count differs between arms (bench/performance-status.md §41 closed
+#     nor from a run whose attention launch count differs between arms (progress/2026-10-21/performance-status-2026-10-21.md §41 closed
 #     launch count as a variable and this lever may not reopen it).
 #
 # Usage:
@@ -61,7 +61,7 @@ REPO=$PWD
 # ---- pins ----------------------------------------------------------------------------
 # A PRE-change sha, never HEAD: after this knob lands HEAD *is* the change, so a baseline read from HEAD would
 # compare the lever with itself and print a clean null (the §13 trap). This is the sha the tree shipped at when
-# A9-L-c was written (bench/performance-status.md §52's funding decision).
+# A9-L-c was written (progress/2026-10-21/performance-status-2026-10-21.md §52's funding decision).
 BASE=${BASE:-8b0a3b4}
 SHORT=$(git rev-parse --short "$BASE" 2>/dev/null || echo "$BASE")
 BASEDIR=${BASEDIR:-/tmp/a9lc-base-$SHORT}
@@ -170,7 +170,7 @@ canary2() {   # $1 = width, $2 = rep
         echo "$G" > "$OUT/wide${WID}_${SIDE}_$R.launches"
     done
     cmp -s "$OUT/wide${WID}_base_$R.launches" "$OUT/wide${WID}_cap_$R.launches" \
-        || fail "canary 2: at $WID lanes the capped arm submits $(cat "$OUT/wide${WID}_cap_$R.launches") attn launches against base's $(cat "$OUT/wide${WID}_base_$R.launches"). Capping the split changes a grid extent and the bytes of a partial, not how many launches a layer submits (bench/performance-status.md §41)."
+        || fail "canary 2: at $WID lanes the capped arm submits $(cat "$OUT/wide${WID}_cap_$R.launches") attn launches against base's $(cat "$OUT/wide${WID}_base_$R.launches"). Capping the split changes a grid extent and the bytes of a partial, not how many launches a layer submits (progress/2026-10-21/performance-status-2026-10-21.md §41)."
     echo "CANARY 2 ok @${WID}: base split=$BS (no SPLITCAP) | cap split=$CS cap=$CC natural=$CN span=$CP | null split=$NS"
 }
 

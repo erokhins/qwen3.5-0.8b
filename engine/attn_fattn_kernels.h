@@ -55,7 +55,7 @@
  *       accumulator VGPRs. REJECTED ON MEASUREMENT — 256 live registers is past what this target keeps in
  *       registers at all: `.vgpr_count 264 / .vgpr_spill_count 115 / .private_segment_fixed_size 724`. It
  *       spilled HARDER than the stage it replaced, and scratch traffic lands on the same dependent chain
- *       `bench/performance-status.md` §28 identifies as the mechanism. That is also why llama.cpp's 358
+ *       `progress/2026-10-21/performance-status-2026-10-21.md` §28 identifies as the mechanism. That is also why llama.cpp's 358
  *       spilled VGPRs are not a number to admire from a distance.
  *   (B) ONE WARP PER BLOCK, Q STAGED, V ALIASED OVER K. **What shipped at `8a7c222`'s parent.** 32-thread blocks
  *       (`FATTN_THREADS`), and `blockIdx.x` names the query head where the shipped wave names a KV group:
@@ -139,7 +139,7 @@
  *     wrong — the first by 8 KiB in the wrong direction (a 128-float stage row indexed with `lane*8 + u`,
  *     lane <= 31, writing `part` up to `pp[385]` on a 258-float slot, i.e. trampling the next (row, head)
  *     partial), the second by publishing only 16 of every row's 256 dims and leaving the merge to read
- *     scratch, which is the NaN of §29 of `bench/performance-status.md`. `fattn_transpose_out` is the only
+ *     scratch, which is the NaN of §29 of `progress/2026-10-21/performance-status-2026-10-21.md`. `fattn_transpose_out` is the only
  *     spelling of those addresses, pinned by three `static_assert`s beside them: the widest stage write, the
  *     widest `part` write, and — the one the second version defeated — the COVERAGE of the publish loop.
  *     A bound says where the last index is; only a coverage assert says every index was reached, and the
@@ -461,7 +461,7 @@ __device__ __forceinline__ int fattn_c_col(int lane, int l) { return 2 * l + (la
 // offset `16*(e&1)`. The witness is `prototype/attn_percost/check_a10_pvf16_map.py` over
 // `a10_pvf16_map_probe.cpp`'s dump in BOTH op_sel orders (0 disagreements over 32 lanes x 16 elements in
 // each); a relabelled map is a permuted row of the output, which is the class of defect that once came back
-// as all-NaN (§29 of `bench/performance-status.md`), so it is measured and pinned rather than reasoned about.
+// as all-NaN (§29 of `progress/2026-10-21/performance-status-2026-10-21.md`), so it is measured and pinned rather than reasoned about.
 __device__ __forceinline__ int fattn_h_dim(int lane, int tau, int e) {
     return 32 * tau + 16 * (e & 1) + fattn_c_col(lane, e >> 1);
 }
@@ -623,7 +623,7 @@ __device__ __forceinline__ int fattn_tr_addr(int row_in_pass, int d) { return ro
 //      blocks landed as 8 dims of one half plus 8 of the other in each of 16 slots: 16 dims published per
 //      row, 240 never written. `attn_combine` merged whatever the scratch held there, and `finish_head`'s
 //      `acc / l` over an unwritten slot is how every covered row came out NaN (§29 of
-//      `bench/performance-status.md`). The bound-style `static_assert`s could not see it, because the defect
+//      `engine/performance-status.md`). The bound-style `static_assert`s could not see it, because the defect
 //      was in the SET of indices touched, not in their maximum — hence the coverage assert on `FATTN_PBLK`,
 //      which fails if a publish loop stops covering the stage.
 //   3. the (m, l) header, published by `lane == 0` alone: legal for a one-row warp, one row of sixteen here.
@@ -837,7 +837,7 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
     // row-slots every round. A strided `for (qr = w; qr < FATTN_MROWS; qr += nw)` — the shape the two K/V fills
     // below use — stages 6/5/5 slots for warps 0/1/2 and leaves the other 11 slots of every stage unwritten;
     // the score leg then reads them as whatever LDS held, `live` is true so nothing masks them, and every such
-    // row's `l` and accumulator go non-finite (`bench/performance-status.md` §32's all-NaN red). Note what that
+    // row's `l` and accumulator go non-finite (`progress/2026-10-21/performance-status-2026-10-21.md` §32's all-NaN red). Note what that
     // means for a bisect: at `FATTN_WARPS = 1` the strided loop and this loop are THE SAME LOOP, so a `WARPS=1`
     // probe cannot see this defect, and its green result is not evidence about the per-warp Q stage.
     //
@@ -934,7 +934,7 @@ __device__ __forceinline__ void attn_fattn_body(const CoreArgs a) {
         // an undefined register block into the first `v_wmma`. One NaN cell anywhere in a row's 16-column P
         // tile makes every output dim of that row NaN, because the P·V tile sums over all 16 KV lanes —
         // which is the whole-row, whole-coverage NaN signature recorded in §29 of
-        // `bench/performance-status.md` and decision D64.
+        // `engine/performance-status.md` and decision D64.
         fattn_CRegs acc{};
         if constexpr (kTwoAcc) {
             // THE TWO-ACCUMULATOR ROLL (`--attn-fattn-roll two`, bet A4-L1). Gate 0 of

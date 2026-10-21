@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The MERGED-form census (D46 / `bench/performance-status.md` §18): does `rec2c`'s fused prologue survive
+"""The MERGED-form census (D46 / `progress/2026-10-21/performance-status-2026-10-21.md` §18): does `rec2c`'s fused prologue survive
 being merged into the shipping unroll4 walks, and do the walks survive the merge?
 
 WHY A CENSUS AND NOT ANOTHER BURST. The §18 screen compared `rec2c` (fused prologue, PRE-unroll4 walks)

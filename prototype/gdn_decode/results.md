@@ -26,7 +26,7 @@ expected outputs from `decode1.*`. Nothing synthesized.
 **The first two rows are the re-take** — run 2026-10-11 in a foreground, zero-subagent window with the
 burst timer below, one `util` record, and `check.py` in the same window: **F1–F4 still PASS**, `o`
 within 1 BF16 ULP of the pinned dump on every element of all 18 layers, with **3 layers holding 1-ULP
-ties**. They replace the **0.062 ms / 918 GB/s** row this file carried, and `bench/performance-status.md`
+ties**. They replace the **0.062 ms / 918 GB/s** row this file carried, and `engine/performance-status.md`
 §4 quotes 0.0648 ms today (the 0.0646 ms row of 2026-10-11 is the frozen ledger's, progress/2026-10-16/performance-status-2026-10-16.md:36,265). The re-take came in ~4 % *slower* than the figure it replaces, which
 is the direction a `min()` over a partly-zero event series is expected to move.
 
@@ -34,7 +34,7 @@ is the direction a `min()` over a partly-zero event series is expected to move.
 `hipEventElapsedTime` loop this directory has now removed: the same timer `d81ff13` disowned
 (`hipEventElapsedTime` returns exactly 0.000 ms for sub-millisecond work on this iGPU, and the loop
 kept `min(best, ms)` with no `ms > 0` guard), with no `util` record and no repeat spread — contrary to
-`bench/performance-status.md` §6's own provenance rule, and `0.062` had been carried straight into the
+`engine/performance-status.md` §6's own provenance rule, and `0.062` had been carried straight into the
 frozen ledger's token sum (progress/2026-10-16/performance-status-2026-10-16.md:271). The timing path is now the burst steady_clock idiom (one warm-up, `--trials` bursts of
 `--iters` launches, best **and** worst printed), which is what produced the numbers above.
 

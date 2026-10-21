@@ -34,7 +34,7 @@
 # document 1,767 tok/s against 11,306 tok/s warm.
 #
 # The tok/s and TTFT this prints are the engine's own wall clock on a box that is also
-# serving this session's tokens. They are NOT ledger numbers: bench/performance-status.md
+# serving this session's tokens. They are NOT ledger numbers: engine/performance-status.md
 # §6 defines the clean window a number has to come from (zero subagents, exclusive,
 # blocking), and a chat session is none of those.
 #

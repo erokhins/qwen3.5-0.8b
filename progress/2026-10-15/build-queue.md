@@ -1,6 +1,6 @@
 # Build queue — what is left between three kernels and an engine
 
-This is the work list, not a status report. `bench/performance-status.md` is the ledger of what
+This is the work list, not a status report. `engine/performance-status.md` is the ledger of what
 is measured; `prototype/README.md` is the index of graduated ops; this file says what to build
 next, in order, and what each item must show before it is allowed to be called done.
 
@@ -110,7 +110,7 @@ A-18's chaos floor rather than by a new tolerance.
 ## W6 — end-to-end correctness, then the first real tok/s row
 
 `testdata/` (the `bench.sh` fixtures) through `engine/`, greedy, against the HF reference:
-token-equality against A-18's floor, then `bench/performance-status.md` §1 gets a **measured**
+token-equality against A-18's floor, then `engine/performance-status.md` §1 gets a **measured**
 tok/s row replacing the projected 137–147. If the projection gap from W2 is real, this is where
 it shows up as a number, and the ledger gets the correction rather than a footnote.
 

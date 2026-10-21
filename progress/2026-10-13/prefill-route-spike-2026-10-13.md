@@ -7,7 +7,7 @@ should be built. It answers those four questions and pre-registers the measureme
 rest.
 
 **What it is not.** It is not a timing document. No TFLOP/s, no ms, no token rate was measured here, and
-nothing in it may be copied into `bench/performance-status.md`. The dense-matrix rates it divides by
+nothing in it may be copied into `engine/performance-status.md`. The dense-matrix rates it divides by
 (bf16 **5.667**, fp16 **6.885**, fp32 **2.932** TFLOP/s at the engine's own `1024×4096×1024`, and the
 2.206 GHz-of-2.9 sustained clock) are **quoted from `devices/strix-halo-compute.md`**, which measured
 them in an exclusive window. Where this file does arithmetic on those quoted rates it says so. Every
@@ -360,11 +360,11 @@ was moved. Both comments are in the file.
    call's whole ~162 KiB of traffic is ~0.7 µs of stream time against a 1.85 µs launch floor, so the call
    is dispatch-bound before anything else gets a vote; if they go to the library at all, fuse them into
    one `N=32` call), `lm_head` at one row (a GEMV already at **102 % of the stream roofline**, 2.105 ms
-   for 485 MB, `bench/performance-status.md`: there is nothing left for a library to win there), every
+   for 485 MB, `engine/performance-status.md`: there is nothing left for a library to win there), every
    mixer and glue kernel, and the `silu`-mul if W6 says the unfuse earns its keep.
 2b. **The in-situ spread is the best argument for the split.** Today's hand projections run at **66 % of
    the probe**, and within them from **77 %** (`in_proj_qkv`) down to **39 %** (`v_proj`) and **5 %** for
-   the 16-row `in_proj_a`/`in_proj_b` (`bench/performance-status.md`, "the wide shapes behave like
+   the 16-row `in_proj_a`/`in_proj_b` (`engine/performance-status.md`, "the wide shapes behave like
    `lm_head`; the narrow ones behave like nothing measured before"). The library's upside is concentrated
    in exactly the shapes the hand kernel is worst at — and it is zero for the ones already at roofline.
 3. **bf16 first, fp16 second.** Land the library route with bf16 in / bf16 `C` — no numerics change at

@@ -369,7 +369,7 @@ Written before the run so the conclusion cannot drift into it — and item 1 is 
    narrower and more specific than "launch count": the engine reads MLP-shaped traffic at **52 % of what the
    identical geometry achieves in a probe**, and the one measured gap that does exist — 9 % for serialized
    launches versus one kernel, §expectation 6 — is an order of magnitude too small to be it.
-2. **If there is a cliff at the step's ratio:** every roofline in `bench/performance-status.md`
+2. **If there is a cliff at the step's ratio:** every roofline in `engine/performance-status.md`
    gets re-based on the measured mixed rate at 62:1, and the plan's #1 priority becomes making the
    step's traffic *more* read-pure (fold the casts, stop widening to F32, write the conv window in
    place) rather than merely fewer bytes.

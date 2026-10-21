@@ -44,10 +44,13 @@ measured 237 GB/s → **~151 tok/s** theoretical (§07.4, confirmed by
 correctness oracle rather than a prototype engine) is 6× below it — which is exactly the
 gap the engine exists to close.
 
-**The engine runs end to end.** `bench/performance-status.md` is the honest ledger:
-decode **90.6 tok/s at 128 lanes** and prefill **3,443.1 prompt tok/s at 1024 lanes** are measured
-device numbers (re-taken 2026-10-16); §1 is the live table, §2–§6 say where the time goes and what a
-number is worth, and the superseded eras are frozen in `progress/2026-10-16/performance-status-2026-10-16.md`. Carry the lane count and the ledger row with any tokens/s figure.
+**The engine runs end to end.** `engine/performance-status.md` is the honest ledger: prefill **12,047
+warm prompt tok/s at 1,024 lanes** (11,070 at 4,096, 8,542 at 16,384 — the 2026-10-20 warm banner) and
+decode **87.1 tok/s marginal at 128 lanes** (the 2026-10-19 window, labelled re-take-owed) are measured
+device numbers; §1 is the live table, §2–§6 say where the time goes and what a number is worth, and the
+superseded eras are frozen in `progress/2026-10-21/performance-status-2026-10-21.md` and
+`progress/2026-10-16/performance-status-2026-10-16.md`. Carry the lane count and the ledger row with any
+tokens/s figure.
 
 ## Target model — verified facts
 
@@ -122,10 +125,13 @@ specification/               # math-only, library-agnostic forward-pass spec (�
 speccheck/                   # independent Python implementation of that spec + all gates (NOT the engine)
 speccheck/chat.sh            # interactive chat on that path, with prefill/decode stats
 testdata/                    # engine-agnostic speed tests (long summarise, long poem) + schema
-bench/                       # the ledger and audits; the runner moved to testdata/
+bench/                       # one data file: bench/band-history.jsonl, the band-move record the
+                             # gate reads and appends to (the ledger moved to engine/, the audits
+                             # and the runner moved out on 2026-10-16 and 2026-10-21)
 progress/                    # archive: dated one-shot docs in <YYYY-MM-DD>/ dirs, plus
                              # progress/<owner>/evidence/ for the committed evidence files
-engine/                      # the engine: kernels, residency, scheduler, state pools, drivers
+engine/                      # the engine: kernels, residency, scheduler, state pools, drivers,
+                             # and engine/performance-status.md, the live ledger
 prototype/                   # one subdir per op: standalone kernel + reference dump + gate
 engines/                     # cloned reference engines for cross-checking (gitignored, read-only)
 data/                        # reference dumps, fixtures, bench output (gitignored, regenerable)
@@ -162,7 +168,7 @@ Conventions inherited from the old project:
   set, single-stream decode, reported in tok/s on this box.
   **Met 2026-10-12** — `engine/gate.py`: `dec8` 8/8 ids exact (94 checks), `dec64t` 0 fails over 546
   checks with 64/64 ids exact and 64/64 identical on a free run; **83.9 tok/s** (11.919 ms/token at a
-  25-lane context, progress/2026-10-16/performance-status-2026-10-16.md:15; the live headline is §1 of `bench/performance-status.md`).
+  25-lane context, progress/2026-10-16/performance-status-2026-10-16.md:15; the live headline is §1 of `engine/performance-status.md`).
 - **M3 — useful.** quantized blobs (reuse the GGUF-import lessons), MTP
   speculative decode, minimal HTTP/serving shim.
   **Descoped 2026-10-12 by scope ruling** — quantization, MTP and any serving shim are dropped for
@@ -240,7 +246,7 @@ M0 in progress:
   logits GEMV, 242.1 GB/s = 102 % of the measured read probe), `prototype/gdn_decode` (S04.2–S04.4
   decode step, all four functions, bit-exact conv), `prototype/mlp_gemv` (S03.3 gate+up+SwiGLU and
   down, F1–F4 over 192 layer×step cases, 2.650 ms per token cold = 84 % of the probe).
-  `bench/performance-status.md` §4 is the ledger's per-op floor table: 4.82 ms of the ~6.5 ms/token
+  `engine/performance-status.md` §4 is the ledger's per-op floor table: 4.82 ms of the ~6.5 ms/token
   budget was this line's pre-engine-era figure, and it is the place that says which numbers are measured and which are projected.
 
 Next: the projection GEMVs — `mlp_gemv`'s shape-generic kernel instantiated at the GDN and

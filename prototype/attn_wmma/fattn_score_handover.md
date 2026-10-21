@@ -8,7 +8,7 @@ census, and one host-side driver query. **No timing was taken and no kernel was 
 appears anywhere in these artifacts.
 
 Shorthands used below so no `§label` is left without its file: `anatomy §N` =
-`progress/2026-10-18/llama-fattn-anatomy.md`; `ledger §N` = `bench/performance-status.md`;
+`progress/2026-10-18/llama-fattn-anatomy.md`; `ledger §N` = `engine/performance-status.md`;
 `results §20.1` = `prototype/attn_decode/results.md`; a bare `§5` is this file's own section.
 
 ## 0. The state of the tree, and the choice the task asked to be stated

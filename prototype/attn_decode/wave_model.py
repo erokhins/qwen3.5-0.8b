@@ -3,7 +3,7 @@
 kernel's own constants and the ISA the compiler emits for it.
 
 CPU-ONLY (`AGENTS.md`: no device work in a worker). Nothing here runs a kernel or takes a
-timing: the two measured inputs are quoted from `bench/performance-status.md` and
+timing: the two measured inputs are quoted from `engine/performance-status.md` and
 `devices/`, and everything else is geometry read out of
 `prototype/attn_decode/attn_decode_kernels.h` plus arithmetic on it. Run:
 

@@ -9,7 +9,7 @@ run ONCE PER TOKEN (the norms, the shuffles, the per-token address recomputation
 bills both at x1. At span 1 the two sets coincide and nothing shows; at the shipped span of 512 the
 per-launch part amortises 512 ways, so the honest per-token bill is the FLAT number minus the per-launch
 part. This file splits them and prints both. The flat number stays the one to compare against
-`bench/performance-status.md` §24's "+156 slots/token-step", because that is how it was taken.
+`progress/2026-10-21/performance-status-2026-10-21.md` §24's "+156 slots/token-step", because that is how it was taken.
 
 THE SECOND THING IT MEASURES — the whole point of the addressing item: how much of a token-step is
 ADDRESS ARITHMETIC. The category table in `isa_census.py` cannot answer it, because LLVM's per-token
@@ -401,7 +401,7 @@ def bill(name: str, body: list[str], w, verbose: bool = True) -> dict:
     w(f"  per-TOKEN straight    : {len(per_tok):3} blocks, {slots_of(it):4} slots")
     w(f"  walks per token       : loopA {slots_of(ia)}x{ta}={slots_of(ia)*ta},"
       f"  loopB {slots_of(ib)}x{tb}={slots_of(ib)*tb}")
-    w(f"  FLAT token-step bill  : {flat} slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md")
+    w(f"  FLAT token-step bill  : {flat} slots/wavefront     <- comparable with isa_census.py and §24 of progress/2026-10-21/performance-status-2026-10-21.md")
     w(f"  PER-TOKEN bill        : {pertok} slots/wavefront"
       + (f"   (flat - {persub} per-launch slots)" if persub else ""))
     w(f"  ADDRESS ARITHMETIC    : {len(a_t)} straight-line + {len(a_a)*ta + len(a_b)*tb} in walks"

@@ -70,7 +70,7 @@
 //   * No thresholds, no verdicts on a timing row. W1/W2/W4's bands live in §7 and are applied outside
 //     this tool; a harness that prints a verdict gets read as one even when it is not, and a rate
 //     printed here is not a ledger row. Nothing this tool prints belongs in
-//     bench/performance-status.md or devices/. The two correctness modes are the only ones a worker
+//     engine/performance-status.md or devices/. The two correctness modes are the only ones a worker
 //     may run, and neither can emit an ms figure because neither contains a timing loop.
 
 #include <hip/hip_runtime.h>

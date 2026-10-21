@@ -352,7 +352,7 @@ is built, compile-only, and both CPU-side bars are met. The detail is NOT in thi
   `progress/2026-10-18/llama-fattn-anatomy.md`, in which their round is 7.16). Of that, 4.00 is the matrix
   itself and 5.72 is everything else. In `m16_census.py`'s slots currency (waits excluded) it is
   4.855/touch, against D58's 1.98 for a round that does not contain the softmax.
-- **And occupancy is probably not the mechanism.** §28 of `bench/performance-status.md` timed the M = 16
+- **And occupancy is probably not the mechanism.** §28 of `progress/2026-10-21/performance-status-2026-10-21.md` timed the M = 16
   re-tile at 3 and at 5 blocks/CU and measured at most a 5 % change, concluding the kernel was never
   occupancy-limited. Claim (i) is a funded bar here, not a predicted win; the lever this form has is the
   instruction stream above.

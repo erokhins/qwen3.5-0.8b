@@ -249,7 +249,7 @@ What to look for, in this order (D44's lesson: read how many checks ran, not onl
 **If `wide4096f` fails on floors rather than on the plan, stop.** Do not widen, tune or special-case:
 that would mean 4104 lanes is the first width the floors in force do not cover, which is a finding to
 report, not a bug to route around. The revert is one line (`kAttnMaxSplit = 8`) plus the comment edits.
-Anything that enters the ledger, every paired A/B, and the `bench/performance-status.md` rows are yours.
+Anything that enters the ledger, every paired A/B, and the `engine/performance-status.md` rows are yours.
 
 ## 6. Decisions I did not make, and residual risks
 

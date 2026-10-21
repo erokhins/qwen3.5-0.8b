@@ -4,7 +4,7 @@ Task: `prototype/gdn_walk/BET.md` §12 adopted G4 and set its lines before the c
 `prototype/gdn_walk/G3-llama-kernel.md` §6 is the constraint set. This file is the record of what was
 built, what was proved on CPU, the one short device gate that was run, and the timing A/B handed to the
 main agent. **It contains no millisecond figure taken by this worker.** Every ms below is quoted from
-`bench/performance-status.md` §42/§43 or from BET.md §12's pre-registration, cited as such.
+`progress/2026-10-21/performance-status-2026-10-21.md` §42/§43 or from BET.md §12's pre-registration, cited as such.
 
 Kernel: `engine/gdn_rec_reg16_kernels.h::rec_reg16_kernel`. Knob: `--gdn-geom reg16`, **default stays
 `block`**.
@@ -209,7 +209,7 @@ Correctness-only, inside the worker budget, no timing. Command exactly as run, a
 * `gpu_lock util@acquire: gpu use: 85%`, `util@release: gpu use: 57%`.
 * `wall for all device runs: 12.0 s` — 14 `decode_run` launches (12 shape runs + 2 token-parity runs); 13 s
   for the whole script. **CORRECTNESS ONLY, no timing taken** — no warm loop, no best-of-N, and no ms figure
-  here may enter `bench/performance-status.md`.
+  here may enter `engine/performance-status.md`.
 * `--base-bin` is a `git worktree` of `HEAD` (`2aa4d7e`) built into `/tmp/base-g4`, with `data`/`models`
   symlinked in.
 

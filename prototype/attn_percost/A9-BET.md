@@ -1,12 +1,12 @@
 # A9-L-c — the bet: cap the attention split, and the 105 GB/pass of scratch that the split costs stops being paid at 32k
 
 Pre-registered **before any measurement**, in the shape of `prototype/attn_percost/A4-BET.md` and
-`prototype/attn_percost/A6-BET.md`. Funded by `bench/performance-status.md` §52 (decision: do L-c now, keep the
+`prototype/attn_percost/A6-BET.md`. Funded by `progress/2026-10-21/performance-status-2026-10-21.md` §52 (decision: do L-c now, keep the
 rewrite pre-gated at a number rather than funding it on hope). Written against tip `8b0a3b4`; the knob is
 `engine/decode_run.cpp --attn-split-cap N`, applied at `engine/kernels_attn.cpp`'s one split decision site.
 
 **No timing in this file.** Every millisecond and byte figure is quoted from
-`prototype/attn_percost/A9-LONGCTX-CENSUS.md` §2.3/§4.2 (which quotes `bench/performance-status.md` §51's traces)
+`prototype/attn_percost/A9-LONGCTX-CENSUS.md` §2.3/§4.2 (which quotes `progress/2026-10-21/performance-status-2026-10-21.md` §51's traces)
 or is arithmetic on those with its formula shown. The main agent measures; the worker who wrote the knob took none.
 
 ---
@@ -90,7 +90,7 @@ The verdict is one of four, and the harness prints exactly one (`run_ab_a9lc.sh`
   describing it.
 * **UNPAIRED / spread too wide** — no verdict; report the NULL row and re-take.
 
-Per `bench/performance-status.md` §36's convention the base is measured **in the same window** (the harness pins
+Per `progress/2026-10-21/performance-status-2026-10-21.md` §36's convention the base is measured **in the same window** (the harness pins
 `BASE=8b0a3b4`, builds a worktree of it, and refuses a base whose binary already knows the flag), both arms are
 inside one `tools/gpu_lock.sh` hold, and ≥ 2 reps each.
 
@@ -175,7 +175,7 @@ logits, `span=576 > MAXSC`).
   and the null arm's `split` equals base's. `SELFTEST=1` colour-tests that abort against fixtures generated from
   the harness's own constants.
 * **No wide prompt through argv.** 32,768 ids in one argv slot is 191,588 B against `MAX_ARG_STRLEN` = 131,072 B;
-  it fails with shell exit 126 in 0 s and reads as "the engine crashes at 32k" (`bench/performance-status.md` §39).
+  it fails with shell exit 126 in 0 s and reads as "the engine crashes at 32k" (`progress/2026-10-21/performance-status-2026-10-21.md` §39).
   Wide legs use `--ids-file` and the file's field count is asserted.
 * **No empty parse.** Every field is `need`-checked, the family table must parse one row per family name, and zero
   `SPLITCAP` records on the capped arm is an abort, not a pass.

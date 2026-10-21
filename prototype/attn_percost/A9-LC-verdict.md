@@ -72,5 +72,5 @@ reach the wave. The remaining distance to llama.cpp at long context — **1.91×
 reachable by anything in the targeted-lever space, which is exactly what A9 §5 predicted from the numbers
 (best-case stack 1.494×) and which this verdict now confirms with the cheapest of those levers spent. What is
 left is the pre-gated geometry rewrite (`SQ_WAIT*` stall census first, prototype must clear **6.5 TFLOP/s**
-before it earns a second week), and that is the user's scope decision, recorded in `bench/performance-status.md`
+before it earns a second week), and that is the user's scope decision, recorded in `engine/performance-status.md`
 §52 and not started.

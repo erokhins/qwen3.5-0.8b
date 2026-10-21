@@ -107,7 +107,7 @@ one half-pass, so no register cost is expected (the accumulator is 16 tiles x 8 
 of additional K/V staging demand, i.e. **+2.27 MB/token/pass** summed over the 6 attention layers
 (A2 §3's own per-pass figure 9,314,500,608 B / 4,096 = 2.27 MB/token, doubled). The comparison the brief named
 is G1: its hoist added **+32 KB/token/layer** of stage traffic, which landed as **+6.06 ms outside the row it
-improved** and turned a −5.91 % family row into −2.21 % of `wall_ms` (`bench/performance-status.md` §40).
+improved** and turned a −5.91 % family row into −2.21 % of `wall_ms` (`progress/2026-10-21/performance-status-2026-10-21.md` §40).
 H1's added demand is **~12x G1's in bytes**, and unlike G1's it lands inside the family the bet is about, so
 the externality print would have to be read as the primary evidence, not as a footnote.
 

@@ -267,4 +267,4 @@ echo "  No timing here and none taken: this row exists to show raising 9 cannot 
 tools/gpu_lock.sh util | tail -1
 tools/gpu_lock.sh release "$TAG"
 echo "WINDOW DONE. Every ms figure in this window is a traced or timed number for the MAIN AGENT to"
-echo "read and enter in bench/performance-status.md; nothing in this script is a ledger row."
+echo "read and enter in engine/performance-status.md; nothing in this script is a ledger row."

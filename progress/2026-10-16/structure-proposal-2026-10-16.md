@@ -44,7 +44,7 @@ Ignored-but-present: **52,909** files (`.venv/` 31,216; `data/` 20,350; `tmp/` 1
 Journal corpus, since PLAN B touches it: `engine/results.md` **4,493** lines; the 8
 `prototype/*/results.md` **3,667** (attn_decode 1,509; mlp_gemv 534; gdn_gated_norm 517; proj_gemv
 313; glue 286; gdn_collapse 220; gdn_decode 163; lm_head_gemv 125);
-`bench/performance-status.md` **1,149**. Total 9,309.
+`engine/performance-status.md` **1,149**. Total 9,309.
 
 ---
 
@@ -54,7 +54,7 @@ Journal corpus, since PLAN B touches it: `engine/results.md` **4,493** lines; th
 
 `git ls-files tmp/` = **39**, `git ls-files logs/` = **8** → **47 of 273** tracked files (1.26 MiB,
 part 1 groups 1–3), cited by **186 doc lines** (157 `tmp/`, 29 `logs/`) in **15 distinct md files**
-(`engine/results.md`, `engine/README.md`, `bench/performance-status.md`,
+(`engine/results.md`, `engine/README.md`, `engine/performance-status.md`,
 `devices/strix-halo-mixed-traffic.md`, the part-1 audit, +10). Measured precisely:
 
 - `git clean -nxd` lists **512** removals (471 under `tmp/`, 11 under `logs/`) and would **not**
@@ -143,7 +143,7 @@ Structure, which decides *how* a split could work:
    after 2204" → ~20 blocks of 13–257 lines.
 3. `engine/results.md`'s own sections are **unnumbered**; its internal references are prose ("see the
    Q6.1 section below") and its `§N` refs point outward (`§04.4` = spec, `ledger §6` =
-   `bench/performance-status.md`; 54 `§6` refs). So a split breaks no label addressing — there is none.
+   `engine/performance-status.md`; 54 `§6` refs). So a split breaks no label addressing — there is none.
 4. The **prototype journals are the opposite**: numbered H2s (`## 18. …`, `## 20.5 …`) and 25
    citations by that number — `AGENTS.md` cites `prototype/attn_decode/results.md §20.1–§20.3, §18,
    §18.2, §20.6`; `progress/2026-10-14/HANDOFF-2026-10-14.md` cites `§20.4, §21`. **Splitting or renumbering a

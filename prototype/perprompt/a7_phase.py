@@ -59,7 +59,7 @@ A7_HELPERS = r"""
 // Instrumentation, not behaviour: every print below is either a phase wall that the shipped
 // binary does not otherwise expose, or a wave the caller asked for with A7_WARMUP/A7_REPEAT.
 // With no A7_* in the environment this binary's stdout is unchanged. These are host
-// wall-clocks and therefore a by-product, never a measurement (`bench/performance-status.md` §6).
+// wall-clocks and therefore a by-product, never a measurement (`engine/performance-status.md` §6).
 namespace a7 {
 inline double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)

@@ -17,8 +17,8 @@ a tile shape A2 explicitly says nobody has compared).
 | form | what it changed | measured cost | where the evidence is |
 |---|---|---|---|
 | **M = 2** (`prototype/attn_m2/`, the `attn_m2` body, 2 live (row, head) pairs/warp) | re-tile of the shipped VALU spell, bit-identical, **demanded bytes halved** | **7-10 % slower at every width taken**, priced **15-29 % slower at the funded ruler** | `prototype/attn_m2/results.md` §2 and §8.4, carried as the geometry-tax anchor by `prototype/attn_wmma/results.md` §5 |
-| **M = 16, VALU spell** (`prototype/attn_m2/attn_m16.hip.cpp`, `burst_m16.sh`, `gate_m16.py`) | 16 query rows per block, shipped dot and fold called not copied, `ndiff_aout = 0` (40/40 admission) | **2.12× to 14.25× slower** at demands of **0.28-0.55 of the bytes**, in every fixture the harness can build; `GRP=4` (3 blocks/CU) and `GRP=2` (5 blocks/CU parity) differ by **<= 5 %** | `bench/performance-status.md` §27 (GRP4) and §28 (GRP2 retake) |
-| **M = 16, WMMA** — `attn_fattn_wave`, **shipped** | the one re-tile that removes the dependent VALU dot: score is one `v_wmma` per 16-dim step | **1.985× over the frozen VALU round** (§33), 1.3955× of the family when it shipped (§30); costs 178 VGPR / 0 spill / **32,768 B LDS** ⇒ 6 wf/CU, and A3 has just closed that axis | `bench/performance-status.md` §29-§33, §36, §41; `engine/attn_fattn_kernels.h` |
+| **M = 16, VALU spell** (`prototype/attn_m2/attn_m16.hip.cpp`, `burst_m16.sh`, `gate_m16.py`) | 16 query rows per block, shipped dot and fold called not copied, `ndiff_aout = 0` (40/40 admission) | **2.12× to 14.25× slower** at demands of **0.28-0.55 of the bytes**, in every fixture the harness can build; `GRP=4` (3 blocks/CU) and `GRP=2` (5 blocks/CU parity) differ by **<= 5 %** | `progress/2026-10-21/performance-status-2026-10-21.md` §27 (GRP4) and §28 (GRP2 retake) |
+| **M = 16, WMMA** — `attn_fattn_wave`, **shipped** | the one re-tile that removes the dependent VALU dot: score is one `v_wmma` per 16-dim step | **1.985× over the frozen VALU round** (§33), 1.3955× of the family when it shipped (§30); costs 178 VGPR / 0 spill / **32,768 B LDS** ⇒ 6 wf/CU, and A3 has just closed that axis | `progress/2026-10-21/performance-status-2026-10-21.md` §29-§33, §36, §41; `engine/attn_fattn_kernels.h` |
 | **M = 32/64 per warp** (several M tiles in one warp) | never built | never measured; priced from two anchors: a full-body M = 16 block's register bill is **above** the re-tile's 134 VGPR because the PV fragments alone are **128 VGPR/lane** (§27's closing note, D30 §2.4), and the shipped form already spends those 128 at 178 total | §27, `prototype/attn_wmma/results.md` §2 ("PV accumulator wall") |
 
 **§28 overturned §27's explanation, and that is the load-bearing fact for anything funded next.** §27 booked
@@ -46,7 +46,7 @@ of each other*.
   measured cost is quotable: **+111 static ops, SGPRs 52 → 54, VGPRs unchanged at 47, LDS unchanged at
   12,288 B**. What AGENTS retires is the *occupancy* half of its claim ("occupancy unchanged at 16
   waves/SIMD"), which was read off clang's `Occupancy [waves/SIMD]` remark — a constant that prints 16 for
-  every kernel in the TU and therefore cannot fail (`bench/performance-status.md` §26, closing paragraph;
+  every kernel in the TU and therefore cannot fail (`progress/2026-10-21/performance-status-2026-10-21.md` §26, closing paragraph;
   AGENTS' "Counter, occupancy and census traps" row). The lesson for L1/L2 is the instrument rule, not the
   result: a register or live-range change here must be judged with
   `prototype/attn_wmma/fattn_residency_read.py` on the note block plus a driver/counter answer, never with the
@@ -145,7 +145,7 @@ term rather than a separate blow-up. Sized against §46's excess `b`: **10-13 % 
 * **Tile waste (C2)** — 4.2-7.3 % at every body at every width: **1.07× at most** (A2 §2).
 * **K/V traffic as the rate gap (C3)** — staged demand 67 GB/s = 7 % of the cache roof, and D57's falsifier
   (an instruction cut made `attn` **1.521× faster with the byte census unchanged**) is the direct disproof that
-  demanded bytes move this kernel (A2 §3, `bench/performance-status.md` §27).
+  demanded bytes move this kernel (A2 §3, `progress/2026-10-21/performance-status-2026-10-21.md` §27).
 * **Residency (C6)** — closed twice: on LDS arithmetic (A3-result.md §1, E1-result.md §4) and undecidably on
   register facts (A3-result.md §2b, `fattn_regfile_ladder.md` §3). §31's elasticity (4→8 wf/CU = 1.647×) stays
   the ledger's only measured number on that axis; it is simply no longer reachable.

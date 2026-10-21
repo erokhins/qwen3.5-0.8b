@@ -191,7 +191,7 @@ grep -n '^## What\|^## The pass\|^## The handover\|^## Deferred\|^## Open questi
 `progress/2026-10-16/structure-proposal-2026-10-16.md` 4;
 `progress/2026-10-11/commit-review-2026-10-11.md` 1; `tools/doc_ref_check.py` 1 (a selftest fixture);
 `AGENTS.md` 2 title-cites (`:64` "`engine/results.md` (Q2 section, …)", `:67` "(“Q5 / P8”)");
-`bench/performance-status.md` 5 (incl. `:716` "§Q6.1"); `engine/kernels.h` 2 (`:171`,`:176` "§Q10b");
+`engine/performance-status.md` 5 (incl. `:716` "§Q6.1"); `engine/kernels.h` 2 (`:171`,`:176` "§Q10b");
 `engine/decode_run.cpp` 1 (`:513` "§Q10b"); plus **10 bare in-file `§Qn` self-references**
 (`§Q10`×5, `§Q9`×2, `§Q6.1`, `§Q7`, `§Q5`) and 4 "section above/below" prose pointers.
 
@@ -202,10 +202,10 @@ grep -n '^## What\|^## The pass\|^## The handover\|^## Deferred\|^## Open questi
 | # | form | real example | occurrences |
 |---|---|---|---:|
 | F1 | `path:NNNN`, `:NNNN-NNNN`, `:NNNN,NNNN` | `engine/results.md:3739`, `engine/results.md:724,726` | **101** |
-| F2 | `` `path` §label `` / `path §N` | `` `bench/performance-status.md` §6 ``, `` `engine/results.md` §Q6.1 `` | **171** |
+| F2 | `` `path` §label `` / `path §N` | `` `engine/performance-status.md` §6 ``, `` `engine/results.md` §Q6.1 `` | **171** |
 | F3 | bare path or bare filename, no anchor | `` `engine/results.md` ``, `` `results.md` `` | §2.4 |
 | F4 | nickname + section | `ledger §6`, `ledger §5(g)` | 16 (5 live, 11 in `progress/`) |
-| F5 | path + parenthetical qualifier, usually a section **title** | `` `engine/results.md` (“Q5 / P8”) ``, `` `bench/performance-status.md` ("Headline tables after the tiled attention wave ships") ``, `` `engine/results.md` ("Decision 2 of the deep gate") `` | 24 |
+| F5 | path + parenthetical qualifier, usually a section **title** | `` `engine/results.md` (“Q5 / P8”) ``, `` `engine/performance-status.md` ("Headline tables after the tiled attention wave ships") ``, `` `engine/results.md` ("Decision 2 of the deep gate") `` | 24 |
 | F5b | letter-labelled section sign, no digits | `§Q6.1`, `§A2`, `§Q9 Results`, `§"the two real limits"`, `§expectation 6` | 95 (42 `§Q`, 33 `§A`) |
 | F6 | label with **no file named on the line** | `engine/gate.py`'s 17 `§A1…§A4`, which live in `progress/2026-10-14/route-c-audit-2026-10-14.md:79,144,204,265` | 66 label-only |
 | F7 | bare `§NN.N` into `specification/` | `§04.4`, `§10.5` — thousands; not adjudicable, unaffected by any move here | — |
@@ -233,7 +233,7 @@ git ls-files -z | xargs -0 grep -ohE '§[A-Za-z]' 2>/dev/null | wc -l     # F5b 
 | `engine/results.md` | **51** | cleanup-audit 26, `progress/README.md` 19, structure-proposal 4, commit-review 1, `tools/doc_ref_check.py` 1 |
 | bare `results.md` | 12 | commit-review 9, cleanup-audit 2, `engine/kernels_glue.cpp` 1 |
 | `engine/README.md` | 8 | commit-review 4, cleanup-audit 3, structure-proposal 1 |
-| `bench/performance-status.md` | 5 | cleanup-audit 3, `progress/README.md` 2 |
+| `engine/performance-status.md` | 5 | cleanup-audit 3, `progress/README.md` 2 |
 | `devices/strix-halo-mixed-traffic.md` | 5 | `progress/README.md` 3, cleanup-audit 2 |
 | `prototype/attn_decode/results.md` | 4 | cleanup-audit 3, `progress/README.md` 1 |
 | `prototype/gdn_gated_norm/results.md` | 2 | cleanup-audit 2 |
@@ -280,7 +280,7 @@ git ls-files -z | grep -zv '^progress/' | xargs -0 grep -nHE "$T:[0-9]" 2>/dev/n
 
 | target | F2 §-form | bare F3 | note |
 |---|---:|---:|---|
-| `bench/performance-status.md` | 65 | 136 | the most section-addressed doc in the repo |
+| `engine/performance-status.md` | 65 | 136 | the most section-addressed doc in the repo |
 | bare `results.md` | 41 | 114 | **directory-less**; resolved by the citing file's neighbourhood |
 | `prototype/attn_decode/results.md` | 19 | 27 | `AGENTS.md` holds 9 of the journal §-form cites |
 | `prototype/gdn_gated_norm/results.md` | 11 | 14 | §1 and §7-§9 cited from `engine/README.md:138,314` |
@@ -338,7 +338,7 @@ line.
 | doc (lines) | LIVE-DATA | NARRATIVE | SUPERSEDED | verdict |
 |---|---|---|---|---|
 | `prototype/attn_decode/results.md` (1,509) | all 21 numbered H2s. §12,14,16,18,20 are CPU worker passes, §13,15,17,19,21 the device passes; each is the only record of a gated result and **19 §-cites address them by number** | none separable — every §n is either cited or is the witness for a gate that cites it | §13 `:665` "**RED — the flip is refused**" and §15 `:875` "one still blocking" are answered by §19/§21, **but they are the anti-vacuity witness** for those results | **KEEP AS IS.** The numbers are a citation namespace: `AGENTS.md` cites §18, §18.2, §20.1-§20.3, §20.6. Renumbering would falsify AGENTS.md's own traps table |
-| `bench/performance-status.md` (1,149) | §6 `244-1072` (829, the ledger proper) + "Headline tables" `1073-1149` (78) = **907 live** | §3 projection `139-172` (34) | §1-§4 `25-184` (160) + §5 `185-243` (59). `:187` "**Done, 2026-10-12.**" marks §5; `:188-189` says of §1 "**§6 supersedes them wherever it has a row**" | **PRUNE** ~220 lines (§1-§5) → `progress/2026-10-16/ledger-pre-clean-window-2026-10-16.md`. Cost: **5 F1 cites, all in `progress/`**; all 65 §-cites point at §6, which does not move. Do it **after** the line-anchor checker (§5 S4) lands, never before |
+| `engine/performance-status.md` (1,149) | §6 `244-1072` (829, the ledger proper) + "Headline tables" `1073-1149` (78) = **907 live** | §3 projection `139-172` (34) | §1-§4 `25-184` (160) + §5 `185-243` (59). `:187` "**Done, 2026-10-12.**" marks §5; `:188-189` says of §1 "**§6 supersedes them wherever it has a row**" | **PRUNE** ~220 lines (§1-§5) → `progress/2026-10-16/ledger-pre-clean-window-2026-10-16.md`. Cost: **5 F1 cites, all in `progress/`**; all 65 §-cites point at §6, which does not move. Do it **after** the line-anchor checker (§5 S4) lands, never before |
 | `prototype/mlp_gemv/results.md` (534) | 9 of 12 H2s: gate F1-F4, the cancellation-band width, `floor_probe.py`, the SwiGLU policy, the negatives, Performance, "What graduates", P4, Q10 | "Traps found while building this" `347-377` (31), already harvested into AGENTS.md | none self-declared | **KEEP AS IS.** The only PRUNE candidate is 31 lines against 46 bare cites from AGENTS.md into this file |
 | `prototype/gdn_gated_norm/results.md` (517) | §1-§5, §7-§10; §8 `363-446` (the fixture-writer NaN) and §9 `447-484` (the PASS) are load-bearing; `engine/README.md:138,314` cites §1 and §7-§9 | §6 "Not done" `287-295` (9) | H1 `:1` still asserts "**the first device run failed and the cause is not established**" — §8 establishes it | **KEEP AS IS** + one same-line title correction (S6) |
 | `prototype/proj_gemv/results.md` (313) | 8 of 10 H2s | "Traps found here (added to the index)" `297-314` (18) | "Performance — **provisional**" `161-228` (68), overtaken by ledger §6 and engine Q6 | **KEEP AS IS** — the `provisional` label already does the supersession work |
@@ -352,7 +352,7 @@ line.
 | `specification/*.md` (13 files, 1,716 lines; largest `10-…` 224) | the whole spec — the requirement document `speccheck/` gates against | — | §07.4 already carries its own correction in place | **KEEP AS IS.** No dated chronicle lives here. Only fix: the **A-19 / A-32 id gap** (§2.5) |
 | `AGENTS.md` (228), `README.md` (248) | scope table, traps index, layout block | — | the stale `thinking/` mentions were fixed in pass 2 | **KEEP AS IS.** Any move changing a journal path must edit AGENTS.md in the same commit: it holds 9 §-form journal cites and 3 F1 cites |
 
-**Net: exactly two documents are worth pruning** — `bench/performance-status.md` (220 lines of
+**Net: exactly two documents are worth pruning** — `engine/performance-status.md` (220 lines of
 superseded pre-clean-window rows) and `engine/README.md` (three stale blocks, corrected in place,
 no move). Everything else is a live instruction, a measurement something consumes, or
 pre-registration prose whose value *is* that it was written before the result.
@@ -369,7 +369,7 @@ begins at `:81`, so any extraction that deletes lines renumbers everything from 
 | archive cite into… | lines referenced |
 |---|---|
 | `engine/results.md` | 51 references, 65 line numbers, `101…4479` |
-| `bench/performance-status.md` | `:988`, `:989`, `:1094` — all below §1-§5, so the ledger PRUNE of §3 shifts all three |
+| `engine/performance-status.md` | `:988`, `:989`, `:1094` — all below §1-§5, so the ledger PRUNE of §3 shifts all three |
 | `engine/README.md` | `:61-62`, `:64`, `:83-84`, `:126`, `:138,314`, `:162`, `:182`, `:246` — all below `:40-50`, so the README PRUNE of §3 shifts all of them |
 
 ```bash
@@ -405,7 +405,7 @@ line numbers`) — which is ugly and correct.
 | S3 | `engine/gate.py, tools, specification: name the file behind every label citation` — append the owning path to the 17 `§A1..§A4` strings in `engine/gate.py`; add `A-19` and `A-32` rows to `specification/ASSUMPTIONS.md` (or retarget the two cites); fix `prototype/gdn_gated_norm/results.md:1` whose H1 states what §8 retracted | `engine/gate.py`, `specification/ASSUMPTIONS.md`, `prototype/gdn_gated_norm/results.md` (**same-line only**) | `python3 tools/citation_census.py --check` shows label-only count drop from 66; `python3 tools/doc_ref_check.py --list-broken` unchanged; `python3 -c "import ast,sys;ast.parse(open('engine/gate.py').read())"` |
 | S4 | `docs: engine/README.md retires three stale claims` — `:11` "no generation token has come out of this engine yet", §"What this is NOT yet" (`:42` no prefill, `:47` no batching), §"What the next worker owes W5b" — **same-line retirement text, no line deletion** | `engine/README.md` | `grep -c 'no generation token\|No `prefill`' engine/README.md` → 0; `wc -l engine/README.md` **must be unchanged at 496** (that is the rule-2 guard); `python3 tools/citation_census.py --check` |
 | S5 | `progress: the journal chronology, extracted by quotation` — option (a′): new `progress/2026-10-16/journal-chronology-2026-10-16.md` + the 5-line append at the tail of `engine/results.md` + `engine/README.md` pointer line | 2 new files, 1 append (0 deletions) | `wc -l engine/results.md` must be **4493+5**; `python3 tools/citation_census.py --check` → F1 still 101, all 65 anchors still resolvable; `python3 tools/doc_ref_check.py` unchanged + the new paths present |
-| S6 | `bench: pre-clean-window rows leave the ledger` — the §3 PRUNE, **only if the parent waives rule 2**. Otherwise this commit is the same-line banner instead | `bench/performance-status.md`, new `progress/2026-10-16/ledger-pre-clean-window-2026-10-16.md`, plus updates to the 3 archive files holding `:988/:989/:1094` | `python3 tools/citation_census.py --check` must report **0 unresolvable anchors**; the ledger's 65 §-cites all still resolve to §6 |
+| S6 | `bench: pre-clean-window rows leave the ledger` — the §3 PRUNE, **only if the parent waives rule 2**. Otherwise this commit is the same-line banner instead | `engine/performance-status.md`, new `progress/2026-10-16/ledger-pre-clean-window-2026-10-16.md`, plus updates to the 3 archive files holding `:988/:989/:1094` | `python3 tools/citation_census.py --check` must report **0 unresolvable anchors**; the ledger's 65 §-cites all still resolve to §6 |
 | S7 | `AGENTS.md: two trap rows` — (i) a line-number citation is destroyed by any deletion above it, and 96 of 101 such cites are in the frozen archive; (ii) label-only citations (`§A2`, `results.md §20`) resolve by neighbourhood and are invisible to `git ls`/`doc_ref_check` | `AGENTS.md` | `python3 tools/doc_ref_check.py && python3 tools/citation_census.py --check` |
 | S8 | `tools: journal_sections.py — the fence-aware section census` (optional; if S1 already carries `--sections`, fold it in and skip this commit) | new tool | `--selftest` asserts 14 H1 / 72 H2 / 33 H3 for `engine/results.md` |
 
@@ -485,7 +485,7 @@ cost of building them:
   check that could not have existed before S2 — a dead line cite in a document
   *about* dead line cites.
 * **§7.4's `§A1…§A4` claim survives contact**; the dead-`§` exemplar in
-  `tools/cold_restore.sh` does not: `:98` is `bench/performance-status.md §6 —
+  `tools/cold_restore.sh` does not: `:98` is `engine/performance-status.md §6 —
   fill in the spread and the util pair`, where `§6` resolves fine and "fill" is
   English, not a label. Recorded because "the check found nothing" is a
   different result from "the check was not run".

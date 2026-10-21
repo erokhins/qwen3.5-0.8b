@@ -12,8 +12,8 @@
 # the next caller merely reclaims it by PID-liveness, so the serialization looks intact by accident).
 #
 # What it is NOT: a timing harness. The wall in the header is this script's own span and the gate prints
-# `ms/step` figures the gate itself disclaims; neither belongs in `bench/performance-status.md`, which
-# belongs to the main agent's exclusive-window protocol (bench/performance-status.md §6). This runs a
+# `ms/step` figures the gate itself disclaims; neither belongs in `engine/performance-status.md`, which
+# belongs to the main agent's exclusive-window protocol (engine/performance-status.md §6). This runs a
 # correctness gate and nothing else.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)

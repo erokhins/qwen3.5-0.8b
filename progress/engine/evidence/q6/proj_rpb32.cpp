@@ -31,7 +31,7 @@ int warp_width() {
 // 32, not the prototype's default 8. `prototype/proj_gemv/results.md` swept rows/block on the cold
 // token plan and got 2.991 ms at 8 against 2.785 ms at 32 (+8 %, the best of 2/4/8/16/32), and
 // wrote that moving the default "is a separate, measurable decision for W5" — this is that decision.
-// `bench/performance-status.md` §4's width table says the same direction from the other side: a
+// `engine/performance-status.md` §4's width table says the same direction from the other side: a
 // launch costs 3.75 µs at 256 threads and 2.776 µs at 1024, and decode issues 114 of these launches
 // per token. The arithmetic per row does not depend on the width at all — one wavefront owns one row
 // from staging to `reduce_row`, which is a within-warp butterfly — so this is the rare width change

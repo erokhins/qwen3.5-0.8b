@@ -13,7 +13,7 @@
 #   WIDE_WARPS=8 WIDE_STAGE=64 ... same, and they go to BOTH builds (the rig refuses a driver built for other axes)
 #
 # IT TAKES `tools/gpu_lock.sh` ITSELF, acquire/release by TAG, and prints util at acquire and at release (recorded
-# and then discounted: identical clean runs on this box read 24-91 %, `bench/performance-status.md` §6). Nothing it
+# and then discounted: identical clean runs on this box read 24-91 %, `engine/performance-status.md` §6). Nothing it
 # calls takes the lock — `time_wide` and `attn_wide` are self-contained binaries, not one of the three self-locking
 # gate drivers that a lock-holding caller deadlocks (AGENTS.md); the release runs on every exit path via the trap.
 #
@@ -34,7 +34,7 @@
 #
 # WHAT IT DELIBERATELY DOES NOT DO: it takes no timing on the engine (no `decode_run`, no `--ids-file` — the rig
 # launches the two kernels directly at a synthetic causal shape), it does not touch the default trio or any knob,
-# and it books nothing into `bench/performance-status.md`; the ledger rows are the main agent's to write.
+# and it books nothing into `engine/performance-status.md`; the ledger rows are the main agent's to write.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 OUT=${OUT:-tmp/attn_wide_time}
@@ -120,5 +120,5 @@ echo "== close: util at release, then release '$TAG'"
 echo "util at release: $(tools/gpu_lock.sh util | tail -1)"
 release
 tools/gpu_lock.sh status
-echo "done. The ms figures above are the main agent's to book into bench/performance-status.md; the rig's own"
+echo "done. The ms figures above are the main agent's to book into engine/performance-status.md; the rig's own"
 echo "limits block (printed per lane count) names what they do not mean."

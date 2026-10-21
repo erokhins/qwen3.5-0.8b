@@ -175,4 +175,4 @@ PY
 
 echo
 echo "NOT TIMED BY THIS SCRIPT'S AUTHOR: no device timing in this file was produced or read by the worker"
-echo "who wrote it. Numbers from here belong in bench/performance-status.md only if the main agent took them."
+echo "who wrote it. Numbers from here belong in engine/performance-status.md only if the main agent took them."

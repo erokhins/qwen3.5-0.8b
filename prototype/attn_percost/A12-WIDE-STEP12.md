@@ -36,7 +36,7 @@ nothing under `engine/`, nothing else under `prototype/attn_percost/`, and no ga
 
 `A12-WIDE-BET.md` §1 states the spill budget as "≤ 1,024 B/thread" and anchors it on llama's kernel at 900 B.
 That anchor came from `A2-census.md` §1 row `flash_attn_ext_f16<256,256,16,4,false,false,false>`, which predates
-the instrument correction of `bench/performance-status.md` §55 and `A11-attribution.md` §2 — the correction that
+the instrument correction of `progress/2026-10-21/performance-status-2026-10-21.md` §55 and `A11-attribution.md` §2 — the correction that
 says a `.vgpr_count` read out of LLVM's note block can be *another kernel's* number, because note entries are not
 in definition order. So the
 number A12 is funded on was re-taken from the code-object header:
@@ -100,7 +100,7 @@ The 256-register shape of both kernels comes from the per-thread ceiling, and fr
 `wide_ladder.sh` compiles twelve variants of the same body, one axis at a time, and reads
 `.amdhsa_next_free_vgpr` / `.amdhsa_private_segment_fixed_size` / `.amdhsa_group_segment_fixed_size`. Nothing is
 launched. Threads = 32 × warps, so the `blk/CU` column is stated per block size; `regs/CU` is the
-"65,536 per SIMD" = 131,072-per-CU reading forced by the pad A/B of `bench/performance-status.md` §55, and the
+"65,536 per SIMD" = 131,072-per-CU reading forced by the pad A/B of `progress/2026-10-21/performance-status-2026-10-21.md` §55, and the
 flag `--regs-per-cu 65536` gives the older reading
 (see the note under the table).
 
@@ -147,7 +147,7 @@ DCE'd shell would otherwise measure nothing). Row A emits 64 + 64 sites.
 
 **Residency, and the one number that is still an assumption.** At 32,768 B of LDS and 256 vGPU on a 256-thread
 block, the reader says 2 blocks/CU = 16 wavefronts, because it divides a register file of 131,072 per CU — the
-"65,536 per SIMD" reading that `bench/performance-status.md` §55's pad A/B forces. Under the older 65,536-per-CU
+"65,536 per SIMD" reading that `progress/2026-10-21/performance-status-2026-10-21.md` §55's pad A/B forces. Under the older 65,536-per-CU
 reading the same fields give **1 block/CU = 8 wavefronts**:
 
 ```
@@ -211,7 +211,7 @@ Geometry and the laws it uses, in one place:
 Run under the lock, blocking, one invocation, `tools/gpu_lock.sh util` **91 %** at acquire and **67 %** at release
 (the serving process; the gate is deterministic and has no atomics). Wall clock of the whole process, as reported
 by `time`: **0.28 s**. **No timing was taken** — no burst, no best-of-N, no `ms` figure for any kernel, and nothing
-in this file belongs in `bench/performance-status.md`.
+in this file belongs in `engine/performance-status.md`.
 
 ```
 $ tools/gpu_lock.sh acquire a12-wide-selftest && tools/gpu_lock.sh util && time tmp/attn_wide/attn_wide
@@ -379,7 +379,7 @@ main agent can decide whether any is general enough.
   The epilogue transpose as its own array took the block to 49,152 B — exactly 48 KiB, at the API's static limit —
   and 1 block/CU on LDS; aliasing it over the K/V stage (the engine's own arrangement, and the reason its
   `fattn_warp_stage_halves` note exists) is 32,768 B and makes 2 blocks/CU possible. Same class as the
-  register-file row of `bench/performance-status.md` §55:
+  register-file row of `progress/2026-10-21/performance-status-2026-10-21.md` §55:
   register-file row: the cost you did not declare is the one you will not notice. → `wide_lds_halves()`
 * **`.amdhsa_group_segment_fixed_size` = 0 means dynamic, not none.** Reading it at face value would have put
   llama at 5 blocks/CU instead of 1. → §1

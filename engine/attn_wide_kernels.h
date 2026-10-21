@@ -12,7 +12,7 @@
  * `fattn_ab_row`, `fattn_score_round`, `fattn_load_tile`, `fattn_load_q_tile`, `fattn_stage_row`,
  * `fattn_h_get`, `fattn_ARegs`/`fattn_CRegs`/`fattn_HRegs`/`fattn_H2Regs`, `FattnO16`) and takes
  * `CoreArgs`, so the fragment maps and the score round exist in exactly one place each. A relabelled
- * fragment map is a permuted row of the output, and §29 of `bench/performance-status.md` is what that
+ * fragment map is a permuted row of the output, and §29 of `progress/2026-10-21/performance-status-2026-10-21.md` is what that
  * costs; nothing below re-derives a map at a use site.
  *
  * INCLUDED AFTER `engine/attn_fattn_kernels.h`, from the one TU that compiles both

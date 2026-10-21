@@ -48,7 +48,7 @@ One consequence recorded here because it was a wrong argument in two other files
 at `rows/block = 8` issues 128 blocks × 256 threads = 32768 threads, which fits inside the
 40960 resident-thread capacity, so its 12 % bandwidth shortfall versus `lm_head_gemv` is **not**
 a block-count under-fill and remains unexplained. `prototype/mlp_gemv/results.md` and
-`bench/performance-status.md` carried the 40-CU version of that claim.
+`engine/performance-status.md` carried the 40-CU version of that claim.
 
 ## What this means for the decode roofline
 

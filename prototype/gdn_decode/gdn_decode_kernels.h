@@ -134,7 +134,7 @@ enum GdnConvNeg {
 
 // CONV_VEC consecutive tile columns are one lane's work, fetched as ONE aligned word.
 //
-// WHY A CHUNK AND NOT A CHANNEL (§13 of bench/performance-status.md, D30 1.7'). Reading the tile in
+// WHY A CHUNK AND NOT A CHANNEL (§13 of progress/2026-10-21/performance-status-2026-10-21.md, D30 1.7'). Reading the tile in
 // its own BF16 dtype instead of a pre-widened F32 copy halved the bytes and made the row 32.5 %
 // SLOWER, and the ISA says why in two counts. The one-column form issues 23 `global_load_u16`s — two
 // bytes per lane, so a wavefront asks for 64 bytes, half a line — and every one of them is followed

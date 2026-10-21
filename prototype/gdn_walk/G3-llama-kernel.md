@@ -15,7 +15,7 @@ Four links, each checked:
 1. **Tree revision.** `engines/llama.cpp` is its own git repo (gitignored by the parent at `.gitignore:16`),
    HEAD = `797de63b2fa7396dcc8caca76834c699ac84e1c3`, tag `b11716`, working tree clean
    (`git -C engines/llama.cpp status --short` → empty). That is exactly the revision §38 records
-   ("llama.cpp is still `797de63`", `bench/performance-status.md:1733`). So the source I can read is the source
+   ("llama.cpp is still `797de63`", `progress/2026-10-21/performance-status-2026-10-21.md:1733`). So the source I can read is the source
    the binary was built from; no local edits.
 2. **The binary is built from this tree.** There is one build directory, `engines/llama.cpp/build-hip`
    (`GGML_HIP=ON`), and the HIP target compiles the CUDA source in place:
@@ -46,7 +46,7 @@ reports grid size in **threads per dimension**, and llama's launch is three-dime
 sees `wgsize 32`, `grid 512` → "16 workgroups, 0.80 blocks/CU" — and that is how §38 came to write
 "llama runs `gated_delta_net` at 32 threads × 512 grid and ours at 128 × 2,048, and **both land at 0.80
 blocks/CU** — 16 workgroups on a 20-CU part, four CUs idle, in both engines"
-(`bench/performance-status.md:1758`).
+(`progress/2026-10-21/performance-status-2026-10-21.md:1758`).
 
 Reading all three dimensions (`prototype/gdn_walk/g3_trace_geom.py`, a 60-line re-parse of the same two CSVs
 §38 already produced — CPU-only, no new measurement):
@@ -302,7 +302,7 @@ census tools"). **No device work was run for this file**: no gate, no timing, no
 
 ## 8. Ledger corrections this census asks for (not applied — `bench/` and `progress/` are cited by line)
 
-1. **§38's `--geom` sentence** (`bench/performance-status.md:1758`): "llama runs `gated_delta_net` at 32
+1. **§38's `--geom` sentence** (`progress/2026-10-21/performance-status-2026-10-21.md:1758`): "llama runs `gated_delta_net` at 32
    threads × 512 grid and ours at 128 × 2,048, and **both land at 0.80 blocks/CU** — 16 workgroups on a 20-CU
    part, four CUs idle, in both engines" is wrong about llama. Correct: **128 blocks of 128 threads, 6.40
    blocks/CU, 25.6 wavefronts/CU, no idle CU**, from the same CSVs. The traced ms and the 5.76× are unaffected.

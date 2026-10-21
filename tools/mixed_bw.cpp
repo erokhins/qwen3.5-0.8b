@@ -2,7 +2,7 @@
  * tools/mixed_bw.cpp — is 237 GB/s even the right ceiling for a decode step?
  *
  * Every roofline in this repo is a READ number: `tools/bw_probe_hip.cpp` streams a 1 GiB buffer
- * with a grid-stride sum and the box answers 237 GB/s, and `bench/performance-status.md` then bills
+ * with a grid-stride sum and the box answers 237 GB/s, and `engine/performance-status.md` then bills
  * ~1.5 GB of weights against it. But a decode step is not a read-only workload: it streams weights
  * WHILE writing activations, the 97 bf16->f32 cast outputs (115 before `62b73e9`), the KV append and the GDN state
  * (18.87 MB read + 18.87 MB written per token, plus the conv window). Q7's M1 refuted the
@@ -176,7 +176,7 @@ __device__ __forceinline__ void publish_block_sum(double acc, double* __restrict
  *
  * Why this exists and what it can prove. `C_mixlaunch_62` walks 48 x 11.01 MiB of contiguous
  * float4s at the step's ratio and gets 86.6 % of the read probe, while the MLP kernels in a real
- * step run the same bytes at 52 % (bench/performance-status.md Q6.1, Q8). One surviving candidate
+ * step run the same bytes at 52 % (engine/performance-status.md Q6.1, Q8). One surviving candidate
  * is that the kernel's own mapping is what costs — which threads touch which bytes, in what order,
  * with what else in flight — and the only way to tell that from "the memory system was cold" is to
  * walk the same bytes with the engine's real mapping in a probe that changes nothing else. So this

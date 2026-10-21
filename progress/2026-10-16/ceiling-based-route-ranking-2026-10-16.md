@@ -5,7 +5,7 @@ number is quoted from an on-disk measurement or is arithmetic on quoted numbers,
 section named at the point of use. Where a number needed by the argument does not exist on disk it is
 written as `NOT MEASURED: <what>`. Companion documents: `prefill-decision-log-2026-10-16.md`
 (D13–D16), `prefill-occupancy-results-2026-10-16.md` (family attribution),
-`bench/performance-status.md` (the ruler), `prototype/issue_rate_probe/results.md` (the ceilings).
+`engine/performance-status.md` (the ruler), `prototype/issue_rate_probe/results.md` (the ceilings).
 
 The deliverable is §5 (the re-ranked route table) and §6 (the one route to fund, and the cheap
 measurement that would falsify the ranking). §1 states the correction to fact B that forced the
@@ -101,7 +101,7 @@ The library row is included because it is the only ceiling a route can adopt wit
 and because the engine's own gemms are already above the probe's scalar leg — pricing a swap against
 7.30 alone would overstate every prize in §5.
 
-**Byte denominator: 237 GB/s** (`bench/performance-status.md` §4; retook 239.3, +1 %, no column moves).
+**Byte denominator: 237 GB/s** (`engine/performance-status.md` §4; retook 239.3, +1 %, no column moves).
 The byte side is priced per family, not in aggregate; §4 gives the aggregate sanity check.
 
 ---
@@ -284,7 +284,7 @@ percentages × `wall_ms=1307.7549` (marked **derived**). The recovery closes: th
   `o = S·q`, 128-long per output element) is per-(head, d_v) with M = 1. `gdn_rec` meets the matrix unit
   only by being reformulated chunk-wise (P9's delta-rule scan, which *is* GEMM-shaped) — and P9 is
   already priced and measured 5.9× worse than its bottom-up price (`prototype/gdn_chunk/`,
-  `bench/performance-status.md` §3 "Route A is dead").
+  `engine/performance-status.md` §3 "Route A is dead").
 * **One prize I must name and explicitly not fund: halving the state width (F32 → 16-bit).** If the
   425–431 GB/s fit were a real wall, halving state bytes would take 520 ms → ~260 ms at 4096 (20 % of the
   wave). Route A's −12 % argues hard against it; **NOT MEASURED: a 16-bit GDN state variant**. And this

@@ -8,7 +8,7 @@ was taken**, by anyone, in this file. Verbatim listings and commands are in
 `prototype/attn_wmma/evidence/fattn_unstage_q.diff` and **is not applied in the tree**.
 
 Citation legend (the repo rule is that a `§N` that names no file resolves only in a reader's memory): a bare
-`§N` below means §N **of this file**; `§31/§33/§37/§26` mean `bench/performance-status.md`; `§1/§2/§3/§4/§5`
+`§N` below means §N **of this file**; `§31/§33/§37/§26` mean `engine/performance-status.md`; `§1/§2/§3/§4/§5`
 when the sentence is about residency or the ladder mean `prototype/attn_wmma/fattn_regfile_ladder.md`; `§7` on
 a line about the attention family means `prototype/gdn_walk/BET.md`; `§20.1` is
 `prototype/attn_decode/results.md` §20.1 and `§07.3` is `specification/07-decode-step.md`.
@@ -46,7 +46,7 @@ Same TU, same `-O3 --offload-arch=gfx1151`, same 96-thread block, one kernel dif
 ```
 
 Full YAML blocks, both from `.name: _ZN6engine7kernels15attn_fattn_waveE8CoreArgs`, are in
-`evidence/fattn_e1_noteblocks.md` §3. The shipped side reproduces `bench/performance-status.md` §33's banner
+`evidence/fattn_e1_noteblocks.md` §3. The shipped side reproduces `progress/2026-10-21/performance-status-2026-10-21.md` §33's banner
 (178 / 0 / 0 / 32,768) exactly, which is what makes the comparison legal rather than a diff of two windows.
 Drift check over the whole TU (`fattn_residency_read.py --all`): exactly one line differs; `attn_core`
 (53 VGPR / 38,944 B), `attn_slim_wave` and `attn_tile_wave` (47 / 12,288), `attn_prep` (30 / 2,080),
@@ -239,7 +239,7 @@ from KFD/rocminfo, reusing `fattn_ship_census.note_blocks` rather than writing a
 ## 8. Device command — **not owed**, and here it is if the traffic question is priced anyway
 
 The residency admission did not pass (§3), so the A/B it would have licensed is not run and nothing here should
-enter `bench/performance-status.md`. If the main agent decides to price the *traffic* leg anyway — the only
+enter `engine/performance-status.md`. If the main agent decides to price the *traffic* leg anyway — the only
 thing the un-stage actually changes — it is a two-binary paired A/B in one `gpu_lock` hold, medians of 3, 4,096
 lanes, with the canary asserted in the same window as the number:
 

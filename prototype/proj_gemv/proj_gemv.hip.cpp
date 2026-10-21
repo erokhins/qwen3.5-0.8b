@@ -10,7 +10,7 @@
  *   self_attn.k_proj        [  512,1024] x6   self_attn.v_proj      [  512,1024] x6
  *   self_attn.o_proj        [ 1024,2048] x6
  *
- * Together 0.4677 GB/token = 29 % of the token's bytes (bench/performance-status.md §4), the
+ * Together 0.4677 GB/token = 29 % of the token's bytes (engine/performance-status.md §4), the
  * largest slice left after the MLP. Only two input widths appear — 1024 and 2048 — so the whole
  * family is `proj_gemv<1024>` and `proj_gemv<2048>`: the same skeleton as `mlp_gemv`'s
  * `mlp_down<IN>` (one wavefront per output row, x staged in shared, F32 accumulator, one BF16

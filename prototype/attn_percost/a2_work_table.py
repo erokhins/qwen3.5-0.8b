@@ -7,7 +7,7 @@ Why this exists and why it is not another ISA census. The census tools that exis
 other half of G3's method (`prototype/gdn_walk/g3_work_table.py`): what does the geometry DEMAND, before
 any instruction count, and what would that demand cost at a measured ceiling. Every input is either
 (a) a constant read out of a header at run time by regex, so a geometry edit moves the output, (b) a
-traced ms figure from `bench/performance-status.md` named in its own label, or (c) a measured roof from
+traced ms figure from `engine/performance-status.md` named in its own label, or (c) a measured roof from
 `prototype/issue_rate_probe/results.md` §1. Nothing here launches, times, or touches a device.
 
 The staging question is answered the way `prototype/attn_tile_model.py:stage_copies` answers it — read

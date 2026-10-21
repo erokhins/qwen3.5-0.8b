@@ -1010,7 +1010,7 @@ All correctness-only, each inside the `<60 s` worker allowance, under `tools/gpu
 "engine gate D-1/D-2 last worker pass (correctness only)"), `gpu_lock.sh util` **92 %** at the first read and
 **60 %** at the last — discounted as usual, the serving engine that renders this text is the load and it
 busy-polls the iGPU. **No timing taken**: the wall figures below are the cost of running a check, printed only
-to show each one fit the worker allowance, and none of it goes near `bench/performance-status.md`. The whole
+to show each one fit the worker allowance, and none of it goes near `engine/performance-status.md`. The whole
 pass is one command — `progress/engine/evidence/d6_final_pass.py` — and it left the ten logs in `tmp/d6_*.log`. Both helpers live
 under `tmp/`, which is gitignored: they are how these figures were made, the tables above are the record.
 
@@ -1079,7 +1079,7 @@ One device call, the whole corpus, correctness only, under `tools/gpu_lock.sh` (
 `gpu_lock.sh util` read **93 %** at the acquire and the lock showed `free` after the release — discounted per
 `AGENTS.md`, the serving engine that renders this text is the load). Wall for the whole command including the
 1.55 GB load was 18 s, comfortably inside the worker allowance; **no timing was taken and nothing here
-belongs in `bench/performance-status.md`** — the wall figure is the cost of running a check, not a
+belongs in `engine/performance-status.md`** — the wall figure is the cost of running a check, not a
 measurement. The margin pass is CPU-only (~45 s) and the report pass touches neither.
 
 ```bash

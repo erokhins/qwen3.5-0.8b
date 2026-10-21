@@ -2,7 +2,7 @@
 
 **The two device experiments that used to stand between this file's launch configurations and
 "trusted" have both run**, in the 2026-10-11 foreground, zero-subagent window whose numbers are
-recorded in `bench/performance-status.md` §6. Both came back confirming the engine's choice, so the
+recorded in `engine/performance-status.md` §6. Both came back confirming the engine's choice, so the
 comments in `kernels_glue.cpp` and `kernels_proj.cpp` now cite a measurement rather than an inference.
 One half of E2 is still open and says so at the end of its entry.
 
@@ -17,7 +17,7 @@ One half of E2 is still open and says so at the end of its entry.
   *What that settles, and in which direction:* the engine's `<256>` is a **measured preference, not a
   numerical requirement**. Nothing in the engine's arithmetic depends on the width, so a move to 1024 is
   purely the performance question glue's §4 sweep raises (≈2.78 vs 3.75 µs/launch, with the
-  bimodality caveat `bench/performance-status.md` §6 attaches to launch-bound numbers) and not a
+  bimodality caveat `engine/performance-status.md` §6 attaches to launch-bound numbers) and not a
   numerics blocker. This file no longer owes that experiment; `prototype/glue/results.md:170`'s ask is
   satisfied.
 * **E2 — RESOLVED (prototype plan): unpacked beats packed at every rows/block.** The engine
@@ -124,7 +124,7 @@ no number here is a measurement of anything except the compiler's willingness.
   localising, 2.936 µs/launch at spread 1.4 % → ≈0.053 ms/token for the 18 launches. That is
   `prototype/gdn_gated_norm/run.py --gate`, whose first two attempts failed on the gate's own fixture
   writer rather than on the kernel — see `prototype/gdn_gated_norm/results.md` §7–§9 and
-  `bench/performance-status.md` §4 (re-taken 2026-10-16; the 2.936 row is progress/2026-10-16/performance-status-2026-10-16.md:267). **None of `engine/`'s own code has run on a device**: no buffer in
+  `engine/performance-status.md` §4 (re-taken 2026-10-16; the 2.936 row is progress/2026-10-16/performance-status-2026-10-16.md:267). **None of `engine/`'s own code has run on a device**: no buffer in
   `state.cpp` has been allocated and no launcher in `kernels_*.cpp` has been launched from the engine.
 
 ## Deferred, with the price named
@@ -306,7 +306,7 @@ And item 1 below named HIP graphs as the first perf item, which the measured dis
 "the first engine throughput row", at the end of this file.
 
 The second run printed `RESULT … ms_per_step=14.631`. **This is an observation, not a number.** It is a
-gate run's by-product, which `bench/performance-status.md` §6 refuses as a measurement; it is one
+gate run's by-product, which `engine/performance-status.md` §6 refuses as a measurement; it is one
 unwarmed first pass over freshly allocated state and scratch, i.e. the first-GPU-touch regime
 `devices/strix-halo-unified-memory.md` measures at ~35 GB/s instead of ~240; there is no burst and no
 best-of-N; and no `util` was recorded for the window. Do not quote it and do not diff it against
@@ -1239,7 +1239,7 @@ Three things this driver has to be, that the torch one does not:
 
 - **A citizen of the one-device rule.** It takes `tools/gpu_lock.sh` for its whole life, refuses to start
   while someone else holds it (with the holder's tag), and its header says in as many words that its tok/s
-  is not a ledger number — `bench/performance-status.md` §6 owns clean windows. It needs no `OMP_NUM_THREADS`
+  is not a ledger number — `engine/performance-status.md` §6 owns clean windows. It needs no `OMP_NUM_THREADS`
   knob, unlike the original: the engine's parallelism is its kernel block counts, not host threads.
 - **Polite when the box is not ready.** Missing binary → the `bash engine/build.sh` line and exit 1; missing
   checkpoint → the `hf download` line; lock held → the holder and a refusal. All three are exercised paths,
@@ -2157,7 +2157,7 @@ All correctness-only, each inside the `<60 s` worker allowance, under `tools/gpu
 "engine gate D-1/D-2 last worker pass (correctness only)"), `gpu_lock.sh util` **92 %** at the first read and
 **60 %** at the last — discounted as usual, the serving engine that renders this text is the load and it
 busy-polls the iGPU. **No timing taken**: the wall figures below are the cost of running a check, printed only
-to show each one fit the worker allowance, and none of it goes near `bench/performance-status.md`. The whole
+to show each one fit the worker allowance, and none of it goes near `engine/performance-status.md`. The whole
 pass is one command — `progress/engine/evidence/d6_final_pass.py` — and it left the ten logs in `tmp/d6_*.log`. Both helpers live
 under `tmp/`, which is gitignored: they are how these figures were made, the tables above are the record.
 
@@ -2319,7 +2319,7 @@ One device call, the whole corpus, correctness only, under `tools/gpu_lock.sh` (
 `gpu_lock.sh util` read **93 %** at the acquire and the lock showed `free` after the release — discounted per
 `AGENTS.md`, the serving engine that renders this text is the load). Wall for the whole command including the
 1.55 GB load was 18 s, comfortably inside the worker allowance; **no timing was taken and nothing here
-belongs in `bench/performance-status.md`** — the wall figure is the cost of running a check, not a
+belongs in `engine/performance-status.md`** — the wall figure is the cost of running a check, not a
 measurement. The margin pass is CPU-only (~45 s) and the report pass touches neither.
 
 ```bash
@@ -2794,8 +2794,8 @@ the floor survey (which may legitimately move F2's `act` tolerance for prefill p
 ### What a worker ran on the device, and what it did not
 
 Correctness-only, each under 60 s wall, one at a time, under `tools/gpu_lock.sh`, **no timing taken** and no
-number here belongs in `bench/performance-status.md`. Util was the usual contended 92–94 % at acquire and
-7–36 % at release; per `bench/performance-status.md` §6 it is recorded and discounted.
+number here belongs in `engine/performance-status.md`. Util was the usual contended 92–94 % at acquire and
+7–36 % at release; per `engine/performance-status.md` §6 it is recorded and discounted.
 
 ```
 tools/gpu_lock.sh acquire … ; python engine/gate.py --fixture {dec8,dec64f,dec64t,dec300f,mt32f}   # 119/601/598/1107/342, 0 failures
@@ -2814,7 +2814,7 @@ figures; they are not reported anywhere and are not ledger material, and the cor
 `L03.mlp.in` row 32); they are not in the tree because nothing about them needs to persist.
 
 **Not run by a worker, by rule:** any timing, the TTFT curve, and every number that would enter the ledger
-(`bench/performance-status.md` §6). The command for the main agent's timing pass is the same
+(`engine/performance-status.md` §6). The command for the main agent's timing pass is the same
 `engine/build/decode_run … --wave-rows {512,1}` pair used above, run blocking with zero subagents; the launch
 counts above are counts precisely so that they stay valid whatever that pass measures.
 
@@ -2903,7 +2903,7 @@ taken and none of the above is a duration** — the gate's own `ms_per_step` by-
 for that reason.
 
 **Not run by a worker, by rule:** any timing, the GB/s of the batched form, the `TPB` sweep, and every number
-that would enter `bench/performance-status.md`. The commands for that pass: `engine/build/decode_run …
+that would enter `engine/performance-status.md`. The commands for that pass: `engine/build/decode_run …
 --wave-rows {512,1}` (the pair above), and for the kernel family `prototype/proj_gemv/run.py --mode burst
 --plan … --tokens 295 --tpb {1,2,4}` — `Job::bytes()` already divides weight bytes per TILE, which is the
 divisor that makes a batched GB/s mean anything. Two things that pass are worth pricing there: `TPB` above the
@@ -3293,7 +3293,7 @@ engine/gate.py --selftest --fixture dec8         # SELFTEST PASS
 
 `util` read 49–58 % on those runs and is reported as read. No `ms/step`, no bandwidth, no burst: the
 decode-vs-context row §07.4 needs is the main agent's, in a window with zero subagents
-(`bench/performance-status.md` §6). The gate prints `decode_run reported 2.353 ms/step` on `wide520f` as
+(`engine/performance-status.md` §6). The gate prints `decode_run reported 2.353 ms/step` on `wide520f` as
 a by-product; it is not a measurement and does not enter the ledger.
 
 **Handed to the main agent.** (1) The timing row, on the two commands §07.4 names — `wide520f` now runs,
@@ -3449,7 +3449,7 @@ them.
 
 `util` read 2–92 % across those runs and is reported as read; it is not a measurement input. Timings were
 deliberately not taken: the launch-count claim is a counter, and the TTFT/attention curve rows are the
-main agent's, in a window with zero subagents (`AGENTS.md`, `bench/performance-status.md` §6).
+main agent's, in a window with zero subagents (`AGENTS.md`, `engine/performance-status.md` §6).
 
 **Handed to the main agent.** (1) The timing rows P8 was supposed to earn: `p128`/`dec300f` TTFT before
 (P5's numbers) and after, and the attention curve plan §5.2 names — this worker took no timings by rule.
@@ -3492,7 +3492,7 @@ one worth keeping.
 
 Again no millisecond in this section is this worker's. Every input is already on disk: the stage-clock
 family rows are `tmp/q61/stage128_{1,2,3}.log` and `tmp/q61/stage4032_{1,2,3}.log` as the main agent took
-them, the isolated-burst rows and the 237 GB/s probe are `bench/performance-status.md`'s Q6 table, and the
+them, the isolated-burst rows and the 237 GB/s probe are `engine/performance-status.md`'s Q6 table, and the
 byte counts are recomputed from `engine/state.h`. What was added is one CPU-only comparison tool,
 `tools/instep_family_budget.py`, which median-merges those logs, re-derives each family's weight bytes
 from the shapes the engine compiles with, and prints the three tests below. It launches nothing and takes
@@ -3589,7 +3589,7 @@ per log, so the claim can be re-checked without a device. 425 is also what the i
 `syncs_` counts closed segments (`stage_clock.cpp`'s `close_segment`), kernel granularity opens a segment
 per submission, and the per-step bill is 424 launches + the `host_tail` segment (on the 2026-10-17 plan: 406 + 1 = 407 waits). So the field was right,
 the subtraction it feeds was never at risk, and the wrong thing was the sentence in
-`bench/performance-status.md` — corrected there, with the pointer to this section, in the same pass that
+`engine/performance-status.md` — corrected there, with the pointer to this section, in the same pass that
 wrote these numbers. `stage`'s 323 is also correct (it is segments, not launches: 424 launches collapse
 into 323 family-boundary segments because same-family neighbours share a segment).
 
@@ -3702,7 +3702,7 @@ null A/B can never be a mis-typed flag wearing the costume of a result.
 
 All of it is bit-comparison, all of it correctness-only, each command under the lock, `util` 91–93 % at
 acquire (the serving engine, discounted per `AGENTS.md`), **no timing taken** — the by-product `ms` the
-harnesses print were ignored and nothing here entered `bench/performance-status.md`.
+harnesses print were ignored and nothing here entered `engine/performance-status.md`.
 
 1. **The switch is not inert — the compiler says so.** Same template, two instantiations, and their weight
    loads differ in program order (`IN=1024`, gfx1151; command in `prototype/mlp_gemv/results.md` §Q10):
@@ -3793,7 +3793,7 @@ Two things follow, and they are the useful part of this verdict.
   next package is a reduction-order change priced as such, not another walk.
 * **`in_proj_a`/`in_proj_b` are a separate, smaller, and cheaper question.** They are 16 rows at
   `kRowsPerBlock = 32`: `grid.x = 1`, and half of every block's warps have no row. Their row in
-  `bench/performance-status.md` §4 is 5 % of probe for 32 KiB of weight per launch, which is launch and
+  `engine/performance-status.md` §4 is 5 % of probe for 32 KiB of weight per launch, which is launch and
   occupancy, not walk pattern. The two available levers are the packed-projection change already costed as
   M3 in §Q7 (a spec-table and gate-plan change, the main agent's call) or a per-shape width for the 16-row
   launches (bit-identical by Q6's argument). Neither belongs in this commit, and neither is a mapping.
@@ -3801,7 +3801,7 @@ Two things follow, and they are the useful part of this verdict.
 ### Pre-registered measurements, expectations written before any of them ran
 
 Every row is the main agent's: timing, exclusive window, blocking, zero subagents (`AGENTS.md`,
-`bench/performance-status.md` §6). Quoting medians of three, and voiding rather than discounting a run with
+`engine/performance-status.md` §6). Quoting medians of three, and voiding rather than discounting a run with
 a contender, is the rule this series has used since Q6.1.
 
 **Q10-M0 — the validity ceiling that binds all rows below.** This box's measured read roofline is
@@ -3978,7 +3978,7 @@ story is wrong and the asymmetry lives in the engine's launch context, not in th
 
 All bit-comparison, correctness-only, each command under `tools/gpu_lock.sh` (`util` 92–93 % at acquire,
 the serving engine, discounted per `AGENTS.md`), one device run at a time, **no timing taken** — the `ms`
-the harnesses print as a by-product were ignored and nothing below entered `bench/performance-status.md`.
+the harnesses print as a by-product were ignored and nothing below entered `engine/performance-status.md`.
 The three driver scripts live under `tmp/q10b/` (`engab.sh`, `run_gates.sh`, `counts_compare.sh`) and are
 not committed; every command they run is spelled out here.
 
@@ -3991,7 +3991,7 @@ not committed; every command they run is spelled out here.
    (168 pass, 0 red, PASS, wall 2.53 s) so the gated build and the committed source agree.
 2. **Gate counts, all eight fixtures, new default**, against Q10's `interleave`-default logs
    (`tmp/q10/int_*.log`, taken from the binary at `3411539`; the only commit since touched
-   `bench/performance-status.md`, so those logs are still valid old-side witnesses and were cited rather
+   `engine/performance-status.md`, so those logs are still valid old-side witnesses and were cited rather
    than re-made):
 
    | fixture | old default | new default | same? | wall |
@@ -4032,7 +4032,7 @@ not committed; every command they run is spelled out here.
 ### Pre-registered: the three numbers, with what a miss would mean (written before any of them ran)
 
 All three are the main agent's: exclusive window, blocking, zero subagents, medians of three, per
-`bench/performance-status.md` §6. Same commands as Q10-M2/M3/M4 with the `--mlp-map` flag simply absent.
+`engine/performance-status.md` §6. Same commands as Q10-M2/M3/M4 with the `--mlp-map` flag simply absent.
 
 | # | row | prediction | if it misses |
 |---|---|---|---|
@@ -4728,5 +4728,5 @@ an aggregate. Two things it has to do that chat mode does not:
   summariser's output is a document, so `--summary` runs the same masking path with the marker off.
 
 Rates printed by this tool are, as before, the engine's wall clock on a box that is also serving this
-session — `bench/performance-status.md` §6 owns clean windows, and no figure from a chat session belongs
+session — `engine/performance-status.md` §6 owns clean windows, and no figure from a chat session belongs
 there. Nothing in this section is a timing claim.

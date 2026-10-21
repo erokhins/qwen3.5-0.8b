@@ -134,7 +134,7 @@ still runs `ship` as reference and times three forms in one rep.
 
 ## 5. Ledger, and where the numbers go
 
-Timing rows belong in `bench/performance-status.md` and only the main agent writes them; the per-op
+Timing rows belong in `engine/performance-status.md` and only the main agent writes them; the per-op
 `results.md` §4 keeps the prototype-harness ruler. A worker device result never enters either. Record, per
 width: the lock tag, `util`, the burst and rep counts, the four bests, and the two speedups — the pairs, not
 one side of a pair.

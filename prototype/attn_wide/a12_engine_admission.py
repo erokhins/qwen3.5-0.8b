@@ -8,7 +8,7 @@ reach and which it cannot, and prints the two arms' exact `engine/gate.py` comma
 agent's device pass. It touches no device and takes no timing.
 
 WHY A SCRIPT AND NOT A LIST IN A DOC. Three gate admissions in this tree claimed a case count off a
-hand-typed fixture list and seven of the nine names did not exist (`bench/performance-status.md` §15.2,
+hand-typed fixture list and seven of the nine names did not exist (`progress/2026-10-21/performance-status-2026-10-21.md` §15.2,
 D40), so the population here is enumerated from disk with `engine/gate.py`'s OWN discriminator between a
 pinned fixture and a carried record — imported, not retyped, because a second copy of a rule is the
 two-authorities failure this repo keeps recording. The geometry constants are read out of the headers that

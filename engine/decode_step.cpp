@@ -801,7 +801,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 // measurement said it was flat. Everything here is a choice about SUBMISSIONS and
                 // nothing else: `engine/gdn_rec_loop_kernels.h` is `rec_fused_kernel`'s body with the
                 // token index moved inside it, admitted bit-identical at spans 0/1/3/16
-                // (`bench/performance-status.md` §23), and `engine/gate.py` section (j) re-proves the
+                // (`progress/2026-10-21/performance-status-2026-10-21.md` §23), and `engine/gate.py` section (j) re-proves the
                 // claim per fixture through this site.
                 //
                 // One launch per `span` token-steps. With `span >= n` — the shipping intent,

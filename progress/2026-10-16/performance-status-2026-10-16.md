@@ -1152,9 +1152,9 @@ no row-to-row state to leak). CPU side: `attn_tile_model.py` selftest 13/13, `ld
 
 **Frozen 2026-10-16: this is the ledger exactly as it stood at the moment of the 2026-10-16 prune.**
 The frozen part is the **1,149** lines above this marker, taken at HEAD `bb7246d`, byte-identical to
-`bench/performance-status.md` as it was then — a whole-file copy rather than an excerpt precisely so
+`engine/performance-status.md` as it was then — a whole-file copy rather than an excerpt precisely so
 that every `path:NNN` line cite and every `§label` in `progress/` still resolves at the same
-coordinates. What the live ledger is now: `bench/performance-status.md`. What decided this:
+coordinates. What the live ledger is now: `engine/performance-status.md`. What decided this:
 `progress/2026-10-16/ledger-prune-2026-10-16.md` (what moved, what stayed, which citations were
 re-pointed, and what today's re-take changed). Everything after this marker is provenance about the
 snapshot itself and is **not** part of the measurement record.

@@ -2,7 +2,7 @@
 """Context sweep: engine decode cost vs lane count, for the performance ledger.
 
 Owned by the main agent: this is a timing harness, and per `AGENTS.md` a number only enters
-`bench/performance-status.md` if it was taken blocking, with zero subagents active, under the GPU
+`engine/performance-status.md` if it was taken blocking, with zero subagents active, under the GPU
 lock, best-of-N, with its spread stated. A worker must not run this and must not quote its output.
 
 Prompts are synthetic on purpose. The question is how per-token cost grows with the §05 attention

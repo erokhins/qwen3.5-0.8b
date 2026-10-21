@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/cold_restore.sh — cold weight-restore: how long to make the text weights resident again
 # on a device pool that holds none? Owned by `progress/2026-10-12/plan-2026-10-12.md` Q4 ("cold weight-restore
-# row (~1 s load) into the perf ledger"); the row itself belongs to `bench/performance-status.md`
+# row (~1 s load) into the perf ledger"); the row itself belongs to `engine/performance-status.md`
 # §6, which only the main agent writes, so this script produces the line and the operator decides.
 #
 # WHAT IS BEING MEASURED, exactly. `engine/loader_test` (built to `engine/build/loader_test` by
@@ -95,7 +95,7 @@ echo "   gpu util after:  $(tools/gpu_lock.sh util 2>/dev/null || echo 'lock too
 echo
 echo "best-of-$RUNS cold load: ${best} ms   (raw list in /tmp/cold_restore_runs.txt)"
 echo
-echo "Ledger line for bench/performance-status.md §6 — fill in the spread and the util pair:"
+echo "Ledger line for engine/performance-status.md §6 — fill in the spread and the util pair:"
 KIND="device-cold, host-warm"
 [ "$DROP" = 1 ] && KIND="device-cold and host-cache-dropped"
 VRF="no verify"

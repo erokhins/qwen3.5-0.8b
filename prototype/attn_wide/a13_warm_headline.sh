@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A13 warm headline — the §51 convention applied to the ported form.
 #
-# CONVENTION (bench/performance-status.md §51, user decision 2026-10-19): the headline is the WARM number,
+# CONVENTION (progress/2026-10-21/performance-status-2026-10-21.md §51, user decision 2026-10-19): the headline is the WARM number,
 # `WAVEPASS gran=burst wall_ms` — `st.reset()` then `prefill_wave` again on the same prompt, first-execution
 # cost excluded — medians of 3, one process per width and arm. Cold `RESULT ms_total` stays first-request
 # latency and must never be compared against another engine's warm figure, which is why this script prints

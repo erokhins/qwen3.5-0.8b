@@ -162,7 +162,7 @@ The real pair is `/tmp/a4l1v/{base,new}/objdump.s`, rebuilt through `a4_l1_build
 ## 6. Device gate — RUN, green, no timing taken
 
 Both legs ran under `tools/gpu_lock.sh` TAG `a4l1-worker-gate`, blocking, one at a time, correctness only.
-`gpu_lock.sh util` read **86 %** at acquire and **92 %** at release; per `bench/performance-status.md` §6 an
+`gpu_lock.sh util` read **86 %** at acquire and **92 %** at release; per `engine/performance-status.md` §6 an
 idle-but-serving box reads 24–91 % on identical clean runs, and none of these legs takes a timing, so
 contention cannot move a result here. **No timing taken, and no number from this section may enter a timing
 doc.** Each wall time is the wall clock of the whole command (model load included), reported as AGENTS.md

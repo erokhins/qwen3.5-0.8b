@@ -7,7 +7,7 @@
 # two of three candidates, and the 64-deep round's `o_proj+out_proj` / `in_proj_qkv` winners lost a second
 # time. `tmp/wsjob/w64_128.log` answers "who wins a 64-deep burst field"; it does not answer "what is
 # faster inside a wave", and this file is where that second answer is recorded so the deriver can adjudicate
-# without guessing. Copy only from `bench/performance-status.md` §9 and its same-day correction (paired
+# without guessing. Copy only from `progress/2026-10-21/performance-status-2026-10-21.md` §9 and its same-day correction (paired
 # medians of 3, both widths, one lock hold per config; raw lines in `tmp/pinab/ab3.txt`), and record the
 # arithmetic, because `bench/` is the main agent's file.
 #

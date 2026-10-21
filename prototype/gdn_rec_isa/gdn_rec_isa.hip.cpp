@@ -118,7 +118,7 @@
  * number taken while this session streams its own tokens is worse than no number. The correctness
  * output carries counts, geometry and verdicts and never ms. The `--burst N` path below is the paired
  * A/B the main agent runs under one lock hold: steady_clock, not `hipEventElapsedTime`, which returns
- * exactly 0 for a sub-ms kernel on this part (`bench/performance-status.md` §6), and every active MODE
+ * exactly 0 for a sub-ms kernel on this part (`engine/performance-status.md` §6), and every active MODE
  * is timed INSIDE each rep (the `prototype/attn_m2` `--forms` pattern) so the falsifier is one window
  * and not four. A burst also REFUSES to run (`NOT TIMED reason=volume_self_check_failed`, exit 1) if
  * the `--volume` self-check does not pass, because a probe whose bytes changed is not a probe.
@@ -332,7 +332,7 @@ void launch_mode(int mode, const float* q, const float* k, const float* v, const
             rec_unroll4_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH);
             break;
         // MODE 2c4: the fused prologue on the SHIPPING unroll4 walks. Compile-only until this run
-        // admits it: `bench/performance-status.md` §18 makes the merged listing the gate in front of
+        // admits it: `progress/2026-10-21/performance-status-2026-10-21.md` §18 makes the merged listing the gate in front of
         // a port, and `receng`/`rec2c4` in one window is the first A/B that compares the merge against
         // the spelling the engine actually runs.
         case M_REC2C4: rec2c4_kernel<<<kNH, kD>>>(q, k, v, g, beta, S_in, o, kNH); break;

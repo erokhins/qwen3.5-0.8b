@@ -6,7 +6,7 @@ the same session: **prefill only**; decode findings are notes for later, not fun
 before implementing is allowed; no approval round trips — decide, log, proceed.
 
 Companion documents: `progress/2026-10-16/prefill-occupancy-2026-10-16.md` (the worker's instrument
-plan and command list), `bench/performance-status.md` (the ruler),
+plan and command list), `engine/performance-status.md` (the ruler),
 `progress/2026-10-14/speedup-routes-2026-10-14.md` (the route index this log amends).
 
 ---
@@ -492,7 +492,7 @@ What changes in the plan:
 ## D22 — D21's lever is on the shipping path: attn 403.38 → 275.19 ms, the wave 1243.07 → 1105.20 ms
 
 `engine/attn_slim_kernels.h` + `--attn-touch`, gates green at both values, witness in
-`bench/performance-status.md` (appended section) and `progress/2026-10-16/HANDOFF-attn-touch.md`. Numbers taken paired
+`engine/performance-status.md` (appended section) and `progress/2026-10-16/HANDOFF-attn-touch.md`. Numbers taken paired
 inside one lock hold with both spellings in **one binary** — the runtime knob was the right call over the
 build-time define the worker proposed, because a define would have made this a two-window comparison, and
 two windows is how the last three plan reversals in this log were produced.
@@ -706,7 +706,7 @@ the two at 4096 (±2.6 % against ±0.1 %), so the ratio is quoted from medians. 
 M=1 ever goes to the library, that claim dies and decode must be re-measured.
 
 Gate: 18/18 green on both fixtures×routes before the move (`wide520f --gemm lt` included, row 180 admitted at
-0.9985 ULP), four fixtures re-taken at the new default green with `gemm=lt` echoed. `bench/performance-status.md`
+0.9985 ULP), four fixtures re-taken at the new default green with `gemm=lt` echoed. `engine/performance-status.md`
 §7 is the ledger row.
 
 The thing worth keeping from the last mile is that **the blocker was a unit error in the gate, not a numerics
@@ -801,7 +801,7 @@ So two families are 73.8 % of the wave, and anything that does not touch `gdn_re
 |---|---|---|---|
 | 4.1 | fuse `cast` work into the producing kernels | **UNTESTED** | 29.59 ms of pure conversion. Census first: which casts, whose output, and whether the producer can write the target dtype without an extra pass. Ceiling ~2.7 % if all of it vanished |
 | 4.2 | eliminate `copy` (12.35 ms) by in-place staging where legal | **UNTESTED** | needs the same census discipline: what is copied, why, and what aliasing rule forbids in-place |
-| 4.3 | reduce `glue` launch count (49 launches/body) | **CLOSED for value** | dispatch-bound and bimodal on this box (`bench/performance-status.md` §6); 14.48 ms of 1112 with a ceiling well under the noise floor of every measurement in this log |
+| 4.3 | reduce `glue` launch count (49 launches/body) | **CLOSED for value** | dispatch-bound and bimodal on this box (`engine/performance-status.md` §6); 14.48 ms of 1112 with a ceiling well under the noise floor of every measurement in this log |
 | 4.4 | overlap independent bodies on separate streams | **CLOSED, measured small** | `WAVEGAP exposed_ms=7.14, ratio=1.030` — there is almost nothing exposed to overlap |
 
 ## 5. out of my authority, listed so it is not mistaken for an oversight
@@ -944,7 +944,7 @@ Prize arithmetic, stated as a ceiling and not a win: `gdn_rec` is 534.54 ms of a
 launch level is **≈ 70 ms ≈ 6.3 % of the whole wave**, prefill 3828 → ~4080 tok/s if it survives. **If it
 survives.** This is a burst over a 1 MiB single-layer state that stays resident for 128 tokens, and the engine
 walks 18 layers per token with everything else competing for L2; D28 is exactly the precedent that a burst
-winner can be an in-situ loser, and it is the reason nothing here enters `bench/performance-status.md` until an
+winner can be an in-situ loser, and it is the reason nothing here enters `engine/performance-status.md` until an
 in-situ A/B says so. A run that does not reproduce at wave level costs the plan the port and nothing else.
 
 Instrument defect found before any number was read off it, and fixed: `--volume` was overloaded as both "run the
@@ -957,7 +957,7 @@ assert its own record count rather than print a verdict.
 
 # D33 — the spelling survives the wave: `gdn_rec` **1.153×** in situ, prefill **3927 → 4284 tok/s**, and a burst winner is not necessarily an in-situ loser (2026-10-16)
 
-`bench/performance-status.md` §7 is the ledger row; this is the decision and the correction to the reasoning
+`progress/2026-10-21/performance-status-2026-10-21.md` §7 is the ledger row; this is the decision and the correction to the reasoning
 that surrounded it.
 
 Paired inside one lock hold per width, alternating, medians of 3, blocking, zero subagents: **4096 lanes**
@@ -1075,7 +1075,7 @@ quietly trusted: the static bills and the 48-example rule selftest are the parts
 
 # D35 — **D30 item 3.7: the deep algo field ships 2 pins of 4, at −0.75 % of wave, and the admissible subset that is worse than nothing** (2026-10-17)
 
-Numbers and the paired instrument in `bench/performance-status.md` §9; the deriver and its admission rule in
+Numbers and the paired instrument in `progress/2026-10-21/performance-status-2026-10-21.md` §9; the deriver and its admission rule in
 `prototype/gemm_algo_sweep/deep_pins.py`; the mechanism in `engine/kernels_gemm.cpp`'s `PinSet`. Decision taken and
 logged here rather than asked, per the standing rule.
 
@@ -1117,7 +1117,7 @@ D35 shipped two pins and retired the original `down_proj` pin on an L2-state sto
 before measuring, as the worker required: with the gateup candidate shipped and the *retired* pin named, `mlp_down`
 should come back at ≈ 32.16 ms (4096) and ≈ 7.97 ms (1024), i.e. +17 %/+20 %. **It measured 26.82 and 6.56 —
 +2.4 % and −0.5 %, both inside §9's own null.** Numbers, instrument and the corrected table in
-`bench/performance-status.md` §9's same-day correction; the shipped set is now `down_proj` (the original D28 pin,
+`progress/2026-10-21/performance-status-2026-10-21.md` §9's same-day correction; the shipped set is now `down_proj` (the original D28 pin,
 restored) **+** `deep_gate_proj+up_proj`, and the wave gain is the gateup row's alone at ≈ **−0.63 %**.
 
 **The cause was a config label, and it is the kind of error a gate cannot catch.** `--gemm-pins <csv>` *replaces*
@@ -1188,7 +1188,7 @@ and `5.1` is out of authority.
 
 # D38 — **per-op submission cost is *not* absorbed by a busy stream, so launch count is a real lever and D30 gets re-read** (2026-10-17)
 
-Source: `47274f4`, `bench/performance-status.md` §11, `tmp/gcc/ab42p.txt`.
+Source: `47274f4`, `progress/2026-10-21/performance-status-2026-10-21.md` §11, `tmp/gcc/ab42p.txt`.
 
 The submission probe said a 2 KiB copy is 84 % submission, but it ran with an idle CPU, where the submit rate
 is by definition the binding rate. The open question was whether the same cost is exposed when the device is
@@ -1217,7 +1217,7 @@ deriver where the census priced two, and 4.2′ needed no `gate.py` change at al
 
 # D39 — **the per-token launch bill is an engine contract, not a specification claim, so a gate's expectation may move with the engine — under four conditions** (2026-10-17)
 
-Source: `62b73e9`, `bench/performance-status.md` §13, `progress/2026-10-17/HANDOFF_17prime_gdn-cast-deletion.md`.
+Source: `62b73e9`, `progress/2026-10-21/performance-status-2026-10-21.md` §13, `progress/2026-10-17/HANDOFF_17prime_gdn-cast-deletion.md`.
 
 The worker hit the branch my brief had reserved as a stop-and-tell: 1.7′'s deletion is **route-blind and
 width-blind**, so it removes a launch from §07's *per-token* bill (cast 115 → 97, total 424 → 406), which
@@ -1895,7 +1895,7 @@ must become bf16, so a new band and a gate section come with it).
 ## D59. Item 2.6 is closed on measurement **[CONCLUSION OVERTURNED BY D61: the +112 % was timed on the one shape the census had already called unoccupiable, and the register attribution is refuted in §28 — the item is re-opened as unmeasured]**: every ingredient of the WMMA re-tile has now been tested, and each one fails
 
 D58 left one unknown: the geometry tax of a 16-row re-tile, as a device number. It is measured, in
-`bench/performance-status.md` §27, paired inside one rep against the kernel the engine ships (`ndiff=0`
+`progress/2026-10-21/performance-status-2026-10-21.md` §27, paired inside one rep against the kernel the engine ships (`ndiff=0`
 on both sides), 40 launches × 5 reps, blocking, zero subagents, admission green first (40/40).
 
 **The re-tile demands 0.28–0.30 of the bytes and runs 2.1× to 14.3× slower** in every fixture the harness
@@ -1968,7 +1968,7 @@ and censused: **flat 1,526, per-token 1,336 (+9, the wrong way)**, VGPR 75 → 6
 spill unchanged, residency unchanged. At §24's elasticity, −4 slots/token is **≈0.17 pp of the wave**; the
 measured +9 is a small loss. **No device window was spent on it.** That is a deliberate call, not an
 oversight: 0.17 pp is below this box's resolution for a dispatch-bound row (best-of-N spreads of 5–10 % in
-`bench/performance-status.md` §6), so a burst could only produce a number that cannot be interpreted —
+`engine/performance-status.md` §6), so a burst could only produce a number that cannot be interpreted —
 which is the same reason D30's null was re-taken rather than trusted.
 
 **A category error of mine, recorded where it can be seen.** My brief told this worker "the census already
@@ -1995,7 +1995,7 @@ new analysis of llama.cpp at all, only the second half of our own experiment.
 **What was wrong.** §27 timed `GRP=4` (134 VGPR → **3 blocks/CU**) and attributed the tax to register
 pressure, then used +112 % to close the item. But `attn_m16_grp2` was already built from the same source at
 `-DATTN_M16_GRP=2`: **96 VGPR, 10,496 B → 5 blocks/CU, shipped parity**. It had never been timed. It now
-has been, in its own hold with admission in the same run (`bench/performance-status.md` §28, log
+has been, in its own hold with admission in the same run (`progress/2026-10-21/performance-status-2026-10-21.md` §28, log
 `prototype/attn_m2/evidence_burst_grp2.txt`):
 
 - **Registers: refuted.** 3 → 5 blocks/CU (**+66 % wavefronts**) moves the time by **≤5 %** in every

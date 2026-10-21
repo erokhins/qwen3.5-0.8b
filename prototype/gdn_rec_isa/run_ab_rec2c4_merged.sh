@@ -3,7 +3,7 @@
 # against MODE `receng` (`engine/gdn_rec_unroll4_kernels.h::rec_unroll4_kernel`, the spelling the engine
 # actually runs). Written for the main agent; nothing in it has been run.
 #
-# WHY A CANARY, AND WHY IT IS NOT THE LAUNCH BILL. `bench/performance-status.md` §18 killed the previous
+# WHY A CANARY, AND WHY IT IS NOT THE LAUNCH BILL. `progress/2026-10-21/performance-status-2026-10-21.md` §18 killed the previous
 # screen because it compared two pre-unroll4 spellings, and `AGENTS.md` ("a paired A/B against a stale
 # binary reads as a clean null") requires a behavioural canary read inside the window. The launch bill is
 # unusable here: `gdn_rec` is deliberately NOT a `launch_stats` family (`engine/launch_stats.h:23`) and the
@@ -122,4 +122,4 @@ PY
 
 echo
 echo "NOT TIMED BY THIS SCRIPT'S AUTHOR: no device run in this window was read by the worker who wrote"
-echo "it. Numbers from here belong in bench/performance-status.md only if the main agent took them."
+echo "it. Numbers from here belong in engine/performance-status.md only if the main agent took them."

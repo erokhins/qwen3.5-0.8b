@@ -1,4 +1,4 @@
-// Compile-only TU for the MERGED-form census (D46 / bench/performance-status.md §18): the two forms the
+// Compile-only TU for the MERGED-form census (D46 / progress/2026-10-21/performance-status-2026-10-21.md §18): the two forms the
 // `rec2c` screen never compared, in ONE listing, so the census can bill the merge itself.
 //
 //   rec_kernel           the pre-unroll4 shipped spelling — the census's MODE-0 control row

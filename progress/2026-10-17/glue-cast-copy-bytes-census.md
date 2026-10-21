@@ -70,7 +70,7 @@ Medians of 3, as §9 takes its rows. Rep spread is quoted, because it bounds wha
 - **219 GB/s** conservative mixed step budget (`devices/strix-halo-mixed-traffic.md`,
   `G_step_1p5g_61p7_arena2m`), used as the pessimistic rate.
 - **1.85 µs** empty-kernel launch floor (`tools/launch_overhead_hip.cpp`, quoted at
-  `bench/performance-status.md` §4). Graph capture replays at **1.78 µs — no gain**, which is why
+  `engine/performance-status.md` §4). Graph capture replays at **1.78 µs — no gain**, which is why
   HIP graphs cannot rescue a launch-bound row and were retired as a lever
   (`engine/results.md` lever 5, struck).
 - **Geometry**: `kMaxWaveRows = 512` (`engine/decode_step.h:49`), 8 bodies for 4096 tokens,

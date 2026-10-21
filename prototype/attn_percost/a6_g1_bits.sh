@@ -26,7 +26,7 @@
 #   * `vgpr=` agreeing with the note block of the BUILT binary (the stale-binary guard, AGENTS 2026-10-17);
 #   * `fattn_rows=n/N` with n > 0: a wave of only one-pass rows runs no WMMA kernel and proves nothing;
 #   * identical launch counts and coverage fields on all three sides (this bet must not move launches,
-#     bench/performance-status.md §41).
+#     progress/2026-10-21/performance-status-2026-10-21.md §41).
 #
 # WHAT IT REFUSES: an empty parse (every field is `need`-checked); a base binary whose note block disagrees with
 # the shipped reading; a side whose banner disagrees with its own note block; a shape where the WMMA form owns
@@ -131,7 +131,7 @@ leg() {
         || fail "canary 2: shape $N side $SIDE banner $vgpr disagrees with that kernel's note block. Two objects are in play."
     local ncov; ncov=$(echo "$cov" | sed -E 's/fattn_rows=([0-9]+).*/\1/')
     [ "${ncov:-0}" -gt 0 ] || fail "non-vacuity: shape $N side $SIDE covers 0 rows with the WMMA form (fattn_rows=$cov). Byte-identity over rows this kernel never wrote proves nothing; pick a wider shape."
-    # launch plan + coverage fields: this bet must not move launches (bench/performance-status.md §41) nor which
+    # launch plan + coverage fields: this bet must not move launches (progress/2026-10-21/performance-status-2026-10-21.md §41) nor which
     # rows the form owns.
     # This is the PLANNED bill (`LAUNCH`, printed in every mode); the OBSERVED count (`family=attn launches=`)
     # needs --time-waves and is therefore asserted inside the A/B window, where timing is the point. A plan bill
@@ -166,7 +166,7 @@ cmp_sides() {
     cmp -s "$OUT/s${N}_$A.statefp" "$OUT/s${N}_$B.statefp" \
         || fail "shape $N: $A vs $B STATEFP rows differ. Same verdict as a moved logit: the premise is false, report it red."
     [ "$(cat "$OUT/s${N}_$A.launches")" = "$(cat "$OUT/s${N}_$B.launches")" ] \
-        || fail "shape $N: $A and $B submitted different attn launch counts ($(cat "$OUT/s${N}_$A.launches") vs $(cat "$OUT/s${N}_$B.launches")). bench/performance-status.md §41 closed launch count as a variable and this bet may not reopen it."
+        || fail "shape $N: $A and $B submitted different attn launch counts ($(cat "$OUT/s${N}_$A.launches") vs $(cat "$OUT/s${N}_$B.launches")). progress/2026-10-21/performance-status-2026-10-21.md §41 closed launch count as a variable and this bet may not reopen it."
     local nf2; nf2=$(find "$d2" -type f | wc -l)
     cmp -s "$OUT/s${N}_$A.fields" "$OUT/s${N}_$B.fields" \
         || fail "shape $N: $A and $B differ in the form's coverage fields: $(paste -d'/' "$OUT/s${N}_$A.fields" "$OUT/s${N}_$B.fields" | tr '\n' ' '). The coverage predicate does not read a staging plan, so a difference here means the knob changed ROUTING and the byte equality above is judging different rows."

@@ -300,7 +300,7 @@ const std::vector<AlgoPin>& algo_pins() {
         // query — none of these hexes was hand-written or reconstructed-and-trusted — and the retirement of
         // candidates is recorded as a verdict in the in-situ table that deriver reads
         // (`prototype/gemm_algo_sweep/insitu_verdicts.tsv`, whose numbers come from
-        // `bench/performance-status.md` §9). `CHECK-TABLE` in that tool refuses to let this table and that
+        // `progress/2026-10-21/performance-status-2026-10-21.md` §9). `CHECK-TABLE` in that tool refuses to let this table and that
         // data disagree in either direction, so the rows below cannot rot into a transcription.
         //
         // One baseline rule for the burst column, because it is the second version of a mistake already
@@ -335,7 +335,7 @@ const std::vector<AlgoPin>& algo_pins() {
         // D36 refuted it by naming this row explicitly: mlp_down came back at 26.82 / 6.56, i.e. +2.4 % /
         // −0.5 % against the deep-field alternative and inside §9's own ±3.1 % / ±1.9 % null. So the cost
         // axis is PIN COVERAGE, not algo identity, and the wave gain is the gateup row's alone (≈ −0.63 %).
-        // Numbers: `bench/performance-status.md` §9 and its same-day correction; raw medians
+        // Numbers: `progress/2026-10-21/performance-status-2026-10-21.md` §9 and its same-day correction; raw medians
         // `tmp/pinab/ab3.txt` (paired 3 reps, both widths, one lock hold). The `wall_ms` column still could
         // not have adjudicated any of it: §9's null test reads family-row drift of +3.1 % at 4096 / +1.9 %
         // at 1024 on a family no pin can touch, so only the pinned families' rows are readable. Both rows

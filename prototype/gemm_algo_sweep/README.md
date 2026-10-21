@@ -8,7 +8,7 @@ hipBLASLt contain an algorithm that beats the one its default heuristic ranks fi
 without writing a kernel*. If no, a hand GEMM has to win on its own merits and the tuning route is
 closed.
 
-Matmul is 28.6 % of a 1024-lane prefill wave (`bench/performance-status.md` §3, `GROUP matmul_ms`
+Matmul is 28.6 % of a 1024-lane prefill wave (`engine/performance-status.md` §3, `GROUP matmul_ms`
 70.30 ms of 245.73 ms), so a 1.2× on the library is worth ~6 % of the wave — and it costs a tool run
 rather than a kernel campaign.
 
@@ -94,7 +94,7 @@ row. Leaves that share a shape are one row here, because the tool times a shape 
 | `down_proj` | mlp_down | 1024 | 3584 | 24 | `engine/kernels_mlp.cpp:276` ← `decode_step.cpp:762` |
 | | | | | **150** | matches the "150-call 24-layer wave mix" priced in `devices/strix-halo-compute.md` |
 
-Family attribution is the one `bench/performance-status.md` §3 prints (proj 38.81 ms, `mlp_gateup`
+Family attribution is the one `engine/performance-status.md` §3 prints (proj 38.81 ms, `mlp_gateup`
 24.99 ms, `mlp_down` 6.42 ms of a 245.73 ms wave).
 
 **Deliberately not swept, with the reason** — the brief listed `lm_head` among the families and it is
@@ -103,7 +103,7 @@ not a library call:
 | excluded | why |
 |---|---|
 | `in_proj_a` / `in_proj_b`, N=16 | `proj_gemm` **refuses** them (`engine/kernels_proj.cpp:134-141`); the engine guard itself records why (12–22× the dispatch floor at that N), so they stay in the hand GEMV at every width |
-| `lm_head`, 248320×1024 | `lm_head_full` (`engine/kernels_lmhead.cpp:25`) is a hand GEMV over an **F32** activation, run once per request, not per wave row. `bench/performance-status.md` §3 lists it as a wave *family*, which is true of the hand kernel; no route hands it to hipBLAS, so sweeping it would price a call the engine does not make |
+| `lm_head`, 248320×1024 | `lm_head_full` (`engine/kernels_lmhead.cpp:25`) is a hand GEMV over an **F32** activation, run once per request, not per wave row. `engine/performance-status.md` §3 lists it as a wave *family*, which is true of the hand kernel; no route hands it to hipBLAS, so sweeping it would price a call the engine does not make |
 | a body of one row (M=1) | `resolve_wave_gemm` sends M≤1 to the hand GEMV whatever the run asked for (`engine/kernels_gemm.cpp:844-850`); `--rows` refuses 1 rather than timing a shape the library never sees |
 
 ### Wave widths (the M axis), and an honest correction

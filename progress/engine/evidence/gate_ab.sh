@@ -19,7 +19,7 @@
 # that incident the header is the only thing in the log that proves which route ran.
 #
 # Same honesty rules as `tools/gate_locked_run.sh`: this is a correctness gate, the wall printed is
-# this script's own span, and nothing here belongs in `bench/performance-status.md`.
+# this script's own span, and nothing here belongs in `engine/performance-status.md`.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" || exit 1

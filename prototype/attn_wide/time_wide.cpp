@@ -682,7 +682,7 @@ int main(int argc, char** argv) {
     if (abort_tflops <= 0) refuse("--abort-tflops must be positive");
     geometry_refusals(lanes);
     if (reps < 2) refuse("--reps must be >= 2: with one rep `best` and `only` are the same number and the spread "
-                         "this box is known for (bench/performance-status.md §6) is invisible");
+                         "this box is known for (engine/performance-status.md §6) is invisible");
 
     // ---- R1: the correctness driver's witness, BEFORE anything is allocated or timed ----------------------
     driver_witness(driver, lanes);

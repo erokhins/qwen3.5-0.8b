@@ -7,7 +7,7 @@ unit     one token-step = one iteration of the token loop (or one launch, for a 
   per-LAUNCH straight   :  80 blocks,  203 slots
   per-TOKEN straight    :  33 blocks,  255 slots
   walks per token       : loopA 44x8=352,  loopB 90x8=720
-  FLAT token-step bill  : 1530 slots/wavefront     <- comparable with isa_census.py and §24 of bench/performance-status.md
+  FLAT token-step bill  : 1530 slots/wavefront     <- comparable with isa_census.py and §24 of progress/2026-10-21/performance-status-2026-10-21.md
   PER-TOKEN bill        : 1327 slots/wavefront   (flat - 203 per-launch slots)
   ADDRESS ARITHMETIC    : 13 straight-line + 80 in walks = 93 slots = 7.0% of the per-token bill, 6.1% of the flat bill
   category rollup       : per-launch | per-token-straight | per trip of the walks

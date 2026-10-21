@@ -4,7 +4,7 @@ Written before any implementation, because that is the rule this repo's own fail
 `prototype/gdn_collapse/results.md` priced a route at 11.4 ms and measured 112.04 ms, and AGENTS.md's
 conclusion — *"price a serial kernel in cycles-per-dependency at its realised occupancy, or do not price it"*
 — is the standard this document tries to meet. Every number below is from an artifact already on disk:
-`bench/performance-status.md` §37 (family medians), §38 (the two-engine phase trace),
+`progress/2026-10-21/performance-status-2026-10-21.md` §37 (family medians), §38 (the two-engine phase trace),
 `prototype/gdn_walk/evidence-tokenbill-2026-10-19.txt` (per-token ISA bill of the shipping walk), and
 `prototype/gdn_rec_isa/token_bill.py`, which is the tool that already did this split correctly.
 

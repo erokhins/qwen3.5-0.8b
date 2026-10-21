@@ -59,7 +59,7 @@ Two findings the probe could not produce:
   spilled (115). The remaining pressure is the 16 F32 output tiles (128 VGPRs/lane) live across the aliased
   V-stage transpose, plus the score-leg operands. At `FATTN_THREADS=32` the per-thread architectural cap is
   256, and the kernel wants more than that: 49 VGPRs go to scratch, 72 B per thread, and they are on the round's
-  dependent chain — the mechanism `bench/performance-status.md` §28 identifies as the whole reason a serial
+  dependent chain — the mechanism `progress/2026-10-21/performance-status-2026-10-21.md` §28 identifies as the whole reason a serial
   scan cannot be covered at low occupancy.
 
 Per the gate this work was routed under (spill, not wavefronts): **non-zero spill means `--attn-fattn` stays

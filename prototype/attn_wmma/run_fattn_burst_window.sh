@@ -236,7 +236,7 @@ print("     NOTE: the ratio is the WHOLE family row, covered rows and uncovered 
 if r < 1.5:
     sys.exit(f"CLAIM (iii) FAILS at T={w}: {r:.4f}x against a 1.5x bar. Report it as a failure; do not"
              " re-quote the CPU-side census as the answer, and do not re-take the row hoping for a better"
-             " window - quote the pair and the spread (bench/performance-status.md §6: a ruler re-taken in"
+             " window - quote the pair and the spread (engine/performance-status.md §6: a ruler re-taken in"
              " a different window is not an A/B).")
 print(f"CLAIM (iii) PASSES at T={w}")
 PY

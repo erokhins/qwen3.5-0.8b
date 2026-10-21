@@ -5,7 +5,7 @@
  *     act  = bf16( silu(bf16(x . Wg^T)) * bf16(x . Wu^T) )      [3584]
  *     out  = bf16(act . Wd^T)                                   [1024]
  * The MLP is 0.5285 GB/token = 33 % of the decode bytes (§01.7, progress/2026-10-16/performance-status-2026-10-16.md:80; §4 of
- * `bench/performance-status.md` carries today's row), the largest single family left after lm_head, and it is the first place the engine has
+ * `engine/performance-status.md` carries today's row), the largest single family left after lm_head, and it is the first place the engine has
  * to fuse an epilogue: the launch floor here is 1.85 us/launch (tools/launch_overhead_hip.cpp)
  * and an unfused MLP pays 3 launches per layer instead of 2, so the shape of this kernel is
  * the shape of the four remaining GEMV families.

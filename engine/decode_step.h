@@ -152,7 +152,7 @@ struct DecodeScratch {
     // Same one-row override too — a ONE-ROW body walks the per-token loop whatever this says, so no
     // decode bit can move under it. The default is 1, the shipped one-launch-per-token form: D54
     // ships the loop as a knob first (D32 → D50's order again), because its 1.58–1.64x is a harness
-    // screen (`bench/performance-status.md` §23) and the paired in-situ A/B on the `gdn_rec` family
+    // screen (`progress/2026-10-21/performance-status-2026-10-21.md` §23) and the paired in-situ A/B on the `gdn_rec` family
     // row is what decides whether the default moves — it moved in §24 (1.63× family row, 1,024/1,024
     // prefill logits rows byte-identical), so this mirrors `decode_run`'s option default and the two
     // must move in one commit. Inert under `kCollapse`, which already submits

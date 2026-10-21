@@ -706,10 +706,10 @@ def main() -> int:
     else:
         vbest = marg[best]
     w("  inputs, every one measured somewhere else in this tree:")
-    w(f"    whole-kernel bill        {BILL} warp-inst/touch  (bench/performance-status.md §26 W2, counter-calibrated)")
+    w(f"    whole-kernel bill        {BILL} warp-inst/touch  (progress/2026-10-21/performance-status-2026-10-21.md §26 W2, counter-calibrated)")
     w(f"    shipped pass-1 window    {SHIP_TOUCH:.0f} slots/touch     (prototype/attn_valu_slim/results.md §2; --calib re-reads it)")
     w(f"    slot->time elasticity    time ∝ slots^{EXPO}–{EXPHI}      (D21/D22; the exponent prototype/attn_m2/results.md §8.4 also used)")
-    w(f"    attn / wave              {ATTN_MS} ms / {WAVE_MS} ms   (bench/performance-status.md §25 and §26; attn = "
+    w(f"    attn / wave              {ATTN_MS} ms / {WAVE_MS} ms   (progress/2026-10-21/performance-status-2026-10-21.md §25 and §26; attn = "
       f"{100.0 * ATTN_MS / WAVE_MS:.1f} % of the wave)")
     w("    matrix headroom          ~36 µs of matrix work per wave against 257 ms of attn (D34): the")
     w("                             matrix PIPE is never the constraint here; only the geometry tax can be")

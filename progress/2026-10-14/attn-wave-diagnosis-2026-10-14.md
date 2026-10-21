@@ -23,7 +23,7 @@ pattern — no re-use — not parallelism, not occupancy, not the causal triangl
 
 ## 0. What is being priced
 
-From `bench/performance-status.md` (§"Wave-path attribution", route-(c) flip tables):
+From `engine/performance-status.md` (§"Wave-path attribution", route-(c) flip tables):
 
 | | value | source |
 |---|---|---|

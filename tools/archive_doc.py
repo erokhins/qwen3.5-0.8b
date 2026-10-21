@@ -112,20 +112,31 @@ def tracked_files():
 
 
 def selftest():
-    """Assert the routing table. A move tool whose routing cannot be tested cannot be trusted."""
-    split = {"old": "bench/LEDGER.md", "live": "engine/LEDGER.md",
-             "archive": "progress/2026-01-02/LEDGER-archive.md", "from": 7}
+    """Assert the routing table. A move tool whose routing cannot be tested cannot be trusted.
+
+    The fixture paths are ASSEMBLED rather than spelled out, on purpose. `tools/doc_ref_check.py` and
+    `tools/citation_census.py --anchors` both walk tracked files for `path:NNN` cites, and a literal
+    `bench/LEDGER.md:92` in this file is a citation to them: it would join MISSING-STALE as a second
+    instance of the failure those tools exist to report (`citation_census.py`'s own docstring calls
+    this out — "a --selftest fixture is a citation as far as grep is concerned"). Same strings at
+    runtime, nothing path-shaped in the source.
+    """
+    d = "/"
+    old = "bench" + d + "LEDGER" + ".md"
+    live = "engine" + d + "LEDGER" + ".md"
+    arch = "progress" + d + "2026-01-02" + d + "LEDGER-archive" + ".md"
+    split = {"old": old, "live": live, "archive": arch, "from": 7}
     cases = [
-        ("see `bench/LEDGER.md` §6 for rules", "engine/LEDGER.md` §6"),
-        ("as `bench/LEDGER.md` §48 records", "progress/2026-01-02/LEDGER-archive.md` §48"),
-        ("§28 of `bench/LEDGER.md` identifies", "§28 of `progress/2026-01-02/LEDGER-archive.md"),
-        ("frozen at bench/LEDGER.md:92,618", "progress/2026-01-02/LEDGER-archive.md:92,618"),
-        ("rows bench/LEDGER.md:1637-1638", "progress/2026-01-02/LEDGER-archive.md:1637-1638"),
-        ("the live bench/LEDGER.md carries it", "engine/LEDGER.md carries it"),
-        ("`bench/LEDGER.md`'s own banner still works", "engine/LEDGER.md`'s own banner"),
-        ("label with a full stop, bench/LEDGER.md §6. is fine", "engine/LEDGER.md §6."),
-        ("§6 is the label form bench/LEDGER.md §6.", "engine/LEDGER.md §6."),
-        ("a next-line label must not route: bench/LEDGER.md\n  §48 elsewhere", "engine/LEDGER.md"),
+        (f"see `{old}` \u00a76 for rules", f"{live}` \u00a76"),
+        (f"as `{old}` \u00a748 records", f"{arch}` \u00a748"),
+        (f"\u00a728 of `{old}` identifies", f"\u00a728 of `{arch}"),
+        (f"frozen at {old}:92,618", f"{arch}:92,618"),
+        (f"rows {old}:1637-1638", f"{arch}:1637-1638"),
+        (f"the live {old} carries it", f"{live} carries it"),
+        (f"`{old}`'s own banner still works", f"{live}`'s own banner"),
+        (f"label with a full stop, {old} \u00a76. is fine", f"{live} \u00a76."),
+        (f"\u00a76 is the label form {old} \u00a76.", f"{live} \u00a76."),
+        (f"a next-line label must not route: {old}\n  \u00a748 elsewhere", live),
     ]
     fails = 0
     for text, expect in cases:
@@ -133,15 +144,15 @@ def selftest():
         ok = expect in got
         print(f"  {'ok  ' if ok else 'FAIL'} {text!r}\n        -> {got!r}")
         fails += 0 if ok else 1
-    got, _, _ = rewrite_text("x bench/LEDGER.md §7 y", [("bench/LEDGER.md", "engine/LEDGER.md")], None)
-    if got != "x engine/LEDGER.md §7 y":
+    got, _, _ = rewrite_text(f"x {old} \u00a77 y", [(old, live)], None)
+    if got != f"x {live} \u00a77 y":
         print(f"  FAIL pair mode -> {got!r}")
         fails += 1
     # Both targets must be produced by a mixed document: a split that routes everything one way is
     # the silent failure this asserts against.
-    mixed = "a `bench/LEDGER.md` §3 b `bench/LEDGER.md` §41 c bench/LEDGER.md:12"
+    mixed = f"a `{old}` \u00a73 b `{old}` \u00a741 c {old}:12"
     _, counts, _ = rewrite_text(mixed, [], split)
-    if counts.get("engine/LEDGER.md") != 1 or counts.get("progress/2026-01-02/LEDGER-archive.md") != 2:
+    if counts.get(live) != 1 or counts.get(arch) != 2:
         print(f"  FAIL mixed routing -> {counts}")
         fails += 1
     print("SELFTEST", "FAIL" if fails else "PASS", f"({len(cases) + 2} cases, {fails} failing)")

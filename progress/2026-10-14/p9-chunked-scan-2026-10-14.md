@@ -281,7 +281,7 @@ at an arbitrary token count — that path is now checked against the dumps, not 
 ## 3. Deliverable 3 — cost model at the engine's real shapes, priced only at measured rates
 
 Shapes: 512-row bodies × 2 = a 1024-token wave, H=16 v-heads, `d_k = d_v = 128`, 18 GDN layers. Baseline is the
-measured `gdn_rec`: **125.4 ms, 18,432 launches, 6.8 µs each** (`bench/performance-status.md`, route-(c) table).
+measured `gdn_rec`: **125.4 ms, 18,432 launches, 6.8 µs each** (`engine/performance-status.md`, route-(c) table).
 
 Sequential §04.4 arithmetic per token-head-layer: decay `D²` + read `2D²` + delta `3D` + write `2D²` + read
 `2D²` = **115,072 flops** → **33.94 GFLOP per wave**, which against the measured 125.4 ms is **0.271 TFLOP/s
@@ -440,7 +440,7 @@ tools/gpu_lock.sh release "p9 phase1 gdn_rec baseline"
 
 Record `tools/gpu_lock.sh status` (util) at acquire, run blocking with zero subagents, and treat the resulting
 `gdn_rec` share as the number the §3 table must be re-priced against — those `ms` figures belong in
-`bench/performance-status.md`, which is main-agent-only, and not in this document.
+`engine/performance-status.md`, which is main-agent-only, and not in this document.
 
 Phase 1, gated on the parent funding this: the HIP chunked kernel for `engine/kernels_gdn.cpp` **prefill only**
 (decode stays on the recurrent kernel — §2.4 shows the handoff is exact), the four-site launch plan, and a gate

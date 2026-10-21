@@ -3,7 +3,7 @@
 CPU-only ISA census of `prototype/gdn_decode/gdn_decode_kernels.h::rec_kernel`, the kernel behind
 the **biggest decode-kernel share on disk**: `gdn_rec` = **126.83 ms, 51.2 %** of the 245.7 ms wave
 at 1024 lanes, **~509 ms, 46 %** of the ~1,105 ms wave at 4096 lanes
-(`bench/performance-status.md`, "Headline tables after the tiled attention wave ships": 18,432 and
+(`engine/performance-status.md`, "Headline tables after the tiled attention wave ships": 18,432 and
 73,728 launches, ~6.8–6.9 µs each). The shape of the question is the one
 `prototype/attn_valu_slim/results.md` asked of attention, and `prototype/m2_launch`'s D21 rule is
 the one that constrains the answer: **census first, do not price a rate as the wall.** The short
@@ -523,7 +523,7 @@ and a statement about `gdn_rec`'s critical path is one burst window in the main 
 ## 10. The burst, measured (main agent, 2026-10-16) — and it does not read the way §9 expected
 
 Two windows, one `gpu_lock` hold each, blocking, zero subagents, `util` 92 % (discounted per
-`bench/performance-status.md` §6), `--modes rec0,rec3,rec4,rec5,rec6 --volume --burst 40 --reps 5`, all four
+`engine/performance-status.md` §6), `--modes rec0,rec3,rec4,rec5,rec6 --volume --burst 40 --reps 5`, all four
 cases. `BURST-LINES printed=100 want=100 ok=1` in both windows, `admission=PASS`, `volume=OK`. Logs:
 `tmp/gdn_burst_w1.log`, `tmp/gdn_burst_w2.log`.
 
@@ -564,7 +564,7 @@ token, so its L2 working set and its interleaving with every other family are di
 the precedent that a burst winner can be an in-situ loser. The claim is therefore: **a bit-identical rec
 kernel worth ~1.15× at launch level**, whose prize at 4096 lanes would be 534.54 → ~465 ms = **~70 ms ≈ 6.3 %
 of the whole wave** if it survives in situ, and ~0 if it does not. Port and adjudicate in situ before any of
-it enters `bench/performance-status.md`.
+it enters `engine/performance-status.md`.
 
 Instrument note, because the first three attempts at this window timed nothing: `--volume` was overloaded as
 both "run the volume check" and "volume-only mode", so the documented `--volume --burst 40 --reps 5` printed

@@ -44,7 +44,7 @@ rate block.
 WHAT THE NUMBERS MEAN. The tok/s and TTFT printed here are the engine's own wall clock on
 a box that is not provably exclusive — `flash_serve`, the server generating this session's
 own tokens, polls the same iGPU. So these are "is the engine behaving sanely" figures, NOT
-ledger numbers: `bench/performance-status.md` §6 owns what a clean window takes (zero
+ledger numbers: `engine/performance-status.md` §6 owns what a clean window takes (zero
 subagents, blocking, exclusive) and nothing printed here may be pasted into that ledger.
 See also `AGENTS.md`, "GPU execution is serialized and belongs to the main agent".
 
@@ -417,7 +417,7 @@ def main() -> int:
               f" (loader line not recognised, so the split inside the engine is unknown)",
               flush=True)
     print("  rates here are this box's wall clock, not a ledger number"
-          " (bench/performance-status.md §6).", flush=True)
+          " (engine/performance-status.md §6).", flush=True)
 
     messages: list[dict] = []
     last_stop = ""

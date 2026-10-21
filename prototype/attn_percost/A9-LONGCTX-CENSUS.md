@@ -1,7 +1,7 @@
 # A9 — why our attention costs ~1.9× llama.cpp's at LONG context: flop model, wasted work, traffic, levers (2026-10-19)
 
 Task: `worker`, CPU-only, tip `6d0512f`. **No device work, no timing taken by me.** Every `ms` is quoted from
-`bench/performance-status.md` §51/§50/§48/§46/§49 or is a *derived* ratio of quoted numbers with its formula
+`progress/2026-10-21/performance-status-2026-10-21.md` §51/§50/§48/§46/§49 or is a *derived* ratio of quoted numbers with its formula
 shown; every byte/slot count is a sum printed beside it or comes from the CPU mirror
 `prototype/attn_percost/a9_waste_model.py` (this file's only new tool), which reproduces A2's two published
 figures before it is allowed to publish its own (§2.0). Labelling follows A5's convention: **read** =
@@ -34,7 +34,7 @@ Written in increments and appended as each part was finished, so a window compac
 | causal mask inside a round | `live = covered && j >= blo && j < bhi`, else `sc = −1e30` | `engine/attn_fattn_kernels.h:846-848` |
 | score tiles / PV tiles per round | `FATTN_KTILES = FATTN_VTILES = DH/16 = 16` | `engine/attn_fattn_kernels.h:189-190` |
 | accumulator rescale | 16 tiles × 8 F32 = **128 F32 mults per lane per round** | `engine/attn_fattn_kernels.h:879-881` |
-| LDS (shipped `_u8` default) | `3 × 4,096 (transpose) + 8,192 (K/V) = 20,480 B` → 3 blocks/CU → 9 wf/CU at 185 VGPR, spill 0 | `engine/attn_fattn_kernels.h:655-660`, `:667`; bench/performance-status.md §48 of `bench/performance-status.md` |
+| LDS (shipped `_u8` default) | `3 × 4,096 (transpose) + 8,192 (K/V) = 20,480 B` → 3 blocks/CU → 9 wf/CU at 185 VGPR, spill 0 | `engine/attn_fattn_kernels.h:655-660`, `:667`; progress/2026-10-21/performance-status-2026-10-21.md §48 of `engine/performance-status.md` |
 | split partial slot | `(2 + DH)` F32 = **1,032 B** per (row, head, lane-block) | `engine/attn_fattn_kernels.h:489-491` (`fattn_part_slot`), stride `(DH + 2)` |
 | roof | WMMA `v_wmma_f32_16x16x16_f16` = **52.63 TFLOP/s** (1 MAC counted as 2 FLOP) | `prototype/issue_rate_probe/results.md` §1 row `irp_wmma_4` |
 
@@ -57,7 +57,7 @@ query-head axis must be in the demand; §2: "Demand 2.062e11 MAC/pass" at 4,096)
 
 ### 1.1 The traced numbers, re-derived with the pass-count discipline
 
-All three traces are the ones already on disk from bench/performance-status.md §51's hold (`tmp/gcc/llamaphase/`), read through
+All three traces are the ones already on disk from progress/2026-10-21/performance-status-2026-10-21.md §51's hold (`tmp/gcc/llamaphase/`), read through
 `tools/trace_phase_split.py`, which derives the pass divisor from a kernel of known per-pass site count and
 never sums raw rows. Commands and derived divisors:
 
@@ -74,10 +74,10 @@ python3 tools/trace_phase_split.py tmp/gcc/llamaphase/llama_pp32768/pp32768_kern
 
 `attn_prep` is 6 sites **per body** (one per attention layer), not per prompt-pass, so the tool's divisor
 `6/pass` yields a **per-body-pass** unit: at 16,384 lanes it derives 96 = 3 wave replays × 32 bodies.
-Multiplying its `ms/pass` by the body count `W/512` gives the whole-prompt-pass figure bench/performance-status.md §51 prints — this is
-the reconciliation the bench/performance-status.md §51 note asks for, stated once:
+Multiplying its `ms/pass` by the body count `W/512` gives the whole-prompt-pass figure progress/2026-10-21/performance-status-2026-10-21.md §51 prints — this is
+the reconciliation the progress/2026-10-21/performance-status-2026-10-21.md §51 note asks for, stated once:
 
-| width | tool's attention ms (per body-pass) | × bodies | whole-prompt ms/pass | bench/performance-status.md §51's row |
+| width | tool's attention ms (per body-pass) | × bodies | whole-prompt ms/pass | progress/2026-10-21/performance-status-2026-10-21.md §51's row |
 |---|---|---|---|---|
 | 16,384 ours | 47.47 | ×32 | **1,519.0** | 1,518.91 ✓ |
 | 32,768 ours | 92.32 | ×64 | **5,908.5** | 5,908.16 ✓ |
@@ -88,19 +88,19 @@ Kernels behind our attention column at 32,768 (traced ms per body-pass / launche
 `attn_fattn_wave_u8` **87.25** at 5.9/pass, `attn_combine` **4.07** at 5.9/pass, the remainder ≈ 1.0 ms is
 `attn_prep` + `attn_slim_wave`'s early-out — i.e. **94.5 % of the attention phase is one kernel**, and
 `attn_combine` is 4.4 %. The `_u8` name confirms the traced binary is the shipped `--attn-fattn-qstage
-unstaged8` default (bench/performance-status.md §48), so no stale-binary risk on this read (AGENTS' 2026-10-17 canary row: the canary here
+unstaged8` default (progress/2026-10-21/performance-status-2026-10-21.md §48), so no stale-binary risk on this read (AGENTS' 2026-10-17 canary row: the canary here
 is the kernel *name*, which only the shipped spelling carries).
 
-### 1.2 Achieved rates — and a correction to bench/performance-status.md §51's absolute rate
+### 1.2 Achieved rates — and a correction to progress/2026-10-21/performance-status-2026-10-21.md §51's absolute rate
 
-bench/performance-status.md §51 printed: "3.3 TFLOP of causal attention per pass at 32k in 5.908 s is **0.56 TFLOP/s**, llama's is **1.07**".
+progress/2026-10-21/performance-status-2026-10-21.md §51 printed: "3.3 TFLOP of causal attention per pass at 32k in 5.908 s is **0.56 TFLOP/s**, llama's is **1.07**".
 That numerator is 8× under §0's model, and the factor is exactly `N_Q = 8` (it is prototype/attn_percost/A2-census.md §0's correction-2b bug
 reintroduced: the head axis missing from the demand). `0.4124 TFLOP/pass at 4096` (prototype/attn_percost/A2-census.md §2, head axis included)
-× `(32768/4096)² = 64` is **26.39 TFLOP/pass**, and `26.39 / 8 = 3.30` — the number bench/performance-status.md §51 printed. The ratio
-ours/llama is unaffected (both sides carry the same 8×), so **bench/performance-status.md §51's attribution survives**, but the absolute
+× `(32768/4096)² = 64` is **26.39 TFLOP/pass**, and `26.39 / 8 = 3.30` — the number progress/2026-10-21/performance-status-2026-10-21.md §51 printed. The ratio
+ours/llama is unaffected (both sides carry the same 8×), so **progress/2026-10-21/performance-status-2026-10-21.md §51's attribution survives**, but the absolute
 utilisation does not read the same way when it is right, so here it is right:
 
-| width | FLOP/pass (derived, §0) | ours ms/pass (quoted from bench/performance-status.md §51 and §49) | ours TFLOP/s | % of WMMA roof | llama ms/pass | llama TFLOP/s | % of roof | ours/llama |
+| width | FLOP/pass (derived, §0) | ours ms/pass (quoted from progress/2026-10-21/performance-status-2026-10-21.md §51 and §49) | ours TFLOP/s | % of WMMA roof | llama ms/pass | llama TFLOP/s | % of roof | ours/llama |
 |---|---|---|---|---|---|---|---|---|
 | 4,096 | 0.4124 TFLOP | 100.79 (§49's traced pair, same hold) | **4.09** | **7.78 %** | 52.31 | **7.88** | 14.98 % | 1.93× |
 | 16,384 | 6.596 TFLOP | 1,518.91 | **4.343** | **8.25 %** | 767.54 | **8.594** | 16.33 % | 1.98× |
@@ -110,19 +110,19 @@ Arithmetic, one row shown: `24576 × 32768 × 32769 = 2.6389e13 FLOP`; `2.6389e1
 `4.466 / 52.63 = 8.49 %`.
 
 **What the correction changes, and what it does not.** It does **not** reopen the bandwidth question: 8.5 % of
-the matrix roof still leaves the phase ~91 % under it, and bench/performance-status.md §51's falsifier (a bandwidth-bound phase cannot sit
+the matrix roof still leaves the phase ~91 % under it, and progress/2026-10-21/performance-status-2026-10-21.md §51's falsifier (a bandwidth-bound phase cannot sit
 that far under the roof) stands — indeed the AGENTS row "a bytes-demanded ÷ time figure near the DRAM plateau
 is not evidence of a bandwidth wall" and decision **D21** ("a model fitted to a measurement cannot falsify
 itself") are why §3 below refuses to conclude anything from a GB/s figure. What it does change: llama is at
 **16 % of the roof, not 2 %**, so the remaining gap is *two kernels that both fail to fill the matrix pipe,
-one of them twice as hard* — not "llama found the fast path and we did not". Anyone quoting bench/performance-status.md §51's 0.56/1.07
+one of them twice as hard* — not "llama found the fast path and we did not". Anyone quoting progress/2026-10-21/performance-status-2026-10-21.md §51's 0.56/1.07
 should quote these instead and say which model they used; I cannot edit `bench/` (rule), so this file is the
 correction's home until the ledger is updated.
 
-Note on the 4,096 row: it uses bench/performance-status.md §49's **traced** attention pair (ours 100.79 vs
+Note on the 4,096 row: it uses progress/2026-10-21/performance-status-2026-10-21.md §49's **traced** attention pair (ours 100.79 vs
 llama 52.31 ms/pass, one hold, post-G1), not §47's untraced 150.16 ms family, because mixing a traced and an
 untraced number across widths is the "ruler re-taken in a different window" trap
-(bench/performance-status.md §46/§48). Two checks say the row is sound: its 1.93× is exactly the phase ratio §49
+(progress/2026-10-21/performance-status-2026-10-21.md §46/§48). Two checks say the row is sound: its 1.93× is exactly the phase ratio §49
 printed, and its 4.09 TFLOP/s sits between the pre-G1 rate A2 derived (2.924 TFLOP/s,
 `prototype/attn_percost/A2-census.md` §2) and the post-G1 16k rate below it — i.e. the same 8× correction applied
 to A2's number lands where this one does.
@@ -151,7 +151,7 @@ Two independent cross-checks from the traces, same hold, no re-collection
 `attn_prep 6.00/pass · attn_slim_wave 6.00 · attn_fattn_wave_u8 5.91 · attn_combine 5.91` at 32,768 — the
 5.91 is 6 × 63/64, which is `attn_decode_layer`'s `ATTN_FATTN_SKIP` for body 0 (a one-pass wave allocates no
 streaming partials, `engine/kernels_attn.cpp:354`) reproduced by arithmetic nobody typed in; and the per-kernel
-sum reproduces bench/performance-status.md §51's attention row exactly (5,583.87 + 260.76 + 32.12 + 31.42 = **5,908.16 ms/pass**).
+sum reproduces progress/2026-10-21/performance-status-2026-10-21.md §51's attention row exactly (5,583.87 + 260.76 + 32.12 + 31.42 = **5,908.16 ms/pass**).
 
 At 32,768 lanes one prompt pass is **64 bodies** (`W/512`), of which body 0 is one-pass (`split = 1`, owned by
 `attn_slim_wave`) and bodies 1..63 stream with `split = i+1`. Per layer: **182,952 fattn blocks**
@@ -176,21 +176,21 @@ issued/useful = 1.0893   ->  8.20 % of every matrix slot this kernel issues is n
 | **(b2)** K/V staged past the diagonal | `if (j >= hi_all) j = hi_all - 1;` — a real global load of a duplicate row, K at `:778`, V at `:895` | 1,232,280 duplicate lane loads = **1.26 GB/pass** | 38.5 KB/token, ≈ 5.3 ms/pass at the 237 GB/s roof | yes, but it is 0.09 % of the phase's demanded traffic — worth nothing |
 | **(c)** split path | Σ splits 2,079 ⇒ 1,064,448 partial slots/layer × 1,032 B × 8 heads × 6 layers = **52.73 GB written + 52.73 GB read back + 1.59 GB merged rows** at 32,768 | **107.05 GB/pass** of scratch traffic | 3.27 MB/token | capped split, §4 L-c — and this is the one item whose *traced* rate is at the DRAM roof: `attn_combine` traced **260.76 ms/pass** moving 54.31 GB = **208 GB/s = 88 % of the 237 GB/s roof** (`devices/strix-halo-memory-bandwidth.md:62`) |
 | **(d)** per-round rescale + running max | 128 `v_mul_f32`/lane-round (`:879-881`) + 1 butterfly + `fmax` + `expf` for the max (`:848-858`) + 16 `expf` and 16 butterflies for the P exchange (`:868-875`) | 109,632,240 rescale lane-rounds/pass = **428,251 `v_mul` slots/token**; 7.7 % of A2's ≥1,654-slot round bill | 428,251 slots/token | batched over 4 rounds (llama's `nbatch_fa = 64`), §4 L-d1 — charged at A4-L1's *measured* pass-through, see §4 |
-| **(e)** per-body / per-launch structure | bodies = W/512 = **64** at 32k; 4 attention launches per body per layer (`attn_prep`, `attn_slim_wave`, `attn_fattn_wave_u8`, `attn_combine`) | traced `attn_prep` 31.42 + `attn_slim_wave` 32.12 = **63.5 ms/pass = 1.07 %** of the phase; `attn_combine` 260.76 ms = 4.4 % (counted in (c)) | 1.94 µs/token of launch-shaped cost | launch structure is already closed as a variable (bench/performance-status.md §41, bench/performance-status.md §29); the two 16-lane fills and four barriers per round are kernel shape, not launch |
+| **(e)** per-body / per-launch structure | bodies = W/512 = **64** at 32k; 4 attention launches per body per layer (`attn_prep`, `attn_slim_wave`, `attn_fattn_wave_u8`, `attn_combine`) | traced `attn_prep` 31.42 + `attn_slim_wave` 32.12 = **63.5 ms/pass = 1.07 %** of the phase; `attn_combine` 260.76 ms = 4.4 % (counted in (c)) | 1.94 µs/token of launch-shaped cost | launch structure is already closed as a variable (progress/2026-10-21/performance-status-2026-10-21.md §41, progress/2026-10-21/performance-status-2026-10-21.md §29); the two 16-lane fills and four barriers per round are kernel shape, not launch |
 
-**(c) in the currency bench/performance-status.md §46 invented.** Post-G1 the attention quadratic is
+**(c) in the currency progress/2026-10-21/performance-status-2026-10-21.md §46 invented.** Post-G1 the attention quadratic is
 `b_attn = 0.1803 ms/token ÷ 32,768 = 5.50e-06 ms/token²` and llama's is `0.0944/32768 = 2.88e-06`, so the
-excess quadratic at 32,768 is `(5.50−2.88)e-06 × 32768² = 2,813 ms` — which is bench/performance-status.md §51's measured +2,815 ms gap,
+excess quadratic at 32,768 is `(5.50−2.88)e-06 × 32768² = 2,813 ms` — which is progress/2026-10-21/performance-status-2026-10-21.md §51's measured +2,815 ms gap,
 derived rather than subtracted ✓. Against it: the split round-trip's cost is 54.31 GB read at a traced
 208 GB/s (260.76 ms) plus 52.73 GB written at the same rate (~253 ms of `attn_fattn_wave_u8`'s time) =
 **453–514 ms, i.e. 7.7–8.7 % of attention and 16–18 % of the excess quadratic.** That is larger than prototype/attn_percost/A2-census.md §4's
-10–13 %, for the reason A2 could not know: bench/performance-status.md §48 shipped G1 and shrank the denominator (the excess was 3,420 ms
+10–13 %, for the reason A2 could not know: progress/2026-10-21/performance-status-2026-10-21.md §48 shipped G1 and shrank the denominator (the excess was 3,420 ms
 pre-G1), so the split path is a *bigger* share of a *smaller* gap. A2's byte figure reproduces exactly
 (`--selftest` line 4), so nothing here contradicts it — the base moved.
 
 **(a)/(b) as a ceiling.** All of (a1)+(a2)+(b1) removed is 8.20 % of the round's matrix work, and A4-L1's
 measured conversion says a slot cut of budget *B* % delivers ≈0.217·*B* % of family (1.67 % delivered for a
-7.7 % budget, bench/performance-status.md §47) — i.e. **≈1.8 % of the attention family**, not 8.2 %. Anyone pricing a padding-removal
+7.7 % budget, progress/2026-10-21/performance-status-2026-10-21.md §47) — i.e. **≈1.8 % of the attention family**, not 8.2 %. Anyone pricing a padding-removal
 lever off the 8.2 % is quoting an upper bound on a quantity that has never converted at better than one-fifth.
 
 
@@ -295,7 +295,7 @@ launches per pass**, and the trace confirms the count (5.91–6.00 per body-pass
 | `attn_prep` | 31.42 | 0.53 % | rope/norm/append, O(W) and not attention's fault |
 
 So the body structure and the launch structure together are **≈63.5 ms = 1.07 % of the phase**, and
-`--attn-launch 1` already closed launch *structure* as a variable (bench/performance-status.md §38: it "changes everything about launch
+`--attn-launch 1` already closed launch *structure* as a variable (progress/2026-10-21/performance-status-2026-10-21.md §38: it "changes everything about launch
 structure and none of it about total instructions"). Body 0's rows — 512 of 32,768, 1.6 % of the tokens — are
 done by the non-WMMA form; its cost is inside the 32.12 ms line, so the F1 asymmetry costs at most 0.5 % of
 this phase and cannot be the 1.9×.
@@ -307,11 +307,11 @@ this phase and cannot be the 1.9×.
 | split scratch round-trip (c) | 453–514 (derived: 54.31 GB read at the traced 208 GB/s + 52.73 GB written at the same rate) | 7.7–8.7 % | removable by L-c, partially |
 | geometry waste (a)+(b): pad + quant + union | 528 ms **if slots converted 1:1**; **≈106 ms at A4-L1's measured 0.217 pass-through** | 8.9 % ceiling / **1.8 % expected** | bounded by the round's shape; only 48-agnostic row tiles remove it |
 | rescale/max chain (d) | **≈99 ms** from A4-L1's measured −1.67 % of family (the raw slot arithmetic says 61 ms — the gap is chain effect) | 1.7 % measured at 4k | batchable, L-d |
-| per-launch / per-body (e) | 63.5 traced | 1.07 % | closed by bench/performance-status.md §38/41 |
+| per-launch / per-body (e) | 63.5 traced | 1.07 % | closed by progress/2026-10-21/performance-status-2026-10-21.md §38/41 |
 | duplicate K/V lane loads (b3) | 5.3 if DRAM, 0 as L-served | 0.09 % | not removable |
 | **sum on the expected-value basis** (split at the measured rate + geometry/rescale at A4's pass-through + launch/body) | **≈730–790** | **12–13 %** | every basis here is measured or A4-calibrated |
 | sum if *every* ceiling converted 1:1 (not a prediction) | ≈1,150 | 19.4 % | shown only to bound the arithmetic |
-| **what parity needs** | **2,815** (bench/performance-status.md §51's measured gap) | **47.6 %** | |
+| **what parity needs** | **2,815** (progress/2026-10-21/performance-status-2026-10-21.md §51's measured gap) | **47.6 %** | |
 
 Why this sums to 12–13 % while §5 stacks the levers to ≈22 %: this table counts only **wasted work**.
 The largest single lever in §4.1 (the residency rung, ≈16 % of attention) is not waste — it is the phase
@@ -342,7 +342,7 @@ quantisation is charged. The much bigger item is Q: our re-read Q at 898.11 GB/p
 staging and 2.1× llama's entire demanded K/V traffic**. Its size is set by the round width, not the row count:
 Q bytes per touch = `DH × 2 / lanes_per_round` = 512/16 = 32 B for us, against 512/64 = 8 B for a 64-lane
 round and ≈0 for llama, who never re-read it. And it exists because G1 un-staged Q to buy the residency G1
-then bought (bench/performance-status.md §48, `engine/attn_fattn_kernels.h:242-264`) — the same trade seen from
+then bought (progress/2026-10-21/performance-status-2026-10-21.md §48, `engine/attn_fattn_kernels.h:242-264`) — the same trade seen from
 the traffic side: Q-in-LDS and 9 wavefronts/CU are mutually exclusive on this part, since 3 blocks × 3 warps ×
 8,192 B = 73,728 B against the 65,536 B of LDS the part has (`:287-291`).
 
@@ -367,10 +367,10 @@ Demanded ≠ DRAM, and at this width the gap is not a factor, it is three orders
 
 And the decision-relevant evidence that traffic is not the wall:
 
-1. **bench/performance-status.md §51's own roof test**: the causal work at 32,768 is 26.39 TFLOP/pass; at the measured WMMA rate of
+1. **progress/2026-10-21/performance-status-2026-10-21.md §51's own roof test**: the causal work at 32,768 is 26.39 TFLOP/pass; at the measured WMMA rate of
    52.63 TFLOP/s (`prototype/issue_rate_probe/results.md:15`) that is 501 ms against **5,908 ms measured** —
    8.5 % of the roof. Neither engine is where the wall is (llama 16.2 %).
-2. **D21's falsification, already run on this exact kernel family** (bench/performance-status.md §20.7 of
+2. **D21's falsification, already run on this exact kernel family** (progress/2026-10-21/performance-status-2026-10-21.md §20.7 of
    `prototype/attn_decode/results.md`, quoted by `prototype/attn_percost/A2-census.md` §3): *"[e1]'s 2× traffic
    reduction, measured, moved the wave by 0.7 %."* A bit-identical instruction cut moved the same kernel 1.52×
    (D21). Traffic cuts do not convert here; instruction cuts do; and A4-L1 showed even instruction cuts convert
@@ -390,10 +390,10 @@ Denominators: at 32,768 lanes attention is **70.9 % of the wave** (`a9_trace_ker
 1 % of attention = 0.558 % of the wave. Two conversion rules, both measured on this box, are used for every
 prediction below and nothing else is:
 
-- **residency**: bench/performance-status.md §48's own datapoint — G1 moved 6 → 9 wavefronts/CU and delivered −22.09 % of family
-  (`bench/performance-status.md` §48, `prototype/attn_wmma/E1-result.md` §6), so
+- **residency**: progress/2026-10-21/performance-status-2026-10-21.md §48's own datapoint — G1 moved 6 → 9 wavefronts/CU and delivered −22.09 % of family
+  (`progress/2026-10-21/performance-status-2026-10-21.md` §48, `prototype/attn_wmma/E1-result.md` §6), so
   `time factor = (wf_new/wf_old)^(−0.616)`, where 0.616 = ln(1/0.7791)/ln(9/6) is §48’s own two points
-  (6 → 9 wavefronts/CU for family ×0.7791). The independent anchor in bench/performance-status.md §31
+  (6 → 9 wavefronts/CU for family ×0.7791). The independent anchor in progress/2026-10-21/performance-status-2026-10-21.md §31
   (4 → 8 wf/CU, family ×0.607, A2-census.md §2 C6) gives −0.72; the printed predictions use 0.616 and the
   difference between the two exponents is ≈2 % of family at 12 wf/CU. Both are **extrapolations beyond the
   measured pair** above 9 wavefronts/CU and are labelled as such.
@@ -403,8 +403,8 @@ prediction below and nothing else is:
 
 | lever | source site | LDS / register cost | predicted effect at 32,768 | verdict |
 |---|---|---|---|---|
-| **L-a** more query rows per K/V stage | `FATTN_WARPS` (`engine/attn_fattn_kernels.h:234`) — rows/stage = warps×16; the launcher's mirror `FATTN_ROWS_PER_BLOCK` (`prototype/attn_decode/attn_decode_kernels.h:544`) **must move in the same commit** (bench/performance-status.md §34's two-header trap, `AGENTS.md` table) | +4,096 B per extra warp (post-G1 transpose stage, `:247-264`) | see the variant table | **partially fundable, aimed at the wrong resource** |
-| **L-b** more KV lanes per round | `FATTN_MLANES` (`:188`); the aliased K/V stage is `FATTN_MLANES*DH*2` (static_assert at `:280`) | +8,192 B per doubling (16→32: 20,480 → 28,672 B) | **rounds/token 1,115 → 565 (−49 %), rescale slots 428k → 217k, BUT LDS forces 3 blocks → 2, so 9 → 6 wf/CU = +28 % family by bench/performance-status.md §48's elasticity**, plus issued/useful 1.0893 → 1.1040 | **DEAD without a device run** — it is the residency lever in reverse |
+| **L-a** more query rows per K/V stage | `FATTN_WARPS` (`engine/attn_fattn_kernels.h:234`) — rows/stage = warps×16; the launcher's mirror `FATTN_ROWS_PER_BLOCK` (`prototype/attn_decode/attn_decode_kernels.h:544`) **must move in the same commit** (progress/2026-10-21/performance-status-2026-10-21.md §34's two-header trap, `AGENTS.md` table) | +4,096 B per extra warp (post-G1 transpose stage, `:247-264`) | see the variant table | **partially fundable, aimed at the wrong resource** |
+| **L-b** more KV lanes per round | `FATTN_MLANES` (`:188`); the aliased K/V stage is `FATTN_MLANES*DH*2` (static_assert at `:280`) | +8,192 B per doubling (16→32: 20,480 → 28,672 B) | **rounds/token 1,115 → 565 (−49 %), rescale slots 428k → 217k, BUT LDS forces 3 blocks → 2, so 9 → 6 wf/CU = +28 % family by progress/2026-10-21/performance-status-2026-10-21.md §48's elasticity**, plus issued/useful 1.0893 → 1.1040 | **DEAD without a device run** — it is the residency lever in reverse |
 | **L-c** cap the split above a lane count | `split_for` (`engine/kernels_attn.cpp:86`) and `blocks_for_row` (`prototype/attn_decode/attn_decode_kernels.h:220-223`) — one rule, two spellings, one commit | **zero** registers, zero LDS; `kAttnMaxSplit` stays 64 (it is the lane ceiling, not the split cap) | at 32k, cap 8: partial round-trip **105.46 → 24.50 GB/pass (−81 GB)**, widest-body serial depth **+2.13 % only** (1,504 → 1,536 rounds); at the traced 208 GB/s that is **≈350–390 ms = 5.9–6.6 % of attention = 4.2–4.7 % of the 32k wave** | **the one lever with a mechanism that does not depend on an unproven theory** |
 | **L-d** cut instructions per round beyond A4 | the rescale (`:879-881`) batched over 4 rounds — llama's `nbatch_fa = 64`, documented as *"Number of KV rows per softmax rescaling of KQ rowsums and VKQ accumulators"* (`engines/llama.cpp/ggml/src/ggml-cuda/fattn-mma-f16.cuh:13`) vs our 16 | +24 VGPR (3 extra live C tiles) → ~209/thread; 4 blocks × 96 × 209 = 60,192 ≤ 65,536, so 3 blocks/CU survives | budget 96 of 1,654 slots = 5.8 % → **−1.26 % of family** at A4's measured 0.217 | **below the 3 % falsification threshold on its own** — bundle it, do not test it alone |
 
@@ -413,19 +413,19 @@ prediction below and nothing else is:
 M=32/64 per warp is not a knob: the C tile's row is `lane % 16` (`:187`, `:192`), so "more rows per warp"
 means more C tiles — and the live O accumulator is already **128 VGPR/lane** at M=16
 (`prototype/attn_wmma/fattn_regfile_ladder.md` §0, derived from `:189`), so doubling it doubles the largest
-single register consumer in the kernel. bench/performance-status.md §33 ("spill-free at 6 wf/CU BEATS spilled
+single register consumer in the kernel. progress/2026-10-21/performance-status-2026-10-21.md §33 ("spill-free at 6 wf/CU BEATS spilled
 at 8") is the measured reason that trade loses here. The
 knob that exists is `FATTN_WARPS`, which raises rows/stage *and* wavefronts/block together. Post-G1 ladder
 (`a9_waste_model.py --variants`, LDS read from the `__shared__` declarations at `:665` + `:247-264`; 64 KiB/CU
 from KFD, per the `AGENTS.md` counter trap):
 
 ```
-warps mlanes   LDS B wf/CU rtiles staged GB/pass  Q GB/pass rescale slots/tok issued/useful  prediction (bench/performance-status.md §48 elasticity + A4 pass-through)
+warps mlanes   LDS B wf/CU rtiles staged GB/pass  Q GB/pass rescale slots/tok issued/useful  prediction (progress/2026-10-21/performance-status-2026-10-21.md §48 elasticity + A4 pass-through)
     3     16  20480     9     11          598.7      898.1           428,251        1.0893  (shipped)
     4     16  24576     8      8          442.0      884.1           421,552        1.0723  +7.2 % family  (residency LOSE: 8 wf/CU)
     5     16  28672    10      7          390.3      975.6           465,216        1.1834  −4.5 % family
     6     16  32768    12      6          338.1     1014.2           483,609        1.2301  −13.9 % family, if 12 wf/CU is reachable
-    7     16  36864     7      5          286.3     1002.2           477,871        1.2155  +19.7 % family (1 block/CU — the bench/performance-status.md §48 G0 failure, post-G1)
+    7     16  36864     7      5          286.3     1002.2           477,871        1.2155  +19.7 % family (1 block/CU — the progress/2026-10-21/performance-status-2026-10-21.md §48 G0 failure, post-G1)
     3     32  28672     6     11          606.8      455.1           217,005        1.1040  +14.6 % family  (L-b, dead)
     3     64  45056     3     11          626.6      235.0           112,039        1.1400  +65.2 % family  (L-b, dead)
 ```
@@ -445,9 +445,9 @@ recorded as UNKNOWN on this part — clang's note block says 185 while `rocprofv
 for the same kernel, and the part exposes no register-file field (`prototype/attn_wmma/fattn_regfile_ladder.md`
 §3, `prototype/attn_percost/A3-result.md` §2b, restated at `prototype/attn_percost/A5-GEOMETRY.md` §4.2:
 *"Any future residency claim on this part must settle the register-file question first."*) If the file is
-64K-class the driver will squeeze VGPR and spill, and bench/performance-status.md §33 measured that losing
+64K-class the driver will squeeze VGPR and spill, and progress/2026-10-21/performance-status-2026-10-21.md §33 measured that losing
 that trade (spill-free at 6 wf/CU beating spilled at 8) costs more than the extra wavefronts buy.
-(ii) that extrapolating bench/performance-status.md §48's 6→9 elasticity to 12 holds at all. **Both are
+(ii) that extrapolating progress/2026-10-21/performance-status-2026-10-21.md §48's 6→9 elasticity to 12 holds at all. **Both are
 answerable without a timing** — the compile read of `prototype/attn_wmma/fattn_census_build.sh
 --arg __launch_bounds__=192,2` + `prototype/attn_wmma/fattn_residency_read.py`, listed as the cheapest
 residency witness in `prototype/attn_percost/A5-GEOMETRY.md` §4.2. There is also a cheaper way
@@ -457,12 +457,12 @@ issued-work ratio all unchanged**; it costs only 8 transpose passes instead of 4
 That is the residency play this census would actually fund, and it is not on the brief's list — named here
 because the brief asked for better candidates if found.
 
-**L-a falsifier (bench/performance-status.md §36 paired window, ≥ 3 %)**: `tools/prefill_sweep.py --lanes 32768
+**L-a falsifier (progress/2026-10-21/performance-status-2026-10-21.md §36 paired window, ≥ 3 %)**: `tools/prefill_sweep.py --lanes 32768
 --runs 3` per arm (both arms inside one
 `tools/gpu_lock.sh` hold, ≥ 2 reps each, canary per the 2026-10-17 rule (the `--attn-fattn` banner's `warps=` /
 `lds=` fields must differ between arms, or the arms are the same binary). **Live line: −3.0 % of the family at
 32,768** (= −4.2 % of attention). **Falsifier fires if** the residency field in the banner reads 12 wavefronts
-and family Δ > −1 % — that combination means residency is not the binding resource, which retires the bench/performance-status.md §48
+and family Δ > −1 % — that combination means residency is not the binding resource, which retires the progress/2026-10-21/performance-status-2026-10-21.md §48
 elasticity as a predictor for > 9 and sends the model back.
 
 ### 4.2 L-c in detail: the cap, and the cheaper spelling of the same byte
@@ -507,7 +507,7 @@ is F32 (`engine/kernels_attn.cpp:204-206`), so a **bf16/fp16 partial store** hal
 partial's *format*, which `AGENTS.md`'s delegated-format rule explicitly allows if the gates stay green, and it
 is cheaper to reason about than a cap. Both attack item (c); the cap is bigger, the format change is safer.
 
-**L-c falsifier (bench/performance-status.md §36 paired window, ≥ 3 %)**: admission first —
+**L-c falsifier (progress/2026-10-21/performance-status-2026-10-21.md §36 paired window, ≥ 3 %)**: admission first —
 `tools/longctx_check.sh --widths 16384,32768` (numerics only; it prints no timing, which is the point) and
 `prototype/attn_wmma/run_fattn_admission.sh`; then the timed A/B in the shape of
 `prototype/attn_percost/run_ab_a4l1.sh` (cap 8 vs shipped, both arms inside one `tools/gpu_lock.sh` hold,
@@ -525,7 +525,7 @@ compile read, not a burst: build with `FATTN_MLANES = 32` and read `group_segmen
 `prototype/attn_wmma/fattn_census_build.sh` + `prototype/attn_wmma/fattn_residency_read.py`. The lever is alive
 only if that read is ≤ 20,480 B (i.e. the aliasing assumption in `:280-282` is wrong and a 32-lane round costs
 what a 16-lane one costs). If it reads 28,672 B as the static_assert arithmetic says, the residency loss is
-arithmetic and no bench/performance-status.md §36 window can rescue it; A5's own write-up of the same candidate reached the same verdict
+arithmetic and no progress/2026-10-21/performance-status-2026-10-21.md §36 window can rescue it; A5's own write-up of the same candidate reached the same verdict
 with a *second* K/V buffer (`prototype/attn_percost/A5-GEOMETRY.md` §3.4: `57,344 B → 3 wf/CU → family
 +64.7 %`), so the cheaper spelling this census modelled (aliased, 6 wf/CU) is the *best case* for L-b and it is
 still net-negative.
@@ -552,31 +552,31 @@ comes back 64K-class or better (60,192 ≤ 65,536 ✓, but the driver's actual g
 **No. On the numbers above, nothing in the targeted-lever space does, and the census can now say by how much.**
 
 Parity at 32,768 means our attention phase going from **5,908.16 ms/pass to 3,093.25** — **−47.6 %** of the phase
-(`bench/performance-status.md` §51's traced table). Everything this census can point at and name adds up to:
+(`progress/2026-10-21/performance-status-2026-10-21.md` §51's traced table). Everything this census can point at and name adds up to:
 
 | item | best honest case | basis |
 |---|---|---|
 | L-c split cap at 8 (−77 % of a 105 GB/pass round-trip) | **−5.9 to −6.6 % of attention** (−4.2 to −4.7 % of the 32k wave) | bytes × the traced 208 GB/s, the only lever whose rate is measured |
-| L-a residency only, `TRG 8→4` (3 → 4 blocks/CU, 9 → 12 wf/CU) | **−16.3 % of attention** if the RF allows it; **−8 %** if the bench/performance-status.md §48 elasticity is already overstretched | bench/performance-status.md §48's 6→9 = −22 % extrapolated (prototype/attn_percost/A2-census.md §2 C6's bench/performance-status.md §31 anchor gives −21 %); unverified past 9 |
+| L-a residency only, `TRG 8→4` (3 → 4 blocks/CU, 9 → 12 wf/CU) | **−16.3 % of attention** if the RF allows it; **−8 %** if the progress/2026-10-21/performance-status-2026-10-21.md §48 elasticity is already overstretched | progress/2026-10-21/performance-status-2026-10-21.md §48's 6→9 = −22 % extrapolated (prototype/attn_percost/A2-census.md §2 C6's progress/2026-10-21/performance-status-2026-10-21.md §31 anchor gives −21 %); unverified past 9 |
 | L-a as a traffic lever (`warps=6`) | **+2.8 %** (net of the +12.9 % issued-work penalty at A4's 0.217) | model, §4.1 |
 | geometry waste (a1+a2+b1) removed entirely | **−1.8 %** | 8.20 % × 0.217 pass-through |
 | L-d batched rescale | **−1.3 %** | 5.8 % × 0.217 |
-| launch/body structure | **−1.1 %** already spent (bench/performance-status.md §38/§41) | traced |
-| L-b | **+28 %** — do not | bench/performance-status.md §48's elasticity, §4 |
+| launch/body structure | **−1.1 %** already spent (progress/2026-10-21/performance-status-2026-10-21.md §38/§41) | traced |
+| L-b | **+28 %** — do not | progress/2026-10-21/performance-status-2026-10-21.md §48's elasticity, §4 |
 
 Stack the two levers that have a mechanism at their optimistic ends — L-c at −6.6 % and the residency rung at
 −16.3 %, multiplied because they act on different resources — and attention goes 5,908 → 4,620 ms/pass, which
 moves the phase gap from **1.910× to 1.494×**: 1,282 of the 2,815 excess milliseconds, **45 % of the gap**, bought
 with a register-file fact nobody has established plus a re-associated merge that has to clear the gates. L-c alone
 — the only lever whose mechanism is measured rather than extrapolated — gives 5,908 → 5,518 ms = **1.784×**.
-Take the residency rung at half its extrapolated elasticity, which is what its own bench/performance-status.md §36 falsifier is likely to
+Take the residency rung at half its extrapolated elasticity, which is what its own progress/2026-10-21/performance-status-2026-10-21.md §36 falsifier is likely to
 allow, and the stack is −13.9 % → **1.64×**. Every one of those outcomes still ends between 1.49× and 1.78×
 where parity is 1.000×, so the answer to the brief's question is: **the targeted levers are worth between a
 quarter and a half of the gap, and no combination of them reaches parity.**
 
 ### 5.1 Where the other four-fifths is, named mechanically
 
-Both engines run the same instruction class on the same part. Correcting bench/performance-status.md §51's rate arithmetic (§1's note: its
+Both engines run the same instruction class on the same part. Correcting progress/2026-10-21/performance-status-2026-10-21.md §51's rate arithmetic (§1's note: its
 TFLOP count is per KV-group, missing the `N_Q = 8` head axis — an 8× factor in the numerator only), the
 long-context attention rates are:
 
@@ -588,7 +588,7 @@ long-context attention rates are:
 | resident wavefronts/CU | **9** (`engine/attn_fattn_kernels.h:287-291`, post-G1) | **8** (prototype/attn_percost/A5-GEOMETRY.md §3.1: 256 threads × 1 block/CU) |
 
 That last row is the finding that reframes the item: **llama achieves 1.9× our rate with *fewer* resident
-wavefronts than we now have.** So the 1.9× is not residency — bench/performance-status.md §48 already harvested the residency we were
+wavefronts than we now have.** So the 1.9× is not residency — progress/2026-10-21/performance-status-2026-10-21.md §48 already harvested the residency we were
 missing — and it is not bandwidth (§3: we demand 3.5× llama's bytes and still do half the rate; and a
 bandwidth-bound phase cannot sit 91 % under a roof it is not touching). What is left is **the work each side
 gets per operand touch**, and it can be stated in one ratio:
@@ -604,7 +604,7 @@ gets per operand touch**, and it can be stated in one ratio:
 **3.2× the matrix work per byte that crosses the LSU.** That single number is what the 1.9× is made of, and both
 of its causes are structural, not tunable here: our M tile is 16 because the only WMMA this part exposes is
 `n_wmma_f32_16_16_16` (`:187`, `:192`, prototype/attn_percost/A3-result.md §1), and our Q lives in global because putting it in LDS costs exactly the
-residency G1 bought (`engine/attn_fattn_kernels.h:242-264`, bench/performance-status.md §48). The Q re-read is ~1,100× redundant per layer at 32k (898 GB/pass against
+residency G1 bought (`engine/attn_fattn_kernels.h:242-264`, progress/2026-10-21/performance-status-2026-10-21.md §48). The Q re-read is ~1,100× redundant per layer at 32k (898 GB/pass against
 0.805 GB of unique Q) — free only because L1 is 32 KB/CU and the block's Q working set is 24 KB, and paid for in
 VMEM/LSU queue slots, which is the one resource this repo has never counted (prototype/attn_percost/A5-GEOMETRY.md §3.6 asked for exactly this: a
 `SQ_WAIT*`-class `rocprofv3` pass over `attn_fattn_wave_u8`).
@@ -613,7 +613,7 @@ VMEM/LSU queue slots, which is the one resource this repo has never counted (pro
 
 1. **L-c (split cap), now.** Zero register/LDS cost, one rule to move (`split_for` at
    `engine/kernels_attn.cpp:86` + `blocks_for_row` at `prototype/attn_decode/attn_decode_kernels.h:220-223`,
-   same commit — bench/performance-status.md §34's two-header trap), a mechanism measured at 88 % of the DRAM roof, worth **−3.9 % of the
+   same commit — progress/2026-10-21/performance-status-2026-10-21.md §34's two-header trap), a mechanism measured at 88 % of the DRAM roof, worth **−3.9 % of the
    32k wave**. Its risk is numerics policy, not performance: a different split re-associates the merge, so it is
    judged by the §10.1 bands of `specification/10-reference-dumps-and-gates.md` as enforced by `engine/gate.py` and `prototype/attn_wmma/run_fattn_admission.sh`, and it must still
    catch every derived must-catch injection (the `partalias` lesson: derive the case list from the geometry).
@@ -633,18 +633,18 @@ VMEM/LSU queue slots, which is the one resource this repo has never counted (pro
    measured long-context rate), the gap mechanism is MAC-per-LSU-byte, and the required geometry is 64 Q rows ×
    64 KV lanes per stage with the GQA group inside the tile and Q never returning to memory — which on this part
    means 256-thread blocks, deliberate 900 B/thread scratch for Q, and a register budget that must be checked
-   against the same file the residency ladder reads. Its bench/performance-status.md §36 falsifier, pre-registered: a paired window at
+   against the same file the residency ladder reads. Its progress/2026-10-21/performance-status-2026-10-21.md §36 falsifier, pre-registered: a paired window at
    16,384 and 32,768, both arms in one `tools/gpu_lock.sh` hold, ≥ 2 reps, ≥ 3 % family live line, canary = the
    banner's geometry fields must differ between arms; **abort line: if a prototype's traced rate does not clear
    6.5 TFLOP/s (76 % of llama's) on the covered rows, the geometry was not the reason and the item dies.**
 
 ### 5.3 What this census cannot see
 
-- **No timing was taken here.** Every millisecond figure is bench/performance-status.md §51's / bench/performance-status.md §49's / bench/performance-status.md §47's / A4-L1's, re-derived or
+- **No timing was taken here.** Every millisecond figure is progress/2026-10-21/performance-status-2026-10-21.md §51's / progress/2026-10-21/performance-status-2026-10-21.md §49's / progress/2026-10-21/performance-status-2026-10-21.md §47's / A4-L1's, re-derived or
   re-binned on CPU; per `AGENTS.md` a worker may not put a number in a timing doc, and this file is a census,
-  not a ledger row. bench/performance-status.md §51's rates are corrected in §1 but `bench/performance-status.md` was **not** edited — that
+  not a ledger row. progress/2026-10-21/performance-status-2026-10-21.md §51's rates are corrected in §1 but `engine/performance-status.md` was **not** edited — that
   is the main agent's call, and the correction needs the same line-citation care the ledger requires.
-- **Two extrapolations carry most of the lever predictions**: the bench/performance-status.md §48 residency elasticity beyond 9 wf/CU (the
+- **Two extrapolations carry most of the lever predictions**: the progress/2026-10-21/performance-status-2026-10-21.md §48 residency elasticity beyond 9 wf/CU (the
   12-wf numbers in §4.1 are predictions, not measurements) and A4-L1's single 0.217 pass-through measured once,
   at 4,096, on a 7.7 % budget. If either is wrong the levers move; the 1.9× conclusion does not, because it is
   an arithmetic sum of ceilings, and the ceiling sum is a fifth of the gap.
@@ -653,7 +653,7 @@ VMEM/LSU queue slots, which is the one resource this repo has never counted (pro
 - The mirror's issued-work model charges every issued row-slot × lane × 2·DH as one MAC and cannot see FMA
   contraction or the `s_waitcnt` placement the device emits (prototype/attn_percost/A3-result.md §2's standing caveat about CPU mirrors). It is
   adjudicated against A2's four figures (§2.1), which is the strongest witness available without a device.
-- §2.3's 88 %-of-roof reading is `attn_combine`'s, on bench/performance-status.md §51's traces, at 32,768 and 16,384 only. The short-width
+- §2.3's 88 %-of-roof reading is `attn_combine`'s, on progress/2026-10-21/performance-status-2026-10-21.md §51's traces, at 32,768 and 16,384 only. The short-width
   split path (≤ 4,096) is 1.95 GB/pass and stays noise.
 
 
@@ -673,4 +673,4 @@ Current state of the three checks (re-run at the time of writing): `--selftest` 
 
 **Nothing in this file is a timing.** The `ms` figures are §51's, §49's, §47's and A4-L1's; the derived ones
 (`208 GB/s`, `453–514 ms`, `528 ms`, `389 ms`) are arithmetic on those plus geometry sums, and each shows its
-formula. Landing any of them in `bench/performance-status.md` is a main-agent decision requiring a paired window.
+formula. Landing any of them in `engine/performance-status.md` is a main-agent decision requiring a paired window.

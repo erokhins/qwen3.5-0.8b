@@ -2,12 +2,12 @@
 
 Two legs, one question each, both run by the main agent inside one `tools/gpu_lock.sh` hold apiece
 (`TAG=r1-wavewidth`, `TAG=r1b-wide-residency`), blocking, zero subagents, `util` 10–92 % at acquire and
-discounted per `bench/performance-status.md` §6. Timing only: **no numerics admission was run for any arm
+discounted per `engine/performance-status.md` §6. Timing only: **no numerics admission was run for any arm
 here**, and neither leg ships anything.
 
 ## Why this was funded
 
-`bench/performance-status.md` §56 measured the *downward* half of the body-width curve with
+`progress/2026-10-21/performance-status-2026-10-21.md` §56 measured the *downward* half of the body-width curve with
 `--wave-rows`: at fixed total lanes, halving the body costs **+10.8 %**, quartering **+29 %**,
 eighthing **+86 %**. Convex, so a body **bigger** than 512 looked cheap — but `--wave-rows` is capped at
 `kMaxWaveRows`, so the interesting direction is not reachable by a flag. It needs three builds of one

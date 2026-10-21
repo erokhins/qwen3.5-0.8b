@@ -3,7 +3,7 @@
 BET.md §10, pre-registered before any number existed. This file records what was built, what has been
 proved on CPU and by a short correctness-only device gate, what the arithmetic says, and what the shipping
 decision still needs. **It contains no millisecond figure taken by this worker**: every timing number
-below is quoted from §40 of `bench/performance-status.md` and is the baseline the pre-registered lines were
+below is quoted from §40 of `progress/2026-10-21/performance-status-2026-10-21.md` and is the baseline the pre-registered lines were
 written against, not a new measurement.
 
 ## 0. The bet, and the two lines
@@ -15,7 +15,7 @@ written against, not a new measurement.
 
 `wall_ms` is the ship gate; the family row is the attribution. Both live bounds must clear to ship, either
 dead line kills, and the middle is UNRESOLVED — reported as unresolved, not narrated (§40 of
-`bench/performance-status.md` is that precedent: G1's −5.9 % on its own row was −2.2 % of the wave because
+`engine/performance-status.md` is that precedent: G1's −5.9 % on its own row was −2.2 % of the wave because
 +6.06 ms landed in its neighbours — `gdn_gated_norm` +15.6 % and `glue` +8.8 %, for +32 KB/token/layer of
 stage traffic).
 The A/B in §7 adjudicates **both** lines and prints the externality (ms summed over every family other
@@ -104,7 +104,7 @@ row inside walk A — 8 B per row per head, **≈16 KiB/token/layer**, re-reads 
 fetched for the norms, served from L1, and scalarised by LLVM into SGPRs (`s_load_b128`, two per four
 rows) so they cost no VGPRs and never touch LDS. For contrast, G1's `--gdn-norm hoist` added
 **+32 KiB/token/layer of new global traffic**, which is what ate its −5.9 % row win (§40 of
-`bench/performance-status.md`). Constraint 1 is satisfied with **0 new staging bytes**, so the
+`engine/performance-status.md`). Constraint 1 is satisfied with **0 new staging bytes**, so the
 stop-and-report clause was not needed.
 
 ## 3. The structure claim, checked rather than believed
@@ -154,7 +154,7 @@ counter row), and **not** clang's `-Rpass-analysis` `waves/SIMD: 16`, which is a
 
 The grid binds in all three cases, not the resources — which is the whole pricing problem: `wf4` puts
 **4× fewer** wavefronts on the device and `wf2` 2× fewer. One correction worth recording: §38 of
-`bench/performance-status.md` records "both engines land at 0.80 blocks/CU, four CUs idle", which is HIP's
+`engine/performance-status.md` records "both engines land at 0.80 blocks/CU, four CUs idle", which is HIP's
 halved-CU arithmetic; on KFD's 40 CUs the shipped form is **0.40 blocks/CU, with 24 of the 40 CUs holding no
 GDN block at all**. The per-SIMD figure (0.80 wf/SIMD) is unchanged, because 40 CUs × 2 SIMDs is the same
 80 SIMDs.
@@ -243,7 +243,7 @@ census tool written), on one listing:
 
 | side | per-token slots **per wavefront** | wavefronts per head-token | slots per head-token | slots per **busy SIMD** per token |
 |---|---|---|---|---|
-| `block` | 1,327 (reproduces the number in §24 of `bench/performance-status.md`) | 4 | 5,308 | 1,327 |
+| `block` | 1,327 (reproduces the number in §24 of `progress/2026-10-21/performance-status-2026-10-21.md`) | 4 | 5,308 | 1,327 |
 | `wf4` | 2,767 | 1 | **2,767 (−48 %)** | 2,767 (**×2.09**) |
 | `wf2` | 1,794 | 2 | 3,588 (−32 %) | 1,794 (×1.35) |
 
@@ -267,7 +267,7 @@ walks, on the order of 1,000 cycles — so its wall is stalls, not issue slots, 
 contains are the three barriers and the LDS round trip this form deletes. In a 32-thread block a barrier
 costs nothing, because there is no sibling wavefront to wait for. AGENTS.md's GDN-collapse row is the
 warning that this class of model has been wrong by up to 9.8× on this box, in the *pessimistic* direction,
-and the §40 lesson (`bench/performance-status.md`) is that a slot model on a serial kernel is exactly the
+and the §40 lesson (`engine/performance-status.md`) is that a slot model on a serial kernel is exactly the
 thing not to trust. **The A/B decides; nothing in this file is a verdict.**
 
 Externality expectation, for the same reason the A/B prints it: the geometry changes no other kernel, no
@@ -336,7 +336,7 @@ here feeds), `prototype/gdn_walk/plan_bill_check.py`, `walk_isa_diff.py --selfte
   lanes in an exclusive window. The 46-token gate proves the geometry is correct and in band; it says
   nothing about whether 16 wavefronts can hold the machine's attention.
 * **Window effects on ms**: cold pages (first pass over fresh pages ~35 GB/s), clock state, and the
-  dispatch-bound bimodality of §6 of `bench/performance-status.md`. Quote the medians with the spread and
+  dispatch-bound bimodality of §6 of `engine/performance-status.md`. Quote the medians with the spread and
   the `CLK@start`/`CLK@end` lines; a single rep outside the spread is a discarded window, not a number. No
   ms figure in this file came from this worker.
 * **Decode is untouched by construction and therefore untested by necessity**: `resolve_gdn_loop` still
