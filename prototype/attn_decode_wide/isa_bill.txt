@@ -1,0 +1,30 @@
+# isa_bill.txt — the static per-loop instruction bill for both cores of this op.
+# Made, from this directory, by:
+#   python3 loop_bill.py attn_decode_wide.hip-hip-amdgcn-amd-amdhsa-gfx1151.s attn_core
+#   python3 loop_bill.py attn_decode_wide.hip-hip-amdgcn-amd-amdhsa-gfx1151.s attn_core_lean
+# CPU only: no device, no timing.
+#
+# READ THE TWO BLOCKS TOGETHER, AND READ THEM AS LOWER BOUNDS. A loop's bill is the instruction
+# count of every basic block LLVM annotated as belonging to that loop, and the SHIPPED core's
+# `nd`-bounded dot loops are rolled and left UNANNOTATED, so their bodies land in the "outside
+# loops" bucket and are missing from its per-loop numbers (that is what `fma32=1` inside BB0_69
+# means: one rolled FMA standing for eight). `attn_core_lean`, whose trip counts are literals, got
+# unrolled and therefore bills more completely (fma32=17 in the same loop). The two cores' bills
+# are NOT comparable with this tool, and any claim that one issues fewer instructions than the
+# other has to come out of a counter pass, not out of these numbers. What IS comparable and is
+# measured here is `group_segment_fixed_size` (38,944 vs 6,176) and `next_free_vgpr` (53 vs 45).
+== attn_core  {'next_free_vgpr': 53, 'next_free_sgpr': 73, 'group_segment_fixed_size': 38944, 'private_segment_fixed_size': 0, 'kernarg_size': 456}
+   instructions: 3648 total, 498 inside annotated loops, 3150 outside
+  (outside loops): 3150 insns
+  loop BB0_69 d1:   226 insns | add_f32=5 barrier=1 cbranch=34 cmp=8 exp=1 fma32=1 lds=7 maxmin=2 mov=8 mul_f32=2 other=33 salu=86 sched=36 vmem=2
+  loop BB0_129 d1:   137 insns | add_f32=6 barrier=1 cbranch=17 cmp=7 lds=7 mov=5 mul_f32=1 other=23 salu=44 sched=24 vmem=2
+  loop BB0_182 d1:   118 insns | add_f32=5 cbranch=10 cmp=6 cvt=1 exp=1 fma32=9 lds=3 mov=1 mul_f32=2 other=21 rcp_div=5 salu=28 sched=24 vmem=2
+  loop BB0_118 d2:    17 insns | cbranch=3 fma32=1 lds=1 other=4 salu=5 sched=2 vmem=1
+
+== attn_core_lean  {'next_free_vgpr': 45, 'next_free_sgpr': 72, 'group_segment_fixed_size': 6176, 'private_segment_fixed_size': 0, 'kernarg_size': 456}
+   instructions: 3624 total, 591 inside annotated loops, 3033 outside
+  (outside loops): 3033 insns
+  loop BB5_69 d1:   270 insns | add_f32=5 barrier=1 cbranch=38 cmp=8 exp=1 fma32=17 lds=16 maxmin=2 mov=5 mul_f32=2 other=42 salu=85 sched=46 vmem=2
+  loop BB5_129 d1:   187 insns | add_f32=6 barrier=1 cbranch=21 cmp=7 fma32=16 lds=16 mov=1 mul_f32=1 other=35 salu=44 sched=37 vmem=2
+  loop BB5_182 d1:   117 insns | add_f32=4 cbranch=10 cmp=6 cvt=1 exp=1 fma32=9 lds=3 mov=1 mul_f32=2 other=21 rcp_div=5 salu=28 sched=24 vmem=2
+  loop BB5_118 d2:    17 insns | cbranch=3 fma32=1 lds=1 other=4 salu=5 sched=2 vmem=1

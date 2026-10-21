@@ -131,3 +131,11 @@ engines/llama.cpp/
 # directory of the same name (see the trap row about ignore patterns matching op directories).
 /kernels_attn-hip-*
 /kernels_attn-host-*
+prototype/attn_decode_wide/attn_decode_wide
+prototype/attn_decode_wide/*.o
+prototype/attn_decode_wide/*.s
+prototype/attn_decode_wide/*.bc
+prototype/attn_decode_wide/*.hipfb
+prototype/attn_decode_wide/*.hipi
+prototype/attn_decode_wide/*.out
+prototype/attn_decode_wide/*.resolution.txt
