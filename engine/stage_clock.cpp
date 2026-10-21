@@ -40,11 +40,14 @@ void drain() {
 // drift. `copy` is `other` minus the lm_head launch (the 19 D2D copies), `host_tail` is a D2H and a host
 // argmax and therefore not a launch, and every row is per TOKEN — which is what `Clock::describe()`
 // divides the observed counts by before comparing.
-std::array<int, kStageCount> plan_bill() {
+std::array<int, kStageCount> plan_bill(int proj_override = 0) {
     const LaunchCounts c = planned_launch_counts();
     std::array<int, kStageCount> p{};
     p[kGlue] = c.glue;
-    p[kProj] = c.proj;
+    // A run whose projection plan is not §07's split one states its own `proj` count (see
+    // `Clock::set_plan_proj`); everything else on this line is still §07's, and `gate.py` section (d)
+    // still polices §07's table off the untouched `LAUNCH` line.
+    p[kProj] = proj_override > 0 ? proj_override : c.proj;
     p[kGdn] = c.gdn;
     p[kAttn] = c.attn;
     p[kMlp] = c.mlp;
@@ -62,6 +65,8 @@ std::array<int, kStageCount> plan_bill() {
 // thing and their agreement means something. Read against `planned_launch_counts()`'s table:
 //
 //   glue  1 + 2 x 24 per body                                proj  5 x 18 + 4 x 6 per body
+//                                                              ...or 2 x 24 = 48 for a body packed by
+//                                                              `--proj-plan packed` (route D1)
 //   gdn_conv / gdn_gates / gdn_gated_norm  1 x 18 per body   gdn_rec  1 x 18 PER TOKEN (a scan)
 //         ...unless the scan batches: `--gdn-scan collapse` is 18 x bodies and `--gdn-loop S` is
 //         18 x ceil(body rows / S). Both stay on the `gdn_rec` row (see the branches below).
@@ -95,9 +100,26 @@ WavePlanBill wave_plan_bill(const WaveShape& sh) {
     const long long tokens = sh.tokens > 0 ? sh.tokens : 0;
     const long long priced = sh.priced_rows > 0 ? sh.priced_rows : 0;
     const long long L = kNumLayers, G = kNumGdnLayers, A = kNumAttnLayers;
+    // How many of this pass's bodies were ONE ROW, derived once at the top because THREE rows below
+    // depend on it. Each is a rule about a body's WIDTH rather than about a flag, and each therefore has to
+    // re-derive its exception from the shape the driver reports instead of trusting a caller to announce
+    // it: `resolve_wave_gemm` gives a one-row body the hand GEMV whatever was asked, `submit_wave_body`
+    // gives it the embedding MEMCPY whatever its gather rule would otherwise allow, and `--proj-plan
+    // packed` groups only its input projections. Same rule the chunked branch applies to `gdn_rec`.
+    const long long last_body_rows =
+        sh.bodies > 0 ? sh.tokens - (sh.bodies - 1) * sh.wave_rows : 0;
+    const long long single_row_bodies =
+        sh.wave_rows <= 1 ? bodies : ((last_body_rows == 1) ? 1 : 0);
     WavePlanBill p;
     p.subs[kGlue] = (1 + 2 * L) * bodies;
     p.subs[kProj] = (5 * G + 4 * A) * bodies;
+    if (sh.proj_packed) {
+        // Route D1: a one-row body submits one launch per layer group plus one output projection. The
+        // count comes from `proj_plan_jobs`, i.e. from the same list the body walks, so the two derivations
+        // cannot disagree about what 48 means; a wide body is untouched by the flag.
+        const long long packed = proj_launches_per_body(kernels::ProjPlan::kPacked);
+        p.subs[kProj] = (5 * G + 4 * A) * (bodies - single_row_bodies) + packed * single_row_bodies;
+    }
     p.subs[kGdnConv] = G * bodies;
     p.subs[kGdnGates] = G * bodies;
     p.subs[kGdnRec] = G * tokens;
@@ -176,18 +198,8 @@ WavePlanBill wave_plan_bill(const WaveShape& sh) {
     // GDN projection widening is not in either count any more, because no consumer reads an F32 copy of
     // those tiles at any width (D30 1.7'). A one-row body owes the HAND count whatever the run asked
     // for — `resolve_wave_gemm` again — so that body is derived from the shape here rather than trusted
-    // to the caller, exactly as the chunked branch above derives it.
-    //
-    // How many of this pass's bodies were ONE ROW — the one derivation two rows below depend on, so it
-    // lives here once rather than twice. Both are rules about a body's WIDTH rather than about a flag,
-    // and both therefore have to re-derive the exception from the shape the driver reports instead of
-    // trusting a caller to announce it: `resolve_wave_gemm` gives a one-row body the hand GEMV whatever
-    // was asked, and `submit_wave_body` gives a one-row body the embedding MEMCPY whatever its gather
-    // rule would otherwise allow. Same rule the chunked branch above applies to `gdn_rec`.
-    const long long last_body_rows =
-        sh.bodies > 0 ? sh.tokens - (sh.bodies - 1) * sh.wave_rows : 0;
-    const long long single_row_bodies =
-        sh.wave_rows <= 1 ? bodies : ((last_body_rows == 1) ? 1 : 0);
+    // to the caller, exactly as the chunked branch above derives it. `single_row_bodies` and
+    // `last_body_rows` are the ones derived at the top of this function, for that reason and this one.
     const long long casts_hand = 3 * L + G + A;
     const long long casts_library = G;
     long long lib_bodies = 0;
@@ -387,7 +399,7 @@ void Clock::close_segment() {
 }
 
 std::string Clock::describe() const {
-    const std::array<int, kStageCount> plan = plan_bill();
+    const std::array<int, kStageCount> plan = plan_bill(plan_proj_);
     std::string out;
     char buf[512];
     long long subs = 0;
@@ -524,6 +536,17 @@ std::string Clock::describe_wave(const WaveShape& shape) const {
                    w.subs[kCopy] == tok[kCopy] && w.subs[kLmHead] == tok[kLmHead];
         };
         const bool same = matches_token_plan(w1);
+        // The same one-row body with `proj_packed` set. The token side of THIS comparison is not §07's
+        // table — it is §07's table with the `proj` row replaced by the count `proj_plan_jobs` produces —
+        // and that is the point: it forces the wave bill's packed branch and the body's own job list to
+        // agree on what a packed step submits, in the same report that prints whether the clock's counted
+        // numbers matched its plan. Two derivations that drifted would read 0 here.
+        WaveShape one_packed = one;
+        one_packed.proj_packed = true;
+        const std::array<int, kStageCount> tok_packed =
+            plan_bill(proj_launches_per_body(kernels::ProjPlan::kPacked));
+        const WavePlanBill w1p = wave_plan_bill(one_packed);
+        const bool same_packed = w1p.subs[kProj] == tok_packed[kProj] && same;
         // The same one-row body on a library route. `resolve_wave_gemm` gives a one-row body the hand
         // GEMV whatever the run asked for, so the route-aware `cast` row must fold back to §07's 97
         // here: this is the witness that the guard is a row-count rule and not a flag rule, and a guard
@@ -533,8 +556,9 @@ std::string Clock::describe_wave(const WaveShape& shape) const {
         one_library.gemm_library = true;
         const bool same_library = matches_token_plan(wave_plan_bill(one_library));
         std::snprintf(buf, sizeof buf,
-                      " body1_plan_matches_token_plan=%d body1_library_plan_matches_token_plan=%d",
-                      same ? 1 : 0, same_library ? 1 : 0);
+                      " body1_plan_matches_token_plan=%d body1_library_plan_matches_token_plan=%d"
+                      " body1_packed_plan_matches_token_plan=%d",
+                      same ? 1 : 0, same_library ? 1 : 0, same_packed ? 1 : 0);
         out += buf;
     }
     if (notes_ignored_) {

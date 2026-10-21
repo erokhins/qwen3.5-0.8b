@@ -4730,3 +4730,161 @@ an aggregate. Two things it has to do that chat mode does not:
 Rates printed by this tool are, as before, the engine's wall clock on a box that is also serving this
 session — `engine/performance-status.md` §6 owns clean windows, and no figure from a chat session belongs
 there. Nothing in this section is a timing claim.
+
+## `--proj-plan` / `--proj-shape`: the `prototype/proj_gemv` win lands in the engine (2026-10-21), flags OFF
+
+Source: `prototype/proj_gemv/results.md` §D1-W4 (commits `7c432a4`, `f8644b1`, `2534b40`). Both levers
+are shipped behind flags and **both default to HEAD's behaviour**: `--proj-plan split` (the one-row-per-launch
+plan, 114 launches/token) and `--proj-shape shipped` (`proj_gemv_tokens<IN,1,false>`). A run that passes no flag
+runs the same kernel with the same plan it ran yesterday, and `engine/gate.py` — which does not know these
+flags — judges that unchanged default. What the flags add, and what was found on the way.
+
+**The shape lever is not the one the handover described.** The transfer memo's mechanism prose was "128
+lanes per row at K=1024, 8 bf16 per lane, one 128-bit load per lane". No timed arm is that. In
+`prototype/proj_gemv/proj_gemv.hip.cpp`'s variant table the two refuted families are `v2/v3/v4/v6`, whose
+`lpw` (lanes per row) is 16/8/4 — 25–47 % of probe because a row's F32 dot is split and re-associated —
+while the winner `v1-unroll` carries **`lpw=32`**, one wavefront per row exactly as shipped, and its claim
+string is "lm_head's inner loop: compile-time word bound with `#pragma unroll`, nothing else changed".
+At LPW=32 a K=1024 row is `1024/(8×32)=4` `uint4` words and the unrolled walk keeps those four loads in
+flight where the shipped `proj_gemv_tokens<IN,1,false>` walk pipelines one. The second half of the arm is geometry, not
+per-lane work: `rpb=8` at `threads=1024` held fixed makes `step = 1024/32 = 32 > rpb = 8`, so 8 of a block's
+32 wavefronts take row work and the grid is 4× the shipped grid. **This is not the old `rpb 8 → 32` lever run
+backwards** (the row this file priced at −0.50 ms, which changed rows/block *and therefore* the block width,
+256 → 1024 threads): here the block stays 1024 threads and only the rows each block owns shrink, which is a
+different shape from either historical point. So the engine flag is `--proj-shape
+shipped|unroll8`, not `--proj-lpr`: the lanes-per-row axis is exactly what was refuted, and naming the
+knob after it would advertise the wrong lever. **No shipped arm reduces lanes per row**, which is also
+what keeps the admission contract satisfiable — see below. The wrong prose is not this port's invention:
+§D1-W4's own mechanism paragraph is what says "128 lanes per row … exactly one 128-bit load per lane", and
+it contradicts the table and the kernel two lines away from it — `lpw=32`, `lane = threadIdx.x % LPW`, and
+`WORDS/LPW = 128/32 = 4` words per lane at K=1024, so four 16-B loads per lane and the unroll is what keeps
+them in flight. `threads/rpb = 1024/8 = 128` is threads per row *slot*, and 3/4 of them have no row; that is
+almost certainly where the sentence came from. The arm's *numbers* stand as measured; the sentence does not,
+and `prototype/proj_gemv/results.md` is outside this worker's edit scope, so it is recorded here and handed
+over rather than fixed there.
+
+**Bit-identity is the contract, and it held.** Every grouped kernel rounds once, at the end, from the same
+F32 product tree: the walk is compile-time now but covers the same elements in the same order at warp width
+32, the reduction is the same `__shfl_down_sync` ladder with the same six offsets, and `stage_words` keeps
+the `s_j = Σ_{i<j} k_i` partition identical to `proj_gemv_tokens<IN,1,false>`'s. The kernel's dot body is transcribed
+from `prototype/proj_gemv/proj_gemv_kernels.h` and its staging from the shipped
+`proj_gemv_tokens<IN,1,false>` in `engine/kernels_proj.cpp`; the one deliberate addition is
+a **runtime-width walk** (same recurrence, runtime trip count) for the K=2048 shapes, which at warp width
+takes the compile-time path. Fallback is loud: `proj_shape_available()` is true only for the checkpoint's two input widths — 1024 and
+2048, the only two the grouped kernel is instantiated at — and only on a device whose warp is 32 wide, which
+is the width the winning geometry was swept at and the width that makes `step = threads/warp` separate from
+`rpb` the way the sweep's winning point does; any one-row body that cannot use the
+grouped shape goes through the shipped shape while `PROJSHAPE-FALLBACK steps=… shapes=… of …` prints in
+the report block — `main()` throws if a run asked for a shape nothing could use, so a typo cannot buy a
+silent no-op.
+
+**The packing is done without copying weights.** The plan is built at load into
+`DecodeScratch::proj_groups`: 192 `ProjSeg` descriptors (24 layers × 2 bodies × up to 4 segments, 24 B each,
+≈4.6 KB resident and ≤4 of them in any one kernel argument), and each segment keeps a pointer to the tensor
+it reads and a pointer to the row-family tile it writes (`out` is row 0 of the *same* tile §07 of
+`specification/07-decode-step.md` passes to `proj_rows`, so no output staging buffer appears on any path).
+The transfer memo's contiguity premise did not survive `engine/loader.h:170`: one `hipMalloc` per tensor, so
+no two tensors are adjacent and a concatenation would have to be manufactured. Priced from the shard header
+rather than from the memo — `tmp/proj_d1_bytes.py` reads the `--dump-proj-plan` echo and the safetensors
+headers and refuses if the two disagree — the projection set is **466,747,392 B = 445 MiB = 0.43 GiB across
+all 24 layers** (per layer 19,447,808 B on average: a GDN layer carries 16.84 MB of input projections and
+4.19 MB of output, an attention layer 10.49 MB and 4.19 MB; the single largest tensor in the plan is
+`in_proj_qkv` at 12,582,912 B). So a contiguous copy would duplicate **30 % of the model's 1.5457 GB of
+resident weights** — 1.3 % of the ~34 GiB device-visible pool, and a read-plus-write of ~0.93 GB at load,
+which at the measured 237 GB/s plateau is single-digit milliseconds. That is affordable, and it is still the
+wrong trade: the segment list buys the identical 48-launch plan for 4.6 KB and no extra traffic at all, and
+the prototype measured the packed plan over *segmented* bases (`proj_run_packed` takes a per-tensor `Tensor&`
+and a `row0`), so no part of the −11.7 % ever depended on adjacency. What the copy would really cost is a
+second resident copy of a third of the weights and a second set of shape claims for `check_weights` to
+cover, bought for a saving the segment list already made.
+
+**One row-family per launch is a layout rule, not a convenience.** A group may only contain row families
+that share an input: `gate_up`/`down` are one family each and go alone; the attention and GDN input
+projections share hidden and are grouped (4 segments for GDN — `qkv 6144` + `z 2048` + `b 16` + `a 16` =
+8224 rows — 3 for attention = 5120). The b/a pair keeps its own `library_eligible=false`, which is the
+§07 carve-out of `specification/07-decode-step.md` preserved verbatim: the two 16-row GDN projections are
+below the arithmetic-intensity ridge at every width (§3.2), the smallest shape the funded library list holds
+is `k_proj`/`v_proj` at N=512, and `proj_gemm` already *refuses* N<512 because that call costs 12–22× the
+dispatch floor for a 162 KiB job. The library eligibility test stayed in the
+caller because `proj_group_rows` takes raw pointers and cannot see `GemmPlan` — moving it into the
+launcher would have silently sent b/a to the library.
+
+**The two launch-count derivers moved together, and the third is deliberately not one.** `wave_plan_bill`
+now takes the packed bill for one-row bodies when the scratch says the step is packed (a shape decision
+reproduced at prefill time from `rows` alone, the same way `proj_uneven_rows` is reproduced), and
+`stage_clock` added a self-check with a forcing it can actually exercise: `body1_packed_plan_matches_token_plan`
+builds the 1-token wave bill with the packed flag set and requires its `proj` row to equal the count
+`proj_plan_jobs(…, packed)` produces, conjoined with the whole split witness. The forcing is the point, not
+the number: if the packed comparison had been taken against the *split* token plan, or had leaned on
+`plan_bill`'s own default, it would have compared a packed wave against a split body and printed `=1` about a
+plan nobody runs. With the token side taken from `proj_launches_per_body(kPacked)` — the same list the body
+walks — two derivations that drift read 0. The old `body1_plan_matches_token_plan` stays as the split witness. `LAUNCH` (the static bill of §07 of
+`specification/07-decode-step.md`) was **left alone on purpose**: gate.py section (d) compares that bill against `LAUNCHSTAT`, and if a flag could make
+`LAUNCH` claim 340 while `LAUNCHSTAT` reported 498, the gate's independent launch-count check would have
+become a tautology inside the binary. The claim line for these flags is `PROJPLAN`, printed beside it.
+
+```
+LAUNCH     glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=97 other=20 total=406
+PROJPLAN   plan=packed shape=unroll8 launches_per_step=48 rpb=8 threads=1024 warp=32 segs_max=4
+NUMERICS   … proj_plan=packed proj_shape=unroll8
+STAGE gran=stage family=proj ms_per_step=… launches_per_step=48 segments_per_step=48 us_per_launch=…
+```
+
+`--dump-proj-plan` echoes the plan on the host without a model, a launch or a timing: `114` rows at the
+default, `48` rows and `tensors=114` when packed, each with its segment list and output base offset.
+
+**Correctness evidence (device, correctness-only; no timing claim is made here).** Seven fixtures ran the
+same process three ways — defaults, `--proj-shape unroll8`, `--proj-shape unroll8 --proj-plan packed` —
+each with `--time-stages`, and the three sides were then byte-compared on `sampled.txt` **and** on every
+`STEP` line (whose `top_logit=%.9g` round-trips a float exactly). `dec8` 17 ids · `p64` 46 · `chunk64b`
+120 · `p300` 277 · `dec300f` 295 · `mt32f` 232 · `wide640f` 640 prompt ids: **bit-identical on all seven,
+0 fallback lines, and 9/9 `STAGEPARITY … tokens_identical=1 logits_bitidentical=1` per fixture** (three
+sides × three granularities). A long-context witness ran the same way at the width no short fixture reaches:
+4,000 ids fed + 32 steps, so the last decode step attends **4,032 lanes**, and defaults and `packed` came out
+byte-identical on `sampled.txt`, on every `STEP` line and 3/3 parity lines per side. Two route witnesses on `p64`: `--gemm hand` off vs both flags on, identical,
+`family=proj calls` 570→306; `--wave-rows 1` off vs on, identical, 5700→2400 — so the hand route and the
+wave's one-row bodies keep their bits under the packed plan. The canary read where it was required to:
+`launches_per_step=114` with the flags off and `48` with them on, in the plan echo, in the stage-clock
+family row, and in `LAUNCHSTAT family=proj calls=` (1026 → 498 for an 8-step run), with `plan_match=1` and
+`body1_packed_plan_matches_token_plan=1` on the `TOTAL` line. At `--wave-rows 1` the wave bill reads
+2208 launches for 46 one-row bodies (46 × 48) and `counts_match=1`. `engine/gate.py` was then run at its
+own defaults over the derived population (`for d in data/refs/*/; do [ -f $d/manifest.json ]; done`, 18
+prompt-bearing fixtures; the three `corpus48*` dirs carry no prompt source and are not engine fixtures):
+**13 PASS, 5 FAIL, and the five FAIL lines are byte-identical to the same gate run against a HEAD binary
+built in a scratch worktree at `2534b40`** — four are a stale `route_allowance.json` (`specimpl_sha256`
+mismatch, a carried cache re-price, not this change) and `dec64f`'s three extra lines are the
+`meanrel <= 5% (§10.2)` steps this file already records as that fixture's honest red state ("`ENGINE GATE
+FAIL — 15 failed` on `--fixture dec64f` is therefore the honest current state"). No band, gate or expectation file was edited
+to obtain any of this.
+
+| perf cell (main agent's clean window, 2026-10-21: 7 paired reps at 128 lanes in one lock hold, 3 at 4,032 lanes in another, `util` 91 % → 73 %) | flags off | `--proj-shape unroll8` | `+ --proj-plan packed` |
+|---|---|---|---|
+| `STAGE gran=stage family=proj ms_per_step`, 128-lane decode | 4.2015 | **2.9521** (0.703×) | **2.7316** (0.650×) |
+| `STAGEPASS gran=burst ms_mean`, whole step, 128 lanes | 11.6967 | 10.4290 (−10.84 %) | **10.1851** (−12.92 %) |
+| `STAGEPASS gran=burst ms_mean`, 4,032-lane row | 14.1867 | — | **12.7164** (−10.4 %) |
+
+The two verdicts are separate, as the handoff required, and **both paid**: the shape is −29.7 % of the
+family in-situ (more than its −24.5 % burst figure, so the idle three-quarters-of-a-block worry in §5.3 of
+the handoff did not materialise) and the plan is a further −7.5 % on top of it, close to but under its −11.7 %
+burst value. All seven paired reps separate cleanly — worst `off` (11.4138 best-of-7 aside, the distributions
+are `off` 11.41–11.79, `shape` 10.36–10.50, `pack` 9.91–10.26, spreads 3.3 / 1.4 / 3.5 %), so this is not a
+best-of-N artefact. `STAGEGAP exposed_ms` moved 2.1007 → 2.0504 → 2.0555, i.e. barely at all, which is the
+handoff §5.1 test read the right way: the prize is removed **work**, not removed submission gap — and that
+is what makes it survive the step.
+
+Two readings to refuse. The `glue` family also drops 18 % (0.7209 → 0.5794 ms/step) with its launch count
+unchanged at 49 and its `us_per_launch` falling 14.44 → 11.82; that is the same step's queue draining
+faster under a shorter projection stage, not a second win, and the aggregate burst row is the number that
+carries it. And 11.6967 ms is this rig's 128-lane step, not the ledger's marginal 11.181 ms/token at 89.4
+tok/s — the headline conversion is `context_sweep.py`'s to make after a default flip, not this table's.
+
+The prototype's own burst figures for scale, not as an engine claim: −24.5 % from the shape at fixed plan
+(2.4693 vs 3.2692 ms/plan) and −11.7 % from the plan at fixed shape (2.4942 vs 2.8244 ms/plan), which
+compose multiplicatively to −33.6 % — the ≈−35 % of the `proj` family the transfer memo expected. Against
+the ledger's carried in-situ `proj` row of 4.1128 ms/step (§2 of
+`progress/2026-10-21/performance-status-2026-10-21.md`, whose isolated burst is 3.2843 ms and whose
+burst→in-situ gap is +0.83 ms) that predicts ≈2.73 ms/step, −1.38 ms of the 11.475 ms marginal token;
+if only the shape transfers — which `engine/performance-status.md` §2's "the exposed submission gap is the
+whole launch bill, not a prize" argues is the likely case for the launch-count half — the prediction is
+≈3.31 ms/step. `engine/performance-status.md` §6 owns which of the two it is, and no figure in this section
+is a timing claim.

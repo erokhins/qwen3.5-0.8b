@@ -488,13 +488,36 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     // 115 to 97 by deleting a widening NO route reads (`cast_bf16_to_f32_3`), which is the same plumbing
     // obligation one level up: both derivers moved with it, and neither number was edited to fit.
     const bool lib_gemm = kernels::wave_gemm_is_library(sc.wave_gemm, n);
+    // ---- route D1's two row-count rules, resolved here for the same reason `lib_gemm` is: they are
+    // rules about the body's WIDTH, and this is where `n` is. A ONE-ROW body takes the grouped kernel
+    // (`--proj-shape unroll8`) and may group its input projections into one launch (`--proj-plan packed`);
+    // a wider body is a prefill wave and runs exactly what it ran before, because §D1-W4 measured one-row
+    // launches and nothing else. Both default to the shipped answer, so an unnamed run resolves both to
+    // HEAD's behaviour.
+    const bool group_shape =
+        (n == 1) && (sc.proj_shape == kernels::ProjShape::kUnroll8);
+    const bool pack_proj = (n == 1) && (sc.proj_plan == kernels::ProjPlan::kPacked);
+    // One hand GEMV of one projection, whichever shape the run asked for. `proj_shape_available` is asked
+    // per call because what can refuse is the width and the device's warp, not the flag; a refusal is
+    // COUNTED (`sc.proj_fallbacks`) so the run's own log reports the side that silently fell back — a
+    // paired A/B against a silently inert arm reads as a clean null (`AGENTS.md`).
+    const auto proj_hand = [&](const void* weight, const float* x_f32, uint16_t* out, int rows,
+                               int in) {
+        if (group_shape && kernels::proj_shape_available(sc.proj_shape, in)) {
+            const kernels::ProjSeg seg{weight, out, rows, 0};
+            kernels::proj_rows(&seg, 1, x_f32, in);
+            return;
+        }
+        if (group_shape) ++sc.proj_fallbacks;
+        kernels::proj_gemv(weight, x_f32, out, rows, in, n);
+    };
     const auto project = [&](const void* weight, const uint16_t* x_bf16, const float* x_f32,
                              uint16_t* out, int rows, int in) {
         if (lib_gemm) {
 
             kernels::proj_gemm(weight, x_bf16, out, rows, in, n);
         } else {
-            kernels::proj_gemv(weight, x_f32, out, rows, in, n);
+            proj_hand(weight, x_f32, out, rows, in);
         }
     };
 
@@ -585,43 +608,66 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // ---- the mixer's INPUT projections: ONE launch each for the whole wave (P5, §06.2's "one
         // GEMM per projection"). Each reads the [n, H] norm tile and writes a [n, rows] tile that the
         // token loop below reads row t of. Hoisting them out of the token loop is all of P5, and at
-        // n == 1 it is the same launch in the same place in the order. The 16-row b/a GEMVs stay
-        // separate launches: `proj_gemv` has a packed multi-weight form and using it is the
-        // ≈0.12 ms/token deferral `engine/results.md` names, which is a plan change, not this one.
+        // n == 1 it is the same launch in the same place in the order. The 16-row b/a GEMVs used to be
+        // named here as a deferral ("`proj_gemv` has a packed multi-weight form and using it is the
+        // ≈0.12 ms/token deferral"); route D1 is that deferral, priced and landed, and it is what the
+        // list below exists to make one submission instead of four.
+        //
+        // ONE LIST, TWO SUBMISSION PLANS. Every input projection of a layer reads the same row of
+        // `norm_f32` and writes its OWN row-family tile, so folding them needs no weight copy and no
+        // output staging — the grouped kernel takes a segment list (`engine/proj_group_kernels.h`) and
+        // the tensors stay where the loader put them. The order of the list is the order the prototype's
+        // packed plan concatenated them in (`operands.py:GDN_PACK/ATTN_PACK`), because the row-to-block
+        // mapping of the measured launch depends on it: [qkv 6144 | z 2048 | b 16 | a 16] and
+        // [q 4096 | k 512 | v 512].
+        struct InProj {
+            kernels::ProjSeg seg;
+            bool library_eligible;
+        };
+        InProj inproj[kernels::kProjMaxSegs];
+        int nseg = 0;
+        const auto add_in = [&](const void* w, uint16_t* out, int rows, bool lib_ok) {
+            inproj[nseg++] = {kernels::ProjSeg{w, out, rows, 0}, lib_ok};
+        };
         if (attn_layer) {
             // §05.1. q_proj's 4096 rows stay interleaved [q|gate] per head because that is the stored
             // layout (§10.5 measured the split reading at cos −0.14), and the block de-interleaves it.
-            stageclock::note(stageclock::kProj);
-            project(layer_dev(weights, layer, leaf::kQProj), sc.norm, sc.norm_f32, sc.a_q,
-                    kQprojRows, kHidden);
-            stageclock::note(stageclock::kProj);
-            project(layer_dev(weights, layer, leaf::kKProj), sc.norm, sc.norm_f32, sc.a_k,
-                    kKvProjRows, kHidden);
-            stageclock::note(stageclock::kProj);
-            project(layer_dev(weights, layer, leaf::kVProj), sc.norm, sc.norm_f32, sc.a_v,
-                    kKvProjRows, kHidden);
+            add_in(layer_dev(weights, layer, leaf::kQProj), sc.a_q, kQprojRows, true);
+            add_in(layer_dev(weights, layer, leaf::kKProj), sc.a_k, kKvProjRows, true);
+            add_in(layer_dev(weights, layer, leaf::kVProj), sc.a_v, kKvProjRows, true);
         } else {
             // §04.1: four projections off the tile. The two fat ones (qkv at N=6144, z at N=2048) take
-            // the route; the two 16-row ones are the §3.2 skinny pair and call `proj_gemv` directly at
-            // any width, which is the carve-out stated as a call rather than as a comment.
-            stageclock::note(stageclock::kProj);
-            project(layer_dev(weights, layer, leaf::kInProjQkv), sc.norm, sc.norm_f32, sc.g_raw,
-                    kQkvRows, kHidden);
-            stageclock::note(stageclock::kProj);
-            project(layer_dev(weights, layer, leaf::kInProjZ), sc.norm, sc.norm_f32, sc.g_z,
-                    kValueDim, kHidden);
-            stageclock::note(stageclock::kProj);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjB), sc.norm_f32, sc.g_b,
-                               kNumValueHeads, kHidden, n);
-            stageclock::note(stageclock::kProj);
-            kernels::proj_gemv(layer_dev(weights, layer, leaf::kInProjA), sc.norm_f32, sc.g_a,
-                               kNumValueHeads, kHidden, n);
+            // the route; the two 16-row ones are the §3.2 skinny pair and never do, at any width — which
+            // is why `library_eligible` travels with the segment instead of being a property of the layer:
+            // a flag that groups launches must not smuggle a 16-row shape onto hipBLAS on the SPLIT path.
+            add_in(layer_dev(weights, layer, leaf::kInProjQkv), sc.g_raw, kQkvRows, true);
+            add_in(layer_dev(weights, layer, leaf::kInProjZ), sc.g_z, kValueDim, true);
+            add_in(layer_dev(weights, layer, leaf::kInProjB), sc.g_b, kNumValueHeads, false);
+            add_in(layer_dev(weights, layer, leaf::kInProjA), sc.g_a, kNumValueHeads, false);
             // No widening here, and that is the whole of D30 1.7'. The conv and the gates used to read
             // a packed `g_raw|g_a|g_b` F32 copy of these three tiles because their kernels took
             // `const float*`; both now widen their own operands in-register, and because a BF16->F32
             // widening is exact the values are the same bits. The launch went with them at EVERY
             // width and on BOTH routes — no consumer ever reads the F32 tiles — which is what makes
             // this one a §07 launch-bill change, not a route guard like 4.1-a's.
+        }
+        if (pack_proj) {
+            // One launch for the whole group. `norm_f32` is row 0 of the tile the cast above just wrote,
+            // and every segment's `out` is row 0 of its own tile, which is why `ProjSeg` carries no stride.
+            stageclock::note(stageclock::kProj);
+            kernels::ProjSeg segs[kernels::kProjMaxSegs];
+            for (int i = 0; i < nseg; ++i) segs[i] = inproj[i].seg;
+            kernels::proj_rows(segs, nseg, sc.norm_f32, kHidden);
+        } else {
+            for (int i = 0; i < nseg; ++i) {
+                stageclock::note(stageclock::kProj);
+                const kernels::ProjSeg& s = inproj[i].seg;
+                if (inproj[i].library_eligible) {
+                    project(s.weight, sc.norm, sc.norm_f32, s.out, s.rows, kHidden);
+                } else {
+                    proj_hand(s.weight, sc.norm_f32, s.out, s.rows, kHidden);
+                }
+            }
         }
 
         // ---- the mixer. What has always ordered it is §08.2's ascending positions WITHIN a layer, and
@@ -935,6 +981,12 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // filled (P5). The two layer types write the same scratch and the same width — `kQwidth` and
         // `kValueDim` are both 2048 — so this is one call site, and it is the §03.2 addend that
         // `add_norm` below consumes for every row of the wave.
+        //
+        // Route D1 leaves it a launch of its own even under `--proj-plan packed`, and that is arithmetic
+        // rather than an omission: its `in` is 2048 where the input group's is 1024, and it reads
+        // `block_out_f32`/`a_gated` instead of `norm_f32`, so there is no segment list that contains both.
+        // The prototype's 48-launch plan is exactly this — 24 input groups + 24 output projections — and
+        // one-launch-per-layer-group plus one-launch-per-output is the 48 the plan row claims.
         stageclock::note(stageclock::kProj);
         // The BF16 operand is NOT one tile: the attention mixer leaves its [n,2048] output in
         // `a_gated` and the GDN gated norm leaves its [n,2048] output in `block_out`, and the one named
@@ -1104,6 +1156,80 @@ LaunchCounts planned_launch_counts() {
     c.cast = 4 * kNumGdnLayers + 4 * kNumAttnLayers + 1;   // +1: the final norm before lm_head
     c.other = 1 + kNumGdnLayers + 1;
     return c;
+}
+
+// ---- route D1: the projection plan as data -----------------------------------------------------------
+//
+// The same two lists `submit_wave_body` builds, spelled a second time as data so a plan can be READ without
+// a device (that is what `--dump-proj-plan` prints and what the main agent checks geometry against while
+// another agent holds the lock). The duplication is deliberate and is the cheaper of the two options: the
+// alternative is the body calling this function to decide what to launch, which would put a vector of
+// strings on the decode path — a per-layer allocation per token, paid 24 times a step, for an echo.
+//
+// What keeps the two spellings from drifting is not the comment: `proj_launches_per_body` is what the stage
+// clock bills itself against (`stage_clock`'s `set_plan_proj`), and the clock's `plan_match` field compares
+// that number against what the body actually submitted. Get the list wrong in here and the plan stops
+// matching the dispatch in the same report that prints both.
+std::vector<ProjPlanJob> proj_plan_jobs(kernels::ProjPlan plan) {
+    struct InLeaf { const char* leaf; const char* dest; int rows; bool lib_ok; };
+    std::vector<ProjPlanJob> jobs;
+    for (int layer = 0; layer < kNumLayers; ++layer) {
+        const bool attn = is_full_attention(layer);
+        // In body order, which is also the order the prototype's packed plan concatenated them in.
+        const InLeaf in_gdn[4] = {
+            {leaf::kInProjQkv, "g_raw", kQkvRows, true},
+            {leaf::kInProjZ, "g_z", kValueDim, true},
+            {leaf::kInProjB, "g_b", kNumValueHeads, false},
+            {leaf::kInProjA, "g_a", kNumValueHeads, false},
+        };
+        const InLeaf in_attn[3] = {
+            {leaf::kQProj, "a_q", kQprojRows, true},
+            {leaf::kKProj, "a_k", kKvProjRows, true},
+            {leaf::kVProj, "a_v", kKvProjRows, true},
+        };
+        const InLeaf* group = attn ? in_attn : in_gdn;
+        const int n = attn ? 3 : 4;
+        const int group_segs = plan == kernels::ProjPlan::kPacked ? n : 1;
+        for (int i = 0; i < n; ++i) {
+            ProjPlanJob j;
+            j.layer = layer;
+            j.group = 0;
+            j.seg = i;
+            j.segs = group_segs;
+            j.rows = group[i].rows;
+            j.in = kHidden;
+            j.weight = layer_name<160>(layer, group[i].leaf);
+            j.dest = group[i].dest;
+            j.kind = attn ? "attn_in" : "gdn_in";
+            j.library_eligible = group[i].lib_ok;
+            j.starts_launch = plan == kernels::ProjPlan::kSplit || i == 0;
+            jobs.push_back(j);
+        }
+        // The output projection: its own launch in both plans, its own operand (`block_out_f32` for a GDN
+        // layer, `a_gated` for an attention one) and width 2048, which is why it can never join the group.
+        ProjPlanJob out;
+        out.layer = layer;
+        out.group = 1;
+        out.seg = 0;
+        out.segs = 1;
+        out.rows = kHidden;
+        out.in = attn ? kQwidth : kValueDim;
+        out.weight = layer_name<160>(layer, attn ? leaf::kOProj : leaf::kOutProj);
+        out.dest = "delta";
+        out.kind = attn ? "attn_out" : "gdn_out";
+        out.library_eligible = true;
+        out.starts_launch = true;
+        jobs.push_back(out);
+    }
+    return jobs;
+}
+
+int proj_launches_per_body(kernels::ProjPlan plan) {
+    int n = 0;
+    for (const ProjPlanJob& j : proj_plan_jobs(plan)) {
+        if (j.starts_launch) ++n;
+    }
+    return n;
 }
 
 std::string check_weights(const WeightStore& weights) {

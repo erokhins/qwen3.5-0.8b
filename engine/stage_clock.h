@@ -247,6 +247,13 @@ struct WaveShape {
     // bills the hand (larger) count, and a library run that forgot to set it reads `plan_match=0`
     // rather than a plausible low number.
     bool gemm_library = false;
+    // Route D1 (`decode_run --proj-plan packed`): whether a ONE-ROW body grouped its input projections into
+    // one launch. The plan needs it for the reason every row above does — `proj` bills launches, and 48 is
+    // not 114 — and it needs it as a rule about the body's width rather than about the flag, which is why
+    // the bill below applies it only to the bodies `submit_wave_body` would actually pack (`n == 1`, derived
+    // from `tokens`/`bodies`/`wave_rows` exactly as `gemm_library`'s exception is). A step clock does not
+    // carry a shape, so it is told the same number once, at construction: `Clock::set_plan_proj`.
+    bool proj_packed = false;
 };
 
 // One measured pass of serialized submission. Constructed per pass, armed for its duration; not
@@ -256,6 +263,14 @@ class Clock {
 public:
     // A step clock folds the launcher families into §07's bill rows; a wave clock reports them.
     explicit Clock(Mode mode, Unit unit = Unit::kStep);
+
+    // How many projection submissions one step emits, when the run changed it from §07's split bill
+    // (`decode_run --proj-plan packed`, which submits 48 where §07 bills 114). The clock has no
+    // `WaveShape` to derive such a thing from, so the driver states it — and it must, because
+    // `plan_match` is the line that tells a reader the instrument and the dispatch agree, and a plan that
+    // silently billed the pre-D1 count would make every packed run read as a broken clock. Left unset
+    // (0), the bill is §07's, and every run before this knob existed is unaffected.
+    void set_plan_proj(int launches_per_step) { plan_proj_ = launches_per_step; }
 
     Clock(const Clock&) = delete;
     Clock& operator=(const Clock&) = delete;
@@ -304,6 +319,7 @@ private:
 
     Mode mode_;
     Unit unit_;
+    int plan_proj_ = 0;        // 0 = derive §07's split bill; see `set_plan_proj`
     bool in_step_ = false;
     bool open_ = false;
     Stage stage_ = kStageCount;

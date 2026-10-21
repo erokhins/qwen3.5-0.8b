@@ -177,6 +177,24 @@ struct DecodeScratch {
     // the existing one (§10.1 aggregates via `engine/gate.py`). Inert under `kCollapse` and under
     // `--gdn-loop 1`, and `decode_run` refuses those pairs rather than echo a shape that did not run.
     kernels::GdnGeom gdn_geom = kernels::GdnGeom::kReg16;
+    // How a ONE-ROW body GROUPS its projection launches (route D1, `kernels.h:ProjPlan`), and which
+    // kernel and block geometry such a launch uses (`kernels.h:ProjShape`). Both ride here for the usual
+    // reason — a run-shape choice that has to reach the call sites inside the body loop — and both carry
+    // the shipped default, because the prototype's −24.5 % / −11.7 % are burst numbers and the in-situ
+    // `proj` family row is what decides whether the defaults move (`HANDOFF-D1-ENGINE.md`).
+    //
+    // The rule the fields cannot express and `submit_wave_body` enforces: BOTH apply to a body of ONE row
+    // and to nothing else. A wide body's projections are already one launch per projection over the whole
+    // tile (P5) and usually a library call (route (c)); grouping them would change a prefill number the
+    // prototype never measured. `kPacked` is therefore meaningless with `kShipped` — the grouping is a
+    // feature of the grouped kernel — and `decode_run` refuses that pair instead of echoing it.
+    kernels::ProjPlan proj_plan = kernels::ProjPlan::kSplit;
+    kernels::ProjShape proj_shape = kernels::ProjShape::kShipped;
+    // How many one-row projection launches asked for a shape this device/width cannot offer and took the
+    // shipped kernel instead. Counted, not assumed: `decode_run` prints it, so a run whose A/B side
+    // silently fell back says so in its own log instead of reading as a null (`AGENTS.md`: a check whose
+    // input can silently fail to arrive must be shown to have arrived).
+    long long proj_fallbacks = 0;
     // The chunk size in tokens, echoed so a run states which chunk it claimed. Only 64 is accepted
     // (`kernels.h:kGdnChunkTokens`); the refusal text carries the measured reason.
     int gdn_chunk = kernels::kGdnChunkTokens;
@@ -428,6 +446,45 @@ struct LaunchCounts {
     std::string describe() const;
 };
 LaunchCounts planned_launch_counts();
+
+// ---- route D1: the projection plan, as data (so geometry can be checked without a GPU) -------------
+//
+// `planned_launch_counts()` stays §07's SPLIT bill whatever the run asks for, for the reason `gate.py`
+// section (d) exists: it re-derives that table from §07 in Python, and a C++ function that quietly
+// returned a different total once a flag was passed would make the cross-check a tautology. So the
+// plan-in-force is a SEPARATE question with its own answer here, derived from the same §00 constants and
+// printable device-free (`decode_run --dump-proj-plan`), and the counted witness that it took effect is
+// the `LAUNCHSTAT family=proj calls=` line plus `STAGE … family=proj launches_per_step=`.
+//
+// One layer under `kPacked` is: one launch over the layer's input projections (they read the same row of
+// `norm_f32`, and each writes its own row-family tile, so no weight is copied), then one launch for its
+// output projection — 48 per token. Under `kSplit` every tensor is its own launch, i.e. `proj`'s 114.
+struct ProjPlanJob {
+    int layer = -1;
+    int group = 0;             // 0 = this layer's input group, 1 = its output projection
+    int seg = 0;               // this tensor's index inside its group
+    int segs = 1;              // segments in the launch this tensor becomes
+    int rows = 0;
+    int in = 0;
+    std::string weight;        // full engine name, `lm.layers.N.…`
+    const char* dest = "";     // which `DecodeScratch` tile the launch writes
+    const char* kind = "";     // "gdn_in" / "attn_in" / "gdn_out" / "attn_out"
+    // Whether this projection could be handed to the library route on a WIDE body. `in_proj_a`/`b` are
+    // the two that cannot (§3.2, the skinny pair), and the split plan must keep calling the hand kernel
+    // for them at any width — the flag must not smuggle a 16-row shape onto hipBLAS.
+    bool library_eligible = true;
+    // Under `kPacked` a group of tensors becomes ONE launch and only the group's first entry starts it, so
+    // "how many launches does a body submit" is a count of these and not a count of entries. Derived, never
+    // typed: `proj_launches_per_body` sums this field, which is why 48 and 114 cannot be edited into shape.
+    bool starts_launch = true;
+};
+
+// The launches one row-priced body submits, in submission order. Pure §00/§07 structure: no device, no
+// weights, so `--dump-proj-plan` can be read while another agent holds the GPU lock.
+std::vector<ProjPlanJob> proj_plan_jobs(kernels::ProjPlan plan);
+
+// `proj_plan_jobs(plan).size()`, for the one-line echo and for the stage clock's plan bill.
+int proj_launches_per_body(kernels::ProjPlan plan);
 
 // Cross-checks the shapes §07 gives this file against the checkpoint the store actually holds, so a
 // width typed in `state.h` cannot disagree with the file silently. Returns "" when all match, else a

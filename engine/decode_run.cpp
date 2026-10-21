@@ -293,6 +293,27 @@ struct Options {
     // why 64 is the default at all.
     int gdn_chunk = engine::kernels::kGdnChunkTokens;
     bool gdn_chunk_given = false;
+    // How a ONE-ROW body groups its projection launches (`--proj-plan`, route D1, route D1's engine
+    // port). `split` — §07's bill, one launch per projection, 114 per token — is the default and is
+    // HEAD's behaviour; `packed` is the prototype's 48-launch plan (`prototype/proj_gemv/results.md`
+    // §D1-W4: 2.4942 vs 2.8244 ms at identical geometry, bit-identical, one clock-controlled window).
+    // It is only meaningful with `--proj-shape unroll8`, because the grouping is a feature of the grouped
+    // kernel, and the pair is REFUSED below rather than echoed as a plan that did not run.
+    engine::kernels::ProjPlan proj_plan = engine::kernels::ProjPlan::kSplit;
+    bool proj_plan_given = false;
+    // Which kernel and block geometry a one-row projection launch uses (`--proj-shape`). `shipped` is
+    // `proj_gemv_tokens<IN,1,false>` at rows/block 32, i.e. HEAD's machine code; `unroll8` is
+    // `engine/proj_group_kernels.h` at rows/block 8 and 1024 threads — the winning arm (§D1-W4: 2.4693 ms
+    // against the shipped shape's 3.2692 ms in the same window), bit-identical for the same reason the
+    // prototype's gate accepted its `v1-unroll`: the word walk, the ladder and the rounding are unchanged.
+    // Echoed on the NUMERICS line like every other knob here, because a timing log that cannot say which
+    // kernel produced its `proj` family row is not evidence, and a stale binary agrees with itself.
+    engine::kernels::ProjShape proj_shape = engine::kernels::ProjShape::kShipped;
+    bool proj_shape_given = false;
+    // Print the projection plan one row-priced body would submit and leave, WITHOUT touching the device
+    // (no weight load, no HIP call), so geometry can be checked while another agent holds the GPU lock —
+    // the same service `prototype/proj_gemv --dump-plan` provides for its own rig.
+    bool dump_proj_plan = false;
     // The stage clock (`engine/stage_clock.h`): re-runs the run's generation steps twice more, once
     // with a wait at every family boundary and once with a wait after every submission, and reports
     // them next to the pipelined step. A bench-only observation flag: the run it is attached to still
@@ -566,6 +587,14 @@ Options parse_args(int argc, char** argv) {
             }
             o.gdn_chunk = n;
             o.gdn_chunk_given = true;
+        } else if (a == "--proj-plan") {
+            o.proj_plan = engine::kernels::parse_proj_plan(next());
+            o.proj_plan_given = true;
+        } else if (a == "--proj-shape") {
+            o.proj_shape = engine::kernels::parse_proj_shape(next());
+            o.proj_shape_given = true;
+        } else if (a == "--dump-proj-plan") {
+            o.dump_proj_plan = true;
         } else if (a == "--time-stages") {
             o.time_stages = true;
         } else if (a == "--time-waves") {
@@ -586,7 +615,7 @@ Options parse_args(int argc, char** argv) {
                                  "kMaxWaveRows rows; `--wave-rows 1` is the one-row-per-launch "
                                  "comparison run)");
     }
-    if (!o.sizes_only && !o.session && o.prompt.empty()) {
+    if (!o.sizes_only && !o.session && !o.dump_proj_plan && o.prompt.empty()) {
         throw std::runtime_error(
             "decode_run needs --ids <comma-separated token ids> (the fixture's prefill_ids) or "
             "--ids-file PATH holding the same list (a prompt beyond ~21,800 ids cannot be an argument); "
@@ -775,6 +804,21 @@ Options parse_args(int argc, char** argv) {
                                  " outright, taking attn_slim_wave and attn_combine off the wave with it, so"
                                  " there is nothing here for it to spell. Use --attn-fattn 1 (the default)"
                                  " with this flag, or --attn-fattn-wide 0 for the shipping wave");
+    }
+    if (o.proj_plan_given && o.proj_plan == engine::kernels::ProjPlan::kPacked &&
+        o.proj_shape != engine::kernels::ProjShape::kUnroll8) {
+        // The grouped kernel is the only thing that can issue a packed plan — a segment list is a kernel
+        // argument (`engine/proj_group_kernels.h`), so `--proj-plan packed` on the shipped kernel would
+        // either be ignored or would need a second packed form of a kernel this route exists to replace.
+        // Either way the log would echo a plan that did not run and price the split form twice, which is
+        // the misreport every other refusal above exists to prevent. Keyed on `_given`: the default plan is
+        // `split`, so a run that never mentioned either flag cannot be refused by this.
+        throw std::runtime_error("--proj-plan packed groups a layer's input projections into ONE launch,"
+                                 " and that grouping is a feature of the grouped kernel selected by"
+                                 " --proj-shape unroll8; --proj-shape " +
+                                 std::string(engine::kernels::proj_shape_name(o.proj_shape)) +
+                                 " submits one launch per projection whatever --proj-plan says. Use"
+                                 " --proj-shape unroll8 with it, or --proj-plan split (the default)");
     }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
@@ -1253,6 +1297,23 @@ void print_usage(FILE* out) {
                  " C=32 is inside that budget but unbuilt — the kernel is instantiated at one C, and a"
                  " second instantiation of a form already 0.3 %% inside a stage line is not added"
                  " unasked. Larger is unbudgeted: 16/32/64 are the sizes the CPU judge sweeps"
+                 "  --proj-plan split|packed  how a ONE-ROW body GROUPS its projection launches (route"
+                 " D1). `split` (the default) is §07's bill: one launch per projection, 114 per token."
+                 " `packed` folds each layer's input projections into ONE launch — they read the same row"
+                 " of `norm_f32` and each writes its own tile, so no weight is copied — for 48 per token"
+                 " (`prototype/proj_gemv/results.md` §D1-W4: 2.4942 vs 2.8244 ms at identical geometry)."
+                 " Requires `--proj-shape unroll8`; the pair is refused rather than echoed. A wider body"
+                 " is untouched by it: a wave's projections are already one launch per projection\n"
+                 "  --proj-shape shipped|unroll8  which kernel and block geometry a one-row projection"
+                 " launch uses. `shipped` (the default) is `proj_gemv_tokens<IN,1,false>` at rows/block 32,"
+                 " i.e. HEAD's machine code. `unroll8` is `engine/proj_group_kernels.h` at rows/block 8 and"
+                 " 1024 threads with a compile-time word walk (§D1-W4's winning arm, 2.4693 vs 3.2692 ms in"
+                 " the same window), bit-identical to the shipped form because the word order, the ladder"
+                 " and the rounding are unchanged. If the device or the width cannot offer it, the run falls"
+                 " back to `shipped` and prints `PROJSHAPE-FALLBACK` instead of pricing one kernel twice\n"
+                 "  --dump-proj-plan  print the projection plan one row-priced body would submit (PROJPLAN"
+                 " plus one PROJJOB line per tensor) and exit WITHOUT loading the model or touching the GPU,"
+                 " so a geometry claim can be checked while another agent holds the device lock\n"
                  "  --time-waves After the run, replay its PROMPT wave from a fresh state at two"
                  " submission granularities — the production shape, queued with one wait at the logits"
                  " (burst), and one wait at every family boundary (stage) — and attribute the serialized"
@@ -1556,6 +1617,11 @@ PassResult stage_pass(const Options& o, const engine::WeightStore& store, engine
 
     std::unique_ptr<Clock> clock;
     if (mode != Mode::kBurst) clock = std::make_unique<Clock>(mode);
+    // Route D1: a packed step submits fewer projections than §07 bills, and the clock has no wave shape to
+    // derive that from, so the driver states it. Leaving it unset would make `plan_match=0` the signature of
+    // a legal run, and an instrument that reads broken on a configuration it should merely describe is an
+    // instrument nobody trusts on the configuration that matters.
+    if (clock) clock->set_plan_proj(engine::proj_launches_per_body(o.proj_plan));
     engine::stageclock::arm(clock.get());
     for (const StepRec& want : ref) {
         if (clock) clock->begin_step();
@@ -1715,6 +1781,12 @@ WavePassResult wave_pass(const Options& o, const engine::WeightStore& store, eng
         // the run asked for and nothing else. Same question the `GEMM` banner asks above.
         shape.gemm_library =
             engine::kernels::wave_gemm_is_library(o.wave_gemm, engine::kMaxWaveRows);
+        // Whether one-row bodies grouped their input projections (route D1). As the run ASKED for it, like
+        // the two rows above: `wave_plan_bill` applies it only to the bodies `submit_wave_body` would pack
+        // (derived from `tokens`/`bodies`/`wave_rows`), so a 512-row wave bills §07's count whatever this
+        // says and only a `--wave-rows 1` pass moves — which is the same no-wide-bit-moves property the
+        // launcher enforces, witnessed rather than asserted.
+        shape.proj_packed = (o.proj_plan == engine::kernels::ProjPlan::kPacked);
         std::printf("%s\n", clock->describe_wave(shape).c_str());
     }
     return out;
@@ -1778,6 +1850,46 @@ void time_stages_report(const Options& o, const engine::WeightStore& store, engi
     }
 }
 
+// ---- route D1: the projection-plan echo -------------------------------------------------------------
+//
+// One line, formatted once. A normal run prints it next to `LAUNCH` (which stays §07's SPLIT bill,
+// because `gate.py` section (d) re-derives that table in Python and would stop being an independent check
+// if the same function answered for a flag); `--dump-proj-plan` prints it as the header of a per-launch
+// dump and leaves. Every field comes from the flags or from the launcher's own geometry constants, so a
+// printed rows/block cannot disagree with a launched one, and neither can be typed into a log by hand.
+std::string proj_plan_line(const Options& o) {
+    char buf[256];
+    std::snprintf(buf, sizeof buf,
+                  "PROJPLAN plan=%s shape=%s launches_per_step=%d rpb=%d threads=%d warp=%d segs_max=%d",
+                  engine::kernels::proj_plan_name(o.proj_plan),
+                  engine::kernels::proj_shape_name(o.proj_shape),
+                  engine::proj_launches_per_body(o.proj_plan),
+                  engine::kernels::proj_shape_rows_per_block(o.proj_shape),
+                  engine::kernels::proj_shape_threads(o.proj_shape),
+                  engine::kernels::proj_warp_width(),
+                  (int)engine::kernels::kProjMaxSegs);
+    return std::string(buf);
+}
+
+// The device-free plan dump: one line per projection a row-priced body submits, with the group it belongs
+// to. Reads the same `proj_plan_jobs` the stage clock bills itself against, so "48 launches" is a counted
+// statement about a list, not a number a reader has to trust.
+void print_proj_plan_dump(const Options& o) {
+    std::printf("%s\n", proj_plan_line(o).c_str());
+    const std::vector<engine::ProjPlanJob> jobs = engine::proj_plan_jobs(o.proj_plan);
+    int launches = 0;
+    int seq = 0;
+    for (const engine::ProjPlanJob& j : jobs) {
+        if (j.starts_launch) ++launches;
+        std::printf("PROJJOB i=%d layer=%d kind=%s group=%d seg=%d/%d launch=%d rows=%d in=%d"
+                    " dest=%s weight=%s library_eligible=%d\n",
+                    ++seq, j.layer, j.kind, j.group, j.seg, j.segs, j.starts_launch ? 1 : 0,
+                    j.rows, j.in, j.dest, j.weight.c_str(), j.library_eligible ? 1 : 0);
+    }
+    std::printf("PROJPLAN summary tensors=%zu launches_per_step=%d\n", jobs.size(), launches);
+    std::fflush(stdout);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1791,6 +1903,13 @@ int main(int argc, char** argv) {
     }
     if (o.help) {
         print_usage(stdout);
+        return 0;
+    }
+    if (o.dump_proj_plan) {
+        // Before the store is loaded, so before any `hipMalloc`, any upload and any kernel: the plan is
+        // §00 structure plus the flags, and that is the whole of what it needs. This is the mode that
+        // lets a geometry claim be checked while someone else holds the GPU lock.
+        print_proj_plan_dump(o);
         return 0;
     }
 
@@ -1848,6 +1967,12 @@ int main(int argc, char** argv) {
         // Printed in every mode, including --sizes-only: it is a statement about the code, not about
         // the run, and `gate.py` asserts it even when the run part is skipped.
         std::printf("LAUNCH %s\n", engine::planned_launch_counts().describe().c_str());
+        // Route D1's own plan line, printed beside `LAUNCH` for the reason `LAUNCH` is printed at all: it
+        // is a statement about the code and the flags, not about the run, so it appears in every mode and
+        // in a `--time-stages` log it is the CLAIM the `STAGE … family=proj launches_per_step=` line is
+        // then checked against. `LAUNCH` deliberately does NOT fold this in: section (d) is §07's split
+        // bill policed from Python, and one function answering for a flag would make that check vacuous.
+        std::printf("%s\n", proj_plan_line(o).c_str());
         // D-11's provenance half. The wave-row ceiling and the hipBLAS version are the two numbers that
         // decide what a pinned corpus means once more than one GEMM can produce it: `kMaxWaveRows`
         // because the row-count rule makes it the last width that is still the hand GEMV, hipBLAS's
@@ -1859,7 +1984,7 @@ int main(int argc, char** argv) {
                     " attn_touch=%d attn_fattn=%d attn_fattn_roll=%s attn_fattn_qstage=%s"
                     " attn_fattn_pvf16=%s attn_fattn_wide=%s gdn_scan=%s"
                     " gdn_chunk=%d gdn_spell=%s gdn_loop=%d"
-                    " gdn_norm=%s gdn_geom=%s\n",
+                    " gdn_norm=%s gdn_geom=%s proj_plan=%s proj_shape=%s\n",
                     engine::kMaxWaveRows, o.wave_rows,
                     engine::kernels::wave_gemm_name(o.wave_gemm),
                     engine::kernels::gemm_route_version().c_str(), o.attn_tile,
@@ -1942,7 +2067,16 @@ int main(int argc, char** argv) {
                         ? "inert-under-collapse"
                         : (o.gdn_loop <= 1
                                ? "na-loop1-per-token-bodies"
-                               : engine::kernels::gdn_geom_name(o.gdn_geom)));
+                               : engine::kernels::gdn_geom_name(o.gdn_geom)),
+                    // Route D1's two levers, echoed like every knob above: both are claimed
+                    // BIT-IDENTICAL, so a log that cannot say which projection plan produced its `proj`
+                    // family row cannot witness the byte-compare in either direction — and, the reason this
+                    // repository has learned the lesson three times, a binary that ignored the flag would
+                    // reproduce the shipped bits exactly, look green, and be priced as the win. The counted
+                    // counterpart is `PROJPLAN launches_per_step=` and the `STAGE`/`LAUNCHSTAT` lines; this
+                    // field is the claim, those are the receipt.
+                    engine::kernels::proj_plan_name(o.proj_plan),
+                    engine::kernels::proj_shape_name(o.proj_shape));
         if (o.sizes_only) {
             std::printf("RESULT mode=sizes-only tensors=%zu check_weights=PASS\n", stats.n_loaded);
             std::fflush(stdout);
@@ -1967,6 +2101,8 @@ int main(int argc, char** argv) {
         sc.gdn_loop = o.gdn_loop;
         sc.gdn_norm = o.gdn_norm;
         sc.gdn_geom = o.gdn_geom;
+        sc.proj_plan = o.proj_plan;
+        sc.proj_shape = o.proj_shape;
         if (engine::kernels::wave_gemm_is_library(o.wave_gemm, engine::kMaxWaveRows)) {
             // Pin filter first: it decides what `gemm_route_plan` below fetches and what the version
             // line counts, so setting it after the plan would print one route and run another.
@@ -2215,6 +2351,16 @@ int main(int argc, char** argv) {
         // and not another output comparison is the proof that P4's batched kernels are the ones
         // running.
         std::printf("%s\n", engine::launchstats::describe_run().c_str());
+        // Route D1's other witness, and the one that cannot be satisfied by the flags alone: a shape the
+        // device or the width could not offer was COUNTED at the call site that fell back. Printed only when
+        // non-zero, so silence means "the A/B side ran the shape it asked for" rather than "nobody looked".
+        if (sc.proj_fallbacks > 0) {
+            std::printf("PROJSHAPE-FALLBACK launches=%lld asked=%s offered=%s warp=%d note=these"
+                        " launches took the shipped kernel, so this run is not one clean A/B side\n",
+                        (long long)sc.proj_fallbacks, engine::kernels::proj_shape_name(o.proj_shape),
+                        engine::kernels::proj_shape_name(engine::kernels::ProjShape::kShipped),
+                        engine::kernels::proj_warp_width());
+        }
 
         // The measurement reports below mutate `st` (every pass resets and replays), so two `RESULT` fields
         // are snapshotted here rather than read off the state afterwards: `prefix_len` is what the RUN's

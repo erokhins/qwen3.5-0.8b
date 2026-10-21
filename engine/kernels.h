@@ -190,6 +190,97 @@ void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int 
 // per body, the same one-site-per-projection bill §06.2's "one GEMM per projection" already prices.
 void proj_gemm(const void* weight, const void* x, uint16_t* out, int rows, int in, int tokens);
 
+// ---- the decode one-row projection route (route D1, `prototype/proj_gemv/results.md` §D1-W4).
+//
+// Two independent levers, both measured in one clock-controlled prototype window against THIS shipped
+// kernel, both bit-identical to it, and both confined to a body of ONE row (a wider body is a prefill
+// wave and takes `proj_gemv`'s token-tiled form or the library, untouched):
+//
+//   SHAPE    the word loop and block geometry of the winning arm: compile-time trip count with
+//            `#pragma unroll 4`, rows/block 8 at 1024 threads. −24.5 % of the family.
+//   PLAN     one launch per layer group instead of one per tensor: 48 launches per token instead of
+//            the 114 §07 bills, at the winning shape. −11.7 % more, at identical geometry.
+//
+// Both live behind flags that default to the shipped behaviour, because the prize is a prototype burst
+// number and the in-situ A/B (the `proj` family row of a real decode step) is what decides whether the
+// defaults move — the same order every other lever in this file was shipped in.
+
+// How the per-token projection launches are GROUPED. A group is one launch over several weight tensors.
+enum class ProjPlan {
+    // §07's bill: one launch per projection — 5 per GDN layer (qkv, z, b, a, out_proj) and 4 per
+    // attention layer (q, k, v, o_proj), 114 per token. What ships today, and what every gate log taken
+    // before this knob exists was measured on.
+    kSplit,
+    // One launch for a layer's INPUT projections (they read the same row of `norm_f32` and each writes
+    // its own row-family destination, so they need no weight copy — see `ProjSeg`) plus one for its
+    // output projection: 2 per layer, 48 per token.
+    kPacked,
+};
+const char* proj_plan_name(ProjPlan plan);
+// "split" / "packed". Throws on anything else: this names which side of an A/B a run is, and a typo that
+// silently became the default would price the default twice and report the second price as the plan's win.
+ProjPlan parse_proj_plan(const std::string& name);
+
+// Which kernel and block geometry a one-row projection launch uses.
+enum class ProjShape {
+    // `proj_gemv_tokens<IN, 1, false>` at rows/block 32, i.e. HEAD's machine code, unchanged.
+    kShipped,
+    // `engine/proj_group_kernels.h`'s grouped kernel, even when it carries ONE segment: unrolled word
+    // loop, rows/block 8 at 1024 threads. Bit-identical to `kShipped` by the same argument the
+    // prototype's gate accepted for its `v1-unroll` (same weight words, same order, same ladder, one
+    // rounding), which is why this lever owes a byte-compare and not a band.
+    kUnroll8,
+};
+const char* proj_shape_name(ProjShape shape);
+ProjShape parse_proj_shape(const std::string& name);
+
+// One tensor inside a grouped launch. `out` addresses ROW 0 of a row-family tile, which is legal for
+// exactly one reason: this route exists for a body of one row (`decode_step.cpp` gates it on `n == 1`),
+// so a `[wave_rows, rows]` tile's first row is `rows` contiguous elements starting at `out` and no
+// output stride has to be carried. `start` is filled by the launcher as a running sum, never by a caller.
+struct ProjSeg {
+    const void* weight;   // device, [rows, in] BF16 as stored (§01: y = x · Wᵀ)
+    uint16_t* out;        // device, `rows` BF16
+    int rows;
+    int start;
+};
+
+// The kernel argument is passed by value, so it has a fixed size. Four is what a layer needs: the widest
+// input group is a GDN layer's {qkv, z, b, a}; an attention layer's is {q, k, v}; an output projection is
+// one segment. A fifth would be a plan the engine does not have, and the launcher refuses rather than
+// truncating.
+constexpr int kProjMaxSegs = 4;
+struct ProjSegs {
+    ProjSeg s[kProjMaxSegs];
+    int n;
+    int total;            // sum of rows: the row-index space of the launch
+};
+
+// ONE launch over `nsegs` tensors, all of width `in`, all reading the row `x` points at. Refuses (throws)
+// on a segment list this route cannot express — empty, over `kProjMaxSegs`, a non-positive row count, a
+// width the kernel is not instantiated for — because a silently skipped projection is a wrong token, and
+// `proj_gemv`'s own silent no-op on an unknown width is paid for by `check_weights` running first; this
+// entry point has no such blanket, since a caller assembles a list here rather than naming one tensor.
+// Counts ONE `launchstats::proj()` submission, so `--proj-plan packed` is visible on the `LAUNCHSTAT`
+// line and not only in the flag that caused it.
+void proj_rows(const ProjSeg* segs, int nsegs, const float* x, int in);
+
+// Can this shape actually run on this device at width `in`? `kShipped` always can. `kUnroll8`'s geometry
+// is stated in lanes-per-row terms and was measured on a wave32 device, so a wave64 target gets the
+// shipped shape; the caller COUNTS such a refusal and prints it (`decode_step.cpp`, `PROJSHAPE-FALLBACK`),
+// because a silently inert A/B side is the failure this file's flags exist to avoid.
+bool proj_shape_available(ProjShape want, int in);
+
+// The geometry `proj_rows` will launch with, for the echo that has to agree with the launch
+// (`--dump-proj-plan`, `PROJPLAN`). One source for both, so a printed rows/block cannot drift from a
+// launched one — the trap AGENTS.md records for a geometry fact that lives in two places.
+int proj_shape_rows_per_block(ProjShape shape);
+int proj_shape_threads(ProjShape shape);
+// The device's warp width as the launcher queried it (the same query `kRowsPerBlock * warp` is built
+// from). The echo prints it next to the geometry, so `unroll8` on a wave64 box reads as the fallback it
+// is instead of as a shape that ran.
+int proj_warp_width();
+
 // ---- §03.3: gate+up+SwiGLU, then down (prototype/mlp_gemv). Both take the input widened to
 // F32; there is no BF16-staged form of these two kernels, so the caller casts (see the launch
 // count in results.md — this is 48 casts/token, a named follow-up).

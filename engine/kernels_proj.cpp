@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "engine/launch_stats.h"
+#include "engine/proj_group_kernels.h"
 #include "prototype/proj_gemv/proj_gemv_kernels.h"
 
 namespace engine::kernels {
@@ -62,6 +63,22 @@ void launch(const void* weight, const float* x, uint16_t* out, int rows, int tok
     // `engine/launch_stats.h` exists to catch is a wave that only ever took the one-token branch,
     // and that is invisible unless the one-token branch reports itself too.
     launchstats::proj().record(tokens);
+}
+
+// The winning arm's geometry from `prototype/proj_gemv/results.md` §D1-W4: rows/block 8 at 1024 threads,
+// i.e. threads/block decoupled from rows/block (the shipped form welds them: `kRowsPerBlock * warp`). At
+// warp 32 that leaves `step = 1024/32 = 32` row slots per trip against `rpb = 8`, so 24 of every block's
+// 32 wavefronts fall out of the row loop — which sounds wrong and is exactly what was timed (2.4693 ms
+// against 3.2692 ms for the shipped shape, same plan, same window, two passes agreeing to 0.1 %).
+// Reproducing the measured shape is the admission; "obviously idle wavefronts are waste" is a guess.
+constexpr int kProjGroupRowsPerBlock = 8;
+constexpr int kProjGroupThreads = 1024;
+
+template <int IN>
+void launch_group(const engine::kernels::ProjSegs& segs, const float* x) {
+    const dim3 grid((segs.total + kProjGroupRowsPerBlock - 1) / kProjGroupRowsPerBlock);
+    engine::projgroup::proj_group_rows<IN><<<grid, kProjGroupThreads>>>(segs, x,
+                                                                        kProjGroupRowsPerBlock);
 }
 }  // namespace
 
@@ -145,6 +162,104 @@ void proj_gemm(const void* weight, const void* x, uint16_t* out, int rows, int i
     }
     gemm_bf16(weight, x, out, tokens, rows, in);
     launchstats::proj().record(tokens);
+}
+
+// ---- route D1: the grouped one-row launch (engine/proj_group_kernels.h) ---------------------------
+//
+// Everything the caller could get wrong is refused here rather than assumed, because a grouped launch has
+// no `check_weights` blanket behind it: a wrong `in` would read another tensor's bytes and produce a
+// plausible token, which is the failure mode this repository keeps being bitten by.
+void proj_rows(const ProjSeg* segs, int nsegs, const float* x, int in) {
+    if (nsegs < 1 || nsegs > kProjMaxSegs) {
+        throw std::runtime_error("proj_rows: nsegs=" + std::to_string(nsegs) +
+                                 "; this launch carries 1.." + std::to_string(kProjMaxSegs) +
+                                 " segments (a layer's input group is 3 or 4, an output projection is 1)");
+    }
+    if (in != 1024 && in != 2048) {
+        throw std::runtime_error("proj_rows: in=" + std::to_string(in) +
+                                 "; the grouped kernel is instantiated at 1024 and 2048 only, and no"
+                                  " width in this checkpoint is anything else");
+    }
+    if (x == nullptr) throw std::runtime_error("proj_rows: x is null");
+
+    ProjSegs arg{};
+    arg.n = nsegs;
+    for (int i = 0; i < nsegs; ++i) {
+        if (segs[i].rows <= 0) {
+            throw std::runtime_error("proj_rows: segment " + std::to_string(i) + " has rows=" +
+                                     std::to_string(segs[i].rows));
+        }
+        if (segs[i].weight == nullptr || segs[i].out == nullptr) {
+            throw std::runtime_error("proj_rows: segment " + std::to_string(i) +
+                                     " has a null weight or output pointer");
+        }
+        arg.s[i] = segs[i];
+        arg.s[i].start = arg.total;      // the launcher owns the row layout, never the caller
+        arg.total += segs[i].rows;
+    }
+    // Every width in this checkpoint is a whole number of 16-byte words per row, which is what the
+    // kernel's `uint4` walk assumes; the assert is on the template argument, not on a runtime value.
+    static_assert((1024 / 8) % 32 == 0 && (2048 / 8) % 32 == 0,
+                  "a row must be at least one uint4 word per lane at warp 32");
+    if (in == 1024) {
+        launch_group<1024>(arg, x);
+    } else {
+        launch_group<2048>(arg, x);
+    }
+    // One submission, width 1: `launchstats::proj()` counts projection SITES at the body width, and a
+    // grouped launch is one site covering several tensors for one row. This is the counter the
+    // `--proj-plan` canary reads (114 with the flag off, 48 with it on).
+    launchstats::proj().record(1);
+}
+
+bool proj_shape_available(ProjShape want, int in) {
+    if (want == ProjShape::kShipped) return true;
+    // Two facts, both about the shape as MEASURED rather than as imaginable: the geometry is stated in
+    // lanes-per-row (`step = threads/warp`, which only separates from `rpb` the way the sweep's winning
+    // point does at warp 32 — the width it was swept at, and the width the prototype's variants refuse
+    // any other target for), and the kernel is instantiated at the checkpoint's two widths and no other.
+    return (in == 1024 || in == 2048) && warp_width() == 32;
+}
+
+int proj_shape_rows_per_block(ProjShape shape) {
+    return shape == ProjShape::kUnroll8 ? kProjGroupRowsPerBlock : kRowsPerBlock;
+}
+
+int proj_shape_threads(ProjShape shape) {
+    return shape == ProjShape::kUnroll8 ? kProjGroupThreads : kRowsPerBlock * warp_width();
+}
+
+int proj_warp_width() { return warp_width(); }
+
+const char* proj_plan_name(ProjPlan plan) {
+    switch (plan) {
+        case ProjPlan::kSplit: return "split";
+        case ProjPlan::kPacked: return "packed";
+    }
+    return "?";
+}
+
+ProjPlan parse_proj_plan(const std::string& name) {
+    if (name == "split") return ProjPlan::kSplit;
+    if (name == "packed") return ProjPlan::kPacked;
+    throw std::runtime_error("--proj-plan takes split (one launch per projection, §07's 114) or"
+                             " packed (one per layer group, 48); got '" + name + "'");
+}
+
+const char* proj_shape_name(ProjShape shape) {
+    switch (shape) {
+        case ProjShape::kShipped: return "shipped";
+        case ProjShape::kUnroll8: return "unroll8";
+    }
+    return "?";
+}
+
+ProjShape parse_proj_shape(const std::string& name) {
+    if (name == "shipped") return ProjShape::kShipped;
+    if (name == "unroll8") return ProjShape::kUnroll8;
+    throw std::runtime_error("--proj-shape takes shipped (HEAD's kernel at rows/block 32) or"
+                             " unroll8 (the grouped kernel, unrolled word loop, rows/block 8 at 1024"
+                             " threads); got '" + name + "'");
 }
 
 }  // namespace engine::kernels
