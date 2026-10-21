@@ -257,8 +257,8 @@ inside `matmul_ms`.
 | `q_proj` | 4096 | 1024 | 512 | 12 | `proj` | `decode_step.cpp:583` | 0.1551 | 1.861 |
 | `k_proj`, `v_proj` (two weights, one shape) | 512 | 1024 | 512 | 24 | `proj` | `decode_step.cpp:586,589` | 0.0328 | 0.787 |
 | `o_proj` (attn) / `out_proj` (GDN) — same shape, one site | 1024 | 2048 | 512 | 48 | `proj` | `decode_step.cpp:810` | 0.0801 | 3.845 |
-| `in_proj_qkv` | 6144 | 1024 | 512 | 36 | `proj` | `decode_step.cpp:596` | 0.1989 | 7.160 |
-| `in_proj_z` | 2048 | 1024 | 512 | 36 | `proj` | `decode_step.cpp:599` | 0.0930 | 3.348 |
+| `in_proj_qkv` | 6144 | 1024 | 512 | 36 | `proj` | `decode_step.cpp:643` | 0.1989 | 7.160 |
+| `in_proj_z` | 2048 | 1024 | 512 | 36 | `proj` | `decode_step.cpp:644` | 0.0930 | 3.348 |
 | `in_proj_b` | 16 | 1024 | 512 | 36 | `proj` **(hand)** | `decode_step.cpp:602` | — | below |
 | `in_proj_a` | 16 | 1024 | 512 | 36 | `proj` **(hand)** | `decode_step.cpp:605` | — | below |
 | `gate_proj`, `up_proj` (two weights, one shape) | 3584 | 1024 | 512 | 96 | `mlp_gateup` | `kernels_mlp.cpp:262-263` | 0.1462 | 14.035 |

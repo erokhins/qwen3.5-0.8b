@@ -88,8 +88,8 @@ row. Leaves that share a shape are one row here, because the tool times a shape 
 | `q_proj` | proj | 4096 | 1024 | 6 | `engine/decode_step.cpp:583` (`kQprojRows`, `kHidden`) |
 | `k_proj` + `v_proj` | proj | 512 | 1024 | 12 | `engine/decode_step.cpp:586,589` (`kKvProjRows`) |
 | `o_proj` + `out_proj` | proj | 1024 | 2048 | 24 | `engine/decode_step.cpp:810` (`kHidden`, `kQwidth`/`kValueDim`) |
-| `in_proj_qkv` | proj | 6144 | 1024 | 18 | `engine/decode_step.cpp:596` (`kQkvRows`) |
-| `in_proj_z` | proj | 2048 | 1024 | 18 | `engine/decode_step.cpp:599` (`kValueDim`) |
+| `in_proj_qkv` | proj | 6144 | 1024 | 18 | `engine/decode_step.cpp:643` (`kQkvRows`) |
+| `in_proj_z` | proj | 2048 | 1024 | 18 | `engine/decode_step.cpp:644` (`kValueDim`) |
 | `gate_proj` + `up_proj` | mlp_gateup | 3584 | 1024 | 48 | `engine/kernels_mlp.cpp:262,263` ← `decode_step.cpp:748` |
 | `down_proj` | mlp_down | 1024 | 3584 | 24 | `engine/kernels_mlp.cpp:276` ← `decode_step.cpp:762` |
 | | | | | **150** | matches the "150-call 24-layer wave mix" priced in `devices/strix-halo-compute.md` |
