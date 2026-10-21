@@ -52,3 +52,12 @@ Worker `2ada39b1-22c8-430f-9dc0-d9e2cced4201`, CPU-side: derive the partial-memo
 raise, implement `kAttnMaxSplit` + `attn_part_floats()` in one coupling, write `tools/longctx_check.sh` with
 the five L2 checks (finish / finite / `plan_match=1` / no silent clamp / **prefix consistency at row N**),
 report at `prototype/attn_wmma/evidence/longctx.md`. Device pass is the main agent's, after the worker lands.
+
+---
+
+**Archived 2026-10-21** from `progress/queue2-2026-10-19.md`, where it sat at the top of `progress/` instead
+of in its dated folder, and under a name that collided with the document it answers. This file is the
+**outcomes** half of the 2026-10-19 second batch; the **plan** half — the decisions R/L/C as they were raised
+— is `progress/2026-10-19/queue2-2026-10-19.md` (its own sibling, unchanged). Rule 3 normally keeps a moved
+filename byte-identical; here the collision is exactly the case rule 3 carves time-or-subject out of the
+filename for, and no citation named the old path, so the rename costs nothing.
