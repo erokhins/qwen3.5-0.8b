@@ -333,7 +333,7 @@ struct Options {
     // setting that is not on the command line is otherwise invisible in a log, which is how a silently
     // inert side is born. Only "0" and "1" are accepted, and anything else is a hard refusal rather than
     // a default, because an unset-by-typo variable reads exactly like an unset-by-choice one.
-    bool cast_fold = false;
+    bool cast_fold = true;
     // Route S1's follow-on: fold the `copy` family's 19 submissions into the kernels that already touch
     // the same bytes — the embedding-row D2D into the layer-0 glue launch that reads the tied table row,
     // and each GDN layer's conv-window roll-back into the conv that produces the rolled window.
@@ -349,7 +349,7 @@ struct Options {
     //
     // and it is echoed on its own `COPYFOLD` line for the same reason `CASTFOLD` is: a setting that is
     // not on the command line is otherwise invisible in a log, which is how a silently inert side is born.
-    bool copy_fold = false;
+    bool copy_fold = true;
     // (no weight load, no HIP call), so geometry can be checked while another agent holds the GPU lock —
     // the same service `prototype/proj_gemv --dump-plan` provides for its own rig.
     bool dump_proj_plan = false;
@@ -392,7 +392,7 @@ Options parse_args(int argc, char** argv) {
             o.cast_fold = false;
         } else {
             throw std::runtime_error("QWEN_CAST_FOLD takes 0 or 1, got '" + v +
-                                     "'; 0 is the shipped behaviour (every widening submitted by"
+                                     "'; 0 restores the pre-2026-10-21 behaviour (every widening submitted by"
                                      " kernels_cast.cpp) and 1 folds it into the consuming kernel"
                                      " (see engine/mlp_xbf16_kernels.h)");
         }
@@ -405,7 +405,7 @@ Options parse_args(int argc, char** argv) {
             o.copy_fold = false;
         } else {
             throw std::runtime_error("QWEN_COPY_FOLD takes 0 or 1, got '" + v +
-                                     "'; 0 is the shipped behaviour (the embedding row and each conv"
+                                     "'; 0 restores the pre-2026-10-21 behaviour (the embedding row and each conv"
                                      " window roll are submitted as D2D copies) and 1 folds them into"
                                      " the kernels that read what they write"
                                      " (see engine/gdn_conv_roll_kernels.h)");
