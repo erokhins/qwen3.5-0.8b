@@ -134,3 +134,7 @@ editing nothing and re-reading the script's verdict line, and it belongs to the 
 Step 6 has a decision in it that is not yours or mine: if M = 2's bit-identity admission cannot survive the
 dot2, that is a gate-policy question for the reviewer, and per the standing rule it is reported, not routed
 around.
+
+---
+
+**Archived 2026-10-21** from `prototype/attn_score_dot2/HANDOFF.md`, where it sat beside the rig it briefed. The device pass it hands over is done and its verdict is in that op's `results.md` and in the ledger, so `progress/README.md` rule 1 puts it here. The filename now carries the op name because a dated folder holds handoffs from several ops at once (rule 3's collision clause); citations naming the old path were re-pointed in the same commit.

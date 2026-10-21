@@ -292,3 +292,7 @@ whether the 512-byte-stride LDS coefficient read (64 distinct banks × 16 B) act
   the compiler's own clamp (`delta -> 0`, i.e. read your own lane) and keeps the range-select, which
   is why MODE 1 saves less than the raw guard count suggests. Written up at the top of
   `gdn_rec_isa_kernels.h`.
+
+---
+
+**Archived 2026-10-21** from `prototype/gdn_rec_isa/HANDOFF.md`, where it sat beside the rig it briefed. The device pass it hands over is done and its verdict is in that op's `results.md` and in the ledger, so `progress/README.md` rule 1 puts it here. The filename now carries the op name because a dated folder holds handoffs from several ops at once (rule 3's collision clause); citations naming the old path were re-pointed in the same commit.

@@ -475,3 +475,7 @@ the answer is (b).
    (`version=10.4.1`, `hipblaslt`). Harmless today because the provenance check compares hipBLAS's
    version against itself, but if `lt` ever ships as the default that file needs the other library's
    version beside it, or the provenance witness is describing a library the run did not use.
+
+---
+
+**Archived 2026-10-21** from `prototype/gemm_algo_sweep/HANDOFF.md`, where it sat beside the rig it briefed. The device pass it hands over is done and its verdict is in that op's `results.md` and in the ledger, so `progress/README.md` rule 1 puts it here. The filename now carries the op name because a dated folder holds handoffs from several ops at once (rule 3's collision clause); citations naming the old path were re-pointed in the same commit.

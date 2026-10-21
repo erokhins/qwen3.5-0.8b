@@ -108,3 +108,7 @@ The lever is bit-identical, costs no numerics decision, costs no occupancy (VGPR
    (m2 does, at 3 ops).
 3. Then, as a separate decision: port the two spellings to `attn_m2_kernels.h` and re-run
    `prototype/attn_m2`'s own gates, which is where D19 says the arithmetic-bound residual lives.
+
+---
+
+**Archived 2026-10-21** from `prototype/attn_valu_slim/HANDOFF.md`, where it sat beside the rig it briefed. The device pass it hands over is done and its verdict is in that op's `results.md` and in the ledger, so `progress/README.md` rule 1 puts it here. The filename now carries the op name because a dated folder holds handoffs from several ops at once (rule 3's collision clause); citations naming the old path were re-pointed in the same commit.

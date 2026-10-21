@@ -26,7 +26,7 @@
 // rather than as a wrong-but-stable answer.
 //
 // Build:  prototype/attn_valu_slim/build.sh
-// Run:    see prototype/attn_valu_slim/HANDOFF.md (this binary does NOT self-lock; the caller holds
+// Run:    see progress/2026-10-16/attn_valu_slim-HANDOFF.md (this binary does NOT self-lock; the caller holds
 //         the lock, and releases before invoking any self-locking gate driver).
 #include <hip/hip_runtime.h>
 #include <hip/hip_bfloat16.h>

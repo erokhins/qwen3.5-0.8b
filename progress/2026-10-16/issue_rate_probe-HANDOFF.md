@@ -167,3 +167,7 @@ Every device-shaped command in §2 is marked as such and **no timing was taken b
 Run §0 (`--wmma-check`) and §1's `irp_wmma_4` row. Those two answer the question the tool was built
 for: whether the only matrix instruction on this part is worth writing a kernel for, and at what
 fraction of its 4-MAC roof a hand-written K-loop lands.
+
+---
+
+**Archived 2026-10-21** from `prototype/issue_rate_probe/HANDOFF.md`, where it sat beside the rig it briefed. The device pass it hands over is done and its verdict is in that op's `results.md` and in the ledger, so `progress/README.md` rule 1 puts it here. The filename now carries the op name because a dated folder holds handoffs from several ops at once (rule 3's collision clause); citations naming the old path were re-pointed in the same commit.

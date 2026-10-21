@@ -48,7 +48,7 @@
 // not what the silicon moved.
 //
 // Build:  prototype/attn_m2/build.sh
-// Run:    see prototype/attn_m2/HANDOFF.md (numbered, with the gpu_lock protocol; this binary does NOT
+// Run:    see progress/2026-10-16/attn_m2-HANDOFF.md (numbered, with the gpu_lock protocol; this binary does NOT
 //         self-lock, so the caller holds the lock).
 #include <hip/hip_runtime.h>
 #include <hip/hip_bfloat16.h>

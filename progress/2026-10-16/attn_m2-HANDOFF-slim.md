@@ -157,3 +157,7 @@ tools/gpu_lock.sh release attn-m2-slim
   already exists as `prototype/attn_valu_slim --slim 2|3`; the header note explains why a second copy of
   that table would be a mistake (the levers share one term and `dot` alone is not bit-identical — an `nd`-of-8
   child loop is not the same summation as `warp_sum` over 4).
+
+---
+
+**Archived 2026-10-21** from `prototype/attn_m2/HANDOFF-slim.md`, where it sat beside the rig it briefed. The device pass it hands over is done and its verdict is in that op's `results.md` and in the ledger, so `progress/README.md` rule 1 puts it here. The filename now carries the op name because a dated folder holds handoffs from several ops at once (rule 3's collision clause); citations naming the old path were re-pointed in the same commit.

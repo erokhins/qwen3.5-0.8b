@@ -133,7 +133,7 @@
  * gate failure is NOT caused by. `results.md` §6 carries their counts and what each rules out.
  *
  * Build:  prototype/gdn_rec_isa/build.sh
- * Run:    prototype/gdn_rec_isa/HANDOFF.md §3 — numbered, with the gpu_lock protocol. This binary does
+ * Run:    progress/2026-10-18/gdn_rec_isa-HANDOFF.md §3 — numbered, with the gpu_lock protocol. This binary does
  *         NOT acquire `tools/gpu_lock.sh`; the three self-locking drivers named in AGENTS.md are glue,
  *         proj_gemv and gdn_gated_norm, and a caller that held the lock and ran one of them deadlocks it.
  */

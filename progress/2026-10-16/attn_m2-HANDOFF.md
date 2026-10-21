@@ -201,3 +201,7 @@ written twice on purpose.
   union exceeds the staging, so staging is not a limit on M = 2.
 * The byte counters are still not admissible evidence (D9, ~100× calibration failure): the traffic claim
   stays bytes-demanded arithmetic plus the burst above, which is why `regime` prints arithmetic.
+
+---
+
+**Archived 2026-10-21** from `prototype/attn_m2/HANDOFF.md`, where it sat beside the rig it briefed. The device pass it hands over is done and its verdict is in that op's `results.md` and in the ledger, so `progress/README.md` rule 1 puts it here. The filename now carries the op name because a dated folder holds handoffs from several ops at once (rule 3's collision clause); citations naming the old path were re-pointed in the same commit.
