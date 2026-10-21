@@ -521,6 +521,14 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     // rather than be re-priced. `engine/mlp_xbf16_kernels.h` carries the argument; the paired
     // byte-compare is `prototype/cast_fold/ab_item1.sh`.
     const bool fold_cast = sc.cast_fold && (n == 1);
+    // Route S1's follow-on, same one-row rule for the same reason: both sites fold into a form that
+    // only exists for a one-row body. The embedding fold has no new kernel at all — it points the
+    // layer-0 glue launch at the table row the copy used to copy — but the conv fold needs
+    // `conv_roll_kernel`, whose in-place end condition is safe because a one-row tile gives one lane
+    // the same CONV_VEC columns on both sides of the roll. A wave's end condition belongs to ONE
+    // token-block of the grid (`last_token_only`) while every other block is still reading that
+    // window, so a wide body keeps the scratch and the copy.
+    const bool fold_copy = sc.copy_fold && (n == 1);
     // One hand GEMV of one projection, whichever shape the run asked for. `proj_shape_available` is asked
     // per call because what can refuse is the width and the device's warp, not the flag; a refusal is
     // COUNTED (`sc.proj_fallbacks`) so the run's own log reports the side that silently fell back — a
@@ -576,9 +584,17 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     // byte, and `kernels_embed.cpp` says why no bit can move.
     const uint16_t* table = (const uint16_t*)weights.at(kEmbedding).device;
     if (n == 1) {
-        stageclock::note(stageclock::kCopy);
-        ENGINE_CK(hipMemcpyAsync(sc.embed, table + (size_t)tokens[0] * kHidden,
-                                 kHidden * sizeof(uint16_t), hipMemcpyDeviceToDevice));
+        // The fold's whole edit is on WHOSE ROW `s` starts at. Shipped, the tied table's row is
+        // D2D-copied into `sc.embed` and `s` is `sc.embed`; folded, `s` IS the table row and nothing
+        // else ever reads or writes `sc.embed` in a one-row body — the ping-pong below writes only
+        // `s_a`/`s_b` (its own comment: "`sc.embed` is never a write target"), and `sc.embed`'s only
+        // other reader is the wave gather this branch does not run. Byte movement, not arithmetic, so
+        // the values are equal by identity rather than by argument.
+        if (!fold_copy) {
+            stageclock::note(stageclock::kCopy);
+            ENGINE_CK(hipMemcpyAsync(sc.embed, table + (size_t)tokens[0] * kHidden,
+                                     kHidden * sizeof(uint16_t), hipMemcpyDeviceToDevice));
+        }
     } else {
         // Slot `slot` of the staging ring (`decode_step.h` explains why it is pinned and why it is a
         // ring). Waiting on its event before writing it is what makes reuse safe rather than lucky; on a
@@ -605,7 +621,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     // `__restrict__ s` and `s_out` never alias. `sc.embed` is never a write target: after the first
     // call the ping-pong is entirely inside s_a/s_b. Each call now covers the WHOLE tile: one launch
     // per layer instead of one per layer per token, which is what `prototype/glue --batched` gates.
-    const uint16_t* s = sc.embed;
+    const uint16_t* s = (n == 1 && fold_copy) ? table + (size_t)tokens[0] * kHidden : sc.embed;
     uint16_t* nxt = sc.s_a;
     const auto add_norm = [&](const uint16_t* delta, const void* norm_w) {
         stageclock::note(stageclock::kGlue);
@@ -742,13 +758,24 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // them. Cheaper than double-buffering 1.27 MiB of state per request, which is the
             // alternative §08.2's "in-place ring update" wording invites; results.md carries it.
             stageclock::note(stageclock::kGdnConv);
-            kernels::gdn_conv(sc.g_raw, st.conv_window_layer(layer),
-                              sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel,
-                              sc.g_u, sc.conv_new, n);
-            stageclock::note(stageclock::kCopy);
-            ENGINE_CK(hipMemcpyAsync(st.conv_window_layer(layer), sc.conv_new,
-                                     (size_t)kConvWindow * kConvChannels * sizeof(float),
-                                     hipMemcpyDeviceToDevice));
+            if (fold_copy) {
+                // One launch, no scratch row and no roll-back: `conv_roll_kernel` reads the window and
+                // writes its own rolled replacement at the same columns the same lane read, which is
+                // the property `conv_kernel`'s end-condition comment already claims and which its
+                // `__restrict__` parameters could not be asked to keep. `sc.conv_new` is untouched and
+                // unneeded here — writing it and then not copying it would leave the window stale.
+                kernels::gdn_conv_roll(sc.g_raw, st.conv_window_layer(layer),
+                                       sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel,
+                                       sc.g_u);
+            } else {
+                kernels::gdn_conv(sc.g_raw, st.conv_window_layer(layer),
+                                  sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel,
+                                  sc.g_u, sc.conv_new, n);
+                stageclock::note(stageclock::kCopy);
+                ENGINE_CK(hipMemcpyAsync(st.conv_window_layer(layer), sc.conv_new,
+                                         (size_t)kConvWindow * kConvChannels * sizeof(float),
+                                         hipMemcpyDeviceToDevice));
+            }
             // §04.3, all n rows at once. `A_log` is one of the 36 tensors the checkpoint stores F32
             // (§01.6), so it goes to the kernel as-is; dt_bias came through the adapter.
             stageclock::note(stageclock::kGdnGates);
@@ -1216,7 +1243,7 @@ std::string LaunchCounts::describe() const {
     return os.str();
 }
 
-LaunchCounts planned_launch_counts(bool cast_fold) {
+LaunchCounts planned_launch_counts(bool cast_fold, bool copy_fold) {
     LaunchCounts c;
     c.glue = 1 + 2 * kNumLayers;
     // The SHIPPED plan's projection row, derived from the plan's own job list rather than typed: `packed`
@@ -1238,7 +1265,13 @@ LaunchCounts planned_launch_counts(bool cast_fold) {
     // site and refuses if a sixth site appears or one of these six is renamed, so the `4·G + 4·A + 1`
     // above and the fold's `= 0` here are both anchored to the same six call sites rather than to taste.
     c.cast = cast_fold ? 0 : 4 * kNumGdnLayers + 4 * kNumAttnLayers + 1;
-    c.other = 1 + kNumGdnLayers + 1;
+    // `+1`: the lm_head launch, the only one in this row that is not a `copy`. Route S1's follow-on
+    // empties the copies of a ONE-ROW body: the embedding-row D2D rides the layer-0 glue launch that
+    // reads the table row, and each GDN layer's window roll rides the conv that produces it, so the
+    // family submits none and `other` is lm_head alone. `c.other`'s `1 + kNumGdnLayers` half is the
+    // embedding row and the 18 rolls, and `prototype/glue_copy_fold/census_sites.py` is what ties
+    // those two numbers to the five call sites rather than to each other.
+    c.other = (copy_fold ? 0 : 1 + kNumGdnLayers) + 1;
     return c;
 }
 

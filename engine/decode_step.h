@@ -213,6 +213,20 @@ struct DecodeScratch {
     // prefill wave runs the kernels it always ran. `decode_run` sets this from `QWEN_CAST_FOLD` (see
     // `decode_run.cpp` for why an environment default rather than a command-line flag).
     bool cast_fold = false;
+    // Route S1's follow-on (`QWEN_COPY_FOLD=1`): whether a ONE-ROW body moved the two `copy`
+    // submissions of its decode step into the kernels that already touch the same bytes — the
+    // embedding-row D2D into the glue launch that reads it, and each GDN layer's conv-window roll-back
+    // into the conv that produces the rolled window (`engine/gdn_conv_roll_kernels.h`). Site by site,
+    // with the consumer each one rides: `prototype/glue_copy_fold/census_sites.py`.
+    //
+    // Like the fold above it this is a rule about the BODY's WIDTH — `submit_wave_body` re-asserts it
+    // with `n == 1` — and for the same arithmetic reason: a wave's embedding lookup is one gather over
+    // the whole tile, and a wave's conv hands its end condition to one token-block of a grid whose
+    // other blocks are still reading the window (`last_token_only`), so neither has a per-thread
+    // read/write coincidence to ride. false is HEAD's machine code; true is owed a byte-compare of the
+    // logits and the whole state table, not a band, because nothing is recomputed — the same values
+    // simply arrive at the address their reader will look at.
+    bool copy_fold = false;
     // The chunk size in tokens, echoed so a run states which chunk it claimed. Only 64 is accepted
     // (`kernels.h:kGdnChunkTokens`); the refusal text carries the measured reason.
     int gdn_chunk = kernels::kGdnChunkTokens;
@@ -469,12 +483,18 @@ void prepare_weight_adapters(const WeightStore& weights, DecodeScratch& sc);
 // moved with the flags would make that cross-check a tautology — the `--attn-tile` and `--proj-plan split`
 // trap of a gate judging a different plan than the engine ships. What the fold-in-force is a bill of is
 // the STAGE clock's plan, and only that clock asks: `stageclock::Clock::set_plan_cast_fold`.
+//
+// `copy_fold` is the same arrangement one family over: a ONE-ROW body with it on submits no `copy`
+// launch at all — no embedding-row D2D and no conv-window roll-back — so `other` drops from 20 to 1,
+// which is lm_head alone. Both spellings of that 20 live in this file's own `c.other` line and in
+// `prototype/glue_copy_fold/census_sites.py`, which re-derives it from the call texts and refuses if a
+// fifth submission site appears or one of the four existing ones is renamed.
 struct LaunchCounts {
     int glue = 0, proj = 0, gdn = 0, attn = 0, mlp = 0, cast = 0, other = 0;
     int total() const { return glue + proj + gdn + attn + mlp + cast + other; }
     std::string describe() const;
 };
-LaunchCounts planned_launch_counts(bool cast_fold = false);
+LaunchCounts planned_launch_counts(bool cast_fold = false, bool copy_fold = false);
 
 // ---- route D1: the projection plan, as data (so geometry can be checked without a GPU) -------------
 //

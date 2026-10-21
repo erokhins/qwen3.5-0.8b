@@ -334,7 +334,22 @@ struct Options {
     // inert side is born. Only "0" and "1" are accepted, and anything else is a hard refusal rather than
     // a default, because an unset-by-typo variable reads exactly like an unset-by-choice one.
     bool cast_fold = false;
-    // Print the projection plan one row-priced body would submit and leave, WITHOUT touching the device
+    // Route S1's follow-on: fold the `copy` family's 19 submissions into the kernels that already touch
+    // the same bytes — the embedding-row D2D into the layer-0 glue launch that reads the tied table row,
+    // and each GDN layer's conv-window roll-back into the conv that produces the rolled window.
+    // false = HEAD's behaviour and the default; `DecodeScratch::copy_fold` carries what each side
+    // submits and `prototype/glue_copy_fold/census_sites.py` says which five call sites the 68 are.
+    //
+    // Environment-gated for the same reason as `cast_fold` immediately above, and it inherits every part
+    // of that argument: `engine/gate.py` builds the engine argv itself and may not be edited to teach its
+    // own judge a new flag, while an environment default reaches the engine through the environment the
+    // gate already inherits. So the folded path is gated today:
+    //
+    //   QWEN_COPY_FOLD=1 .venv/bin/python engine/gate.py --fixture dec8
+    //
+    // and it is echoed on its own `COPYFOLD` line for the same reason `CASTFOLD` is: a setting that is
+    // not on the command line is otherwise invisible in a log, which is how a silently inert side is born.
+    bool copy_fold = false;
     // (no weight load, no HIP call), so geometry can be checked while another agent holds the GPU lock —
     // the same service `prototype/proj_gemv --dump-plan` provides for its own rig.
     bool dump_proj_plan = false;
@@ -380,6 +395,20 @@ Options parse_args(int argc, char** argv) {
                                      "'; 0 is the shipped behaviour (every widening submitted by"
                                      " kernels_cast.cpp) and 1 folds it into the consuming kernel"
                                      " (see engine/mlp_xbf16_kernels.h)");
+        }
+    }
+    if (const char* env = std::getenv("QWEN_COPY_FOLD"); env != nullptr && env[0] != '\0') {
+        const std::string v(env);
+        if (v == "1") {
+            o.copy_fold = true;
+        } else if (v == "0") {
+            o.copy_fold = false;
+        } else {
+            throw std::runtime_error("QWEN_COPY_FOLD takes 0 or 1, got '" + v +
+                                     "'; 0 is the shipped behaviour (the embedding row and each conv"
+                                     " window roll are submitted as D2D copies) and 1 folds them into"
+                                     " the kernels that read what they write"
+                                     " (see engine/gdn_conv_roll_kernels.h)");
         }
     }
     for (int i = 1; i < argc; ++i) {
@@ -1365,6 +1394,19 @@ void print_usage(FILE* out) {
                  " only the final-norm one. It is read from the environment so `engine/gate.py` can judge"
                  " the folded path by inheriting it, with no edit to the gate; the run echoes "
                  "`CASTFOLD on=... plan=... folded=...` beside `LAUNCH`\n"
+                 "  QWEN_COPY_FOLD=0|1  (environment, not a flag) route S1's follow-on: fold the `copy`"
+                 " family's 19 submissions into the kernels that already touch the same bytes. `0` (the"
+                 " default) is HEAD's behaviour: one D2D copy of the tied embedding row and one D2D"
+                 " roll-back of each GDN layer's conv window, 19 per token. `1` points the layer-0 glue"
+                 " launch at the table row the embedding copy used to copy, and runs"
+                 " `engine/gdn_conv_roll_kernels.h`, whose conv writes its rolled window in place at the"
+                 " columns its own lane just read. Both are data movement rather than arithmetic, so the"
+                 " admission is a byte-compare of logits AND the whole state table, not a band; a roll"
+                 " written to the wrong row would move every later token's conv and could not hide. A"
+                 " ONE-ROW body folds both sites; a wider body folds neither (its embedding lookup is one"
+                 " gather over the tile, and its conv end condition belongs to one token-block while the"
+                 " others are still reading the window). Read from the environment for the same reason as"
+                 " `QWEN_CAST_FOLD`, and echoed as `COPYFOLD on=... plan=... folded=...`\n"
                  "  --dump-proj-plan  print the projection plan one row-priced body would submit (PROJPLAN"
                  " plus one PROJJOB line per tensor) and exit WITHOUT loading the model or touching the GPU,"
                  " so a geometry claim can be checked while another agent holds the device lock\n"
@@ -1682,6 +1724,11 @@ PassResult stage_pass(const Options& o, const engine::WeightStore& store, engine
     // of this same fact, and it is a one-row rule — which is fine for a STEP clock, because a step IS a
     // one-row body (`decode_step` submits one token), so the fold either reaches the whole 97 or none.
     if (clock) clock->set_plan_cast_fold(o.cast_fold);
+    // The same telling, one family over: a folded step submits no `copy` at all, and a clock left on the
+    // shipped bill would read `plan_match=0` against 224 submissions for a run that is merely folded.
+    // `decode_step.cpp`'s `fold_copy` is the dispatch side, and it too is a one-row rule, which a STEP
+    // clock satisfies by construction because a step IS a one-row body.
+    if (clock) clock->set_plan_copy_fold(o.copy_fold);
     engine::stageclock::arm(clock.get());
     for (const StepRec& want : ref) {
         if (clock) clock->begin_step();
@@ -1852,6 +1899,7 @@ WavePassResult wave_pass(const Options& o, const engine::WeightStore& store, eng
         // only `finish_token`'s final-norm widening, and this line cannot make a wide pass bill the fold of
         // a site `submit_wave_body` still submitted.
         shape.cast_fold = o.cast_fold;
+        shape.copy_fold = o.copy_fold;
         std::printf("%s\n", clock->describe_wave(shape).c_str());
     }
     return out;
@@ -2068,6 +2116,22 @@ int main(int argc, char** argv) {
                         o.cast_fold ? 1 : 0, plan_cast, plan_cast - bill.cast, bill.cast,
                         o.cast_fold ? "final-norm-only" : "all", bill.total());
         }
+        // Route S1's follow-on, on its own line for the same reason and with the same fields. Here the
+        // two derivations it ties together are `stage_clock.cpp`'s wave `copy` row and
+        // `planned_launch_counts`'s `c.other`, both of which spell the same five submission sites; the
+        // `sites=` field is the census's own count and `census_sites.py` refuses if the source ever
+        // disagrees with it, so this line cannot quietly keep claiming five sites after a sixth appears.
+        // `step_bill=` is the field the A/B asserts, and it must equal the `STAGE` line's
+        // `plan_per_step` in the same run.
+        {
+            const int plan_copy = engine::planned_launch_counts().other - 1;   // other minus lm_head
+            const engine::LaunchCounts bill =
+                engine::planned_launch_counts(o.cast_fold, o.copy_fold);
+            std::printf("COPYFOLD on=%d env=QWEN_COPY_FOLD plan=%d folded=%d kept=%d sites=5"
+                        " body=one-row full_wide=%s step_bill=%d\n",
+                        o.copy_fold ? 1 : 0, plan_copy, plan_copy - (bill.other - 1), bill.other - 1,
+                        o.copy_fold ? "lm-head-only" : "all", bill.total());
+        }
         // D-11's provenance half. The wave-row ceiling and the hipBLAS version are the two numbers that
         // decide what a pinned corpus means once more than one GEMM can produce it: `kMaxWaveRows`
         // because the row-count rule makes it the last width that is still the hand GEMV, hipBLAS's
@@ -2199,6 +2263,7 @@ int main(int argc, char** argv) {
         sc.proj_plan = o.proj_plan;
         sc.proj_shape = o.proj_shape;
         sc.cast_fold = o.cast_fold;
+        sc.copy_fold = o.copy_fold;
         if (engine::kernels::wave_gemm_is_library(o.wave_gemm, engine::kMaxWaveRows)) {
             // Pin filter first: it decides what `gemm_route_plan` below fetches and what the version
             // line counts, so setting it after the plan would print one route and run another.

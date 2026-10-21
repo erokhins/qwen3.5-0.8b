@@ -5,6 +5,7 @@
 #include "engine/launch_stats.h"
 #include "engine/state.h"   // kQkvRows / kValueDim: the tile row strides the call site walks
 #include "engine/gdn_collapse_kernels.h"
+#include "engine/gdn_conv_roll_kernels.h"
 #include "engine/gdn_rec_fused_kernels.h"
 #include "engine/gdn_rec_hoist_kernels.h"
 #include "engine/gdn_rec_loop_kernels.h"
@@ -41,6 +42,25 @@ void gdn_conv(const uint16_t* raw, const float* win, const float* conv_weight, f
                                                              conv_weight, u, new_win, tokens,
                                                              GCK_NONE);
     launchstats::gdn_conv().record(tokens);
+}
+
+// Route S1's follow-on: the same conv, the same grid, the same operands, and the state window handed in
+// as BOTH window operands so the roll needs no copy. `tokens` is not a parameter because this entry
+// point exists only for the shape where the roll is per-thread safe (one row); the caller's guard is
+// `submit_wave_body`'s `fold_copy`, and a wider body calls `gdn_conv` above.
+//
+// `launchstats::gdn_conv().record(1)` is called here rather than skipped, so the `gdn_conv` family row
+// in `LAUNCHSTAT` reads the same on both sides of the flag and an A/B cannot be confounded by the
+// instrument noticing the fold. What does change is the STAGE clock's `copy` row: the caller stops
+// noting `kCopy` here, which is the whole point and is why the plan has to be told
+// (`stageclock::Clock::set_plan_copy_fold`).
+void gdn_conv_roll(const uint16_t* raw, float* win, const float* conv_weight, float* u) {
+    // The grid is `gdn_conv`'s at tokens = 1, stated a second time from the same constants rather than
+    // taken from it, because a folded launch that touched a narrower strip would be cheaper for a
+    // reason that has nothing to do with deleting a copy.
+    static_assert(CH % (256 * CONV_VEC) == 0, "conv_roll_kernel's grid must match conv_kernel's");
+    conv_roll_kernel<<<CH / (256 * CONV_VEC), 256>>>((const hip_bfloat16*)raw, win, conv_weight, u);
+    launchstats::gdn_conv().record(1);
 }
 
 // §04.3: `<<<tokens, NH>>>`, one thread per (token, value head), so a decode step is still the

@@ -264,6 +264,14 @@ struct WaveShape {
     // body loses. A step clock carries no shape, so the driver states the flag once: `set_plan_cast_fold`.
     // Left false, the plan bills §07's 97 and a run that folded without saying so reads `plan_match=0`.
     bool cast_fold = false;
+    // Route S1's follow-on (`QWEN_COPY_FOLD=1`): whether a ONE-ROW body folded its two `copy`
+    // submissions into their consumers — the embedding-row D2D into the layer-0 glue launch, each GDN
+    // layer's window roll-back into the conv that writes the rolled window. Same shape of exception as
+    // `cast_fold` immediately above, and for the same reason: the rule is about the BODY's width
+    // (`submit_wave_body`'s `fold_copy = sc.copy_fold && (n == 1)`), so a one-row body owes NO copy at
+    // all while a wide body keeps its id upload, its gather and its 18 rolls untouched. Left false, the
+    // bill is §07's shipped 19 for a decode step.
+    bool copy_fold = false;
 };
 
 // One measured pass of serialized submission. Constructed per pass, armed for its duration; not
@@ -289,6 +297,13 @@ public:
     // the dispatch agree, and a plan that kept billing 97 widenings a step after they were deleted would
     // make every folded run read as a broken clock. Left unset, the bill is §07's shipped 97.
     void set_plan_cast_fold(bool cast_fold) { plan_cast_fold_ = cast_fold; }
+
+    // Route S1's follow-on: tell the clock the run folded its `copy` submissions, so a ONE-ROW body
+    // submitted no embedding D2D and no conv-window roll-back. Same argument as the setter above, down
+    // to `plan_match` being the line that says the instrument and the dispatch agree: a plan that kept
+    // billing 19 copies a step after they were deleted would make every folded run read as a broken
+    // clock, and a clock that silently billed 0 for a run that folded nothing would hide a lost launch.
+    void set_plan_copy_fold(bool copy_fold) { plan_copy_fold_ = copy_fold; }
 
     Clock(const Clock&) = delete;
     Clock& operator=(const Clock&) = delete;
@@ -339,6 +354,7 @@ private:
     Unit unit_;
     int plan_proj_ = 0;        // 0 = derive §07's split bill; see `set_plan_proj`
     bool plan_cast_fold_ = false;   // see `set_plan_cast_fold`
+    bool plan_copy_fold_ = false;   // see `set_plan_copy_fold`
     bool in_step_ = false;
     bool open_ = false;
     Stage stage_ = kStageCount;

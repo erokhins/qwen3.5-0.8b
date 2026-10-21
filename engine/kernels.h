@@ -397,6 +397,14 @@ void mlp_down_gemm(const void* w_down, const void* act, uint16_t* out, int rows,
 // that a wider tile could get wrong while every single-wave fixture still passed.
 void gdn_conv(const uint16_t* raw, const float* win, const float* conv_weight, float* u,
               float* new_win, int tokens = 1);
+// Route S1's follow-on (`QWEN_COPY_FOLD=1`, one-row bodies only): the same conv with the window roll
+// inside it. `win` is the state window and is BOTH operand — no scratch row, no D2D roll-back — which
+// is why it needs its own entry point instead of `gdn_conv` called with aliased arguments:
+// `conv_kernel`'s `win`/`new_win` are `__restrict__`, and one buffer through two such parameters is
+// the case the qualifier forbids, not a warning to walk past. Body and geometry:
+// `engine/gdn_conv_roll_kernels.h`; why the values are the same ones the copy used to move:
+// `prototype/glue_copy_fold/GLUECOPY-HANDOVER.md` §2.
+void gdn_conv_roll(const uint16_t* raw, float* win, const float* conv_weight, float* u);
 void gdn_gates(const uint16_t* a_raw, const uint16_t* b_raw, const float* a_log,
                const float* dt_bias, float* g, float* beta, int tokens = 1);
 // Which SPELLING of the sequential recurrence's state walks a `gdn_rec` launch runs

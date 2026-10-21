@@ -40,8 +40,9 @@ void drain() {
 // drift. `copy` is `other` minus the lm_head launch (the 19 D2D copies), `host_tail` is a D2H and a host
 // argmax and therefore not a launch, and every row is per TOKEN — which is what `Clock::describe()`
 // divides the observed counts by before comparing.
-std::array<int, kStageCount> plan_bill(int proj_override = 0, bool cast_fold = false) {
-    const LaunchCounts c = planned_launch_counts(cast_fold);
+std::array<int, kStageCount> plan_bill(int proj_override = 0, bool cast_fold = false,
+                                      bool copy_fold = false) {
+    const LaunchCounts c = planned_launch_counts(cast_fold, copy_fold);
     std::array<int, kStageCount> p{};
     p[kGlue] = c.glue;
     // A run whose projection plan is not the SHIPPED one states its own `proj` count (see
@@ -227,7 +228,15 @@ WavePlanBill wave_plan_bill(const WaveShape& sh) {
     // table — where it used to submit one 2 KiB copy per row. That is the whole of the item: a 512-row
     // body went from 512 operations to 2, and the wave's 4096 embedding copies became 16.
     // Route-blind (unlike `cast` above): which form a body runs depends on `n` and on nothing else.
-    p.subs[kCopy] = single_row_bodies + 2 * (bodies - single_row_bodies) + G * bodies;
+    // EXCEPT route S1's follow-on, which is the same width rule `cast_fold` above carries: a one-row
+    // body with `QWEN_COPY_FOLD=1` submits neither the embedding D2D nor its 18 window roll-backs
+    // (`submit_wave_body`'s `fold_copy`), while a wider body's upload + gather + rolls are untouched
+    // because a wave's embedding lookup is one gather over the tile and its conv end condition belongs
+    // to one token-block of a grid whose other blocks are still reading the window. Both halves come
+    // from the shape here, and `body1_copyfold_plan_matches_token_plan` below is the witness that this
+    // row and `planned_launch_counts`'s `c.other` were written from the same call sites.
+    p.subs[kCopy] = (sh.copy_fold ? 0 : single_row_bodies) + 2 * (bodies - single_row_bodies)
+                  + G * bodies;
     p.subs[kLmHead] = priced;
     p.subs[kHostTail] = 0;
     return p;
@@ -410,7 +419,8 @@ void Clock::close_segment() {
 }
 
 std::string Clock::describe() const {
-    const std::array<int, kStageCount> plan = plan_bill(plan_proj_, plan_cast_fold_);
+    const std::array<int, kStageCount> plan =
+        plan_bill(plan_proj_, plan_cast_fold_, plan_copy_fold_);
 
     std::string out;
     char buf[512];
@@ -592,13 +602,24 @@ std::string Clock::describe_wave(const WaveShape& shape) const {
         WaveShape one_fold = one;
         one_fold.cast_fold = true;
         const bool same_fold = matches_token_plan(wave_plan_bill(one_fold), plan_bill(0, true));
+        // The same one-row body with the COPY fold on, which is the same kind of witness one family
+        // over: the wave bill's `copy` row and `planned_launch_counts`'s `c.other` are two derivations
+        // of the same five call sites, and comparing a folded wave bill against the SHIPPED 19 would
+        // read 0 forever and prove nothing. On a one-row body the folded bill must be zero copies and
+        // lm_head alone on both sides; a fold rule that only moved one of the two derivations reads 0
+        // here and is caught at the commit rather than in a timing window.
+        WaveShape one_copyfold = one;
+        one_copyfold.copy_fold = true;
+        const bool same_copyfold =
+            matches_token_plan(wave_plan_bill(one_copyfold), plan_bill(0, false, true));
         std::snprintf(buf, sizeof buf,
                       " body1_plan_matches_token_plan=%d body1_library_plan_matches_token_plan=%d"
                       " body1_split_plan_matches_token_plan=%d"
                       " body1_packed_plan_matches_token_plan=%d"
-                      " body1_castfold_plan_matches_token_plan=%d",
+                      " body1_castfold_plan_matches_token_plan=%d"
+                      " body1_copyfold_plan_matches_token_plan=%d",
                       same ? 1 : 0, same_library ? 1 : 0, same_split ? 1 : 0, same_packed ? 1 : 0,
-                      same_fold ? 1 : 0);
+                      same_fold ? 1 : 0, same_copyfold ? 1 : 0);
         out += buf;
     }
     if (notes_ignored_) {
