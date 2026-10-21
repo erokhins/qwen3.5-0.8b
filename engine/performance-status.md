@@ -77,8 +77,8 @@ and 512's 11.36 % spread is §6's dispatch bimodality, not a regression. Paired,
 
 | lanes at last step | marginal ms/token, best of 3 | spread | tok/s |
 |---|---|---|---|
-| **4,032** | **11.175** (D3-`lean` paired window, 2026-10-21: stage-clock burst, never `context_sweep.py` — §6; the pre-port base in the SAME window read 12.4036 = 80.6 tok/s, so the paired step moved −9.9 % and `attn` itself 3.0060 → 1.6121 ms/step, −46.4 %; the D1 row it overtakes read 12.680 = 78.9, and base-vs-ledger across windows is §6's ~2 % drift) | 1.72 % | **89.5** |
-| 128 | 9.918 (same window; base 9.864 — a 0.55 % move inside overlapping spreads, i.e. FLAT, which `prototype/attn_decode_wide/HANDOFF-D3.md` §4.3 predicted in advance: 8 blocks on 40 CUs is one round at either residency, so neither lever can bind here) | 0.62 % | 100.8 |
+| **4,032** | **10.9357** (cast-fold paired window, 2026-10-21: stage-clock burst, never `context_sweep.py` — §6; the base arm in the SAME window read 11.2365 = 89.0 tok/s, so the step moved −0.3008 ms = −2.7 % by deleting all 97 per-token `cast` launches, which prices the per-launch residual at 3.10 µs against the ~3.8 µs predicted and thereby funds the `glue`/`copy` tail; the D3 row it overtakes read 11.175 = 89.5, and base-vs-ledger across windows is §6's ~2 % drift) | 0.34 % | **91.4** |
+| 128 | 9.7855 (same window; base 9.9782 = 100.2, so −1.93 %, and NO LINE was set here — D3/S1 §4 put short widths out of reach of this route in advance, so a move at 128 is a bonus, not the adjudicating row) | 1.64 % | 102.2 |
 | 512 | 10.609 | 11.36 % | 94.3 |
 | 1,024 | 11.028 | 3.98 % | 90.7 |
 | 2,048 | 10.929 | 7.20 % | 91.5 |

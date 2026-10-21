@@ -7,7 +7,7 @@ it, and every "could still be faster" says what is unpriced. Written 2026-10-21;
 `e02c568` + the D2/D4/S1 prototype work.
 
 **Operating point.** Decode is reported at **4,032 lanes** (4,000 prompt + 32 steps), shorter widths beside
-it, per the standing rule. Headline: **11.1750 ms/token = 89.5 tok/s** at 4,032, **9.9182 ms = 100.8 tok/s**
+it, per the standing rule. Headline: **10.9357 ms/token = 91.4 tok/s** at 4,032, **9.7855 ms = 102.2 tok/s**
 at 128. Prefill: 11,070 tok/s at 4,096. Both from paired windows (`engine/performance-status.md` §1).
 
 ## 0. The three facts that set every floor
@@ -17,7 +17,8 @@ at 128. Prefill: 11,070 tok/s at 4,096. Both from paired windows (`engine/perfor
    a consequence of how many bytes a token must move.
 2. **A token must move ~1.50 GB of weights.** Census per step (derived from `engine/state.h` +
    `tools/step_traffic_model.py`, `prototype/launch_price/census.py`, 128-lane context):
-   **1532.3 MB read / 24.4 MB written**, at 340 launches and 305 stage-clock segments. Divided by the
+   **1532.3 MB read / 24.4 MB written**, at 340 launches and 305 stage-clock segments before the cast fold
+   of §7 and **243 / 184** after it. Divided by the
    plateau that is **6.47 ms of unavoidable weight traffic** inside an 11.175 ms step. Everything above
    6.47 ms is the sum of everything that is not a pure weight read.
 3. **16-bit quantization is not on the table.** It would roughly halve fact 2, which is why so many rows
@@ -38,7 +39,7 @@ worth). Floors are bytes ÷ 237 GB/s. Efficiency = floor ÷ cost.
 | `proj` | 48 | 467.6 MiB | **2.7578** | 2.069 ms | 75 % | hipBLASLt heuristic picks per-shape algos; D1 already shipped the packed projection launch (−11 %). Remaining 25 % is library algo choice at M=512, swept and bounded at ~1.17× |
 | `lm_head` | 1 | 509.6 MiB | **2.1685** | 2.254 ms | **104 %** | **AT THE WALL, cannot be faster.** 246 GB/s demanded against a ~237–240 plateau — it is reading the 486 MiB tied embedding as fast as this machine can read anything. Only quantization moves it |
 | `attn` | 6 | 49.55 MiB (unique KV, 4k) | **1.6121** | 0.209 ms | 13 % | **latency at occupancy**, and the fix already landed: a spelling change took `attn_core` from 38,944 B to 6,176 B reserved LDS, residency 1 → 4 blocks/CU, −46 % on this line (§3). Remaining headroom is large in ratio terms but is a serial per-tile walk at 4,032 lanes with 8 query heads |
-| `cast` | **97** | 0.371 MiB | 0.7775 | ~0.00 ms | 0 % | **pure per-launch cost**, no bytes at all: 97 launches × 7.78 us. Whether the ~3.8 us/launch residual is real or instrument is what item (1) decides |
+| `cast` | **97 → 0** | 0.371 MiB | 0.7775 → **0** | ~0.00 ms | — | **DELETED, 2026-10-21.** Widening BF16→F32 is exact, so all 6 sites fold into their consumers and the step saves **0.3008 ms** — which is also the answer to whether a launch costs anything: **3.10 us per launch**, a production cost, not an instrument artefact |
 | `gdn` | 72 | 22.6 r + 20.4 w MiB | 0.6458 | 0.190 ms | 30 % | **not the chain** (the recurrence kernel alone is 0.1243 of a 0.2790 shipped-shape rig row); ~0.07 ms is L2 residency of the 18.9 MiB state, saturating at 32 MiB; 47.4 % of its traffic is **writes**, so it is not a read stream |
 | `glue` | 49 | 0.407 MiB | 0.5593 | ~0 | 0 % | pure per-launch cost (49 × 11.16 us), same question as `cast` |
 | `host_tail` | 0 | — | 0.7163 | — | — | CPU work per step (sampling, logits D2H, bookkeeping). **Hidden today**: the pipelined shape covers it; it becomes exposed only if the GPU side shrinks enough (§6) |
@@ -107,8 +108,12 @@ engages the clock only under the flag, and `decode_step.cpp:423`'s sync is one-t
 * What is **not** settled is the marginal cost of a *launch* in the pipelined shape. The rig's slope says
   3.95 us but was measured at `body=tiny` (nothing to overlap behind), and its merge gain (13.08 us/launch)
   moves workgroups-per-launch along with launch count (grid 271 vs 1918) — a confound, not a result. The
-  small-op families suggest the residual is real: `cast` at 97 × 7.78 us minus ~5.3 us of instrument is
-  ~3.8 us/launch. **Item (1) is the direct test**: delete 97 launches of real work and read the wall.
+  small-op families suggested the residual was real: `cast` at 97 × 7.78 us minus ~5.3 us of instrument is
+  ~3.8 us/launch. **Item (1) settled it by deletion**: folding all 97 `cast` launches out of the step moved
+  the wall **−0.3008 ms at 4,032 lanes = 3.10 us per launch**, so the residual is real and the ~116 tiny
+  launches left in `glue`/`copy` are a funded route, not a speculation. What the fold does NOT settle is the
+  *shape* question — whether a launch is expensive because of its count or because a one-row launch has no
+  work to hide behind, which is item (2).
 
 ## 5. Things that look like headroom and are not
 
@@ -126,7 +131,7 @@ engages the clock only under the flag, and `decode_step.cpp:423`'s sync is one-t
 
 ## 6. The honest summary, in three sentences
 
-About **6.5 ms of the 11.175 ms step is weight bytes this machine can only read once at ~237 GB/s**, and
+About **6.5 ms of the 10.936 ms step is weight bytes this machine can only read once at ~237 GB/s**, and
 `lm_head` (2.17 ms, 104 % of the wall) plus `proj` (2.76 ms, 75 %) are already at or near that line, so
 they cannot be made faster without quantization, which is out of scope. Attention spent months at 3.0 ms
 because a compiler artifact cut its occupancy to a quarter and that has now been fixed for −46 % on that
@@ -139,7 +144,7 @@ CUs says the work is under-spread rather than slow (item 2).
 
 | open item | the arm that settles it | pre-registered reading |
 |---|---|---|
-| **(1) the small-op tail** — are 97 `cast` launches worth their ~0.78 ms stage line? | fold the BF16→F32 widen into the consuming GEMV, paired wall A/B at 4,032 with numerics first | saves ≥ 0.24 ms on the wall → the ~3.8 us/launch residual is real and `glue`/`copy` follow; ≤ 0.05 ms → launches are free when pipelined and the whole tail is instrument, close the route |
+| **(1) the small-op tail** — **RESOLVED 2026-10-21**: all 97 `cast` launches folded into their consumers, `dec8` + `wide4096f` green with the fold on, bit-identical at both widths | done (`c9d3b3f`, `prototype/cast_fold/`) | **WIN: −0.3008 ms at 4,032 = 3.10 us per launch**, above the pre-registered 0.24 ms line → **`glue`/`copy` (~116 tiny launches, ~0.36 ms at that rate) are funded** |
 | **(2) per-launch parallelism** | launch-count arms that **hold workgroups-per-launch fixed** at real bytes (the A12 rule) | a gain at equal grid shape prices the lever; a gain that vanishes at equal grid shape was always parallelism, not launch count |
 | **`gdn`'s unattributed ~0.2 ms** | same rig, arms that separate state residency from per-launch cost | D4 already excluded the chain and bytes |
 | **> `MAXSC` numerics** | rule which instrument is authoritative, flat floors vs priced allowance | gates `--split 18` (~0.36 ms) |

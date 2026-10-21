@@ -45,8 +45,8 @@ correctness oracle rather than a prototype engine) is 6× below it — which is 
 gap the engine exists to close.
 
 **The engine runs end to end.** `engine/performance-status.md` is the honest ledger: prefill **12,047 warm prompt tok/s
-at 1,024 lanes** (11,070 at 4,096, 8,542 at 16,384 — the 2026-10-20 warm banner) and decode **89.5 tok/s marginal at 4,032
-lanes** (100.8 at 128; 2026-10-21 D3-`lean` paired window) are device numbers; §1 is the live table, §2–§6 say where the time goes
+at 1,024 lanes** (11,070 at 4,096, 8,542 at 16,384 — the 2026-10-20 warm banner) and decode **91.4 tok/s marginal at 4,032
+lanes** (102.2 at 128; 2026-10-21 cast-fold paired window, all 97 per-token cast launches deleted by widening in the consumer) are device numbers; §1 is the live table, §2–§6 say where the time goes
 and what a number is worth, and superseded eras are frozen in the two `progress/<date>/performance-status-<date>.md` snapshots. Carry the lane count and the ledger row with any tokens/s figure.
 
 ## Target model — verified facts
