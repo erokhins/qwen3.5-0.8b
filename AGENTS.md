@@ -461,3 +461,21 @@ denominator's set size has been established.
 | trap (appended 2026-10-21, same line-citation reason as the rows above) | where it is written up |
 |---|---|
 | **a document move is two jobs, not one: re-point the cites, and keep every file that is cited BY LINE the same length.** Both halves bit in one pass. (a) `tools/citation_census.py` re-reads each tracked file's census-era text from the commit that carried the census, **keyed by path**; after 13 documents moved it reported F2 = 160 against an expected 171 — `git diff --name-only` names only the new side of a rename, `git show REF:newpath` is empty, the old path is untracked, and the citations left the population without an error. A census that silently shrinks is the same failure as an empty-parse gate, and the fix was an explicit `RENAMES_AT_CENSUS` map (needed anyway, because a split document has no single `--follow` ancestor). (b) `README.md` is cited from frozen journals by line (`README.md:47`, `:167`, `:246`, `:313`, `:323`, +4), so correcting its headline had to be done as a **line-count-neutral** rewrite of the four lines it occupied; adding two lines there rotates nine citations and `tools/citation_rot_check.py` reports 0 rotted while it does, because its baseline is `HEAD` and `HEAD` moved with the commit. `wc -l` before and after a cited file is the guard, and `tools/archive_doc.py` enforces the same-line half by refusing any substitution that would change a file's line count. | `progress/2026-10-21/ledger-prune-2026-10-21.md` §C, `tools/{citation_census,archive_doc}.py` |
+
+## Decode is measured and reported at 4k context (user, 2026-10-21)
+
+Appended at the end for the standing line-citation reason stated in the citation-hygiene section.
+
+The headline decode number is the **4,032-lane** one, taken from the stage-clock burst
+(`decode_run --time-stages`, never `context_sweep.py` above 4k — `engine/performance-status.md` §6),
+with shorter widths quoted beside it rather than instead. The reason is structural, not stylistic: at
+128 lanes the KV read is ~0.21 ms of a 9.9 ms step, so a short-context row is almost pure weight-walk
+and is blind to the term that dominates long requests, where `attn` costs 3.02 ms/step. A route that
+helps at 128 and not at 4k is now visible as exactly that, instead of being reported as a win.
+
+Two consequences for how routes are priced. A fixed per-token saving is a **smaller** fraction of a 4k
+step than of a 128 one (D1: −13.0 % at 128 lanes, −11.0 % at 4,032), so pre-registered win/kill lines
+must state the width they are set at — the decode route lines in
+`progress/2026-10-21/decode-attribution-2026-10-21.md` are already per-width and are unchanged by this.
+And any new headline table leads with the 4k row: `engine/performance-status.md` §1 and the top-level
+`README.md` headline both do now, and both stay line-count-neutral when edited (307 and 248 lines).
