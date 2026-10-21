@@ -106,3 +106,56 @@ the window, `NO-TIMING` if red, and a `sampled.txt`-style decision check at **bo
 > `MAXSC` streaming shape, because byte-identity on short fixtures is not a witness at width
 (`AGENTS.md`). `spell_unroll4` from D4 is the model: bit-identical at equal bytes, so no band is in play
 (`AGENTS.md`, numeric-format rule) and any win is pure.
+
+---
+
+## 7. Gate zero's answer (2026-10-21, main agent): the sync half of S1 does not exist in the shipping path
+
+`prototype/launch_price/s1_sweep.sh --run`, blocking, zero subagents, one `tools/gpu_lock.sh` hold, util
+55 % at release; fitter `fit_slope.py` printed `FIT ok` on 24 arms, every arm `verify=ok` with
+`count_match=1` on its own printed launch and sync counts. Correctness gate `check_s1.sh` was green
+before the rig was timed.
+
+**The decisive arm is a single-variable sync sweep at the engine's own operating point** — engine launch
+pattern, 340 launches, same grids, the step's real 1461.3 MiB, identical work, one variable:
+
+| syncs | ms/step | marginal |
+|---|---|---|
+| 1 | **9.4798** | — |
+| 305 | 11.0932 | **+1.6134 ms** = 5.29 us per sync |
+| 340 | 11.2855 | +0.1923 ms for 35 more = 5.5 us per sync |
+
+Linear to within 4 % across three points, so this is a real, well-measured cost of **5.3 us per sync** —
+and it independently reproduces the gap I measured today between the serialized stage total (14.2057) and
+the burst step (12.4036): 1.80 ms, against the rig's 1.61 ms for 305 syncs. Two different instruments
+agreeing to 10 % on the size of the thing.
+
+**And the shipping path never pays it.** `engine/decode_run.cpp:325` is `bool time_stages = false` and
+`:2403` is `if (o.time_stages) { time_stages_report(...); }`; the only per-segment `hipDeviceSynchronize`
+in the engine is `engine/stage_clock.cpp:32`, and the one at `engine/decode_step.cpp:423` is a one-time
+adapter-prep sync guarded by `sc.adapters_ready`. So `syncs_per_step=305` is a property of the
+**instrument**: without `--time-stages` the step is S≈1. That gives gate zero's verdict on the sync half:
+
+- **S1's sync leg is closed.** Every per-segment drain term in this week's route work is the stage clock
+  billing for its own ruler: D2's `T_serial` +0.2709 ms, D4's ~0.19-0.21 ms of the gdn line, and the
+  ledger's `segments x 7.2 us` subtraction. The ledger's per-family stage rows remain correct *as an
+  ordering of families*, but any prize computed as "segments x us_per_segment" is pricing the measurement,
+  not the engine. This is the same class as the D2 shape mismatch and the `spantest` no-op: an attribute of
+  the instrument read as an attribute of the machine.
+- **S1's launch leg is unpriced, not refuted** — and the fitter's headline `3.9473 us/launch -> S1 IS REAL`
+  must not be read as funding it, for two named reasons. The slope ladder is measured at body=tiny
+  (5.3 MiB, 340 launches, nothing to overlap behind), which is precisely the regime the brief warned
+  would overstate; and the merge gain (13.08 us per launch removed) compares 340 launches at
+  `grid_max=271` against 48 at `grid_max=1918`, so it moves workgroups-per-launch along with launch count —
+  the A12 rule, read workgroups on both sides. The one clean comparison at real bytes and equal grid shape
+  is not in the matrix.
+- **Therefore the WIN/KILL lines in §4 are withdrawn untested.** They were lines for a mechanism that
+  turns out not to be in the shipping path, and leaving them in place would invite someone to chase 0.62 ms
+  that has no cause behind it.
+
+**What this leaves, honestly.** The remaining decode prize is *work deletion* on the wall, which is D5's
+half of the argument and was never a segment-count story: the 97 `cast` launches, `copy`'s roll-back, the
+`glue` epilogues. Plus one unpriced candidate that D2 surfaced and this gate did not settle: a one-token
+`down_proj` emits 1,024 rows over 128 blocks on 40 CUs, and D4's `comb_all` vs `split8` gap (0.1839 ->
+0.0644 at equal bytes) says there is something in per-launch parallelism. Pricing that needs a launch-count
+comparison that holds workgroups-per-launch fixed — a different arm from anything run today.
