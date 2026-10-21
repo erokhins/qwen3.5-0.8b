@@ -11,7 +11,7 @@ Checks (both kernel modes):
   full  : argmax equality with the reference, cos >= 0.999 and meanrel <= 0.05 (§10.1
           `logits` class), the top-5 set, AND a per-element rule on the logits themselves —
           `bf16_ulp` distances with a cancellation band, sized by `floor_probe.py` rather than
-          typed in. That last part is the closure of `bench/gate-audit.md` G1: until it existed this
+          typed in. That last part is the closure of `progress/2026-10-11/gate-audit.md` G1: until it existed this
           gate asserted three aggregates over 248 320 values and a dropped term or a misplaced row
           walked straight through.
   fused : the in-kernel argmax must equal the reference argmax, since that mode never

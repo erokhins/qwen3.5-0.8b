@@ -264,3 +264,10 @@ engine uses them correctly — offsets, slicing order and the flat `[6144][4]` i
 gate's problem, and `prepare_weight_adapters` re-asserts the collapse at the use site for that reason.
 It also reads only the header, so it cannot see whether the loaded bytes match the declared dtype; that
 is `loader_test`'s verification pass.
+
+---
+
+**Archived 2026-10-21** from `bench/gate-audit.md`, its title dating it to 2026-10-11. Every gate finding it
+raised has since been closed or superseded, so it is the record of an audit, not an open instruction
+(`progress/README.md` rule 1). Its 24 citations were re-pointed in the same commit, including the ones in
+kernel and gate comments (`engine/gate.py`, `engine/kernels_attn.cpp`, `prototype/lm_head_gemv/*`).

@@ -3,7 +3,7 @@
 The deliverable: C++/HIP for `gfx1151`, gated by `../speccheck/`. The Python
 implementation in `../speccheck/` validates the specification and is **not** the engine.
 
-What exists now is **W5's first half: weight residency** (`bench/build-queue.md` W5) plus **W5b's
+What exists now is **W5's first half: weight residency** (`progress/2026-10-15/build-queue.md` W5) plus **W5b's
 token loop**: per-request state, one launcher per graduated kernel, and `decode_step`, which runs one
 token through all of it. `engine/decode_run.cpp` drives it and `engine/gate.py` gates it against the
 pinned `dec8` fixture. **Two device passes have run** (`engine/results.md`, last section): the loader
@@ -90,7 +90,7 @@ Two things to know before reading it:
   glue kernel's norm-only form; after that each layer is mixer → glue(add + post-attention norm) →
   MLP → glue(add + the *next* norm), and layer 23's second glue call takes the final norm as a side
   effect of the residual add. 49 glue launches per token, which is the plan `prototype/glue/run.py`
-  pins and `bench/gate-audit.md`'s §07 audit demanded; `gate.py` re-derives it in Python.
+  pins and `progress/2026-10-11/gate-audit.md`'s §07 audit demanded; `gate.py` re-derives it in Python.
 * **The conv window is rolled into scratch and copied back** (one D2D memcpy per GDN layer). The
   roll-back is the documented cost of `conv_kernel`'s `__restrict__` `win`/`new_win`, sized in the
   comment where it is spent.

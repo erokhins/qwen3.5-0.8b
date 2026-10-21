@@ -189,7 +189,7 @@ What a first device run is most likely to break, in the order to look at them:
    report it, do not loosen the constant. `ndiff` and max-ULP are already excluded on principle
    (§10.1 F1–F4).
 
-* **Fixture: `dec8`, not the `prefix24dec8` `bench/build-queue.md` W5 proposed.** `dec8` is what the
+* **Fixture: `dec8`, not the `prefix24dec8` `progress/2026-10-15/build-queue.md` W5 proposed.** `dec8` is what the
   task named, it is the fixture whose per-step dumps (`decode{s}.input_ids`,
   `decode{s}.logits_last`) make the pairing provable, and its prompt is 17 tokens rather than 24 — so
   the attention stages run at ≤25 lanes against `MAXSC` 512. Same assertions would run against
@@ -1087,14 +1087,14 @@ tools/gpu_lock.sh acquire "D-4 corpus free run"; tools/gpu_lock.sh util
 .venv/bin/python tools/corpus_freerun.py                      # device, 18 s: all 49 prompts, then the report
 tools/gpu_lock.sh release "D-4 corpus free run"
 .venv/bin/python tools/corpus_margin.py --out data/refs/corpus48-margins.json   # CPU, ~45 s
-.venv/bin/python tools/corpus_freerun.py --report-only --json bench/corpus-freerun-2026-10-12.json
+.venv/bin/python tools/corpus_freerun.py --report-only --json progress/engine/evidence/corpus-freerun-2026-10-12.json
 ```
 
 `--start`/`--limit` chunk the corpus across several calls if a longer budget is ever wanted (a 128-token
 corpus budget would be ~4× the steps and still one session; `--steps 128` overrides the corpus' own 24,
 which only changes what this tool prints — the pins stay 24 and the comparison caps at the pin length).
 The full per-prompt records — first divergence, both margins, the flip's rank in the reference's top-8,
-the tie flag — are committed as `bench/corpus-freerun-2026-10-12.json`; the engine manifest it reads lives
+the tie flag — are committed as `progress/engine/evidence/corpus-freerun-2026-10-12.json`; the engine manifest it reads lives
 in the gitignored `data/` like every other regenerable fixture.
 ````
 

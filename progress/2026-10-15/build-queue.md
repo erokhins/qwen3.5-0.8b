@@ -167,3 +167,11 @@ the dump. They are written up in `engine/results.md` route (c) rather than fixed
 incident they hid: the “16/16 on both routes” claimed by `0b30422` was sixteen hand runs, because the A/B
 harness put the route in a wrapper binary whose flag the gate's own appended `--gemm` overrode.
 
+
+---
+
+**Archived 2026-10-21** from `bench/build-queue.md`, filed under the date it was last true. Written 2026-08
+as the work list between three graduated kernels and an engine; W1–W8 and decision D-11 are all closed —
+the engine shipped, prefill shipped, and the queue's own tail records D-11 as DONE (2026-10-14). A queue
+with nothing left in it is a record, not a queue (`progress/README.md` rule 1). Its 13 citations were
+re-pointed in the same commit.

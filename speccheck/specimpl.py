@@ -378,7 +378,7 @@ def attention(w: Weights, l: int, x: torch.Tensor, cos: torch.Tensor, sin: torch
         # promotes to F32 no matter what dtype the weights were loaded in, and the BF16 rounding of
         # the scores that the old comment credited for "~3e-3 per score" never happens here. What
         # this block really does: F32 scores → F32 softmax → attention weights rounded back to
-        # `x.dtype` before they multiply V. That promotion is the plumbing `bench/gate-audit.md` G6
+        # `x.dtype` before they multiply V. That promotion is the plumbing `progress/2026-10-11/gate-audit.md` G6
         # says G6 and G3-smoke were measured through, which is exactly why the dtype is left alone:
         # making the scores actually BF16 moves those bands and needs the gate owner, not a comment.
         s = (qh[:, i, :] @ K[:, j, :].t()) * S_SCALE          # [T, P], F32 by promotion

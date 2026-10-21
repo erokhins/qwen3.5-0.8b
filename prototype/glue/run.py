@@ -622,7 +622,7 @@ def batched_stage(d: Path, layers: list[int], args, fails: list[str]) -> None:
 # ------------------------------------------------------------------ timing
 @contextlib.contextmanager
 def gpu_lock(tag: str):
-    """Timings need the box to themselves (bench/build-queue.md). Ownership is by tag, so acquire
+    """Timings need the box to themselves (progress/2026-10-15/build-queue.md). Ownership is by tag, so acquire
     and release pass the identical string. `util` is printed at both ends and a busy box makes
     every number below provisional — this box's GPU is never idle (flash_serve polls it), so a
     quiet window may not exist at all and a provisional number with util stated beats none."""

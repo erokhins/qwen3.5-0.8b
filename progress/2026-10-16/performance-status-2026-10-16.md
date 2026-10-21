@@ -504,7 +504,7 @@ a first pass over fresh pages.
 What this number is for: it is a **once-per-process** cost, not a per-token one — 454 ms against an
 11.92 ms/token steady state, so a cold start is ~38 tokens' worth of generation and no spread in this
 row changes anything downstream. It closes the last `cold weight-restore` debt from
-`bench/gate-audit.md`, and it is the number that bounds any future "restart the engine per request"
+`progress/2026-10-11/gate-audit.md`, and it is the number that bounds any future "restart the engine per request"
 idea: at 454 ms it is affordable exactly zero times inside a conversation.
 
 ### Long-context decode and time-to-first-token (2026-10-13, zero subagents, foreground, locks `main-ctx-final` and `main-ttft3`)

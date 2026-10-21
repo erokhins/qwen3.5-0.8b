@@ -1,4 +1,4 @@
-// engine/loader_test.cpp — the gate for weight residency (bench/build-queue.md W5, first half).
+// engine/loader_test.cpp — the gate for weight residency (progress/2026-10-15/build-queue.md W5, first half).
 //
 // Every claim it prints it also asserts; any failure exits non-zero. The checks:
 //   * 335 text tensors loaded / 153 vision skipped — the G0 split (§10), re-derived from

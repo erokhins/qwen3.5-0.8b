@@ -10,7 +10,7 @@ Four subcommands, one deliverable each, from `progress/2026-10-14/plan-p9-chunke
 
 `data/refs/` is the reference. The chunked form is never judged against the sequential form
 alone — that proves self-consistency and nothing else (§04.7, G3's weak half, and the reason
-`bench/gate-audit.md` flags the existing `run_chunkcheck.py` as a cos-only check). Every table
+`progress/2026-10-11/gate-audit.md` flags the existing `run_chunkcheck.py` as a cos-only check). Every table
 here therefore prints three sides: chunk-vs-pin, sequential-vs-pin (the floor the engine already
 pays) and chunk-vs-sequential (the delta a route change would introduce).
 

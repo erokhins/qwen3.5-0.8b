@@ -2,7 +2,7 @@
 """Floor probe for the tied logits GEMV: how far apart may two LEGAL computations of the same logits
 be, per element? CPU-only, no device — the device's own output is only read, as the subject.
 
-WHY. `bench/gate-audit.md` G1: `prototype/lm_head_gemv/run.py` asserts argmax, `cos >= 0.999` and
+WHY. `progress/2026-10-11/gate-audit.md` G1: `prototype/lm_head_gemv/run.py` asserts argmax, `cos >= 0.999` and
 `meanrel <= 5 %` and prints the rest, so it has **no per-element rule at all** — two wrong kernels
 named in the audit (a row written into its neighbour's slot; a dropped term in the reduction) pass
 every asserted check. Adding a per-element rule needs a band, and a band here must not be typed in:

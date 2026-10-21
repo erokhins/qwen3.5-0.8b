@@ -25,7 +25,7 @@ What the weight dtype alone moves, on the same 294 912 dec8 elements with identi
 
 An earlier revision of this probe handed the oracle the third of those — `w.float()` off the
 checkpoint — and reported its 105 683 as an oracle disagreement with the pins. That claim was
-retracted in `bench/gate-audit.md` (G2 amendment); the row is now the BF16-weight call and the file
+retracted in `progress/2026-10-11/gate-audit.md` (G2 amendment); the row is now the BF16-weight call and the file
 asserts it at ndiff 0, so the retraction is a live check rather than prose.
 
 Run: .venv/bin/python prototype/gdn_gated_norm/mirror_probe.py [fixture ...]

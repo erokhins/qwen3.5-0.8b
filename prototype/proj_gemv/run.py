@@ -517,7 +517,7 @@ def run_tokens(args, fails, worst) -> None:
 # ------------------------------------------------------------------ timing
 @contextlib.contextmanager
 def gpu_lock(tag: str):
-    """Timings need the box to themselves (bench/build-queue.md). Another agent may hold it and
+    """Timings need the box to themselves (progress/2026-10-15/build-queue.md). Another agent may hold it and
     waiting is normal; the release happens whatever this section does. Ownership is by tag, so
     acquire and release pass the identical string. `util` is printed at both ends and a busy box
     makes every number below provisional — a cold bandwidth figure measured while something else

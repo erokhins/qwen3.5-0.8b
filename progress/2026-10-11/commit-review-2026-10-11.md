@@ -68,7 +68,7 @@ Six claims on 2026-10-11 are false as written, three of them load-bearing for `e
    produces. The kernel's POLICY variant is unaffected and the pin-level assertion is genuinely
    valuable; but the probe's specimpl row is an artifact, and `gdn_gated_norm/results.md:26,30,49`
    and the probe docstring `:16-17` still print the retracted 105683 figure — `fc444d0` amended
-   `bench/gate-audit.md` only. **This also resolves the "Unresolved" note at the end of the G2
+   `progress/2026-10-11/gate-audit.md` only. **This also resolves the "Unresolved" note at the end of the G2
    amendment**: the three numbers are one formula at three weight dtypes — specimpl-as-called
    (BF16 weight, product rounded in BF16) = **0**; A-01-as-written with the BF16-rounded weight
    widened back to F32 = **74860** (the amendment's number); A-01-as-written with the raw F32
@@ -124,7 +124,7 @@ Priority commits first, then the rest that carry a measurement, a gate, or a num
 | sha | claim (message / doc) | what the code does | verdict |
 |---|---|---|---|
 | `0a062b5` | mirror is bit-exact for the 3-boundary policy; "refuses A-01-as-written (105683) and specimpl.rmsnorm_gated (same 105683)"; kernel "COMPILE CLEAN AND HAVE NEVER RUN ON A DEVICE" | POLICY row is a genuine 6-variant pin comparison (`mirror_probe.py:41-62`); specimpl row is run with a raw-F32 weight, which speccheck never produces; `results.md:26,30,49` still carry the retracted figure | **UNSUPPORTED** (second half) / CONFIRMED (first half) — WORST FIRST 4 |
-| `fc444d0` | "the oracle is bit-exact on §04.5 after all — the 105683 was the probe's weight dtype, not the model's" | Mechanistically correct: `specimpl.py:70-86` casts norm weight to BF16 by default; `:146` `n = w * n` then rounds the product in BF16 = the probe's POLICY. The amendment's own "unresolved 74860 vs 105683" is the same formula at two weight dtypes (see WORST FIRST 4) | **CONFIRMED** (one number pending §4-B1). Gap: it amended only `bench/gate-audit.md`; the probe, its results.md and `engine/` still carry the old claim |
+| `fc444d0` | "the oracle is bit-exact on §04.5 after all — the 105683 was the probe's weight dtype, not the model's" | Mechanistically correct: `specimpl.py:70-86` casts norm weight to BF16 by default; `:146` `n = w * n` then rounds the product in BF16 = the probe's POLICY. The amendment's own "unresolved 74860 vs 105683" is the same formula at two weight dtypes (see WORST FIRST 4) | **CONFIRMED** (one number pending §4-B1). Gap: it amended only `progress/2026-10-11/gate-audit.md`; the probe, its results.md and `engine/` still carry the old claim |
 | `27dbaed` | state sized from §08.1; four TUs "COMPILE CLEAN with `hipcc -O3` and zero warnings"; `state_sizes.py` reproduces 18.0 MiB and 12288 B/token and "flags three doc slips" | Arithmetic checks out exactly: `18·16·128·128·4 = 18.0 MiB`, `18·3·6144·4 = 1.265 MiB`, `2·2·256·2·6 = 12288 B/token`, `12288·262144 = 3.000 GiB` (not §00.5's 3.07). Slips are indeed flagged in `state_sizes.py:66-79` — and `state.h:14` contradicts them. Compile claim is not reproducible from the repo: `engine/build.sh` builds only `loader_test` | CONFIRMED (arithmetic) / **DEVICE-PENDING** (compile) / **UNSUPPORTED** (`state.h:14` doc line) |
 | `f79fe0f` | hand-off README: "CPU commands (state_sizes PASS, gdn_gated_norm mirror ndiff 0)", device commands with expected results, "≈66 cast launches/token", "the two launch-count deferrals" | README structure is good and honest about what cannot run. But `:83-84` asserts the retracted oracle mismatch (WORST FIRST 1) and `results.md:101` credits an unwritten helper (WORST FIRST 3). 66 casts: no cast launcher exists; the ≈358-vs-≈225 unpacked-launch deferral is arithmetic on measured launch cost, which the file says | **UNSUPPORTED** (2 statements) / CONFIRMED (rest) |
 | `d81ff13` | "time with burst wall-clock, because hipEvents returned exactly 0.000 ms for a 2 ms kernel" | `lm_head_gemv.hip.cpp` now runs 1 warm-up + `nb=5` bursts of `iters/5` launches, `best` = min per-launch wall time, and prints `RESULT mode=… ms=… gbs=…` key/value; `run.py` parses by **name** (`fields["ms"]`), so the field order is not load-bearing. No event path left in that binary | **CONFIRMED** |
@@ -296,5 +296,5 @@ after a PASS, so the doc and the tool cannot drift. Run row 8 (or row 5, which s
 | 12 | `prototype/attn_decode/build.sh && .venv/bin/python prototype/attn_decode/run.py` | PASS | untouched by this scrub; run only to keep the ledger current |
 
 After 3–11, the rows to update from the results — not before: `bench/performance-status.md`'s two
-`gdn_decode` rows (0.062 ms/918 GB/s, 1.344 ms/255 GB/s), `bench/gate-audit.md` G2's device-gate line,
+`gdn_decode` rows (0.062 ms/918 GB/s, 1.344 ms/255 GB/s), `progress/2026-10-11/gate-audit.md` G2's device-gate line,
 and `engine/results.md`'s E1/E2 blocks (written in `88193ef`, still `NOT RUN AS OF THIS COMMIT`).

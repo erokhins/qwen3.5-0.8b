@@ -117,7 +117,7 @@ Three consequences, none of them mine to decide:
    | BF16-rounded, then widened to F32 — A-01's letter | 74 860 |
    | raw F32 checkpoint tensor — what the old probe passed | 105 683 |
 
-   `fc444d0` retracted the claim in `bench/gate-audit.md` (G2 amendment); the probe now *asserts*
+   `fc444d0` retracted the claim in `progress/2026-10-11/gate-audit.md` (G2 amendment); the probe now *asserts*
    its oracle row at ndiff 0 and asserts the ladder is ordered, so the retraction is checked on
    every run instead of remembered. One caveat the ladder exposes: bit-exactness is a property of
    the **call**, not of the function — `speccheck/specimpl.py --keep-f32-scalars` (the A-02 A/B knob)

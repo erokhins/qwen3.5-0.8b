@@ -148,7 +148,7 @@ every row and is the shape the wave's byte-identity comparison against the pre-P
 is made in (`progress/2026-10-12/plan-prefill-2026-10-12.md` §4, row P2).
 
 Why this file contains no engine arithmetic. Its value is independence. A Python mirror of the
-kernels would check the engine against the engine, which is the failure `bench/gate-audit.md` exists
+kernels would check the engine against the engine, which is the failure `progress/2026-10-11/gate-audit.md` exists
 to find. Everything Python-side here is either a §10 metric, the §00/§08 state derivation, or the
 §03.4 argmax used to prove the fixture pairs with itself. Nothing here recomputes a model output.
 
@@ -745,7 +745,7 @@ SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller 
 # THE CASCADE BAND — what a reassociating GEMM route is entitled to look like at the END of the
 # cascade, and the fourth named exception. ADOPTED 2026-10-14 from `progress/2026-10-14/route-c-audit-2026-10-14.md`;
 # the measurements are in that file and in `progress/bench/evidence/rc_a1/a1.json` (reproduced independently in
-# `tmp/rcv_a1/a1.json`), and D-11 (`bench/build-queue.md`) is the decision that asks for them here.
+# `tmp/rcv_a1/a1.json`), and D-11 (`progress/2026-10-15/build-queue.md`) is the decision that asks for them here.
 #
 # WHY A FOURTH POLICY WAS NEEDED. Everything this file policed before was measured either one op deep
 # (§10.1 G5's cos, §10.2's meanrel, A1's per-matmul 1 ULP) or on one specific route (the D-2 allowance,
@@ -911,7 +911,7 @@ SLACK_RULE = ("the pin's winner is unique but its top-1/top-2 margin is smaller 
 # the number above; `stage_cos_min` is listed in that tool's `LOWER_IS_LOOSER` because it is a FLOOR, so a
 # downward move there is the band widening. The lines spell their decision as the commit subject
 # ("D-11 accepted (option A), commit f3b2f6c") rather than the bare `D-11`, because `record` only resolves
-# a bare `D-x` against `progress/2026-10-12/plan-2026-10-12.md`'s log and D-11 lives in `bench/build-queue.md`. Moving
+# a bare `D-x` against `progress/2026-10-12/plan-2026-10-12.md`'s log and D-11 lives in `progress/2026-10-15/build-queue.md`. Moving
 # a value here still takes a line first:
 #
 #     .venv/bin/python tools/band_history.py record --file engine/gate.py \
@@ -4028,7 +4028,7 @@ def launch_plan(n_layers: int, n_gdn: int, n_attn: int) -> dict:
            + the next layer's input norm, and after layer 23 the MLP add + the FINAL norm. That last
            pairing is why the final norm is not a launch of its own, and why this is the same 49 that
            `prototype/glue/run.py` pins its token plan against — the number §07's audit in
-           `bench/gate-audit.md` demanded.
+           `progress/2026-10-11/gate-audit.md` demanded.
     proj   GDN: in_proj_qkv, in_proj_z, in_proj_b, in_proj_a (§04.1) + out_proj = 5.
            attention: q_proj, k_proj, v_proj (§05.1) + o_proj = 4.
     gdn    conv (§04.2), gates (§04.3), recurrence (§04.4), gated norm (§04.5) = 4.

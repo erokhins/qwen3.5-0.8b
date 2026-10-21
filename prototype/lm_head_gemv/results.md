@@ -68,7 +68,7 @@ since 248320 < 2²⁰).
 
 Until today this gate asserted three aggregates over 248 320 values — argmax equality,
 `cos >= 0.999`, `meanrel <= 5 %` — and printed top-5 and `max|d|` without asserting them. That is
-the hole `bench/gate-audit.md` G1 names: the two wrong kernels it lists walk straight through. The
+the hole `progress/2026-10-11/gate-audit.md` G1 names: the two wrong kernels it lists walk straight through. The
 gate now compares the logits element by element and asserts on it. From a `--iters 1` device run:
 
     argmax 760 (ref 760) | cos 1.000000 | max|d| 0.0617 | meanrel 0.00141 | top5 match 5/5

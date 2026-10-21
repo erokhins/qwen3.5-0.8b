@@ -111,9 +111,9 @@ Every cite changed by this pass, what it asserted, and where it now points. **L*
 | L `engine/results.md:520` | "ledger §6 bills" | frozen `:271` (kept §6) | the old token sum the table reconciles against |
 | L `engine/results.md:740` | "ledger §2's two not-measured rows" | live §4 | the command block for the two projection rows the `--only` selector was built for |
 | L `engine/results.md:1020` | "ledger §2's two not-measured rows" | live §4 | the hand-off note repeating the same ask, now marked closed by §4 |
-| L `bench/gate-audit.md:9` | §5 item 0 of `performance-status.md` | frozen `:191` | the quiescent-pass procedure |
-| L `bench/gate-audit.md:226` | §6 | frozen `:267` + live §4 | 2.936 µs/launch, spread 1.4 %, then; 2.967, spread 0.8 %, today |
-| L `bench/build-queue.md:69` | §5 item 5 | frozen `:240` | the block-count question expected to land on `out_proj`/`o_proj` |
+| L `progress/2026-10-11/gate-audit.md:9` | §5 item 0 of `performance-status.md` | frozen `:191` | the quiescent-pass procedure |
+| L `progress/2026-10-11/gate-audit.md:226` | §6 | frozen `:267` + live §4 | 2.936 µs/launch, spread 1.4 %, then; 2.967, spread 0.8 %, today |
+| L `progress/2026-10-15/build-queue.md:69` | §5 item 5 | frozen `:240` | the block-count question expected to land on `out_proj`/`o_proj` |
 | L `README.md:47-51` | 87.1 / 3,331 tok/s, "§6 is the live table, §1–§5 are superseded" | **90.6 tok/s @128, 3,443.1 @1024**, §1 is the live table, eras frozen in the snapshot | the on-ramp's headline and section map |
 | L `README.md:167` | §6 | frozen `:15` (+ live §1) | M2's 83.9 tok/s / 11.919 ms row |
 | L `README.md:246-248` | "§1 gets a measured tok/s row replacing the projected 137–147" | live §4 named as the per-op floor table, old figure labelled pre-engine-era | which numbers are measured vs projected |
@@ -142,7 +142,7 @@ protocol, the bimodality warning, the `util` rule, "timings are the main agent's
 `engine/gate.py:4813`, `engine/chat.py:47,419`, `engine/kernels_glue.cpp:44`,
 `engine/README.md:459,490`, `engine/results.md:5,20,309,1242,2798,2817,3296,3452,3804,4035`,
 `AGENTS.md:122`, `prototype/{proj_gemv,glue,mlp_gemv,attn_decode}/*` protocol cites, and
-`bench/build-queue.md:114` ("§1 gets a measured tok/s row" — live §1 is that row).
+`progress/2026-10-15/build-queue.md:114` ("§1 gets a measured tok/s row" — live §1 is that row).
 
 ## E. Rule 2 compliance for `progress/`
 
@@ -157,8 +157,8 @@ is the ledger itself.
 |---|---|---|---|---|---|
 | `AGENTS.md` | 255 | 255 | `prototype/attn_decode/results.md` | 1509 | 1509 |
 | `README.md` | 248 | 248 | `prototype/attn_decode/wave_model.py` | 401 | 401 |
-| `bench/build-queue.md` | 169 | 169 | `prototype/attn_tile_model.py` | 1629 | 1629 |
-| `bench/gate-audit.md` | 266 | 266 | `prototype/gdn_decode/gdn_decode.hip.cpp` | 273 | 273 |
+| `progress/2026-10-15/build-queue.md` | 169 | 169 | `prototype/attn_tile_model.py` | 1629 | 1629 |
+| `progress/2026-10-11/gate-audit.md` | 266 | 266 | `prototype/gdn_decode/gdn_decode.hip.cpp` | 273 | 273 |
 | `devices/strix-halo-mixed-traffic.md` | 639 | 639 | `prototype/gdn_decode/results.md` | 163 | 163 |
 | `engine/README.md` | 496 | 496 | `prototype/gdn_gated_norm/results.md` | 517 | 517 |
 | `engine/kernels.h` | 381 | 381 | `prototype/glue/glue.hip.cpp` | 402 | 402 |

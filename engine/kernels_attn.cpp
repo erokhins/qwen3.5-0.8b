@@ -24,7 +24,7 @@
 //     differ, blocked 25 745. Its own band is §07.3's pre-authorized one, gated in
 //     `prototype/attn_decode/run.py` (results.md §10), and it is the form that can be split.
 //   * `score_f32=0` — the score is rounded through BF16 before the scale, which is the form the pins
-//     carry (see G6's history in `bench/gate-audit.md`: the band that hid this was an audit finding).
+//     carry (see G6's history in `progress/2026-10-11/gate-audit.md`: the band that hid this was an audit finding).
 #include "engine/launch_stats.h"
 #include "kernels.h"
 

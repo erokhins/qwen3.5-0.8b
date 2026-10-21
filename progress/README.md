@@ -39,10 +39,10 @@ evidence **do** move here. This file is the index, the naming rule, and the cros
 | path | why it is live |
 |---|---|
 | `bench/performance-status.md` | the ledger: appended to, 82 doc lines cite it |
-| `bench/build-queue.md`, `bench/gate-audit.md` | undated, still open |
+| `progress/2026-10-15/build-queue.md`, `progress/2026-10-11/gate-audit.md` | undated and still open on 2026-10-16, so they stayed in `bench/` then; both moved here on 2026-10-21 when their content closed — see "The 2026-10-21 pass" below |
 | `testdata/run.py`, `bench.sh`, `testdata/` | the CPU speed harness, untouched by this pass (the runner moved out of `bench/` on 2026-10-16) |
 | `bench/band-history.jsonl` | data file, default of `tools/band_history.py --check` |
-| `bench/corpus-freerun-2026-10-12.json` | data file, 4 doc lines read it |
+| `progress/engine/evidence/corpus-freerun-2026-10-12.json` | data file read by 4 doc lines; live in `bench/` on 2026-10-16, archived as engine evidence on 2026-10-21 (nothing regenerates it: the free-run corpus is a pinned 2026-10-12 result) |
 | `engine/results.md`, `prototype/*/results.md` | the journals: live append-only record; this pass made same-line path fixes only, no line moved |
 | `engines/` | unchanged: cloned reference engines, gitignored, absent on this box |
 
