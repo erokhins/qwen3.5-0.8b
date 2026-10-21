@@ -83,7 +83,7 @@ struct DecodeScratch {
     // bit moves under it either. The default is 1, the slim spelling, because the two spellings were
     // proved bit-identical on the prototype harness's 12 plans before being ported; `engine/gate.py`
     // re-proves it on the engine path against the pinned dumps at BOTH values, which is the device pass
-    // `engine/HANDOFF-attn-touch.md` hands over. `--attn-touch 0` is the frozen side of that A/B.
+    // `progress/2026-10-16/HANDOFF-attn-touch.md` hands over. `--attn-touch 0` is the frozen side of that A/B.
     int attn_touch = 1;
     // Which attention FORM owns a wave body's STREAMING rows (`--attn-fattn`,
     // `kernels.h:AttnLayerArgs::wave_fattn`). Same riding reason as the two above, and the same override

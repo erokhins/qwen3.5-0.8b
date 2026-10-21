@@ -241,3 +241,11 @@ Then, if you want the ledger's own TTFT rows rather than the family attribution:
 * **The injections stayed in the prototype.** The engine never injects `NEG_DIMHALF`, so lever 1's
   `nd == 4` branch is compiled and unreachable in the engine; the injection matrix that proves it agrees
   is `prototype/attn_valu_slim`'s (`--neg dimhalf`), not a gate in this tree.
+
+---
+
+**Archived 2026-10-21** from `engine/HANDOFF-attn-touch.md`. It is a record, not a live instruction: the
+port it hands over shipped, its numbers are in the ledger's `--attn-touch` section, and `progress/README.md`
+rule 1 says a handoff that has produced its verdict belongs here. The citations that named the old path
+(`engine/decode_step.h`, `progress/2026-10-16/prefill-decision-log-2026-10-16.md`) were re-pointed in the
+same commit. Nothing above this marker was edited.

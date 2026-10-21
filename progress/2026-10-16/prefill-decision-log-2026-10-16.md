@@ -492,7 +492,7 @@ What changes in the plan:
 ## D22 — D21's lever is on the shipping path: attn 403.38 → 275.19 ms, the wave 1243.07 → 1105.20 ms
 
 `engine/attn_slim_kernels.h` + `--attn-touch`, gates green at both values, witness in
-`bench/performance-status.md` (appended section) and `engine/HANDOFF-attn-touch.md`. Numbers taken paired
+`bench/performance-status.md` (appended section) and `progress/2026-10-16/HANDOFF-attn-touch.md`. Numbers taken paired
 inside one lock hold with both spellings in **one binary** — the runtime knob was the right call over the
 build-time define the worker proposed, because a define would have made this a two-window comparison, and
 two windows is how the last three plan reversals in this log were produced.
