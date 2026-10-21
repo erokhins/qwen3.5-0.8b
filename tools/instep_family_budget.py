@@ -211,7 +211,8 @@ def main(argv: list[str]) -> int:
         deficit = ms - fbytes[fam] / PROBE_GBS / 1e6
         print(f"  {fam:<8} deficit {deficit:+.3f} ms over {n:>3} launches = "
               f"{deficit*1000/n:+6.1f} us/launch = {deficit*1000/mb:+6.2f} us/MB")
-    n_all = int(tot["launches"]) if tot else 406  /* §07 per-token bill as of `62b73e9`; fallback only, real value comes from tot */
+    # §07 per-token bill as of `62b73e9`; the fallback is only for a log with no TOTAL line.
+    n_all = int(tot["launches"]) if tot else 406
     step_ms = statistics.median(tot["ms"]) if tot else float("nan")
     print("  a per-launch ramp sized to explain mlp would bill every one of the "
           f"{n_all} launches at that rate; the step is {step_ms:.2f} ms.")
