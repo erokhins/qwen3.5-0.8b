@@ -71,14 +71,14 @@ is a cross-window comparison, not a paired A/B, and is quoted as such (§57's ru
 --steps 32 --runs 3`; differential by construction: two runs differing only in `--steps`, so the prompt wave
 cancels). **The headline decode row is the 4k one** (user, 2026-10-21): report decode at 4,032 lanes and quote
 shorter widths beside it, not instead — a short-context row hides the KV term, where most of the remaining headroom
-sits; at 4k it comes from the stage-clock burst, never `context_sweep.py` (§6). **Rows below are the 2026-10-21
+sits; at 4k it comes from the stage-clock burst, never `context_sweep.py` (§6). **The 512–2,048 rows below are the 2026-10-21
 window on the D1 tree** (projection flip, §5; on G4 §44 / G1 §48 / A13 §60); 96 lanes reads 9.619 ms = 104.0 tok/s,
 and 512's 11.36 % spread is §6's dispatch bimodality, not a regression. Paired, the step moved −13.0 % at 128 and −11.0 % at 4,032 (`proj` 4.1946 → 2.7284 and 4.177 → 2.745 ms/step, 7/7 reps separating).
 
 | lanes at last step | marginal ms/token, best of 3 | spread | tok/s |
 |---|---|---|---|
-| **4,032** | **12.680** (stage-clock burst, never `context_sweep.py` — §6; the sweep's own 4,096 row reads 12.556, 2.81 %) | 0.70 % | **78.9** |
-| 128 | 9.876 | 0.43 % | 101.3 |
+| **4,032** | **11.175** (D3-`lean` paired window, 2026-10-21: stage-clock burst, never `context_sweep.py` — §6; the pre-port base in the SAME window read 12.4036 = 80.6 tok/s, so the paired step moved −9.9 % and `attn` itself 3.0060 → 1.6121 ms/step, −46.4 %; the D1 row it overtakes read 12.680 = 78.9, and base-vs-ledger across windows is §6's ~2 % drift) | 1.72 % | **89.5** |
+| 128 | 9.918 (same window; base 9.864 — a 0.55 % move inside overlapping spreads, i.e. FLAT, which `prototype/attn_decode_wide/HANDOFF-D3.md` §4.3 predicted in advance: 8 blocks on 40 CUs is one round at either residency, so neither lever can bind here) | 0.62 % | 100.8 |
 | 512 | 10.609 | 11.36 % | 94.3 |
 | 1,024 | 11.028 | 3.98 % | 90.7 |
 | 2,048 | 10.929 | 7.20 % | 91.5 |

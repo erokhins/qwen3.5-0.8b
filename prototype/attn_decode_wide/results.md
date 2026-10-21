@@ -82,3 +82,62 @@ confirm, not a result.
    streaming merge, and §5's open item (two instruments disagreeing about the >`MAXSC` pins) is
    unresolved. It is worth ~0.4 ms more than `lean` alone and it needs the numerics ruling first.
 3. **Do not touch the 128-lane line here.** Confirmed out of reach of both levers.
+
+---
+
+## The engine window (2026-10-21, later same day): the port lands, the projection is falsified upward
+
+Taken by the main agent, blocking, zero subagents active, one `tools/gpu_lock.sh` hold (`d3-lean-ab`),
+util 58 % at acquire, discounted per `AGENTS.md`. Command:
+`REPS=3 GATE_FIXTURES="dec8 wide4096f" bash prototype/attn_decode_wide/ab_d3_engine.sh`. Base is a
+build of `fe3528f` from a scratch worktree; new is the working tree at `fa68dd6`. This is the ledger
+row now (`engine/performance-status.md` §1), and it supersedes the projection below.
+
+**Canaries, all asserted inside the window before any ms.** Code objects: base `attn_core` reserves
+38,944 B / next_free_vgpr 53, new reserves 6,176 B / 45 — two distinct objects, read from each side's
+own metadata. Numerics: `engine/gate.py` PASS for **both binaries** on `dec8` **and** `wide4096f`.
+Direct decision byte-identity: `sampled.txt` identical at 128 lanes (129 lines) and at **4,032 lanes
+(4,033 lines)** — so the streaming route, which is where the change actually lives, is decision-neutral
+at width and not just at the short case. Every timed run re-asserted `PREFILL tokens=` against the id
+file's field count, `SPLITCAP split=8 lanes=4032`, and its own `STAGEPARITY … 1/1`.
+
+| width | arm | `attn` ms/step (median, spread) | burst ms/token (median, spread) | tok/s |
+|---|---|---|---|---|
+| **4,032** | base | 3.0060 (2.9955..3.0470) | 12.4036 (12.3852..12.6292) | 80.6 |
+| **4,032** | new | **1.6121** (1.6109..1.6320) | **11.1750** (11.0747..11.2665) | **89.5** |
+| 128 | base | 0.4805 (0.4798..0.4849) | 9.8639 (9.8222..9.9447) | 101.4 |
+| 128 | new | 0.4649 (0.4625..0.4697) | 9.9182 (9.8772..9.9379) | 100.8 |
+
+**Verdict at 4,032 lanes: NEITHER.** 1.6121 ms sits between the pre-registered WIN (≤ 1.50) and KILL
+(≥ 2.55), and reports as neither, which is what §4.1 predicted for `lean` alone: it said the arm's
+ceiling was 1.51 ms and that it should be read as a measurement of X rather than as a candidate. It
+was. Halving the walk removed 1.394 ms of a 3.006 ms line, so **X ≈ 2.82, not the 0.64 this file
+derived** — the walk is nearly the whole `attn` line. The 0.64 came from multiplying an isolated
+single-layer body by six and calling the product the line, which ignored that the line contains almost
+nothing else at split 8. §4.1's threshold arithmetic survived; §"What X comes out as"'s arithmetic did
+not, and is superseded by this section rather than edited.
+
+**The projection is falsified, in the direction that matters.** It said ~84.7 tok/s at 4,032; the
+engine delivered **−46.4 % on `attn` and −9.9 % on the step, 80.6 → 89.5 tok/s**. Absolute cross-window
+comparison is not free: the same window's pre-port base reads 12.4036 ms = 80.6 tok/s against the
+ledger's 12.680 = 78.9, i.e. §6's ~2 % window drift, which is why §1 publishes the pair and not just
+the new absolute.
+
+**The 128-lane row is a predicted PASS, not a miss** (§4.3 pre-declared it): 8 blocks on 40 CUs is one
+round at either residency, and the measured move is 0.55 % with overlapping spreads. The `attn` line
+itself moved −3.25 % there, which is inside the same noise and is not claimed as anything.
+
+**Consequence for the held split lever, and it is now smaller.** §2's split-18 arm bought −66.5 % of
+the body against `lean`'s −45.2 %, i.e. roughly 0.36 ms/step more at best — but that was priced against
+a 3.023 ms line when the line is now 1.612 ms, so the remaining walk it can attack is less than half
+what §4 assumed. It still needs the > `MAXSC` numerics ruling before it can be spent, and this window
+did **not** touch that question: `engine/gate.py` passes `wide4096f` because it judges against priced
+route allowances, while the prototype op gate still reports `pinned_off_floor=8` for the streaming
+route. Two instruments still disagree, the disagreement is unadjudicated, and the lever stays held.
+
+Two harness defects this window caught by running the script, recorded because the repo's rule is that a
+check which cannot fail is the bug: the burst parser looked for `STAGE gran=burst family=TOTAL`, a line
+shape the engine does not emit at any granularity, and the empty-parse guard aborted instead of printing
+blanks; and the `sampled.txt` byte comparison sat inside the fixture loop while always running the
+128-lane prompt, so it printed the same coverage line per fixture and never tested 4k. Both fixed in
+`ab_d3_engine.sh` before the numbers above were taken.
