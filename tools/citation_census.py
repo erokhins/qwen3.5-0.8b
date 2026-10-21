@@ -120,6 +120,7 @@ TARGET_ALTS = (
     r"engine/results\.md",
     r"prototype/[^/ ]+/results\.md",
     r"bench/performance-status\.md",
+    r"engine/performance-status\.md",
     r"devices/[A-Za-z0-9-]+\.md",
     r"specification/[A-Za-z0-9.-]+\.md",
     r"engine/README\.md",
@@ -331,6 +332,13 @@ def baseline_provider() -> tuple[dict, list[str], list[str]]:
 
     Files edited since `CENSUS_REF` are read from that commit; files it did not contain read as empty
     (that includes this tool, and the census document itself — untracked when it counted).
+
+    A file that MOVED since the census reads its census-era text from the path it had then, listed in
+    `RENAMES_AT_CENSUS`. Without that the count silently drops every citation that lived in a moved
+    document: `git diff --name-only` reports only the new side of a rename, `git show REF:newpath`
+    comes back empty, and the old path is no longer tracked, so those citations are simply not in the
+    population any more — an undercount with a PASS-shaped shape. The 2026-10-21 document cleanup
+    (13 documents into `progress/`, plus the ledger split in two) is what made this necessary.
     """
     changed = {x for x in git("diff", "--name-only", CENSUS_REF).split("\n") if x}
     untracked = {x for x in git("ls-files", "--others", "--exclude-standard").split("\n") if x}
@@ -340,15 +348,39 @@ def baseline_provider() -> tuple[dict, list[str], list[str]]:
         if path == CENSUS_DOC:
             continue
         shown = git("show", "%s:%s" % (CENSUS_REF, path))
+        if not shown.strip() and path in RENAMES_AT_CENSUS:
+            shown = git("show", "%s:%s" % (CENSUS_REF, RENAMES_AT_CENSUS[path]))
         sub[path] = shown.split("\n") if shown.strip() else []
         if shown.strip():
             re_read.append(path)
     return sub, re_read, sorted(set(sub) - {CENSUS_DOC} - set(re_read))
 
 
+# Where each document moved on 2026-10-21 (current path -> path at `CENSUS_REF`). Kept here rather
+# than discovered from `git log --follow` because a split has no single ancestor: the frozen snapshot
+# carries the census-era ledger's text and the live ledger that now shares its subject deliberately
+# reads as new, because its content was rewritten. If this map and `progress/README.md`'s crosswalk
+# disagree, the census is measuring a population that does not exist.
+RENAMES_AT_CENSUS = {
+    "progress/2026-10-21/performance-status-2026-10-21.md": "bench/performance-status.md",
+    "progress/2026-10-11/gate-audit.md": "bench/gate-audit.md",
+    "progress/2026-10-15/build-queue.md": "bench/build-queue.md",
+    "progress/engine/evidence/corpus-freerun-2026-10-12.json": "bench/corpus-freerun-2026-10-12.json",
+    "progress/2026-10-16/HANDOFF-attn-touch.md": "engine/HANDOFF-attn-touch.md",
+    "progress/2026-10-19/queue2-outcomes-2026-10-19.md": "progress/queue2-2026-10-19.md",
+    "progress/2026-10-16/attn_m2-HANDOFF.md": "prototype/attn_m2/HANDOFF.md",
+    "progress/2026-10-16/attn_m2-HANDOFF-slim.md": "prototype/attn_m2/HANDOFF-slim.md",
+    "progress/2026-10-16/attn_score_dot2-HANDOFF.md": "prototype/attn_score_dot2/HANDOFF.md",
+    "progress/2026-10-16/attn_valu_slim-HANDOFF.md": "prototype/attn_valu_slim/HANDOFF.md",
+    "progress/2026-10-16/gemm_algo_sweep-HANDOFF.md": "prototype/gemm_algo_sweep/HANDOFF.md",
+    "progress/2026-10-16/issue_rate_probe-HANDOFF.md": "prototype/issue_rate_probe/HANDOFF.md",
+    "progress/2026-10-18/gdn_rec_isa-HANDOFF.md": "prototype/gdn_rec_isa/HANDOFF.md",
+}
+
 # The census's own recipes (§2.1), kept verbatim so a disagreement can be adjudicated without
 # reading this file. `T` is its target alternation, interpolated where its recipe used it.
 CENSUS_T = (r'(engine/results\.md|prototype/[^/ ]+/results\.md|bench/performance-status\.md'
+            r'|engine/performance-status\.md'
             r'|devices/[A-Za-z0-9-]+\.md|specification/[A-Za-z0-9.-]+\.md|engine/README\.md'
             r'|AGENTS\.md|README\.md|results\.md|performance-status\.md)')
 CENSUS_RECIPES = {
