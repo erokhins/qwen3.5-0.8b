@@ -94,9 +94,20 @@ undercount. `RENAMES_AT_CENSUS` maps each moved document to the path it had then
 passes 39 checks (14 of them mutation cases that must FAIL).
 
 The rest of the checker inventory, before and after: BROKEN-ANCHOR 17 → 17, BROKEN-LABEL 20 → 20,
-LABEL-UNNAMED 89 → 89, and MISSING-STALE 54 → 67. The 13 new rows are deliberate and all the same kind:
-each archived document's footer naming the path it moved from, which is the information a reader needs and
-is what `progress/README.md`'s own crosswalk column already does for the 2026-10-14 and 2026-10-16 passes.
+LABEL-UNNAMED 89 → 89, and MISSING-STALE 54 → 67. The 13 new entries are the 13 paths the moved
+documents used to have, and each one is cited deliberately from three places: the footer on the moved
+document naming where it came from, `progress/README.md`'s crosswalk row, and
+`tools/citation_census.py`'s rename map. They are the same kind of row those crosswalk tables have
+always contained, and a checker whose MISSING-STALE could not contain an intentional historical path
+would have to lose the useful half.
+
+**`README.md` was edited line-count-neutrally, and had to be.** It is cited by line from the frozen
+journals (`README.md:47`, `:167`, `:246`, `:313`, `:323`, and four more), so the headline correction that
+belongs to this pass — 3,443 → 12,047 warm prompt tok/s at 1,024 lanes, and the pointer to both frozen
+eras — had to be written back into exactly the four lines it replaced. The guard for touching a cited
+file is `wc -l` before and after, which is the `AGENTS.md` line-citation rule applied to the file this
+pass had to correct; `tools/citation_rot_check.py` cannot see the difference, because its own baseline
+moved with the commit.
 `tools/archive_doc.py --selftest` passes 12 cases; its fixtures assemble their fake paths at runtime so
 the checkers do not mistake a fixture for a citation.
 

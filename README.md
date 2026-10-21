@@ -44,13 +44,10 @@ measured 237 GB/s → **~151 tok/s** theoretical (§07.4, confirmed by
 correctness oracle rather than a prototype engine) is 6× below it — which is exactly the
 gap the engine exists to close.
 
-**The engine runs end to end.** `engine/performance-status.md` is the honest ledger: prefill **12,047
-warm prompt tok/s at 1,024 lanes** (11,070 at 4,096, 8,542 at 16,384 — the 2026-10-20 warm banner) and
-decode **87.1 tok/s marginal at 128 lanes** (the 2026-10-19 window, labelled re-take-owed) are measured
-device numbers; §1 is the live table, §2–§6 say where the time goes and what a number is worth, and the
-superseded eras are frozen in `progress/2026-10-21/performance-status-2026-10-21.md` and
-`progress/2026-10-16/performance-status-2026-10-16.md`. Carry the lane count and the ledger row with any
-tokens/s figure.
+**The engine runs end to end.** `engine/performance-status.md` is the honest ledger: prefill **12,047 warm prompt tok/s
+at 1,024 lanes** (11,070 at 4,096, 8,542 at 16,384 — the 2026-10-20 warm banner) and decode **87.1 tok/s marginal at 128
+lanes** (2026-10-19 window, labelled re-take-owed) are device numbers; §1 is the live table, §2–§6 say where the time goes
+and what a number is worth, and superseded eras are frozen in the two `progress/<date>/performance-status-<date>.md` snapshots. Carry the lane count and the ledger row with any tokens/s figure.
 
 ## Target model — verified facts
 
@@ -125,13 +122,10 @@ specification/               # math-only, library-agnostic forward-pass spec (�
 speccheck/                   # independent Python implementation of that spec + all gates (NOT the engine)
 speccheck/chat.sh            # interactive chat on that path, with prefill/decode stats
 testdata/                    # engine-agnostic speed tests (long summarise, long poem) + schema
-bench/                       # one data file: bench/band-history.jsonl, the band-move record the
-                             # gate reads and appends to (the ledger moved to engine/, the audits
-                             # and the runner moved out on 2026-10-16 and 2026-10-21)
+bench/                       # one data file: `bench/band-history.jsonl`, the band record the gate reads and appends to (the ledger moved to `engine/` and the audits to `progress/`)
 progress/                    # archive: dated one-shot docs in <YYYY-MM-DD>/ dirs, plus
                              # progress/<owner>/evidence/ for the committed evidence files
-engine/                      # the engine: kernels, residency, scheduler, state pools, drivers,
-                             # and engine/performance-status.md, the live ledger
+engine/                      # the engine: kernels, residency, scheduler, state pools, drivers, and `engine/performance-status.md`, the live ledger
 prototype/                   # one subdir per op: standalone kernel + reference dump + gate
 engines/                     # cloned reference engines for cross-checking (gitignored, read-only)
 data/                        # reference dumps, fixtures, bench output (gitignored, regenerable)
