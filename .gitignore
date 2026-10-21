@@ -142,3 +142,6 @@ prototype/attn_decode_wide/*.resolution.txt
 # mlp_insitu (D2 diagnosis rig): binary named after its directory, so the path is written in
 # full — a `prototype/**/mlp_insitu` pattern would match the directory and hide the sources.
 prototype/mlp_insitu/mlp_insitu
+# gdn_insitu (D4 diagnosis rig): binary named after its directory, so the path is written in
+# full — a `prototype/**/gdn_insitu` pattern would match the directory and hide the sources.
+prototype/gdn_insitu/gdn_insitu
