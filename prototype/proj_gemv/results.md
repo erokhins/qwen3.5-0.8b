@@ -818,11 +818,18 @@ every arm is the same 48-launch packed plan unless the row says otherwise.
 is in play). The two levers are separable and roughly multiplicative:
 
 - **launch shape, −24.5 %**: the shipped kernel's best row in this same window is 3.2692 ms, the winning
-  arm is 2.4693. The mechanism is lanes per row, not rows per block: at K = 1024, 128 lanes per row is
-  8 bf16 per lane = **exactly one 128-bit load per lane**, where the shipped one-warp-per-row shape does
-  four narrower loads and a four-times-longer serial FMA chain per lane. Rows/block is close to
-  irrelevant on top of that (rpb 8/16/32 at 1024 threads: 2.469 / 2.893 / 3.285 — the *narrow* end wins,
-  which is the opposite of what the published rows/block sweep implied).
+  arm is 2.4693. **The mechanism is not lanes per row, and the first version of this paragraph said it
+  was** — corrected the same day, because the engine port had to read the kernel back to port it and found
+  the prose contradicting the table beside it. `v1-unroll` carries `lpw = 32`: one wavefront per row,
+  exactly as shipped, `WORDS/LPW = 128/32 = 4` words (16-byte loads) per lane. What actually differs is
+  (a) a *compile-time* word bound, so those four loads stay in flight instead of forming a four-long
+  serial chain, and (b) holding `threads = 1024` while `rpb = 8`, so `step = threads/warpSize = 32 > rpb`
+  — three quarters of each block's wavefronts fall straight out of the row loop and the grid is 4× the
+  shipped one. `threads/rpb = 128` is threads per row *slot*, not lanes per row, which is the division
+  the first sentence inverted. The refuted arms are the narrow ones (`v2/v3/v4/v6`, `lpw` 16/8/4, 25-47 %
+  of probe), which split a row's F32 dot and re-associate it — they lose on speed *and* would have lost
+  bit-identity. Rows/block then barely matters (v1 rpb 4..16 within 1.5 %). The measured wins are
+  untouched by the correction; the next reader should size routes from this version.
 - **plan packing, −11.7 %**: identical kernel, identical geometry, same window, ~2600 MHz on both sides:
   packed 48 launches 2.4942 vs unpacked 114 launches 2.8244. Against the engine's shipped combination
   (114 launches at the shipped shape, 4.135 ms in the first window) the two together are about **−40 % of
