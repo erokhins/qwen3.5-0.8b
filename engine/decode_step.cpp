@@ -22,6 +22,11 @@
 // apart quietly. Each collapsed family bills the SAME 49/114/48/18/18/18 launches for a body of 295
 // tokens as for a body of one — one launch per op per body, whatever its width — which is why this
 // table is the plan for both paths and `gate.py` section (h) can judge a wave against it unchanged.
+// The one family that does NOT bill the same at both widths is `proj` under route D1's shipped plan: the
+// grouping is a rule about a body of ONE row (`pack_proj = (n == 1) && packed`), so a one-row body pays
+// 48 launches where a wide body still pays the 114 below. `stage_clock.cpp`'s `wave_plan_bill` and
+// `gate.py`'s `wave_expect` are the two readers of that width dependence; this table is the n = 1 bill
+// under the shipped plan and the wide-body bill for every family but `proj`.
 // The GDN family is the one that does NOT collapse whole: of its four launches per layer, three are
 // now per body and `rec_kernel` (§04.4's sequential scan) stays per token until P9 chunks it. Same
 // for `other`'s 18 conv-window copies: per token at n = 1, per wave from P6 on, because the window
@@ -33,18 +38,23 @@
 //
 //   glue   1 norm-only (layer 0's input norm) + 2 × 24 fused add+norm = 49   (§03.2, = glue's own
 //          gated 49-launch token plan; the final norm is the last of them, not an extra launch)
-//   proj   GDN 4 in_proj + out_proj = 5 × 18;  attention q,k,v,o = 4 × 6     = 114
+//   proj   SHIPPED PLAN, `--proj-plan packed` (route D1): one grouped launch over a layer's input
+//          projections + one for its output projection = 2 × 24                        =  48
+//          `--proj-plan split`, and ANY wide body under either plan: GDN 4 in_proj + out_proj = 5 × 18;
+//          attention q,k,v,o = 4 × 6                                                   = 114
 //   gdn    conv + gates + rec + gated_norm = 4 × 18                          =  72
 //   attn   one fused §05 block per attention layer                           =   6
 //   mlp    gateup + down = 2 × 24                                            =  48
 //   cast   GDN 4/layer × 18 + attention 4/layer × 6 + the final norm         =  97
 //   other  1 embedding row copy + 18 conv-window copies + 1 lm_head          =  20
 //                                                                          ─────────
-//                                                                          = 406
-// At the measured 1.85 µs dispatch floor (`tools/launch_overhead_hip.cpp`) that is ≈0.75 ms/token of
-// pure launch cost on top of ~7.5 ms of weight traffic. It is the engine's current bill, not a
-// measurement: the two levers `engine/results.md` names — packed projections, and BF16-staged
-// `mlp_gateup`/`mlp_down` (which would delete 48 of the 97 casts) — are what shrink it.
+//                                                                          = 340  shipped (proj=48)
+//                                                                              406  with --proj-plan split
+// At the measured 1.85 µs dispatch floor (`tools/launch_overhead_hip.cpp`) that is ≈0.63 ms/token of
+// pure launch cost on top of ~7.5 ms of weight traffic — ≈0.75 ms on the pre-D1 split bill. It is the
+// engine's current bill, not a measurement: the two levers `engine/results.md` names — packed projections,
+// which shipped at 4.2015 → 2.7316 ms of `proj` per step, and BF16-staged `mlp_gateup`/`mlp_down` (which
+// would delete 48 of the 97 casts) — are what shrink it.
 // `gate.py` re-derives every row of that table from §07 in Python and fails on a mismatch, so this
 // comment and the code cannot drift apart quietly.
 //
@@ -1149,7 +1159,15 @@ std::string LaunchCounts::describe() const {
 LaunchCounts planned_launch_counts() {
     LaunchCounts c;
     c.glue = 1 + 2 * kNumLayers;
-    c.proj = kNumGdnLayers * 5 + kNumAttnLayers * 4;
+    // The SHIPPED plan's projection row, derived from the plan's own job list rather than typed: `packed`
+    // groups a layer's input projections into one launch and its output projection is another, so 2 per
+    // layer. The `split` plan that shipped before route D1 bills `kNumGdnLayers * 5 + kNumAttnLayers * 4`
+    // = 114, which is still what a WIDE body issues (the grouping is a one-row rule) and is still
+    // reachable by flag; `gate.py`'s `launch_plan_split()` is the Python spelling of that row and
+    // `launch_plan()` the one this line must agree with. Going through `proj_launches_per_body` is what
+    // stops the two agreeing by accident: this count is counted off the same job list the clock bills
+    // against, and the plan is named in one place (`kernels::kProjPlanDefault`) rather than repeated.
+    c.proj = proj_launches_per_body(kernels::kProjPlanDefault);
     c.gdn = kNumGdnLayers * 4;
     c.attn = kNumAttnLayers;
     c.mlp = 2 * kNumLayers;

@@ -50,7 +50,8 @@
 // WHAT A STAGE IS: the families `planned_launch_counts()` already names, plus `copy` (the D2D memcpys)
 // and `host_tail` (the logits D2H and the argmax), so a stage row can be set against the launch bill
 // line for line. `note()` also counts submissions, and at a lane count inside the attention staging the
-// observed total equals the plan exactly — 406 launches since D30 1.7' — the report prints both and
+// observed total equals the plan exactly — 340 launches since route D1 shipped the packed projection plan,
+// 406 on the pre-D1 `--proj-plan split` pair — the report prints both and
 // says whether they match, which is what makes the instrument checkable rather than plausible. Above the staging an attention
 // site legitimately issues 2 kernels instead of 1 (`kernels_attn.cpp`'s launch plan), so the observed
 // total exceeds the plan there; that is reported, not smoothed.
@@ -247,7 +248,8 @@ struct WaveShape {
     // bills the hand (larger) count, and a library run that forgot to set it reads `plan_match=0`
     // rather than a plausible low number.
     bool gemm_library = false;
-    // Route D1 (`decode_run --proj-plan packed`): whether a ONE-ROW body grouped its input projections into
+    // Route D1 (`decode_run --proj-plan packed`, the SHIPPED plan): whether a ONE-ROW body grouped its
+    // input projections into
     // one launch. The plan needs it for the reason every row above does — `proj` bills launches, and 48 is
     // not 114 — and it needs it as a rule about the body's width rather than about the flag, which is why
     // the bill below applies it only to the bodies `submit_wave_body` would actually pack (`n == 1`, derived
@@ -264,12 +266,13 @@ public:
     // A step clock folds the launcher families into §07's bill rows; a wave clock reports them.
     explicit Clock(Mode mode, Unit unit = Unit::kStep);
 
-    // How many projection submissions one step emits, when the run changed it from §07's split bill
-    // (`decode_run --proj-plan packed`, which submits 48 where §07 bills 114). The clock has no
+    // How many projection submissions one step emits, when the run departed from the shipped plan
+    // (`decode_run --proj-plan split`, which submits 114 where the shipped bill is 48; before route D1's
+    // flip this setter was how a `packed` run told the clock about its 48). The clock has no
     // `WaveShape` to derive such a thing from, so the driver states it — and it must, because
     // `plan_match` is the line that tells a reader the instrument and the dispatch agree, and a plan that
-    // silently billed the pre-D1 count would make every packed run read as a broken clock. Left unset
-    // (0), the bill is §07's, and every run before this knob existed is unaffected.
+    // silently billed the other plan's count would make every departing run read as a broken clock. Left
+    // unset (0), the bill is the shipped one, and every run that names no `--proj-*` flag is unaffected.
     void set_plan_proj(int launches_per_step) { plan_proj_ = launches_per_step; }
 
     Clock(const Clock&) = delete;

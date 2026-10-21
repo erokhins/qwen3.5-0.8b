@@ -294,21 +294,25 @@ struct Options {
     int gdn_chunk = engine::kernels::kGdnChunkTokens;
     bool gdn_chunk_given = false;
     // How a ONE-ROW body groups its projection launches (`--proj-plan`, route D1, route D1's engine
-    // port). `split` — §07's bill, one launch per projection, 114 per token — is the default and is
-    // HEAD's behaviour; `packed` is the prototype's 48-launch plan (`prototype/proj_gemv/results.md`
-    // §D1-W4: 2.4942 vs 2.8244 ms at identical geometry, bit-identical, one clock-controlled window).
-    // It is only meaningful with `--proj-shape unroll8`, because the grouping is a feature of the grouped
-    // kernel, and the pair is REFUSED below rather than echoed as a plan that did not run.
-    engine::kernels::ProjPlan proj_plan = engine::kernels::ProjPlan::kSplit;
+    // port). `packed` is the shipped default and the pair the in-situ A/B funded: one launch over a
+    // layer's input projections plus one for its output projection, 48 per token where §07 bills one
+    // launch per projection (`prototype/proj_gemv/results.md` §D1-W4: 2.4942 vs 2.8244 ms at identical
+    // geometry, bit-identical, one clock-controlled window; `engine/results.md` for the in-situ step).
+    // `split` — §07's bill, 114 per token — is HEAD's behaviour and stays selectable so a pre-D1 log can
+    // be replayed byte for byte. The plan is only meaningful with `--proj-shape unroll8`, because the
+    // grouping is a feature of the grouped kernel, and the unbuildable pair is REFUSED below rather than
+    // echoed as a plan that did not run.
+    engine::kernels::ProjPlan proj_plan = engine::kernels::kProjPlanDefault;
     bool proj_plan_given = false;
-    // Which kernel and block geometry a one-row projection launch uses (`--proj-shape`). `shipped` is
-    // `proj_gemv_tokens<IN,1,false>` at rows/block 32, i.e. HEAD's machine code; `unroll8` is
-    // `engine/proj_group_kernels.h` at rows/block 8 and 1024 threads — the winning arm (§D1-W4: 2.4693 ms
-    // against the shipped shape's 3.2692 ms in the same window), bit-identical for the same reason the
-    // prototype's gate accepted its `v1-unroll`: the word walk, the ladder and the rounding are unchanged.
-    // Echoed on the NUMERICS line like every other knob here, because a timing log that cannot say which
-    // kernel produced its `proj` family row is not evidence, and a stale binary agrees with itself.
-    engine::kernels::ProjShape proj_shape = engine::kernels::ProjShape::kShipped;
+    // Which kernel and block geometry a one-row projection launch uses (`--proj-shape`). `unroll8` is the
+    // shipped default: `engine/proj_group_kernels.h` at rows/block 8 and 1024 threads — the winning arm
+    // (§D1-W4: 2.4693 ms against the shipped shape's 3.2692 ms in the same window), bit-identical for the
+    // same reason the prototype's gate accepted its `v1-unroll`: the word walk, the ladder and the rounding
+    // are unchanged. `shipped` is `proj_gemv_tokens<IN,1,false>` at rows/block 32, i.e. HEAD's machine code,
+    // and needs `--proj-plan split` alongside it (the grouped kernel is what does the grouping). Echoed on
+    // the NUMERICS line like every other knob here, because a timing log that cannot say which kernel
+    // produced its `proj` family row is not evidence, and a stale binary agrees with itself.
+    engine::kernels::ProjShape proj_shape = engine::kernels::kProjShapeDefault;
     bool proj_shape_given = false;
     // Print the projection plan one row-priced body would submit and leave, WITHOUT touching the device
     // (no weight load, no HIP call), so geometry can be checked while another agent holds the GPU lock —
@@ -805,20 +809,24 @@ Options parse_args(int argc, char** argv) {
                                  " there is nothing here for it to spell. Use --attn-fattn 1 (the default)"
                                  " with this flag, or --attn-fattn-wide 0 for the shipping wave");
     }
-    if (o.proj_plan_given && o.proj_plan == engine::kernels::ProjPlan::kPacked &&
+    if (o.proj_shape_given && o.proj_plan == engine::kernels::ProjPlan::kPacked &&
         o.proj_shape != engine::kernels::ProjShape::kUnroll8) {
         // The grouped kernel is the only thing that can issue a packed plan — a segment list is a kernel
         // argument (`engine/proj_group_kernels.h`), so `--proj-plan packed` on the shipped kernel would
         // either be ignored or would need a second packed form of a kernel this route exists to replace.
         // Either way the log would echo a plan that did not run and price the split form twice, which is
-        // the misreport every other refusal above exists to prevent. Keyed on `_given`: the default plan is
-        // `split`, so a run that never mentioned either flag cannot be refused by this.
-        throw std::runtime_error("--proj-plan packed groups a layer's input projections into ONE launch,"
-                                 " and that grouping is a feature of the grouped kernel selected by"
-                                 " --proj-shape unroll8; --proj-shape " +
+        // the misreport every other refusal above exists to prevent. Keyed on the SHAPE being given:
+        // since the flip the default plan is `packed`, so it is a bare `--proj-shape shipped` that asks
+        // for the unbuildable pair, and a run that never mentions either flag still gets the shipped
+        // default pair. `--proj-plan split --proj-shape shipped` is the pre-D1 form and stays legal.
+        throw std::runtime_error("--proj-shape " +
                                  std::string(engine::kernels::proj_shape_name(o.proj_shape)) +
-                                 " submits one launch per projection whatever --proj-plan says. Use"
-                                 " --proj-shape unroll8 with it, or --proj-plan split (the default)");
+                                 " submits one launch per projection whatever --proj-plan says, and"
+                                 " --proj-plan packed groups a layer's input projections into ONE launch;"
+                                 " that grouping is a feature of the grouped kernel selected by"
+                                 " --proj-shape unroll8 (the default). Use --proj-plan split with " +
+                                 std::string(engine::kernels::proj_shape_name(o.proj_shape)) +
+                                 " for the pre-D1 pair, or drop --proj-shape for the shipped plan");
     }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
@@ -1298,18 +1306,20 @@ void print_usage(FILE* out) {
                  " second instantiation of a form already 0.3 %% inside a stage line is not added"
                  " unasked. Larger is unbudgeted: 16/32/64 are the sizes the CPU judge sweeps"
                  "  --proj-plan split|packed  how a ONE-ROW body GROUPS its projection launches (route"
-                 " D1). `split` (the default) is §07's bill: one launch per projection, 114 per token."
-                 " `packed` folds each layer's input projections into ONE launch — they read the same row"
-                 " of `norm_f32` and each writes its own tile, so no weight is copied — for 48 per token"
-                 " (`prototype/proj_gemv/results.md` §D1-W4: 2.4942 vs 2.8244 ms at identical geometry)."
-                 " Requires `--proj-shape unroll8`; the pair is refused rather than echoed. A wider body"
+                 " D1). `packed` (the default) folds each layer's input projections into ONE launch — they"
+                 " read the same row of `norm_f32` and each writes its own tile, so no weight is copied —"
+                 " for 48 per token (`prototype/proj_gemv/results.md` §D1-W4: 2.4942 vs 2.8244 ms at"
+                 " identical geometry). `split` is §07's bill: one launch per projection, 114 per token,"
+                 " i.e. what shipped before D1, kept so a pre-D1 log replays byte for byte. Requires"
+                 " `--proj-shape unroll8`; the other pair is refused rather than echoed. A wider body"
                  " is untouched by it: a wave's projections are already one launch per projection\n"
                  "  --proj-shape shipped|unroll8  which kernel and block geometry a one-row projection"
-                 " launch uses. `shipped` (the default) is `proj_gemv_tokens<IN,1,false>` at rows/block 32,"
-                 " i.e. HEAD's machine code. `unroll8` is `engine/proj_group_kernels.h` at rows/block 8 and"
+                 " launch uses. `unroll8` (the default) is `engine/proj_group_kernels.h` at rows/block 8 and"
                  " 1024 threads with a compile-time word walk (§D1-W4's winning arm, 2.4693 vs 3.2692 ms in"
                  " the same window), bit-identical to the shipped form because the word order, the ladder"
-                 " and the rounding are unchanged. If the device or the width cannot offer it, the run falls"
+                 " and the rounding are unchanged. `shipped` is `proj_gemv_tokens<IN,1,false>` at"
+                 " rows/block 32, i.e. HEAD's machine code, and must be asked for together with `--proj-plan"
+                 " split`. If the device or the width cannot offer `unroll8`, the run falls"
                  " back to `shipped` and prints `PROJSHAPE-FALLBACK` instead of pricing one kernel twice\n"
                  "  --dump-proj-plan  print the projection plan one row-priced body would submit (PROJPLAN"
                  " plus one PROJJOB line per tensor) and exit WITHOUT loading the model or touching the GPU,"
@@ -1970,8 +1980,14 @@ int main(int argc, char** argv) {
         // Route D1's own plan line, printed beside `LAUNCH` for the reason `LAUNCH` is printed at all: it
         // is a statement about the code and the flags, not about the run, so it appears in every mode and
         // in a `--time-stages` log it is the CLAIM the `STAGE … family=proj launches_per_step=` line is
-        // then checked against. `LAUNCH` deliberately does NOT fold this in: section (d) is §07's split
-        // bill policed from Python, and one function answering for a flag would make that check vacuous.
+        // then checked against. Since the flip the two lines AGREE on a default run: `planned_launch_counts()`
+        // bills the shipped plan, which is `packed`, so `LAUNCH proj=48` and `PROJPLAN … launches_per_step=48`
+        // are one claim spelled twice (typed arithmetic here, a counted job list there). They DISAGREE only
+        // on a `--proj-plan split` run, where `LAUNCH` keeps the shipped 48 and `PROJPLAN` says 114 — and
+        // `LAUNCH` stays flag-free on purpose, because `gate.py` section (d) re-derives the shipped bill in
+        // Python and that cross-check stops being independent the moment the engine's echo is a function of
+        // its own flags (the `--attn-tile` trap in AGENTS.md). On a split arm read `PROJPLAN`, or the counted
+        // `STAGE`/`LAUNCHSTAT` lines, rather than `LAUNCH`.
         std::printf("%s\n", proj_plan_line(o).c_str());
         // D-11's provenance half. The wave-row ceiling and the hipBLAS version are the two numbers that
         // decide what a pinned corpus means once more than one GEMM can produce it: `kMaxWaveRows`

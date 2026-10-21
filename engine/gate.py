@@ -4020,8 +4020,44 @@ def state_checks(state_line: dict | None) -> None:
 
 
 # ---- (d) the launch plan -----------------------------------------------------------------------
+def launch_plan_split(n_layers: int, n_gdn: int, n_attn: int) -> dict:
+    """§07's table: one launch per OPERATION per body, at any body width.
+
+    This was the shipped per-token bill until route D1 made `--proj-plan packed` the default, and it is
+    still two things at once, which is why it is kept as its own function rather than folded away:
+
+    * the bill of a `--proj-plan split` run, which stays reachable so the pre-D1 parity form can be
+      replayed (`engine/HANDOFF-D1-ENGINE.md` §4c), and
+    * the bill of a WIDE body under any plan. The grouping D1 adds is a rule about a body of ONE row
+      (`pack_proj = (n == 1) && packed`, `engine/decode_step.cpp`), so a wave of 295 rows submits
+      §07's 114 projection launches whatever the plan says. `section (h)` reads this row for exactly
+      that reason, via `wave_expect`'s wide bill.
+
+    The one row that differs from the shipped per-token bill is `proj`: 5 per GDN layer and 4 per
+    attention layer here, against 2 per layer under the shipped plan (`launch_plan`). Everything else
+    is shared, and the two functions share the spelling of the shared rows.
+    """
+    return {
+        "glue": 1 + 2 * n_layers,
+        "proj": 5 * n_gdn + 4 * n_attn,
+        "gdn": 4 * n_gdn,
+        "attn": n_attn,
+        "mlp": 2 * n_layers,
+        "cast": 4 * n_gdn + 4 * n_attn + 1,
+        "other": 1 + n_gdn + 1,
+    }
+
+
 def launch_plan(n_layers: int, n_gdn: int, n_attn: int) -> dict:
-    """One token's launch bill, counted from §07 — independent of the C++'s own arithmetic.
+    """One token's launch bill under the SHIPPED projection plan — independent of the C++'s own arithmetic.
+
+    Same table as `launch_plan_split()` in every row but `proj`, which the shipped `packed` plan groups:
+    one launch for a layer's INPUT projections (they read the same row of `norm_f32` and each writes its
+    own row-family destination, so no weight copy is needed) plus one for its output projection — 2 per
+    layer, 48 per token, where §07's per-operation count is 5 per GDN layer and 4 per attention layer.
+    That is why 48 and 114 cannot be edited into shape here: this row is derived from how many launches
+    a layer's grouped plan emits, and section (d) fails if the engine's echo disagrees in either
+    direction. The `--proj-plan split` arm bills 114 and `launch_plan_split()` is where that lives.
 
     glue   1 + 2·24. Layer 0's mixer norm has no add in front of it (§03.2's first call), and every
            other add is fused with the norm that follows it: mixer add + post-attention norm, MLP add
@@ -4029,8 +4065,11 @@ def launch_plan(n_layers: int, n_gdn: int, n_attn: int) -> dict:
            pairing is why the final norm is not a launch of its own, and why this is the same 49 that
            `prototype/glue/run.py` pins its token plan against — the number §07's audit in
            `progress/2026-10-11/gate-audit.md` demanded.
-    proj   GDN: in_proj_qkv, in_proj_z, in_proj_b, in_proj_a (§04.1) + out_proj = 5.
-           attention: q_proj, k_proj, v_proj (§05.1) + o_proj = 4.
+    proj   SHIPPED PLAN: 2 per layer — one grouped launch over the layer's input projections, one for
+           its output projection — so 48, and 340 for the token. `launch_plan_split()` bills §07's
+           per-operation count instead (GDN: in_proj_qkv, in_proj_z, in_proj_b, in_proj_a (§04.1) +
+           out_proj = 5; attention: q_proj, k_proj, v_proj (§05.1) + o_proj = 4), which is what a
+           `--proj-plan split` run issues and what a WIDE body always issues.
     gdn    conv (§04.2), gates (§04.3), recurrence (§04.4), gated norm (§04.5) = 4.
     attn   one fused §05.1-§05.7 launch per attention layer (§07.3).
     mlp    gate+up in one launch, down in another (§03.3) = 2 per layer.
@@ -4055,15 +4094,7 @@ def launch_plan(n_layers: int, n_gdn: int, n_attn: int) -> dict:
            to look like the other.
     other  the embedding row read (§02.3), one conv-window roll-back per GDN layer (§08.2), lm_head.
     """
-    return {
-        "glue": 1 + 2 * n_layers,
-        "proj": 5 * n_gdn + 4 * n_attn,
-        "gdn": 4 * n_gdn,
-        "attn": n_attn,
-        "mlp": 2 * n_layers,
-        "cast": 4 * n_gdn + 4 * n_attn + 1,
-        "other": 1 + n_gdn + 1,
-    }
+    return launch_plan_split(n_layers, n_gdn, n_attn) | {"proj": 2 * (n_gdn + n_attn)}
 
 
 def launch_plan_verdicts(want: dict, got: dict) -> list[tuple[str, bool, str]]:
@@ -4096,6 +4127,13 @@ def selftest_launch_bill() -> list[str]:
     and each must be named at its own row. `total` gets its own case because a sum that no longer follows
     from its rows is a different defect from a row that moved — and the third case (a row the engine
     never printed at all) is the one a `dict.get()` would otherwise turn into a silent None.
+
+    The fourth case is the one this flip owes: `proj` billed at §07's per-operation count instead of the
+    shipped plan's grouped count. It is an injection rather than a remembered +66 because the number
+    comes from `launch_plan_split()`, so it moves with the table it describes — and it is the exact
+    failure mode of a default that went back to `split` while section (d)'s Python expectation stayed at
+    48, which is the `--attn-tile` trap in AGENTS.md (a gate quietly judging a different launch plan than
+    the engine ships).
     """
     bad: list[str] = []
     want = launch_plan(24, 18, 6)          # §03.5: 24 layers, 18 GDN, 6 attention
@@ -4125,6 +4163,10 @@ def selftest_launch_bill() -> list[str]:
          {**clean, "total": clean["total"] + 1}, "launch total")
     case("a row the engine never printed", {k: v for k, v in clean.items() if k != "gdn"},
          "launch count gdn")
+    case("the projection plan reverted to one launch per projection",
+         {**clean, "proj": launch_plan_split(24, 18, 6)["proj"],
+          "total": clean["total"] - want["proj"] + launch_plan_split(24, 18, 6)["proj"]},
+         "launch count proj")
     return bad
 
 
@@ -4597,56 +4639,102 @@ def wave_row_sizes(prompt_len: int, wave_rows: int) -> list:
     return sizes
 
 
-def wave_expect(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int) -> dict:
+def wave_expect(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int,
+                one_row: dict | None = None) -> dict:
     """The counters a run of this shape MUST print, family by family, derived rather than remembered.
 
-    `counts` is the per-body launch bill from `launch_plan()` (§07's structure, section (d)'s source),
-    so this is the same arithmetic §07 implies — which is the point: the engine's observed counters are
-    compared against what §07 says a wave of that width owes. A refactor that loops the wave body per
-    token changes `calls` and `rows_max` and leaves every output bit alone, and this is the table that
-    notices.
+    `counts` is the per-body launch bill for a body of MORE THAN ONE ROW (`launch_plan_split()` —
+    §07's structure, and the reason this is the same arithmetic §07 implies: the engine's observed
+    counters are compared against what §07 says a wave of that width owes). A refactor that loops the
+    wave body per token changes `calls` and `rows_max` and leaves every output bit alone, and this is
+    the table that notices.
 
-    "Per body" means one `submit_wave_body` call, and for all three batchable families that number is
-    the per-TOKEN bill from §07 whether the body was one token or 295: glue issues one launch per fused
-    add+norm, the MLP one per half, and `proj` one per projection (§06.2's "one GEMM per projection"),
-    each covering every row of the body — so 49/24/24/114 launches arrive per body at any width (49
-    glue, 24+24 MLP halves, 114 proj: five projections for each of 18 GDN layers, four for each of 6
-    attention layers), and what the width changes is `rows` on each of them. That is why the same table
-    serves both sides. `cast` is NOT in this table and must not be added to it: it has no launcher
-    counter (`engine/launch_stats.h`), and a wide body's cast count is route-dependent —
-    `engine/stage_clock.cpp`'s `wave_plan_bill` prices it against the wave report, per body and per
-    route, which is where a per-body cast row is read.
+    "Per body" means one `submit_wave_body` call. For glue and the MLP and the three token-parallel GDN
+    sites and the attention site that number is the per-TOKEN bill from §07 whether the body was one
+    token or 295: glue issues one launch per fused add+norm, the MLP one per half, each covering every
+    row of the body — so 49 glue and 24+24 MLP launches arrive per body at any width, and what the
+    width changes is `rows` on each of them.
+
+    `one_row` carries the per-body bill for a body of exactly ONE row, for the families whose bill is
+    width-dependent. Under the shipped plan that is `proj` alone, and it is width-dependent because the
+    grouping is a rule about a one-row body: `pack_proj = (n == 1) && packed` (`engine/decode_step.cpp`)
+    bundles a layer's input projections into one launch, so a generation step bills 48 launches where a
+    wide body still submits §07's 114 (one per projection, §06.2's "one GEMM per projection"). A family
+    absent from `one_row` bills the same at every width, which is what every family did before route D1
+    and what every family except `proj` still does. `cast` is NOT in this table and must not be added to
+    it: it has no launcher counter (`engine/launch_stats.h`), and a wide body's cast count is
+    route-dependent — `engine/stage_clock.cpp`'s `wave_plan_bill` prices it against the wave report, per
+    body and per route, which is where a per-body cast row is read.
 
     A generation step is a body of one token (`submit_token_body` is `submit_wave_body` with n = 1),
-    which is why the decode steps join the wave sizes below and why `rows_total` comes out
-    independent of `wave_rows`: batching moves work between launches, it does not add or remove any.
+    which is why the decode steps join the wave sizes below. `rows_total` is no longer
+    independent of `wave_rows` for a family whose bill moves with width — see `launch_work_rows()`,
+    which restates it in the plan-invariant unit for the "not less work" comparison.
     """
     sizes = wave_row_sizes(prompt_len, wave_rows) + [1] * int(decode_steps)
     out = {}
     for family, per_body in counts.items():
+        per_one_row = (one_row or {}).get(family, per_body)
         out[family] = {
-            "calls": per_body * len(sizes),
+            "calls": sum(per_one_row if s == 1 else per_body for s in sizes),
             "calls_batched": per_body * sum(1 for s in sizes if s > 1),
-            "rows_total": per_body * sum(sizes),
+            # A one-row launch records a width of 1 (`engine/launch_stats.h` counts SITES and the width
+            # each covered), so a one-row body contributes its launch count, not launch count × rows.
+            "rows_total": sum(per_one_row if s == 1 else per_body * s for s in sizes),
             "rows_max": max(sizes) if sizes else 0,
         }
     return out
 
 
+def launch_work_rows(got: dict, family: str, counts: dict, one_row: dict | None) -> int | None:
+    """Observed launch counters for one family, restated as TENSOR-rows — the plan-invariant work unit.
+
+    A launcher reports sites and the token width each covered, so `rows_total` measures work only while
+    one site covers one tensor. The shipped `packed` plan stops that for one-row bodies: a grouped
+    launch bundles a GDN layer's four input tensors (an attention layer's three) into ONE site that
+    still reports width 1, so per one-row body `wide − one` = 114 − 48 = 66 tensor-rows are grouped out
+    of the counter (18 GDN groups x 3 + 6 attention groups x 2). Folding them back is what lets the
+    cross-side "fewer launches, not less work" comparison keep meaning the same thing across the plan
+    change, and it is derived here from the two bills and the observed counters — never read off the
+    engine's echo. For every family whose bill does not move with width this is the identity, so the
+    check keeps exactly the shape it had before route D1.
+
+    Returns None when the side printed no counters, or when its one-row launch count is not a whole
+    number of one-row bodies — which is itself a failure the caller prints, not an arithmetic to hide.
+    """
+    counters = got.get(family) or {}
+    if not counters:
+        return None
+    per_wide = counts[family]
+    per_one = (one_row or {}).get(family, per_wide)
+    rows = counters.get("rows_total")
+    if rows is None:
+        return None
+    if per_wide == per_one:
+        return rows
+    one_row_launches = counters.get("calls", 0) - counters.get("calls_batched", 0)
+    if one_row_launches % per_one:
+        return None
+    return rows + (per_wide - per_one) * (one_row_launches // per_one)
+
+
 def wave_launchstat_lines(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int,
-                          family_rows: dict | None = None) -> list:
+                          family_rows: dict | None = None,
+                          one_row: dict | None = None) -> list:
     """`wave_expect()` formatted as the `LAUNCHSTAT` lines the engine prints. Stand-in only — a real
     run's counters come from the launchers — but produced from the same function the check compares
     against, so the dry-run plumbing cannot drift from the device one.
 
     `family_rows` names families whose observed width differs from the side's wave width, which is how
     `--break-wave` and `--break-gdn-one-row` write the counters of a body that silently ran one row at
-    a time while still asking for (and echoing) a wide wave."""
+    a time while still asking for (and echoing) a wide wave. `one_row` is the width-dependent bill
+    `wave_expect` needs to price those one-row counters under the shipped plan.
+    """
     out = []
-    for fam, c in wave_expect(counts, prompt_len, decode_steps, wave_rows).items():
+    for fam, c in wave_expect(counts, prompt_len, decode_steps, wave_rows, one_row).items():
         if family_rows and fam in family_rows:
             c = wave_expect({fam: counts[fam]}, prompt_len, decode_steps,
-                            family_rows[fam])[fam]
+                            family_rows[fam], one_row)[fam]
         out.append(f"LAUNCHSTAT family={fam} calls={c['calls']} calls_batched={c['calls_batched']}"
                    f" rows_total={c['rows_total']} rows_max={c['rows_max']}")
     return out
@@ -4706,7 +4794,8 @@ def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: d
                         break_ab_logits: int = -1, break_ab_ids: int = -1, carry_rows: int = 0,
                         break_gdn_one_row: bool = False,
                         break_attn_one_row: bool = False,
-                        break_ab_room: str = "") -> dict:
+                        break_ab_room: str = "",
+                        one_row: dict | None = None) -> dict:
     """The sides of section (h), on the CPU, for `--dry-run` / `--selftest`.
 
     Like section (d) in dry-run mode this is Python comparing with itself — said out loud in the note
@@ -4816,7 +4905,7 @@ def batched_ab_stand_in(man: dict, prompt_ids: list, dec_logits: list, counts: d
                 (rc[0] if rc is not None else np.arange(64, dtype=np.float32)).tobytes())
             perturb(pos)
         lines += wave_launchstat_lines(counts, len(prompt_ids), len(dec_logits), observed_rows,
-                                       only_one_row)
+                                       only_one_row, one_row)
         lines.append(f"RESULT mode=run steps={len(prompt_ids) + len(dec_logits)} ms_total=0"
                      f" ms_per_step=0 last_sampled={greedy[-1]}"
                      f" prefix_len={len(prompt_ids) + len(dec_logits)} stopped=0")
@@ -5069,11 +5158,17 @@ def cross_width_ids(sides: list[tuple[str, dict]], band_ref: str) -> None:
 
 
 def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_steps: int,
-                         wave_rows: int, *, stand_in: bool) -> None:
+                         wave_rows: int, *, stand_in: bool,
+                         one_row: dict | None = None) -> None:
     """Section (h). `sides` is what `batched_ab_stand_in` returns, or the same shape built from real
     `decode_run` runs; one judging function, so the negative exercises the code that judges the
     engine. Two sides (`batched`, `perrow`) is P4b/P5's shape; a third (`carry`, P6) is judged by the
-    same rules and compared for bit-identity against the wide side."""
+    same rules and compared for bit-identity against the wide side.
+
+    `counts` is the per-body bill for a WIDE body and `one_row` the override for a body of one row
+    (route D1's grouped projection plan makes `proj` the one family whose bill moves with width);
+    `wave_expect` and `launch_work_rows` are the only readers of the difference.
+    """
     section("(h) the batched path — counted launches, not inferred outputs (§08.2, P4b/P5/P6)")
     batched, perrow = sides["batched"], sides["perrow"]
     judged = [("batched", batched), ("one-row", perrow)]
@@ -5089,7 +5184,8 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
               f"PREFILL wave_rows={echoed}, the command asked"
               f" {side['requested_wave_rows']}")
 
-    want = {label: wave_expect(counts, prompt_len, decode_steps, side["requested_wave_rows"])
+    want = {label: wave_expect(counts, prompt_len, decode_steps, side["requested_wave_rows"],
+                              one_row)
             for label, side in judged}
     for label, side in judged:
         got = side["run"].get("launchstat", {})
@@ -5188,19 +5284,36 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
           f"attn calls_batched={rat.get('calls_batched')} rows_max={rat.get('rows_max')}"
           " — both must be 0 and 1")
 
-    # Same work, fewer launches. `rows_total` wave-independent is the half that says the launch
-    # delta is batching rather than skipped work. Every side is compared against the wide one, so a
-    # third (--wave-rows 5) side is held to the same "not less work" rule as the one-row side.
+    # Same work, fewer launches — restated in the unit that survives route D1. `rows_total` as the
+    # launcher prints it is sites x token-width, which was a work measure while every site covered one
+    # tensor and stopped being one for one-row bodies the day those bodies began bundling four tensors
+    # into one launch. `launch_work_rows` folds the bundled tensor-rows back from the two bills and the
+    # observed counters, so the quantity compared here is the same one the pre-D1 plan compared
+    # (114 tensor-rows per token on every side) without the check being softened into a tautology: it
+    # still goes red if a side skips a projection, and it is derived, not remembered. Every side is
+    # compared against the wide one, so a third (--wave-rows 5) side is held to the same "not less work"
+    # rule as the one-row side.
     for family in sorted(counts):
-        b_total = batched["run"].get("launchstat", {}).get(family, {}).get("rows_total")
+        b_total = launch_work_rows(batched["run"].get("launchstat", {}), family, counts, one_row)
         for label, side in judged:
             if label == "batched":
                 continue
-            o_total = side["run"].get("launchstat", {}).get(family, {}).get("rows_total")
+            o_total = launch_work_rows(side["run"].get("launchstat", {}), family, counts, one_row)
             check(b_total == o_total and b_total is not None,
                   f"the {label} side covers the same {family} rows as the batched side"
                   " (fewer launches, not less work)",
-                  f"rows_total {b_total} vs {o_total}")
+                  f"tensor-rows {b_total} vs {o_total} (raw rows_total"
+                  f" {batched['run'].get('launchstat', {}).get(family, {}).get('rows_total')} vs"
+                  f" {side['run'].get('launchstat', {}).get(family, {}).get('rows_total')};"
+                  " grouped tensor-rows folded back by launch_work_rows for any family whose per-body"
+                  " bill moves with width)")
+    # The delta belongs to the PROMPT wave, so that is what gets compared. Generation steps are one
+    # token wide whatever the prompt does — `submit_token_body` is `submit_wave_body` with n = 1, and
+    # batching the mixer is P5/P6/P7's job, not this one's — so on a fixture like `dec64t` (27 prompt
+    # tokens, 64 steps) the whole-run ratio is only 1.4x even though the wave itself is 27x cheaper.
+    # Quoting the whole-run ratio as "the batching win" would understate it and, as a threshold, would
+    # fail a correct engine.
+    #
     b_calls = sum(c.get("calls", 0) for c in batched["run"].get("launchstat", {}).values())
     r_calls = sum(c.get("calls", 0) for c in perrow["run"].get("launchstat", {}).values())
     # The delta belongs to the PROMPT wave, so that is what gets compared. Generation steps are one
@@ -5209,15 +5322,29 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
     # tokens, 64 steps) the whole-run ratio is only 1.4x even though the wave itself is 27x cheaper.
     # Quoting the whole-run ratio as "the batching win" would understate it and, as a threshold, would
     # fail a correct engine.
-    decode_share = sum(counts.values()) * decode_steps
+    #
+    # Each side's prompt-wave count is now checked against its OWN derived bill rather than against the
+    # other side's scaled by the wave count. The old form was `r_wave * waves_b == b_wave * waves_r`,
+    # which is only true while a body bills the same at any width; the shipped grouped plan makes a
+    # one-row body cheaper than a wide one (`proj` 48 against 114), so the two sides are no longer
+    # proportional by wave count alone and the identity would have gone red on a correct engine — the
+    # `--wave-rows 1` off/on canary in `engine/HANDOFF-D1-ENGINE.md` §2 is exactly that reading (5,700
+    # launches off against 2,400 on, where §07's arithmetic bills 48 per one-row body). Per-side
+    # equality is the stronger statement, and `r_wave > b_wave` keeps the claim the section is for.
+    decode_share = sum({**counts, **(one_row or {})}.values()) * decode_steps
     b_wave, r_wave = b_calls - decode_share, r_calls - decode_share
     waves_b = len(wave_row_sizes(prompt_len, wave_rows))
     waves_r = len(wave_row_sizes(prompt_len, 1))
+    exp_b_wave = sum(v["calls"] for v in
+                     wave_expect(counts, prompt_len, 0, wave_rows, one_row).values())
+    exp_r_wave = sum(v["calls"] for v in
+                     wave_expect(counts, prompt_len, 0, 1, one_row).values())
     wave_ratio = (r_wave / b_wave) if b_wave else 0.0
-    check(b_wave > 0 and r_wave > b_wave and r_wave * waves_b == b_wave * waves_r,
+    check(b_wave > 0 and r_wave > b_wave and b_wave == exp_b_wave and r_wave == exp_r_wave,
           "the batched run issues materially fewer batchable launches for the prompt wave",
-          f"prompt wave: {b_wave} glue+proj+MLP+GDN launches across {waves_b} wave(s) vs {r_wave}"
-          f" across {waves_r} — {wave_ratio:.0f}x fewer for a {prompt_len}-token prompt. The whole"
+          f"prompt wave: {b_wave} glue+proj+MLP+GDN launches across {waves_b} wave(s) (this side's"
+          f" derived bill is {exp_b_wave}) vs {r_wave} across {waves_r} (derived {exp_r_wave}) —"
+          f" {wave_ratio:.0f}x fewer for a {prompt_len}-token prompt. The whole"
           f" run is {b_calls} vs {r_calls}: {decode_steps} generation steps are one token wide"
           " however the prompt is batched")
 
@@ -8451,6 +8578,16 @@ def main() -> int:
           f"{want['glue']}")
     check(n_gdn + n_attn == n_layers and n_attn == 6,
           "layer routing read from the manifest matches §03.5", f"{n_gdn}+{n_attn} of {n_layers}")
+    # The same two tables, in the shapes section (h) needs them. `launch_plan()` is the bill of ONE TOKEN
+    # under the shipped plan and section (d) above judges the engine's echo against it;
+    # `launch_plan_split()` is §07's per-operation table, which is what a WIDE body issues under either
+    # plan because the grouping is a one-row rule (`pack_proj = (n == 1) && packed`). Keeping both
+    # spellings is what stops one side of the flip from being derived from the other: if section (h)
+    # reused the per-token number for a wide body it would expect 48 launches per wide body, go red on
+    # every device fixture, and the tempting fix would be to make the engine agree with the wrong model.
+    wide_plan = launch_plan_split(n_layers, n_gdn, n_attn)
+    one_row_plan = {"proj": want["proj"]}
+
     if "ms_per_step" in run["result"]:
         notes.append(f"decode_run reported {run['result']['ms_per_step']} ms/step. Timing from a"
                      " gate run is a by-product, not a measurement: see engine/performance-status.md"
@@ -8461,21 +8598,21 @@ def main() -> int:
     # to per-row launches fails something. The counters come from the launchers (`engine/launch_stats.h`)
     # and the sides differ only in `--wave-rows`, so this is the one place in the tree that can tell
     # "batching cost nothing" from "batching never ran" — the outputs cannot.
-    counts = {"glue": want["glue"], "proj": want["proj"],
-              "mlp_gateup": want["mlp"] // 2, "mlp_down": want["mlp"] // 2,
+    counts = {"glue": wide_plan["glue"], "proj": wide_plan["proj"],
+              "mlp_gateup": wide_plan["mlp"] // 2, "mlp_down": wide_plan["mlp"] // 2,
               # P6's three token-parallel GDN sites. Each bills ONE launch per GDN layer per body at
               # any width — the same per-body shape as glue/proj/MLP — so `wave_expect` can price a
               # wave of them unchanged. `gdn_rec` (§04.4's scan) is absent on purpose: its launcher has
               # no width to report, and a family that can only ever read rows=1 is a check that cannot
               # fail (`engine/launch_stats.h` says the same).
-              "gdn_conv": want["gdn"] // 4, "gdn_gates": want["gdn"] // 4,
-              "gdn_gated_norm": want["gdn"] // 4,
+              "gdn_conv": wide_plan["gdn"] // 4, "gdn_gates": wide_plan["gdn"] // 4,
+              "gdn_gated_norm": wide_plan["gdn"] // 4,
               # P8's attention site. One per attention layer per body at any width — the same per-body
               # shape as the four above, which is why `wave_expect` prices it unchanged — where the body
               # is a wave of n rows or a single generation step. It counts SITES, not the 1-3 kernels a
               # site submits; `engine/launch_stats.h` explains why counting kernels would make the
               # expected number a function of context length instead of of wave width.
-              "attn": want["attn"]}
+              "attn": wide_plan["attn"]}
     wave_rows = wave_row_ceiling()
     # P6's third side: a prompt cut into waves of 5, so a 46-token prompt crosses nine interior wave
     # boundaries and every one of them has to hand the conv window to the next. 5 is small enough to
@@ -8515,12 +8652,12 @@ def main() -> int:
                                     args.break_wave, args.break_ab_logits, args.break_ab_ids,
                                     carry_rows,
                                     args.break_gdn_one_row, args.break_attn_one_row,
-                                    args.break_ab_room)
+                                    args.break_ab_room, one_row_plan)
     else:
         sides = run_batched_ab(args, prompt_ids, n_decode, greedy, ab_replay, work, wave_rows,
                                carry_rows)
     batched_proof_checks(sides, counts, len(prompt_ids), n_decode, wave_rows,
-                         stand_in=args.dry_run)
+                         stand_in=args.dry_run, one_row=one_row_plan)
     # (j) the `gdn_rec` spelling A/B, and it runs here rather than next to section (b) because it is a
     # RUN-vs-RUN comparison like (h), not a run-vs-pin one. Every spelling of the recurrence is in this
     # binary whatever the flags say, so the sides are launches of one build and the claim under

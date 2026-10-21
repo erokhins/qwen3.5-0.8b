@@ -44,9 +44,11 @@ std::array<int, kStageCount> plan_bill(int proj_override = 0) {
     const LaunchCounts c = planned_launch_counts();
     std::array<int, kStageCount> p{};
     p[kGlue] = c.glue;
-    // A run whose projection plan is not §07's split one states its own `proj` count (see
-    // `Clock::set_plan_proj`); everything else on this line is still §07's, and `gate.py` section (d)
-    // still polices §07's table off the untouched `LAUNCH` line.
+    // A run whose projection plan is not the SHIPPED one states its own `proj` count (see
+    // `Clock::set_plan_proj`): since route D1's flip the shipped bill is `packed`'s 48, so it is a
+    // `--proj-plan split` run that needs the override now rather than a packed one. Everything else on
+    // this line is still §07's, and `gate.py` section (d) still polices the shipped table off the
+    // untouched `LAUNCH` line.
     p[kProj] = proj_override > 0 ? proj_override : c.proj;
     p[kGdn] = c.gdn;
     p[kAttn] = c.attn;
@@ -400,6 +402,7 @@ void Clock::close_segment() {
 
 std::string Clock::describe() const {
     const std::array<int, kStageCount> plan = plan_bill(plan_proj_);
+
     std::string out;
     char buf[512];
     long long subs = 0;
@@ -520,13 +523,21 @@ std::string Clock::describe_wave(const WaveShape& shape) const {
     // priced row must reproduce §07's per-token bill, which `gate.py` section (d) polices from the other
     // side. If someone edits one of the two formulas and not the other, this reads 0 in every run.
     {
+        // The shape is built the way the SHIPPED plan builds a one-row body, because "the per-token bill
+        // §07 now bills" is the shipped bill: `planned_launch_counts()` answers for `kProjPlanDefault`, and
+        // comparing a default-constructed (split) body against it would read 0 forever and prove nothing —
+        // the check-that-cannot-fail class. Pre-D1 the shipped plan WAS split, which is why the packed arm
+        // below used to be the odd one out; after the flip the two arms are named for their plans so a
+        // revert of the default cannot silently make one of them redundant.
         WaveShape one;
         one.tokens = one.bodies = one.wave_rows = one.priced_rows = 1;
+        one.proj_packed = (kernels::kProjPlanDefault == kernels::ProjPlan::kPacked);
         const WavePlanBill w1 = wave_plan_bill(one);
         const std::array<int, kStageCount> tok = plan_bill();
         // `gdn` and `mlp` are the two rows the tables spell differently: §07 bills them as 72 and 48 under
         // one name each, the wave bill carries them under six. Fold, then compare everything.
-        const auto matches_token_plan = [&](const WavePlanBill& w) {
+        const auto matches_token_plan = [&](const WavePlanBill& w,
+                                           const std::array<int, kStageCount>& tok) {
             const long long gdn_wave = w.subs[kGdnConv] + w.subs[kGdnGates] + w.subs[kGdnRec] +
                                        w.subs[kGdnChunk] + w.subs[kGdnGatedNorm];
             const long long mlp_wave = w.subs[kMlpGateup] + w.subs[kMlpDown];
@@ -535,18 +546,26 @@ std::string Clock::describe_wave(const WaveShape& shape) const {
                    mlp_wave == tok[kMlp] && w.subs[kCast] == tok[kCast] &&
                    w.subs[kCopy] == tok[kCopy] && w.subs[kLmHead] == tok[kLmHead];
         };
-        const bool same = matches_token_plan(w1);
-        // The same one-row body with `proj_packed` set. The token side of THIS comparison is not §07's
-        // table — it is §07's table with the `proj` row replaced by the count `proj_plan_jobs` produces —
-        // and that is the point: it forces the wave bill's packed branch and the body's own job list to
-        // agree on what a packed step submits, in the same report that prints whether the clock's counted
-        // numbers matched its plan. Two derivations that drifted would read 0 here.
+        const bool same = matches_token_plan(w1, tok);
+        // The same one-row body under the plan that is NOT shipped: `split`, one launch per projection.
+        // Its token side is that plan's own count, from `proj_plan_jobs` — the same list the body walks —
+        // so a wave bill whose packed branch broke in a way that only shows on the split side still reads 0
+        // in the same report that prints whether the counted numbers matched the plan.
+        WaveShape one_split = one;
+        one_split.proj_packed = false;
+        const std::array<int, kStageCount> tok_split =
+            plan_bill(proj_launches_per_body(kernels::ProjPlan::kSplit));
+        const bool same_split = matches_token_plan(wave_plan_bill(one_split), tok_split);
+        // The same one-row body with `proj_packed` set explicitly. Under the shipped plan this is now the
+        // SAME comparison as the first one, and it is kept anyway: if the default ever goes back to `split`
+        // the two separate again, and a reader of one log should not have to know which way the default
+        // went to know whether the packed branch was checked.
         WaveShape one_packed = one;
         one_packed.proj_packed = true;
         const std::array<int, kStageCount> tok_packed =
             plan_bill(proj_launches_per_body(kernels::ProjPlan::kPacked));
         const WavePlanBill w1p = wave_plan_bill(one_packed);
-        const bool same_packed = w1p.subs[kProj] == tok_packed[kProj] && same;
+        const bool same_packed = matches_token_plan(w1p, tok_packed);
         // The same one-row body on a library route. `resolve_wave_gemm` gives a one-row body the hand
         // GEMV whatever the run asked for, so the route-aware `cast` row must fold back to §07's 97
         // here: this is the witness that the guard is a row-count rule and not a flag rule, and a guard
@@ -554,11 +573,12 @@ std::string Clock::describe_wave(const WaveShape& shape) const {
         // every run instead of being a claim nobody can check.
         WaveShape one_library = one;
         one_library.gemm_library = true;
-        const bool same_library = matches_token_plan(wave_plan_bill(one_library));
+        const bool same_library = matches_token_plan(wave_plan_bill(one_library), tok);
         std::snprintf(buf, sizeof buf,
                       " body1_plan_matches_token_plan=%d body1_library_plan_matches_token_plan=%d"
+                      " body1_split_plan_matches_token_plan=%d"
                       " body1_packed_plan_matches_token_plan=%d",
-                      same ? 1 : 0, same_library ? 1 : 0, same_packed ? 1 : 0);
+                      same ? 1 : 0, same_library ? 1 : 0, same_split ? 1 : 0, same_packed ? 1 : 0);
         out += buf;
     }
     if (notes_ignored_) {

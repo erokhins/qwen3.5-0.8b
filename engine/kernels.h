@@ -201,19 +201,23 @@ void proj_gemm(const void* weight, const void* x, uint16_t* out, int rows, int i
 //   PLAN     one launch per layer group instead of one per tensor: 48 launches per token instead of
 //            the 114 §07 bills, at the winning shape. −11.7 % more, at identical geometry.
 //
-// Both live behind flags that default to the shipped behaviour, because the prize is a prototype burst
-// number and the in-situ A/B (the `proj` family row of a real decode step) is what decides whether the
-// defaults move — the same order every other lever in this file was shipped in.
+// Both shipped behind flags that defaulted to HEAD's behaviour, because the prize was a prototype burst
+// number and the in-situ A/B (the `proj` family row of a real decode step) is what had to decide whether
+// the defaults move — the same order every other lever in this file was shipped in. It did move them:
+// the in-situ `proj` family is 4.2015 → 2.9521 → 2.7316 ms/step and the whole step 11.6967 → 10.1851 ms
+// (`engine/results.md`, route D1), so `kProjPlanDefault`/`kProjShapeDefault` below name the pair that
+// ships, and `kSplit`/`kShipped` are the pre-D1 pair — still reachable, because a pre-D1 log has to stay
+// replayable bit for bit.
 
 // How the per-token projection launches are GROUPED. A group is one launch over several weight tensors.
 enum class ProjPlan {
     // §07's bill: one launch per projection — 5 per GDN layer (qkv, z, b, a, out_proj) and 4 per
-    // attention layer (q, k, v, o_proj), 114 per token. What ships today, and what every gate log taken
-    // before this knob exists was measured on.
+    // attention layer (q, k, v, o_proj), 114 per token. What every gate log taken before route D1 was
+    // measured on, and what `--proj-plan split` still replays byte-identically; no longer the default.
     kSplit,
     // One launch for a layer's INPUT projections (they read the same row of `norm_f32` and each writes
     // its own row-family destination, so they need no weight copy — see `ProjSeg`) plus one for its
-    // output projection: 2 per layer, 48 per token.
+    // output projection: 2 per layer, 48 per token. THE SHIPPED PLAN (`kProjPlanDefault`).
     kPacked,
 };
 const char* proj_plan_name(ProjPlan plan);
@@ -233,6 +237,16 @@ enum class ProjShape {
 };
 const char* proj_shape_name(ProjShape shape);
 ProjShape parse_proj_shape(const std::string& name);
+
+// The shipped pair, named ONCE, because three C++ readers have to agree on it and none of them may type a
+// launch count: `decode_run`'s option defaults, `engine/decode_step.cpp`'s `planned_launch_counts()` (the
+// `LAUNCH` bill `engine/gate.py`'s section (d) polices — which is why that bill is 48 and not 114), and
+// `engine/stage_clock.cpp`'s one-row-body self-checks, which have to build a one-row body the way the
+// shipped plan builds one. Beware the near-name: `ProjShape::kShipped` is the enum word for the PRE-D1
+// shape and is NOT this default; the flag word `shipped` still selects it, and a log that reads
+// `shape=shipped` is a parity run rather than the engine.
+constexpr ProjPlan kProjPlanDefault = ProjPlan::kPacked;
+constexpr ProjShape kProjShapeDefault = ProjShape::kUnroll8;
 
 // One tensor inside a grouped launch. `out` addresses ROW 0 of a row-family tile, which is legal for
 // exactly one reason: this route exists for a body of one row (`decode_step.cpp` gates it on `n == 1`),

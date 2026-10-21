@@ -139,11 +139,11 @@ Two measured footnotes, both from `prototype/` kernels rather than from the prob
   18 MiB and 255 GB/s at 108 MiB. State traffic therefore costs 0.06 ms warm (0.22 ms if it
   were cold), not a surprise. See `devices/strix-halo-memory-bandwidth.md` §0b.
 - **Kernel dispatch adds a floor of ~0.36 ms/token.** A kernel costs ~1.8 µs to launch even
-  if it does nothing, and **capturing the launches into a HIP graph does not reduce it**
-  (1.78 µs/kernel replayed, 1.0×) — the limit is GPU dispatch, not host submission. At ~200
-  kernel issues per decode step that is 6.5 ms of bandwidth + ~0.36 ms of dispatch, so the
-  honest band is **145–153 tok/s** and the lever is fusing the small ops into the GEMV
-  epilogues, not graph capture. Probe: `tools/launch_overhead_hip.cpp`.
+  if it does nothing, and **capturing the launches into a HIP graph does not reduce it** (1.78
+  µs/kernel replayed, 1.0×) — the limit is GPU dispatch, not host submission. At the ~200
+  kernel issues per decode step estimated above: 6.5 ms of bandwidth + ~0.36 ms of dispatch, so
+  the honest band is **145–153 tok/s**; the lever is fusing small ops into the GEMV epilogues,
+  not graph capture (`tools/launch_overhead_hip.cpp`). Audited: 406/token, 340 since route D1.
 
 Same arithmetic, other levers at 237 GB/s (bytes/token in parentheses): 4-bit blocks with
 a bf16 logits table → 202 tok/s (1.17 GB); 4-bit everywhere → 243 (0.98); 3-bit → 283

@@ -7,7 +7,7 @@ What exists now is **W5's first half: weight residency** (`progress/2026-10-15/b
 token loop**: per-request state, one launcher per graduated kernel, and `decode_step`, which runs one
 token through all of it. `engine/decode_run.cpp` drives it and `engine/gate.py` gates it against the
 pinned `dec8` fixture. **Two device passes have run** (`engine/results.md`, last section): the loader
-loads, `check_weights` passes, the state sizes and the 424-launch plan verify against §07 *(424 then; the bill is 406 since `62b73e9` — `engine/results.md` and `progress/2026-10-21/performance-status-2026-10-21.md` §13 carry the move)*, and the loop
+loads, `check_weights` passes, the state sizes and the 424-launch plan verify against §07 *(424 then; the bill was 406 from `62b73e9` and is 340 with route D1's shipped packed projection plan, 406 again on `--proj-plan split` — `engine/results.md` and `progress/2026-10-21/performance-status-2026-10-21.md` §13 carry the moves)*, and the loop
 executes — but **no generation token has come out of this engine yet.** **Retired 2026-10-16: the engine free-runs the corpus — `engine/results.md` §"the engine free-runs the corpus" is the live statement, and what follows this sentence is the record of those first two device passes.** The first two runs ended inside
 the prompt because §07.5's stop check was armed during it; that is fixed in `5e7114b`, and the token
 result is what the next device pass is for.
@@ -369,7 +369,7 @@ tools/gpu_lock.sh release "engine decode_step token gate (W5b)"
 #                          per-step argmax must equal the pin's either way. ndiff/max-ULP lines are printed
 #                          for the record.
 #   (c) state sizes      — engine's bytes == state_sizes.py's, byte-exact, at cap 26.
-#   (d) launch plan      — glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=97 other=20 total=406
+#   (d) launch plan      — shipped plan: glue=49 proj=48 gdn=72 attn=6 mlp=48 cast=97 other=20 total=340;  `--proj-plan split` (pre-D1): proj=114 total=406
 # If it FAILS, in this order:
 #   0. Fewer prompt steps than 17? `gate.py` now prints the last STEP's kind/index/sample/stop and the
 #      RESULT line, so the cause is in its own output — a fired stop check there is `5e7114b`'s bug
@@ -492,10 +492,10 @@ the two named deferrals:
 2. `prefill.{h,cpp}` — token-at-a-time through `decode_step` is already what `gate.py` does, so this
    is a chunked/parallel prefill and nothing else. It is a throughput item, not a correctness one. **Retired 2026-10-16: `engine/prefill.{h,cpp}` exists — `engine/results.md` §P2 is the live statement.**
 3. The two levers `results.md` defers: packed projections (merges the 16-row `in_proj_a`/`in_proj_b`
-   launches and several other small dots) and BF16-staged `mlp_gateup`/`mlp_down` (would remove 48 of
-   the 97 casts/token (115 until `62b73e9` retired the packed GDN widening; none of the 48). Both are launch-count and traffic wins; neither is a correctness item, and
-   `gate.py`'s (d) section is what has to be updated if the plan changes. And the new one, one rank
-   above them once a token is green: **HIP graphs** over the 406-launch token (424 before `62b73e9`), because the engine's one
+   launches and several other small dots) — SHIPPED by route D1, whose packed plan is the default now — and BF16-staged
+   `mlp_gateup`/`mlp_down`, which would still remove 48 of the 97 casts/token (115 until `62b73e9` retired the packed GDN
+   widening; none of the 48). Launch-count and traffic wins, not correctness ones; `gate.py`'s (d) section is what has
+   to move if the plan changes, and route D1 moved it 114→48. And the new one above what is left: **HIP graphs** over the 340-launch token (406 on the pre-D1 `--proj-plan split` bill, 424 before `62b73e9`), because the engine's one
    unwarmed `ms_per_step` observation (14.631, not a measurement — `results.md` says why) is ~1.8× the
    ledger's op-sum and dispatch is the first suspect.
 4. `attn_decode` is called `fused=1, full=1, split=1, score_f32=0, tile=min(TILE, threads/warp)`, and

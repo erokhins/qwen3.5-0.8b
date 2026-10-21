@@ -34,7 +34,9 @@ int warp_width() {
 // wrote that moving the default "is a separate, measurable decision for W5" — this is that decision.
 // `engine/performance-status.md` §4's width table says the same direction from the other side: a
 // launch costs 3.75 µs at 256 threads and 2.776 µs at 1024 (that table is frozen at progress/2026-10-16/performance-status-2026-10-16.md:135; live §4 re-takes the direction at 512/256/128), and decode issues 114 of these launches
-// per token. The arithmetic per row does not depend on the width at all — one wavefront owns one row
+// per token under the pre-D1 split bill — 48 grouped ones under the shipped packed plan, at the grouped
+// kernel's own geometry (`kProjGroupRowsPerBlock`), which is what this constant prices a wide body's
+// launches at. The arithmetic per row does not depend on the width at all — one wavefront owns one row
 // from staging to `reduce_row`, which is a within-warp butterfly — so this is the rare width change
 // that is bit-identical by construction and needs no margin re-price.
 constexpr int kRowsPerBlock = 32;
@@ -208,7 +210,7 @@ void proj_rows(const ProjSeg* segs, int nsegs, const float* x, int in) {
     }
     // One submission, width 1: `launchstats::proj()` counts projection SITES at the body width, and a
     // grouped launch is one site covering several tensors for one row. This is the counter the
-    // `--proj-plan` canary reads (114 with the flag off, 48 with it on).
+    // `--proj-plan` canary reads (48 with the shipped `packed` plan, 114 with `--proj-plan split`).
     launchstats::proj().record(1);
 }
 
@@ -242,8 +244,9 @@ const char* proj_plan_name(ProjPlan plan) {
 ProjPlan parse_proj_plan(const std::string& name) {
     if (name == "split") return ProjPlan::kSplit;
     if (name == "packed") return ProjPlan::kPacked;
-    throw std::runtime_error("--proj-plan takes split (one launch per projection, §07's 114) or"
-                             " packed (one per layer group, 48); got '" + name + "'");
+    throw std::runtime_error("--proj-plan takes packed (one launch per layer group, 48, the shipped"
+                             " default) or split (one launch per projection, §07's 114, what shipped"
+                             " before route D1); got '" + name + "'");
 }
 
 const char* proj_shape_name(ProjShape shape) {

@@ -358,9 +358,10 @@ constexpr int kStopToken = 248046;
 
 // The body: `x = E[y]` → input norm → 24 blocks (GDN §07.2 or attention §07.3 by layer type, each
 // followed by the MLP §03.3 and the fused add+norm) → the final norm falling out of the last glue
-// call. Submits 405 of the token's 406 launches (`planned_launch_counts()` derives the bill; the
-// 406th is the `lm_head_full` that belongs to the tail) and WAITS FOR NONE OF THEM: no logits, no
-// D2H, no sync, no argmax, so bodies can be queued back to back on one stream.
+// call. Submits 339 of the token's 340 launches (`planned_launch_counts()` derives the bill; the
+// 340th is the `lm_head_full` that belongs to the tail) and WAITS FOR NONE OF THEM: no logits, no
+// D2H, no sync, no argmax, so bodies can be queued back to back on one stream. Under the pre-D1
+// `--proj-plan split` pair the same body submits 405 of that plan's 406; only the `proj` row moves.
 //
 // It still advances the state, because the next token's position depends on it: `pos` is
 // `st.prefix_len` on entry and `st.prefix_len` is `pos + 1` on exit, the GDN state and conv window
@@ -449,16 +450,21 @@ LaunchCounts planned_launch_counts();
 
 // ---- route D1: the projection plan, as data (so geometry can be checked without a GPU) -------------
 //
-// `planned_launch_counts()` stays §07's SPLIT bill whatever the run asks for, for the reason `gate.py`
-// section (d) exists: it re-derives that table from §07 in Python, and a C++ function that quietly
-// returned a different total once a flag was passed would make the cross-check a tautology. So the
-// plan-in-force is a SEPARATE question with its own answer here, derived from the same §00 constants and
-// printable device-free (`decode_run --dump-proj-plan`), and the counted witness that it took effect is
-// the `LAUNCHSTAT family=proj calls=` line plus `STAGE … family=proj launches_per_step=`.
+// `planned_launch_counts()` bills the SHIPPED plan (`kernels::kProjPlanDefault`, now `packed`) whatever a
+// run asks for, for the reason `gate.py` section (d) exists: it re-derives that bill from §07 in Python,
+// and a C++ function that quietly returned a different total once a flag was passed would make the
+// cross-check a tautology — the `--attn-tile` trap of a gate judging one plan while the engine ships
+// another. Before the flip this same paragraph explained why the function stayed on the SPLIT bill while
+// `packed` was the flag arm; only which of the two is "shipped" changed, and the reason it must be one
+// named constant rather than two call sites' opinions is unchanged. So the plan-in-force is a SEPARATE
+// question with its own answer here, derived from the same §00 constants and printable device-free
+// (`decode_run --dump-proj-plan`), and the counted witness that it took effect is the `LAUNCHSTAT
+// family=proj calls=` line plus `STAGE … family=proj launches_per_step=`.
 //
 // One layer under `kPacked` is: one launch over the layer's input projections (they read the same row of
 // `norm_f32`, and each writes its own row-family tile, so no weight is copied), then one launch for its
-// output projection — 48 per token. Under `kSplit` every tensor is its own launch, i.e. `proj`'s 114.
+// output projection — 48 per token, the shipped bill. Under `kSplit` every tensor is its own launch, i.e.
+// `proj`'s 114 — what a WIDE body pays under either plan, since the grouping is a one-row rule.
 struct ProjPlanJob {
     int layer = -1;
     int group = 0;             // 0 = this layer's input group, 1 = its output projection
