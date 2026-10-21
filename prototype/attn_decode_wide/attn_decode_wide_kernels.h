@@ -36,11 +36,17 @@
 // equal to the frozen `attn_core` on every case, including the `dimhalf` injection the guard
 // exists to preserve.
 //
-// PROVENANCE. The kernel below is `prototype/attn_decode/attn_decode_kernels.h` lines 251-401,
-// copied verbatim except (a) the name, (b) the two loop spellings above. `gate.py --check-source`
-// re-derives that claim from the two files and fails if the copy ever drifts. The frozen header is
-// NOT edited: it is the witness §20.1/§20.2 established for one address expression per address, and
-// a variant in a prototype is how `attn_slim_kernels.h` and `attn_fattn_kernels.h` were built.
+// PROVENANCE. The kernel below was `prototype/attn_decode/attn_decode_kernels.h`'s `attn_core`, copied
+// verbatim except (a) the name and (b) the two loop spellings above. **The port has now happened**
+// (2026-10-21, `PORT-D3-LEAN.md`): the frozen header carries the literal-trip spelling itself, so (b)
+// is gone and the name is the only difference — `gate.py --check-source` re-derives that from the two
+// files and fails if the copy drifts or if either header regresses to a runtime trip count.
+// Consequence to read before using `--core lean`: the two arms now compile from byte-identical bodies,
+// so gate.py §1 (lean vs ship, bit-identity) is a tautology from here on and this rig's ship-vs-lean
+// A/B measures one kernel twice. What this directory still witnesses is (i) the code-object claim —
+// `census.sh` prints both reservations from the same object file, which is where the 38,944-vs-6,176
+// asymmetry was found — and (ii) the case population and derived negatives, which the engine gate
+// inherited. The pre-port device evidence is `results.md` and it stands on its own.
 #pragma once
 #include "../attn_decode/attn_decode_kernels.h"
 
@@ -108,12 +114,12 @@ __global__ void attn_core_lean(CoreArgs a) {
                 const int j = base + w;
                 float dot = 0.f;
                 if (j == row_pos) {
-                    for (int t = 0; t < 8; ++t) if (t < nd) dot += sq[lane * 8 + t] * sk[lane * 8 + t];
+                    for (int t = 0; t < 8; ++t) if (t < nd) dot += sq[lane * 8 + t] * sk[lane * 8 + t];   // D3: literal trip + guard, NOT `nd` — promote-alloca-to-LDS; see "D3 LDS" at the foot of this file
                 } else {
                     const hip_bfloat16* kr = a.kcache + ((size_t)kv * a.cap + (size_t)j) * DH;
                     uint4 u = *reinterpret_cast<const uint4*>(kr + lane * 8);
                     const hip_bfloat16* k = reinterpret_cast<const hip_bfloat16*>(&u);
-                    for (int t = 0; t < 8; ++t) if (t < nd) dot += bf(k[t]) * qreg[t];
+                    for (int t = 0; t < 8; ++t) if (t < nd) dot += bf(k[t]) * qreg[t];   // D3: literal trip + guard, NOT `nd` — promote-alloca-to-LDS; see "D3 LDS" at the foot of this file
                 }
                 dot = warp_sum(dot);
                 if (lane == 0) sc[ns + w] = a.score_f32 ? dot * SCALE : bf(fb(dot)) * SCALE;
@@ -145,12 +151,12 @@ __global__ void attn_core_lean(CoreArgs a) {
                 const int j = base + w;
                 float dot = 0.f;
                 if (j == row_pos) {
-                    for (int t = 0; t < 8; ++t) if (t < nd) dot += sq[lane * 8 + t] * sk[lane * 8 + t];
+                    for (int t = 0; t < 8; ++t) if (t < nd) dot += sq[lane * 8 + t] * sk[lane * 8 + t];   // D3: literal trip + guard, NOT `nd` — promote-alloca-to-LDS; see "D3 LDS" at the foot of this file
                 } else {
                     const hip_bfloat16* kr = a.kcache + ((size_t)kv * a.cap + (size_t)j) * DH;
                     uint4 u = *reinterpret_cast<const uint4*>(kr + lane * 8);
                     const hip_bfloat16* k = reinterpret_cast<const hip_bfloat16*>(&u);
-                    for (int t = 0; t < 8; ++t) if (t < nd) dot += bf(k[t]) * qreg[t];
+                    for (int t = 0; t < 8; ++t) if (t < nd) dot += bf(k[t]) * qreg[t];   // D3: literal trip + guard, NOT `nd` — promote-alloca-to-LDS; see "D3 LDS" at the foot of this file
                 }
                 dot = warp_sum(dot);
                 if (lane == 0) sc[w] = a.score_f32 ? dot * SCALE : bf(fb(dot)) * SCALE;

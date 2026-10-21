@@ -1507,3 +1507,28 @@ tile form was proved against, and the A/B stays one flag wide.
   of the wave).
 * The CPU suite `speccheck/run_all.py --quick` (11 gates) was re-run after the change and passed, and nothing
   in `speccheck/` consumes this path anyway. `M > 1` was never priced.
+
+---
+
+## Foot note (2026-10-21): `attn_core`'s four score dots are no longer `for (t = 0; t < nd; ++t)`
+
+Every description of this kernel written before 2026-10-21 — including the passages above, which are
+left as written because they record what the code said then — spells the two one-pass and two streaming
+score dots with a **runtime** trip count:
+
+```
+for (int t = 0; t < nd; ++t) dot += sq[lane * 8 + t] * sk[lane * 8 + t];
+for (int t = 0; t < nd; ++t) dot += bf(k[t]) * qreg[t];
+```
+
+The shipping spelling is now `for (int t = 0; t < 8; ++t) if (t < nd) dot += …`, same trip set, same
+order of additions, `nd` still in {4, 8} so the `dimhalf` injection still lands. The reason is a code
+object, not a style point: with a runtime bound LLVM's promote-alloca-to-LDS moves `qreg[8]` and the K-row
+`uint4` into LDS and the kernel reserves 38,944 B instead of 6,176 B — one resident block per CU instead
+of four. Measurement, bisect and the engine-side witness: `prototype/attn_decode_wide/results.md` and
+`prototype/attn_decode_wide/PORT-D3-LEAN.md`; the gate that keeps it from regressing is
+`prototype/attn_decode_wide/gate.py::check_source`. `attn_tile_body`'s dot at
+`attn_decode_kernels.h:641` is a different kernel and was deliberately left as it was.
+
+Appended at the foot deliberately: this file is cited by line from coordinates reaching 1122, and
+`attn_decode_kernels.h` is cited from 45 coordinates reaching 767, so notes go below the population.

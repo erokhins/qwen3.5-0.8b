@@ -312,12 +312,12 @@ __global__ void attn_core(CoreArgs a) {
                 const int j = base + w;
                 float dot = 0.f;
                 if (j == row_pos) {
-                    for (int t = 0; t < nd; ++t) dot += sq[lane * 8 + t] * sk[lane * 8 + t];
+                    for (int t = 0; t < 8; ++t) if (t < nd) dot += sq[lane * 8 + t] * sk[lane * 8 + t];   // D3: literal trip + guard, NOT `nd` — promote-alloca-to-LDS; see "D3 LDS" at the foot of this file
                 } else {
                     const hip_bfloat16* kr = a.kcache + ((size_t)kv * a.cap + (size_t)j) * DH;
                     uint4 u = *reinterpret_cast<const uint4*>(kr + lane * 8);
                     const hip_bfloat16* k = reinterpret_cast<const hip_bfloat16*>(&u);
-                    for (int t = 0; t < nd; ++t) dot += bf(k[t]) * qreg[t];
+                    for (int t = 0; t < 8; ++t) if (t < nd) dot += bf(k[t]) * qreg[t];   // D3: literal trip + guard, NOT `nd` — promote-alloca-to-LDS; see "D3 LDS" at the foot of this file
                 }
                 dot = warp_sum(dot);
                 if (lane == 0) sc[ns + w] = a.score_f32 ? dot * SCALE : bf(fb(dot)) * SCALE;
@@ -349,12 +349,12 @@ __global__ void attn_core(CoreArgs a) {
                 const int j = base + w;
                 float dot = 0.f;
                 if (j == row_pos) {
-                    for (int t = 0; t < nd; ++t) dot += sq[lane * 8 + t] * sk[lane * 8 + t];
+                    for (int t = 0; t < 8; ++t) if (t < nd) dot += sq[lane * 8 + t] * sk[lane * 8 + t];   // D3: literal trip + guard, NOT `nd` — promote-alloca-to-LDS; see "D3 LDS" at the foot of this file
                 } else {
                     const hip_bfloat16* kr = a.kcache + ((size_t)kv * a.cap + (size_t)j) * DH;
                     uint4 u = *reinterpret_cast<const uint4*>(kr + lane * 8);
                     const hip_bfloat16* k = reinterpret_cast<const hip_bfloat16*>(&u);
-                    for (int t = 0; t < nd; ++t) dot += bf(k[t]) * qreg[t];
+                    for (int t = 0; t < 8; ++t) if (t < nd) dot += bf(k[t]) * qreg[t];   // D3: literal trip + guard, NOT `nd` — promote-alloca-to-LDS; see "D3 LDS" at the foot of this file
                 }
                 dot = warp_sum(dot);
                 if (lane == 0) sc[w] = a.score_f32 ? dot * SCALE : bf(fb(dot)) * SCALE;
@@ -819,3 +819,31 @@ __global__ void rope_table(CoreArgs a) {
         a.rope_out[ROT + d] = fb(s);
     }
 }
+
+// ================================================================================================
+// D3 LDS — why `attn_core`'s four score dots are spelled `for (t = 0; t < 8; ++t) if (t < nd)` and
+// NOT `for (t = 0; t < nd; ++t)`. Do not "simplify" the guard back into the trip bound.
+//
+// THE MECHANISM. With a runtime trip count, LLVM's promote-alloca-to-LDS moves the per-thread
+// `float qreg[8]` and the `uint4` that receives a K row into local memory: the kernel then reserves
+// 38,944 B of LDS per block instead of the 6,176 B its source declares. On this part's 64 KiB LDS
+// per CU (read from KFD: `lds_size_in_kb 64`, never from a HIP capability query, which reports a
+// halved CU count on this SKU) that is ONE resident block per CU instead of FOUR — the shipping
+// decode attention at 8 of 32 wavefronts, at every lane count, because a decode step is always one
+// query row and `attn_core` is the decode attention.
+//
+// WHY THE GUARD COSTS NOTHING. `nd` is in {4, 8}: the trip set is {0..nd-1} either way, the skipped
+// iterations add nothing to `dot`, and the order of the additions is the same serial chain, so the
+// `dimhalf` negative injection — the only reason `nd` is runtime at all — still lands. Bits identical,
+// code object not. Numbers, bisect and device evidence: prototype/attn_decode_wide/results.md (and
+// that directory's gate.py::check_source fails if any of the four sites regresses to a runtime bound).
+//
+// WHY THIS NOTE IS AT THE FOOT INSTEAD OF AT THE LOOP. This file is cited by line from 45 named
+// coordinates across the tree, highest :767, and 28 of them sit below line 314 — so a comment
+// inserted at the loop rotates all 28 (11 of them in frozen progress/ journals) to buy ten lines of
+// prose. The warning therefore lives on the four lines as a trailing marker and in full here, below
+// every cited coordinate. Tidying this note back into the loop costs 28 citations. The code edit
+// itself is line-count-neutral (821 lines before it, 821 after); only this appended note grows the
+// file, and it grows below :767. Witness is `wc -l` on this file, because tools/citation_rot_check.py
+// cannot see drift introduced inside the change it checks (its baseline is HEAD, and HEAD moves with
+// the commit).

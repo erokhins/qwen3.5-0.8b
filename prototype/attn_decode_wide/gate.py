@@ -9,6 +9,11 @@ WHAT IT ADJUDICATES, in the order it prints
      and every stage. This is the whole claim of the candidate, so it is asserted per stage per case and
      an empty case list is an error, not a pass (AGENTS.md, "a gate driver whose parser silently matches
      nothing reports PASS").
+     POST-PORT READING (2026-10-21, PORT-D3-LEAN.md): the `lean` spelling now lives in the shipping
+     header, so the two bodies are identical and this section is a tautology by construction — it can
+     still catch a build that linked a stale object, and nothing else. The evidence that `lean` was
+     bit-identical to the pre-port core is `results.md` §1, taken before the port; the live authority on
+     the shipping path is now `engine/gate.py`, not this section.
   2. AGAINST THE PINS. Where a case has a pinned HF reference, both cores are also judged by the floors
      this op already publishes (`prototype/attn_decode/run.py`'s COS_MIN/MEANREL_MAX/NDIFF_*), imported,
      never restated. A candidate that is bit-identical to a form that passes the pins needs no new band;
@@ -57,6 +62,29 @@ COS_MIN, MEANREL_MAX = OPRUN.COS_MIN, OPRUN.MEANREL_MAX
 
 STAGES = ["attn_pre_gate", "gated", "q_rope", "k_rope", "cache_keys", "cache_values"]
 BOUNDARY = [1, 511, 512, 513, 514, 515, 1023, 1024, 1025]
+
+# The dot-loop spellings `check_source()` adjudicates. Written as fragments rather than regexes because
+# the test is "this exact text appears in the shipping kernel", and a regex that matches nothing reads as
+# a pass (AGENTS.md). Two score dots per branch (self-row and cache-row) x two branches = 4 sites.
+LITERAL_TRIP = "for (int t = 0; t < 8; ++t) if (t < nd)"
+RUNTIME_TRIP = "for (int t = 0; t < nd; ++t)"
+DOT_SITES_EXPECT = 4
+
+
+def slice_kernel(lines: list[str], signature: str) -> list[str]:
+    """The brace-balanced body of the kernel whose definition starts with `signature`, or [] if absent.
+    Braces are counted per line, which is the same simplification the original made and is sound for
+    this header's house style (one brace per line at the statement level, no brace in a string)."""
+    try:
+        start = next(i for i, l in enumerate(lines) if l.startswith(signature))
+    except StopIteration:
+        return []
+    depth = 0
+    for i in range(start, len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        if depth == 0 and i > start:
+            return lines[start:i + 1]
+    return []
 
 # What each injection can reach, and which geometry exempts it. BOTH halves are derived, not listed by
 # taste — §20.6's lesson is that a hand-listed must-catch set rots into "everything" and proves nothing,
@@ -221,29 +249,49 @@ def judge_pin(outroot: Path, case: dict) -> tuple[bool, str]:
 
 
 def check_source() -> int:
-    """The variant is a COPY of a frozen kernel, so the copy claim has to be re-derived from the two files
-    rather than asserted in a comment (the AGENTS row about a geometry fact living in two headers: the
-    working tree is where the uncommitted half hides). Exactly two loop spellings and the name may differ.
+    """Two claims about one kernel, both re-derived from the two files rather than asserted in a comment.
+
+    (1) THE SHIPPING CORE IS STILL `lean`. `attn_core`'s four score-dot loops must be spelled with a
+        literal trip count and the `t < nd` test inside the body. A runtime `t < nd` bound is not a
+        style question: LLVM's promote-alloca-to-LDS then moves `qreg[8]` and the `uint4` K-row read
+        into LDS, the kernel reserves 38,944 B instead of 6,176 B, and residency on this part's
+        64 KiB LDS/CU falls from 4 blocks/CU to 1 — the shipping decode attention at 8 of 32
+        wavefronts per CU. So this half of the check exists to catch a REWRITE, not a drift: someone
+        "simplifying" the guard back to a runtime bound keeps every numerics gate green and quietly
+        costs 4x residency. `prototype/attn_decode_wide/results.md` is the measurement; the count is
+        asserted equal to 4 because a check that matched nothing would pass (AGENTS.md, several rows).
+
+    (2) THE VARIANT IS STILL A COPY. `attn_core_lean` was the candidate; after the port it is the same
+        kernel under a second name, so the bodies must agree line for line modulo that name and the
+        difference count must be exactly 1. Line counts equal, every line identical after the rename:
+        a copy claim that is re-derived cannot rot the way a comment about a copy does (AGENTS.md, the
+        geometry-fact-in-two-headers row — the working tree is where the uncommitted half hides).
     """
     frozen = (OP / "attn_decode_kernels.h").read_text().splitlines()
-    start = next(i for i, l in enumerate(frozen) if l.startswith("__global__ void attn_core(CoreArgs"))
-    depth, end = 0, start
-    for i in range(start, len(frozen)):
-        depth += frozen[i].count("{") - frozen[i].count("}")
-        if depth == 0 and i > start:
-            end = i + 1
-            break
-    body = frozen[start:end]
+    body = slice_kernel(frozen, "__global__ void attn_core(CoreArgs")
     variant_text = (HERE / "attn_decode_wide_kernels.h").read_text().splitlines()
-    vstart = next(i for i, l in enumerate(variant_text)
-                  if l.startswith("__global__ void attn_core_lean(CoreArgs"))
-    depth, vend = 0, vstart
-    for i in range(vstart, len(variant_text)):
-        depth += variant_text[i].count("{") - variant_text[i].count("}")
-        if depth == 0 and i > vstart:
-            vend = i + 1
-            break
-    variant = variant_text[vstart:vend]
+    variant = slice_kernel(variant_text, "__global__ void attn_core_lean(CoreArgs")
+    if not body or not variant:
+        print("   SOURCE DRIFT: could not slice a kernel body out of %s / %s"
+              % (OP.name, HERE.name))
+        return 1
+
+    # ---- (1) the four dot sites, in the file the engine actually compiles ------------------------
+    for label, lines in (("shipping attn_core", body), ("attn_core_lean", variant)):
+        literal = [i for i, l in enumerate(lines) if LITERAL_TRIP in l]
+        runtime = [i for i, l in enumerate(lines) if RUNTIME_TRIP in l]
+        if len(literal) != DOT_SITES_EXPECT or runtime:
+            print("   SHIPPING KERNEL REGRESSED to a runtime trip count: %s has %d of %d "
+                  "literal-trip dot sites (%s) and %d spelled `%s`."
+                  % (label, len(literal), DOT_SITES_EXPECT, LITERAL_TRIP, len(runtime), RUNTIME_TRIP))
+            print("   A runtime `nd` bound makes LLVM promote `qreg[8]` and the K-row `uint4` to LDS: "
+                  "38,944 B reserved instead of 6,176 B, 1 resident block per CU instead of 4. "
+                  "Witness and numbers: prototype/attn_decode_wide/results.md; re-take with census.sh.")
+            return 1
+        print("   %s: %d/%d dot sites on the literal trip count, %d on a runtime bound"
+              % (label, len(literal), DOT_SITES_EXPECT, len(runtime)))
+
+    # ---- (2) the copy claim ----------------------------------------------------------------------
     if len(body) != len(variant):
         print("   SOURCE DRIFT: %d frozen lines vs %d variant lines" % (len(body), len(variant)))
         return 1
@@ -251,22 +299,17 @@ def check_source() -> int:
     for a, b in zip(body, variant):
         if a == b:
             continue
-        tail_a = a.split("++t)")[-1]
-        tail_b = b.split("++t)")[-1]
-        renamed = a.replace("attn_core", "attn_core_lean") == b
-        # The ONE arithmetic-adjacent change permitted: a runtime trip count becomes a literal and the
-        # same test moves inside as a guard, leaving the sequence of additions untouched.
-        resailed = ("t < nd; ++t)" in a
-                    and "t < 8; ++t) if (t < nd)" in b
-                    and tail_b == " if (t < nd)" + tail_a)
-        if not (renamed or resailed):
-            print("   SOURCE DRIFT:\n     frozen:  %s\n     variant: %s" % (a.strip(), b.strip()))
-            return 1
-        allowed += 1
-    print("   variant is the frozen kernel: %d lines, %d permitted differences "
-          "(the name and every `nd` loop site)" % (len(body), allowed))
-    if allowed < 3:
-        print("   UNEXPECTED: fewer permitted differences than the name plus the loop sites")
+        if a.replace("attn_core", "attn_core_lean") == b:
+            allowed += 1
+            continue
+        print("   SOURCE DRIFT:\n     frozen:  %s\n     variant: %s" % (a.strip(), b.strip()))
+        return 1
+    print("   variant is the frozen kernel: %d lines, %d permitted difference (the name; the four "
+          "`nd` loop sites are now identical because the shipping kernel carries this spelling)"
+          % (len(body), allowed))
+    if allowed != 1:
+        print("   UNEXPECTED: the name is the only difference a copy is allowed, and there %s %d"
+              % ("is" if allowed == 1 else "are", allowed))
         return 1
     return 0
 

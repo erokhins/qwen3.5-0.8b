@@ -4,15 +4,56 @@
 #   python3 loop_bill.py attn_decode_wide.hip-hip-amdgcn-amd-amdhsa-gfx1151.s attn_core_lean
 # CPU only: no device, no timing.
 #
-# READ THE TWO BLOCKS TOGETHER, AND READ THEM AS LOWER BOUNDS. A loop's bill is the instruction
-# count of every basic block LLVM annotated as belonging to that loop, and the SHIPPED core's
-# `nd`-bounded dot loops are rolled and left UNANNOTATED, so their bodies land in the "outside
-# loops" bucket and are missing from its per-loop numbers (that is what `fma32=1` inside BB0_69
-# means: one rolled FMA standing for eight). `attn_core_lean`, whose trip counts are literals, got
-# unrolled and therefore bills more completely (fma32=17 in the same loop). The two cores' bills
-# are NOT comparable with this tool, and any claim that one issues fewer instructions than the
-# other has to come out of a counter pass, not out of these numbers. What IS comparable and is
-# measured here is `group_segment_fixed_size` (38,944 vs 6,176) and `next_free_vgpr` (53 vs 45).
+# READ EACH BLOCK AS AN UPPER BOUND ON ONE TRIP. A loop's bill is the instruction count of every basic
+# block LLVM annotated as belonging to that loop. Blocks the geometry skips (`if (w < nt)`,
+# `if (j == row_pos)`) are counted once per trip, so this is what a trip may issue, not what it does.
+#
+# THE CAVEAT THIS FILE USED TO CARRY, AND WHY IT IS GONE. Until the port (2026-10-21,
+# PORT-D3-LEAN.md) the two cores' bills were NOT comparable, and the file said so: the shipped core's
+# `nd`-bounded dot loops were rolled and left UNANNOTATED, so their bodies fell outside every annotated
+# loop and its per-loop numbers under-counted — `fma32=1` inside BB0_69 was one rolled FMA standing for
+# eight — while `attn_core_lean`, whose trip counts are literals, unrolled and billed completely
+# (`fma32=17` in the same loop). That asymmetry was a property of the two SPELLINGS, not of the tool.
+# The port put the literal-trip spelling into the shipping header, so both cores are now unrolled and
+# both bills are complete, and comparing them means what it appears to mean: they are equal. The two
+# blocks below are from one build of one header and agree loop for loop; the residual 3-instruction
+# difference sits entirely outside the annotated loops and is unexamined (identical source text, so
+# whatever it is, LLVM chose it, not the kernel).
+#
+# WHAT THAT DOES NOT BUY. A static bill is not a measurement, and the comparable facts were always the
+# LDS reservation and the VGPR (`group_segment_fixed_size` 6,176 for both now, 38,944 for the shipped
+# core before the port; `next_free_vgpr` 45 for both, 53 for the shipped core before). The pre-port
+# record is kept verbatim underneath, because it is the evidence that the 226/137+118 figures quoted in
+# `HANDOFF-D3.md` §1 and `results.md` were real — reading those numbers against THIS build would repeat
+# the error AGENTS.md records as "a number taken from a file that has already corrected itself".
+
+== POST-PORT (2026-10-21, build after the four dot sites became literal-trip in the shipping header)
+
+== attn_core  {'next_free_vgpr': 45, 'next_free_sgpr': 72, 'group_segment_fixed_size': 6176, 'private_segment_fixed_size': 0, 'kernarg_size': 456}
+   instructions: 3621 total, 591 inside annotated loops, 3030 outside
+  (outside loops): 3030 insns
+  loop BB0_69 d1:   270 insns | add_f32=5 barrier=1 cbranch=38 cmp=8 exp=1 fma32=17 lds=16 maxmin=2 mov=5 mul_f32=2 other=42 salu=85 sched=46 vmem=2
+  loop BB0_129 d1:   187 insns | add_f32=6 barrier=1 cbranch=21 cmp=7 fma32=16 lds=16 mov=1 mul_f32=1 other=35 salu=44 sched=37 vmem=2
+  loop BB0_182 d1:   117 insns | add_f32=4 cbranch=10 cmp=6 cvt=1 exp=1 fma32=9 lds=3 mov=1 mul_f32=2 other=21 rcp_div=5 salu=28 sched=24 vmem=2
+  loop BB0_118 d2:    17 insns | cbranch=3 fma32=1 lds=1 other=4 salu=5 sched=2 vmem=1
+
+== attn_core_lean  {'next_free_vgpr': 45, 'next_free_sgpr': 72, 'group_segment_fixed_size': 6176, 'private_segment_fixed_size': 0, 'kernarg_size': 456}
+   instructions: 3624 total, 591 inside annotated loops, 3033 outside
+  (outside loops): 3033 insns
+  loop BB5_69 d1:   270 insns | add_f32=5 barrier=1 cbranch=38 cmp=8 exp=1 fma32=17 lds=16 maxmin=2 mov=5 mul_f32=2 other=42 salu=85 sched=46 vmem=2
+  loop BB5_129 d1:   187 insns | add_f32=6 barrier=1 cbranch=21 cmp=7 fma32=16 lds=16 mov=1 mul_f32=1 other=35 salu=44 sched=37 vmem=2
+  loop BB5_182 d1:   117 insns | add_f32=4 cbranch=10 cmp=6 cvt=1 exp=1 fma32=9 lds=3 mov=1 mul_f32=2 other=21 rcp_div=5 salu=28 sched=24 vmem=2
+  loop BB5_118 d2:    17 insns | cbranch=3 fma32=1 lds=1 other=4 salu=5 sched=2 vmem=1
+
+   The arithmetic HANDOFF-D3 §1 wanted is now directly readable: 270 warp-instructions per (head, lane)
+   touch on the one-pass route and 187 + 117 = 304 on the streaming route, from the SHIPPING core, not
+   from a proxy. The pre-port figures for `attn_core_lean` (270 / 187 + 117) are unchanged, which is the
+   same claim from the other side: nothing about the work moved, only the code object.
+
+== PRE-PORT RECORD (2026-10-21 morning, the build `HANDOFF-D3.md` and `results.md` were written from).
+== `attn_core` here is the runtime-`nd` spelling: rolled dot loops, 38,944 B reserved, 53 VGPR. Kept
+== verbatim; it is NOT this build.
+
 == attn_core  {'next_free_vgpr': 53, 'next_free_sgpr': 73, 'group_segment_fixed_size': 38944, 'private_segment_fixed_size': 0, 'kernarg_size': 456}
    instructions: 3648 total, 498 inside annotated loops, 3150 outside
   (outside loops): 3150 insns
