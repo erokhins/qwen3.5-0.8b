@@ -35,8 +35,7 @@ that the tables under them are current or say which later section overtook them.
 `Options`, `engine/decode_step.h`, `engine/kernels_proj.cpp`): `--gemm lt` with `--gemm-pins all`,
 `--attn-tile 1`, `--attn-touch 1`, `--attn-fattn 1` with `--attn-fattn-qstage unstaged8` and
 `--attn-fattn-wide 2` (A13, the wide llama-ported round), `--attn-split-cap` off, `--gdn-scan seq`,
-`--gdn-spell fused`, `--gdn-geom reg16` (G4), `--gdn-loop 512`, `--gdn-norm inline`,
-`--mlp-map auto`, `kRowsPerBlock = 32`, `wave_rows = kMaxWaveRows = 512`, lane ceiling
+`--gdn-spell fused`, `--gdn-geom reg16` (G4), `--gdn-loop 512`, `--gdn-norm inline`, `--mlp-map auto`, `--proj-plan packed --proj-shape unroll8` (D1; pre-D1 is `split`+`shipped`), `kRowsPerBlock = 32`, `wave_rows = kMaxWaveRows = 512`, lane ceiling
 `MAXSC × kAttnMaxSplit = 512 × 64 = 32,768` (§39 of the frozen ledger).
 
 **The headline convention is warm** (§51): a cold process pays hipBLASLt's first-execution cost and
@@ -68,20 +67,21 @@ Against §51's published figures that is **+9.4 % at 512, +6.8 % at 1,024, +13.1
 this engine is now the faster of the two at long context — **8.7 % at 16k, 12.4 % at 32k** — which
 is a cross-window comparison, not a paired A/B, and is quoted as such (§57's rule, §59's note).
 
-**Decode — marginal cost of one generated token** (`tools/context_sweep.py --lanes 128,512,1024,2048
---steps 32 --runs 3`; differential by construction: two runs differing only in `--steps`, so the
-prompt wave cancels). **These rows are the 2026-10-19 window and predate three shipped rounds** — G4
-`reg16` (§44), G1 residency (§48) and the A13 default flip (§60). They are the newest decode numbers
-this repo has, which is a fact about the re-take schedule, not a claim that they are current. A
-re-take is owed; the command above is the whole re-take.
+**Decode — marginal cost of one generated token** (`tools/context_sweep.py --lanes 96,128,512,1024,2048,4096
+--steps 32 --runs 3`; differential by construction: two runs differing only in `--steps`, so the prompt wave
+cancels). **These rows are the 2026-10-21 window on the D1 tree** — the projection shape+plan flip (§5 below)
+on top of G4 `reg16` (§44), G1 residency (§48) and A13 (§60). 96 lanes reads **9.619 ms = 104.0 tok/s** (3.04 %)
+and is the cleanest point in the set; 512 carries an 11.36 % spread, which is §6's dispatch bimodality and not a
+regression. The paired A/B moved the step −13.0 % (stage-clock, `proj` 4.1946 → 2.7284 ms/step,
+seven of seven reps separating); this differential agrees at +13.3 %.
 
 | lanes at last step | marginal ms/token, best of 3 | spread | tok/s |
 |---|---|---|---|
-| 128 | **11.475** | 1.99 % | 87.1 |
-| 512 | **12.928** | 1.45 % | 77.4 |
-| 1,024 | **11.922** | 5.39 % | 83.9 |
-| 2,048 | **12.558** | 2.70 % | 79.6 |
-| 4,032 | **14.028** (stage-clock burst, never `context_sweep.py` — §6) | 1.6 % | 71.3 |
+| 128 | **9.876** | 0.43 % | 101.3 |
+| 512 | **10.609** | 11.36 % | 94.3 |
+| 1,024 | **11.028** | 3.98 % | 90.7 |
+| 2,048 | **10.929** | 7.20 % | 91.5 |
+| 4,032 | **12.680** (stage-clock burst, never `context_sweep.py` — §6; the sweep's own 4,096 row reads 12.556, 2.81 %) | 0.70 % | 78.9 |
 
 **Cold start** (`tools/cold_restore.sh --runs 5` → `engine/build/loader_test --no-verify`,
 2026-10-16): text weights made resident in a fresh process, device pool empty, host page cache warm —
@@ -173,7 +173,7 @@ re-take is owed before any of them is used as a floor.
 | `lm_head_gemv` fused | **2.1309 ms** (238.7 GB/s) | **100.7 %** — at ceiling | `--iters 8`, lock held; reproduces window to window to 0.2 % |
 | MLP, 528 MB, `contig` (the one-row walk) | **2.275 ms** | 98 % | roofline 2.230 ms; the shipped `--mlp-map auto` choice for one row |
 | MLP, 132 MB, `interleave` (the wave walk) | 2.647 ms | 84 % | `--layers all --fixture dec8` |
-| projections, whole 48-launch token plan, rows/block 32 | **3.2843 ms** (142.3 GB/s) | 60 % | roofline 1.972 ms; of which GDN projections 2.5969 ms (62 %), attention projections 0.6887 ms (54 %) |
+| projections, whole 48-launch token plan, rows/block 8 at 1,024 threads with a compile-time word walk | **2.4693 ms** (187.3 GB/s, 79.4 % of probe) | 79 % | roofline 1.972 ms; clock-controlled window (per-arm burn, 0 VOID / 0 LOWCLK), and the *shape label* moved with the number — the pre-D1 default was rows/block 32 at 3.2843 ms (60 %) |
 | `glue` fused, 49 launches, 512 t | **0.1496 ms** (spread 4.0 %) | launch-bound | fusion still buys ≈0.089 ms/token; unfused 0.2386 ms |
 | `gdn_gated_norm` §04.5, 144-job plan | **0.4273 ms** = 2.967 µs/launch (spread 0.8 %) | launch-bound | `DEVICE GATE PASS`, all six negatives localise |
 | kernel launch floor (empty/tiny kernel) | **1.85 µs**/launch | — | captured graphs replay at 1.78 µs: no gain |

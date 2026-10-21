@@ -4888,3 +4888,93 @@ if only the shape transfers — which `engine/performance-status.md` §2's "the 
 whole launch bill, not a prize" argues is the likely case for the launch-count half — the prediction is
 ≈3.31 ms/step. `engine/performance-status.md` §6 owns which of the two it is, and no figure in this section
 is a timing claim.
+
+## Route D1's defaults flip: `packed` + `unroll8` are the shipped path (2026-10-21), and the launch bill moved 406 → 340 in the same commit as every structural check that reads it
+
+The section above left the two flags default OFF and named the flip as someone else's call. It has been
+taken: `--proj-plan` now defaults to `packed` and `--proj-shape` to `unroll8`, so the engine a bare
+`engine/build/decode_run` invocation runs is the pair the in-situ A/B funded — `proj` 4.2015 → 2.9521 →
+2.7316 ms/step and the whole step 11.6967 → 10.1851 ms, bit-identical on nine fixtures. No timing in this
+section is new; those are the banked window's figures, quoted as the reason the defaults moved.
+
+**One spelling of "the shipped plan".** `kernels::kProjPlanDefault` / `kProjShapeDefault`
+(`engine/kernels.h`) are now the single place the default pair is named, and three C++ readers take it from
+there: `decode_run`'s option defaults, `planned_launch_counts()` (which is what the `LAUNCH` echo prints),
+and `stage_clock.cpp`'s one-row-body self-check, which has to build a one-row body the way the shipped plan
+builds one or `body1_plan_matches_token_plan` would compare a split wave against a packed token bill and
+read 0 forever. `planned_launch_counts()` does not type 48: it calls
+`proj_launches_per_body(kernels::kProjPlanDefault)`, so the count is still counted off the job list the body
+walks. `LAUNCH` therefore reads `glue=49 proj=48 gdn=72 attn=6 mlp=48 cast=97 other=20 total=340` and
+`submit_token_body` submits 339 of those 340.
+
+**What the old bill's prose became, rather than being deleted.** `engine/decode_step.cpp`'s header table now
+carries both rows — the packed `proj`=48/total=340 as shipped and §07's per-operation 114/406 as the `split`
+plan and the WIDE-body bill — because the grouping is a one-row rule (`pack_proj = (n == 1) && packed`) and a
+wave of 295 rows still pays 114 whatever the plan says. Same for `engine/README.md`'s section-(d) line, which
+prints the shipped bill and the `--proj-plan split` bill side by side, and for
+`specification/07-decode-step.md` §07.4, whose "~200 kernel issues per decode step" is now marked as the
+estimate it was and followed by the audited 406/340. Note one finding while editing the spec: §07 has **no**
+launch table and no "five per GDN layer / four per attention layer" sentence — that census lives in
+`decode_step.cpp` and `gate.py`, and §07.4's only launch-count claim was that ~200 estimate, which was
+already ~2× low before this change. The 145–153 tok/s band is left exactly as written: re-pricing a band is a
+measurement decision, not an edit.
+
+**gate.py stayed an independent expectation, and gained a case.** `launch_plan()` now derives the shipped
+per-token bill — `proj = 2 × 24`, one grouped input launch plus one output projection per layer — and
+`launch_plan_split()` holds §07's per-operation table as its own Python spelling, which is what a wide body
+bills and what `--proj-plan split` runs. `selftest_launch_bill()` gained the case this flip owes: `proj`
+injected back at §07's 5-per-GDN/4-per-attn count must be caught at `launch count proj`, and the injected
+value is taken from `launch_plan_split()` rather than typed as +66, so a default that quietly reverted while
+the Python model stayed at 48 is caught rather than accommodated. That is the `--attn-tile` trap class
+(a gate judging one plan while the engine ships another) made fail-loud.
+
+**Two section (h) witnesses had to be restated, not removed.** Under a plan where one-row bodies group four
+tensors into one site, `rows_total` is no longer the work measure it was — a grouped launch reports width 1
+while covering four tensors — so the cross-side "fewer launches, not less work" check now compares
+**tensor-rows**, with the bundled rows folded back by `launch_work_rows()` from the two bills and the
+observed counters (114 − 48 = 66 per one-row body: 18 GDN groups × 3 + 6 attention groups × 2). On dec64f
+all three sides now read 9,234 tensor-rows, which is §07's 114 × 81 tokens, and the raw `rows_total`
+(5,010 batched / 3,888 one-row) is printed beside it so nothing is hidden. The wave-ratio identity
+`r_wave × waves_b == b_wave × waves_r` also stopped being true of a correct engine — a one-row body is now
+cheaper than a wide one, so the two sides are no longer proportional by wave count — and it was replaced by
+two per-side equalities against each side's own derived bill (271 batched, 205 × prompt_len one-row on
+dec64f), which is the stronger statement and keeps `r_wave > b_wave`. `wave_expect()` takes the one-row bill
+as a parameter for exactly this, and the negative controls' must-catch/must-not-catch lists are unchanged:
+`--break-wave` still reddens the launch half and still leaves the work comparison green, because the tensor
+count really is unchanged when a wave runs one row at a time.
+
+**Evidence (worker; correctness only, no timing).** `bash engine/build.sh` clean. `--dump-proj-plan` reads
+`plan=packed shape=unroll8 launches_per_step=48` with no flags, `114` on `--proj-plan split`, and
+`--proj-shape shipped` alone is refused with the reason (the pre-D1 pair `--proj-plan split --proj-shape
+shipped` still runs, and is what `PROJSHAPE`-level parity work asks for). Parity, same binary, no flags:
+p128 + 32 steps is byte-identical in all 160 `STEP` lines to each of the three banked arms in
+`tmp/proj-d1/ab128_{off,shape,pack}_1.log`, and at 4,000 fed + 32 steps the shipped default and the frozen
+pre-D1 pair produce identical `STEP` lines for all 4,032 rows. The counters the flip predicts were seen on
+device: p128 `LAUNCHSTAT family=proj calls=1650 calls_batched=114 rows_total=16128` = 114×128 + 48×32;
+4,032-lane run `calls=2448 rows_total=457536` = 114×4,000 + 48×32; `--time-waves` bills the wide body's 114
+and the one-row bodies' 48 in the same report with `plan_match=1` and all four `body1_*_plan_matches_token_plan`
+reading 1 (`body1_split_plan_matches_token_plan` is new: it keeps the non-shipped plan's derivation witnessed
+now that packed is the default). Device `gate.py` over the derived population (`for d in data/refs/*/;
+[ -f $d/manifest.json ]`) — 21 fixtures, all 21 judged: 13 PASS, 5 FAIL, and the 5 are the recorded set
+(dec300f/dec64f/dec64t/mt32f/wide520f stale `route_allowance.json` hashes, plus dec64f's three §10.2 meanrel
+steps) with nothing new; `--selftest` PASS including the new launch-bill case; `--dry-run` over all 21 green
+apart from those five; `speccheck/run_all.py --quick` 11 gates, 0 failed.
+
+**The main agent's windows, taken after this pass, blocking, zero subagents, one lock hold each, util
+recorded at both ends.** The pre-D1 side is named explicitly (`--proj-plan split --proj-shape shipped`)
+because after the flip a no-flag run *is* the shipped arm: the first cut of the wide script left both arms
+on the default and they matched to 0.5 %, which is the stale-arm null this repo already has a rule about.
+
+| row | pre-D1 (`split`+`shipped`) | shipped (`packed`+`unroll8`) | Δ |
+|---|---|---|---|
+| `proj` ms/step, 128 lanes, median of 7 | 4.1946 | **2.7284** | **−34.9 %** |
+| step burst ms_mean, 128 lanes | 11.7456 (best 11.5338) | **10.2156** (best 9.8675) | **−13.0 %** |
+| step burst ms_mean, 4,032 lanes, median of 3 | 14.2423 | **12.6803** | **−11.0 %** |
+| marginal decode, 128 lanes (`context_sweep.py`, best of 3) | 11.181 (carried, 89.4 tok/s) | **9.876** = **101.3 tok/s** | **+13.3 %** |
+
+Every one of the seven paired 128-lane reps separates — shipped 9.868–10.274 against pre-D1 11.534–11.795, no
+overlap — so the headline is not a best-of-N artefact. The two instruments agree from different directions:
+the stage-clock burst says −13.0 % of the step, the `--steps` differential says +13.3 % of the marginal, and
+the wide row was taken on the burst because `context_sweep.py` is void above 4k (§6). Ledger rows fed: §1's
+decode table and README headline, §2's `proj` row, §4's isolation row — which also lost its old geometry
+label, since rows/block 32 is no longer what ships.
