@@ -35,7 +35,7 @@ worth). Floors are bytes ÷ 237 GB/s. Efficiency = floor ÷ cost.
 
 | family | launches | reads/step | ms/step at 4k | floor | eff | the bound that fixes it |
 |---|---|---|---|---|---|---|
-| `mlp` | 48 | 528.8 MiB | **3.3628** | 2.340 ms | 70 % | **unpriced**: not memory state (only ~0.06 ms available), not launch count for sure — a one-token `down_proj` is 1,024 rows over 128 blocks on 40 CUs, i.e. under-parallelised per launch |
+| `mlp` | 48 | 528.8 MiB | **3.3628** | 2.340 ms | 70 % | **not memory state** (only ~0.06 ms there), **not launch count** (3.10 us measured), **not launch shape** (item 2: split-K on the one-row `down_proj` loses at every setting, best gain 0.0000 ms). What is left is the M=1 GEMV shape itself and hipBLASLt's algo choice at 3,584 rows, bounded ~1.17x by `gemm_algo_sweep` |
 | `proj` | 48 | 467.6 MiB | **2.7578** | 2.069 ms | 75 % | hipBLASLt heuristic picks per-shape algos; D1 already shipped the packed projection launch (−11 %). Remaining 25 % is library algo choice at M=512, swept and bounded at ~1.17× |
 | `lm_head` | 1 | 509.6 MiB | **2.1685** | 2.254 ms | **104 %** | **AT THE WALL, cannot be faster.** 246 GB/s demanded against a ~237–240 plateau — it is reading the 486 MiB tied embedding as fast as this machine can read anything. Only quantization moves it |
 | `attn` | 6 | 49.55 MiB (unique KV, 4k) | **1.6121** | 0.209 ms | 13 % | **latency at occupancy**, and the fix already landed: a spelling change took `attn_core` from 38,944 B to 6,176 B reserved LDS, residency 1 → 4 blocks/CU, −46 % on this line (§3). Remaining headroom is large in ratio terms but is a serial per-tile walk at 4,032 lanes with 8 query heads |
@@ -111,9 +111,11 @@ engages the clock only under the flag, and `decode_step.cpp:423`'s sync is one-t
   small-op families suggested the residual was real: `cast` at 97 × 7.78 us minus ~5.3 us of instrument is
   ~3.8 us/launch. **Item (1) settled it by deletion**: folding all 97 `cast` launches out of the step moved
   the wall **−0.3008 ms at 4,032 lanes = 3.10 us per launch**, so the residual is real and the ~116 tiny
-  launches left in `glue`/`copy` are a funded route, not a speculation. What the fold does NOT settle is the
-  *shape* question — whether a launch is expensive because of its count or because a one-row launch has no
-  work to hide behind, which is item (2).
+  launches left in `glue`/`copy` are a funded route, not a speculation. The *shape* question the fold left
+  open — is a launch expensive because of its count or because a one-row launch has no work to hide behind
+  — was answered by item (2) and is now closed: the engine sits on the plateau of a plateau-then-cliff curve
+  (`prototype/wave_shape/ITEM2-RESULT.md` §2), and the cliff is behind a cross-layer merge the residual
+  chain forbids.
 
 ## 5. Things that look like headroom and are not
 
@@ -135,17 +137,18 @@ About **6.5 ms of the 10.936 ms step is weight bytes this machine can only read 
 `lm_head` (2.17 ms, 104 % of the wall) plus `proj` (2.76 ms, 75 %) are already at or near that line, so
 they cannot be made faster without quantization, which is out of scope. Attention spent months at 3.0 ms
 because a compiler artifact cut its occupancy to a quarter and that has now been fixed for −46 % on that
-line and −9.9 % on the step. What is genuinely left is small and of two kinds: **~0.6–1.5 ms in ~165 tiny
-launches whose real per-launch cost is still unmeasured** (the `cast`/`glue`/`copy` tail, item 1), and
-**the per-launch parallelism of one-token GEMVs** in `mlp`/`gdn`, where 1,024 rows over 128 blocks on 40
-CUs says the work is under-spread rather than slow (item 2).
+line and −9.9 % on the step. What is genuinely left is small and of two kinds: **~0.21 ms in the 68 tiny `glue`/`copy` launches
+left after item 1 deleted 97 of them at a measured 3.10 us each**, and **nothing else structural**: item 2
+priced the last candidate, per-launch parallelism, and found the engine sitting on a plateau whose only large
+nearby effect (7.20 → 311.37 ms at equal bytes and workgroups) lies behind a cross-layer merge the 24-layer
+residual chain forbids, while split-K on the one-row `down_proj` loses at every setting tested.
 
 ## 7. Open, with what would settle each
 
 | open item | the arm that settles it | pre-registered reading |
 |---|---|---|
 | **(1) the small-op tail** — **RESOLVED 2026-10-21**: all 97 `cast` launches folded into their consumers, `dec8` + `wide4096f` green with the fold on, bit-identical at both widths | done (`c9d3b3f`, `prototype/cast_fold/`) | **WIN: −0.3008 ms at 4,032 = 3.10 us per launch**, above the pre-registered 0.24 ms line → **`glue`/`copy` (~116 tiny launches, ~0.36 ms at that rate) are funded** |
-| **(2) per-launch parallelism** | launch-count arms that **hold workgroups-per-launch fixed** at real bytes (the A12 rule) | a gain at equal grid shape prices the lever; a gain that vanishes at equal grid shape was always parallelism, not launch count |
+| **(2) per-launch parallelism** — **RESOLVED 2026-10-21**: (L,G) matrix at fixed bytes with an iso-population diagonal + a real two-pass split-K on the one-row `down_proj` (`prototype/wave_shape/`) | matrix **NOT ADJUDICABLE** (noise floor 0.3071 ms ≥ 0.30 band; re-take then refused bimodal at 21.8 %) — **split-K KILLED** (every arm loses, best gain 0.0000 vs 0.15 ms required) | shape is a plateau-then-cliff and the engine is on the plateau: 7.20 → 311.37 ms at equal bytes/workgroups only as G falls to 1, i.e. **1.43 MiB per block**, a shape the 24-layer residual chain cannot build. "Fewer, fatter launches" is closed, not deferred |
 | **`gdn`'s unattributed ~0.2 ms** | same rig, arms that separate state residency from per-launch cost | D4 already excluded the chain and bytes |
 | **> `MAXSC` numerics** | rule which instrument is authoritative, flat floors vs priced allowance | gates `--split 18` (~0.36 ms) |
 

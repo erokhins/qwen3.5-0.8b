@@ -84,3 +84,6 @@ staging penalty that decides the verdict is independent of that, and every sign 
 4. **Still funded, still untried**: `glue` + `copy` = 68 launches (was ~116 before the cast fold took its 97)
    at 3.10 µs ≈ **0.21 ms**, on the same mechanism item (1) proved. That is below item (1)'s WIN line and
    above its KILL line, so it is a route with an honest ~2 % ceiling and no more.
+
+Raw timed files live in `prototype/wave_shape/out/` (gitignored: they are re-creatable with
+`sweep.sh` inside one lock hold, and re-timing them is the only way to change what is in there).
