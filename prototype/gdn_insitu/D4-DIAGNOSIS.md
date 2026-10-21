@@ -503,3 +503,40 @@ Two things the rig did NOT find, recorded as negatives. `census.py` reports `pri
 seven GDN kernels, so there is no promote-alloca-to-LDS reclaim available here — the D3 finding does not
 repeat on this path. And the census's 43.067 MB/token is 47.4 % **writes**, so unlike the MLP walk this is
 not a read-bound stream: any floor built on reads alone would have been half the traffic.
+
+## 7. The matrix (2026-10-21, main agent): the route named the wrong mechanism, and the money is shared with D2
+
+`bash prototype/gdn_insitu/ab_d4_sweep.sh`, same discipline as §6 (blocking, zero subagents, one hold,
+util 91 % at acquire). `ROWS asked=16 parsed=16 red=0`, behavioural canary inside the window (`ship`
+reports `launches=72`, `repro` reports `launches=1`). `P = ship - repro = 0.2790 - 0.0747 = 0.2043 ms`.
+
+| arm | ms | what it says |
+|---|---|---|
+| `cold_0MiB -> 32 -> 512 -> 1536` | 0.1216 / 0.1917 / 0.1894 / 0.1922 | state coldness costs **+0.070 ms and then stops** — it saturates at 32 MiB, which is the L2 tier the 18.9 MiB state lives in. Not a DRAM cliff. |
+| `only_rec / only_conv / only_gates / only_gnorm` | 0.1243 / 0.0605 / 0.0451 / 0.0568 | the four kernels are ~additive (sum 0.2867 vs all-four 0.2790). The **recurrence kernel proper is 0.1243 of 0.2790**, so the chain the route blamed is under half the line. |
+| `split8` vs `comb_all` | 0.1839 vs **0.0644** | merging 18 launches into 1 at identical bytes buys **0.12 ms**. This is D2's `T_geo` again, on a different family. |
+| `spell_ship` vs `spell_unroll4` | 0.1445 vs 0.1249 | a **bit-identical** spelling change is −13.6 % at the same bytes — the cheapest candidate in the package, and ~0.02 ms at engine scale. |
+| `drain_each` (72 syncs) | 0.6516 | exceeds P on its own: per-launch drain is not a term inside P, it is a parallel cost on the family line. |
+
+**Verdict, stated against what the route actually claimed.** D4 attributed the gap to "the per-token chain
+at 72 launches, not bytes". Bytes are indeed excluded (the census's 43.067 MB/token at 47.4 % writes never
+approaches the plateau, and `private_segment=0` on all seven kernels rules out the D3-style residency
+reclaim). But the chain is **not** the mechanism either: the recurrence kernel alone is 0.1243 of the
+0.2790 shipped-shape row. What the matrix does find is two terms, both already seen elsewhere —
+**launch/segment count** (0.12 ms between the 18-launch and 1-launch shapes, and ~0.19-0.21 ms of the
+engine's 0.63 ms line is per-segment drain, §6) and **L2 residency of the state** (+0.07 ms, saturating
+at 32 MiB).
+
+**Consequence, and it is a synthesis rather than a GDN result.** D2 and D4 have now independently landed on
+the same lever: fewer, fatter launches and fewer stage-clock segments per step. D2 called it `T_geo` +
+`T_serial` (0.7565 + 0.2709 ms), D4 calls it `comb_all` vs `split8` + the drain term. A prize offered
+twice by two routes is still one prize, so **-0.80 ms of D2 and -0.23 ms of D4 must not be added**: they
+are one segment-count route wearing two family names, and it needs its own pre-registered line measured
+against the step wall, not against a per-family stage row.
+
+**What is NOT adjudicated.** The route's WIN/KILL (0.50 / 0.60 ms) are lines on **wall**, and nothing here
+measures wall per family — the rig's shipped-shape warm row is 0.2790 and the engine's stage row is
+0.6297, and these are different instruments (§0(i)). So D4 gets no WIN/KILL verdict from this package;
+it gets a mechanism verdict and a warning that its lines cannot be checked on a stage row. `ab_d4_sweep.sh`
+also prints its shares with comma decimals under this box's locale (`P = 0,2043`); the arithmetic is
+right, the formatting needs the same `LC_ALL=C` the D2 script sets.
