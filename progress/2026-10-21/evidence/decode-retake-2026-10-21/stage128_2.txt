@@ -1,0 +1,202 @@
+loaded 335 tensors, 1.5457 GB resident in 337.4 ms (335 allocations)
+LAUNCH glue=49 proj=114 gdn=72 attn=6 mlp=48 cast=97 other=20 total=406
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=lt hipblas=3.6.0 attn_tile=1 attn_touch=1 attn_fattn=1 attn_fattn_roll=single attn_fattn_qstage=unstaged8 attn_fattn_pvf16=f32 attn_fattn_wide=wide_llama gdn_scan=seq gdn_chunk=64 gdn_spell=fused gdn_loop=512 gdn_norm=inline gdn_geom=reg16
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,4) wide_rows=112/112 wave_rows=112 lanes_last=112 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+prefill 0 | fed     760 | sampled       - | top       - | P 0 -> 1
+prefill 1 | fed   25744 | sampled       - | top       - | P 1 -> 2
+prefill 2 | fed    7338 | sampled       - | top       - | P 2 -> 3
+prefill 3 | fed     506 | sampled       - | top       - | P 3 -> 4
+prefill 4 | fed     279 | sampled       - | top       - | P 4 -> 5
+prefill 5 | fed    6607 | sampled       - | top       - | P 5 -> 6
+prefill 6 | fed     314 | sampled       - | top       - | P 6 -> 7
+prefill 7 | fed     279 | sampled       - | top       - | P 7 -> 8
+prefill 8 | fed    2002 | sampled       - | top       - | P 8 -> 9
+prefill 9 | fed      11 | sampled       - | top       - | P 9 -> 10
+prefill 10 | fed    4661 | sampled       - | top       - | P 10 -> 11
+prefill 11 | fed     264 | sampled       - | top       - | P 11 -> 12
+prefill 12 | fed   40289 | sampled       - | top       - | P 12 -> 13
+prefill 13 | fed     421 | sampled       - | top       - | P 13 -> 14
+prefill 14 | fed     995 | sampled       - | top       - | P 14 -> 15
+prefill 15 | fed     978 | sampled       - | top       - | P 15 -> 16
+prefill 16 | fed    3799 | sampled       - | top       - | P 16 -> 17
+prefill 17 | fed    2166 | sampled       - | top       - | P 17 -> 18
+prefill 18 | fed    1599 | sampled       - | top       - | P 18 -> 19
+prefill 19 | fed    2942 | sampled       - | top       - | P 19 -> 20
+prefill 20 | fed     321 | sampled       - | top       - | P 20 -> 21
+prefill 21 | fed     995 | sampled       - | top       - | P 21 -> 22
+prefill 22 | fed   14276 | sampled       - | top       - | P 22 -> 23
+prefill 23 | fed   11702 | sampled       - | top       - | P 23 -> 24
+prefill 24 | fed     680 | sampled       - | top       - | P 24 -> 25
+prefill 25 | fed     314 | sampled       - | top       - | P 25 -> 26
+prefill 26 | fed   13727 | sampled       - | top       - | P 26 -> 27
+prefill 27 | fed    4598 | sampled       - | top       - | P 27 -> 28
+prefill 28 | fed    1056 | sampled       - | top       - | P 28 -> 29
+prefill 29 | fed    2790 | sampled       - | top       - | P 29 -> 30
+prefill 30 | fed      13 | sampled       - | top       - | P 30 -> 31
+prefill 31 | fed   26482 | sampled       - | top       - | P 31 -> 32
+prefill 32 | fed      11 | sampled       - | top       - | P 32 -> 33
+prefill 33 | fed     279 | sampled       - | top       - | P 33 -> 34
+prefill 34 | fed   75721 | sampled       - | top       - | P 34 -> 35
+prefill 35 | fed     998 | sampled       - | top       - | P 35 -> 36
+prefill 36 | fed    4101 | sampled       - | top       - | P 36 -> 37
+prefill 37 | fed      11 | sampled       - | top       - | P 37 -> 38
+prefill 38 | fed     279 | sampled       - | top       - | P 38 -> 39
+prefill 39 | fed   13736 | sampled       - | top       - | P 39 -> 40
+prefill 40 | fed    4886 | sampled       - | top       - | P 40 -> 41
+prefill 41 | fed     998 | sampled       - | top       - | P 41 -> 42
+prefill 42 | fed   58205 | sampled       - | top       - | P 42 -> 43
+prefill 43 | fed     303 | sampled       - | top       - | P 43 -> 44
+prefill 44 | fed     264 | sampled       - | top       - | P 44 -> 45
+prefill 45 | fed   16097 | sampled       - | top       - | P 45 -> 46
+prefill 46 | fed    1375 | sampled       - | top       - | P 46 -> 47
+prefill 47 | fed      11 | sampled       - | top       - | P 47 -> 48
+prefill 48 | fed     321 | sampled       - | top       - | P 48 -> 49
+prefill 49 | fed     279 | sampled       - | top       - | P 49 -> 50
+prefill 50 | fed   69862 | sampled       - | top       - | P 50 -> 51
+prefill 51 | fed     995 | sampled       - | top       - | P 51 -> 52
+prefill 52 | fed     978 | sampled       - | top       - | P 52 -> 53
+prefill 53 | fed   28898 | sampled       - | top       - | P 53 -> 54
+prefill 54 | fed     974 | sampled       - | top       - | P 54 -> 55
+prefill 55 | fed     506 | sampled       - | top       - | P 55 -> 56
+prefill 56 | fed     279 | sampled       - | top       - | P 56 -> 57
+prefill 57 | fed    6784 | sampled       - | top       - | P 57 -> 58
+prefill 58 | fed     539 | sampled       - | top       - | P 58 -> 59
+prefill 59 | fed    4184 | sampled       - | top       - | P 59 -> 60
+prefill 60 | fed     852 | sampled       - | top       - | P 60 -> 61
+prefill 61 | fed    3481 | sampled       - | top       - | P 61 -> 62
+prefill 62 | fed     310 | sampled       - | top       - | P 62 -> 63
+prefill 63 | fed    2445 | sampled       - | top       - | P 63 -> 64
+prefill 64 | fed    1142 | sampled       - | top       - | P 64 -> 65
+prefill 65 | fed     310 | sampled       - | top       - | P 65 -> 66
+prefill 66 | fed     424 | sampled       - | top       - | P 66 -> 67
+prefill 67 | fed      13 | sampled       - | top       - | P 67 -> 68
+prefill 68 | fed   35254 | sampled       - | top       - | P 68 -> 69
+prefill 69 | fed     303 | sampled       - | top       - | P 69 -> 70
+prefill 70 | fed     279 | sampled       - | top       - | P 70 -> 71
+prefill 71 | fed    4599 | sampled       - | top       - | P 71 -> 72
+prefill 72 | fed    3481 | sampled       - | top       - | P 72 -> 73
+prefill 73 | fed     264 | sampled       - | top       - | P 73 -> 74
+prefill 74 | fed    1067 | sampled       - | top       - | P 74 -> 75
+prefill 75 | fed    1518 | sampled       - | top       - | P 75 -> 76
+prefill 76 | fed    7548 | sampled       - | top       - | P 76 -> 77
+prefill 77 | fed      11 | sampled       - | top       - | P 77 -> 78
+prefill 78 | fed     864 | sampled       - | top       - | P 78 -> 79
+prefill 79 | fed     369 | sampled       - | top       - | P 79 -> 80
+prefill 80 | fed    3069 | sampled       - | top       - | P 80 -> 81
+prefill 81 | fed     279 | sampled       - | top       - | P 81 -> 82
+prefill 82 | fed   12967 | sampled       - | top       - | P 82 -> 83
+prefill 83 | fed   73096 | sampled       - | top       - | P 83 -> 84
+prefill 84 | fed     506 | sampled       - | top       - | P 84 -> 85
+prefill 85 | fed     279 | sampled       - | top       - | P 85 -> 86
+prefill 86 | fed   17323 | sampled       - | top       - | P 86 -> 87
+prefill 87 | fed     314 | sampled       - | top       - | P 87 -> 88
+prefill 88 | fed     279 | sampled       - | top       - | P 88 -> 89
+prefill 89 | fed    3000 | sampled       - | top       - | P 89 -> 90
+prefill 90 | fed    6992 | sampled       - | top       - | P 90 -> 91
+prefill 91 | fed    3808 | sampled       - | top       - | P 91 -> 92
+prefill 92 | fed     279 | sampled       - | top       - | P 92 -> 93
+prefill 93 | fed    6220 | sampled       - | top       - | P 93 -> 94
+prefill 94 | fed    4598 | sampled       - | top       - | P 94 -> 95
+prefill 95 | fed    1056 | sampled       - | top       - | P 95 -> 96
+prefill 96 | fed     506 | sampled       - | top       - | P 96 -> 97
+prefill 97 | fed     279 | sampled       - | top       - | P 97 -> 98
+prefill 98 | fed   17323 | sampled       - | top       - | P 98 -> 99
+prefill 99 | fed     314 | sampled       - | top       - | P 99 -> 100
+prefill 100 | fed     866 | sampled       - | top       - | P 100 -> 101
+prefill 101 | fed    3820 | sampled       - | top       - | P 101 -> 102
+prefill 102 | fed    9064 | sampled       - | top       - | P 102 -> 103
+prefill 103 | fed      13 | sampled       - | top       - | P 103 -> 104
+prefill 104 | fed     561 | sampled       - | top       - | P 104 -> 105
+prefill 105 | fed   25744 | sampled       - | top       - | P 105 -> 106
+prefill 106 | fed    7338 | sampled       - | top       - | P 106 -> 107
+prefill 107 | fed     506 | sampled       - | top       - | P 107 -> 108
+prefill 108 | fed     279 | sampled       - | top       - | P 108 -> 109
+prefill 109 | fed    6607 | sampled       - | top       - | P 109 -> 110
+prefill 110 | fed     314 | sampled       - | top       - | P 110 -> 111
+prefill 111 | fed     279 | sampled    2002 | top 21.639324 | P 111 -> 112
+LAUNCHSTAT family=glue calls=833 calls_batched=49 rows_total=6272 rows_max=112
+LAUNCHSTAT family=proj calls=1938 calls_batched=114 rows_total=14592 rows_max=112
+LAUNCHSTAT family=mlp_gateup calls=408 calls_batched=24 rows_total=3072 rows_max=112
+LAUNCHSTAT family=mlp_down calls=408 calls_batched=24 rows_total=3072 rows_max=112
+LAUNCHSTAT family=gdn_conv calls=306 calls_batched=18 rows_total=2304 rows_max=112
+LAUNCHSTAT family=gdn_gates calls=306 calls_batched=18 rows_total=2304 rows_max=112
+LAUNCHSTAT family=gdn_gated_norm calls=306 calls_batched=18 rows_total=2304 rows_max=112
+LAUNCHSTAT family=attn calls=102 calls_batched=6 rows_total=768 rows_max=112
+STAGE gran=calib idle_sync_us=0.099 iters=200 note=one_of_these_sits_inside_every_serialized_segment
+STAGEPASS gran=burst steps=16 ms_mean=11.3031 ms_min=11.0624 ms_max=11.9341 spread_pct=7.88
+STAGEPARITY gran=burst tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+STAGESTEP gran=burst step=112 fed=2002 sampled=11 ms=11.0624
+STAGESTEP gran=burst step=113 fed=11 sampled=4661 ms=11.0813
+STAGESTEP gran=burst step=114 fed=4661 sampled=264 ms=11.0737
+STAGESTEP gran=burst step=115 fed=264 sampled=40289 ms=11.1040
+STAGESTEP gran=burst step=116 fed=40289 sampled=421 ms=11.1238
+STAGESTEP gran=burst step=117 fed=421 sampled=995 ms=11.7765
+STAGESTEP gran=burst step=118 fed=995 sampled=978 ms=11.9243
+STAGESTEP gran=burst step=119 fed=978 sampled=3799 ms=11.0933
+STAGESTEP gran=burst step=120 fed=3799 sampled=2166 ms=11.1489
+STAGESTEP gran=burst step=121 fed=2166 sampled=1599 ms=11.1288
+STAGESTEP gran=burst step=122 fed=1599 sampled=2942 ms=11.1043
+STAGESTEP gran=burst step=123 fed=2942 sampled=321 ms=11.1484
+STAGESTEP gran=burst step=124 fed=321 sampled=995 ms=11.8266
+STAGESTEP gran=burst step=125 fed=995 sampled=14276 ms=11.9341
+STAGESTEP gran=burst step=126 fed=14276 sampled=11702 ms=11.1261
+STAGESTEP gran=burst step=127 fed=11702 sampled=680 ms=11.1923
+STAGEPASS gran=stage steps=16 ms_mean=13.5840 ms_min=13.0090 ms_max=14.4757 spread_pct=11.27
+STAGEPARITY gran=stage tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+STAGE gran=stage family=glue      ms_per_step=0.6879 ms_total=11.007 launches_per_step=49 segments_per_step=49 us_per_launch=14.04
+STAGE gran=stage family=proj      ms_per_step=4.2491 ms_total=67.985 launches_per_step=114 segments_per_step=48 us_per_launch=37.27
+STAGE gran=stage family=gdn       ms_per_step=0.6570 ms_total=10.512 launches_per_step=72 segments_per_step=36 us_per_launch=9.12
+STAGE gran=stage family=attn      ms_per_step=0.4964 ms_total=7.942 launches_per_step=6 segments_per_step=6 us_per_launch=82.73
+STAGE gran=stage family=mlp       ms_per_step=3.3881 ms_total=54.209 launches_per_step=48 segments_per_step=48 us_per_launch=70.59
+STAGE gran=stage family=cast      ms_per_step=0.8075 ms_total=12.919 launches_per_step=97 segments_per_step=97 us_per_launch=8.32
+STAGE gran=stage family=copy      ms_per_step=0.2199 ms_total=3.519 launches_per_step=19 segments_per_step=19 us_per_launch=11.57
+STAGE gran=stage family=lm_head   ms_per_step=2.1384 ms_total=34.214 launches_per_step=1 segments_per_step=1 us_per_launch=2138.39
+STAGE gran=stage family=host_tail ms_per_step=0.9305 ms_total=14.889 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+STAGE gran=stage TOTAL steps=16 ms_per_step=13.5747 ms_total=217.195 launches_per_step=406 plan_per_step=406 plan_match=1 syncs_per_step=305
+STAGESTEP gran=stage step=112 fed=2002 sampled=11 ms=13.0090
+STAGESTEP gran=stage step=113 fed=11 sampled=4661 ms=13.0242
+STAGESTEP gran=stage step=114 fed=4661 sampled=264 ms=13.3417
+STAGESTEP gran=stage step=115 fed=264 sampled=40289 ms=13.5030
+STAGESTEP gran=stage step=116 fed=40289 sampled=421 ms=13.9515
+STAGESTEP gran=stage step=117 fed=421 sampled=995 ms=13.1727
+STAGESTEP gran=stage step=118 fed=995 sampled=978 ms=13.2820
+STAGESTEP gran=stage step=119 fed=978 sampled=3799 ms=13.5768
+STAGESTEP gran=stage step=120 fed=3799 sampled=2166 ms=13.7960
+STAGESTEP gran=stage step=121 fed=2166 sampled=1599 ms=14.3409
+STAGESTEP gran=stage step=122 fed=1599 sampled=2942 ms=13.4093
+STAGESTEP gran=stage step=123 fed=2942 sampled=321 ms=13.4970
+STAGESTEP gran=stage step=124 fed=321 sampled=995 ms=13.4846
+STAGESTEP gran=stage step=125 fed=995 sampled=14276 ms=14.0231
+STAGESTEP gran=stage step=126 fed=14276 sampled=11702 ms=14.4757
+STAGESTEP gran=stage step=127 fed=11702 sampled=680 ms=13.4561
+STAGEPASS gran=kernel steps=16 ms_mean=14.3907 ms_min=13.9849 ms_max=15.0314 spread_pct=7.48
+STAGEPARITY gran=kernel tokens_identical=1 logits_bitidentical=1 first_mismatch=none
+STAGE gran=kernel family=glue      ms_per_step=0.7011 ms_total=11.218 launches_per_step=49 segments_per_step=49 us_per_launch=14.31
+STAGE gran=kernel family=proj      ms_per_step=4.6938 ms_total=75.102 launches_per_step=114 segments_per_step=114 us_per_launch=41.17
+STAGE gran=kernel family=gdn       ms_per_step=0.8935 ms_total=14.296 launches_per_step=72 segments_per_step=72 us_per_launch=12.41
+STAGE gran=kernel family=attn      ms_per_step=0.4870 ms_total=7.792 launches_per_step=6 segments_per_step=6 us_per_launch=81.17
+STAGE gran=kernel family=mlp       ms_per_step=3.3936 ms_total=54.297 launches_per_step=48 segments_per_step=48 us_per_launch=70.70
+STAGE gran=kernel family=cast      ms_per_step=0.8233 ms_total=13.173 launches_per_step=97 segments_per_step=97 us_per_launch=8.49
+STAGE gran=kernel family=copy      ms_per_step=0.2156 ms_total=3.450 launches_per_step=19 segments_per_step=19 us_per_launch=11.35
+STAGE gran=kernel family=lm_head   ms_per_step=2.1531 ms_total=34.450 launches_per_step=1 segments_per_step=1 us_per_launch=2153.12
+STAGE gran=kernel family=host_tail ms_per_step=1.0159 ms_total=16.254 launches_per_step=0 segments_per_step=1 us_per_launch=0.00
+STAGE gran=kernel TOTAL steps=16 ms_per_step=14.3770 ms_total=230.032 launches_per_step=406 plan_per_step=406 plan_match=1 syncs_per_step=407
+STAGESTEP gran=kernel step=112 fed=2002 sampled=11 ms=14.0862
+STAGESTEP gran=kernel step=113 fed=11 sampled=4661 ms=14.2985
+STAGESTEP gran=kernel step=114 fed=4661 sampled=264 ms=15.0184
+STAGESTEP gran=kernel step=115 fed=264 sampled=40289 ms=13.9883
+STAGESTEP gran=kernel step=116 fed=40289 sampled=421 ms=14.0391
+STAGESTEP gran=kernel step=117 fed=421 sampled=995 ms=14.0537
+STAGESTEP gran=kernel step=118 fed=995 sampled=978 ms=13.9849
+STAGESTEP gran=kernel step=119 fed=978 sampled=3799 ms=14.6059
+STAGESTEP gran=kernel step=120 fed=3799 sampled=2166 ms=15.0314
+STAGESTEP gran=kernel step=121 fed=2166 sampled=1599 ms=15.0083
+STAGESTEP gran=kernel step=122 fed=1599 sampled=2942 ms=14.1239
+STAGESTEP gran=kernel step=123 fed=2942 sampled=321 ms=14.1304
+STAGESTEP gran=kernel step=124 fed=321 sampled=995 ms=14.0870
+STAGESTEP gran=kernel step=125 fed=995 sampled=14276 ms=14.7043
+STAGESTEP gran=kernel step=126 fed=14276 sampled=11702 ms=14.9356
+STAGESTEP gran=kernel step=127 fed=11702 sampled=680 ms=14.1548
+STAGEGAP gran=stage burst_ms_mean=11.3031 serialized_ms_mean=13.5840 exposed_ms=2.2809 ratio=1.202
+STAGEGAP gran=kernel burst_ms_mean=11.3031 serialized_ms_mean=14.3907 exposed_ms=3.0876 ratio=1.273
+RESULT mode=run steps=128 ms_total=278.692 ms_per_step=2.177 last_sampled=680 prefix_len=128 stopped=0
