@@ -3,8 +3,9 @@
 **What this document is.** One self-contained answer to "why can't generation be faster?", per part of a
 decode step, on this machine, for `Qwen/Qwen3.5-0.8B` text-only. Every claim names the measurement that
 established it and the width it was taken at. Every "cannot be faster" is a bound with arithmetic behind
-it, and every "could still be faster" says what is unpriced. Written 2026-10-21; the engine it describes is
-`e02c568` + the D2/D4/S1 prototype work.
+it, and every "could still be faster" says what is unpriced. Written 2026-10-21 at `c9d3b3f` (which already
+includes the cast fold described in §1 and §7); the routes behind it are D2, D4 and S1, and each retired
+number is named at its own `results.md`.
 
 **Operating point.** Decode is reported at **4,032 lanes** (4,000 prompt + 32 steps), shorter widths beside
 it, per the standing rule. Headline: **10.9357 ms/token = 91.4 tok/s** at 4,032, **9.7855 ms = 102.2 tok/s**
@@ -19,7 +20,7 @@ at 128. Prefill: 11,070 tok/s at 4,096. Both from paired windows (`engine/perfor
    `tools/step_traffic_model.py`, `prototype/launch_price/census.py`, 128-lane context):
    **1532.3 MB read / 24.4 MB written**, at 340 launches and 305 stage-clock segments before the cast fold
    of §7 and **243 / 184** after it. Divided by the
-   plateau that is **6.47 ms of unavoidable weight traffic** inside an 11.175 ms step. Everything above
+   plateau that is **6.47 ms of unavoidable weight traffic** inside a 10.936 ms step. Everything above
    6.47 ms is the sum of everything that is not a pure weight read.
 3. **16-bit quantization is not on the table.** It would roughly halve fact 2, which is why so many rows
    below end at "would need int8/int4, explicitly out of scope" (`AGENTS.md`, numeric-format rule:
@@ -31,7 +32,9 @@ problem. Generation is a bandwidth and latency story, end to end.
 ## 1. Per-family ledger: cost, floor, and what the gap is
 
 Costs are stage-clock family lines at 4,032 lanes from a paired window (see §4 for what a stage line is
-worth). Floors are bytes ÷ 237 GB/s. Efficiency = floor ÷ cost.
+worth). **They were taken before the cast fold**, so `cast` still shows the 0.7775 ms it no longer costs and
+the others carry their pre-fold values; they summed to an 11.175 ms step and the same step now measures
+10.9357 ms. Floors are bytes ÷ 237 GB/s. Efficiency = floor ÷ cost.
 
 | family | launches | reads/step | ms/step at 4k | floor | eff | the bound that fixes it |
 |---|---|---|---|---|---|---|
@@ -45,10 +48,11 @@ worth). Floors are bytes ÷ 237 GB/s. Efficiency = floor ÷ cost.
 | `host_tail` | 0 | — | 0.7163 | — | — | CPU work per step (sampling, logits D2H, bookkeeping). **Hidden today**: the pipelined shape covers it; it becomes exposed only if the GPU side shrinks enough (§6) |
 | `copy` | 19 | 1.327 MiB r + 1.327 w | 0.2141 | ~0 | 0 % | pure per-launch cost (19 × 10.7 us); candidate work is folding the roll-back into the conv ring |
 
-**Read the table as a budget, not as a wish list.** Two families are effectively finished (`lm_head` at
-104 % of the wall, `proj` at 75 % with a swept library bound), two are small tails whose prize depends
-entirely on a question still open (`cast`, `glue`+`copy`), and two still have real unpriced structure
-(`mlp`, `gdn`).
+**Read the table as a budget, not as a wish list.** Three families are effectively finished: `lm_head` at
+104 % of the wall, `proj` at 75 % with a swept library bound, and `mlp`, where memory state, launch count and
+launch shape have all now been measured and priced out (§2, item 2). One is deleted. Two tails remain: the 68
+`glue`/`copy` launches worth ~0.21 ms at the measured 3.10 us each, and `gdn`, whose 30 % of floor is the one
+remaining gap with no mechanism named yet.
 
 ## 2. Why the two big families are near their floors and cannot be moved much
 
@@ -66,7 +70,11 @@ the engine ships 48 launches at 3,584 rows. With a shape-matched arm the publish
 +1.0 % and the 1.09 ms gap decomposes as **launch shape 0.7565 + drain 0.2709 (instrument, §4) + pipelining
 0.0484 + memory state ~0.06**. The fat shape cannot be harvested: layer *i*'s `act` must exist before its
 `down`, and `down` feeds the residual layer *i+1* reads, so 24 layers' MLPs cannot become 2 launches.
-What is left as a genuine candidate is per-launch parallelism, not memory state (`mlp_insitu/D2-DIAGNOSIS.md` §5).
+That is why the last candidate for `mlp` was parallelism rather than memory state — and parallelism is now
+measured too: split-K on the one-row `down_proj` **loses at every setting tested** (best gain 0.0000 ms
+against 0.15 ms required, because a split re-stages the activation row 1,792 → 14,336 KiB against 7,168 KiB
+of weights). What survives is the M=1 GEMV shape itself and hipBLASLt's algorithm choice at 3,584 rows,
+bounded at ~1.17× by `prototype/gemm_algo_sweep` (`mlp_insitu/D2-DIAGNOSIS.md` §5, `wave_shape/ITEM2-RESULT.md` §3).
 
 ## 3. Why attention got faster today, and why the short-context line did not
 
@@ -110,8 +118,8 @@ engages the clock only under the flag, and `decode_step.cpp:423`'s sync is one-t
   moves workgroups-per-launch along with launch count (grid 271 vs 1918) — a confound, not a result. The
   small-op families suggested the residual was real: `cast` at 97 × 7.78 us minus ~5.3 us of instrument is
   ~3.8 us/launch. **Item (1) settled it by deletion**: folding all 97 `cast` launches out of the step moved
-  the wall **−0.3008 ms at 4,032 lanes = 3.10 us per launch**, so the residual is real and the ~116 tiny
-  launches left in `glue`/`copy` are a funded route, not a speculation. The *shape* question the fold left
+  the wall **−0.3008 ms at 4,032 lanes = 3.10 us per launch**, so the residual is real and the 68 tiny
+  launches left in `glue`/`copy` (49 + 19) are a funded mechanism, not a speculation. The *shape* question the fold left
   open — is a launch expensive because of its count or because a one-row launch has no work to hide behind
   — was answered by item (2) and is now closed: the engine sits on the plateau of a plateau-then-cliff curve
   (`prototype/wave_shape/ITEM2-RESULT.md` §2), and the cliff is behind a cross-layer merge the residual
@@ -119,6 +127,13 @@ engages the clock only under the flag, and `decode_step.cpp:423`'s sync is one-t
 
 ## 5. Things that look like headroom and are not
 
+* **"Fewer, fatter launches" — closed, not deferred.** It looks free: fewer launches, more work each. Item 2
+  measured the price of the fat end of that curve (7.20 ms at 16 launches of 64 blocks vs 311.37 ms at 1,024
+  launches of 1 block, equal bytes and equal total workgroups) and the engine is on the flat side of it; the
+  only way to build a fat launch here is a cross-layer merge, which layer *i*'s `act` → its `down` → the
+  residual that layer *i+1* reads forbids outright (§2, `wave_shape/ITEM2-RESULT.md` §2).
+* **Split-K for the one-row GEMVs**: measured, loses at 2, 4, 7, 8 and 14 ways (`intra1 == ship` at `ndiff 0`,
+  every gain negative). It is not a latency problem in that shape.
 * **Sub-ms "obvious" wins already taken**: the F32 seam, the packed-cast deletion, the conv coalesced read,
   the looped GDN launch, the projection packed flip (D1, −11 % at 4k), G4 `reg16` GDN wave form, A13 wide
   attention (+39.5 % at 16k prefill). Each has its own record in `progress/`.
@@ -137,7 +152,7 @@ About **6.5 ms of the 10.936 ms step is weight bytes this machine can only read 
 `lm_head` (2.17 ms, 104 % of the wall) plus `proj` (2.76 ms, 75 %) are already at or near that line, so
 they cannot be made faster without quantization, which is out of scope. Attention spent months at 3.0 ms
 because a compiler artifact cut its occupancy to a quarter and that has now been fixed for −46 % on that
-line and −9.9 % on the step. What is genuinely left is small and of two kinds: **~0.21 ms in the 68 tiny `glue`/`copy` launches
+line and −9.9 % on the step. What is genuinely left is one small item: **~0.21 ms in the 68 tiny `glue`/`copy` launches
 left after item 1 deleted 97 of them at a measured 3.10 us each**, and **nothing else structural**: item 2
 priced the last candidate, per-launch parallelism, and found the engine sitting on a plateau whose only large
 nearby effect (7.20 → 311.37 ms at equal bytes and workgroups) lies behind a cross-layer merge the 24-layer
@@ -147,13 +162,17 @@ residual chain forbids, while split-K on the one-row `down_proj` loses at every 
 
 | open item | the arm that settles it | pre-registered reading |
 |---|---|---|
-| **(1) the small-op tail** — **RESOLVED 2026-10-21**: all 97 `cast` launches folded into their consumers, `dec8` + `wide4096f` green with the fold on, bit-identical at both widths | done (`c9d3b3f`, `prototype/cast_fold/`) | **WIN: −0.3008 ms at 4,032 = 3.10 us per launch**, above the pre-registered 0.24 ms line → **`glue`/`copy` (~116 tiny launches, ~0.36 ms at that rate) are funded** |
+| **(1) the small-op tail** — **RESOLVED 2026-10-21**: all 97 `cast` launches folded into their consumers, `dec8` + `wide4096f` green with the fold on, bit-identical at both widths | done (`c9d3b3f`, `prototype/cast_fold/`) | **WIN: −0.3008 ms at 4,032 = 3.10 us per launch**, above the pre-registered 0.24 ms line → the mechanism is proven, and the 68 launches left in `glue`/`copy` (49 + 19) are worth ~0.21 ms at that rate, which is **below** that WIN line, so it is funded as a mechanism and small as a prize |
 | **(2) per-launch parallelism** — **RESOLVED 2026-10-21**: (L,G) matrix at fixed bytes with an iso-population diagonal + a real two-pass split-K on the one-row `down_proj` (`prototype/wave_shape/`) | matrix **NOT ADJUDICABLE** (noise floor 0.3071 ms ≥ 0.30 band; re-take then refused bimodal at 21.8 %) — **split-K KILLED** (every arm loses, best gain 0.0000 vs 0.15 ms required) | shape is a plateau-then-cliff and the engine is on the plateau: 7.20 → 311.37 ms at equal bytes/workgroups only as G falls to 1, i.e. **1.43 MiB per block**, a shape the 24-layer residual chain cannot build. "Fewer, fatter launches" is closed, not deferred |
-| **`gdn`'s unattributed ~0.2 ms** | same rig, arms that separate state residency from per-launch cost | D4 already excluded the chain and bytes |
+| **`glue`/`copy` fold** — the one route the mechanism now *funds*: 68 launches of near-zero bytes, ~0.21 ms ceiling | same shape as item 1: fold the row-norm/gate epilogues and the conv roll-back into their consumers, paired wall A/B at 4,032, numerics first | item 1's 0.24 ms line is more than this population can deliver, so the honest band is **0.10 ms WIN / 0.03 ms KILL**; expect ~1–2 % and say so before starting |
+| **`gdn`'s unattributed ~0.2 ms** | arms that separate state residency from per-launch cost, at relative rather than absolute noise floors (item 2's instrument lesson) | D4 already excluded the chain and bytes; **47.4 % of its traffic is writes**, so a read-bandwidth floor may not be the right floor for it at all |
 | **> `MAXSC` numerics** | rule which instrument is authoritative, flat floors vs priced allowance | gates `--split 18` (~0.36 ms) |
 
-*Corrections log: this document exists partly because four confident numbers were wrong — the `mlp`
+*Corrections log: this document exists partly because six confident numbers were wrong — the `mlp`
 "1.11 ms in-situ penalty" (shape mismatch), `X ≈ 0.64` for attention's walk (real value 2.82), the
-per-segment drain prizes (instrument cost), and a `--split 1` probe that produced plausible numbers from
-an out-of-bounds LDS run. Each is recorded at its own `results.md`, and the pattern is consistent: a
-measurement is only worth the instrument that took it.*
+per-segment drain prizes (instrument cost), a `--split 1` probe that produced plausible numbers from
+an out-of-bounds LDS run, a gate-zero slope that printed "S1 IS REAL (3.95 us/launch)" from a regime with
+nothing to overlap behind it (the honest number came from deleting launches instead: 3.10), and a noise
+floor defined as the largest *absolute* within-arm spread, which let one 311 ms cell make a 7 ms comparison
+unadjudicable. Each is recorded at its own `results.md`, and the pattern is consistent: a measurement is
+only worth the instrument that took it.*
