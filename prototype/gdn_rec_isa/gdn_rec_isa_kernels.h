@@ -692,7 +692,7 @@ __global__ void recptr_kernel(const float* __restrict__ qtile, const float* __re
  * accumulator `acc`). Two dependencies exist and they are separable:
  *
  *   CROSS-TOKEN. Token t+1's first state load is the address token t's last state store wrote — one
- *     launch per token (`engine/decode_step.cpp:752-762`), so this is a RAW/WAR round trip through
+ *     launch per token (`engine/decode_step.cpp:762-762`), so this is a RAW/WAR round trip through
  *     global memory, and it is also what forces the `s_waitcnt vmcnt(0)` store drain inside loop B
  *     (16 per token-step, `results.md` §3 class 3). `recx_indep_kernel` breaks it: read one buffer,
  *     write another, so no launch waits on its predecessor's store.

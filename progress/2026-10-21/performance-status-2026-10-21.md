@@ -1914,7 +1914,7 @@ behind them, **not approved by anything in this ledger**.
 The same commit settles A0's loose end, and that removes a candidate too. The traced
 `prep 48 / slim 48 / fattn 42 / combine 42` at 4,096 lanes comes from **one integer**: `split = split_for(lanes_last)`
 (`engine/kernels_attn.cpp:248`), with `attn_fattn_wave` gated on `split ≥ 2` and `attn_combine` on `split > 1`.
-Body 0 has `lvalid = 1` (`engine/decode_step.cpp:687`), so `lanes_last = 512 = MAXSC`, so `split = 1`, so that
+Body 0 has `lvalid = 1` (`engine/decode_step.cpp:697`), so `lanes_last = 512 = MAXSC`, so `split = 1`, so that
 one body per layer pays neither — 7 × 6 = 42. The WMMA form covers **87.5 % of rows and 98.4 % of the
 lane-work** (`prototype/attn_wmma/a0_work_split.py`, RECONCILED). "Too many launches go through it" is dead as
 a framing; what remains for attention is **per-launch cost** — §26's instruction/traffic gap, sized there at
@@ -2263,7 +2263,7 @@ item, because no kernel-level attention or GDN work can reach it.
 §49's subtraction was measured correctly (both operands came from one `--steps 0 --time-waves` invocation, lock
 TAG `fixedcost`) but **interpreted wrongly by me**: I called `RESULT ms_total − wall_ms` "per-prompt host cost
 outside the wave". It is not. `prototype/perprompt/A7-CANDIDATES.md` §0 read the source and the worker's reading
-is confirmed line by line: `ms_total` is the wall of the **first** `prefill_wave` (`engine/decode_run.cpp:1787-1795`,
+is confirmed line by line: `ms_total` is the wall of the **first** `prefill_wave` (`engine/decode_run.cpp:1797-1795`,
 printed `:1990`), while `wall_ms` is printed by `wave_pass`, which calls `st.reset()` and runs **the same
 `prefill_wave` again** (`:1404-1421`), with `WAVEPARITY … logits_bitidentical=1` as the engine's own witness that
 the re-pass is identical work. Both operands are the same call in the same process, so the difference can only be

@@ -315,7 +315,7 @@ Following the `--attn-fattn-roll` graduation (`84f35f8`) shape for shape:
 Verification actually run on the control plane: `engine/build.sh` green (both binaries); `engine/gate.py --selftest`
 → `SELFTEST PASS` after the passthrough edit. One pre-existing defect was found and deliberately left alone:
 `engine/gate.py --help` crashes (`ValueError: unsupported format character 'v'`) because an unrelated `--dry-run`
-help string at `engine/gate.py:6936` contains a literal `5 %`, which argparse’s `_expand_help` reads as a format
+help string at `engine/gate.py:7063` contains a literal `5 %`, which argparse’s `_expand_help` reads as a format
 specifier. None of the 45 lines this change adds contain a `%` (checked against the diff), so it is not this
 change’s and is not routed around here — but it means `--help` is not a usable way to list the flags; `--selftest`
 and `--attn-fattn-qstage` are.

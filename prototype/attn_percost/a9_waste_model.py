@@ -16,7 +16,7 @@ Rules transcribed (path:line at tip 6d0512f):
   fattn_covers   = cover and q<nrows and blocks_for_row>1
                                                  attn_decode_kernels.h:553-555
   body i of a W-lane prefill: pos0=512i, lvalid=pos0+1, nrows=512
-                                                 engine/decode_step.cpp:686-688
+                                                 engine/decode_step.cpp:696-688
   split = split_for(lanes_last) = ceil(lanes_last/512), lanes_last = lvalid+nrows-1
                                                  engine/kernels_attn.cpp:86, :239, :256
   grid = (N_Q, split, fattn_rtiles_of(512)); FATTN_ROWS_PER_BLOCK=48 -> rtiles=11

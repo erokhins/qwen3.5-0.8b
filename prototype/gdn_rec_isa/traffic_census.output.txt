@@ -7,13 +7,13 @@
   one layer's state 262144 elems = 1.000 MiB; all 18 layers = 18.000 MiB/request
   wavefronts        64 per launch (16 blocks x 4 warps)
   launch            `rec_kernel<<<NH, D>>>` at engine/kernels_gdn.cpp:40  (16 blocks x 128 threads, wave32)
-  one launch = ONE (token, layer); the token loop is the host loop at engine/decode_step.cpp:682 inside engine/decode_step.cpp:677
+  one launch = ONE (token, layer); the token loop is the host loop at engine/decode_step.cpp:682 inside engine/decode_step.cpp:687
   kernel body       gdn_decode_kernels.h:179: 2 state read passes, 1 write pass
 
 == 2. resident or re-read?  RE-READ, EVERY TOKEN, because there is no token loop to be resident in
   The shipped form's only loops are the two `for (int i = 0; i < D; ++i)` walks over the state
   inside ONE launch (gdn_decode_kernels.h:179); the next token is the next launch
-  (engine/decode_step.cpp:677 -> engine/decode_step.cpp:682), so the state is read from global on every
+  (engine/decode_step.cpp:677 -> engine/decode_step.cpp:692), so the state is read from global on every
   token by construction. It is not a staging choice either: a block owns one head's 128x128 F32
   strip = 64 KiB, which is the whole LDS budget of a CU (65,536 B), so the shipped geometry
   CANNOT hold the state across tokens. The engine does own a resident form

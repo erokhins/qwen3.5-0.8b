@@ -176,7 +176,7 @@ of the four launches:
 | `attn_fattn_wave` | `engine/kernels_attn.cpp:467`, gated by `:338` `wave_fattn = … && split >= 2` | **only if `split >= 2`** |
 | `attn_combine` | `engine/kernels_attn.cpp:487`, gated by `:477` `if (split > 1)` | **only if `split > 1`** |
 | `split` itself | `engine/kernels_attn.cpp:248` `const int split = split_for(lanes_last);` | with `:86` `split_for(l) = ceil(l / MAXSC)` and `:226` `lanes_last = a.lvalid + rows - 1` |
-| a wave body's `lvalid` | `engine/decode_step.cpp:687` `a.lvalid = pos0 + 1` | so `lanes_last` of a 512-row body is `pos0 + 512` |
+| a wave body's `lvalid` | `engine/decode_step.cpp:697` `a.lvalid = pos0 + 1` | so `lanes_last` of a 512-row body is `pos0 + 512` |
 | a wave body's width | `engine/prefill.cpp:57` (`wave_cap = sc.wave_rows`) | `sc.wave_rows = kMaxWaveRows = 512` (`engine/decode_step.h:51`) |
 | which ROWS the WMMA kernel owns once launched | `prototype/attn_decode/attn_decode_kernels.h:553` `fattn_covers` → `:220` `blocks_for_row` → `:221` `if (a.full && lanes_of(a,qrow) <= MAXSC) return 1`, with `:203` `lanes_of = lvalid + qrow`; `MAXSC` is `:32` |
 | how many attention layers a pass has | `specification/00-notation-and-hyperparameters.md:93` — `full_attention` at `3,7,11,15,19,23` → **6 layers** |

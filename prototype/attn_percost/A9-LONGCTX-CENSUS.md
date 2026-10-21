@@ -15,13 +15,13 @@ Written in increments and appended as each part was finished, so a window compac
 
 | quantity | value | source |
 |---|---|---|
-| model layers | 24, of which **6** are full attention (`layer % 4 == 3`) | `models/Qwen3.5-0.8B/config.json` `num_hidden_layers:24`, `full_attention_interval:4`; `engine/state.h:67` `is_full_attention(int layer) { return layer % 4 == 3; }` (quoted in `engine/decode_step.cpp:566` `attn_layer = is_full_attention(layer)`) |
+| model layers | 24, of which **6** are full attention (`layer % 4 == 3`) | `models/Qwen3.5-0.8B/config.json` `num_hidden_layers:24`, `full_attention_interval:4`; `engine/state.h:67` `is_full_attention(int layer) { return layer % 4 == 3; }` (quoted in `engine/decode_step.cpp:576` `attn_layer = is_full_attention(layer)`) |
 | query heads `N_Q` | **8** | `prototype/attn_decode/attn_decode_kernels.h:23` |
 | KV heads `N_KV` | **2** | `:24` |
 | GQA share `GQA = N_Q/N_KV` | **4** query heads per KV head | `:25` |
 | head dim `DH` | **256** | `:26` (and `config.json` `head_dim:256`) |
 | wave rows per body `kMaxWaveRows` / `MAXSC` | **512** | `engine/decode_step.h:51`; `prototype/attn_decode/attn_decode_kernels.h:32` (`MAXSC`) |
-| body *i* geometry | `pos0 = 512 i`, `lvalid = pos0 + 1`, `nrows = 512`, `lanes_last = lvalid + nrows − 1 = 512(i+1)` | `engine/decode_step.cpp:686-688` (`a.pos = pos0`, `a.lvalid = pos0 + 1`, `a.nrows = n`); `engine/kernels_attn.cpp:239` (`lanes_last = a.lvalid + rows - 1`) |
+| body *i* geometry | `pos0 = 512 i`, `lvalid = pos0 + 1`, `nrows = 512`, `lanes_last = lvalid + nrows − 1 = 512(i+1)` | `engine/decode_step.cpp:696-688` (`a.pos = pos0`, `a.lvalid = pos0 + 1`, `a.nrows = n`); `engine/kernels_attn.cpp:239` (`lanes_last = a.lvalid + rows - 1`) |
 | per-row causal extent `lanes_of(row) = lvalid + row` | row 0 sees `lvalid` lanes | `prototype/attn_decode/attn_decode_kernels.h:203` |
 | lane blocks a row uses | `blocks_for_row = 1` if `full && lanes_of ≤ 512` else `a.split` | `prototype/attn_decode/attn_decode_kernels.h:220-223` |
 | launch `split` | `split_for(lanes_last) = ceil(lanes_last / 512)` ⇒ **body i has split i+1**, body 0 is not split | `engine/kernels_attn.cpp:86`, `:258` |

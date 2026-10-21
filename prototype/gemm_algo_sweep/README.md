@@ -85,11 +85,11 @@ row. Leaves that share a shape are one row here, because the tool times a shape 
 
 | shape | family | N | K | calls / 24-layer wave | site it came from |
 |---|---|---|---|---|---|
-| `q_proj` | proj | 4096 | 1024 | 6 | `engine/decode_step.cpp:583` (`kQprojRows`, `kHidden`) |
-| `k_proj` + `v_proj` | proj | 512 | 1024 | 12 | `engine/decode_step.cpp:586,589` (`kKvProjRows`) |
-| `o_proj` + `out_proj` | proj | 1024 | 2048 | 24 | `engine/decode_step.cpp:810` (`kHidden`, `kQwidth`/`kValueDim`) |
-| `in_proj_qkv` | proj | 6144 | 1024 | 18 | `engine/decode_step.cpp:643` (`kQkvRows`) |
-| `in_proj_z` | proj | 2048 | 1024 | 18 | `engine/decode_step.cpp:644` (`kValueDim`) |
+| `q_proj` | proj | 4096 | 1024 | 6 | `engine/decode_step.cpp:593` (`kQprojRows`, `kHidden`) |
+| `k_proj` + `v_proj` | proj | 512 | 1024 | 12 | `engine/decode_step.cpp:596,589` (`kKvProjRows`) |
+| `o_proj` + `out_proj` | proj | 1024 | 2048 | 24 | `engine/decode_step.cpp:820` (`kHidden`, `kQwidth`/`kValueDim`) |
+| `in_proj_qkv` | proj | 6144 | 1024 | 18 | `engine/decode_step.cpp:653` (`kQkvRows`) |
+| `in_proj_z` | proj | 2048 | 1024 | 18 | `engine/decode_step.cpp:654` (`kValueDim`) |
 | `gate_proj` + `up_proj` | mlp_gateup | 3584 | 1024 | 48 | `engine/kernels_mlp.cpp:262,263` ← `decode_step.cpp:748` |
 | `down_proj` | mlp_down | 1024 | 3584 | 24 | `engine/kernels_mlp.cpp:276` ← `decode_step.cpp:762` |
 | | | | | **150** | matches the "150-call 24-layer wave mix" priced in `devices/strix-halo-compute.md` |
@@ -102,7 +102,7 @@ not a library call:
 
 | excluded | why |
 |---|---|
-| `in_proj_a` / `in_proj_b`, N=16 | `proj_gemm` **refuses** them (`engine/kernels_proj.cpp:134-141`); the engine guard itself records why (12–22× the dispatch floor at that N), so they stay in the hand GEMV at every width |
+| `in_proj_a` / `in_proj_b`, N=16 | `proj_gemm` **refuses** them (`engine/kernels_proj.cpp:136-141`); the engine guard itself records why (12–22× the dispatch floor at that N), so they stay in the hand GEMV at every width |
 | `lm_head`, 248320×1024 | `lm_head_full` (`engine/kernels_lmhead.cpp:25`) is a hand GEMV over an **F32** activation, run once per request, not per wave row. `engine/performance-status.md` §3 lists it as a wave *family*, which is true of the hand kernel; no route hands it to hipBLAS, so sweeping it would price a call the engine does not make |
 | a body of one row (M=1) | `resolve_wave_gemm` sends M≤1 to the hand GEMV whatever the run asked for (`engine/kernels_gemm.cpp:844-850`); `--rows` refuses 1 rather than timing a shape the library never sees |
 

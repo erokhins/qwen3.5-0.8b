@@ -334,7 +334,7 @@ of `rec_kernel`'s own loop body. Full output is kept beside it as `traffic_censu
 | conv window | **F32**, `float* conv_window` (`engine/state.h:89`) = **1.266 MiB**/request | same. The brief's "conv state 0.63 MiB" is the **retired** §00.5 BF16 cell; `state_sizes.py`'s FIXES list and `state.h`'s header comment both record the correction to F32 / 1.27 MiB |
 | launch | `rec_kernel<<<NH=16, D=128>>>`, 64 wavefronts, **one (token, layer) per launch** | `engine/kernels_gdn.cpp:40` |
 | state passes per launch | **2 read + 1 write** | `prototype/gdn_decode/gdn_decode_kernels.h:179`'s two `for (i = 0; i < D; ++i)` walks; independently confirmed in machine code (§9's volume check reads 256 state loads and 128 state stores per token-step, i.e. exactly 2 MiB read and 1 MiB written) |
-| token loop | a **host** loop around the launch | `engine/decode_step.cpp:752` → call at `:757` |
+| token loop | a **host** loop around the launch | `engine/decode_step.cpp:762` → call at `:757` |
 
 **Is the state resident across tokens, or re-read?** **Re-read, every token — and it cannot be anything
 else in this geometry.** The shipped `seq` route launches once per (token, layer), so there is no token loop

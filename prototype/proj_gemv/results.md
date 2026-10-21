@@ -418,7 +418,7 @@ widened for any variant**. Two results matter more than a ms row:
   the hand↔hipBLASLt pairing at all), and `engine/kernels_gemm.cpp:19` states the rule that band serves
   — a library-chosen kernel differs in **accumulation order**, so it "is gated by the same cascade band
   as `library` and not by byte-identity". Routing `M = 1` through hipBLASLt would move the decode
-  projection out of the byte-identity guarantee it holds today (`engine/kernels_proj.cpp:70`: `tokens ==
+  projection out of the byte-identity guarantee it holds today (`engine/kernels_proj.cpp:72`: `tokens ==
   1` is "bit-for-bit the shape this launcher issued before P5", which `run.py --tokens` requires to agree
   exactly) and under a reassociation band. A ceiling number that cannot be admitted is not a cheap
   number. Separately, the tree's only hipBLASLt harness refuses `M <= 1` on purpose

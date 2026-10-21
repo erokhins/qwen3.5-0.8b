@@ -80,8 +80,8 @@ one use at the decision site; default inert; help text printed.
 
 | file | what |
 |---|---|
-| `engine/kernels.h:579` | `constexpr int kAttnSplitCapOff = 0;` — the sentinel is "no cap", deliberately not `64`, so the constant census sees no new `kAttnMaxSplit` reader |
-| `engine/kernels.h:686` | `int split_cap = kAttnSplitCapOff;` in `AttnLayerArgs`, with the note about why it never feeds a size |
+| `engine/kernels.h:593` | `constexpr int kAttnSplitCapOff = 0;` — the sentinel is "no cap", deliberately not `64`, so the constant census sees no new `kAttnMaxSplit` reader |
+| `engine/kernels.h:700` | `int split_cap = kAttnSplitCapOff;` in `AttnLayerArgs`, with the note about why it never feeds a size |
 | `engine/kernels_attn.cpp:95` | `cap_split(split, cap) = cap >= 2 ? min(split, cap) : split` — one expression, and `cap == 0` returns `split_for(lanes)` verbatim |
 | `engine/kernels_attn.cpp:227` | `splitcap_echo()` — the A/B canary line (see §4), deduped per geometry exactly like `fattn_echo` |
 | `engine/kernels_attn.cpp:336` | refusal of `split_cap == 1` |
@@ -132,7 +132,7 @@ field is in the **host** struct `AttnLayerArgs`; every `__global__` in this fami
   it would have *weakened* the check it exists to make.
 * **If gate.py is ever asked to judge a capped run**, it needs the flag forwarded into every engine leg — that is
   gate policy, so it is handed over rather than applied. The pattern to copy is the `--attn-fattn-qstage`
-  forwarding: the parser (`engine/gate.py:7120`), the three argv inserts (`:5257`, `:7496`, `:8547`), and the
+  forwarding: the parser (`engine/gate.py:7247`), the three argv inserts (`:5257`, `:7496`, `:8547`), and the
   NUMERICS-echo assertion (`:7687-7699`) that refuses to judge a binary which did not echo the flag it was asked
   for. i.e.:
 

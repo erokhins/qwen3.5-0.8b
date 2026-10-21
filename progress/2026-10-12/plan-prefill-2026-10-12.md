@@ -26,7 +26,7 @@ Binding for every package, from `AGENTS.md` and `progress/2026-10-12/plan-2026-1
 
 ### 1.1 There is no prefill pass; the prompt *is* a run of decode steps
 
-- `engine/decode_run.cpp:393-395`: “Steps 0 .. prompt_len-1 feed the prompt … prefill is token-at-a
+- `engine/decode_run.cpp:397-395`: “Steps 0 .. prompt_len-1 feed the prompt … prefill is token-at-a
   time through `decode_step` with no chunked variant … `prefill.{h,cpp}` remains a throughput item”.
   The run loop calls `decode_step` once per prompt token at `:401`; the session `feed` path does the
   same at `:214` and `:219`.

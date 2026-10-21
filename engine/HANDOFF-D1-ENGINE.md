@@ -8,12 +8,20 @@ needs a clean exclusive window: blocking, zero subagents, `tools/gpu_lock.sh` he
 
 ## 1. What shipped, and what it is actually called
 
-Two flags, both **default OFF** (HEAD's behaviour), on `engine/build/decode_run`:
+> **Correction, same day (the default flip was taken).** The two flags below are no longer default OFF: the
+> in-situ A/B landed in `engine/performance-status.md`'s favour and `--proj-plan packed --proj-shape unroll8`
+> is now what a bare `decode_run` runs — `engine/results.md`'s closing section names the evidence and
+> `engine/HANDOFF-D1-FLIP.md` lists the ledger windows still owed. `split`/`shipped` remain selectable, and
+> the pair `--proj-plan split --proj-shape shipped` is still the byte-for-byte pre-D1 replay. Everything the
+> rest of this file says about "default OFF" is the state at the time it was written; §4c and §2's
+> "consequence" paragraph carry the flip itself.
 
-| flag | values (default in bold) | what it moves |
+Two flags, both **default OFF** at the time of writing (HEAD's behaviour), on `engine/build/decode_run` — see the correction above for the current defaults:
+
+| flag | values (default at writing; **bold = shipped today**) | what it moves |
 |---|---|---|
-| `--proj-plan` | **`split`** · `packed` | one-row projection bodies: the 114 launches/token of §07 of `specification/07-decode-step.md` → the prototype's 48-job plan |
-| `--proj-shape` | **`shipped`** · `unroll8` | the one-row kernel: `proj_gemv_tokens<IN,1,false>` → `proj_group_rows` (compile-time word walk, `rpb=8` at `threads=1024`) |
+| `--proj-plan` | `split` · **`packed`** | one-row projection bodies: the 114 launches/token of §07 of `specification/07-decode-step.md` → the prototype's 48-job plan, now the shipped bill |
+| `--proj-shape` | `shipped` · **`unroll8`** | the one-row kernel: `proj_gemv_tokens<IN,1,false>` → `proj_group_rows` (compile-time word walk, `rpb=8` at `threads=1024`) |
 
 **`--proj-lpr 32|128` was not built, deliberately.** The handover described the winning arm as "128 lanes
 per row at K=1024, one 128-bit load per lane". No timed arm is that. In the prototype's variant table
@@ -65,15 +73,26 @@ measurement never asked for contiguity either.
 | `engine/results.md` | new closing section `--proj-plan / --proj-shape … (2026-10-21), flags OFF`, with the perf cells left as `<main-agent window>`. |
 
 `LAUNCH` was **deliberately left at the split bill of §07 of `specification/07-decode-step.md`**
-(`kLaunchCounts`, proj=114). gate.py section (d)
+(`kLaunchCounts`, proj=114) in the commit that added the flags. gate.py section (d)
 compares that static bill against `LAUNCHSTAT` independently of the binary; making `LAUNCH` follow the flag
 would have turned the gate's launch-count check into a tautology inside the tested binary — the exact
-failure the `body1_*` self-checks exist to avoid. `PROJPLAN` is the claim line for these flags.
+failure the `body1_*` self-checks exist to avoid. `PROJPLAN` is the claim line for these flags. **That
+arrangement survived the flip unchanged in kind and inverted in value**: `LAUNCH` is still flag-free and now
+bills the shipped plan, i.e. proj=48/total=340, so on a default run `LAUNCH` and `PROJPLAN` agree and on a
+`--proj-plan split` run they deliberately disagree (read `PROJPLAN` there). `planned_launch_counts()` gets
+its count from `proj_launches_per_body(kernels::kProjPlanDefault)` rather than typing 48, so the two
+spellings still have to earn the same number.
 
-**Consequence for whoever flips the default** (not this worker's call, and forbidden here): with `packed` as
-the shipped default, `kLaunchCounts::proj` and `gate.py:launch_plan()` must move to 48 in the **same** commit,
-or section (d) and every `--wave-rows 1` launch-count expectation goes red — the trap class of "`--attn-tile`
-default and `decode_run.cpp` must move in one commit".
+**Consequence for whoever flips the default** — taken on 2026-10-21, in one set of edits, which is what this
+paragraph existed to force: with `packed` as the shipped default, `kLaunchCounts::proj` and
+`gate.py:launch_plan()` had to move to 48 in the **same** commit, or section (d) and every `--wave-rows 1`
+launch-count expectation would go red — the trap class of "`--attn-tile` default and `decode_run.cpp` must
+move in one commit". What that turned out to require, beyond the two numbers: section (h)'s wave model had to
+learn that a one-row body now bills fewer projections than a wide one (`wave_expect`'s `one_row` parameter),
+the "fewer launches, not less work" comparison had to move from `rows_total` to tensor-rows
+(`launch_work_rows`), the wave-ratio identity had to become two per-side derived equalities, and
+`stage_clock`'s `body1_plan_matches_token_plan` had to build its one-row body under the shipped plan. All of
+it, with the evidence, is in `engine/results.md`'s closing section.
 
 ## 3. Correctness evidence already on disk (worker, device, no timings)
 
@@ -224,11 +243,20 @@ wall of 7.9 s for both sides.
 
 ### 4c. If the numbers land
 
-Then, and only then, the default question — which is yours/the user's, not mine: keep the flags as a booked
-lever, or flip `--proj-plan packed --proj-shape unroll8` to be the shipped path (see `engine/performance-status.md` §2's note: `kLaunchCounts`
-and `gate.py:launch_plan()` move in the same commit). The ledger rows to update are the decode attribution's
-`proj` row and the headline decode tok/s; `engine/performance-status.md` §6 owns the window, and the
-`<main-agent window>` cells in `engine/results.md`'s new closing section are the place the three columns go.
+**They landed, and the flip was taken on 2026-10-21.** The in-situ `proj` family row went 4.2015 → 2.9521 →
+2.7316 ms/step (off → `unroll8` → `+ packed`) and the whole step 11.6967 → 10.1851 ms, −12.92 %, with a
+−10.4 % 4,032-lane row and bit-identity on the nine fixtures the parity work compared; those are the
+banked window's figures and the `<main-agent window>` cells in `engine/results.md`'s D1 section is where the
+three columns went. `--proj-plan packed --proj-shape unroll8` is therefore the shipped path, and
+`engine/results.md`'s final section records what moved with it: `kLaunchCounts` 406 → 340,
+`gate.py:launch_plan()` proj 114 → 48 (with `launch_plan_split()` keeping §07's table and a new
+must-catch case), `wave_expect`/`launch_work_rows`/the wave-ratio check in section (h), `stage_clock`'s
+one-row self-checks, `engine/README.md`'s section-(d) line and §07.4 of the spec. The remaining debt is
+ledger-side, not engine-side, and it is itemised with its commands in `engine/HANDOFF-D1-FLIP.md`:
+`tools/context_sweep.py` re-taken at 96/128 and 512/1024/2048/4096, the stage-clock family rows at 128 lanes,
+and the decode-attribution `proj` row plus the headline decode tok/s in `engine/performance-status.md`
+(§6 owns the window). The flags stay as booked levers: `--proj-plan split --proj-shape shipped` is the
+pre-D1 replay and still runs byte-identically (re-witnessed at 4,032 rows after the flip).
 
 ## 5. What could make the prize not transfer
 
@@ -272,8 +300,8 @@ It scanned 281 documents, found **93** citations into the seven edited files, an
 
 | cited as | meaning | where that call site is now |
 |---|---|---|
-| `engine/decode_step.cpp:596` (`kQkvRows`) | the GDN `in_proj_qkv` projection call | `engine/decode_step.cpp:643`, now `add_in(… kInProjQkv, sc.g_raw, kQkvRows, true)` |
-| `engine/decode_step.cpp:599` (`kValueDim`) | the GDN `in_proj_z` projection call | `engine/decode_step.cpp:644`, now `add_in(… kInProjZ, sc.g_z, kValueDim, true)` |
+| `engine/decode_step.cpp:596` (`kQkvRows`) | the GDN `in_proj_qkv` projection call | `engine/decode_step.cpp:653`, now `add_in(… kInProjQkv, sc.g_raw, kQkvRows, true)` |
+| `engine/decode_step.cpp:599` (`kValueDim`) | the GDN `in_proj_z` projection call | `engine/decode_step.cpp:654`, now `add_in(… kInProjZ, sc.g_z, kValueDim, true)` |
 
 Both live in `prototype/gemm_algo_sweep/README.md:91,92` (and the bare `decode_step.cpp:596/599` in that
 directory's `results.md:260,261`), which this worker may not edit. Note they were **already 13 lines stale at
@@ -287,7 +315,8 @@ that file is below them.
 The admission contract is bit-identity, and it held everywhere it was tested. If a future run prints
 `tokens_identical=0`, a `DIFFERS` in the byte-compare, or a `PROJSHAPE-FALLBACK` you did not expect, the
 route is: stop, keep the logs, and report — do **not** widen a band, do not edit `engine/gate.py`,
-`engine/attn_form_band.py` or `speccheck/`, and do not flip the default. Diff the `STEP` lines first: the
+`engine/attn_form_band.py` or `speccheck/` (and, since 2026-10-21, there is no default left to flip: the
+shipped pair is the packed one, so a red run means reverting the pair by flag, not by editing a default). Diff the `STEP` lines first: the
 first step at which the two sides' `top_logit` differs localises the row, and `STAGESTEP gran=burst step=…`
 gives the same index in the replay. Two signatures are diagnostic on sight: `ndiff == nrows × width` exactly
 is a whole-tensor difference, i.e. a changed work split or a wrong segment index rather than a wrong value;

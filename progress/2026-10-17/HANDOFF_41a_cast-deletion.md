@@ -214,22 +214,22 @@ caused by inserting lines into two cited files (22 into `engine/decode_step.cpp`
 Full list:
 
 ```
-engine/decode_step.cpp:455  <- engine/results.md:2670
-engine/decode_step.cpp:469  <- progress/2026-10-16/ceiling-based-route-ranking-2026-10-16.md:304
-engine/decode_step.cpp:471  <- engine/results.md:2670
-engine/decode_step.cpp:514  <- prototype/gemm_algo_sweep/README.md:88 ; gemm_algo_sweep.cpp:97
-engine/decode_step.cpp:517  <- prototype/gemm_algo_sweep/README.md:89 ; gemm_algo_sweep.cpp:98
-engine/decode_step.cpp:520  <- prototype/gemm_algo_sweep/README.md:89 ; gemm_algo_sweep.cpp:98
-engine/decode_step.cpp:527  <- prototype/gemm_algo_sweep/README.md:91 ; gemm_algo_sweep.cpp:100
-engine/decode_step.cpp:530  <- prototype/gemm_algo_sweep/README.md:92 ; gemm_algo_sweep.cpp:101
-engine/decode_step.cpp:677  <- prototype/gdn_rec_isa/gdn_rec_isa_kernels.h:372 ; results.md:337 ;
+engine/decode_step.cpp:465  <- engine/results.md:2670
+engine/decode_step.cpp:479  <- progress/2026-10-16/ceiling-based-route-ranking-2026-10-16.md:304
+engine/decode_step.cpp:481  <- engine/results.md:2670
+engine/decode_step.cpp:524  <- prototype/gemm_algo_sweep/README.md:88 ; gemm_algo_sweep.cpp:97
+engine/decode_step.cpp:527  <- prototype/gemm_algo_sweep/README.md:89 ; gemm_algo_sweep.cpp:98
+engine/decode_step.cpp:530  <- prototype/gemm_algo_sweep/README.md:89 ; gemm_algo_sweep.cpp:98
+engine/decode_step.cpp:537  <- prototype/gemm_algo_sweep/README.md:91 ; gemm_algo_sweep.cpp:100
+engine/decode_step.cpp:540  <- prototype/gemm_algo_sweep/README.md:92 ; gemm_algo_sweep.cpp:101
+engine/decode_step.cpp:687  <- prototype/gdn_rec_isa/gdn_rec_isa_kernels.h:372 ; results.md:337 ;
                                traffic_census.output.txt:10, :16
-engine/decode_step.cpp:682  <- prototype/gdn_rec_isa/traffic_census.output.txt:10, :16
-engine/decode_step.cpp:687  <- prototype/gdn_rec_isa/gdn_rec_isa_kernels.h:372
-engine/decode_step.cpp:722  <- prototype/gemm_algo_sweep/README.md:90 ; gemm_algo_sweep.cpp:99
+engine/decode_step.cpp:692  <- prototype/gdn_rec_isa/traffic_census.output.txt:10, :16
+engine/decode_step.cpp:697  <- prototype/gdn_rec_isa/gdn_rec_isa_kernels.h:372
+engine/decode_step.cpp:732  <- prototype/gemm_algo_sweep/README.md:90 ; gemm_algo_sweep.cpp:99
 engine/gate.py:3834         <- progress/2026-10-16/archive-review-2026-10-16.md:321 ; specification/ASSUMPTIONS.md:28
-engine/gate.py:4813         <- progress/2026-10-16/ledger-prune-2026-10-16.md:142
-engine/gate.py:6156         <- progress/2026-10-16/archive-review-2026-10-16.md:296
+engine/gate.py:4902         <- progress/2026-10-16/ledger-prune-2026-10-16.md:142
+engine/gate.py:6283         <- progress/2026-10-16/archive-review-2026-10-16.md:296
 ```
 
 Re-pointing is cheap in one direction only: `decode_step.cpp` grew by a net 39 lines (+66/−27),

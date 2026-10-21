@@ -193,20 +193,20 @@ By file: `engine/decode_step.cpp` 23, `engine/decode_step.h` 10, `engine/kernels
 `tmp/gcc/citation_rot_final.txt`; the pairs are:
 
 ```
-engine/decode_step.cpp:37   <- progress/2026-10-16/ceiling-based-route-ranking-2026-10-16.md:304
-engine/decode_step.cpp:455  <- engine/results.md:2670
-engine/decode_step.cpp:469  <- progress/2026-10-16/ceiling-based-route-ranking-2026-10-16.md:304
-engine/decode_step.cpp:471  <- engine/results.md:2670
-engine/decode_step.cpp:514  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:97 ; prototype/gemm_algo_sweep/README.md:88
-engine/decode_step.cpp:517  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:98 ; prototype/gemm_algo_sweep/README.md:89
-engine/decode_step.cpp:520  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:98 ; prototype/gemm_algo_sweep/README.md:89
-engine/decode_step.cpp:527  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:100; prototype/gemm_algo_sweep/README.md:91
-engine/decode_step.cpp:530  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:101; prototype/gemm_algo_sweep/README.md:92
-engine/decode_step.cpp:677  <- prototype/gdn_rec_isa/gdn_rec_isa_kernels.h:372 ; prototype/gdn_rec_isa/results.md:337 ;
+engine/decode_step.cpp:45   <- progress/2026-10-16/ceiling-based-route-ranking-2026-10-16.md:304
+engine/decode_step.cpp:465  <- engine/results.md:2670
+engine/decode_step.cpp:479  <- progress/2026-10-16/ceiling-based-route-ranking-2026-10-16.md:304
+engine/decode_step.cpp:481  <- engine/results.md:2670
+engine/decode_step.cpp:524  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:97 ; prototype/gemm_algo_sweep/README.md:88
+engine/decode_step.cpp:527  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:98 ; prototype/gemm_algo_sweep/README.md:89
+engine/decode_step.cpp:530  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:98 ; prototype/gemm_algo_sweep/README.md:89
+engine/decode_step.cpp:537  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:100; prototype/gemm_algo_sweep/README.md:91
+engine/decode_step.cpp:540  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:101; prototype/gemm_algo_sweep/README.md:92
+engine/decode_step.cpp:687  <- prototype/gdn_rec_isa/gdn_rec_isa_kernels.h:372 ; prototype/gdn_rec_isa/results.md:337 ;
                                prototype/gdn_rec_isa/traffic_census.output.txt:10,16
-engine/decode_step.cpp:682  <- prototype/gdn_rec_isa/traffic_census.output.txt:10,16
-engine/decode_step.cpp:687  <- prototype/gdn_rec_isa/gdn_rec_isa_kernels.h:372
-engine/decode_step.cpp:722  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:99 ; prototype/gemm_algo_sweep/README.md:90
+engine/decode_step.cpp:692  <- prototype/gdn_rec_isa/traffic_census.output.txt:10,16
+engine/decode_step.cpp:697  <- prototype/gdn_rec_isa/gdn_rec_isa_kernels.h:372
+engine/decode_step.cpp:732  <- prototype/gemm_algo_sweep/gemm_algo_sweep.cpp:99 ; prototype/gemm_algo_sweep/README.md:90
 engine/decode_step.h:49     <- AGENTS.md:315 ; progress/2026-10-16/prefill-decision-log-2026-10-16.md:598 ;
                                progress/2026-10-17/glue-cast-copy-bytes-census.md:76 ;
                                prototype/gemm_algo_sweep/{deep_pins.py:668, results.md:190, README.md:113,

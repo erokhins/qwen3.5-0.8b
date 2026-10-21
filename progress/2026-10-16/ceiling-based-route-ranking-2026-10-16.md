@@ -301,7 +301,7 @@ percentages × `wall_ms=1307.7549` (marked **derived**). The recovery closes: th
 | `gdn_conv` | 4.44 / ~18 (linear; the split is not printed at 4096) | byte floor 1.91 ms at 1024 (453 MB of conv traffic) | bytes at 2.3× floor; arithmetic is 0.90 GFLOP = 0.12 ms | **0** | 4-tap depthwise stencil, not a matmul |
 | `gdn_gated_norm` | 2.37 / ~9.5 (linear; split not printed) | 0.0016 ms; **burst 0.4273 ms** (ledger §4) | interleave: in-situ is 5.5× its own burst — 66 µs/launch against a 2.967 µs burst launch | **0** | elementwise + norm |
 | `cast` | 7.32 / 31.52 | ~0.007 ms of traffic; 229 launches at 1024 | dispatch | **0** — these casts exist because the vector path and the gemm path disagree on width; dot2/WMMA take 16-bit operands and still need them | elementwise |
-| `copy` = **embed** gather + conv-window copies | 2.67 / 10.72 | ~2.5 KB/token; `launches=1060` at 1024 = 1,024 embed rows + 36 window copies (`engine/decode_step.cpp:37,469`) | 100 % dispatch: 1,060 × 1.85 µs = 1.96 ms | **0** — a gather, no arithmetic at all | gather |
+| `copy` = **embed** gather + conv-window copies | 2.67 / 10.72 | ~2.5 KB/token; `launches=1060` at 1024 = 1,024 embed rows + 36 window copies (`engine/decode_step.cpp:45,469`) | 100 % dispatch: 1,060 × 1.85 µs = 1.96 ms | **0** — a gather, no arithmetic at all | gather |
 | `lm_head` | 2.26 / 2.22 | **2.146 ms** (485 MiB); burst 2.1309 ms = **100.7 % of probe** (ledger §4) | bytes, at the ceiling | **0**, and unfundable in principle: **M = 1**, so a 16×16×16 tile does not exist for it. Its 508.6 MFLOP is 0.07 ms of arithmetic against 2.26 ms of weight stream | GEMV |
 | `host_tail` | 0.95 / 1.18 | CPU | host | 0 | — |
 

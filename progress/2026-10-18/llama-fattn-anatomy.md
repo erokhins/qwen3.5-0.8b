@@ -580,7 +580,7 @@ it, judged by whether the widened band still catches every geometry-derived inje
 
 ### 4.4 Gate work that comes with it
 
-* **A section-(j)-style spelling A/B.** `engine/gate.py:8120` is the existing pattern — section (j),
+* **A section-(j)-style spelling A/B.** `engine/gate.py:8247` is the existing pattern — section (j),
   "the gdn_rec spellings and the token-loop launch — bit-identical, all run in this gate (§04.4, D32, D50,
   D54)" — whose comment states the property to copy: "the sides are launches of one build and the claim
   under test … is checked rather than assumed". Both spellings run inside one gate process and the

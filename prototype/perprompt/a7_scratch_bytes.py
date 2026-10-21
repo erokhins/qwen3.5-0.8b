@@ -5,7 +5,7 @@ Why this exists. §49's ~65-71 ms per-prompt constant has been read as "first-to
 fresh pages at ~35 GB/s" (`devices/strix-halo-unified-memory.md`). To use that reading
 you need the byte count, and the byte count is NOT the checkpoint: `WeightStore::load()`
 runs a warm pass over every resident weight page (`engine/loader.cpp:626-644`) inside
-`load()`, which `decode_run` brackets separately (`engine/decode_run.cpp:1588-1593`) and
+`load()`, which `decode_run` brackets separately (`engine/decode_run.cpp:1598-1593`) and
 never adds to `RESULT ms_total`. The bytes that ARE cold at the first wave are the
 scratch, the KV, and the hipBLASLt workspace. This script sums them from the same
 constants `allocate_scratch` uses, so the page-warming hypothesis has a number attached.
@@ -37,7 +37,7 @@ QKV_ROWS = 3 * VALUE_DIM                  # 6144
 QWIDTH = NUM_QUERY_HEADS * HEAD_DIM       # 2048
 QPROJ_ROWS = 2 * QWIDTH                   # 4096
 KVPROJ_ROWS = NUM_KV_HEADS * HEAD_DIM     # 512
-GDN_CHUNK_TOKENS = 64                     # engine/kernels.h:490
+GDN_CHUNK_TOKENS = 64                     # engine/kernels.h:504
 EMBED_ID_SLOTS = 8                        # engine/decode_step.h:274
 WORKSPACE_BYTES = 128 * 1024 * 1024       # kernels_gemm.cpp: workspace_mib=128
 
@@ -45,14 +45,14 @@ WORKSPACE_BYTES = 128 * 1024 * 1024       # kernels_gemm.cpp: workspace_mib=128
 # comment states the value at the 512-row ceiling, so quote it rather than re-derive the
 # split-K geometry here (re-deriving it is a different tool's job and would be a second
 # spelling of the same layout — the §20.1 trap).
-A_PART_BYTES = int(3.38e7)   # "a_part's 33.8 MB", engine/decode_step.cpp:292
+A_PART_BYTES = int(3.38e7)   # "a_part's 33.8 MB", engine/decode_step.cpp:302
 
 u16 = lambda n: 2 * n
 f32 = lambda n: 4 * n
 
 
 def scratch_bytes(rows: int) -> list[tuple[str, int]]:
-    """One entry per `alloc<>` in `allocate_scratch` (engine/decode_step.cpp:214-318)."""
+    """One entry per `alloc<>` in `allocate_scratch` (engine/decode_step.cpp:224-318)."""
     h, i = rows * HIDDEN, rows * INTERMEDIATE
     qkv, vdim = rows * QKV_ROWS, rows * VALUE_DIM
     qprj, kprj = rows * QPROJ_ROWS, rows * KVPROJ_ROWS
@@ -110,7 +110,7 @@ def main() -> None:
                     help="steady read, GB/s (quoted: same file)")
     args = ap.parse_args()
 
-    print("# derived from engine/state.h:41-64, engine/decode_step.cpp:214-318, "
+    print("# derived from engine/state.h:41-64, engine/decode_step.cpp:224-318, "
           "engine/state.cpp:47-60")
     print(f"# rates QUOTED from devices/strix-halo-unified-memory.md: cold {args.cold_gbs} "
           "GB/s (first pass over fresh pages), warm "

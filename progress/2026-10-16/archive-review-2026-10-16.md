@@ -293,7 +293,7 @@ git ls-files -z | grep -zv '^progress/' | xargs -0 grep -nHE "$T:[0-9]" 2>/dev/n
 | `devices/strix-halo-memory-bandwidth.md` | 1 | 18 | — |
 
 Two rot hazards visible only here. **(a) Bare `results.md` is 41+12 anchors with no directory:**
-`engine/gate.py:6156` "the default since results.md §21" and `engine/kernels_attn.cpp:330`
+`engine/gate.py:6283` "the default since results.md §21" and `engine/kernels_attn.cpp:330`
 "(results.md §20 …)" both mean `prototype/attn_decode/results.md`; `engine/kernels_glue.cpp:35`
 means `prototype/glue/results.md`. Nothing resolves this form mechanically today. **(b) Live code
 cites archive labels with the file unnamed:** `engine/gate.py` uses `§A1`/`§A2`/`§A3`/`§A4` **17

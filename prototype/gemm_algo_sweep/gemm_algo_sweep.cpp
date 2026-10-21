@@ -94,17 +94,17 @@ struct EngineShape {
 };
 
 const EngineShape kShapes[] = {
-    {"q_proj", "proj", "engine/decode_step.cpp:583", 4096, 1024, 6},
-    {"k_proj+v_proj", "proj", "engine/decode_step.cpp:586,589", 512, 1024, 12},
-    {"o_proj+out_proj", "proj", "engine/decode_step.cpp:810", 1024, 2048, 24},
-    {"in_proj_qkv", "proj", "engine/decode_step.cpp:596", 6144, 1024, 18},
-    {"in_proj_z", "proj", "engine/decode_step.cpp:599", 2048, 1024, 18},
+    {"q_proj", "proj", "engine/decode_step.cpp:593", 4096, 1024, 6},
+    {"k_proj+v_proj", "proj", "engine/decode_step.cpp:596,589", 512, 1024, 12},
+    {"o_proj+out_proj", "proj", "engine/decode_step.cpp:820", 1024, 2048, 24},
+    {"in_proj_qkv", "proj", "engine/decode_step.cpp:606", 6144, 1024, 18},
+    {"in_proj_z", "proj", "engine/decode_step.cpp:609", 2048, 1024, 18},
     {"gate_proj+up_proj", "mlp_gateup",
      "engine/kernels_mlp.cpp:262,263 <- decode_step.cpp:748", 3584, 1024, 48},
     {"down_proj", "mlp_down", "engine/kernels_mlp.cpp:276 <- decode_step.cpp:762", 1024, 3584, 24},
 };
 // NOT here, with the reason said out loud:
-//   in_proj_a / in_proj_b (N=16) — `proj_gemm` refuses them (engine/kernels_proj.cpp:134-141) and
+//   in_proj_a / in_proj_b (N=16) — `proj_gemm` refuses them (engine/kernels_proj.cpp:136-141) and
 //       they stay in the hand GEMV at every width (§7 W4: 12-22x the dispatch floor there).
 //   lm_head (248320 x 1024) — not a library call at all. `lm_head_full` (engine/kernels_lmhead.cpp:25)
 //       is a hand GEMV over an F32 activation and runs once per request, not once per wave row.
@@ -2785,7 +2785,7 @@ int print_list() {
     std::printf("TOTAL library matmuls per 24-layer wave = %d  (cross-check: "
                 "devices/strix-halo-compute.md second correction prices a 150-call 24-layer mix)\n",
                 total);
-    std::printf("EXCLUDED in_proj_a/in_proj_b (N=16): engine/kernels_proj.cpp:134-141 refuses them "
+    std::printf("EXCLUDED in_proj_a/in_proj_b (N=16): engine/kernels_proj.cpp:136-141 refuses them "
                 "to the hand GEMV\n");
     std::printf("EXCLUDED lm_head (248320x1024): hand GEMV at engine/kernels_lmhead.cpp:25, once "
                 "per request; no route reaches hipBLAS with it\n");

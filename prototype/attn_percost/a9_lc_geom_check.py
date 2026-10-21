@@ -97,7 +97,7 @@ def span_of(nrow: int, s_row: int, floor_div=False) -> int:
 def bodies(width: int):
     """A prefill of `width` lanes is `width/512` sequential bodies plus a remainder (§06.3). Yields
     `(lvalid, nrows)`; body i has `lvalid = 512i + 1` and its widest row is `lvalid + nrows - 1`
-    (`engine/decode_step.cpp:686-688`). The remainder body is the one that makes widths like 4,104 —
+    (`engine/decode_step.cpp:696-688`). The remainder body is the one that makes widths like 4,104 —
     the widest PINNED fixture — part of the population instead of a case nobody runs."""
     full, rest = divmod(width, ROWS)
     for i in range(full):
