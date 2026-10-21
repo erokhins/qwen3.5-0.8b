@@ -148,3 +148,8 @@ prototype/gdn_insitu/gdn_insitu
 # s1_launch_price (route S1 gate-zero rig): same trap as above — the binary is named after its
 # directory, so the ignore line is the full path, never `prototype/**/s1_launch_price`.
 prototype/launch_price/s1_launch_price
+
+# wave_shape (item 2 rig): the binary is named after its directory — ignore the exact path,
+# never `prototype/**/wave_shape`, which would match the directory and hide the whole rig (AGENTS trap).
+prototype/wave_shape/wave_shape
+prototype/wave_shape/out/
