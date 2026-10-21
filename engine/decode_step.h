@@ -195,6 +195,24 @@ struct DecodeScratch {
     // silently fell back says so in its own log instead of reading as a null (`AGENTS.md`: a check whose
     // input can silently fail to arrive must be shown to have arrived).
     long long proj_fallbacks = 0;
+    // Route S1 item (1): fold the BF16->F32 activation widening into the kernel that consumes the
+    // result, deleting the `cast` launches (`engine/generation-limits.md` §1's 97-launch row, whose
+    // 0.371 MiB read / 0.741 MiB written per token is no bytes of consequence — the whole line is
+    // per-launch cost, and whether that cost is real in the pipelined shape is what this flag exists
+    // to measure).
+    //
+    // false is the shipped behaviour and HEAD's machine code: every widening is submitted by
+    // `kernels_cast.cpp` exactly where it always was. true makes each consumer stage the BF16 tile
+    // itself and widen in registers, which is bit-identical because `hip_bfloat16 -> float` is exact
+    // (`engine/mlp_xbf16_kernels.h` states the argument once). It is a RUNTIME knob rather than a
+    // build define so both sides live in one binary and the paired A/B is one window — the `--attn-touch`
+    // precedent, and the reason a base binary and a new binary can be compared without a rebuild.
+    //
+    // The rule these fields cannot express and `submit_wave_body` enforces, the same one `proj_plan`
+    // and `proj_shape` carry: the per-layer folds apply to a body of ONE row and to nothing else, so a
+    // prefill wave runs the kernels it always ran. `decode_run` sets this from `QWEN_CAST_FOLD` (see
+    // `decode_run.cpp` for why an environment default rather than a command-line flag).
+    bool cast_fold = false;
     // The chunk size in tokens, echoed so a run states which chunk it claimed. Only 64 is accepted
     // (`kernels.h:kGdnChunkTokens`); the refusal text carries the measured reason.
     int gdn_chunk = kernels::kGdnChunkTokens;
@@ -441,12 +459,22 @@ void prepare_weight_adapters(const WeightStore& weights, DecodeScratch& sc);
 // dispatch floor, `tools/launch_overhead_hip.cpp`), which is what `engine/results.md`'s two deferrals
 // (packed projections, a BF16-staged MLP) are priced against. `gate.py` checks these numbers against
 // its own independent reading of §07, so the C++ and the Python cannot silently drift.
+//
+// `cast_fold` is route S1 item (1): whether the run widens its activations in the kernels that read
+// them, in which case a ONE-ROW body — the body this bill describes — submits NO `cast` launches at all,
+// because all six per-token sites fold (site by site: `prototype/cast_fold/census_sites.py`). It is a
+// parameter with a default rather than a global the function reads for the reason `planned_launch_counts()`
+// already exists in this shape: the `LAUNCH` line prints the default (§07's shipped bill, 97/340) in every
+// run whatever the flags say, and that is what `gate.py` section (d) re-derives in Python. A bill that
+// moved with the flags would make that cross-check a tautology — the `--attn-tile` and `--proj-plan split`
+// trap of a gate judging a different plan than the engine ships. What the fold-in-force is a bill of is
+// the STAGE clock's plan, and only that clock asks: `stageclock::Clock::set_plan_cast_fold`.
 struct LaunchCounts {
     int glue = 0, proj = 0, gdn = 0, attn = 0, mlp = 0, cast = 0, other = 0;
     int total() const { return glue + proj + gdn + attn + mlp + cast + other; }
     std::string describe() const;
 };
-LaunchCounts planned_launch_counts();
+LaunchCounts planned_launch_counts(bool cast_fold = false);
 
 // ---- route D1: the projection plan, as data (so geometry can be checked without a GPU) -------------
 //

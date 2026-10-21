@@ -183,6 +183,17 @@ void gemm_bf16(const void* weight, const void* x, void* out, int m, int n, int k
 void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int in,
                int tokens = 1);
 
+// The same GEMV with the activation staged as BF16 and widened in registers (`route S1 item 1`).
+// `x` is the BF16 tile the producer wrote — the same bytes the caller would otherwise widen into
+// `norm_f32`/`block_out_f32` with a launch of `kernels_cast.cpp`. Bit-identical to `proj_gemv` by the
+// exactness of `hip_bfloat16 -> float`, and it is `proj_gemv_tokens<IN, 1, PACK_X=true>`, i.e. the
+// prototype's own gated packed staging at the one-row tile width, so nothing new is transcribed here.
+// ONE ROW ONLY (`tokens` is fixed at 1 by the launcher): a wider body is a prefill wave and keeps the
+// widening, which is why `decode_step.cpp` gates the fold on `n == 1`. The kernel cost of this trade
+// has a measured precedent against it in `engine/results.md`'s cast row (`PACK_X` cost +0.278 ms over
+// 48 launches to save 48 casts, quoted); the wall A/B decides whether it survives on this shape.
+void proj_gemv_xbf16(const void* weight, const uint16_t* x, uint16_t* out, int rows, int in);
+
 // The same projection through hipBLAS (route (c)). `x` is the SAME tile `proj_gemv`'s `x` was widened
 // from, still in the BF16 glue wrote — the library takes a 16-bit `A` operand, so it reads what the
 // producer wrote instead of a widening of it. `tokens` is the body's row count (`m`), and as in
@@ -279,6 +290,12 @@ struct ProjSegs {
 // line and not only in the flag that caused it.
 void proj_rows(const ProjSeg* segs, int nsegs, const float* x, int in);
 
+// `proj_rows` with the shared `x` row staged as BF16 instead of taken as a widened F32 tile: the same
+// segment list, the same grid, the same geometry, one fewer launch in front of it. Same bit-identity
+// argument as `proj_gemv_xbf16`, same one-row-only restriction (`decode_step.cpp` gates it), and the
+// staged row is half the LDS per block — a shape effect the A/B reads, not this declaration.
+void proj_rows_xbf16(const ProjSeg* segs, int nsegs, const uint16_t* x, int in);
+
 // Can this shape actually run on this device at width `in`? `kShipped` always can. `kUnroll8`'s geometry
 // is stated in lanes-per-row terms and was measured on a wave32 device, so a wave64 target gets the
 // shipped shape; the caller COUNTS such a refusal and prints it (`decode_step.cpp`, `PROJSHAPE-FALLBACK`),
@@ -347,6 +364,14 @@ void mlp_gateup(const uint16_t* w_gate, const uint16_t* w_up, const float* x, ui
                 int rows, int in, int tokens, MlpGateMap map);
 void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows, int in,
               int tokens = 1);
+
+// The same two dots with the activation staged as BF16 (`engine/mlp_xbf16_kernels.h`), which is what
+// deletes 48 of the 97 widenings: `x`/`act` are the BF16 tiles `glue` and the gate/up walk already
+// wrote instead of F32 copies of them. Bit-identical for the reason that header gives; ONE ROW ONLY,
+// so a prefill wave still runs the batched pair above with its widenings in front of it.
+void mlp_gateup_xbf16(const uint16_t* w_gate, const uint16_t* w_up, const uint16_t* x,
+                      uint16_t* act, int rows, int in, MlpGateMap map);
+void mlp_down_xbf16(const uint16_t* w_down, const uint16_t* act, uint16_t* out, int rows, int in);
 
 // The MLP through hipBLAS (route (c)). The library unfuses exactly one epilogue in this model —
 // `silu(gate)·up`, §3.3's bill of the one place the engine fuses today — so this issues two matmuls
@@ -873,10 +898,21 @@ std::size_t attn_part_floats(int rows = 1);
 // engine computes the logits and takes the argmax host-side (results.md, "the last 2 KB").
 void lm_head_full(const uint16_t* table, const float* h, float* logits, int vocab);
 
+// The same GEMV with the norm row staged as BF16, which deletes the last of the 97 widenings
+// (`engine/lm_head_xbf16_kernels.h`). `h` is the BF16 norm row itself. Bit-identical for the same
+// reason as every other `_xbf16` entry point here; it is the one folded kernel with no headroom in its
+// own family, and `prototype/cast_fold/ITEM1-HANDOVER.md` says why that matters for reading the A/B.
+void lm_head_full_xbf16(const uint16_t* table, const uint16_t* h, float* logits, int vocab);
+
 // ---- dtype adapters, engine's own (no model math here at all). These exist only because some
 // graduated kernels take F32 activations (`proj_gemv` with PACK_X=false, `mlp_gemv`, `lm_head_gemv`)
 // while the activations the other kernels produce are BF16. `gdn_decode`'s conv and gates used to be
 // on that list; they read the BF16 tiles their projections wrote as of D30 1.7'.
+//
+// The `_xbf16` entry points above exist to delete these: a consumer that stages the BF16 itself needs
+// no widening in front of it, and a BF16 widened in registers is the same value as one widened by a
+// launch. What is left here after the fold is the two one-time weight-adapter widenings in
+// `decode_step.cpp`'s `prepare_weight_adapters()` and whatever a run with the fold off still submits.
 void cast_bf16_to_f32(const uint16_t* src, float* dst, int n);
 void cast_f32_to_bf16(const float* src, uint16_t* dst, int n);
 

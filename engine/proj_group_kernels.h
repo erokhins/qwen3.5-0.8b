@@ -31,15 +31,29 @@
  * of logits and sampled tokens against the same run with the flags off — not a band, and no band is
  * widened (`HANDOFF-D1-ENGINE.md`).
  *
- * ONE SHAPE ONLY: a body of ONE row, `x` = one row of F32 activations, `out` = one row of a
+ * ONE SHAPE ONLY: a body of ONE row, `x` = one row of activations, `out` = one row of a
  * row-family tile. A wider body takes `proj_gemv_tokens` at `TPB > 1` (the prefill wave's token tiling
  * is a different lever and §D1-W4 did not touch it), which is why `decode_step.cpp` gates this route on
  * `n == 1` and why `ProjSeg` carries no output stride: with one row, `out[lrow]` IS the destination.
+ *
+ * `XBF16` — route S1 item (1)'s fold, and it changes one thing. At `false` (the shipped default) `x`
+ * is the F32 widening `decode_step` writes into `sc.norm_f32`/`sc.block_out_f32` with a launch of
+ * `kernels_cast.cpp`. At `true` the caller hands the BF16 tile itself and this kernel stages it as
+ * BF16, widening each element to F32 at the use site. That is bit-identical by
+ * construction and not by measurement, and the argument is narrow on purpose: a BF16 widened to F32 is
+ * the same real number (`hip_bfloat16 -> float` is exact, no rounding, no reassociation), so the
+ * staged value at every index is the same float the cast buffer held, the products are the same
+ * floats, the walk order is unchanged, and the ladder and the single rounding are untouched. What
+ * moves is one fewer launch and half the LDS per block (`IN` × 2 B instead of × 4 B) against one
+ * `v_bfe`-class conversion per element at the use site — a shape question, which is what the paired
+ * wall A/B in `prototype/cast_fold/ab_item1.sh` is for, not something this comment can settle.
  */
 #pragma once
 
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
+
+#include <type_traits>
 
 #include "engine/kernels.h"   // engine::kernels::ProjSeg / ProjSegs / kProjMaxSegs
 
@@ -50,6 +64,13 @@ namespace engine::projgroup {
 // rule (`engine/kernels.h`'s header note). Namespace scope + constexpr = internal linkage, so it is
 // private to whichever TU includes this file.
 constexpr unsigned long long kFullShuffleMask = 0xffffffffffffffffull;
+
+// The staged operand converts to F32 the same way whichever dtype it is: `float(f)` on an F32 is the
+// identity, so the shipped side of `XBF16` keeps the machine code it had, and `hip_bfloat16` carries the
+// exact widening as its conversion operator. The conversion is therefore written inline at the use site
+// and not as a local `tof<T>` helper, because this header is included by the same TU that includes
+// `prototype/proj_gemv/proj_gemv_kernels.h`, which defines its own `tof<T>` at global scope — two
+// candidates, one call, ambiguous. That is the same collision `engine/kernels.h`'s header note is about.
 
 /*
  * One launch over the concatenation of `segs.n` weight tensors, all of width `IN`, all reading the
@@ -76,11 +97,17 @@ constexpr unsigned long long kFullShuffleMask = 0xffffffffffffffffull;
  * arithmetic instead of a silently skipped tail; `decode_step.cpp` refuses this shape off a wave32
  * device anyway, and says so.
  */
-template <int IN>
-__global__ void proj_group_rows(const engine::kernels::ProjSegs segs, const float* __restrict__ x,
+template <int IN, bool XBF16 = false>
+__global__ void proj_group_rows(const engine::kernels::ProjSegs segs, const void* __restrict__ x,
                                 int rpb) {
-    __shared__ float xs[IN];
-    for (int i = threadIdx.x; i < IN; i += blockDim.x) xs[i] = x[i];
+    using Xstaged = typename std::conditional<XBF16, hip_bfloat16, float>::type;
+    __shared__ Xstaged xs[IN];
+    // The staging is a copy, not an arithmetic step: at XBF16=false it is the same F32 load the
+    // shipped kernel issued; at XBF16=true it loads the BF16 the producer wrote and the `float()` in
+    // `dot8` below widens it at the use site instead.
+    for (int i = threadIdx.x; i < IN; i += blockDim.x) {
+        xs[i] = XBF16 ? ((const hip_bfloat16*)x)[i] : ((const float*)x)[i];
+    }
     __syncthreads();
 
     const int ws = warpSize;
@@ -106,7 +133,7 @@ __global__ void proj_group_rows(const engine::kernels::ProjSegs segs, const floa
             const uint4 u = wrow[v];             // ONE 16-B weight word per iteration
             const hip_bfloat16* p = reinterpret_cast<const hip_bfloat16*>(&u);
 #pragma unroll
-            for (int j = 0; j < 8; ++j) acc += float(p[j]) * xs[v * 8 + j];
+            for (int j = 0; j < 8; ++j) acc += float(p[j]) * float(xs[v * 8 + j]);
         };
         constexpr int WORDS = IN / 8;
         if (ws == 32) {

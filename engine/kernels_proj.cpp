@@ -55,11 +55,15 @@ constexpr int tpb_batch() {
 
 // One submission. grid.x is the row blocks — exactly the k=1 grid — and grid.y the token tiles, so a
 // decode step still launches (rows/rpb, 1) and a 295-token wave launches (rows/rpb, 74).
-template <int IN, int TPB>
-void launch(const void* weight, const float* x, uint16_t* out, int rows, int tokens, int threads) {
+// `PACK_X` is the prototype's own staging switch (`proj_gemv_kernels.h`): false stages the operand row
+// as F32 (the shipped default, and the reason `decode_step` has to widen at all), true stages it as
+// BF16 and converts at the use site. The engine's shipped calls all pass false, so the default side of
+// the fold is HEAD's machine code; `proj_gemv_xbf16` below is the only caller that passes true.
+template <int IN, int TPB, bool PACK_X = false>
+void launch(const void* weight, const void* x, uint16_t* out, int rows, int tokens, int threads) {
     const dim3 grid((rows + kRowsPerBlock - 1) / kRowsPerBlock,
                     (unsigned)((tokens + TPB - 1) / TPB));
-    ::proj_gemv_tokens<IN, TPB, false><<<grid, threads>>>(
+    ::proj_gemv_tokens<IN, TPB, PACK_X><<<grid, threads>>>(
         (const hip_bfloat16*)weight, x, (hip_bfloat16*)out, rows, tokens, kRowsPerBlock, NEG_NONE);
     // Counted after the launch, and counted on BOTH widths on purpose: the failure
     // `engine/launch_stats.h` exists to catch is a wave that only ever took the one-token branch,
@@ -77,10 +81,18 @@ constexpr int kProjGroupRowsPerBlock = 8;
 constexpr int kProjGroupThreads = 1024;
 
 template <int IN>
-void launch_group(const engine::kernels::ProjSegs& segs, const float* x) {
+void launch_group(const engine::kernels::ProjSegs& segs, const void* x, bool xbf16) {
     const dim3 grid((segs.total + kProjGroupRowsPerBlock - 1) / kProjGroupRowsPerBlock);
-    engine::projgroup::proj_group_rows<IN><<<grid, kProjGroupThreads>>>(segs, x,
-                                                                        kProjGroupRowsPerBlock);
+    // The staged dtype is a TEMPLATE argument chosen by a host-side branch, so each side compiles as if
+    // it were the only one — the same shape of choice `kernels_mlp.cpp` makes for the gate/up walk, and
+    // for the same reason: an A/B side must not be a test inside the row loop.
+    if (xbf16) {
+        engine::projgroup::proj_group_rows<IN, true><<<grid, kProjGroupThreads>>>(
+            segs, x, kProjGroupRowsPerBlock);
+    } else {
+        engine::projgroup::proj_group_rows<IN, false><<<grid, kProjGroupThreads>>>(
+            segs, x, kProjGroupRowsPerBlock);
+    }
 }
 }  // namespace
 
@@ -138,6 +150,28 @@ void proj_gemv(const void* weight, const float* x, uint16_t* out, int rows, int 
     }
 }
 
+// The BF16-staged twin of `proj_gemv`'s one-row launch (route S1 item 1). Deliberately narrow:
+// `TPB = 1` and `tokens = 1`, i.e. the identical grid, block, word walk, ladder and rounding of
+// `launch<IN, 1, false>`, with the staging dtype as the only difference. No token-tiled form is
+// instantiated here because the fold is a one-row-body rule (`decode_step.cpp` gates it on `n == 1`)
+// and a second width would be a lever no caller has asked for.
+void proj_gemv_xbf16(const void* weight, const uint16_t* x, uint16_t* out, int rows, int in) {
+    if (rows <= 0) {
+        throw std::runtime_error("proj_gemv_xbf16: rows=" + std::to_string(rows) +
+                                 "; a projection has at least one output row");
+    }
+    if (x == nullptr) throw std::runtime_error("proj_gemv_xbf16: x is null");
+    const int threads = kRowsPerBlock * warp_width();
+    if (in == 1024) {
+        launch<1024, 1, true>(weight, x, out, rows, 1, threads);
+    } else if (in == 2048) {
+        launch<2048, 1, true>(weight, x, out, rows, 1, threads);
+    } else {
+        throw std::runtime_error("proj_gemv_xbf16: input width " + std::to_string(in) +
+                                 " is not one of the two widths this kernel is instantiated at");
+    }
+}
+
 // The library form of the same projection (route (c)). One hipBLAS call per projection per body, and
 // it records the SAME family counter `proj_gemv` records: `LAUNCHSTAT family=proj` has to mean "one
 // projection site" whichever GEMM ran, or `gate.py` section (h) and the `--time-waves` attribution
@@ -171,7 +205,10 @@ void proj_gemm(const void* weight, const void* x, uint16_t* out, int rows, int i
 // Everything the caller could get wrong is refused here rather than assumed, because a grouped launch has
 // no `check_weights` blanket behind it: a wrong `in` would read another tensor's bytes and produce a
 // plausible token, which is the failure mode this repository keeps being bitten by.
-void proj_rows(const ProjSeg* segs, int nsegs, const float* x, int in) {
+// The two entry points share everything a caller could get wrong, so the validation lives here once and
+// the only difference between them is which `proj_group_rows` instantiation the launch picks. Internal
+// linkage: it is a helper of the two public entry points below, not a fourth projection entry point.
+static void proj_rows_checked(const ProjSeg* segs, int nsegs, const void* x, int in, bool xbf16) {
     if (nsegs < 1 || nsegs > kProjMaxSegs) {
         throw std::runtime_error("proj_rows: nsegs=" + std::to_string(nsegs) +
                                  "; this launch carries 1.." + std::to_string(kProjMaxSegs) +
@@ -204,14 +241,24 @@ void proj_rows(const ProjSeg* segs, int nsegs, const float* x, int in) {
     static_assert((1024 / 8) % 32 == 0 && (2048 / 8) % 32 == 0,
                   "a row must be at least one uint4 word per lane at warp 32");
     if (in == 1024) {
-        launch_group<1024>(arg, x);
+        launch_group<1024>(arg, x, xbf16);
     } else {
-        launch_group<2048>(arg, x);
+        launch_group<2048>(arg, x, xbf16);
     }
     // One submission, width 1: `launchstats::proj()` counts projection SITES at the body width, and a
     // grouped launch is one site covering several tensors for one row. This is the counter the
     // `--proj-plan` canary reads (48 with the shipped `packed` plan, 114 with `--proj-plan split`).
     launchstats::proj().record(1);
+}
+
+void proj_rows(const ProjSeg* segs, int nsegs, const float* x, int in) {
+    proj_rows_checked(segs, nsegs, x, in, /*xbf16=*/false);
+}
+
+// The BF16-staged form (route S1 item 1): one launch fewer in front of it, identical segment list,
+// identical geometry. See `engine/proj_group_kernels.h`'s `XBF16` note for the bit-identity argument.
+void proj_rows_xbf16(const ProjSeg* segs, int nsegs, const uint16_t* x, int in) {
+    proj_rows_checked(segs, nsegs, x, in, /*xbf16=*/true);
 }
 
 bool proj_shape_available(ProjShape want, int in) {

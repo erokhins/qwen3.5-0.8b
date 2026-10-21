@@ -314,6 +314,26 @@ struct Options {
     // produced its `proj` family row is not evidence, and a stale binary agrees with itself.
     engine::kernels::ProjShape proj_shape = engine::kernels::kProjShapeDefault;
     bool proj_shape_given = false;
+    // Route S1 item (1): fold the per-token BF16->F32 activation widenings into the kernels that consume
+    // the result, deleting the `cast` family's 97 launches (`engine/generation-limits.md` §1, §4's last
+    // paragraph, §7's open item). false = HEAD's behaviour, and the default; see
+    // `DecodeScratch::cast_fold` for what each side does and why it is bit-identical.
+    //
+    // IT IS ENVIRONMENT-GATED, NOT A COMMAND-LINE FLAG, and that is a deliberate difference from every
+    // other knob in this struct. `engine/gate.py` builds the engine argv itself and carries its own list
+    // of the form flags it must pass through to every side it runs, so a new flag is unreachable inside
+    // the gate unless gate.py learns it — and gate.py is the one file in this tree a route may not edit to
+    // make its own numbers come out. An environment default reaches the engine through the subprocess
+    // environment gate.py already inherits, which means the folded path is gated today:
+    //
+    //   QWEN_CAST_FOLD=1 .venv/bin/python engine/gate.py --fixture dec8
+    //
+    // Same "both sides live in one binary, so the A/B is one window" property as `--attn-touch`, and no
+    // edit to the judge. It is echoed on its own `CASTFOLD` line (`main`, beside `LAUNCH`) because a
+    // setting that is not on the command line is otherwise invisible in a log, which is how a silently
+    // inert side is born. Only "0" and "1" are accepted, and anything else is a hard refusal rather than
+    // a default, because an unset-by-typo variable reads exactly like an unset-by-choice one.
+    bool cast_fold = false;
     // Print the projection plan one row-priced body would submit and leave, WITHOUT touching the device
     // (no weight load, no HIP call), so geometry can be checked while another agent holds the GPU lock —
     // the same service `prototype/proj_gemv --dump-plan` provides for its own rig.
@@ -347,6 +367,21 @@ std::vector<int> parse_ids(const std::string& csv) {
 
 Options parse_args(int argc, char** argv) {
     Options o;
+    // The environment-gated side of route S1 item (1); see `Options::cast_fold` for why this one knob
+    // is spelled in the environment and not in argv.
+    if (const char* env = std::getenv("QWEN_CAST_FOLD"); env != nullptr && env[0] != '\0') {
+        const std::string v(env);
+        if (v == "1") {
+            o.cast_fold = true;
+        } else if (v == "0") {
+            o.cast_fold = false;
+        } else {
+            throw std::runtime_error("QWEN_CAST_FOLD takes 0 or 1, got '" + v +
+                                     "'; 0 is the shipped behaviour (every widening submitted by"
+                                     " kernels_cast.cpp) and 1 folds it into the consuming kernel"
+                                     " (see engine/mlp_xbf16_kernels.h)");
+        }
+    }
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() {
@@ -1321,6 +1356,15 @@ void print_usage(FILE* out) {
                  " rows/block 32, i.e. HEAD's machine code, and must be asked for together with `--proj-plan"
                  " split`. If the device or the width cannot offer `unroll8`, the run falls"
                  " back to `shipped` and prints `PROJSHAPE-FALLBACK` instead of pricing one kernel twice\n"
+                 "  QWEN_CAST_FOLD=0|1  (environment, not a flag) route S1 item (1): fold the per-token"
+                 " BF16->F32 activation widenings into the kernels that consume the result and delete the"
+                 " `cast` family's 97 launches. `0` (the default) is HEAD's behaviour: `kernels_cast.cpp`"
+                 " submits each widening. `1` makes each consumer stage the BF16 tile itself and widen in"
+                 " registers, which is bit-identical because `hip_bfloat16 -> float` is exact"
+                 " (engine/mlp_xbf16_kernels.h). A ONE-ROW body folds all six sites; a wider body folds"
+                 " only the final-norm one. It is read from the environment so `engine/gate.py` can judge"
+                 " the folded path by inheriting it, with no edit to the gate; the run echoes "
+                 "`CASTFOLD on=... plan=... folded=...` beside `LAUNCH`\n"
                  "  --dump-proj-plan  print the projection plan one row-priced body would submit (PROJPLAN"
                  " plus one PROJJOB line per tensor) and exit WITHOUT loading the model or touching the GPU,"
                  " so a geometry claim can be checked while another agent holds the device lock\n"
@@ -1632,6 +1676,12 @@ PassResult stage_pass(const Options& o, const engine::WeightStore& store, engine
     // a legal run, and an instrument that reads broken on a configuration it should merely describe is an
     // instrument nobody trusts on the configuration that matters.
     if (clock) clock->set_plan_proj(engine::proj_launches_per_body(o.proj_plan));
+    // Route S1 item (1), stated for the same reason and with the same consequence: a folded step submits
+    // no `cast` launch, so a clock that was not told would bill §07's 97 against 243 submissions and read
+    // `plan_match=0` on a run that is merely folded. `decode_step.cpp`'s `fold_cast` is the dispatch side
+    // of this same fact, and it is a one-row rule — which is fine for a STEP clock, because a step IS a
+    // one-row body (`decode_step` submits one token), so the fold either reaches the whole 97 or none.
+    if (clock) clock->set_plan_cast_fold(o.cast_fold);
     engine::stageclock::arm(clock.get());
     for (const StepRec& want : ref) {
         if (clock) clock->begin_step();
@@ -1797,6 +1847,11 @@ WavePassResult wave_pass(const Options& o, const engine::WeightStore& store, eng
         // says and only a `--wave-rows 1` pass moves — which is the same no-wide-bit-moves property the
         // launcher enforces, witnessed rather than asserted.
         shape.proj_packed = (o.proj_plan == engine::kernels::ProjPlan::kPacked);
+        // Route S1 item (1). Asked as the run asked for it, like the two rows above, because the WIDTH rule
+        // is `wave_plan_bill`'s to derive: a one-row body folds all six per-token sites, a wide body folds
+        // only `finish_token`'s final-norm widening, and this line cannot make a wide pass bill the fold of
+        // a site `submit_wave_body` still submitted.
+        shape.cast_fold = o.cast_fold;
         std::printf("%s\n", clock->describe_wave(shape).c_str());
     }
     return out;
@@ -1989,6 +2044,30 @@ int main(int argc, char** argv) {
         // its own flags (the `--attn-tile` trap in AGENTS.md). On a split arm read `PROJPLAN`, or the counted
         // `STAGE`/`LAUNCHSTAT` lines, rather than `LAUNCH`.
         std::printf("%s\n", proj_plan_line(o).c_str());
+        // Route S1 item (1)'s own line, printed beside `LAUNCH` for the reason `LAUNCH` is printed at
+        // all: a run has to be able to say which of its widenings it submitted. It is a separate line
+        // rather than another `NUMERICS` field because `NUMERICS` is compared against
+        // `engine/numerics_provenance.json` by `gate.py`'s provenance check, and a field that file has
+        // never heard of is a red gate for a reason that has nothing to do with numerics.
+        //
+        // `plan=` is `planned_launch_counts()`'s §07 bill, derived from the layer counts and NOT edited by
+        // this route — `gate.py` section (d) re-derives that table in Python and its independence is worth
+        // more than one extra field here. `folded=` is what this run deletes from it and `kept=` is what it
+        // submits instead, both taken from `planned_launch_counts(cast_fold)` so this echo and the stage
+        // clock's `plan_per_step` are ONE derivation and cannot drift apart; `step_bill=` is that total, and
+        // it is the number a `STAGE … TOTAL plan_per_step=` line must equal (the A/B asserts it). A one-row
+        // body folds every per-layer site and the final-norm site, so `kept=0` when the knob is on; a wide
+        // prefill body folds only the final-norm site, which is what `full_wide=final-norm-only` states
+        // instead of leaving it to a comment. `prototype/cast_fold/census_sites.py` is the file that
+        // accounts for the claim site by site (six sites, 97 launches, the §1 byte rows).
+        {
+            const int plan_cast = engine::planned_launch_counts().cast;
+            const engine::LaunchCounts bill = engine::planned_launch_counts(o.cast_fold);
+            std::printf("CASTFOLD on=%d env=QWEN_CAST_FOLD plan=%d folded=%d kept=%d sites=6"
+                        " body=one-row full_wide=%s step_bill=%d\n",
+                        o.cast_fold ? 1 : 0, plan_cast, plan_cast - bill.cast, bill.cast,
+                        o.cast_fold ? "final-norm-only" : "all", bill.total());
+        }
         // D-11's provenance half. The wave-row ceiling and the hipBLAS version are the two numbers that
         // decide what a pinned corpus means once more than one GEMM can produce it: `kMaxWaveRows`
         // because the row-count rule makes it the last width that is still the hand GEMV, hipBLAS's
@@ -2119,6 +2198,7 @@ int main(int argc, char** argv) {
         sc.gdn_geom = o.gdn_geom;
         sc.proj_plan = o.proj_plan;
         sc.proj_shape = o.proj_shape;
+        sc.cast_fold = o.cast_fold;
         if (engine::kernels::wave_gemm_is_library(o.wave_gemm, engine::kMaxWaveRows)) {
             // Pin filter first: it decides what `gemm_route_plan` below fetches and what the version
             // line counts, so setting it after the plan would print one route and run another.

@@ -507,19 +507,45 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     const bool group_shape =
         (n == 1) && (sc.proj_shape == kernels::ProjShape::kUnroll8);
     const bool pack_proj = (n == 1) && (sc.proj_plan == kernels::ProjPlan::kPacked);
+    // Route S1 item (1)'s rule, stated once here for the same reason `lib_gemm`, `group_shape` and
+    // `pack_proj` are stated here: it is a rule about the body's WIDTH and this is where `n` is. The
+    // per-layer folds need one-row BF16 forms of the consumers (`proj_rows_xbf16`,
+    // `mlp_gateup_xbf16`, `mlp_down_xbf16`), and those exist only for a body of one row, so a wide body
+    // keeps its widenings and a generation step folds all five per-layer sites. The sixth site —
+    // `finish_token`'s final-norm widening — is width-blind and folds at any `n`; `finish_token` reads
+    // `sc.cast_fold` directly for that one.
+    //
+    // Bit-identity, not a band: every folded consumer converts the same BF16 to the same F32 that the
+    // deleted launch used to write (`hip_bfloat16 -> float` is exact), so the operand values, the word
+    // walks, the reduction ladders and the roundings are unchanged and the gate has to stay green
+    // rather than be re-priced. `engine/mlp_xbf16_kernels.h` carries the argument; the paired
+    // byte-compare is `prototype/cast_fold/ab_item1.sh`.
+    const bool fold_cast = sc.cast_fold && (n == 1);
     // One hand GEMV of one projection, whichever shape the run asked for. `proj_shape_available` is asked
     // per call because what can refuse is the width and the device's warp, not the flag; a refusal is
     // COUNTED (`sc.proj_fallbacks`) so the run's own log reports the side that silently fell back — a
     // paired A/B against a silently inert arm reads as a clean null (`AGENTS.md`).
-    const auto proj_hand = [&](const void* weight, const float* x_f32, uint16_t* out, int rows,
-                               int in) {
+    //
+    // It now carries BOTH activation dtypes, because under the fold there is no F32 tile to hand it and
+    // under `lib_gemm` there is never a BF16 one; which of the two it reads is the same `fold_cast` the
+    // widenings are guarded on, so the two cannot disagree about which side of the A/B a call is on.
+    const auto proj_hand = [&](const void* weight, const uint16_t* x_bf16, const float* x_f32,
+                               uint16_t* out, int rows, int in) {
         if (group_shape && kernels::proj_shape_available(sc.proj_shape, in)) {
             const kernels::ProjSeg seg{weight, out, rows, 0};
-            kernels::proj_rows(&seg, 1, x_f32, in);
+            if (fold_cast) {
+                kernels::proj_rows_xbf16(&seg, 1, x_bf16, in);
+            } else {
+                kernels::proj_rows(&seg, 1, x_f32, in);
+            }
             return;
         }
         if (group_shape) ++sc.proj_fallbacks;
-        kernels::proj_gemv(weight, x_f32, out, rows, in, n);
+        if (fold_cast) {
+            kernels::proj_gemv_xbf16(weight, x_bf16, out, rows, in);
+        } else {
+            kernels::proj_gemv(weight, x_f32, out, rows, in, n);
+        }
     };
     const auto project = [&](const void* weight, const uint16_t* x_bf16, const float* x_f32,
                              uint16_t* out, int rows, int in) {
@@ -527,7 +553,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
 
             kernels::proj_gemm(weight, x_bf16, out, rows, in, n);
         } else {
-            proj_hand(weight, x_f32, out, rows, in);
+            proj_hand(weight, x_bf16, x_f32, out, rows, in);
         }
     };
 
@@ -610,7 +636,10 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // The polarity of the guard is the reader list, not the layer word: `!lib_gemm || !attn_layer`
         // casts for every hand body and for every GDN layer, and skips only the library body's attention
         // layers.
-        if (!lib_gemm || !attn_layer) {
+        //
+        // `fold_cast` deletes the widening outright: the readers below take `sc.norm` and widen each
+        // element in registers, which is the same value this launch would have written.
+        if (!fold_cast && (!lib_gemm || !attn_layer)) {
             stageclock::note(stageclock::kCast);
             kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
         }
@@ -664,10 +693,16 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         if (pack_proj) {
             // One launch for the whole group. `norm_f32` is row 0 of the tile the cast above just wrote,
             // and every segment's `out` is row 0 of its own tile, which is why `ProjSeg` carries no stride.
+            // Under the fold there is no such tile, and none is needed: the grouped kernel stages
+            // `sc.norm` itself, which is row-for-row the same values.
             stageclock::note(stageclock::kProj);
             kernels::ProjSeg segs[kernels::kProjMaxSegs];
             for (int i = 0; i < nseg; ++i) segs[i] = inproj[i].seg;
-            kernels::proj_rows(segs, nseg, sc.norm_f32, kHidden);
+            if (fold_cast) {
+                kernels::proj_rows_xbf16(segs, nseg, sc.norm, kHidden);
+            } else {
+                kernels::proj_rows(segs, nseg, sc.norm_f32, kHidden);
+            }
         } else {
             for (int i = 0; i < nseg; ++i) {
                 stageclock::note(stageclock::kProj);
@@ -675,7 +710,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 if (inproj[i].library_eligible) {
                     project(s.weight, sc.norm, sc.norm_f32, s.out, s.rows, kHidden);
                 } else {
-                    proj_hand(s.weight, sc.norm_f32, s.out, s.rows, kHidden);
+                    proj_hand(s.weight, sc.norm, sc.norm_f32, s.out, s.rows, kHidden);
                 }
             }
         }
@@ -800,7 +835,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // Guarded: the o_proj `project` call below is this tile's only reader, and it names
             // `a_gated` as the BF16 operand and this widening as the F32 one, so on a library route the
             // widening is written and never read.
-            if (!lib_gemm) {
+            if (!fold_cast && !lib_gemm) {
                 stageclock::note(stageclock::kCast);
                 kernels::cast_bf16_to_f32(sc.a_gated, sc.block_out_f32, (size_t)n * kQwidth);
             }
@@ -981,7 +1016,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // The GDN twin of the attention widening above, and guarded for the identical reason: the
             // out_proj `project` call below reads `sc.block_out` when the library won and this
             // widening only when the hand GEMV is in charge.
-            if (!lib_gemm) {
+            if (!fold_cast && !lib_gemm) {
                 stageclock::note(stageclock::kCast);
                 kernels::cast_bf16_to_f32(sc.block_out, sc.block_out_f32, n * kValueDim);
             }
@@ -1009,6 +1044,9 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // On a library route neither side widens into `block_out_f32` any more (the only reader of that
         // scratch is this call's hand branch), so it holds whatever the last hand body wrote — which is
         // legal for exactly one reason: nothing on that route reads it.
+        // read `block_out_f32` any more (the only reader of that scratch is this call's hand branch), so
+        // it holds whatever the last hand body wrote — which is legal for exactly one reason: nothing on
+        // that route reads it. Under the fold it is not written either, and for the same reason.
         project(layer_dev(weights, layer, attn_layer ? leaf::kOProj : leaf::kOutProj),
                 attn_layer ? sc.a_gated : sc.block_out, sc.block_out_f32, sc.delta, kHidden,
                 attn_layer ? kQwidth : kValueDim);
@@ -1022,7 +1060,7 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
         // rows and `act` are widened once for the tile rather than once per token. The library halves
         // read the BF16 `sc.norm` and `sc.mlp_act` directly, so both widenings are guarded on that
         // difference instead of being submitted and ignored.
-        if (!lib_gemm) {
+        if (!fold_cast && !lib_gemm) {
             stageclock::note(stageclock::kCast);
             kernels::cast_bf16_to_f32(sc.norm, sc.norm_f32, n * kHidden);
         }
@@ -1043,12 +1081,18 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                                      layer_dev(weights, layer, leaf::kUpProj), sc.norm,
                                      sc.mlp_gate_raw, sc.mlp_up_raw, sc.mlp_act, kIntermediate,
                                      kHidden, n);
+        } else if (fold_cast) {
+            // The BF16-staged twin: `sc.norm` is the tile the widening above would have read, and
+            // `mlp_gateup_xbf16` is the same kernel with the staged row typed BF16.
+            kernels::mlp_gateup_xbf16((const uint16_t*)layer_dev(weights, layer, leaf::kGateProj),
+                                      (const uint16_t*)layer_dev(weights, layer, leaf::kUpProj),
+                                      sc.norm, sc.mlp_act, kIntermediate, kHidden, gate_up_map);
         } else {
             kernels::mlp_gateup((const uint16_t*)layer_dev(weights, layer, leaf::kGateProj),
                                 (const uint16_t*)layer_dev(weights, layer, leaf::kUpProj),
                                 sc.norm_f32, sc.mlp_act, kIntermediate, kHidden, n, gate_up_map);
         }
-        if (!lib_gemm) {
+        if (!fold_cast && !lib_gemm) {
             stageclock::note(stageclock::kCast);
             kernels::cast_bf16_to_f32(sc.mlp_act, sc.mlp_act_f32, n * kIntermediate);
         }
@@ -1058,6 +1102,9 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // why that widening is now guarded rather than submitted for nobody.
             kernels::mlp_down_gemm(layer_dev(weights, layer, leaf::kDownProj), sc.mlp_act, sc.delta,
                                    kHidden, kIntermediate, n);
+        } else if (fold_cast) {
+            kernels::mlp_down_xbf16((const uint16_t*)layer_dev(weights, layer, leaf::kDownProj),
+                                    sc.mlp_act, sc.delta, kHidden, kIntermediate);
         } else {
             kernels::mlp_down((const uint16_t*)layer_dev(weights, layer, leaf::kDownProj),
                               sc.mlp_act_f32, sc.delta, kHidden, kIntermediate, n);
@@ -1108,11 +1155,24 @@ StepResult finish_token(const WeightStore& weights, RequestState& st, DecodeScra
     const uint16_t* norm_row_ptr = sc.norm + (size_t)norm_row * kHidden;
     // Row 0 of `norm_f32` is the scratch this widens into: by the time a row is priced the body is
     // over, so nothing else is reading it.
-    stageclock::note(stageclock::kCast);
-    kernels::cast_bf16_to_f32(norm_row_ptr, sc.norm_f32, kHidden);
-    stageclock::note(stageclock::kLmHead);
-    kernels::lm_head_full((const uint16_t*)weights.at(kHead).device, sc.norm_f32, sc.logits,
-                          kVocab);
+    //
+    // Route S1 item (1)'s sixth and last site, and the one fold that is NOT width-bound: `sc.norm` is
+    // already a BF16 row and `lm_head_full_xbf16` stages it as one, so the widening goes away for a
+    // priced prefill row exactly as it does for a decode step. Bit-identical for the same reason as the
+    // other five — see `engine/lm_head_xbf16_kernels.h` — and the one folded kernel whose own family the
+    // ledger measures at the read roof, which is why `ab_item1.sh` reads the `lm_head` line beside the
+    // headline rather than only the headline.
+    if (sc.cast_fold) {
+        stageclock::note(stageclock::kLmHead);
+        kernels::lm_head_full_xbf16((const uint16_t*)weights.at(kHead).device, norm_row_ptr,
+                                    sc.logits, kVocab);
+    } else {
+        stageclock::note(stageclock::kCast);
+        kernels::cast_bf16_to_f32(norm_row_ptr, sc.norm_f32, kHidden);
+        stageclock::note(stageclock::kLmHead);
+        kernels::lm_head_full((const uint16_t*)weights.at(kHead).device, sc.norm_f32, sc.logits,
+                              kVocab);
+    }
 
     // ---- §03.4's tie rule, on the host: ties go to the LOWEST id, which is a strict `>` scan.
     // One sync for the whole step, here and only here.
@@ -1156,7 +1216,7 @@ std::string LaunchCounts::describe() const {
     return os.str();
 }
 
-LaunchCounts planned_launch_counts() {
+LaunchCounts planned_launch_counts(bool cast_fold) {
     LaunchCounts c;
     c.glue = 1 + 2 * kNumLayers;
     // The SHIPPED plan's projection row, derived from the plan's own job list rather than typed: `packed`
@@ -1171,7 +1231,13 @@ LaunchCounts planned_launch_counts() {
     c.gdn = kNumGdnLayers * 4;
     c.attn = kNumAttnLayers;
     c.mlp = 2 * kNumLayers;
-    c.cast = 4 * kNumGdnLayers + 4 * kNumAttnLayers + 1;   // +1: the final norm before lm_head
+    // `+1`: the final norm before lm_head. Route S1 item (1) is the one route that changes this row, and it
+    // changes it to ZERO rather than to a smaller number: a one-row body with the fold on reads every
+    // BF16 activation in the consumer that widens it, so nothing writes an F32 copy of anything and the
+    // family's submissions go to none. `prototype/cast_fold/census_sites.py` accounts for the 97 site by
+    // site and refuses if a sixth site appears or one of these six is renamed, so the `4·G + 4·A + 1`
+    // above and the fold's `= 0` here are both anchored to the same six call sites rather than to taste.
+    c.cast = cast_fold ? 0 : 4 * kNumGdnLayers + 4 * kNumAttnLayers + 1;
     c.other = 1 + kNumGdnLayers + 1;
     return c;
 }

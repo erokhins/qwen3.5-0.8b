@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "engine/launch_stats.h"
+#include "engine/mlp_xbf16_kernels.h"   // the BF16-staged pair (route S1 item 1); includes the op header
 #include "prototype/mlp_gemv/mlp_gemv_kernels.h"
 
 namespace engine::kernels {
@@ -126,6 +127,32 @@ static void launch_gateup_single(const uint16_t* w_gate, const uint16_t* w_up, c
     }
 }
 
+// The BF16-staged pair (route S1 item 1). Same geometry, same `kRowsPerBlock`, same walk template
+// argument as the shipped forms above; the only difference is which kernel object is submitted, and
+// `engine/mlp_xbf16_kernels.h` is where that difference is transcribed and argued bit-identical. No
+// token-tiled form: the fold is a one-row-body rule and a wave keeps the batched pair above.
+template <int IN, int MAP>
+static void launch_gateup_single_xbf16_kernel(const uint16_t* w_gate, const uint16_t* w_up,
+                                              const uint16_t* x, uint16_t* act, int rows,
+                                              int threads, int blocks) {
+    ::engine::mlpxbf16::mlp_gateup_xbf16<IN, MAP><<<blocks, threads>>>(
+        (const hip_bfloat16*)w_gate, (const hip_bfloat16*)w_up, (const hip_bfloat16*)x,
+        (hip_bfloat16*)act, nullptr, rows, kRowsPerBlock, NEG_NONE);
+}
+
+template <int IN>
+static void launch_gateup_single_xbf16(const uint16_t* w_gate, const uint16_t* w_up,
+                                       const uint16_t* x, uint16_t* act, int rows, int threads,
+                                       int blocks, MlpGateMap map) {
+    if (map == MlpGateMap::kContig) {
+        launch_gateup_single_xbf16_kernel<IN, MAP_CONTIG>(w_gate, w_up, x, act, rows, threads,
+                                                          blocks);
+    } else {
+        launch_gateup_single_xbf16_kernel<IN, MAP_INTERLEAVE>(w_gate, w_up, x, act, rows, threads,
+                                                              blocks);
+    }
+}
+
 // The batched launch: grid.x is the row blocks and grid.y the token tiles, so a weight row is read
 // once per tile. Same per-output-element order as the single-token kernel, which is what makes the
 // two interchangeable for a given (row, token) — gated bit for bit in `prototype/mlp_gemv/run.py
@@ -237,6 +264,46 @@ void mlp_down(const uint16_t* w_down, const float* act, uint16_t* out, int rows,
                                  " is not one of the two shapes the gated kernel instantiates");
     }
     launchstats::mlp_down().record(1);   // see the note in `mlp_gateup`
+}
+
+void mlp_gateup_xbf16(const uint16_t* w_gate, const uint16_t* w_up, const uint16_t* x,
+                      uint16_t* act, int rows, int in, MlpGateMap map) {
+    if (map == MlpGateMap::kAuto) {
+        throw std::runtime_error("mlp_gateup_xbf16: got kAuto, which is a request and not a walk; "
+                                 "call resolve_mlp_gate_map(want, rows) at the call site");
+    }
+    check("gateup_xbf16", rows, in);
+    if (x == nullptr) throw std::runtime_error("mlp_gateup_xbf16: x is null");
+    const int threads = kRowsPerBlock * warp_width();
+    const int blocks = (rows + kRowsPerBlock - 1) / kRowsPerBlock;
+    if (in == HID) {
+        launch_gateup_single_xbf16<HID>(w_gate, w_up, x, act, rows, threads, blocks, map);
+    } else {
+        throw std::runtime_error("mlp_gateup_xbf16: input width " + std::to_string(in) +
+                                 " is not HID; gate/up is [3584,1024] in this checkpoint");
+    }
+    // The same counter the shipped form records, so `LAUNCHSTAT family=mlp_gateup` still means "one
+    // gateup site per layer per body" whichever side of the fold produced it.
+    launchstats::mlp_gateup().record(1);
+}
+
+void mlp_down_xbf16(const uint16_t* w_down, const uint16_t* act, uint16_t* out, int rows, int in) {
+    check("down_xbf16", rows, in);
+    if (act == nullptr) throw std::runtime_error("mlp_down_xbf16: act is null");
+    const int threads = kRowsPerBlock * warp_width();
+    const int blocks = (rows + kRowsPerBlock - 1) / kRowsPerBlock;
+    // down_proj is [1024, 3584] (§01.3), so FF is the only width this fold is ever asked for; the FF
+    // stage row is also the largest of the six folded tiles (3584 elements a token), which is the row
+    // the A/B should watch if the fold turns out to cost rather than save.
+    if (in == FF) {
+        ::engine::mlpxbf16::mlp_down_xbf16<FF><<<blocks, threads>>>(
+            (const hip_bfloat16*)w_down, (const hip_bfloat16*)act, (hip_bfloat16*)out, rows,
+            kRowsPerBlock, NEG_NONE);
+    } else {
+        throw std::runtime_error("mlp_down_xbf16: input width " + std::to_string(in) +
+                                 " is not FF; down_proj is [1024,3584] in this checkpoint");
+    }
+    launchstats::mlp_down().record(1);
 }
 
 // The MLP's first half through hipBLAS (route (c)): two matmuls and the epilogue the library unfuses.

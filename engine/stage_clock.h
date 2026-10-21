@@ -256,6 +256,14 @@ struct WaveShape {
     // from `tokens`/`bodies`/`wave_rows` exactly as `gemm_library`'s exception is). A step clock does not
     // carry a shape, so it is told the same number once, at construction: `Clock::set_plan_proj`.
     bool proj_packed = false;
+    // Route S1 item (1) (`QWEN_CAST_FOLD=1`): whether the pass widened its activations inside the kernels
+    // that read them, so the `cast` family submitted nothing. Like every row above this is a rule about
+    // the BODY, and the bill below applies it only where the fold can reach: a ONE-ROW body folds all six
+    // per-token sites (`submit_wave_body`'s `fold_cast = sc.cast_fold && (n == 1)`), and a body of any
+    // width folds `finish_token`'s final-norm widening — which is the `priced` term, the only cast a wide
+    // body loses. A step clock carries no shape, so the driver states the flag once: `set_plan_cast_fold`.
+    // Left false, the plan bills §07's 97 and a run that folded without saying so reads `plan_match=0`.
+    bool cast_fold = false;
 };
 
 // One measured pass of serialized submission. Constructed per pass, armed for its duration; not
@@ -274,6 +282,13 @@ public:
     // silently billed the other plan's count would make every departing run read as a broken clock. Left
     // unset (0), the bill is the shipped one, and every run that names no `--proj-*` flag is unaffected.
     void set_plan_proj(int launches_per_step) { plan_proj_ = launches_per_step; }
+
+    // Route S1 item (1): tell the clock the run folded its widenings into their consumers, so a ONE-ROW
+    // body submitted no `cast` launch at all. The same argument as `set_plan_proj`'s: the clock has no
+    // wave shape to derive the fold from, `plan_match` is the line that tells a reader the instrument and
+    // the dispatch agree, and a plan that kept billing 97 widenings a step after they were deleted would
+    // make every folded run read as a broken clock. Left unset, the bill is §07's shipped 97.
+    void set_plan_cast_fold(bool cast_fold) { plan_cast_fold_ = cast_fold; }
 
     Clock(const Clock&) = delete;
     Clock& operator=(const Clock&) = delete;
@@ -323,6 +338,7 @@ private:
     Mode mode_;
     Unit unit_;
     int plan_proj_ = 0;        // 0 = derive §07's split bill; see `set_plan_proj`
+    bool plan_cast_fold_ = false;   // see `set_plan_cast_fold`
     bool in_step_ = false;
     bool open_ = false;
     Stage stage_ = kStageCount;
