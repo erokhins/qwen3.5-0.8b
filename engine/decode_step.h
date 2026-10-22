@@ -434,6 +434,15 @@ void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScrat
 void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
                       const int* tokens, int n);
 
+// §03.4's greedy token, in one place: the LOWEST id among the maxima, i.e. a strict `>` scan.
+//
+// It is a function rather than the four lines inside `finish_token` because the MTP draft (§09, the
+// side computation behind `QWEN_MTP_DRAFT`) prices its proposal out of a logits row of its own, and an
+// accept rate measured with a different tie rule than the engine's own tokens is not the engine's
+// accept rate. `finish_token` calls this, so there is exactly one spelling of the rule in the engine
+// and the draft cannot grow a second standard.
+int argmax_greedy(const float* logits, int n);
+
 // The tail: `lm_head_full` over the normed row the last `submit_token_body` left in `sc.norm`, then
 // exactly ONE blocking D2H of the vocabulary (this is the sync of the token, and the only one), then
 // §03.4's host argmax — a strict `>` scan, so ties go to the LOWEST id. Sets `st.sampled_token`,

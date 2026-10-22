@@ -50,6 +50,7 @@
 #include "engine/decode_step.h"
 #include "engine/launch_stats.h"
 #include "engine/loader.h"
+#include "engine/mtp_draft.h"
 #include "engine/prefill.h"
 #include "engine/stage_clock.h"
 #include "engine/state.h"
@@ -77,6 +78,27 @@ struct Options {
     bool session = false;            // resident line protocol for engine/chat.sh
     bool no_stop = false;            // §07.5 stays unarmed in generation too (deep smoke runs only)
     bool state_fp = false;           // emit the §08.6 state fingerprints (see the `--state-fp` block)
+    // §09: the MTP draft block as a SIDE computation (`engine/mtp_draft.h`). Default OFF, and off means
+    // the binary is byte-identical in behaviour to the one that shipped without it: no extra allocation
+    // is touched, no extra submission is made, and no line below prints. On, the block reads the
+    // finished step's final-norm row and its emitted token and produces a proposal id, and it must not
+    // alter one byte the target path consumes — which is exactly why this knob's admission test is
+    // `sampled.txt` and every STATEFP row byte-identical with it on and off, and not a band.
+    //
+    // Environment-defaulted like QWEN_CAST_FOLD, for the reason given there: a gate that runs the
+    // shipping path must not have to remember to pass a flag, and the flag below is how an A/B names
+    // the side it is on.
+    int mtp_draft = 0;
+    bool mtp_draft_given = false;
+    // Which round sequence the side computation walks: `loop` reproduces speccheck's greedy_mtp(k=1)
+    // round geometry (the one the carried accept rate was measured on), `every` drafts after every
+    // step. See `engine::mtpdraft::Schedule`; refused-and-parsed, never defaulted into.
+    std::string mtp_sched = "loop";
+    bool mtp_sched_given = false;
+    // Lanes allocated for the draft's own KV cache. The one-pass attention form serves at most
+    // `mtp_attn_max_lanes()` of them, so the usable ceiling is the smaller of the two and a round past
+    // it is REFUSED and counted (`DRAFT-SKIP`), not silently served a shorter cache.
+    int mtp_cap = 512;
     // Which logits a prompt wave gives back (§06.5 / `engine/prefill.h`). `last` is the spec's shape
     // and the default; `all` is the gate's byte-identity mode, which asks for the rows §06.5 throws
     // away so they can be `cmp`'d against what the per-token prompt loop used to write.
@@ -411,6 +433,20 @@ Options parse_args(int argc, char** argv) {
                                      " (see engine/gdn_conv_roll_kernels.h)");
         }
     }
+    if (const char* env = std::getenv("QWEN_MTP_DRAFT"); env != nullptr && env[0] != '\0') {
+        const std::string v(env);
+        if (v == "1") {
+            o.mtp_draft = 1;
+            o.mtp_draft_given = true;      // the env IS the naming, for the `_given` refusals below
+        } else if (v == "0") {
+            o.mtp_draft = 0;
+        } else {
+            throw std::runtime_error("QWEN_MTP_DRAFT takes 0 or 1, got '" + v +
+                                     "'; 0 is the default and runs no draft at all, 1 runs the §09 block"
+                                     " as a read-only side computation over the finished step's hidden"
+                                     " row (see engine/mtp_draft.h)");
+        }
+    }
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() {
@@ -454,6 +490,23 @@ Options parse_args(int argc, char** argv) {
             o.no_stop = true;
         } else if (a == "--state-fp") {
             o.state_fp = true;
+        } else if (a == "--mtp-draft") {
+            // Parses or throws, like every flag that names which side of an A/B a run is on: a typo that
+            // silently became "off" would report an off run as an on run, and the two differ by the
+            // whole proposal path.
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--mtp-draft takes 0 or 1, got '" + v + "'");
+            }
+            o.mtp_draft = std::atoi(v.c_str());
+            o.mtp_draft_given = true;      // the flag outranks the environment, and it is the naming
+        } else if (a == "--mtp-sched") {
+            o.mtp_sched = next();
+            o.mtp_sched_given = true;
+            engine::mtpdraft::parse_schedule(o.mtp_sched);   // parses or throws
+        } else if (a == "--mtp-cap") {
+            o.mtp_cap = std::atoi(next().c_str());
+            if (o.mtp_cap < 1) throw std::runtime_error("--mtp-cap needs at least one lane");
         } else if (a == "--prefill-logits") {
             o.prefill_logits = engine::parse_prefill_logits(next());
         } else if (a == "--wave-rows") {
@@ -892,6 +945,27 @@ Options parse_args(int argc, char** argv) {
                                  std::string(engine::kernels::proj_shape_name(o.proj_shape)) +
                                  " for the pre-D1 pair, or drop --proj-shape for the shipped plan");
     }
+    if (o.mtp_draft && (o.time_stages || o.time_waves)) {
+        // The two timing instruments price the target path by draining the stream at each
+        // `stageclock::note` boundary, and the draft's submissions carry no note — they belong to no
+        // family of §07's bill. Running both would charge the draft to whichever stage preceded it and
+        // print the result as an attribution, which is the "one launch that is invisible" failure
+        // `engine/stage_clock.h` is written against. The draft is a correctness instrument in this
+        // increment; the timing question is a later one and needs its own family, not this flag.
+        throw std::runtime_error("--mtp-draft 1 with --time-stages/--time-waves would charge the draft's"
+                                 " submissions to whichever stage-clock segment preceded them, because"
+                                 " the draft belongs to no family of §07's launch bill. Run the"
+                                 " correctness pass without the timing flags (--mtp-draft prints its own"
+                                 " MTPDRAFT census line); timing the draft needs its own stage family.");
+    }
+    if (o.mtp_sched_given && !o.mtp_draft) {
+        // Naming a schedule for a path that does not run. Keyed on `given` deliberately: `loop` is the
+        // default, so a bare run must not be refused, exactly the `--gdn-norm hoist` / `--gdn-geom`
+        // precedent about defaults not manufacturing refusals.
+        throw std::runtime_error("--mtp-sched " + o.mtp_sched +
+                                 " schedules rounds for a draft that is not running; name --mtp-draft 1"
+                                 " with it, or drop it");
+    }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
         // caller's, and a resident process cannot know which one a gate wants — and --sizes-only
@@ -970,8 +1044,113 @@ void write_raw(const std::string& dir, const std::string& name, const std::vecto
 // token — the layers run in §07.1 order and `prefix_len` advances only at the end — so the state
 // is half-advanced and no longer matches the caller's transcript. Refusing until `reset` is a
 // refusal; continuing would be the quiet-corruption case the brief asks this driver to avoid.
+// ---- §09: the draft side computation, driver side ------------------------------------------------
+//
+// Everything the side computation needs that is not in `engine/mtp_draft.h`: the resolved block
+// weights, the draft's own cache, the round schedule, and the counters the `MTPDRAFT` line prints.
+// Constructed ONLY when the flag is on — with `--mtp-draft 0` no allocation here happens and no line
+// below prints, which is what makes "off is byte-identical to the binary that shipped without this
+// feature" a fact about the code path rather than a claim about it.
+struct MtpSide {
+    engine::mtpdraft::Weights w;
+    engine::mtpdraft::State st;
+    engine::mtpdraft::RoundTracker track{engine::mtpdraft::Schedule::kLoop};
+    long long made = 0;           // proposals submitted
+    long long adjudicated = 0;    // ... and settled against a later target prediction
+    long long accepted = 0;
+    long long refused = 0;        // rounds the block could not run (the cache ceiling); counted and
+                                  // printed, never silently dropped — a skipped proposal is not a
+                                  // rejected one, and the denominator has to be able to say so
+    long long unadjudicated = 0;  // proposals left pending when the run ended (no later step)
+    int lanes_max = 0;
+};
+
+// One generation step's worth of side computation.
+//
+// `pred_pos` is the position the step's row predicted — its `pos_before`, the same number the STEP /
+// GEN lines print — and `pred_token` the token it predicted. `h_norm_row` is the BF16 final-norm row
+// the step left in `sc.norm`, which is §09.1's `h` (post-final-norm; A-12's "pre-norm" reading was
+// falsified at 0.232 against 0.642).
+//
+// THE ALIGNMENT, spelled out because getting it wrong is this repo's own recorded trap. A round whose
+// target has consumed through position `pred_pos` drafts position `pred_pos + 2` behind the token
+// just emitted, and that proposal is settled by the target's own prediction AT position
+// `pred_pos + 1` — i.e. by the NEXT step, never this one. So `adjudicated_by_pred_pos` is printed on
+// every DRAFT line and the harness joins on that printed position rather than on an index;
+// `RoundTracker::after_step` refuses a pending proposal whose recorded position is not this step's.
+// A free run aligned on `[0:]` read a false 0/128 here before, and the fix was never to assume an
+// index.
+//
+// A proposal may BE the stop id (gate zero saw the restricted head propose it at dec8 step 0), and it
+// settles a round like any other id: §07.5's stop rule applies to tokens the TARGET emitted, in the
+// generation loop, and nothing in the side path is allowed to end a run.
+void mtp_after_step(MtpSide& m, const engine::WeightStore& store, const uint16_t* h_norm_row,
+                    int pred_pos, int pred_token) {
+    const auto a = m.track.after_step(pred_pos, pred_token);
+    if (a.alignment_broken) {
+        // Cannot happen without a bug in this file's own bookkeeping, and if it does happen the accept
+        // rate is meaningless rather than merely noisy, so the run aborts instead of printing a number.
+        throw std::runtime_error(
+            "MTP round alignment is broken: a proposal recorded for position " +
+            std::to_string(m.track.pending_pred_pos()) + " was handed the prediction of position " +
+            std::to_string(pred_pos) + ". Do not read an accept rate out of this run.");
+    }
+    if (a.adjudicated) {
+        m.adjudicated++;
+        if (a.accept) m.accepted++;
+        std::printf("MTPACCEPT settled_pos=%d proposal=%d target_pred=%d accept=%d\n", a.settled_pos,
+                    a.settled_proposal, pred_token, a.accept ? 1 : 0);
+    }
+    if (a.drop_lane) engine::mtpdraft::truncate_lane(m.st);
+    if (!a.draft) return;                    // kLoop skips the step after an accept: q advanced by 2
+
+    const std::string why = engine::mtpdraft::refusal(m.st);
+    if (!why.empty()) {
+        m.refused++;
+        std::printf("DRAFT-SKIP reason=%s would_adjudicate_at=%d\n", why.c_str(), pred_pos + 1);
+        return;
+    }
+    const engine::mtpdraft::Proposal p =
+        engine::mtpdraft::draft_round(store, m.w, m.st, h_norm_row, pred_token, pred_pos + 2);
+    m.track.pending(pred_pos + 1, p.token);
+    m.made++;
+    if (m.st.lanes_max > m.lanes_max) m.lanes_max = m.st.lanes_max;
+    std::printf("DRAFT round=%lld draft_pos=%d adjudicated_by_pred_pos=%d y_next=%d proposal=%d"
+                " top_logit=%.9g lanes=%d\n",
+                (long long)p.round, pred_pos + 2, pred_pos + 1, pred_token, p.token, p.top_logit,
+                p.nlanes);
+    std::fflush(stdout);
+}
+
+// The proposal the last round made and no later step settled. Counted and explained, never dropped: it
+// belongs in "proposals made" and not in the numerator, and a tally that cannot say where it ended
+// reads as a rate that is simply lower.
+void mtp_close_run(MtpSide& m) {
+    if (m.track.has_pending()) {
+        m.unadjudicated++;
+        std::printf("DRAFT-UNADJUDICATED adjudicated_by_pred_pos=%d proposal=%d"
+                    " reason=no_later_generation_step_in_this_run_or_turn\n",
+                    m.track.pending_pred_pos(), m.track.pending_proposal());
+        m.track.clear();
+    }
+}
+
+void mtp_census_line(const MtpSide& m, const char* mode, const char* sched) {
+    std::printf("MTPDRAFT on=1 sched=%s mode=%s block=%d+%d head=%d+%d per_round=%d"
+                " rounds=%lld adjudicated=%lld accepted=%lld refused=%lld unadjudicated=%lld"
+                " lanes_max=%d cap=%d tensors=15 block_bytes=%lld\n",
+                sched, mode,
+                engine::mtpdraft::kBlockCopies, engine::mtpdraft::kBlockLaunches,
+                engine::mtpdraft::kHeadLaunches, engine::mtpdraft::kHeadCopies,
+                engine::mtpdraft::kSubmissionsPerRound,
+                (long long)m.made, (long long)m.adjudicated, (long long)m.accepted,
+                (long long)m.refused, (long long)m.unadjudicated, m.lanes_max, m.st.cap,
+                m.w.bytes);
+    std::fflush(stdout);
+}
+
 void session_loop(const engine::WeightStore& store, engine::RequestState& st,
-                  engine::DecodeScratch& sc) {
+                  engine::DecodeScratch& sc, MtpSide* mtp) {
     std::printf("READY cap=%lld\n", (long long)st.cap);
     std::fflush(stdout);
     bool poisoned = false;
@@ -982,6 +1161,11 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
         words >> cmd;
         if (cmd.empty()) continue;
         if (cmd == "quit" || cmd == "bye") {
+            if (mtp) {
+                mtp_close_run(*mtp);
+                mtp_census_line(*mtp, "session",
+                                engine::mtpdraft::schedule_name(mtp->track.sched));
+            }
             std::printf("BYE\n");
             std::fflush(stdout);
             return;
@@ -990,6 +1174,13 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
             st.reset();
             st.sampled_token = -1;
             st.stopped = false;
+            if (mtp) {
+                // §08.4 fresh request, and the draft's own cache is fresh with it: the block's cache is
+                // per-request state like the target's KV, and a stale lane from the previous turn would
+                // earn real softmax weight in this turn's first draft.
+                engine::mtpdraft::reset(mtp->st);
+                mtp->track.clear();
+            }
             poisoned = false;
             std::printf("RESET prefix_len=0\n");
             std::fflush(stdout);
@@ -1031,17 +1222,25 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
                 int emitted = 0;
                 bool stop = false;
                 int cur = st.sampled_token;
+                int last_gen_pos = -1;      // GEN label of the last token this turn printed
                 while (emitted < budget) {
                     const int pos = st.prefix_len - 1;
                     std::printf("GEN %d %d\n", cur, pos);
                     std::fflush(stdout);
                     ++emitted;
+                    last_gen_pos = pos;
                     if (cur == engine::kStopToken) {   // §07.5, generation phase
                         stop = true;
                         break;
                     }
                     const engine::StepResult r = decode_step(store, st, sc, cur, nullptr);
                     cur = r.token;
+                    if (mtp) {
+                        // The step's row predicted position `prefix_len - 1`; `sc.norm` row 0 is the
+                        // final-norm row it was priced from, and it is still there (the tail only reads
+                        // it). Generation phase only, like §07.5's stop rule on the line above.
+                        mtp_after_step(*mtp, store, sc.norm, st.prefix_len - 1, cur);
+                    }
                 }
                 st.sampled_token = stop ? cur : -1;
                 // Stop path: `cur` was emitted but never stepped, so it stays pending and the next
@@ -1051,12 +1250,38 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
                 // was ever shown. Dropping it is the difference between a state that matches the
                 // caller's transcript and one holding a token the user never saw; the driver
                 // closes the assistant turn instead (`last_stop != "eos"` in engine/chat.py).
+                // The turn's last round may have left a proposal that no later step in THIS turn
+                // settles; printing that here (before `END`) attributes it to the turn that made it, so
+                // the harness's per-line tally and the engine's census agree. In a chat session a
+                // following turn's first token would settle it, and the reason text says exactly that
+                // rather than claiming the proposal is lost.
+                // The budget path stepped the last printed token, so `cur` is a real target sample that
+                // this turn never prints (the driver closes the assistant turn instead — see above). The
+                // draft may already have had a proposal settled by exactly that sample, and a tally that
+                // could not see it would read one settlement short of the engine's own census. Printing
+                // it is draft-only, so a flag-off session emits byte-for-byte what it always did, and
+                // `chat.py` treats an unrecognised line as a diagnostic (its TERMINAL filter), so the
+                // driver protocol is unchanged. `GEN` labels a token by `prefix_len - 1` at the moment it
+                // prints, one row behind the sample it shows, so this sample's label is one past the last
+                // printed one — which is the same key `mtp_after_step` filed the pending proposal under.
+                if (mtp) {
+                    if (!stop && emitted > 0)
+                        std::printf("LASTSAMPLE pos=%d token=%d\n", last_gen_pos + 1, cur);
+                    mtp_close_run(*mtp);
+                }
                 st.stopped = stop;
                 std::printf("END steps=%d stop=%d prefix_len=%d\n", emitted, stop ? 1 : 0,
                             st.prefix_len);
             } else if (cmd == "stats") {
                 std::printf("PREFIX p=%d sampled=%d stopped=%d\n", st.prefix_len,
                             st.sampled_token, st.stopped ? 1 : 0);
+                if (mtp) {
+                    // The census is the caller's per-turn read of the side computation; the per-turn
+                    // ACCEPT tally is not, and deliberately is not printed here: the harness joins the
+                    // printed positions itself, so that its join and this one are two implementations
+                    // that have to agree rather than one number reading its own output.
+                    mtp_census_line(*mtp, "session", engine::mtpdraft::schedule_name(mtp->track.sched));
+                }
             } else {
                 std::printf("ERROR unknown command '%s' (feed|gen|reset|stats|quit)\n",
                             cmd.c_str());
@@ -1081,6 +1306,7 @@ void print_usage(FILE* out) {
                  " [--attn-split-cap N]"
                  " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
                  " [--gdn-geom block|wf4|wf2|reg16]"
+                 " [--mtp-draft 0|1] [--mtp-sched loop|every] [--mtp-cap N]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -1407,6 +1633,37 @@ void print_usage(FILE* out) {
                  " gather over the tile, and its conv end condition belongs to one token-block while the"
                  " others are still reading the window). Read from the environment for the same reason as"
                  " `QWEN_CAST_FOLD`, and echoed as `COPYFOLD on=... plan=... folded=...`\n"
+                 "  --mtp-draft 0|1  §09's MTP draft block as a READ-ONLY SIDE COMPUTATION"
+                 " (`engine/mtp_draft.h`; `QWEN_MTP_DRAFT=0|1` does the same from the environment, and"
+                 " the flag outranks it). `0` is the DEFAULT and runs nothing: no allocation, no"
+                 " submission, no extra line of output, so an off run is the pre-MTP binary. `1` runs one"
+                 " draft round per generation step as the round schedule says — 13 kernel launches and 1"
+                 " D2D for the block, 1 `lm_head_full_xbf16` and 1 logits D2H for the proposal, 16"
+                 " submissions a round, all of it reading and writing only its own arena, cache and"
+                 " logits row. It therefore owes a byte-compare, not a band: `sampled.txt` and every"
+                 " `--state-fp` row must be identical with it on and off, and if they are not the draft is"
+                 " not a side computation. Prints `DRAFT round= draft_pos= adjudicated_by_pred_pos="
+                 " y_next= proposal= top_logit= lanes=` per round, `MTPACCEPT settled_pos= proposal="
+                 " target_pred= accept=` when a later step settles one, `DRAFT-SKIP`/`DRAFT-UNADJUDICATED"
+                 "` for rounds it could not run or could not settle, and one `MTPDRAFT` census line. It"
+                 " is NOT a verify body, an accept loop, or a rollback path: no candidate row is fed to"
+                 " the target, nothing is snapshotted, and the target keeps running plain greedy. Refused"
+                 " with --time-stages/--time-waves, which would charge the draft's submissions to"
+                 " whichever stage-clock segment preceded them\n"
+                 "  --mtp-sched loop|every  which round sequence --mtp-draft 1 walks. `loop` (the"
+                 " default) reproduces `speccheck/mtp.py`'s `greedy_mtp(k=1)` round geometry on a plain"
+                 " greedy stream — draft at q+1, next round at q+2 after an accept and q+1 after a"
+                 " reject, the rejected round's draft-cache lane truncated — which is the geometry the"
+                 " carried accept rate of 0.7329 was measured on (`prototype/mtp_gatezero/draft_survival.py"
+                 "`, whose `verify=\"steps\"` this is the device counterpart of). `every` drafts after"
+                 " every step, so its draft cache holds every position rather than the accepted rounds'"
+                 " — more context than the loop ever gives a draft, and the gap between the two numbers"
+                 " is that difference measured rather than assumed. Parsed or throws; refused if"
+                 " --mtp-draft is off\n"
+                 "  --mtp-cap N  lanes allocated for the draft block's own 1-layer KV cache (512 by"
+                 " default). The one-pass attention form refuses beyond `mtp_attn_max_lanes()`, and a"
+                 " round past the ceiling is counted as `DRAFT-SKIP reason=...` rather than served a"
+                 " shorter cache, because a silently shorter run reads as a lower accept rate\n"
                  "  --dump-proj-plan  print the projection plan one row-priced body would submit (PROJPLAN"
                  " plus one PROJJOB line per tensor) and exit WITHOUT loading the model or touching the GPU,"
                  " so a geometry claim can be checked while another agent holds the device lock\n"
@@ -2304,6 +2561,26 @@ int main(int argc, char** argv) {
         }
         engine::prepare_weight_adapters(store, sc);
 
+        // §09: the draft side computation, allocated only when it is on. `resolve()` is the block's own
+        // shape check against the shard — 15 tensors, rank and both dims stated per tensor — and it
+        // throws naming the first disagreement, which is the form AGENTS.md prescribes for a shape claim
+        // ("state the rank, and put the contract at the use site"). Nothing here touches `sc` or `st`.
+        std::unique_ptr<MtpSide> mtp;
+        if (o.mtp_draft) {
+            mtp = std::make_unique<MtpSide>();
+            mtp->w = engine::mtpdraft::resolve(store);
+            mtp->st = engine::mtpdraft::allocate_state(o.mtp_cap);
+            mtp->track =
+                engine::mtpdraft::RoundTracker(engine::mtpdraft::parse_schedule(o.mtp_sched));
+            // The launch census, stated as its own line rather than smuggled into `LAUNCH`:
+            // `planned_launch_counts()` is §07's bill and `gate.py` section (d) re-derives it in Python,
+            // so a bill that moved with a flag would make that cross-check a tautology — the `--attn-tile`
+            // trap of a gate judging a different plan than the engine ships. This line says what the DRAFT
+            // adds, per round, in the vocabulary `CASTFOLD`/`COPYFOLD` already use.
+            mtp_census_line(*mtp, o.session ? "session" : "run",
+                            engine::mtpdraft::schedule_name(mtp->track.sched));
+        }
+
         const std::string inv = st.check_invariants();
         if (!inv.empty()) {
             std::fprintf(stderr, "decode_run: fresh state violates §08.6: %s\n", inv.c_str());
@@ -2311,7 +2588,8 @@ int main(int argc, char** argv) {
         }
 
         if (o.session) {
-            session_loop(store, st, sc);
+            session_loop(store, st, sc, mtp.get());
+            if (mtp) engine::mtpdraft::free_state(mtp->st);
             engine::kernels::gemm_route_shutdown();
             engine::free_scratch(sc);
             engine::free_state(st);
@@ -2443,6 +2721,13 @@ int main(int argc, char** argv) {
             step_ms += wall_ms;
             step_records.push_back({step, token, r.token, r.top_logit});
             sampled = r.token;
+            if (mtp) {
+                // Generation phase only — this loop is the only place §07.5's stop rule lives, and the
+                // draft's rounds start from a decoded step, never from a prompt wave row (whose sample
+                // is discarded and must never arm a stop). `r.token` is this step's prediction at
+                // position `pos_before`, and `sc.norm` row 0 the row it was priced from.
+                mtp_after_step(*mtp, store, sc.norm, pos_before, r.token);
+            }
 
             const bool stop_match = r.token == engine::kStopToken;
             // §07.5 ends a FREE run, in this loop and nowhere else (see the prefill loop for the other
@@ -2481,6 +2766,14 @@ int main(int argc, char** argv) {
             fed++;
         }
         if (log) std::fclose(log);
+
+        // The side computation's own close: the last round's proposal, if the run ended before a later
+        // step could settle it, and the census line that states the denominator it is counting.
+        if (mtp) {
+            mtp_close_run(*mtp);
+            mtp_census_line(*mtp, o.feed.empty() ? "run" : "replay",
+                            engine::mtpdraft::schedule_name(mtp->track.sched));
+        }
 
         if (o.state_fp) {
             if (o.steps > 0) {
@@ -2555,6 +2848,7 @@ int main(int argc, char** argv) {
                     step_ms / (n > 0 ? n : 1), sampled,
                     result_prefix_len, run_stopped ? 1 : 0);
         std::fflush(stdout);
+        if (mtp) engine::mtpdraft::free_state(mtp->st);
         engine::kernels::gemm_route_shutdown();
         engine::free_scratch(sc);
         engine::free_state(st);

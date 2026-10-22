@@ -841,4 +841,154 @@ const char* fattn_qstage_name(FattnQStage s) {
     return s == FattnQStage::kUnstaged8 ? "unstaged8" : "stage";
 }
 
+// ---- §09.2: the draft block's own attention row -------------------------------------------------
+//
+// A transcription of `attn_core`'s fused, one-pass `full` path with ONE change: the appended lane's
+// slot is the dense append index instead of `slot_of(row_pos, cap, …) = pos % cap`, because the draft
+// block's cache is dense in drafted steps and sparse in absolute positions (`kernels.h:MtpAttnRow`
+// states why). Everything else is the shipped arithmetic, character for character, including the parts
+// that look accidental: the score dot's literal `for (t = 0; t < 8; ++t) if (t < nd)` trip and guard
+// (the `D3 LDS` note at the foot of `attn_decode_kernels.h` says the obvious spelling cost a
+// promote-alloca-to-LDS), the `bf(fb(dot)) * SCALE` rounding site, the tile-of-8 scoring with warp w
+// owning lane base+w, the max-then-sum-then-BF16-rounded-weight-then-P.V order of the `full` pass 2
+// (that round IS §05.5's reference form), `l = 1.0f` after it so `finish_head`'s epilogue does not
+// divide twice, and §05.6's `av * bf(fb(1/(1+exp(-g))))` with `av = bf(fb(acc))`. Bit identity is owed
+// to the source text's ASSOCIATION, not to the algebra (`engine/gdn_collapse_kernels.h`'s q̃ note), and
+// a CPU mirror cannot see a re-association, which is why the copy keeps the parentheses.
+//
+// `head_norm_rope` is the SHIPPED §05.2/§05.3 function, called exactly as `attn_core`'s fused branch
+// calls it, so the norm and the rope are not a copy at all.
+//
+// THE WITNESS FOR THE COPY is not in this binary and is not derived from it:
+// `prototype/mtp_draft`'s `xcheck` arm runs this arithmetic (as `mtp_attn_row_kernel` in
+// `prototype/mtp_draft/td_attn_tu.cpp`, its source) against the shipped `attn_core` over 10 lane
+// counts on the only geometry where the two addressings coincide — positions contiguous from 0 — and
+// requires bit-identity on BOTH outputs: `diff_aout=0 diff_gout=0` over 4,096,000 compared values,
+// recorded green in `prototype/mtp_draft/results.md` §4.
+//
+// One deliberate difference from that transcription: the rig's staged `qrope_out`/`krope_out`/`gate_out`
+// dumps are not stored here, because the engine has no reader for them. They were pure stores that no
+// value reads back — the self-lane's score comes from the staged `sk[]` in shared memory and its V from
+// `sv[]` — so the arithmetic of `aout`/`gout` and of the cache append is untouched.
+namespace {
+
+struct MtpRowArgs {
+    const hip_bfloat16 *qg, *kg, *vg, *qn, *kn;
+    hip_bfloat16 *kcache, *vcache, *aout, *gout;
+    int cap, nlanes, self_lane, pos;
+};
+
+__global__ void __launch_bounds__(THREADS)
+mtp_attn_row_kernel(MtpRowArgs a) {
+    __shared__ float sq[DH], sk[DH], sv[DH], zs[DH], red[MAXW];
+    __shared__ float sc[MAXSC];                       // MAXSC >= TILE; the one-pass row lives here
+    const int head = blockIdx.x;
+    const int kv = head / GQA;                        // kappa(i) = i/4, §05.5
+    const int d = threadIdx.x;
+    const int lane = threadIdx.x % warpSize, w = threadIdx.x / warpSize;
+    const int nw = blockDim.x / warpSize;
+    const float pos = (float)a.pos;                   // ABSOLUTE position: rope only
+    const int nrow = a.nlanes;                        // dense lane count, incl. this step's append
+
+    // §05.2 + §05.3 + the v stage, shipped `head_norm_rope`, fused-plan call shape.
+    head_norm_rope(a.qg + (size_t)head * (2 * DH), a.qn, pos, NEG_NONE, sq, zs, red, nw);
+    head_norm_rope(a.kg + (size_t)kv * DH, a.kn, pos, NEG_NONE, sk, zs, red, nw);
+    for (int i = d; i < DH; i += blockDim.x) sv[i] = bf(a.vg[(size_t)kv * DH + i]);
+    __syncthreads();
+
+    // §05.7's append, at the DENSE slot. `head % GQA == 0` is the same one-writer-per-kv-head guard
+    // `stage_head` uses.
+    if (head % GQA == 0) {
+        a.kcache[((size_t)kv * a.cap + a.self_lane) * DH + d] = fb(sk[d]);
+        a.vcache[((size_t)kv * a.cap + a.self_lane) * DH + d] = fb(sv[d]);
+    }
+
+    float qreg[8];
+    for (int t = 0; t < 8; ++t) qreg[t] = sq[lane * 8 + t];
+
+    const int nd = 8;                                 // all 8 BF16 of a lane's 512-byte read
+    const int tile = TILE;
+    float m = 0.f, l = 0.f, acc = 0.f;                // neutral seed, §07.3's note
+
+    // ---- pass 1: score tiles of `tile`, warp w scores lane base+w
+    int ns = 0;
+    for (int base = 0; base < nrow; base += tile) {
+        const int nt = std::min(tile, nrow - base);
+        __syncthreads();
+        if (w < nt) {
+            const int j = base + w;
+            float dot = 0.f;
+            if (j == a.self_lane) {                   // the appended lane comes from shared
+                for (int t = 0; t < 8; ++t) if (t < nd) dot += sq[lane * 8 + t] * sk[lane * 8 + t];
+            } else {
+                const hip_bfloat16* kr = a.kcache + ((size_t)kv * a.cap + (size_t)j) * DH;
+                uint4 u = *reinterpret_cast<const uint4*>(kr + lane * 8);
+                const hip_bfloat16* k = reinterpret_cast<const hip_bfloat16*>(&u);
+                for (int t = 0; t < 8; ++t) if (t < nd) dot += bf(k[t]) * qreg[t];
+            }
+            dot = warp_sum(dot);
+            if (lane == 0) sc[ns + w] = bf(fb(dot)) * SCALE;
+        }
+        ns += nt;
+        __syncthreads();
+    }
+    // ---- pass 2 (reference form): max, sum, BF16 weights, P.V. The weights were already normalised
+    // and rounded, so the epilogue must not divide again; hence l = 1 below.
+    for (int t = 0; t < ns; ++t) m = fmaxf(m, sc[t]);
+    for (int t = 0; t < ns; ++t) l += expf(sc[t] - m);
+    for (int t = 0; t < ns; ++t) {
+        const int j = t;
+        const float wt = bf(fb(expf(sc[t] - m) / l));
+        const float v = (j == a.self_lane)
+                            ? sv[d]
+                            : bf(a.vcache[((size_t)kv * a.cap + (size_t)j) * DH + d]);
+        acc += wt * v;
+    }
+    l = 1.0f;
+
+    // §05.6 epilogue, verbatim from finish_head().
+    const float av = bf(fb(acc / l));
+    a.aout[(size_t)head * DH + d] = fb(av);
+    const float g = bf(a.qg[(size_t)head * (2 * DH) + DH + d]);
+    a.gout[(size_t)head * DH + d] = fb(av * bf(fb(1.0f / (1.0f + expf(-g)))));
+}
+
+}  // namespace
+
+void mtp_attn_row(const MtpAttnRow& r) {
+    if (r.nlanes < 1)
+        throw std::runtime_error("mtp_attn_row: nlanes=" + std::to_string(r.nlanes) +
+                                 "; a draft step's cache holds at least the lane it just appended");
+    // The one-pass row stages its scores in MAXSC floats, exactly as `attn_core` does, and refuses
+    // anything wider for the same reason the tiled route refuses what it cannot stage: walking off the
+    // end of a shared array is a fault presented as a hang on this box (AGENTS.md, the device-fault-row).
+    if (r.nlanes > MAXSC)
+        throw std::runtime_error("mtp_attn_row: " + std::to_string(r.nlanes) +
+                                 " lanes exceeds the one-pass form's MAXSC=" + std::to_string(MAXSC) +
+                                 "; a draft cache longer than that needs the streaming route, which is a"
+                                 " decision about the draft cache's lifetime, not a store this launcher"
+                                 " may grow by accident");
+    if (r.self_lane < 0 || r.self_lane >= r.nlanes || r.self_lane >= r.cap)
+        throw std::runtime_error("mtp_attn_row: self_lane=" + std::to_string(r.self_lane) +
+                                 " is outside [0, min(nlanes, cap)) with nlanes=" +
+                                 std::to_string(r.nlanes) + " cap=" + std::to_string(r.cap));
+    if (r.qg == nullptr || r.kg == nullptr || r.vg == nullptr || r.qn == nullptr || r.kn == nullptr ||
+        r.kcache == nullptr || r.vcache == nullptr || r.aout == nullptr || r.gout == nullptr)
+        throw std::runtime_error("mtp_attn_row: a required pointer is null; a half-set launch plan is"
+                                  " a fault, not a no-op (see AGENTS.md's staged-plan row)");
+    MtpRowArgs a;
+    a.qg = (const hip_bfloat16*)r.qg;  a.kg = (const hip_bfloat16*)r.kg;
+    a.vg = (const hip_bfloat16*)r.vg;  a.qn = (const hip_bfloat16*)r.qn;
+    a.kn = (const hip_bfloat16*)r.kn;
+    a.kcache = (hip_bfloat16*)r.kcache; a.vcache = (hip_bfloat16*)r.vcache;
+    a.aout = (hip_bfloat16*)r.aout;     a.gout = (hip_bfloat16*)r.gout;
+    a.cap = r.cap; a.nlanes = r.nlanes; a.self_lane = r.self_lane; a.pos = r.pos;
+    mtp_attn_row_kernel<<<dim3(N_Q, 1, 1), THREADS>>>(a);
+    // Deliberately NOT recorded in `launchstats`: the families there are §07's per-BODY sites, and
+    // `gate.py` section (h) prices each family's expected count off that bill. The draft is not part of
+    // a body; its census is the `MTPDRAFT` line in `decode_run.cpp`, which states its own submissions.
+}
+
+int mtp_attn_max_lanes() { return MAXSC; }
+
 }  // namespace engine::kernels

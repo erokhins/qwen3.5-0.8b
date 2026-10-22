@@ -1166,6 +1166,18 @@ void submit_token_body(const WeightStore& weights, RequestState& st, DecodeScrat
 }
 
 // ---- the tail -------------------------------------------------------------------------------
+// §03.4's greedy token rule, spelled once. Strict `>` from index 0, so the first (lowest) id holds a
+// tie. The fused-argmax kernel that exists in `prototype/lm_head_gemv` resolves ties the other way,
+// which is why the engine computes the row and takes the argmax here (results.md, "the last 2 KB").
+int argmax_greedy(const float* logits, int n) {
+    if (n <= 0) throw std::runtime_error("argmax_greedy: no logits to read");
+    int best = 0;
+    for (int i = 1; i < n; ++i) {
+        if (logits[i] > logits[best]) best = i;   // strict: first (lowest) id wins a tie
+    }
+    return best;
+}
+
 // One `lm_head_full`, ONE blocking D2H (the sync of the token), and §03.4's argmax. Reads the row
 // `submit_token_body` left in `sc.norm`; see the declaration in `decode_step.h` for why that
 // ordering is a contract rather than an accident.
@@ -1207,10 +1219,9 @@ StepResult finish_token(const WeightStore& weights, RequestState& st, DecodeScra
     std::vector<float> host_logits(kVocab);
     ENGINE_CK(hipMemcpy(host_logits.data(), sc.logits, kVocab * sizeof(float),
                         hipMemcpyDeviceToHost));
-    int best = 0;
-    for (int i = 1; i < kVocab; ++i) {
-        if (host_logits[i] > host_logits[best]) best = i;   // strict: first (lowest) id wins a tie
-    }
+    // §03.4's tie rule, on the host, in the one place it is spelled (`argmax_greedy`): a strict `>`
+    // scan, so the LOWEST id wins a tie. The MTP draft proposal goes through the same function.
+    const int best = argmax_greedy(host_logits.data(), kVocab);
     const float host_logit = host_logits[best];   // read before the vector is moved out
     if (logits) *logits = std::move(host_logits);
 

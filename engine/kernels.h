@@ -933,4 +933,43 @@ void cast_f32_to_bf16(const float* src, uint16_t* dst, int n);
 // rather than a throw.
 void embed_gather_rows(const uint16_t* table, const int* ids, uint16_t* out, int rows);
 
+// ---- §09.2: the MTP draft block's OWN attention row --------------------------------------------
+//
+// One query row over the draft block's own 1-layer KV cache, at an ABSOLUTE rope position that is
+// DECOUPLED from the lane the k/v go to. That decoupling is the whole reason this is a separate entry
+// point and not a call to `attn_decode_layer`: `attn_core` couples the two (`row_pos = a.pos + qrow`
+// feeds both `head_norm_rope` and `slot_of(row_pos, cap, …) = pos % cap`), which is right for the
+// target — every position writes a lane, so the dense lane index IS the position — and wrong for the
+// draft block, whose cache holds one lane per DRAFTED step while the target consumes k+1 per round
+// (`speccheck/mtp.py`'s `greedy_mtp` drafts at q+1, q+3, q+5 … at k=1). The gaps cannot be filled: those
+// positions were never drafted and a zero lane earns real softmax weight.
+//
+// `engine/kernels_attn.cpp` defines it as a transcription of `attn_core`'s fused one-pass `full` path
+// with that ONE change, and names the witness that licenses the copy (`prototype/mtp_draft`'s `xcheck`
+// arm: bit-identity with `attn_core` on the only geometry where the two addressings coincide). It is
+// declared HERE rather than included from the op header because `attn_decode_kernels.h` defines its
+// `__global__`s with external linkage and `engine/kernels_attn.cpp` already includes it; a second TU
+// including it would be a duplicate-symbol link error, which is why this TU is where the kernel lives.
+struct MtpAttnRow {
+    const uint16_t* qg = nullptr;    // [8 * 2 * 256] this step's q_proj row, [q 256 | gate 256] per head
+    const uint16_t* kg = nullptr;    // [2 * 256]
+    const uint16_t* vg = nullptr;    // [2 * 256]
+    const uint16_t* qn = nullptr;    // [256] q_norm weight
+    const uint16_t* kn = nullptr;    // [256] k_norm weight
+    uint16_t* kcache = nullptr;      // [2 * cap * 256] plane-major, the target's own layout
+    uint16_t* vcache = nullptr;
+    uint16_t* aout = nullptr;        // [8 * 256] pre-gate attention out (§05.5)
+    uint16_t* gout = nullptr;        // [8 * 256] §05.6 gated out — o_proj's operand
+    int cap = 0;                     // lane stride of the cache
+    int nlanes = 0;                  // valid lanes AFTER this step's append
+    int self_lane = 0;               // the DENSE slot this step's k/v go to
+    int pos = 0;                     // ABSOLUTE position, for rope only
+};
+void mtp_attn_row(const MtpAttnRow& a);
+
+// The longest draft cache the one-pass form can serve (`MAXSC`, that op's constant, read not retyped).
+// Past it the streaming/split route would be needed, which is a decision about the draft cache's
+// lifetime and not a store the launcher may grow by accident.
+int mtp_attn_max_lanes();
+
 }  // namespace engine::kernels
