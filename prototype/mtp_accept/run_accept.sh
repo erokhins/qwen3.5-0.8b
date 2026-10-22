@@ -32,6 +32,9 @@
 #   RUN_GATE=1 prototype/mtp_accept/run_accept.sh           # with the engine gate, off and on
 #   STAGES=corpus SCHED=every prototype/mtp_accept/run_accept.sh    # one split piece
 #
+# `RUN_GATE=1` and `STAGES=...,gate` are the same request two ways: the flag appends the stage, naming the
+# stage works on its own and needs no flag.
+#
 # Stages: build, gate, identity, corpus, witness, tally. `STAGES` is a comma list; the default is
 # `build,identity,corpus,witness` (the gate is opt-in because of its wall, the tally always runs with
 # the corpus pass). NO TIMING IS TAKEN from any of it: the printed walls are the harness's own minutes,
@@ -62,6 +65,20 @@ fi
 mkdir -p "$OUT"
 
 has_stage() { case ",$STAGES," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+
+# `RUN_GATE=1` is the documented way to ask for the engine gate (USAGE above), and until this line existed
+# it was a flag accepted by silence: `gate` is not in the default stage list, so `RUN_GATE=1` read the
+# variable, ignored it, and printed the ordinary stage list as though nothing had been requested
+# (`prototype/mtp_accept/ACCEPT-RESULT.md` — the third flag-of-that-class in one session, after
+# `price_block.py --evidence` and a `run_locked.sh` that wrote no evidence). It now ADDS the stage, so both
+# spellings work and an unrecognised value is an error rather than a second silent path.
+case "$RUN_GATE" in
+    0|1) ;;
+    *) echo "RUN_GATE must be 0 or 1, got '$RUN_GATE'" >&2; exit 2 ;;
+esac
+if [ "$RUN_GATE" = 1 ] && ! has_stage gate; then
+    STAGES="$STAGES,gate"
+fi
 
 T0=$(date +%s)
 stage_start() { STAGE_T0=$(date +%s); printf '\n=== %s ===\n' "$1"; }

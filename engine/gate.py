@@ -104,7 +104,11 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       half is what turns "P4's deficits were bit-identical" into "batching cost zero numerics"; the
       first half is what makes the second half mean anything, because a wave that never batched would
       print bit-identical outputs too. `--selftest` injects each half alone (`--break-wave`,
-      `--break-ab-logits`) and requires the other to stay green.
+      `--break-ab-logits`) and requires the other to stay green. When the §09 draft side computation is
+      on (`QWEN_MTP_DRAFT=1`) its declared per-round bill (`mtp_draft_plan()`, cross-checked against the
+      engine's own `MTPDRAFT` census line) joins the expectation, so flag-on is judged against a declared
+      plan rather than against a bill it cannot satisfy by construction
+      (`prototype/mtp_accept/ACCEPT-RESULT.md`; `selftest_mtp_census` is its wrong-count witness).
 
   (i) THE PREFILL ROWS — every pinned row of the prompt wave against the engine's own per-row dump
       (`logits<i>.bin` ↔ row *i*, §06.5's pairing), judged by the floors section (b) already uses and by
@@ -4119,6 +4123,152 @@ def launch_plan_verdicts(want: dict, got: dict) -> list[tuple[str, bool, str]]:
     return out
 
 
+# ---- the draft's own launch plan (§09, `QWEN_MTP_DRAFT`) -------------------------------------------
+#
+# WHY A SECOND PLAN TABLE when `launch_plan()` already bills a token. The draft is a SIDE computation: it
+# adds launches to a run without adding a token, so §07's per-token bill cannot describe it, and
+# `planned_launch_counts()` — the target's bill, which deliberately does NOT move with flags
+# (`engine/decode_step.h`, so that section (d) stays a cross-check rather than a tautology) — does not
+# carry it either. Section (h) is where the two meet: the observed counters include the draft's launches
+# whatever `QWEN_MTP_DRAFT` says, so the EXPECTATION has to account for them too, or flag-on is red by
+# construction (`prototype/mtp_accept/ACCEPT-RESULT.md`: 15 failures on `dec8`, +25 per counted family at
+# 5 rounds, every one of them this missing row rather than an engine defect).
+#
+# Every number below is a count of §09's declared block order as spelled in `engine/mtp_draft.h`'s
+# numbered list and called in `engine/mtp_draft.cpp`, re-counted here in Python — never read off a run. A
+# gate that copies its expectation from the counters it judges is the defect this file keeps recording
+# (AGENTS.md's `--attn-tile` row, its `--proj-plan` trap, its "a check whose reference side is derived from
+# the thing under test" row). What a run contributes is the ROUND COUNT, and even that comes from the
+# engine's declared census line rather than from the launch counters, with its own witness below.
+def mtp_draft_plan() -> dict:
+    """The launches ONE draft round adds to each family `engine/launch_stats.h` counts.
+
+    glue        5 — the block's five norm sites: `pre_fc_norm_embedding` and `pre_fc_norm_hidden` (§09.1's
+                  `e' ‖ h'`; TWO launches because `glue_add_norm` deliberately does not row-index its
+                  weight, so one launch would feed one weight to both halves), `input_layernorm`,
+                  `post_attention_layernorm` (§03.2's add+norm pairing, residual `u` + attn output), and
+                  `mtp.norm` (whose output is `x_d`, the head's operand).
+    proj        5 — `mtp.fc` [1024,2048], then `q_proj`, `k_proj`, `v_proj` (§09.1's own attention) and
+                  `o_proj` [1024,2048].
+    mlp_gateup  1 — SwiGLU gate+up in one launch, the block's own copy of §03.3's first half.
+    mlp_down    1 — `down_proj` [1024,3584].
+
+    12 counted launches per round, every one of them ONE ROW wide (`record(1)` at every launcher, because
+    the block prices a single position). That is what makes `rows_total` move by exactly the same amount as
+    `calls` and `calls_batched` not move at all — and what breaks `launch_work_rows()`'s grouped-tensor
+    divisibility until it is told about them.
+    """
+    return {"glue": 5, "proj": 5, "mlp_gateup": 1, "mlp_down": 1}
+
+
+# The submissions §09 declares that have NO launcher family, so they are in the engine's census arithmetic
+# and in no counter section (h) reads. Constants, named, because the point of the arithmetic below is that
+# the declared `block=`/`head=` totals must equal Python's counted bill PLUS exactly these: a fourth
+# uncounted submission — a widening, a second D2H, a fourth norm — makes that equality fail and names
+# itself, instead of arriving as an unexplained +1 on some family.
+MTP_DRAFT_UNCOUNTED = {
+    "block_attn_site": 1,   # `mtp_attn_row`: a site with no counter, by `engine/kernels_attn.cpp`'s note
+    "head_lm": 1,           # `lm_head_full_xbf16`: family `other`, which has no launcher counter
+}
+MTP_DRAFT_COPIES = {"block_d2d": 1, "head_d2h": 1}   # E[y_next] upload, and the one blocking logits read
+
+
+def mtp_plan_verdicts(echo: dict, draft_lines: int,
+                      bill: dict | None = None) -> list[tuple[str, bool, str]]:
+    """Does the run's declared `MTPDRAFT` census agree with §09 as Python counts it?
+
+    `echo` is the parsed `MTPDRAFT` line (`block="1+13" head="1+1" per_round=16 rounds=5 …`) and
+    `draft_lines` the number of `DRAFT round=` lines the same stdout carried. Same extraction reason as
+    `launch_plan_verdicts`: section (h) prints these verdicts and nothing else, so `--selftest` aims at
+    the comparison the shipping path runs instead of at a second spelling of it.
+
+    The last row is the one that keeps the round count honest, since the round count is the one input that
+    comes from the run rather than from the plan: the census field and the per-round print are two
+    different call sites (`mtp_census_line`'s `made` counter and the `DRAFT` line `mtp_after_step` prints
+    after each `made++`), so a round count that under-reported — and thereby shrank the expectation to
+    whatever the engine happened to count — is caught by the second one. It is not the launch counters,
+    which is the point.
+    """
+    want = mtp_draft_plan() if bill is None else bill
+    out: list[tuple[str, bool, str]] = []
+
+    def pair(field: str) -> tuple[int, int] | None:
+        a, plus, b = str(echo.get(field, "")).partition("+")
+        if not plus:
+            return None
+        try:
+            return int(a), int(b)
+        except ValueError:
+            return None
+
+    block, head = pair("block"), pair("head")
+    try:
+        per_round = int(echo.get("per_round", -1))
+        rounds = int(echo.get("rounds", -1))
+    except ValueError:
+        per_round, rounds = -1, -1
+    if block is None or head is None or per_round < 0 or rounds < 0:
+        return [("draft census line is parseable", False,
+                 f"MTPDRAFT printed {echo!r}: `block`/`head` must read `copies+launches` and "
+                 "`per_round`/`rounds` must be integers. Without them the draft's share of the launch "
+                 "census is undeclared, and section (h) cannot bill a run for it")]
+    counted = sum(want.values())
+    out.append(("draft block launches match §09", block[1] == counted + MTP_DRAFT_UNCOUNTED["block_attn_site"],
+                f"declared block={block[0]}+{block[1]} against Python's §09 count: {counted} counted by "
+                f"launch_stats + {MTP_DRAFT_UNCOUNTED['block_attn_site']} with no family "
+                f"(= {counted + MTP_DRAFT_UNCOUNTED['block_attn_site']}). A block submission added or "
+                "dropped on one side of the C++/Python border and not the other"))
+    out.append(("draft block copies match §09",
+                block[0] == MTP_DRAFT_COPIES["block_d2d"],
+                f"declared {block[0]} vs §09.1's one E[y_next] D2D "
+                f"({MTP_DRAFT_COPIES['block_d2d']}); a copy is not a launch and must not join the launch "
+                "bill"))
+    out.append(("draft head matches §09", head == (MTP_DRAFT_COPIES["head_d2h"], MTP_DRAFT_UNCOUNTED["head_lm"]),
+                f"declared head={head[0]}+{head[1]} vs §09's {MTP_DRAFT_COPIES['head_d2h']} lm_head pass "
+                f"+ {MTP_DRAFT_UNCOUNTED['head_lm']} blocking vocabulary D2H"))
+    out.append(("draft per_round is its own parts", per_round == sum(block) + sum(head),
+                f"per_round={per_round} vs block+head={sum(block) + sum(head)}"))
+    out.append(("draft rounds witnessed by the per-round lines", rounds == draft_lines,
+                f"census says rounds={rounds}, the run printed {draft_lines} `DRAFT round=` line(s)."
+                " These are two call sites in `engine/decode_run.cpp`; the round count is the ONE input "
+                "this section takes from the run rather than from §09, so it needs a witness that is not "
+                "the launch counters it sizes"))
+    return out
+
+
+def mtp_draft_rounds(run: dict) -> int:
+    """The declared round count of one side's run, 0 when the side printed no `MTPDRAFT` line (flag off).
+
+    A malformed field returns 0 and so prices the draft at nothing — which would be a silent shrinking of
+    the expectation if it were not for `mtp_plan_verdicts`, which section (h) runs first and which goes
+    red on exactly that line.
+    """
+    try:
+        return int((run.get("mtpdraft") or {}).get("rounds", 0))
+    except ValueError:
+        return 0
+
+
+def mtp_draft_calls(run: dict, bill: dict | None = None) -> int:
+    """The draft's whole share of the counted-launch census for one run: `rounds × per-round bill`."""
+    return mtp_draft_rounds(run) * sum((mtp_draft_plan() if bill is None else bill).values())
+
+
+def wave_census_verdicts(want: dict, got: dict, why: str) -> list[tuple[str, bool, str]]:
+    """One verdict per family: a run's observed `LAUNCHSTAT` counters against `wave_expect()`'s derived
+    bill. Extracted from section (h) for the same reason `launch_plan_verdicts` exists — the selftest must
+    inject into the comparison the shipping path runs, not into a second copy of it that can agree with
+    itself while the shipped one goes untested.
+
+    Exact dict equality per family (`calls`/`calls_batched`/`rows_total`/`rows_max` together), so a
+    regression that keeps the launch COUNT but moves the WIDTH is caught by the same line, and the detail
+    names the family it got wrong rather than printing a whole table.
+    """
+    return [(f"{fam} launches match the wave arithmetic", got.get(fam) == want[fam],
+             f"observed {got.get(fam)} vs §07's plan {why}: {want[fam]}")
+            for fam in sorted(want)]
+
+
 def selftest_launch_bill() -> list[str]:
     """Section (d)'s teeth, in both directions, on the CPU — no engine, no device.
 
@@ -4170,9 +4320,134 @@ def selftest_launch_bill() -> list[str]:
     return bad
 
 
+def selftest_mtp_census() -> list[str]:
+    """Section (h)'s DRAFT census, with teeth, on the CPU — no engine, no device.
+
+    The must-catch set is DERIVED from what the row is — a declared per-round bill times a declared round
+    count — not hand-listed. The ways that can be wrong are then: a wrong declared count per family; a
+    launch on the device that the plan does not declare; a round count that does not match the rounds the
+    run printed; a declared block total that no longer equals Python's §09 count plus the uncounted sites;
+    and an unparseable census line. Each is injected at `wave_census_verdicts` / `mtp_plan_verdicts`, the
+    functions section (h) itself runs, so the witness cannot drift from the shipping path.
+
+    The must-not-catch set falls out of the same arithmetic and is asserted too: injecting `glue` must not
+    redden `proj`, and a flag-off run must reproduce the pre-draft bill EXACTLY — that last case is what
+    makes "the default path is untouched" a checked claim rather than an unfailed one.
+
+    The observed side is spelled out by hand for this shape (one prompt wave + `steps` one-row bodies),
+    deliberately NOT by calling `wave_expect`, because a check whose reference side is derived from the
+    thing under test cannot adjudicate it: the clean case is then a cross-check of two spellings, and it
+    reproduces the §07 plan numbers the main agent measured red on `dec8` (441 glue / 498 proj / 216+216
+    MLP) before any draft term was added.
+    """
+    bad: list[str] = []
+    counts = {"glue": 49, "proj": 114, "mlp_gateup": 24, "mlp_down": 24, "attn": 6}
+    one_row = {"proj": 48}
+    prompt_len, steps, rows, round_n = 46, 8, 512, 5
+    plan = mtp_draft_plan()
+
+    # The literal values `engine/mtp_draft.h`'s constants make the engine print today, quoted from
+    # `prototype/mtp_accept/ACCEPT-RESULT.md` rather than computed from `plan`, so that a change to
+    # Python's count of §09 without the matching C++ change (or the reverse) fails HERE instead of being
+    # absorbed silently on both sides.
+    clean_echo = {"block": "1+13", "head": "1+1", "per_round": "16", "rounds": str(round_n)}
+
+    def observed(rounds: int, bill: dict) -> dict:
+        out = {}
+        for fam, per_wide in counts.items():
+            per_step = one_row.get(fam, per_wide)
+            extra = rounds * bill.get(fam, 0)
+            out[fam] = {"calls": per_wide + per_step * steps + extra,
+                        "calls_batched": per_wide,
+                        "rows_total": per_wide * prompt_len + per_step * steps + extra,
+                        "rows_max": prompt_len}
+        return out
+
+    def census_failing(want: dict, got: dict) -> list[str]:
+        return [name for name, ok, _ in wave_census_verdicts(want, got, "(selftest)") if not ok]
+
+    def plan_failing(echo: dict, lines: int, bill: dict | None = None) -> list[str]:
+        return [name for name, ok, _ in mtp_plan_verdicts(echo, lines, bill) if not ok]
+
+    def case(name: str, hits: list[str], must: list[str]) -> None:
+        ok = sorted(hits) == sorted(must)
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name} — reddened by {hits or 'nothing'}"
+              + ("" if ok else f", wanted {must}"))
+        if not ok:
+            bad.append(f"draft-census selftest: {name} reddened {hits or 'nothing'}, wanted {must}")
+
+    clean = wave_expect(counts, prompt_len, steps, rows, one_row, draft_rounds=round_n)
+    clean_names = {f"{f} launches match the wave arithmetic" for f in counts}
+    case("a run that submits exactly what the plan declares is green",
+         census_failing(clean, observed(round_n, plan)), [])
+    case("a WRONG DECLARED count (glue billed at 6 per round, not 5) goes red at glue alone",
+         census_failing(wave_expect(counts, prompt_len, steps, rows, one_row,
+                                    draft_rounds=round_n, draft_bill={**plan, "glue": 6}),
+                        observed(round_n, plan)),
+         ["glue launches match the wave arithmetic"])
+    case("a launch the plan does not declare (a block widening re-added: glue +1 per round) "
+         "goes red at glue alone",
+         census_failing(clean, observed(round_n, {**plan, "glue": plan["glue"] + 1})),
+         ["glue launches match the wave arithmetic"])
+    case("a lost projection launch goes red at proj alone",
+         census_failing(clean, observed(round_n, {**plan, "proj": plan["proj"] - 1})),
+         ["proj launches match the wave arithmetic"])
+    # Flag off: the draft term must be exactly nothing, against both the no-parameter spelling of the
+    # derivation and the hand-spelled counters of the same shape.
+    off = wave_expect(counts, prompt_len, steps, rows, one_row, draft_rounds=0)
+    off_identity = off == wave_expect(counts, prompt_len, steps, rows, one_row) == observed(0, plan)
+    print(f"  [{'PASS' if off_identity else 'FAIL'}] flag off (no rounds) reproduces the pre-draft bill "
+          f"exactly (glue={off['glue']['calls']}, proj={off['proj']['calls']})")
+    if not off_identity:
+        bad.append("draft-census selftest: draft_rounds=0 does not reproduce the pre-draft bill")
+    # The derivation is not allowed to be fiction: at this shape the flag-ON bill must come out as the four
+    # numbers the main agent actually measured red on `dec8` (`ACCEPT-RESULT.md`: glue 466, proj 523,
+    # mlp_down/mlp_gateup 221 each, against §07's 441/498/216/216 at 5 declared rounds). Quoting a real
+    # run's numbers as a case is the opposite of copying them as the expectation — the expectation is
+    # §09's block structure, and this row is what notices if that structure stopped describing the engine.
+    on = wave_expect(counts, prompt_len, steps, rows, one_row, draft_rounds=round_n)
+    measured = {"glue": 466, "proj": 523, "mlp_gateup": 221, "mlp_down": 221}
+    drift = {f: (on[f]["calls"], v) for f, v in measured.items() if on[f]["calls"] != v}
+    derived = ", ".join(f"{f}={on[f]['calls']}" for f in measured)
+    print(f"  [{'PASS' if not drift else 'FAIL'}] the derived flag-on bill reproduces the four numbers "
+          f"measured on `dec8` ({derived})" + ("" if not drift else f" — drifted: {drift}"))
+    if drift:
+        bad.append(f"draft-census selftest: derived flag-on bill drifts from the measured dec8 census: {drift}")
+
+    case("the declared plan as the engine prints it is accepted", plan_failing(clean_echo, round_n), [])
+    case("a block that declares a 14th launch, uncounted by §09's Python row",
+         plan_failing({**clean_echo, "block": "1+14"}, round_n),
+         ["draft block launches match §09", "draft per_round is its own parts"])
+    case("a round count that under-reports (census 4, five per-round lines)",
+         plan_failing({**clean_echo, "rounds": "4"}, round_n),
+         ["draft rounds witnessed by the per-round lines"])
+    case("an unparseable census line refuses to price the draft at nothing",
+         plan_failing({"block": "1", "head": "1+1", "per_round": "16", "rounds": "5"}, 5),
+         ["draft census line is parseable"])
+    case("a declared bill that disagrees with the declared block total names itself",
+         plan_failing(clean_echo, round_n, {**plan, "glue": 6}),
+         ["draft block launches match §09"])
+
+    # The grouped-tensor fold's half of the 15 failures: the draft's width-1 sites are not body members,
+    # so they must come out of the divisibility test — and the OLD spelling must be shown to break, or the
+    # new one is witness to nothing.
+    got = observed(round_n, plan)
+    fold_new = launch_work_rows(got, "proj", counts, one_row, draft_rounds=round_n)
+    fold_old = launch_work_rows(got, "proj", counts, one_row)
+    want_rows = launch_work_rows(observed(0, plan), "proj", counts, one_row)
+    ok = fold_new is not None and fold_old is None and want_rows is not None \
+        and fold_new == want_rows + round_n * plan["proj"]
+    print(f"  [{'PASS' if ok else 'FAIL'}] the grouped-tensor fold survives the draft's width-1 sites "
+          f"(tensor-rows {fold_new} = {want_rows} + {round_n * plan['proj']} draft rows; the spelling "
+          f"that ignores them reads {fold_old})")
+    if not ok:
+        bad.append("draft-census selftest: launch_work_rows does not survive the draft's launches")
+    return bad
+
+
 def parse_run(text: str) -> dict:
     out = {"steps": [], "state": {}, "launch": {}, "launchstat": {}, "prefill": {},
-           "result": {}, "statefp": []}
+           "result": {}, "statefp": [], "mtpdraft": {}, "draft_lines": 0}
     for line in text.splitlines():
         if line.startswith("STEP "):
             out["steps"].append(dict(re.findall(r"(\w+)=([^\s]+)", line)))
@@ -4191,6 +4466,19 @@ def parse_run(text: str) -> dict:
             out["launchstat"][family] = {k: int(v) for k, v in d.items()}
         elif line.startswith("PREFILL "):
             out["prefill"] = dict(re.findall(r"(\w+)=([^\s]+)", line))
+        elif line.startswith("MTPDRAFT "):
+            # The §09 side computation's declared census (`engine/decode_run.cpp:mtp_census_line`). Its
+            # `block=`/`head=`/`per_round=` fields are the DECLARED draft plan, which is what section (h)
+            # bills a flag-on run against; `rounds=` is the one input taken from the run, and the
+            # `draft_lines` counter below is its witness. Separate key for the standing reason `LAUNCH `
+            # and `LAUNCHSTAT `, and `STATE` and `STATEFP`, are separate keys: a plan line and an
+            # observation line must not be readable as each other.
+            out["mtpdraft"] = dict(re.findall(r"(\w+)=([^\s]+)", line))
+        elif line.startswith("DRAFT round="):
+            # One line per round actually submitted (`mtp_after_step`, right after `made++`). Matched on
+            # `DRAFT round=` so the `DRAFT-SKIP` and `DRAFT-UNADJUDICATED` lines — different events, and a
+            # skipped round submits nothing — cannot join the count.
+            out["draft_lines"] += 1
         elif line.startswith("GEMM "):
             # The handle line: which GEMM a wide body ran, echoed by `decode_run` when `--gemm` was
             # named. NOT the route assertion — its `route=` field names the library ("route=hipblas
@@ -4640,7 +4928,8 @@ def wave_row_sizes(prompt_len: int, wave_rows: int) -> list:
 
 
 def wave_expect(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int,
-                one_row: dict | None = None) -> dict:
+                one_row: dict | None = None, draft_rounds: int = 0,
+                draft_bill: dict | None = None) -> dict:
     """The counters a run of this shape MUST print, family by family, derived rather than remembered.
 
     `counts` is the per-body launch bill for a body of MORE THAN ONE ROW (`launch_plan_split()` —
@@ -4670,23 +4959,36 @@ def wave_expect(counts: dict, prompt_len: int, decode_steps: int, wave_rows: int
     which is why the decode steps join the wave sizes below. `rows_total` is no longer
     independent of `wave_rows` for a family whose bill moves with width — see `launch_work_rows()`,
     which restates it in the plan-invariant unit for the "not less work" comparison.
+
+    `draft_rounds` is the §09 side computation's DECLARED round count (`mtp_draft_rounds`), and it bills
+    `draft_bill` per round (default `mtp_draft_plan()`) on top of the target's own body bill: 5 glue, 5
+    proj and one of each MLP half per round, every one of them one row wide. That is why `calls_batched`
+    does not move, why `rows_total` moves by exactly what `calls` does, and why `rows_max` cannot move: a
+    width-1 site is never the widest thing in a run that has a prompt at all. Zero rounds — no `MTPDRAFT`
+    line, which is the default — adds nothing whatever, which is the flag-off path staying arithmetically
+    identical to the version of this function that had no such parameter (`selftest_mtp_census` is the
+    case that witnesses it, so "the default path is unchanged" is a checked claim and not a hope).
     """
     sizes = wave_row_sizes(prompt_len, wave_rows) + [1] * int(decode_steps)
+    draft = (mtp_draft_plan() if draft_bill is None else draft_bill) if draft_rounds else {}
     out = {}
     for family, per_body in counts.items():
         per_one_row = (one_row or {}).get(family, per_body)
+        extra = int(draft_rounds) * draft.get(family, 0)
         out[family] = {
-            "calls": sum(per_one_row if s == 1 else per_body for s in sizes),
+            "calls": sum(per_one_row if s == 1 else per_body for s in sizes) + extra,
             "calls_batched": per_body * sum(1 for s in sizes if s > 1),
             # A one-row launch records a width of 1 (`engine/launch_stats.h` counts SITES and the width
             # each covered), so a one-row body contributes its launch count, not launch count × rows.
-            "rows_total": sum(per_one_row if s == 1 else per_body * s for s in sizes),
+            # A draft launch is one-row for the same reason, so `extra` enters here unchanged too.
+            "rows_total": sum(per_one_row if s == 1 else per_body * s for s in sizes) + extra,
             "rows_max": max(sizes) if sizes else 0,
         }
     return out
 
 
-def launch_work_rows(got: dict, family: str, counts: dict, one_row: dict | None) -> int | None:
+def launch_work_rows(got: dict, family: str, counts: dict, one_row: dict | None,
+                     draft_rounds: int = 0, draft_bill: dict | None = None) -> int | None:
     """Observed launch counters for one family, restated as TENSOR-rows — the plan-invariant work unit.
 
     A launcher reports sites and the token width each covered, so `rows_total` measures work only while
@@ -4701,6 +5003,12 @@ def launch_work_rows(got: dict, family: str, counts: dict, one_row: dict | None)
 
     Returns None when the side printed no counters, or when its one-row launch count is not a whole
     number of one-row bodies — which is itself a failure the caller prints, not an arithmetic to hide.
+
+    The draft's launches come OUT of that divisibility test, and out of nothing else: they are width-1
+    sites that belong to no body, so leaving them in makes `one_row_launches % per_one` nonzero at any
+    round count that is not a multiple of the per-body bill — which is exactly how 5 draft rounds on
+    `dec8` produced two extra failures of the "covers the same rows" check. They stay in `rows`, because a
+    draft launch really is one tensor-row of work and that is the unit being compared.
     """
     counters = got.get(family) or {}
     if not counters:
@@ -4712,7 +5020,8 @@ def launch_work_rows(got: dict, family: str, counts: dict, one_row: dict | None)
         return None
     if per_wide == per_one:
         return rows
-    one_row_launches = counters.get("calls", 0) - counters.get("calls_batched", 0)
+    draft = int(draft_rounds) * ((mtp_draft_plan() if draft_bill is None else draft_bill).get(family, 0))
+    one_row_launches = counters.get("calls", 0) - counters.get("calls_batched", 0) - draft
     if one_row_launches % per_one:
         return None
     return rows + (per_wide - per_one) * (one_row_launches // per_one)
@@ -5184,20 +5493,33 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
               f"PREFILL wave_rows={echoed}, the command asked"
               f" {side['requested_wave_rows']}")
 
+    # The draft's DECLARED plan first, before anything is billed with it. `QWEN_MTP_DRAFT` is an environment
+    # flag, so every side of this A/B inherits it, and each side carries its own census line; with the flag
+    # off there is no line and nothing here changes. The verdicts are the cross-check that keeps the C++
+    # block structure and Python's count of it from drifting apart in silence (AGENTS.md's "one geometry
+    # fact in two headers" row, one language over), and they run BEFORE the census because a mis-declared
+    # plan would otherwise show up as an unexplained per-family delta.
+    for label, side in judged:
+        echo = side["run"].get("mtpdraft") or {}
+        if not echo:
+            continue
+        for name, ok, detail in mtp_plan_verdicts(echo, side["run"].get("draft_lines", 0)):
+            check(ok, f"{label} side: {name}", detail)
+    rounds = {label: mtp_draft_rounds(side["run"]) for label, side in judged}
     want = {label: wave_expect(counts, prompt_len, decode_steps, side["requested_wave_rows"],
-                              one_row)
+                              one_row, draft_rounds=rounds[label])
             for label, side in judged}
     for label, side in judged:
         got = side["run"].get("launchstat", {})
         check(bool(got), f"the {label} run reported observed launch counters",
               "no LAUNCHSTAT line: the counters are compiled out or the driver stopped printing"
               " them, and section (h) has nothing to judge" if not got else "")
-        for family in sorted(counts):
-            obs = got.get(family)
-            exp = want[label][family]
-            check(obs == exp, f"{label} side: {family} launches match the wave arithmetic",
-                  f"observed {obs} vs §07's plan for a {prompt_len}-token prompt +"
-                  f" {decode_steps} steps at wave_rows={side['requested_wave_rows']}: {exp}")
+        why = (f"for a {prompt_len}-token prompt + {decode_steps} steps at"
+               f" wave_rows={side['requested_wave_rows']}")
+        if rounds[label]:
+            why += f", plus {rounds[label]} declared draft round(s) at {mtp_draft_plan()}"
+        for name, ok, detail in wave_census_verdicts(want[label], got, why):
+            check(ok, f"{label} side: {name}", detail)
 
     # The two halves of the claim, spelled out so a FAIL names the thing that broke rather than a
     # dict comparison.
@@ -5294,11 +5616,13 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
     # compared against the wide one, so a third (--wave-rows 5) side is held to the same "not less work"
     # rule as the one-row side.
     for family in sorted(counts):
-        b_total = launch_work_rows(batched["run"].get("launchstat", {}), family, counts, one_row)
+        b_total = launch_work_rows(batched["run"].get("launchstat", {}), family, counts, one_row,
+                                   draft_rounds=rounds["batched"])
         for label, side in judged:
             if label == "batched":
                 continue
-            o_total = launch_work_rows(side["run"].get("launchstat", {}), family, counts, one_row)
+            o_total = launch_work_rows(side["run"].get("launchstat", {}), family, counts, one_row,
+                                       draft_rounds=rounds[label])
             check(b_total == o_total and b_total is not None,
                   f"the {label} side covers the same {family} rows as the batched side"
                   " (fewer launches, not less work)",
@@ -5332,7 +5656,13 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
     # launches off against 2,400 on, where §07's arithmetic bills 48 per one-row body). Per-side
     # equality is the stronger statement, and `r_wave > b_wave` keeps the claim the section is for.
     decode_share = sum({**counts, **(one_row or {})}.values()) * decode_steps
-    b_wave, r_wave = b_calls - decode_share, r_calls - decode_share
+    # The draft's launches belong to NEITHER the prompt wave nor the generation steps, so they come out of
+    # each side's whole-run total before the wave is priced — per side, from that side's own declared round
+    # count, because "both sides subtract the same draft" is a fact to derive and not a wish (the same
+    # reason the family bills above are per-side). With the flag off both terms are 0 and this is the line it
+    # was.
+    b_draft, r_draft = mtp_draft_calls(batched["run"]), mtp_draft_calls(perrow["run"])
+    b_wave, r_wave = b_calls - decode_share - b_draft, r_calls - decode_share - r_draft
     waves_b = len(wave_row_sizes(prompt_len, wave_rows))
     waves_r = len(wave_row_sizes(prompt_len, 1))
     exp_b_wave = sum(v["calls"] for v in
@@ -5346,7 +5676,10 @@ def batched_proof_checks(sides: dict, counts: dict, prompt_len: int, decode_step
           f" derived bill is {exp_b_wave}) vs {r_wave} across {waves_r} (derived {exp_r_wave}) —"
           f" {wave_ratio:.0f}x fewer for a {prompt_len}-token prompt. The whole"
           f" run is {b_calls} vs {r_calls}: {decode_steps} generation steps are one token wide"
-          " however the prompt is batched")
+          " however the prompt is batched"
+          + (f"; the §09 draft's declared rounds add {b_draft} (batched side) / {r_draft} (one-row"
+             " side) counted launches, which belong to neither term and are subtracted before the"
+             " comparison"))
 
     # And the outputs must not have moved — which means something different per route, and the route
     # has to be said out loud because the stronger claim is the one a reader assumes. On `--gemm hand`
@@ -7017,6 +7350,8 @@ def selftest(fixture: str = "dec8") -> int:
     bad += selftest_non_pin_fixtures()
     section("(d2) the launch bill's own teeth — both directions, in process")
     bad += selftest_launch_bill()
+    section("(d3) the §09 draft's declared census — both directions, in process")
+    bad += selftest_mtp_census()
     section("(h2) the flip rule's TWO room readings, on one injected row — in process")
     bad += selftest_room_readings(fixture, slack_out)
     section("(b2) the echo window's own teeth — nothing admitted, an admitted flip, and a late defect")
