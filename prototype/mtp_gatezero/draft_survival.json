@@ -1,0 +1,246 @@
+{
+  "prompts": 20,
+  "steps": 40,
+  "verify": "steps",
+  "rounds": 468,
+  "accept": 0.7329059829059829,
+  "loop_accept": 343,
+  "loop_draft": 468,
+  "rank_strict": {
+    "p50": 31.5,
+    "p75": 266.0,
+    "p90": 1226.9,
+    "p99": 21008.449999999837
+  },
+  "accept_by_position": [
+    {
+      "positions": "0-7",
+      "n": 17,
+      "accept": 0.5882352941176471
+    },
+    {
+      "positions": "8-15",
+      "n": 90,
+      "accept": 0.6555555555555556
+    },
+    {
+      "positions": "16-31",
+      "n": 189,
+      "accept": 0.7142857142857143
+    },
+    {
+      "positions": "32-63",
+      "n": 172,
+      "accept": 0.8081395348837209
+    }
+  ],
+  "routes": [
+    {
+      "k": 16,
+      "c": 0.01981336484275035,
+      "survival": 0.41452991452991456,
+      "accept_eff": 0.31196581196581197,
+      "speedup": 1.286476385969025
+    },
+    {
+      "k": 32,
+      "c": 0.019825139685917786,
+      "survival": 0.5106837606837606,
+      "accept_eff": 0.3888888888888889,
+      "speedup": 1.3618892443822617
+    },
+    {
+      "k": 64,
+      "c": 0.019848689372252662,
+      "survival": 0.5811965811965812,
+      "accept_eff": 0.4465811965811966,
+      "speedup": 1.41842727421811
+    },
+    {
+      "k": 128,
+      "c": 0.01989578874492242,
+      "survival": 0.6602564102564102,
+      "accept_eff": 0.5021367521367521,
+      "speedup": 1.4728335666384822
+    },
+    {
+      "k": 256,
+      "c": 0.019989987490261932,
+      "survival": 0.7371794871794872,
+      "accept_eff": 0.5576923076923077,
+      "speedup": 1.5271643121959364
+    },
+    {
+      "k": 512,
+      "c": 0.02017838498094095,
+      "survival": 0.8162393162393162,
+      "accept_eff": 0.6132478632478633,
+      "speedup": 1.581338996197221
+    },
+    {
+      "k": 1024,
+      "c": 0.020555179962298994,
+      "survival": 0.8717948717948718,
+      "accept_eff": 0.6517094017094017,
+      "speedup": 1.6184420344330803
+    },
+    {
+      "k": 2048,
+      "c": 0.021308769925015077,
+      "survival": 0.9316239316239316,
+      "accept_eff": 0.6987179487179487,
+      "speedup": 1.6632755918101723
+    },
+    {
+      "k": 4096,
+      "c": 0.02281594985044724,
+      "survival": 0.9551282051282052,
+      "accept_eff": 0.7051282051282052,
+      "speedup": 1.6670919194968787
+    }
+  ],
+  "full_c": 0.2180970809146592,
+  "full_speedup": 1.4226337211191393,
+  "per_prompt": [
+    {
+      "prompt": "The capital of France is",
+      "loop_accept": 17,
+      "loop_draft": 23,
+      "probe_accept": 17,
+      "probe_rounds": 23
+    },
+    {
+      "prompt": "The largest planet in the solar syst",
+      "loop_accept": 17,
+      "loop_draft": 23,
+      "probe_accept": 17,
+      "probe_rounds": 23
+    },
+    {
+      "prompt": "Water boils at a temperature of",
+      "loop_accept": 18,
+      "loop_draft": 22,
+      "probe_accept": 18,
+      "probe_rounds": 22
+    },
+    {
+      "prompt": "The chemical symbol for gold is",
+      "loop_accept": 17,
+      "loop_draft": 23,
+      "probe_accept": 17,
+      "probe_rounds": 23
+    },
+    {
+      "prompt": "Shakespeare wrote the tragedy",
+      "loop_accept": 16,
+      "loop_draft": 25,
+      "probe_accept": 16,
+      "probe_rounds": 25
+    },
+    {
+      "prompt": "The theory of relativity was propose",
+      "loop_accept": 18,
+      "loop_draft": 23,
+      "probe_accept": 18,
+      "probe_rounds": 23
+    },
+    {
+      "prompt": "The mitochondria is the",
+      "loop_accept": 17,
+      "loop_draft": 23,
+      "probe_accept": 17,
+      "probe_rounds": 23
+    },
+    {
+      "prompt": "The first person to walk on the Moon",
+      "loop_accept": 15,
+      "loop_draft": 26,
+      "probe_accept": 15,
+      "probe_rounds": 26
+    },
+    {
+      "prompt": "A group of lions is called a",
+      "loop_accept": 16,
+      "loop_draft": 25,
+      "probe_accept": 16,
+      "probe_rounds": 25
+    },
+    {
+      "prompt": "The longest river in Africa is",
+      "loop_accept": 18,
+      "loop_draft": 23,
+      "probe_accept": 18,
+      "probe_rounds": 23
+    },
+    {
+      "prompt": "In Python, a list literal is written",
+      "loop_accept": 15,
+      "loop_draft": 25,
+      "probe_accept": 15,
+      "probe_rounds": 25
+    },
+    {
+      "prompt": "The gradient of a scalar field is a",
+      "loop_accept": 19,
+      "loop_draft": 21,
+      "probe_accept": 19,
+      "probe_rounds": 21
+    },
+    {
+      "prompt": "Recurrence relations are solved by",
+      "loop_accept": 17,
+      "loop_draft": 23,
+      "probe_accept": 17,
+      "probe_rounds": 23
+    },
+    {
+      "prompt": "The time complexity of merge sort is",
+      "loop_accept": 19,
+      "loop_draft": 22,
+      "probe_accept": 19,
+      "probe_rounds": 22
+    },
+    {
+      "prompt": "An operating system provides",
+      "loop_accept": 18,
+      "loop_draft": 22,
+      "probe_accept": 18,
+      "probe_rounds": 22
+    },
+    {
+      "prompt": "The TCP handshake consists of",
+      "loop_accept": 19,
+      "loop_draft": 22,
+      "probe_accept": 19,
+      "probe_rounds": 22
+    },
+    {
+      "prompt": "A hash table degrades to",
+      "loop_accept": 17,
+      "loop_draft": 24,
+      "probe_accept": 17,
+      "probe_rounds": 24
+    },
+    {
+      "prompt": "The bits per character of a good ent",
+      "loop_accept": 12,
+      "loop_draft": 29,
+      "probe_accept": 12,
+      "probe_rounds": 29
+    },
+    {
+      "prompt": "Matrix multiplication is associative",
+      "loop_accept": 19,
+      "loop_draft": 22,
+      "probe_accept": 19,
+      "probe_rounds": 22
+    },
+    {
+      "prompt": "The Fourier transform converts",
+      "loop_accept": 19,
+      "loop_draft": 22,
+      "probe_accept": 19,
+      "probe_rounds": 22
+    }
+  ]
+}

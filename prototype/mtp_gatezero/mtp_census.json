@@ -1,0 +1,200 @@
+{
+  "mtp_block_bytes": 40905728,
+  "mtp_tensors": [
+    {
+      "name": "mtp.fc.weight",
+      "dtype": "BF16",
+      "shape": [
+        1024,
+        2048
+      ],
+      "bytes": 4194304
+    },
+    {
+      "name": "mtp.layers.0.input_layernorm.weight",
+      "dtype": "BF16",
+      "shape": [
+        1024
+      ],
+      "bytes": 2048
+    },
+    {
+      "name": "mtp.layers.0.mlp.down_proj.weight",
+      "dtype": "BF16",
+      "shape": [
+        1024,
+        3584
+      ],
+      "bytes": 7340032
+    },
+    {
+      "name": "mtp.layers.0.mlp.gate_proj.weight",
+      "dtype": "BF16",
+      "shape": [
+        3584,
+        1024
+      ],
+      "bytes": 7340032
+    },
+    {
+      "name": "mtp.layers.0.mlp.up_proj.weight",
+      "dtype": "BF16",
+      "shape": [
+        3584,
+        1024
+      ],
+      "bytes": 7340032
+    },
+    {
+      "name": "mtp.layers.0.post_attention_layernorm.weight",
+      "dtype": "BF16",
+      "shape": [
+        1024
+      ],
+      "bytes": 2048
+    },
+    {
+      "name": "mtp.layers.0.self_attn.k_norm.weight",
+      "dtype": "BF16",
+      "shape": [
+        256
+      ],
+      "bytes": 512
+    },
+    {
+      "name": "mtp.layers.0.self_attn.k_proj.weight",
+      "dtype": "BF16",
+      "shape": [
+        512,
+        1024
+      ],
+      "bytes": 1048576
+    },
+    {
+      "name": "mtp.layers.0.self_attn.o_proj.weight",
+      "dtype": "BF16",
+      "shape": [
+        1024,
+        2048
+      ],
+      "bytes": 4194304
+    },
+    {
+      "name": "mtp.layers.0.self_attn.q_norm.weight",
+      "dtype": "BF16",
+      "shape": [
+        256
+      ],
+      "bytes": 512
+    },
+    {
+      "name": "mtp.layers.0.self_attn.q_proj.weight",
+      "dtype": "BF16",
+      "shape": [
+        4096,
+        1024
+      ],
+      "bytes": 8388608
+    },
+    {
+      "name": "mtp.layers.0.self_attn.v_proj.weight",
+      "dtype": "BF16",
+      "shape": [
+        512,
+        1024
+      ],
+      "bytes": 1048576
+    },
+    {
+      "name": "mtp.norm.weight",
+      "dtype": "BF16",
+      "shape": [
+        1024
+      ],
+      "bytes": 2048
+    },
+    {
+      "name": "mtp.pre_fc_norm_embedding.weight",
+      "dtype": "BF16",
+      "shape": [
+        1024
+      ],
+      "bytes": 2048
+    },
+    {
+      "name": "mtp.pre_fc_norm_hidden.weight",
+      "dtype": "BF16",
+      "shape": [
+        1024
+      ],
+      "bytes": 2048
+    }
+  ],
+  "embed": {
+    "key": "model.language_model.embed_tokens.weight",
+    "dtype": "BF16",
+    "shape": [
+      248320,
+      1024
+    ],
+    "bytes": 508559360
+  },
+  "quoted": {
+    "step_ms": 10.9357,
+    "step_read_mib": 1532.3,
+    "lm_head_mib": 509.552,
+    "lm_head_ms": 2.1685,
+    "launch_us": 3.1,
+    "plateau_gibs": 237.0
+  },
+  "routes": [
+    {
+      "route": "full tied head (x_d . E^T)",
+      "bytes": 575209725,
+      "c": 0.2129945427903787,
+      "draft_ms": 2.3292444215927444
+    },
+    {
+      "route": "restricted head, top-4 rows",
+      "bytes": 40913920,
+      "c": 0.014701995586094271,
+      "draft_ms": 0.16077661313085112
+    },
+    {
+      "route": "restricted head, top-8 rows",
+      "bytes": 40922112,
+      "c": 0.01470493929688613,
+      "draft_ms": 0.16080880466895767
+    },
+    {
+      "route": "restricted head, top-16 rows",
+      "bytes": 40938496,
+      "c": 0.014710826718469851,
+      "draft_ms": 0.16087318774517076
+    },
+    {
+      "route": "restricted head, top-32 rows",
+      "bytes": 40971264,
+      "c": 0.014722601561637289,
+      "draft_ms": 0.16100195389759692
+    },
+    {
+      "route": "restricted head, top-64 rows",
+      "bytes": 41036800,
+      "c": 0.014746151247972166,
+      "draft_ms": 0.16125948620244923
+    },
+    {
+      "route": "restricted head, top-128 rows",
+      "bytes": 41167872,
+      "c": 0.014793250620641922,
+      "draft_ms": 0.1617745508121539
+    },
+    {
+      "route": "restricted head, top-256 rows",
+      "bytes": 41430016,
+      "c": 0.014887449365981431,
+      "draft_ms": 0.16280468003156315
+    }
+  ]
+}

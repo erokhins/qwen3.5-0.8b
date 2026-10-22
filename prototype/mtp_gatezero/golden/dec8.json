@@ -1,0 +1,59 @@
+{
+  "fixture": "dec8",
+  "h_pin": "final_hidden",
+  "y_next": 271,
+  "pos": 25,
+  "n_steps": 2,
+  "h_source": "post_norm",
+  "fc_order": "eh",
+  "proposals": [
+    2064,
+    369
+  ],
+  "positions": [
+    25,
+    26
+  ],
+  "storage": "bf16 bits stored in a uint16 array",
+  "vocab": 248320,
+  "hidden": 1024,
+  "witness_cos": 1.0,
+  "read_bytes_per_run": 549465088,
+  "mtp_bytes": 40905728,
+  "read_tensors": [
+    "model.language_model.embed_tokens.weight",
+    "mtp.fc.weight",
+    "mtp.layers.0.input_layernorm.weight",
+    "mtp.layers.0.mlp.down_proj.weight",
+    "mtp.layers.0.mlp.gate_proj.weight",
+    "mtp.layers.0.mlp.up_proj.weight",
+    "mtp.layers.0.post_attention_layernorm.weight",
+    "mtp.layers.0.self_attn.k_norm.weight",
+    "mtp.layers.0.self_attn.k_proj.weight",
+    "mtp.layers.0.self_attn.o_proj.weight",
+    "mtp.layers.0.self_attn.q_norm.weight",
+    "mtp.layers.0.self_attn.q_proj.weight",
+    "mtp.layers.0.self_attn.v_proj.weight",
+    "mtp.norm.weight",
+    "mtp.pre_fc_norm_embedding.weight",
+    "mtp.pre_fc_norm_hidden.weight"
+  ],
+  "reads_as_run": {
+    "model.language_model.embed_tokens.weight": 2,
+    "mtp.pre_fc_norm_embedding.weight": 2,
+    "mtp.pre_fc_norm_hidden.weight": 2,
+    "mtp.fc.weight": 2,
+    "mtp.layers.0.input_layernorm.weight": 2,
+    "mtp.layers.0.self_attn.q_proj.weight": 2,
+    "mtp.layers.0.self_attn.k_proj.weight": 2,
+    "mtp.layers.0.self_attn.v_proj.weight": 2,
+    "mtp.layers.0.self_attn.q_norm.weight": 2,
+    "mtp.layers.0.self_attn.k_norm.weight": 2,
+    "mtp.layers.0.self_attn.o_proj.weight": 2,
+    "mtp.layers.0.post_attention_layernorm.weight": 2,
+    "mtp.layers.0.mlp.gate_proj.weight": 2,
+    "mtp.layers.0.mlp.up_proj.weight": 2,
+    "mtp.layers.0.mlp.down_proj.weight": 2,
+    "mtp.norm.weight": 2
+  }
+}
