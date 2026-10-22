@@ -878,6 +878,19 @@ struct AttnLayerArgs {
     // `attn_m2` prototype's standing rule that a grid shallower than `split_for_lanes` is not launchable.
     // The lane CEILING is priced on the UNCAPPED split, so a cap never widens `MAXSC × kAttnMaxSplit`.
     int split_cap = kAttnSplitCapOff;
+    // THE ATTENTION-BODY DUMP (`--dump-attn-rows`). An instrument, not a feature. When `attn_dump_dir` is
+    // null (the default) nothing below is read and the shipping path executes exactly the instructions it
+    // executed before this existed — the flag-off run being byte-identical is the check, not a hope. When
+    // it names a directory, `attn_decode_layer` copies this body's two finished output tiles
+    // (`attn_out_pre_gate`, `gated`) out of the device and prints one machine-readable `ATTN_DUMP` line
+    // naming the core that produced them and every `CoreArgs` field that launch dereferenced.
+    // Why it is worth carrying: a logits file cannot say WHICH stage mixed two query rows. The open
+    // question in `prototype/mtp_verify/FIX-CROSSROW.md` is whether one query row's ATTENTION output moves
+    // when a later token changes, or whether the mixing happens downstream of this block, and no
+    // out-of-process probe can answer it without either the dump or a synthetic input that can fail.
+    // `attn_dump_tag` is the caller's layer index, so a dumped file names its layer.
+    const char* attn_dump_dir = nullptr;
+    int attn_dump_tag = -1;
 };
 void attn_decode_layer(const AttnLayerArgs& a);
 

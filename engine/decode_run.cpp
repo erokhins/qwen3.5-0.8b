@@ -70,6 +70,10 @@ constexpr int64_t kSessionDefaultCap = 4096;
 struct Options {
     std::string model_dir = "models/Qwen3.5-0.8B";
     std::string out_dir;             // where logits/sampled dumps go; empty means do not write
+    // `--dump-attn-rows`: also write the attention block's own per-row output tiles into `out_dir` and
+    // print one `ATTN_DUMP` line per body (`kernels.h:AttnLayerArgs::attn_dump_dir`). An instrument, and
+    // it lives or dies by being byte-identical when absent.
+    bool dump_attn_rows = false;
     std::vector<int> prompt;         // the tokens fed before generation starts (the fixture prefill)
     std::vector<int> feed;           // --replay: what to feed each GENERATION step, from outside
     int steps = 8;                   // decode steps after the prompt
@@ -578,6 +582,11 @@ Options parse_args(int argc, char** argv) {
             o.verify_guard_given = true;
         } else if (a == "--prefill-logits") {
             o.prefill_logits = engine::parse_prefill_logits(next());
+        } else if (a == "--dump-attn-rows") {
+            // A switch, not a value: it writes into `--out`, so there is no second path to keep in step
+            // with the first. Whether `--out` was actually given is checked after the parse loop, because
+            // flags may arrive in any order.
+            o.dump_attn_rows = true;
         } else if (a == "--wave-rows") {
             o.wave_rows = std::atoi(next().c_str());
         } else if (a == "--mlp-map") {
@@ -978,6 +987,12 @@ Options parse_args(int argc, char** argv) {
                                  " re-spells the WMMA wave's P*V accumulator and --attn-fattn 0 launches no WMMA"
                                  " wave at all, so there is nothing here for it to spell. Use --attn-fattn 1"
                                  " (the default) with this flag, or drop it for the shipped VALU wave");
+    }
+    if (o.dump_attn_rows && o.out_dir.empty()) {
+        // Checked here rather than at the flag, because `--out` may come before or after it. A dump that
+        // had nowhere to go would print a line and no bytes, which is the worst kind of clean result.
+        throw std::runtime_error("--dump-attn-rows needs --out DIR: the output tiles go with the other "
+                                 "dumps, and a dump that wrote no file must not look like a pass");
     }
     if (o.attn_fattn_wide && !o.attn_fattn) {
         // The wide block is a spelling of the WMMA family (`engine/attn_wide_kernels.h`), and `--attn-fattn 0`
@@ -1963,6 +1978,10 @@ void print_usage(FILE* out) {
                  "  --prefill-logits  `last` (default) samples only the prompt wave's last row, which"
                  " is all §06.5 uses; `all` dumps every row's logits, which is what the wave's"
                  " byte-identity gate compares against\n"
+                 "  --dump-attn-rows  also write the attention block's own per-row output tiles"
+                 " (pre-gate and gated) for every wave body into --out, one ATTN_DUMP line per body"
+                 " naming the core and its full CoreArgs. An instrument for attributing a cross-row"
+                 " dependence to a stage; with the flag absent the binary is byte-identical.\n"
                  "  --wave-rows N  rows in the wave scratch (default: the engine's kMaxWaveRows)."
                  " `1` forces one-row glue/MLP launches for every prompt token: the P4b comparison"
                  " run, whose launch counts must differ from the default's and whose outputs must"
@@ -2779,6 +2798,9 @@ int main(int argc, char** argv) {
         sc.attn_fattn_pvf16 = o.attn_fattn_pvf16;
         sc.attn_fattn_wide = o.attn_fattn_wide;
         sc.attn_split_cap = o.attn_split_cap;
+        // The dump sink, read by nothing but the dump itself (see `DecodeScratch::attn_dump_dir`). It
+        // points into `o.out_dir`, which lives as long as the run.
+        sc.attn_dump_dir = o.dump_attn_rows ? o.out_dir.c_str() : nullptr;
         sc.gdn_scan = o.gdn_scan;
         sc.gdn_chunk = o.gdn_chunk;
         sc.gdn_spell = o.gdn_spell;

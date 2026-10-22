@@ -854,6 +854,11 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // as above; the NOT-wave-only difference is stated at `DecodeScratch::attn_split_cap` — a one-row
             // body reads it too, because the fused core streams long rows through the same partial layout.
             a.split_cap = sc.attn_split_cap;
+            // And where the per-body attention dump goes, plus which layer this call is, so the files name
+            // their layer (`--dump-attn-rows`). Null in every run that did not ask for it, and the dump is
+            // the only reader — nothing about the launch depends on these two fields.
+            a.attn_dump_dir = sc.attn_dump_dir;
+            a.attn_dump_tag = layer;
             stageclock::note(stageclock::kAttn);
             kernels::attn_decode_layer(a);
             // One widening over the whole [n][2048] tile, for the same reason P5 packed the casts

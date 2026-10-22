@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "prototype/attn_decode/attn_decode_kernels.h"
 // The engine's copy of the tiled wave body with the two per-touch instruction levers applied
@@ -318,6 +319,97 @@ std::size_t attn_part_floats(int rows) {    // `attn_core`'s own partial layout:
     // one request touches is not this anyway, it is one KV cache pair, 2*cap*DH = 201 MB at 32,768.
     // It is written only by rows above the staging, so a request under 512 lanes never touches it.
     return static_cast<size_t>(rows) * N_Q * kAttnMaxSplit * (DH + 2);
+}
+
+// THE ATTENTION-BODY DUMP (`AttnLayerArgs::attn_dump_dir`, `--dump-attn-rows`). DUMP ONLY: it runs after
+// the core(s) have written this body's two output tiles, reads them back, writes two files and prints one
+// line. It computes no value the engine consumes, and it is inert unless the flag names a directory, which
+// is what makes a flag-off byte-identical run the check rather than a hope.
+//
+// The line is as much the point as the bytes. A probe that launches a kernel out of process and claims to
+// have launched "the same kernel with the same arguments" has to be able to show the arguments —
+// `prototype/mtp_verify/form_ladder.sh` exists because an earlier ladder priced one arm under four names,
+// and AGENTS' `--attn-fattn-wide` row is the same failure one level up. So every scalar `CoreArgs` field
+// is printed by name, and every pointer field as set/unset: a pointer the probe left null that the kernel
+// had READ would have faulted, so "unset" is a proof of unread rather than a hole in the comparison.
+unsigned g_attn_dump_seq = 0;
+
+void dump_attention_body(const AttnLayerArgs& a, const CoreArgs& launched, const char* core_name,
+                         int rows, int lanes_last, int split_eff, bool combine) {
+    if (a.attn_dump_dir == nullptr || *a.attn_dump_dir == '\0') return;
+    const size_t n = static_cast<size_t>(rows) * ROW_H;
+    const unsigned seq = ++g_attn_dump_seq;
+    // The core's OWN inputs as well as its outputs, because the useful question is not only "did this row's
+    // attention output move" but "did anything this row was allowed to read move". A moved output with
+    // byte-identical in-bound inputs is a core that read past its bound; a moved output with a moved input
+    // is a stage upstream of the core, and the two need different fixes. `q_rope`/`gate_out` are [rows][...]
+    // per row, `k_rope` is [rows][2][256], and the two cache tiles are dumped for the body's own lane range
+    // only ([pos, pos+rows)), which is where a leaked lane would show up.
+    struct Slice { const uint16_t* p; size_t n; const char* tag; size_t row_floats; };
+    const size_t rows_h = static_cast<size_t>(rows) * ROW_H;
+    const size_t rows_kv = static_cast<size_t>(rows) * ROW_KV;
+    const Slice slices[] = {
+        {a.q_rope, rows_h, "in_q_rope", ROW_H},
+        {a.gate_out, rows_h, "in_gate", ROW_H},
+        {a.k_rope, rows_kv, "in_k_rope", ROW_KV},
+        // One file per KV group: the cache is [kv][cap][dim], so a single flat slice of `lanes` lanes would
+        // be group 0 only and would silently hide a leaked lane in group 1.
+        {reinterpret_cast<const uint16_t*>(launched.kcache),
+         static_cast<size_t>(lanes_last + 1) * DH, "in_kcache0", DH},
+        {reinterpret_cast<const uint16_t*>(launched.kcache) + static_cast<size_t>(a.cap) * DH,
+         static_cast<size_t>(lanes_last + 1) * DH, "in_kcache1", DH},
+        {reinterpret_cast<const uint16_t*>(launched.vcache),
+         static_cast<size_t>(lanes_last + 1) * DH, "in_vcache0", DH},
+        {reinterpret_cast<const uint16_t*>(launched.vcache) + static_cast<size_t>(a.cap) * DH,
+         static_cast<size_t>(lanes_last + 1) * DH, "in_vcache1", DH},
+    };
+    constexpr int kOutTiles = 2;
+    constexpr int kNTiles = kOutTiles + int(sizeof(slices) / sizeof(slices[0]));
+    for (int which = 0; which < kNTiles; ++which) {
+        const bool out = which < kOutTiles;
+        std::vector<uint16_t> h;
+        const char* tag;
+        if (out) {
+            h.resize(n);
+            const hip_bfloat16* src = which ? launched.gout : launched.aout;
+            tag = which ? "gated" : "pre_gate";
+            if (hipMemcpy(h.data(), src, sizeof(uint16_t) * n, hipMemcpyDeviceToHost) != hipSuccess) {
+                throw std::runtime_error("--dump-attn-rows: reading an output tile back failed");
+            }
+        } else {
+            const Slice& s = slices[which - kOutTiles];
+            h.resize(s.n);
+            tag = s.tag;
+            if (hipMemcpy(h.data(), s.p, sizeof(uint16_t) * s.n, hipMemcpyDeviceToHost) != hipSuccess) {
+                throw std::runtime_error("--dump-attn-rows: reading an input tile back failed");
+            }
+        }
+        char path[1024];
+        std::snprintf(path, sizeof path, "%s/attn%03u_L%d_%s_r%d_lanes%d.bin", a.attn_dump_dir, seq,
+                      a.attn_dump_tag, tag, rows, lanes_last);
+        FILE* f = std::fopen(path, "wb");
+        if (f == nullptr) throw std::runtime_error(std::string("--dump-attn-rows: cannot open ") + path);
+        const size_t wrote = std::fwrite(h.data(), sizeof(uint16_t), h.size(), f);
+        std::fclose(f);
+        if (wrote != h.size()) {
+            throw std::runtime_error("--dump-attn-rows: short write to " + std::string(path));
+        }
+    }
+    auto set = [](const void* p) { return p != nullptr ? 1 : 0; };
+    std::printf("ATTN_DUMP seq=%u layer=%d core=%s rows=%d lanes_last=%d split_eff=%d combine=%d "
+                "cap=%d pos=%d lvalid=%d neg=%d full=%d score_f32=%d fused=%d tile=%d tile_kernel=%d "
+                "fattn_cover=%d set_qg=%d set_kg=%d set_vg=%d set_qn=%d set_kn=%d set_qrope=%d "
+                "set_krope=%d set_kcache=%d set_vcache=%d set_aout=%d set_gout=%d set_kc_as=%d "
+                "set_vc_as=%d set_part=%d set_stale=%d set_qrope_out=%d set_krope_out=%d set_gate_out=%d\n",
+                seq, a.attn_dump_tag, core_name, rows, lanes_last, split_eff, combine ? 1 : 0,
+                launched.cap, launched.pos, launched.lvalid, launched.neg, launched.full,
+                launched.score_f32, launched.fused, launched.tile, launched.tile_kernel,
+                launched.fattn_cover, set(launched.qg), set(launched.kg), set(launched.vg),
+                set(launched.qn), set(launched.kn), set(launched.qrope), set(launched.krope),
+                set(launched.kcache), set(launched.vcache), set(launched.aout), set(launched.gout),
+                set(launched.kc_as), set(launched.vc_as), set(launched.part), set(launched.stale),
+                set(launched.qrope_out), set(launched.krope_out), set(launched.gate_out));
+    std::fflush(stdout);
 }
 
 void attn_decode_layer(const AttnLayerArgs& a) {
@@ -623,11 +715,17 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     // bytes prep already wrote, a write against other rows' reads that is harmless only because the values
     // match. `attn_prep` is the staging kernel and does not read `fused`; `attn_combine` reads only
     // `part`/`aout`/`gout`/`qg`, all of which `c` carries.
+    // `core` is the struct a WAVE core dereferences. It is declared here, rather than inside the wave
+    // branch, so the dump at the end of this function can name the arguments that actually ran: for a
+    // one-row body it is `c` untouched, so the one-row launch below passing `core` instead of `c` is the
+    // same struct and the same bits. `attn_core_name` is the canary beside it — which kernel this site
+    // submitted, recorded at the launch, not inferred afterwards.
+    CoreArgs core = c;
+    const char* attn_core_name = "attn_core(one-row,fused)";
     if (rows == 1) {
-        attn_core<<<dim3(N_Q, split_eff), THREADS>>>(c);
+        attn_core<<<dim3(N_Q, split_eff), THREADS>>>(core);
     } else {
         attn_prep<<<dim3(N_Q + N_KV, rows), THREADS>>>(c);
-        CoreArgs core = c;
         core.fused = wave_fused;        // read the staged rows instead of recomputing them: the plan
                                         // the guard above was priced against
         core.qrope = bf16(a.q_rope);    // what `attn_prep` wrote at ROW_H * qrow
@@ -665,10 +763,12 @@ void attn_decode_layer(const AttnLayerArgs& a) {
             // `wide_plan_ok` above is shared because its two refusals are properties of the plan and of the
             // score rounding, not of the spelling.
             if (a.fattn_wide == 2) {
+                attn_core_name = "attn_wide_llama_wave";
                 attn_wide_llama_wave<<<wide_grid, WIDE_THREADS>>>(core);
                 wide_echo(rows, lanes_last, split_eff, /*combine=*/0,
                           reinterpret_cast<const void*>(attn_wide_llama_wave), wide_grid.z, /*form=*/2);
             } else {
+                attn_core_name = "attn_wide_wave";
                 attn_wide_wave<<<wide_grid, WIDE_THREADS>>>(core);
                 wide_echo(rows, lanes_last, split_eff, /*combine=*/0,
                           reinterpret_cast<const void*>(attn_wide_wave), wide_grid.z, /*form=*/1);
@@ -698,6 +798,8 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                 // shared split flag and the early-out lives inside the body, before any barrier, so the
                 // covered rows are genuinely this launch's business and not a partial write it abandons.
                 core.fattn_cover = wave_fattn ? 1 : 0;
+                attn_core_name = wave_fattn ? "attn_slim_wave+attn_fattn_wave(see ATTN line)"
+                                            : "attn_slim_wave";
                 attn_slim_wave<<<dim3(N_KV, split_eff, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
                 if (wave_fattn) {
                     // The plan guard, in the one place it can be honest: `core` is complete here, so this
@@ -776,9 +878,11 @@ void attn_decode_layer(const AttnLayerArgs& a) {
                                pv_f16 ? "f16" : "f32");
                 }
             } else {
+                attn_core_name = "attn_tile_wave";
                 attn_tile_wave<<<dim3(N_KV, split_eff, tile_rtiles_of(rows)), ATTN_TILE_THREADS>>>(core);
             }
         } else {
+            attn_core_name = "attn_core(wave,per-row)";
             attn_core<<<dim3(N_Q, split_eff, rows), THREADS>>>(core);
         }
     }
@@ -798,6 +902,8 @@ void attn_decode_layer(const AttnLayerArgs& a) {
     // the gate has to see is the wave going through once instead of once per token, and the 1-to-3
     // kernel factor is lane depth, which is the same on both sides of the A/B. `launch_stats.h` owns
     // the wording; `gate.py`'s `launch_plan()["attn"]` is the same number from §07.
+    dump_attention_body(a, core, attn_core_name, rows, lanes_last, split_eff,
+                        split_eff > 1 && !wave_wide);
     launchstats::attn().record(rows);
 }
 

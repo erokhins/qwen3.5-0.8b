@@ -124,6 +124,10 @@ struct DecodeScratch {
     // under a flag nobody passed. Inertness at 0 is a byte-compare rather than an argument, because the wide
     // kernel is a separate code object.
     int attn_fattn_wide = 0;
+    // Where the attention-body dump goes (`--dump-attn-rows`, `kernels.h:AttnLayerArgs::attn_dump_dir`).
+    // Null unless the flag was given, and it names no routing decision: it is read only by the dump at the
+    // end of `attn_decode_layer`, so the shipping path cannot be moved by it.
+    const char* attn_dump_dir = nullptr;
     // How deep the split path may cut a wide row (`--attn-split-cap`, bet A9-L-c;
     // `kernels.h:AttnLayerArgs::split_cap`). Same riding reason as the five above — it has to reach the one
     // call site in `submit_wave_body` — with one difference worth naming: unlike them it is NOT wave-only. A
