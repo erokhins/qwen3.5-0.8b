@@ -139,7 +139,8 @@ engages the clock only under the flag, and `decode_step.cpp:423`'s sync is one-t
   attention (+39.5 % at 16k prefill). Each has its own record in `progress/`.
 * **MTP speculative decoding**: bit-lossless but **slower** on this box (~21 vs ~24 tok/s on torch CPU,
   accept 0.66 at k=1). It is a GPU-path bet, not a win today.
-* **Deeper lane splits in attention** (`--split 18`): worth ~0.36 ms, held behind the numerics ruling in §3.
+* **Deeper lane splits in attention** (`--split 18`) — **retired twice over.** The ~0.36 ms figure quoted here and in §7 was never a numerics-gated prize: the geometry has never existed on the shipping path (`gate.py` has no `--split`; `decode_run --attn-split-cap` is `min(split, cap)`, so the knob can only make a cut *shallower*). And in the rig that does have the knob, at the wide geometry, **18 is already the optimum**: 0.129 ms/case vs 0.141 at 16, **0.175 at 24 (worse)**, 0.140 at 32, 0.141 at 48. Best possible delta ≈ 0.063 ms/step, and the default sits on it (`progress/2026-10-21/generation-idea-queue-2026-10-21.md` P4).
+* **Cross-phase prefetch — measured 2026-10-21, real, and 10× under the bar.** The idea was to stage phase *i+1*'s bytes into the ~32 MiB fast tier while phase *i* runs, since `attn` uses ~31 GB/s of 237 and the host tail leaves the GPU idle. Both the mechanism and its ceiling are now measured (`prototype/prefetch_tier/`): a prefetch makes the use-site read **+0.027 to +0.029 ms faster**, adjudicable wherever adjudicable — but it survives only while *staged + intervening* fits the tier. For the 18 MiB GDN state the engine reading (warmed, then deliberately polluted) is **+0.0278 ms at 7 MiB of intervention and −0.0001 to +0.0008 ms at 21, 43 and 64 MiB**; a 7.875 MiB KV slice still survives 21 MiB (+0.0138). Best engine-shaped extrapolation **+0.0278 ms/step against a pre-registered 0.30 ms bar**. Hardware residency hints are not an alternative: `PersistingL2CacheMaxSize` = 2,097,152 B, byte-identical to `L2CacheSize` (the carve-out is the 2 MiB per-GPC L2, not the tier), `accessPolicyMaxWindowSize` = 0, and an access-policy window is rejected at every size from 1 to 64 MiB.
 * **Bigger tiles / WMMA in decode attention**: the decode step is one row, and the wave forms only route
   prefill (`kernels_attn.cpp:627`: `if (rows == 1) attn_core<<<...>>>`). Decode attention is a GEMV-shaped
   read, not a matmul; matrix units do not help a one-row walk.
@@ -152,11 +153,14 @@ About **6.5 ms of the 10.936 ms step is weight bytes this machine can only read 
 `lm_head` (2.17 ms, 104 % of the wall) plus `proj` (2.76 ms, 75 %) are already at or near that line, so
 they cannot be made faster without quantization, which is out of scope. Attention spent months at 3.0 ms
 because a compiler artifact cut its occupancy to a quarter and that has now been fixed for −46 % on that
-line and −9.9 % on the step. What is genuinely left is one small item: **~0.21 ms in the 68 tiny `glue`/`copy` launches
-left after item 1 deleted 97 of them at a measured 3.10 us each**, and **nothing else structural**: item 2
-priced the last candidate, per-launch parallelism, and found the engine sitting on a plateau whose only large
-nearby effect (7.20 → 311.37 ms at equal bytes and workgroups) lies behind a cross-layer merge the 24-layer
-residual chain forbids, while split-K on the one-row `down_proj` loses at every setting tested.
+line and −9.9 % on the step. The launch tail is now spent rather than pending: item 1 deleted 97 `cast`
+launches at a measured **3.10 us each** (−0.3008 ms) and the copy fold deleted 19 more (−0.036 to −0.065 ms
+across two paired windows), leaving 224 launches per step with the 49 `glue` launches priced at 10.9× their
+prize to fold. Since then every remaining candidate has been measured and come in short of the bar —
+split-K loses at every setting, per-launch shape is a plateau the engine already sits on, vocabulary pruning
+survives at 100 % so nothing is prunable, deeper lane splits are worth ~0.063 ms at best, and cross-phase
+prefetch is worth **+0.0278 ms/step** where it works at all. **Nothing structural is left above the bar**
+short of quantization (out of scope) or multi-request batching (a server scope decision, not a kernel).
 
 ## 7. Open, with what would settle each
 
@@ -164,15 +168,18 @@ residual chain forbids, while split-K on the one-row `down_proj` loses at every 
 |---|---|---|
 | **(1) the small-op tail** — **RESOLVED 2026-10-21**: all 97 `cast` launches folded into their consumers, `dec8` + `wide4096f` green with the fold on, bit-identical at both widths | done (`c9d3b3f`, `prototype/cast_fold/`) | **WIN: −0.3008 ms at 4,032 = 3.10 us per launch**, above the pre-registered 0.24 ms line → the mechanism is proven, and the 68 launches left in `glue`/`copy` (49 + 19) are worth ~0.21 ms at that rate, which is **below** that WIN line, so it is funded as a mechanism and small as a prize |
 | **(2) per-launch parallelism** — **RESOLVED 2026-10-21**: (L,G) matrix at fixed bytes with an iso-population diagonal + a real two-pass split-K on the one-row `down_proj` (`prototype/wave_shape/`) | matrix **NOT ADJUDICABLE** (noise floor 0.3071 ms ≥ 0.30 band; re-take then refused bimodal at 21.8 %) — **split-K KILLED** (every arm loses, best gain 0.0000 vs 0.15 ms required) | shape is a plateau-then-cliff and the engine is on the plateau: 7.20 → 311.37 ms at equal bytes/workgroups only as G falls to 1, i.e. **1.43 MiB per block**, a shape the 24-layer residual chain cannot build. "Fewer, fatter launches" is closed, not deferred |
-| **`glue`/`copy` fold** — the one route the mechanism now *funds*: 68 launches of near-zero bytes, ~0.21 ms ceiling | same shape as item 1: fold the row-norm/gate epilogues and the conv roll-back into their consumers, paired wall A/B at 4,032, numerics first | item 1's 0.24 ms line is more than this population can deliver, so the honest band is **0.10 ms WIN / 0.03 ms KILL**; expect ~1–2 % and say so before starting |
-| **`gdn`'s unattributed ~0.2 ms** | arms that separate state residency from per-launch cost, at relative rather than absolute noise floors (item 2's instrument lesson) | D4 already excluded the chain and bytes; **47.4 % of its traffic is writes**, so a read-bandwidth floor may not be the right floor for it at all |
-| **> `MAXSC` numerics** | rule which instrument is authoritative, flat floors vs priced allowance | gates `--split 18` (~0.36 ms) |
+| **`glue`/`copy` fold** — **RESOLVED 2026-10-21**: 19 of the 68 fold; the 49 `glue` launches cost 394 MB/token of extra reads to ride a consumer, 10.9× their 0.152 ms prize | done (`b2cffa4`, `c118d12`, `775e376`; `prototype/glue_copy_fold/`) | two paired windows both cleared the scaled WIN line (0.10 ms × 19/68 = 0.0279): **−0.0361 and −0.0645 ms**, bit-identical `sampled.txt` and all 86 STATEFP rows at 128 and 4,032 |
+| **cross-phase prefetch (P1)** — **RESOLVED 2026-10-21**: three arms per target with an *intervening-traffic* arm, because "is a warm loop fast" was never the question | done (`9109f2f`, `prototype/prefetch_tier/`) | mechanism real (+0.027 to +0.029 ms per staged read), cliff-bounded (18 MiB state survives 7 MiB of intervention, is gone by 21), best **+0.0278 ms/step** vs a 0.30 ms bar → **no engine change funded**; and HIP residency hints cannot address the tier at all (P1c) |
+| **> `MAXSC` numerics** — **RESOLVED 2026-10-21, and the question was mis-posed**: on the shipping `--gemm lt` route a priced allowance cannot bind (`cascade_floor` takes `max(cap, 2e-3 / 3 %)`, derived caps sit 31–73× below), so a third instrument has been judging those rows all along; the format also records no **route**, so cross-route pricing reddens `hand` | `prototype/maxsc_allowance/MAXSC-HANDOVER.md`; the two offending allowances withdrawn (`e588807`) | it gated `--split 18`, which turns out to be unbuilt *and* worth ~0.063 ms — see §5. What is left is a gate-integrity fix, not a numerics ruling: give the allowance format a `route` field and refuse a mismatch (queue P11) |
 
-*Corrections log: this document exists partly because six confident numbers were wrong — the `mlp`
+*Corrections log: this document exists partly because eight confident numbers were wrong — the `mlp`
 "1.11 ms in-situ penalty" (shape mismatch), `X ≈ 0.64` for attention's walk (real value 2.82), the
 per-segment drain prizes (instrument cost), a `--split 1` probe that produced plausible numbers from
 an out-of-bounds LDS run, a gate-zero slope that printed "S1 IS REAL (3.95 us/launch)" from a regime with
-nothing to overlap behind it (the honest number came from deleting launches instead: 3.10), and a noise
+nothing to overlap behind it (the honest number came from deleting launches instead: 3.10), a noise
 floor defined as the largest *absolute* within-arm spread, which let one 311 ms cell make a 7 ms comparison
-unadjudicable. Each is recorded at its own `results.md`, and the pattern is consistent: a measurement is
+unadjudicable, a **per-stratum** bimodality cap that no arm on this rig could pass (the warm arm of a
+1,152-workgroup single read repeats 2.0–2.5 % apart at REPS=5 *and* at REPS=12 alike, so it discarded
+almost every stratum — now each comparison is judged against the spread of the two arms it uses, cap
+unmoved), and a `--split 18` prize of 0.36 ms that was both unbuilt and 6× smaller than claimed. Each is recorded at its own `results.md`, and the pattern is consistent: a measurement is
 only worth the instrument that took it.*
