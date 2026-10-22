@@ -912,6 +912,18 @@ void lm_head_full(const uint16_t* table, const float* h, float* logits, int voca
 // own family, and `prototype/cast_fold/ITEM1-HANDOVER.md` says why that matters for reading the A/B.
 void lm_head_full_xbf16(const uint16_t* table, const uint16_t* h, float* logits, int vocab);
 
+// The batched tied head: `nrows` query rows, one pass over the 485 MiB table (§03.4, P7's 2-row verify).
+// `h_rows` is `nrows` contiguous rows of the BF16 final-norm tile and `logits_rows` `nrows` contiguous
+// vocabulary rows — one launch and one D2H for the pair, which is the whole point (`D3-RESULT.md` priced
+// the two-pass alternative at KILLED). `kLmHeadBatchedRows` is the only width instantiated, and the
+// launcher refuses any other rather than guessing: k>1 is unfunded
+// (`prototype/mtp_draft/DRAFT-RESULT.md`'s closing instruction). Bit-identity of row 0 against
+// `lm_head_full_xbf16` is claimed in `engine/lm_head_batched_kernels.h` and witnessed by
+// `prototype/mtp_verify`'s byte compare, not by the header.
+constexpr int kLmHeadBatchedRows = 2;
+void lm_head_batched_xbf16(const uint16_t* table, const uint16_t* h_rows, float* logits_rows,
+                           int vocab, int nrows);
+
 // ---- dtype adapters, engine's own (no model math here at all). These exist only because some
 // graduated kernels take F32 activations (`proj_gemv` with PACK_X=false, `mlp_gemv`, `lm_head_gemv`)
 // while the activations the other kernels produce are BF16. `gdn_decode`'s conv and gates used to be

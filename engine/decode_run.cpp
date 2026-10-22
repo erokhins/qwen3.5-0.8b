@@ -51,6 +51,7 @@
 #include "engine/launch_stats.h"
 #include "engine/loader.h"
 #include "engine/mtp_draft.h"
+#include "engine/mtp_verify.h"
 #include "engine/prefill.h"
 #include "engine/stage_clock.h"
 #include "engine/state.h"
@@ -90,6 +91,32 @@ struct Options {
     // the side it is on.
     int mtp_draft = 0;
     bool mtp_draft_given = false;
+    // §09 / P7: the batched 2-row VERIFY body, as a measured side pass (`engine/mtp_verify.h`). Default
+    // OFF, and off means the binary does nothing differently: no allocation, no submission, no line.
+    // On, every generation step also runs one 2-row body over the populated KV on a SHADOW state, prices
+    // both rows with one pass of the tied head, and reports both argmaxes — and the target's own bytes must
+    // still come out byte-identical, because nothing here consumes the result. There is deliberately no
+    // accept loop: emitting two tokens per step is the next increment, and the point of this ordering is
+    // that the riskiest arithmetic in the repo gets measured before any output depends on it.
+    int mtp_verify = 0;
+    bool mtp_verify_given = false;
+    // The id fed as row 1 at every anchor: `""` (default) means "the token this step was fed" (a real
+    // second row at the next position, but a degenerate draft), `"sampled"` means "the token this step
+    // predicted" — the TRUE next token, which makes one probe run comparable against a plain run's own
+    // logits files at EVERY anchor (`prototype/mtp_verify/gate.py`'s row-1 witness, a reproduction rather
+    // than a filename) — and any decimal id is a genuinely wrong candidate, which is the negative: row 1
+    // must move and row 0 must not.
+    std::string verify_candidate;
+    bool verify_candidate_given = false;
+    // The witness pair, `--verify-guard 1` (`engine/mtp_verify.h`'s operand/guard section). Per round it
+    // downloads what the step was about to read and what the shadow body actually read and byte-compares
+    // them, then poisons the one KV lane the body is entitled to write and re-reads every live buffer after
+    // it. Default OFF for one reason and one only: it is tens of MiB of downloads per round, and
+    // `prototype/mtp_verify/ARMS.md`'s arms must not pay for a witness while timing. The admission gate
+    // therefore names it explicitly rather than trusting a default, and the `VERIFY2` line prints which way
+    // it was set, so a timing run can be shown to have run without it.
+    int verify_guard = 0;
+    bool verify_guard_given = false;
     // Which round sequence the side computation walks: `loop` reproduces speccheck's greedy_mtp(k=1)
     // round geometry (the one the carried accept rate was measured on), `every` drafts after every
     // step. See `engine::mtpdraft::Schedule`; refused-and-parsed, never defaulted into.
@@ -447,6 +474,20 @@ Options parse_args(int argc, char** argv) {
                                      " row (see engine/mtp_draft.h)");
         }
     }
+    if (const char* env = std::getenv("QWEN_MTP_VERIFY"); env != nullptr && env[0] != '\0') {
+        const std::string v(env);
+        if (v == "1") {
+            o.mtp_verify = 1;
+            o.mtp_verify_given = true;      // the env IS the naming, as for the draft above
+        } else if (v == "0") {
+            o.mtp_verify = 0;
+        } else {
+            throw std::runtime_error("QWEN_MTP_VERIFY takes 0 or 1, got '" + v +
+                                     "'; 0 is the default and runs no verify body at all, 1 runs the"
+                                     " batched 2-row verify as a read-only side pass over the step's own"
+                                     " state (see engine/mtp_verify.h)");
+        }
+    }
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() {
@@ -507,6 +548,34 @@ Options parse_args(int argc, char** argv) {
         } else if (a == "--mtp-cap") {
             o.mtp_cap = std::atoi(next().c_str());
             if (o.mtp_cap < 1) throw std::runtime_error("--mtp-cap needs at least one lane");
+        } else if (a == "--mtp-verify") {
+            // Parses or throws, same rule as `--mtp-draft`: this names which side of an A/B the run is on.
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--mtp-verify takes 0 or 1, got '" + v + "'");
+            }
+            o.mtp_verify = std::atoi(v.c_str());
+            o.mtp_verify_given = true;      // the flag outranks the environment, and it is the naming
+        } else if (a == "--verify-candidate") {
+            o.verify_candidate = next();
+            o.verify_candidate_given = true;
+            // Validated at parse time, not at the first round: a typo that reached the loop would produce
+            // a wrong candidate for a whole run before anything complained.
+            if (o.verify_candidate != "sampled") {
+                try {
+                    (void)std::stoi(o.verify_candidate);
+                } catch (const std::exception&) {
+                    throw std::runtime_error("--verify-candidate takes an id or `sampled`, got '" +
+                                             o.verify_candidate + "'");
+                }
+            }
+        } else if (a == "--verify-guard") {
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--verify-guard takes 0 or 1, got '" + v + "'");
+            }
+            o.verify_guard = std::atoi(v.c_str());
+            o.verify_guard_given = true;
         } else if (a == "--prefill-logits") {
             o.prefill_logits = engine::parse_prefill_logits(next());
         } else if (a == "--wave-rows") {
@@ -966,6 +1035,39 @@ Options parse_args(int argc, char** argv) {
                                  " schedules rounds for a draft that is not running; name --mtp-draft 1"
                                  " with it, or drop it");
     }
+    if (o.verify_candidate_given && !o.mtp_verify) {
+        throw std::runtime_error("--verify-candidate feeds row 1 of a verify body that is not running;"
+                                 " name --mtp-verify 1 with it, or drop it");
+    }
+    if (o.verify_guard_given && !o.mtp_verify) {
+        // Keyed on `given`, the `--mtp-sched` precedent: the guard's default is 0, so a plain run must not
+        // be refused for a flag it never named — but naming it alongside no body is a witness pointed at
+        // nothing, and that is worth saying out loud.
+        throw std::runtime_error("--verify-guard witnesses a verify body that is not running; name"
+                                 " --mtp-verify 1 with it, or drop it");
+    }
+    if (o.mtp_verify && (o.session || o.sizes_only)) {
+        // The verify probe prices one body per generation step against the state that step built, and it
+        // reports through the run's own step lines and `--out` dumps. A session's `gen` budget is the
+        // caller's and its state is re-anchored at every `feed`, and --sizes-only runs no steps at all —
+        // so neither has the object this flag measures. Refusing beats printing nothing.
+        throw std::runtime_error("--mtp-verify (or QWEN_MTP_VERIFY=1) probes a run's generation steps;"
+                                 " --session has no such list and --sizes-only prefills nothing");
+    }
+    if (o.mtp_verify && (o.time_stages || o.time_waves)) {
+        // Same rule the draft states above: the verify body's submissions belong to no family of §07's
+        // launch bill, and the stage clock would charge them to whatever segment preceded them.
+        throw std::runtime_error("--mtp-verify and --time-stages/--time-waves cannot share a run: the"
+                                 " verify body is not a family of §07's bill, so the clock would misbill"
+                                 " it. Run the correctness pass without the timing flags; the verify"
+                                 " body prints its own VERIFY2 census line and its cost is taken as a"
+                                 " paired wall-clock A/B (see prototype/mtp_verify/ARMS.md)");
+    }
+    if (o.mtp_verify && o.wave_rows < engine::mtpverify::kRows) {
+        throw std::runtime_error("--mtp-verify needs a scratch at least " +
+                                 std::to_string(engine::mtpverify::kRows) + " rows tall; this run's"
+                                 " --wave-rows is " + std::to_string(o.wave_rows));
+    }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
         // caller's, and a resident process cannot know which one a gate wants — and --sizes-only
@@ -1149,6 +1251,123 @@ void mtp_census_line(const MtpSide& m, const char* mode, const char* sched) {
     std::fflush(stdout);
 }
 
+// ---- §09 / P7: the batched verify body, driver side -----------------------------------------------
+//
+// Everything the probe needs that is not in `engine/mtp_verify.h`: the snapshot, the shadow's logits tile,
+// and the lines that make its cost and its byte surface printed numbers. Built ONLY when the flag is on,
+// for the same reason `MtpSide` is: with the flag off no allocation here happens and no line below prints,
+// which is what makes "off is byte-identical to the binary that shipped without this" a fact about the
+// code path rather than a claim about it.
+struct VerifySide {
+    engine::mtpverify::Snapshot snap;
+    engine::mtpverify::LaneStage lanes;
+    engine::mtpverify::Stats stats;
+    float* logits_dev = nullptr;      // [kRows][kVocab] F32, the shadow's own logits tile
+    bool guard = false;               // `--verify-guard 1`: see `engine/mtp_verify.h`'s witness section
+};
+
+// One round, run AFTER the step and after the draft have taken everything they need from `sc` (the verify
+// body overwrites rows 0..1 of the scratch, including `sc.norm`, which the draft reads). `anchor_pos` is
+// the position the step's own row sat at; `fed` the token it was fed; `candidate` row 1's token.
+//
+// The printed `row0_eq_step` is not a courtesy: it is the per-step behavioural canary that row 0 of the
+// batched body reproduces the step it replaces, on the engine's own bits, in the same run that produced
+// the cost figure. If it ever reads 0 the batched-body premise is wrong and `prototype/mtp_delta`'s whole
+// `delta` has to be re-priced — which is why it is a printed field and not an assert that ends the run.
+//
+// With the guard on, the same round also answers two questions in bytes rather than in metrics, because a
+// metric is what let this body pass four checks while reading the wrong state:
+//
+//   operands   what the step was about to read, against what the shadow actually held. A row-0 logits gap
+//              is "different operands" or it is rounding, and this is the only line that can tell.
+//   leak       every live buffer, before the body against after it, plus the poisoned lane. §08.6 makes
+//              one lane above the prefix writable and everything below it sacred; this says which of the
+//              two the body touched, and the poison says whether it wrote anywhere at all.
+//
+// `selftest` is the witness that the witnesses bite: the step is required to move the mixer state, so a
+// mixer comparison across a step that reads "same" is a comparator that cannot fail, and that is the one
+// failure mode this section would otherwise share with the empty-parse gates in `AGENTS.md`.
+void verify_round(VerifySide& v, const engine::WeightStore& store, engine::DecodeScratch& sc,
+                  const engine::RequestState& st, int anchor_pos, int fed, int candidate,
+                  int step_token, int step, const std::string& out_dir,
+                  const engine::mtpverify::StateBytes* step_reads,
+                  const engine::mtpverify::StateBytes* step_after) {
+    const int tokens[engine::mtpverify::kRows] = {fed, candidate};
+    engine::mtpverify::StateBytes body_reads;
+    // The lane the body is entitled to write: its second row sits at `anchor_pos + 1`, which is
+    // `st.prefix_len` now that the step has advanced it. Poisoning it is safe precisely because it is above
+    // the live prefix, and it converts "row 1 wrote its own lane" from an assumption into a printed byte
+    // count. `poison_kv_lane` refuses anything at or below the prefix, so this cannot drift into poisoning a
+    // lane the request reads. The REPORT is taken inside `verify_body`, between the body and the lane revert:
+    // the revert puts this lane's pre-body bytes back, so a report read here, after the call, would describe
+    // the revert rather than the body — and a witness that measures the repair instead of the write is exactly
+    // the decoration this tree keeps refusing.
+    const int poison_lane = st.prefix_len;
+    engine::mtpverify::StateBytes live_before;
+    engine::mtpverify::PoisonReport poison;
+    if (v.guard) {
+        live_before = engine::mtpverify::capture_state_bytes(st, -1);
+        engine::mtpverify::poison_kv_lane(st, poison_lane);
+    }
+    const engine::mtpverify::Result r = engine::mtpverify::verify_body(
+        store, st, sc, v.snap, anchor_pos, tokens, v.logits_dev, v.lanes,
+        v.guard ? &body_reads : nullptr, v.guard ? &poison : nullptr);
+    v.stats.rounds++;
+    v.stats.snapshot_bytes += v.snap.bytes();
+    v.stats.restored_bytes += v.snap.bytes();   // the shadow is seeded every round, not only on a reject
+    v.stats.lane_bytes += r.lane_bytes;         // the anchor-lane revert, both directions, this round
+    v.stats.kv_bytes_left = engine::mtpverify::kv_bytes_above_prefix(st);
+    std::printf("VERIFY2 step=%d anchor_pos=%d fed=%d candidate=%d row0=%d row1=%d row0_top=%.9g"
+                " row1_top=%.9g row0_eq_step=%d head_passes=%d d2h=%d logits_bytes=%lld"
+                " checkpoint_bytes=%lld lane_revert_bytes=%lld guard=%d\n",
+                step, anchor_pos, fed, candidate, r.token[0], r.token[1], r.top[0], r.top[1],
+                r.token[0] == step_token ? 1 : 0, r.head_passes, r.d2h_count,
+                (long long)r.bytes_read_back, (long long)v.snap.bytes(), (long long)r.lane_bytes,
+                v.guard ? 1 : 0);
+    std::fflush(stdout);
+    if (v.guard) {
+        const engine::mtpverify::StateBytes live_after =
+            engine::mtpverify::capture_state_bytes(st, -1);
+        const std::string operands = engine::mtpverify::first_state_diff(*step_reads, body_reads);
+        const std::string leak = engine::mtpverify::first_state_diff(live_before, live_after);
+        const std::string selftest =
+            engine::mtpverify::first_mixer_diff(*step_reads, *step_after);
+        v.stats.guard_bytes += (long long)live_before.gdn.size() + (long long)live_before.conv.size() +
+                               (long long)live_before.kv.size();
+        std::printf("VERIFYGUARD step=%d pos=%d poison_lane=%d operands_same=%d leak_clean=%d"
+                    " poison_written=%d poison_regions_unwritten=%d/%d poison_survivors=%lld"
+                    " poison_lane_bytes=%lld selftest_bites=%d"
+                    " operand_first_diff=%s leak_first_diff=%s leak_extent=%s\n",
+                    step, anchor_pos, poison_lane, operands.empty() ? 1 : 0, leak.empty() ? 1 : 0,
+                    poison.written() ? 1 : 0, poison.regions_unwritten, poison.regions,
+                    poison.survivors, poison.lane_bytes, selftest.empty() ? 0 : 1,
+                    operands.empty() ? "-" : operands.c_str(), leak.empty() ? "-" : leak.c_str(),
+                    engine::mtpverify::state_diff_summary(live_before, live_after).c_str());
+        std::fflush(stdout);
+    }
+    if (!out_dir.empty()) {
+        // Raw F32, [2][kVocab], the same dtype rule every logits dump in this driver follows (a
+        // comparator that guesses the dtype from a file size is `AGENTS.md`'s trap; so is reading F32
+        // dumps as BF16).
+        write_raw(out_dir, "verify2_" + std::to_string(step) + ".bin", r.logits);
+    }
+}
+
+void verify_census_line(const VerifySide& v, const std::string& restore_witness) {
+    std::printf("VERIFY2DONE on=1 rows=%d rounds=%lld checkpoint_bytes_per_round=%lld"
+                " restored_bytes=%lld lane_revert_bytes_per_round=%lld lane_revert_bytes=%lld"
+                " kv_bytes_above_prefix=%lld head=batched d2h_per_round=1"
+                " gemm=hand gdn_scan=seq guard=%d guard_bytes=%lld restore_witness=%s\n",
+                engine::mtpverify::kRows, (long long)v.stats.rounds, (long long)v.snap.bytes(),
+                (long long)v.stats.restored_bytes,
+                v.stats.rounds ? (long long)v.stats.lane_bytes / (long long)v.stats.rounds : 0LL,
+                (long long)v.stats.lane_bytes,
+                (long long)v.stats.kv_bytes_left,
+                v.guard ? 1 : 0, (long long)v.stats.guard_bytes,
+                restore_witness.empty() ? "identical" : restore_witness.c_str());
+    std::fflush(stdout);
+}
+
 void session_loop(const engine::WeightStore& store, engine::RequestState& st,
                   engine::DecodeScratch& sc, MtpSide* mtp) {
     std::printf("READY cap=%lld\n", (long long)st.cap);
@@ -1307,6 +1526,7 @@ void print_usage(FILE* out) {
                  " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
                  " [--gdn-geom block|wf4|wf2|reg16]"
                  " [--mtp-draft 0|1] [--mtp-sched loop|every] [--mtp-cap N]"
+                 " [--mtp-verify 0|1] [--verify-candidate ID|sampled] [--verify-guard 0|1]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -1650,6 +1870,54 @@ void print_usage(FILE* out) {
                  " the target, nothing is snapshotted, and the target keeps running plain greedy. Refused"
                  " with --time-stages/--time-waves, which would charge the draft's submissions to"
                  " whichever stage-clock segment preceded them\n"
+                 "  --mtp-verify 0|1  §09's batched 2-row VERIFY body as a read-only side pass"
+                 " (`engine/mtp_verify.h`; `QWEN_MTP_VERIFY=0|1` does the same from the environment, and"
+                 " the flag outranks it). `0` is the DEFAULT and runs nothing: no allocation, no"
+                 " submission, no extra line. `1` runs, after every generation step, ONE body of two rows"
+                 " at positions q and q+1 over the populated KV — the shipping `submit_wave_body` at"
+                 " width 2 — on a SHADOW mixer state RESTORED from a per-step checkpoint of the GDN state"
+                 " and conv window (repointing the shadow is not seeding it: without the restore the body"
+                 " reads memory it never wrote, which is a different operand rather than a worse rounding),"
+                 " then prices both rows with ONE pass of the batched tied head"
+                 " (`lm_head_batched_xbf16`) and ONE logits download, and argmaxes both with §03.4's rule."
+                 " The target's own state is never the shadow, so there is nothing to commit: this is the"
+                 " body and its cost, NOT the accept loop, and it changes no emitted token (that loop is"
+                 " the next increment). It forces the hand GEMM and the sequential GDN scan for its own"
+                 " body, because a one-row decode step runs those by rule and row 0 has to reproduce them"
+                 " bit for bit. Prints `VERIFY2 step= anchor_pos= fed= candidate= row0= row1= row0_top="
+                 " row1_top= row0_eq_step= head_passes= d2h= logits_bytes= checkpoint_bytes= guard=` per"
+                 " round, writes `verify2_<step>.bin` (F32, [2][vocab]) beside the other dumps when --out"
+                 " is given, and ends with a `VERIFY2DONE` census line carrying the per-round checkpoint"
+                 " bytes, the bytes left above `prefix_len`, and the restore witness. Refused with"
+                 " --session (no step list) and with --time-stages/--time-waves (the body is not a family"
+                 " of §07's bill, so the clock would misbill it; its cost is a paired wall-clock A/B, see"
+                 " prototype/mtp_verify/ARMS.md).\n"
+                 "  --verify-candidate ID|sampled  the id fed as row 1 at every anchor. Without the flag"
+                 " the candidate is the token the step itself was fed: a real second row at the next"
+                 " position, but a degenerate draft. `sampled` uses the token the step PREDICTED, i.e. the"
+                 " true next token, which makes ONE probe run directly comparable against a plain run's"
+                 " own `logits<step>.bin` files at every anchor — that pairing is `prototype/mtp_verify`'s"
+                 " row-1 witness, and it is a reproduction, not a filename. Any decimal id is a genuinely"
+                 " wrong candidate, which is the negative: row 1 must move and row 0 must not. Refused"
+                 " unless --mtp-verify is on — a flag accepted by silence is the defect this session has"
+                 " now recorded three times.\n"
+                 "  --verify-guard 0|1  witness the verify body in BYTES rather than in metrics"
+                 " (`engine/mtp_verify.h`'s operand/guard section); 0 is the default and submits nothing"
+                 " extra. `1` downloads, per round, what the step was about to read and what the shadow"
+                 " body actually held, byte-compares them, poisons the one KV lane above `prefix_len` that"
+                 " the body is entitled to write, and re-reads every live buffer afterwards. Prints"
+                 " `VERIFYGUARD step= pos= poison_lane= operands_same= leak_clean= poison_written="
+                 " poison_regions_unwritten=/poison_regions poison_survivors= poison_lane_bytes="
+                 " selftest_bites= operand_first_diff= leak_first_diff= leak_extent=` per round."
+                 " `selftest_bites=1` is"
+                 " the control that says the comparison can fail at all (the step had to move the mixer"
+                 " state), and `poison_written` is per-region rather than a byte count because a lane that"
+                 " WAS written still contains a few 0xA5 bytes by coincidence. `leak_extent` counts the"
+                 " bytes that moved in each buffer and names the lanes they moved in, which is what tells"
+                 " 'the body re-staged its own lane' from 'the body wrote all over the cache'. Off during"
+                 " timing on"
+                 " purpose: it is tens of MiB of downloads per round, so `prototype/mtp_verify/ARMS.md`"
+                 " runs it off and the admission gate runs it on. Refused unless --mtp-verify is on.\n"
                  "  --mtp-sched loop|every  which round sequence --mtp-draft 1 walks. `loop` (the"
                  " default) reproduces `speccheck/mtp.py`'s `greedy_mtp(k=1)` round geometry on a plain"
                  " greedy stream — draft at q+1, next round at q+2 after an accept and q+1 after a"
@@ -2581,6 +2849,28 @@ int main(int argc, char** argv) {
                             engine::mtpdraft::schedule_name(mtp->track.sched));
         }
 
+        // §09 / P7: the verify probe's checkpoint, allocated only when it is on. `snapshot.bytes()` is
+        // DERIVED from `state_sizes()` (18.0 MiB of GDN state plus the F32 conv window — 1.265 MiB, not the
+        // 0.63 MiB `MTP-IMPL.md` §1 carries, which predates the 2026-10-11 correction to F32), so the
+        // printed per-round checkpoint cost cannot be stale in the direction of flattering the route.
+        // The bytes are the whole rollback surface a length field cannot undo: KV stays a length
+        // (see `engine/mtp_verify.h`), and `download_state` compacts KV to `prefix_len`, so what the shadow
+        // body writes above P is neither fingerprinted nor reachable.
+        std::unique_ptr<VerifySide> verify;
+        if (o.mtp_verify) {
+            verify = std::make_unique<VerifySide>();
+            verify->guard = o.verify_guard != 0;
+            verify->snap = engine::mtpverify::allocate_snapshot(st);
+            verify->lanes = engine::mtpverify::make_lane_stage(st);
+            const hipError_t le = hipMalloc((void**)&verify->logits_dev,
+                                            (size_t)engine::mtpverify::kRows * engine::kVocab *
+                                            sizeof(float));
+            if (le != hipSuccess) {
+                throw std::runtime_error(std::string("hip: ") + hipGetErrorString(le) +
+                                         " allocating the verify logits tile");
+            }
+        }
+
         const std::string inv = st.check_invariants();
         if (!inv.empty()) {
             std::fprintf(stderr, "decode_run: fresh state violates §08.6: %s\n", inv.c_str());
@@ -2712,6 +3002,17 @@ int main(int argc, char** argv) {
             // which is what a free run does and what A-18 says cannot be pinned past ~8 tokens.
             const int token = o.feed.empty() ? sampled : o.feed[i];
             const int pos_before = st.prefix_len;
+            // The witness's first half, in bytes and on the host: what the STEP is about to read. Held as a
+            // copy rather than a pointer because the step is exactly what moves it, and because the whole
+            // point of the comparison below is to say which operand the shadow body did not get.
+            engine::mtpverify::StateBytes step_reads, step_after;
+            if (verify && verify->guard) {
+                step_reads = engine::mtpverify::capture_state_bytes(st, token);
+            }
+            // The checkpoint, taken BEFORE the body: it has to hold the state the verify body starts from,
+            // and after the step that state is gone. This is the per-round cost D3 excluded as out of
+            // scope rather than solved, and it is a device-to-device copy of `snapshot.bytes()`.
+            if (verify) engine::mtpverify::take_snapshot(st, verify->snap);
             const auto ts = std::chrono::steady_clock::now();
             const engine::StepResult r =
                 engine::decode_step(store, st, sc, token,
@@ -2721,12 +3022,30 @@ int main(int argc, char** argv) {
             step_ms += wall_ms;
             step_records.push_back({step, token, r.token, r.top_logit});
             sampled = r.token;
+            // The witness's own control: the step is required to have moved the mixer state, so a mixer
+            // comparison across it that reads "same" is a comparator that cannot fail. Captured here,
+            // adjudicated in `verify_round`, next to the two comparisons it vouches for.
+            if (verify && verify->guard) {
+                step_after = engine::mtpverify::capture_state_bytes(st, -1);
+            }
             if (mtp) {
                 // Generation phase only — this loop is the only place §07.5's stop rule lives, and the
                 // draft's rounds start from a decoded step, never from a prompt wave row (whose sample
                 // is discarded and must never arm a stop). `r.token` is this step's prediction at
                 // position `pos_before`, and `sc.norm` row 0 the row it was priced from.
                 mtp_after_step(*mtp, store, sc.norm, pos_before, r.token);
+            }
+            if (verify) {
+                // AFTER the draft, because the draft reads `sc.norm` row 0 and the verify body overwrites
+                // rows 0..1 of the scratch. The candidate is the flag's, or the degenerate self-candidate
+                // (the token this step fed) when none was named — either way row 1 is a second row at the
+                // next position, which is what the body and the batched head are for.
+                const int candidate = !o.verify_candidate_given || o.verify_candidate.empty()
+                                          ? token
+                                      : o.verify_candidate == "sampled" ? r.token
+                                                                        : std::stoi(o.verify_candidate);
+                verify_round(*verify, store, sc, st, pos_before, token, candidate, r.token, step,
+                             o.out_dir, &step_reads, &step_after);
             }
 
             const bool stop_match = r.token == engine::kStopToken;
@@ -2773,6 +3092,29 @@ int main(int argc, char** argv) {
             mtp_close_run(*mtp);
             mtp_census_line(*mtp, o.feed.empty() ? "run" : "replay",
                             engine::mtpdraft::schedule_name(mtp->track.sched));
+        }
+
+        // The verify probe's close. The restore witness is not optional and not per round: it poisons the
+        // shadow with a pattern no body writes, restores, and compares EVERY byte, so "the restore was
+        // complete" is a witnessed claim rather than "the restore call ran" — and a partial restore would
+        // leave a state that looks plausible and is wrong. Costs two downloads of the mixer state once.
+        if (verify) {
+            std::string witness = "no_rounds_ran";
+            if (verify->stats.rounds > 0) {
+                // Fresh checkpoint of the FINAL state, so the witness is about real content rather than
+                // whatever the last round's snapshot happened to hold. The copy this performs is the
+                // witness's own cost and is NOT added to `restored_bytes`, which counts the restores the
+                // rounds actually needed — the two figures answer different questions and folding one into
+                // the other would make `restored_bytes == rounds × checkpoint` stop being checkable.
+                engine::mtpverify::take_snapshot(st, verify->snap);
+                witness = engine::mtpverify::restore_witness(verify->snap);
+            }
+            verify_census_line(*verify, witness);
+            engine::mtpverify::free_snapshot(verify->snap);
+            engine::mtpverify::free_lane_stage(verify->lanes);
+            if (verify->logits_dev) (void)hipFree(verify->logits_dev);   // nodiscard, per
+                                                                        // `mtp_draft.cpp`'s teardown
+            verify->logits_dev = nullptr;
         }
 
         if (o.state_fp) {

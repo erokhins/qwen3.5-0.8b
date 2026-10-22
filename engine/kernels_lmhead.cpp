@@ -8,6 +8,7 @@
 
 #include <stdexcept>
 
+#include "engine/lm_head_batched_kernels.h"  // the N-rows-from-one-table-read form (P7's verify body)
 #include "engine/lm_head_xbf16_kernels.h"   // the BF16-staged form (route S1 item 1)
 #include "prototype/lm_head_gemv/lm_head_gemv_kernels.h"
 
@@ -63,6 +64,38 @@ void lm_head_full_xbf16(const uint16_t* table, const uint16_t* h, float* logits,
     const int blocks = (vocab + kRowsPerBlock - 1) / kRowsPerBlock;
     engine::lmheadxbf16::lm_head_gemv_full_xbf16<true><<<blocks, threads>>>(
         (const hip_bfloat16*)table, h, logits, vocab, kRowsPerBlock);
+}
+
+// The batched form (P7's verify body): N query rows of the tied head from ONE pass over the table, which
+// is the difference between `delta` = 0.1505 of a step and `delta` = 0.4729 = KILLED
+// (`prototype/mtp_delta/D3-RESULT.md`), measured as a shape at 1.0019x of the one-row pass for N=2
+// (`prototype/mtp_headbatch/HEADBATCH-RESULT.md`). Same grid, same block, same wave32 refusal, same
+// rows-per-block constant as the shipped one-row launch — only the work per block differs, so the two are
+// directly comparable in a paired A/B.
+//
+// NROWS is accepted only as 2, and says so rather than falling back: a deeper verify (k>1) is unfunded
+// work (`prototype/mtp_draft/DRAFT-RESULT.md`: "fund a staging pass, do not fund deeper k"), and a
+// launcher that quietly served k=3 with a k=2 kernel would be the silent-substitution failure this repo
+// keeps recording.
+void lm_head_batched_xbf16(const uint16_t* table, const uint16_t* h_rows, float* logits_rows,
+                           int vocab, int nrows) {
+    if (warp_width() != 32) {
+        throw std::runtime_error("lm_head_batched_xbf16: the gated kernel assumes a 32-lane wavefront;"
+                                 " this device reports " + std::to_string(warp_width()));
+    }
+    if (vocab <= 0) throw std::runtime_error("lm_head_batched_xbf16: vocab must be > 0");
+    if (h_rows == nullptr) throw std::runtime_error("lm_head_batched_xbf16: h_rows is null");
+    if (nrows != kLmHeadBatchedRows) {
+        throw std::runtime_error("lm_head_batched_xbf16: this build instantiates NROWS=" +
+                                 std::to_string(kLmHeadBatchedRows) + ", asked for " +
+                                 std::to_string(nrows) + ". A deeper verify is a funding decision, not"
+                                 " a template argument.");
+    }
+    constexpr int kRowsPerBlock = ROWS_PER_BLOCK;
+    const int threads = 32 * kRowsPerBlock;
+    const int blocks = (vocab + kRowsPerBlock - 1) / kRowsPerBlock;
+    engine::lmheadbatched::lm_head_gemv_batched<kLmHeadBatchedRows><<<blocks, threads>>>(
+        (const hip_bfloat16*)table, (const hip_bfloat16*)h_rows, logits_rows, vocab, kRowsPerBlock);
 }
 
 }  // namespace engine::kernels

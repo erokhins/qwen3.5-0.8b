@@ -58,6 +58,10 @@ echo "built $BIN/loader_test"
 # path uses, plus `kernels::mtp_attn_row`, which lives in `kernels_attn.cpp` because that is the one TU
 # allowed to include `attn_decode_kernels.h` (its `__global__`s have external linkage, so a second TU
 # including that header would be a duplicate-symbol link error).
+# `mtp_verify.cpp` is §09's batched 2-row verify body as a measured side pass (`engine/mtp_verify.h`),
+# default off: like `mtp_draft.cpp` it owns no arithmetic and no kernel — it submits `submit_wave_body` at
+# width 2 on a shadow state and reads through `kernels::lm_head_batched_xbf16` — so it is its own TU for
+# the same reason, to keep an inactive route out of the shipping path's object code.
 # `kernels_gemm.cpp` is the hipBLAS route of route (c) and the only TU that links `-lhipblas`: one
 # handle and one pinned workspace for the process, and the one call form every library matmul in the
 # engine shares (`tools/gemm_common.h`, which `tools/gemm_peak --check` and `tools/prefill_mix --check`
@@ -67,7 +71,7 @@ echo "built $BIN/loader_test"
 # must be present to be measured in one window. The engine never has both routes live at once.
 hipcc "${FLAGS[@]}" \
   engine/decode_run.cpp engine/decode_step.cpp engine/prefill.cpp engine/state.cpp engine/loader.cpp \
-  engine/mtp_draft.cpp \
+  engine/mtp_draft.cpp engine/mtp_verify.cpp \
   engine/launch_stats.cpp engine/stage_clock.cpp \
   engine/kernels_glue.cpp engine/kernels_proj.cpp engine/kernels_mlp.cpp \
   engine/kernels_gdn.cpp engine/kernels_attn.cpp engine/kernels_lmhead.cpp \
