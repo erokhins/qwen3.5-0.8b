@@ -31,7 +31,7 @@ This is the running checkpoint for the funded correctness fix that follows
       `crossrow_arm1.py sweep` (per-row byte-identity over the rows that must not move). The cell-level
       gate is `prototype/mtp_verify/causal_bound` with `--must-catch` (33 injections, all RED).
 - [x] device confirm list for the main agent — §"Device confirm list".
-- [x] instrument: `prototype/mtp_verify/causal_bound.{cpp,sh}` — five encodings, three forms, three
+- [x] instrument: `prototype/mtp_verify/causal_bound.cpp` + `build_causal_bound.sh` — five encodings, three forms, three
       injections, all implemented and run on device.
 - [x] dump-only engine flag `--dump-attn-rows` (default off, byte-identical off AND on) plus
       `attn_dump_diff.py` / `attn_dump_shape.py` — the instrument that localises the defect to the wide
