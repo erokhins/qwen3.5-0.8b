@@ -190,3 +190,24 @@ bash tools/gpu_lock.sh release <tag>
 .venv/bin/python prototype/mtp_verify/crossrow_arm1.py compare <ref-dir> <pert-dir> --edge-row <q>
 bash prototype/mtp_verify/crossrow_ladder.sh                  # 8 configs x 2 runs; wall ~20 s total per batch
 ```
+
+---
+
+## Correction appended by the main agent (2026-10-22) — the predicate named here is REFUTED
+
+This file's headline claim — that the wide block admits `lanes_of(a,q)` because the **causal
+bound is one lane too wide** — was disproved at cell resolution by `FIX-CROSSROW.md`
+(commit `b574f40`). The datum this file discovered is real and reproduced; the mechanism is
+not mask widening. Measured at the attention output from the dump: perturbing one token moves
+**exactly one earlier row, by ≤ 1 BF16 ULP (1−cos 0.0)**, and only when that row's bound is
+odd — a widening would move every lane past the bound, not one. The wide kernels launched
+directly with the engine's own `CoreArgs` honour the bound exactly across 345 cases and four
+independent encodings, with 39 must-catch injections all red including a host-side
+widen-by-one that is exactly the defect refuted here.
+
+Surviving mechanism, as a shaped clue rather than a finding: f16x2 P-pair packing
+(`__shfl_xor_sync`) straddles the causal boundary exactly when the bound is odd, so one live
+and one masked cell share a pair — which matches the dependence set and the fact that both
+wide knobs leak identically. Read `FIX-CROSSROW.md` Results 5, 7 and "what is left" before
+using anything in this file as a diagnosis. Kept unedited above for the record of how the
+datum was found; a superseded diagnosis is history, not an instruction.
