@@ -24,18 +24,30 @@ THREE ARMS, each a separate invocation so every device command stays small and b
 
   --arms sweep     engine per-row sweep. One `decode_run --dump-attn-rows` per position (reference plus the
                    derived set), adjudicated on the FIRST attention layer's `pre_gate` tile.
-  --arms sinfzero  the signed-zero injection as a must-catch, through `pack_ab`: a negative staged V at the
-                   disallowed lane MUST move the straddling row and a non-negative one MUST NOT. Both halves
-                   are asserted, so this arm cannot pass by being blind. The `0 x inf` arm of the same ladder
-                   is a must-FIRE in its own right (the recorded hazard), expected from the F16 range rather
-                   than from a typed case name.
+  --arms sinfzero  the signed-zero injection as a must-catch, through `pack_ab`, over a DERIVED population of
+                   (attention layer, straddle row) points, adjudicated on the rig's own output FILES rather
+                   than on the counter it prints. What is hard at every point: a non-negative staged V must
+                   not move the straddle row or any row behind it, a negative one may move it by <= 1 BF16 ULP
+                   with no NaN, all negatives at a point must agree with each other (the dead product is
+                   0 x V = +-0, so a response that depends on |V| means the dead weight is no longer exactly
+                   +0), and the `0 x inf` arm MUST fire (the recorded hazard). What is NOT hard anywhere: that
+                   the sign nudge is VISIBLE at all - it is a 1-F16-ULP nudge of the F16 accumulator and shows
+                   in the BF16 output only where a cell sits near a BF16 rounding boundary, which is a
+                   property of the fixture's values, not of its geometry. So the arm SEARCHES its derived
+                   population for at least one point where the sign channel is visible and, if the budget
+                   holds none, it REFUSES loudly. A silent pass on an uninhabited question is the failure mode
+                   this arm had: see FIX-ZERO §"Correction: the signed-zero arm was asserting one point's luck".
   --arms widen     the one-lane widening must-catch, by REUSING `tmp/mtp_verify/causal_bound --must-catch`
                    (its `widen1` is the engine's own host-side bound lie) instead of re-deriving an injection.
 
 `selftest` proves the ADJUDICATOR can fail in both directions, on synthetic mutants of a real reference dump
 dir (CPU only): an even-bound row moved, a straddle row moved 2 ULP, a NaN in an exempt row, and the
-unmutated copy - the last one proves the must-not-catch side is not vacuous. AGENTS' rule applies to every
-count in here: a parsed list that can be empty cannot fail, so each arm asserts its expected case count.
+unmutated copy - the last one proves the must-not-catch side is not vacuous - plus eight mutants of the
+signed-zero arm's own case tiles (a sensitive point that must read adjudicable, a straddle move of 2 ULP, a
+non-negative that moves, an `inf` that does not fire, a row behind the straddle that moves, a value-dependent
+negative, a rig counter that disagrees with its own bytes, and the blind pattern, which must read as NOT
+adjudicable rather than as clean). AGENTS' rule applies to
+every count in here: a parsed list that can be empty cannot fail, so each arm asserts its expected case count.
 
 Geometry is READ, never typed: `WIDE_POS_PER_BLOCK` comes from the header that defines it, the row count from
 the fixture manifest (enumerated, not remembered), the attention layer from the dump file names, and the row
@@ -47,6 +59,7 @@ command at a time, `tools/gpu_lock.sh` acquired by THIS driver and by none of it
 Usage:
     .venv/bin/python prototype/mtp_verify/zero_gate.py plan  [--fixture p128]
     .venv/bin/python prototype/mtp_verify/zero_gate.py run   [--fixture p128] [--arms sweep,sinfzero,widen]
+    .venv/bin/python prototype/mtp_verify/zero_gate.py run   --fixture dec8 --arms sinfzero --sinf-rows 4
     .venv/bin/python prototype/mtp_verify/zero_gate.py selftest --ref-dump DIR [--work DIR]
 """
 from __future__ import annotations
@@ -180,6 +193,9 @@ def first_layer_tile(d: Path, what: str = "pre_gate") -> tuple[Path, int, int]:
 def load_bits(path: Path) -> np.ndarray:
     """Raw BF16 bit patterns as [rows][ROW_FLOATS], dtype PROVEN by byte count (AGENTS' dump-dtype row: read
     a BF16 tile as F32 or back and you get a plausible ndiff and a NaN cos)."""
+    if not path.is_file():
+        raise SystemExit(f"{path}: no such file. A missing tile is an unadjudicated case, not a clean one, so "
+                         "it aborts rather than reading as a pass.")
     n = path.stat().st_size
     if n % (2 * ROW_FLOATS):
         raise SystemExit(f"{path}: {n} bytes is not a whole number of BF16 rows of {ROW_FLOATS} elements")
@@ -317,54 +333,273 @@ def run_sweep(fixture: str, work: Path, positions: list[int], form: list[str]) -
 
 
 # ------------------------------------------------------------------ arm B: the signed-zero injection -----------------------------------------------
-def run_sinfzero(pack_ab: Path, ref_dump: Path, row: int) -> tuple[int, int]:
-    """The signed-zero must-catch, both halves, plus the recorded `0 x inf` hazard as its own must-fire.
-    The expectation for each case is DERIVED from the value the rig itself prints (`--list` carries `val=`),
-    against the F16 range: a finite value stages to +/-0 so only its SIGN can matter, and a value at or above
-    F16's 65504 stages to `inf`, where `0 x inf` is NaN and reaches the live row (FIX-ZERO's hazard note).
-    Returns (cases, failures)."""
+# This arm used to assert ONE fact at ONE hard-coded point - the smallest-L tile of the dump, row 8 - namely
+# that a negative staged V at the disallowed lane moves the straddling row. `--fixture dec8` read 10 failures
+# and the bytes say why, and the rig's counter was NOT the liar:
+#
+#   dec8 (engine echo `core=attn_wide_llama_wave rows=17 lanes_last=17 lvalid=1 cap=19`, rig canary
+#   BYTE-IDENTICAL, so the wide F16-D form really does run at 17 rows): at L3, every one of rows 2,4,6,8,10,
+#   12,14 leaves its straddle row BYTE-IDENTICAL under all ten negative cases - 0 of 2 048 cells move, which
+#   is what the rig's counter printed and what `bf16_ulp` confirms on the files. At L23 row 8 the same fixture
+#   moves exactly 1 cell, `h5/d62 3fe3 -> 3fe2`, 1 BF16 ULP, all ten negatives together.
+#   p128: L3 row 8 moves 1 cell (`h4/d62 3ecd -> 3ecc`); L3 rows 2,4,6,10,20,40,60,80,98,100,110 do not.
+#   wide640f body 1 (512 rows): L3 rows 2,4,6,8 do not; L7 row 8 moves 1 cell (`h5/d62 3e4c -> 3e4b`).
+#   The counter was compared against the files on 80 case-reads across five of those points: 0 disagreements.
+#
+# So "row 8 moves" is neither geometry nor a law: it is whether one cell of that row's 2 048 sits within one
+# F16 ULP of a BF16 rounding boundary, because that is the only way the nudge that `CAUSE.md` F3 names (the
+# F16-D WMMA atom is not neutral to the sign of a `0 x V` product) survives the BF16 epilogue. The leak is
+# present at dec8 whether or not it shows - `v62_p1e6` puts NaN in 8 cells of row 8 there, which proves the
+# dead k-term is formed and accumulated at that row. An expectation imported from another fixture's row 8 was
+# therefore a check about the wrong thing. What this arm now asserts:
+#
+#   HARD, at every derived point (fixture-independent):
+#     canary                                  the rig reproduces the engine's own tile, else it adjudicates
+#                                             nothing (pack_ab aborts; re-checked here by name);
+#     0 <= val < 65504                        straddle row and every row behind it BYTE-IDENTICAL;
+#     val < 0, finite                         straddle row may move, by <= 1 BF16 ULP and NaN-free, and no
+#                                             row behind it may move. Move recorded as known-leak;
+#     all negatives at a point                must AGREE (product is 0 x V = +-0 for every finite V, so a
+#                                             response that depends on |V| means the dead weight stopped
+#                                             being exactly +0 - the thing most worth catching here);
+#     |val| >= 65504                          MUST move the straddle row. 0 x inf = NaN is IEEE-forced, and
+#                                             movement of rows behind it is the recorded hazard, printed and
+#                                             not charged;
+#     rig counter vs the rig's own files      must agree, per case. `ISOLATED.md` records one build where
+#                                             `row_at_moved` disagreed with its files, so the FILES adjudicate
+#                                             and a disagreement is a failure of the rig, loudly.
+#   SEARCHED, at the fixture as a whole:
+#     at least one derived point where the sign channel is VISIBLE. If the derived population holds none
+#     within `--sinf-probes`, the arm REFUSES (non-zero exit). That is not a pass and not a violation: the
+#     fixture cannot adjudicate that half, and saying so is the whole point.
+F16_MAX_NORMAL = 65504.0     # the largest finite F16: at or above it the staged V is inf and 0 x inf is NaN
+
+
+def sinf_kind(val: float) -> str:
+    """The three expectations, derived from the VALUE the rig prints for a case, never from its name."""
+    if abs(val) >= F16_MAX_NORMAL:
+        return "overflow"          # stages to inf: 0 x inf = NaN, must reach the live row
+    return "negative" if val < 0.0 else "nonnegative"
+
+
+def sinf_case_table(pack_ab: Path) -> dict[str, float]:
+    """case -> value, read from `pack_ab --list` (that branch returns before any HIP call, so it is device
+    free). The arm and the selftest share this one source so the two cannot drift apart."""
     if not pack_ab.is_file():
         raise SystemExit(f"{pack_ab} not built; run bash prototype/mtp_verify/pack_ab/build.sh")
-    r = sh([str(pack_ab), "--dump", str(ref_dump), "--row", str(row), "--out", "/tmp/zero_gate/packab"])
-    if r.returncode != 0:
-        raise SystemExit(f"pack_ab failed: {r.stdout[-800:]}{r.stderr[-300:]}")
     lst = sh([str(pack_ab), "--list"])
-    n_lines = len([ln for ln in lst.stdout.splitlines() if ln.startswith("v62_")])
+    lines = [ln for ln in lst.stdout.splitlines() if ln.startswith("v62_")]
     want: dict[str, float] = {}
-    for ln in lst.stdout.splitlines():
+    for ln in lines:
         m = re.match(r"^(v62_\S+)\b.*\bval=(-?[0-9.eE+-]+)\}", ln)
         if m:
             want[m.group(1)] = float(m.group(2))
     if not want:
         raise SystemExit("pack_ab --list shows no v62_* cases with a val=: this arm has no cases and cannot fail")
-    if len(want) != n_lines:
-        raise SystemExit(f"parsed a val= for {len(want)} of {n_lines} v62_* cases; the arm would silently "
+    if len(want) != len(lines):
+        raise SystemExit(f"parsed a val= for {len(want)} of {len(lines)} v62_* cases; the arm would silently "
                          "adjudicate a subset (the empty-parse failure class)")
-    seen: dict[str, int] = {}
-    for ln in r.stdout.splitlines():
-        m = re.match(r"^CASE (v62_\S+)\b.*row_at_moved=(\d)", ln)
-        if m:
-            seen[m.group(1)] = int(m.group(2))
-    missing = [c for c in want if c not in seen]
-    if missing:
-        raise SystemExit(f"parsed {len(seen)} of {len(want)} CASE lines (missing {missing}); "
-                         "a driver that parses less than the rig printed cannot adjudicate")
-    fails = 0
-    for c, val in sorted(want.items()):
-        overflow = abs(val) >= 65504.0            # F16 max normal: stages to inf, and 0 x inf is NaN
-        want_moved = (val < 0.0) or overflow
-        got_moved = seen[c] == 1
-        ok = want_moved == got_moved
-        if not ok:
-            fails += 1
-        why = ("stages to inf -> 0 x inf = NaN, the recorded hazard" if overflow else
-               f"stages to {'-' if val < 0 else '+'}0, sign {'can' if val < 0 else 'cannot'} reach the row")
-        print(f"  {c:14s} val={val:<10g} {why:52s} row_at_moved={seen[c]} "
-              f"{'ok' if ok else '*** NOT AS REQUIRED ***'}")
-    if "CANARY fid: BYTE-IDENTICAL" not in r.stdout:
-        print("  *** pack_ab fidelity canary did not report BYTE-IDENTICAL; this arm adjudicates nothing ***")
-        fails += 1
-    return len(want), fails
+    return want
+
+
+def row_diff(ref_row: np.ndarray, got_row: np.ndarray) -> dict:
+    """One row's byte difference as {moved, cells, max_ulp, nan}. ULP is measured only where NEITHER side is
+    NaN, because a NaN's bit pattern is 48 700-odd ULPs from any number and a band checked over it passes or
+    fails on the encoding rather than on the arithmetic."""
+    d = ref_row != got_row
+    cells = int(d.sum())
+    if cells == 0:
+        return {"moved": False, "cells": 0, "max_ulp": 0, "nan": 0}
+    both_real = ~(is_nan_bits(ref_row) | is_nan_bits(got_row))
+    sel = d & both_real
+    mx = int(ulp_between(ref_row[sel], got_row[sel]).max()) if int(sel.sum()) else 0
+    return {"moved": True, "cells": cells, "max_ulp": mx, "nan": int(is_nan_bits(got_row).sum())}
+
+
+def adjudicate_sinfzero(ref: np.ndarray, tiles: dict[str, np.ndarray], counter: dict[str, tuple[int, int, int]],
+                        want: dict[str, float], row: int) -> tuple[list[str], list[str], dict]:
+    """The rule table above, at one point, over the rig's FILES. `counter` is the rig's own printed
+    (at, below, above) triple per case, kept only to be contradicted. Returns (violations, notes, stats) with
+    stats['sensitive'] non-zero iff a negative case visibly moved the straddle row here."""
+    viol: list[str] = []
+    notes: list[str] = []
+    if ref.shape[0] < row + 2:
+        raise SystemExit(f"cannot adjudicate row {row} of a {ref.shape[0]}-row tile: there is no row after "
+                         "it to witness that the injection reached the kernel")
+    stats = {"cases": 0, "sensitive": 0, "cells": 0, "max_ulp": 0, "nan": 0}
+    neg_move: dict[str, bool] = {}
+    for case, val in sorted(want.items()):
+        if case not in tiles:
+            viol.append(f"{case}: the rig printed a CASE line but no tile {case}; an unadjudicated case "
+                        "cannot be counted as clean")
+            continue
+        stats["cases"] += 1
+        kind = sinf_kind(val)
+        at = row_diff(ref[row], tiles[case][row])
+        below = sum(1 for q in range(row) if not np.array_equal(ref[q], tiles[case][q]))
+        above = sum(1 for q in range(row + 1, min(ref.shape[0], tiles[case].shape[0]))
+                    if not np.array_equal(ref[q], tiles[case][q]))
+        c = counter.get(case)
+        if c is None:
+            viol.append(f"{case}: no CASE line in the rig's output; a driver that parses less than the rig "
+                        "printed cannot adjudicate")
+        elif c != (int(at["moved"]), below, above):
+            viol.append(f"{case}: the rig's counter says at={c[0]} below={c[1]} above={c[2]} but its own "
+                        f"files say at={int(at['moved'])} below={below} above={above}; the files adjudicate "
+                        "and the counter is the suspect (ISOLATED.md's loose end)")
+        if kind == "nonnegative":
+            if at["moved"]:
+                viol.append(f"{case}: val={val:g} is non-negative, the dead product is exactly +0, yet the "
+                            f"straddle row moved {at['cells']} cells by {at['max_ulp']} ULP")
+            if below:
+                viol.append(f"{case}: {below} row(s) BEHIND the straddle row moved on a non-negative value")
+        elif kind == "negative":
+            neg_move[case] = at["moved"]
+            if below:
+                viol.append(f"{case}: {below} row(s) behind the straddle row moved; their bounds are smaller, "
+                            "so this lane is outside their causal set")
+            if at["moved"]:
+                stats["sensitive"] += 1
+                stats["cells"] = max(stats["cells"], at["cells"])
+                stats["max_ulp"] = max(stats["max_ulp"], at["max_ulp"])
+                if at["nan"]:
+                    viol.append(f"{case}: NaN in {at['nan']} cells of the straddle row; the signed-zero band "
+                                "is 1 ULP with no NaN")
+                elif at["max_ulp"] > 1:
+                    viol.append(f"{case}: straddle row moved {at['max_ulp']} BF16 ULP; the carried band is 1, "
+                                "so the leak got worse and a carried leak stops being carried")
+        else:  # overflow: the recorded `0 x inf` hazard, and a must-fire in its own right
+            if not at["moved"]:
+                viol.append(f"{case}: val={val:g} stages to inf, 0 x inf is NaN by IEEE, and nothing in the "
+                            "straddle row moved; the dead k-term is no longer being formed at all")
+            if at["nan"]:
+                notes.append(f"hazard: {at['nan']} NaN cells in the straddle row ({case})")
+            if below:
+                notes.append(f"hazard: {below} row(s) behind it moved too ({case}); the staged V is shared by "
+                             "every row of the block, so a NaN in it is not contained to one row")
+            stats["nan"] += at["nan"]
+    uniq = set(neg_move.values())
+    if len(uniq) > 1:
+        viol.append(f"the negative cases disagree about moving the straddle row "
+                    f"({sorted(neg_move)}): the dead product is 0 x V = +-0 for every finite V, so a "
+                    "response that depends on |V| means the masked weight stopped being exactly +0")
+    return viol, notes, stats
+
+
+def sinf_points(dump: Path, lvalid: int, n_rows: int, n_layers: int) -> list[dict]:
+    """The derived probe population for this arm: one point per (attention layer of the dump's FIRST body,
+    straddle row). Everything in it is read or derived, nothing is typed -
+      * the layers and the `seq` index come from the `attnNNN_L<M>_pre_gate_r<R>_lanes<L>.bin` names, and only
+        the FIRST body's occurrence of each layer is taken, which is the same tile the sweep arm adjudicates;
+      * a straddle row needs an ODD bound (`bound = lvalid + row`), because only then does the causal boundary
+        fall inside a packed f16x2 P cell (`FIX-CROSSROW` Result 7); an even bound has nothing to adjudicate;
+      * `row >= 1` because the rig's own must-fire control is `rows_below > 0` and row 0 has no row below it,
+        which is why running it used to exit 1 with three controls that structurally could not fire;
+      * `row + 1 < rows` because the injected lane must have a legitimate live consumer, else the injection is
+        inert and the point is vacuous (dec8 row 16, whose dead lane is the last cached lane, moves 0 bytes);
+      * `bound <= lanes` because the rig cannot vary a lane the dump does not carry.
+    `lvalid` is the value the body's own ATTN_DUMP line prints for a `--steps 0` prefill (FIX-CROSSROW Result
+    0); a wrong one is falsified by the rig's fidelity canary, which cannot reproduce the tile."""
+    by_layer: dict[int, dict] = {}
+    for f in dump_files(dump):
+        m = DUMP_NAME.match(f.name)
+        if not m:
+            continue
+        seq, layer, rows, lanes = int(m.group(1)), int(m.group(2)), int(m.group(4)), int(m.group(5))
+        if layer not in by_layer:            # first occurrence of the layer = the first body
+            by_layer[layer] = {"seq": seq, "layer": layer, "tile": f, "rows": rows, "lanes": lanes}
+    if not by_layer:
+        raise SystemExit(f"{dump}: no attention tiles to probe; this arm has no points and cannot fail")
+    layers = sorted(by_layer)[:n_layers] if n_layers > 0 else sorted(by_layer)
+    points: list[dict] = []
+    for layer in layers:
+        info = by_layer[layer]
+        rows = [q for q in range(1, info["rows"] - 1)
+                if (lvalid + q) % 2 == 1 and lvalid + q <= info["lanes"]]
+        for q in rows[:n_rows]:
+            points.append({**info, "row": q, "bound": lvalid + q})
+    if not points:
+        raise SystemExit(f"{dump}: no straddle row (odd bound, a row before it and one after it) in a "
+                         f"{info['rows']}-row body at lvalid={lvalid}; the arm has no cases")
+    return points
+
+
+def run_sinfzero(pack_ab: Path, ref_dump: Path, points: list[dict], out_root: Path,
+                 budget: int) -> tuple[int, int]:
+    """Device part: probe the derived points, in layer-major order, until one is sensitive; adjudicate every
+    one that was probed. Returns (cases adjudicated, failures). REFUSES (SystemExit) if none is sensitive."""
+    want = sinf_case_table(pack_ab)
+    probes = points[:budget]
+    if len(probes) < len(points):
+        print(f"  note: {len(points)} points derived, budget --sinf-probes={budget} probes the first "
+              f"{len(probes)}; raise it if this fixture's sensitive point is further along")
+    total_cases = fails = 0
+    probed = sensitive_points = hazard_nan = 0
+    for pt in probes:
+        tile, layer, seq, row = pt["tile"], pt["layer"], pt["seq"], pt["row"]
+        r = sh([str(pack_ab), "--dump", str(ref_dump), "--seq", str(seq), "--layer", str(layer),
+                "--row", str(row), "--out", str(out_root / f"s{seq:03d}_L{layer}_r{row}")])
+        if r.returncode != 0:
+            raise SystemExit(f"pack_ab --seq {seq} --layer {layer} --row {row} failed rc={r.returncode}: "
+                             f"{r.stdout[-600:]}{r.stderr[-300:]}")
+        if "CANARY fid: BYTE-IDENTICAL" not in r.stdout:
+            raise SystemExit(f"pack_ab's fidelity canary did not report BYTE-IDENTICAL at seq={seq} "
+                             f"layer={layer}: the rig does not reproduce the engine's tile, so nothing this "
+                             "arm prints about that point means anything")
+        counter: dict[str, tuple[int, int, int]] = {}
+        for ln in r.stdout.splitlines():
+            m = re.match(r"^CASE (v62_\S+)\b.*rows_below=(\d+) first_below=(-?\d+) row_at_moved=(\d) "
+                         r"rows_above=(\d+)", ln)
+            if m:
+                counter[m.group(1)] = (int(m.group(4)), int(m.group(2)), int(m.group(5)))
+        missing = [c for c in want if c not in counter]
+        if missing:
+            raise SystemExit(f"parsed {len(counter)} of {len(want)} CASE lines at seq={seq} layer={layer} "
+                             f"row={row} (missing {missing}); a driver that parses less than the rig printed "
+                             "cannot adjudicate")
+        ref = load_bits(tile)
+        tiles = {c: load_bits(out_root / f"s{seq:03d}_L{layer}_r{row}" / f"{c}_L{layer}.bin")
+                 for c in want}
+        viol, notes, stats = adjudicate_sinfzero(ref, tiles, counter, want, row)
+        probed += 1
+        total_cases += stats["cases"]
+        hazard_nan += stats["nan"]
+        fails += len(viol)
+        n_neg = sum(1 for v in want.values() if sinf_kind(v) == "negative")
+        head = (f"  point seq={seq} layer=L{layer} row={row} bound={pt['bound']} (odd, straddling) "
+                f"cases={stats['cases']} negatives_visible={stats['sensitive']}/{n_neg} "
+                f"max_ulp={stats['max_ulp']} -> ")
+        if stats["sensitive"]:
+            sensitive_points += 1
+            print(head + f"SENSITIVE, adjudicating the sign half here ({stats['cells']} cell(s) at "
+                         f"{stats['max_ulp']} BF16 ULP; per-case NaN counts below)")
+        else:
+            print(head + "no BF16-boundary crossing here, so the sign half is not adjudicable AT THIS POINT "
+                         "(see the arm's note: this is the fixture's values, not its geometry)")
+        for c, val in sorted(want.items()):
+            kind = sinf_kind(val)
+            at = row_diff(ref[row], tiles[c][row])
+            bad = any(v.startswith(f"{c}:") for v in viol)
+            print(f"      {c:12s} val={val:<10g} {kind:12s} straddle_row_moved={int(at['moved'])} "
+                  f"cells={at['cells']} max_ulp={at['max_ulp']} nan={at['nan']} "
+                  f"{'*** NOT AS REQUIRED ***' if bad else 'ok'}")
+        for v in viol:
+            print(f"      VIOLATION: {v}")
+        for n in notes:
+            print(f"      recorded: {n}")
+        if sensitive_points and not viol:
+            break          # one adjudicable point is what the sign half needs; the hard half ran on all
+    if sensitive_points == 0:
+        raise SystemExit(
+            f"REFUSED: the signed-zero arm found NO adjudicable point in {probed} probed "
+            f"(layer, row) point(s) of {ref_dump}: no negative case moved a straddle row anywhere, so this "
+            "fixture cannot adjudicate the sign channel and a green here would be a green about nothing. "
+            "This is not a violation of the engine - the leak is present whether or not it shows (the "
+            "`0 x inf` case fires). Raise --sinf-rows / --sinf-probes to search more of the derived "
+            "population, or run this arm at a fixture recorded as adjudicable in FIX-ZERO.md.")
+    print(f"  points_probed={probed} sensitive={sensitive_points} cases={total_cases} "
+          f"hazard_nan_cells={hazard_nan}")
+    return total_cases, fails
 
 
 # ------------------------------------------------------------------ arm C: the one-lane widening must-catch ------------------------------------
@@ -419,6 +654,93 @@ def selftest(ref_dump: Path, work: Path, positions: list[int]) -> tuple[int, int
     return cases, fails
 
 
+def selftest_sinfzero(ref_dump: Path, pack_ab: Path) -> tuple[int, int]:
+    """Mutants of the SIGNED-ZERO arm's own case tiles, built from a real reference tile (CPU only, no device
+    run). Every mutant goes through `adjudicate_sinfzero`, i.e. through the same file-shaped data the arm uses,
+    so what is being proved is that the arm can fail - not that a hand-written list agrees with itself. The
+    counter side is derived from the tiles for every case except the one whose whole point is a lying counter.
+    """
+    want = sinf_case_table(pack_ab)
+    tile, layer, trows = first_layer_tile(ref_dump)
+    ref = load_bits(tile)
+    row = next((q for q in range(1, trows - 1) if (1 + q) % 2 == 1), 0)
+    if row == 0:
+        raise SystemExit(f"a {trows}-row dump has no straddle row to mutate; the selftest would adjudicate "
+                         "nothing and must not be allowed to pass")
+    negs = [c for c, v in want.items() if sinf_kind(v) == "negative"]
+    nonnegs = [c for c, v in want.items() if sinf_kind(v) == "nonnegative"]
+    overs = [c for c, v in want.items() if sinf_kind(v) == "overflow"]
+    if not (negs and nonnegs and overs):
+        raise SystemExit(f"the rig's ladder has no {negs and 'negative'} / {nonnegs and 'non-negative'} / "
+                         f"{overs and 'overflow'} case to mutate; it cannot exercise both directions")
+
+    def build(mut: dict[str, str], moved: list[str] | None = None) -> tuple[dict, dict]:
+        """tiles = copies of ref with per-case mutations; `moved` overrides WHICH cases the derived counter
+        claims moved, so a counter can be made to lie."""
+        tiles: dict[str, np.ndarray] = {}
+        for c in want:
+            a = ref.copy()
+            how = mut.get(c)
+            if how == "ulp1":
+                a[row, 0] = shift_ulp(ref[row, 0], 1)
+            elif how == "ulp2":
+                a[row, 0] = shift_ulp(ref[row, 0], 2)
+            elif how == "nan":
+                a[row, 0] = 0x7FC0
+            elif how == "behind":
+                a[row - 1, 0] = shift_ulp(ref[row - 1, 0], 1)
+            tiles[c] = a
+        counter = {}
+        for c, a in tiles.items():
+            at = 1 if (moved is None and mut.get(c) in ("ulp1", "ulp2", "nan")) or \
+                     (moved is not None and c in moved) else 0
+            counter[c] = (at, 1 if mut.get(c) == "behind" else 0, 0)
+        return tiles, counter
+
+    def verdict(tiles: dict, counter: dict) -> tuple[str, list[str]]:
+        viol, _, stats = adjudicate_sinfzero(ref, tiles, counter, want, row)
+        if viol:
+            return "violation", viol
+        return ("sensitive" if stats["sensitive"] else "blind"), []
+
+    cases = fails = 0
+    mutations = [
+        # the pattern a sensitive point really shows: every negative moves the straddle row 1 ULP, the
+        # non-negatives do nothing, the overflow case puts a NaN there. Must read adjudicable, not red.
+        ("sensitive point (all negatives move 1 ULP)", {c: "ulp1" for c in negs} | {c: "nan" for c in overs},
+         None, "sensitive"),
+        # the dec8/L3 pattern: no negative moves anywhere, though the overflow case still fires. That is NOT
+        # clean - it is a point the sign half cannot adjudicate, and reading it as clean is exactly the defect
+        # this fix removes.
+        ("blind point (no negative moves)",        {c: "nan" for c in overs}, None, "blind"),
+        ("a negative moves 2 ULP (band broken)",   {c: "ulp2" for c in negs} | {c: "nan" for c in overs},
+         None, "violation"),
+        ("a non-negative moves 1 ULP",             {c: "ulp1" for c in negs + nonnegs[:1]} | {c: "nan" for c in overs},
+         None, "violation"),
+        ("the 0 x inf case does not fire",          {c: "ulp1" for c in negs}, None, "violation"),
+        ("a negative moves a row behind it",       {c: "behind" for c in negs} | {c: "nan" for c in overs},
+         None, "violation"),
+        ("only the biggest negatives move",        {negs[-1]: "ulp1", negs[-2]: "ulp1"} | {c: "nan" for c in overs},
+         None, "violation"),
+        # the rig prints a counter as well as files; ISOLATED.md records one build where they disagreed, so a
+        # disagreement must be a failure of the rig rather than a silent adoption of whichever the code read.
+        ("counter claims a move the bytes lack",    {c: "ulp1" for c in negs} | {c: "nan" for c in overs},
+         [], "violation"),
+    ]
+    for name, mut, moved, expect in mutations:
+        tiles, counter = build(mut, moved)
+        got, viol = verdict(tiles, counter)
+        ok = got == expect
+        cases += 1
+        fails += 0 if ok else 1
+        print(f"  [{layer}] sinf: {name:40s} expected={expect:10s} got={got:10s} "
+              f"{'ok' if ok else '*** SELFTEST FAILED ***'}"
+              + (f"  ({viol[0]})" if viol and not ok else ""))
+    if fails == 0 and not any(e == "violation" for _, _, _, e in mutations):
+        raise SystemExit("the signed-zero selftest asserts no violation, so it cannot fail")
+    return cases, fails
+
+
 # ------------------------------------------------------------------ main ----------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(prog="zero_gate.py")
@@ -435,7 +757,14 @@ def main() -> int:
         p.add_argument("--arms", default="sweep,sinfzero,widen")
         p.add_argument("--pack-ab", default="tmp/mtp_verify/pack_ab/pack_ab")
         p.add_argument("--causal-bound", default="tmp/mtp_verify/causal_bound")
-        p.add_argument("--sinf-row", type=int, default=-1, help="straddle row for the signed-zero arm")
+        p.add_argument("--sinf-rows", type=int, default=4,
+                       help="signed-zero arm: how many derived straddle rows per attention layer")
+        p.add_argument("--sinf-layers", type=int, default=0,
+                       help="signed-zero arm: how many attention layers of the first body (0 = all)")
+        p.add_argument("--sinf-probes", type=int, default=24,
+                       help="signed-zero arm: cap on pack_ab invocations per run (search budget)")
+        p.add_argument("--sinf-lvalid", type=int, default=1,
+                       help="lvalid the body's own ATTN_DUMP line printed (1 for a --steps 0 prefill)")
         p.add_argument("--no-lock", action="store_true", help="caller already holds tools/gpu_lock.sh")
     ns = ap.parse_args()
 
@@ -470,8 +799,10 @@ def main() -> int:
         if not Path(ns.ref_dump).is_dir():
             raise SystemExit("--ref-dump DIR is required and must be a dump dir from `run`")
         cases, fails = selftest(Path(ns.ref_dump), work, positions)
-        print(f"SELFTEST cases={cases} failures={fails}")
-        return 1 if fails else 0
+        scases, sfails = selftest_sinfzero(Path(ns.ref_dump), ROOT / ns.pack_ab)
+        print(f"SELFTEST cases={cases + scases} failures={fails + sfails} "
+              f"(sweep adjudicator {cases}/{fails}, signed-zero adjudicator {scases}/{sfails})")
+        return 1 if (fails + sfails) else 0
 
     tag = "zero_gate sweep"
     if not ns.no_lock:
@@ -484,9 +815,17 @@ def main() -> int:
             print(f"ARM sweep: cases={cases} violations={viol} known_leaks={known}")
             total_fail += viol
         if "sinfzero" in ns.arms:
-            srow = ns.sinf_row if ns.sinf_row >= 0 else 8
-            cases, fails = run_sinfzero(ROOT / ns.pack_ab, ref_dump, srow)
-            print(f"ARM sinfzero: cases={cases} failures={fails} (row {srow}, bound {srow + 1})")
+            if not ref_dump.is_dir():
+                raise SystemExit(f"{ref_dump} is not a dump dir; run the sweep arm first, or pass --ref-dump "
+                                 "(a signed-zero arm with no reference tile cannot fail)")
+            points = sinf_points(ref_dump, ns.sinf_lvalid, ns.sinf_rows, ns.sinf_layers)
+            print(f"  sinfzero points: {len(points)} derived "
+                  f"({len({p['layer'] for p in points})} layer(s) x up to {ns.sinf_rows} straddle row(s), "
+                  f"lvalid={ns.sinf_lvalid}); first={points[0]['layer']}/r{points[0]['row']} "
+                  f"last={points[-1]['layer']}/r{points[-1]['row']}")
+            cases, fails = run_sinfzero(ROOT / ns.pack_ab, ref_dump, points,
+                                        work / "packab", ns.sinf_probes)
+            print(f"ARM sinfzero: cases={cases} failures={fails}")
             total_fail += fails
         if "widen" in ns.arms:
             red, green = run_widen(ROOT / ns.causal_bound)

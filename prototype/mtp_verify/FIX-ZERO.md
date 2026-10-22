@@ -95,6 +95,11 @@ through `pack_ab`, expectations **derived from the value the rig prints** agains
 `0 x inf` arm is a must-fire in its own right instead of a typed exception), `widen` (reuses
 `causal_bound --must-catch`'s `widen1` host-side bound lie instead of re-deriving an injection).
 
+**SUPERSEDED IN PART, later the same week.** The `sinfzero` arm as just described asserted a per-case MUST-MOVE
+at one hard-coded point — smallest-L tile, `row=8` — and that assertion was about the wrong thing; on `dec8` it
+read 10 false failures. The diagnosis, the corrected rule table and the measured runs are in §"Correction: the
+signed-zero arm was asserting one point's luck". Everything else in this section stands.
+
 Measured, this session (device, correctness-only, no timing):
 
 | command | wall | result |
@@ -253,3 +258,170 @@ could have changed.
 whole-command wall; no kernel timing, burst, best-of-N or sweep appears anywhere in this file.
 
 `packab_bits.py` and the `report.py` diffs are CPU-only.
+
+## Correction: the signed-zero arm was asserting one point's luck (Step 3, arm B, reworked)
+
+The main agent ran the gate at `797b0a5` on `--fixture dec8` and got: `engine/gate.py --fixture dec8` PASS,
+`--fixture wide1024f` PASS, `ARM sweep: cases=2 violations=0 known_leaks=1`, `ARM widen: red=39 green=0`, but
+**`ARM sinfzero: cases=16 failures=1` → `VERDICT: RED`**, the 10 failures being exactly the ten negative cases
+of the ladder, each printing `stages to -0, sign can reach the row / row_at_moved=0 *** NOT AS REQUIRED ***`.
+The suspicion handed over was that `row=8` was p128 geometry asserted against a 17-row fixture, and that
+`pack_ab`'s `row_at_moved` counter — which `ISOLATED.md` already caught once disagreeing with its own bytes —
+might be the liar. Both halves were checked against the bytes before anything was changed.
+
+### Which one lied: the counter did not. The *expectation* lied.
+
+`pack_ab --dump <dec8 zg-ref> --row 8` re-run on dec8's own dump, and the rig's output tiles then diffed
+against the dump's `pre_gate` through `prototype/bf16_ulp.py`'s `monotone_key` (imported, never retyped):
+
+```
+REF attn001_L3_pre_gate_r17_lanes17.bin rows=17 lanes=17 bytes=69632
+case          counter  bytes_at  cells  maxULP  nan  below  above  agree  movers
+v62_m1e12     0        0         0      0       0    0      8      yes
+v62_p1        0        0         0      0       0    0      8      yes
+v62_p1e6      1        1         8      0       8    8      8      yes    h0/d62 3dc7->ffc0;h1/d62 3e70->ffc0;…
+rows=17 adjudicated_row=8 counter_vs_bytes_disagreements=0
+```
+
+`maxULP = 0` on the `inf` row is not "no movement": all 8 movers are NaN cells, and `row_diff` measures ULP
+only where NEITHER side is NaN — a NaN's bit pattern sits 48 700-odd ULPs from any number, so a band checked
+over it passes or fails on the encoding rather than on the arithmetic (a first cut of the comparator printed
+`maxULP=48769` for this row and looked like a catastrophic move).
+
+The counter and the files agree on every case: **row 8 of dec8's L3 tile really is byte-identical** (0 of 2 048
+cells) under all ten negative injections. Counter-vs-bytes was compared on 80 case-reads across five
+(layer, row) points and disagreed 0 times, so `ISOLATED`'s loose end is closed for these builds — and the arm
+now adjudicates the files and treats a counter disagreement as a failure of the rig, whichever way it goes.
+
+Two further checks killed the geometry reading of the brief, both from dec8's own artefacts:
+
+* **the wide form does run at 17 rows.** The engine's own echo for the fixture's body is
+  `ATTN_DUMP seq=1 layer=3 core=attn_wide_llama_wave rows=17 lanes_last=17 cap=19 pos=0 lvalid=1 …`, and the
+  rig's fidelity canary is `BYTE-IDENTICAL` there. So it is not a below-the-wide-threshold fixture, and there
+  is no "scope it to the wide fixtures" out.
+* **the dead lane really does reach row 8 there.** `v62_p1e6` puts NaN (`0xffc0`) into 8 cells of row 8 — one
+  per head, dim 62 — i.e. the dead k-term is formed and accumulated at that row, exactly as `CAUSE.md` F3 says.
+  What is invisible at dec8/L3/row 8 is not the mechanism, only its BF16-visible trace.
+
+### The real shape: visibility is per (fixture, layer, row), and it is rare
+
+The nudge `CAUSE.md` F3 names is one **F16** ULP on the accumulator; it reaches the BF16 output only where a
+cell sits within that much of a BF16 rounding boundary. That is a property of the fixture's *values* at that
+row and layer, not of its geometry. Measured on three fixtures, same rig, same case set (`m1e12_moved` = did a
+negative move the straddle row):
+
+| dump (`--dump`) | points tried | points where the sign effect is visible | the mover, where visible |
+|---|---|---|---|
+| `dec8` (17 rows, L3) | rows 2,4,6,8,10,12,14 | none | — |
+| `dec8` (17 rows, row 8) | layers 3,7,11,15,19,**23** | **L23 r8** | 1 cell `h5/d62 3fe3→3fe2`, 1 BF16 ULP, all ten negatives |
+| `p128` (128 rows) | L3 rows 2,4,6,8,10,20,40,60,80,98,100,110 | **L3 r8** only | 1 cell `h4/d62 3ecd→3ecc`, 1 BF16 ULP |
+| `wide640f` (512-row body) | L3 r2,4,6,8; L7,L11,L15,L19,L23 r8 | **L7 r8** only | 1 cell `h5/d62 3e4c→3e4b`, 1 BF16 ULP |
+
+One sensitive point in twelve tried at p128, one in six at dec8, one in nine at wide640f. `row=8` at `p128` was
+the lucky cell the rig was built on, and the ten "must move" expectations were a single coincidence counted ten
+times — all ten negatives produce the same `±0` product, so they all move or none does. Also measured here, because it is the same population and it bounds what a probe may even ask: dec8
+`--row 0` exits 1 — with no row *below* row 0 the rig's own `widen_*` controls cannot fire, so row 0 is not a
+point the rig can adjudicate at all — and dec8 `--row 16` moves **0 bytes for every case**, because its dead
+lane is the last cached lane, which no row of the body reads.
+
+### What the arm asserts now (`zero_gate.py`, arm B rewritten)
+
+The point population is **derived and searched**, not typed: `sinf_points()` reads the layers and `seq` indices
+off the dump's own `attnNNN_L<M>_pre_gate_r<R>_lanes<L>.bin` names (first body only, the same tile the sweep arm
+judges), and takes as straddle rows those `row` with **odd bound** `lvalid + row` (only an odd bound puts the
+causal boundary inside a packed f16x2 P cell — `FIX-CROSSROW` Result 7), `row ≥ 1` (the rig's must-fire control
+needs a row below), `row + 1 < rows` (the injected lane needs a live consumer, else the injection is inert), and
+`bound ≤ lanes` (the rig cannot vary a lane the dump does not carry). `lvalid` is the body's own `ATTN_DUMP`
+value, and a wrong one is falsified by the rig's fidelity canary. Default population = 4 rows × every attention
+layer = 24 probes, in layer-major order, **stopping at the first sensitive point**.
+
+Hard at every probed point (fixture-independent, and each of these was already true of the old arm):
+
+| case class | requirement | why it is fixture-independent |
+|---|---|---|
+| rig canary | must print `BYTE-IDENTICAL`, else the arm refuses the point | the rig reproduces the engine's tile or nothing below means anything |
+| `0 ≤ val < 65504` | straddle row **and every row behind it** byte-identical | the product is exactly `+0`; IEEE neutrality is not luck |
+| `val < 0`, finite | straddle row may move, **≤ 1 BF16 ULP, NaN-free**; no row behind it may move | the carried band; a worse move is a worse leak |
+| all negatives at a point | must **agree** with one another | the product is `0 × V = ±0` for *every* finite `V`, so a response that depends on \|V\| means the masked weight stopped being exactly `+0` |
+| `\|val\| ≥ 65504` | **must** move the straddle row; movement of rows behind it printed as the recorded hazard, not charged | `0 × inf = NaN` is IEEE-forced once the k-term is formed |
+| rig counter vs rig files | the `(at, below, above)` triple must agree, per case | `ISOLATED`'s loose end, made a check instead of a caveat |
+
+Searched, over the fixture: **at least one probed point where the sign channel is visible.** If the population
+holds none, the arm prints `REFUSED: … a green here would be a green about nothing …` and exits non-zero. It is
+not a violation and it is not a pass; a skip that reads as a pass was the defect. `--sinf-rows`, `--sinf-layers`
+and `--sinf-probes` widen the search, `--sinf-lvalid` states the body's `lvalid`.
+
+`selftest` grew from 6 cases to 14: the six sweep-arm mutants plus eight mutants of the signed-zero arm's **own
+case tiles**, run through `adjudicate_sinfzero` — sensitive point (green), blind point (must read *blind*, not
+*clean* — that one case is this fix in one line), a 2-ULP negative, a non-negative that moves, an `inf` that
+does not fire, a row behind the straddle that moves, only-the-biggest-negatives-move (the agreement rule), and a
+counter that claims a move the bytes lack.
+
+### Proof that the corrected arm can fail
+
+* `selftest` **both directions**: `SELFTEST cases=14 failures=0 (sweep adjudicator 6/0, signed-zero adjudicator
+  8/0)`. Must-catch direction = the five mutants that break a rule; must-not-catch direction = the clean copy,
+  the sensitive point and the blind point. The verdict labels are not decoration: retyping the blind point's
+  expected verdict as `clean` — precisely the mistake this fix removes — turns the run red on a throwaway copy
+  of the gate: `[3] sinf: blind point (no negative moves) expected=clean got=blind *** SELFTEST FAILED ***`,
+  `SELFTEST cases=14 failures=1`.
+* injected RED, end to end: the real `pack_ab` behind a wrapper that, at `p128`'s sensitive point only, pushes
+  one cell of `v62_m1e12`'s tile 2 BF16 ULP from the reference value (distance applied through
+  `bf16_ulp.monotone_key`/`bits_from_key`, i.e. the repo's own key law, nothing retyped):
+  `… negatives_visible=10/10 max_ulp=2 -> SENSITIVE …`; `VIOLATION: v62_m1e12: straddle row moved 2 BF16 ULP;
+  the carried band is 1, so the leak got worse and a carried leak stops being carried`;
+  `ARM sinfzero: cases=80 failures=1` → `VERDICT: RED`, rc 1.
+* must-catch half of the other arms untouched: `ARM widen: red=39 green=0` (was, still is).
+
+### Measured, this pass (device, correctness-only, **no timing taken**; each command blocking, one at a time)
+
+| command | wall | `util` at the time |
+|---|---|---|
+| `decode_run --ids-file dec8/ref.csv --steps 0 --prefill-logits all --dump-attn-rows` | 1 s | 87 % |
+| `pack_ab --dump <dec8> --row {0,2,4,…,16}` (9 probes) | ≤1 s each | 87 % |
+| `pack_ab --dump <dec8> --seq s --layer {7,11,15,19,23} --row 8` | ≤1 s each | 87 % |
+| `pack_ab --dump <p128> --row {2,4,6,8,10,20,40,60,80,98,100,110}` (12 probes) | 2 s total | 87 % |
+| `decode_run … wide640f … --dump-attn-rows` | 3 s | 45 % |
+| `pack_ab --dump <wide640f> …` (9 probes) | ≤1 s each | 45 % |
+| `zero_gate.py run --fixture dec8 --work /tmp/zgfix` (all three arms) | 10 s | 92 % |
+| `zero_gate.py run --fixture dec8 --arms sinfzero` | 4 s | 91 % |
+| `zero_gate.py run --fixture p128 --arms sinfzero` | 2 s | 93 % |
+| `zero_gate.py run --fixture wide640f --arms sinfzero` | 5 s | 91 % |
+| same, `--sinf-probes 3` (the refusal path) | 2 s, rc 1 | 93 % |
+| same, behind the RED injector | 2 s, rc 1 | 91 % |
+| `run --fixture wide640f --arms sinfzero` (re-take after the last edit) | 4 s | 93 % |
+| `run --fixture dec8 --arms sinfzero,widen` (re-take after the last edit) | 6 s | 90 % |
+| `zero_gate.py selftest --fixture dec8 --ref-dump <dec8 zg-ref>` | <1 s | CPU only |
+
+Headline after the fix, `zero_gate run --fixture dec8`: `ARM sweep: cases=2 violations=0 known_leaks=1`,
+`ARM sinfzero: cases=384 failures=0` (24 points probed, sensitive at L23/r8, `hazard_nan_cells=192`),
+`ARM widen: red=39 green=0`, `VERDICT: GREEN`. `p128 --arms sinfzero`: `points_probed=4 sensitive=1
+cases=64 hazard_nan_cells=32`, `failures=0`. `wide640f --arms sinfzero`: `points_probed=8 sensitive=1
+cases=128 hazard_nan_cells=64`, `failures=0`. The refusal path was exercised by shrinking the budget
+(`--sinf-probes 3` at p128, whose only sensitive point is the fourth in the order): rc 1, `REFUSED: …`.
+
+### The trap, for the index
+
+**An arm whose expectation is imported from another fixture's geometry is a check about the wrong thing.** The
+old arm's "a negative staged V must move row 8" was true of one row of one fixture and was being charged to
+every fixture it ever ran on — and it *looked* principled, because it was derived from a real measurement of a
+real leak. Two sharpenings, both cheap to apply before writing any expectation: **(a)** ask whether the fact was
+taken from *this* fixture or carried in from elsewhere — if it was measured somewhere else, derive it from the
+object under test or refuse when the object cannot show it (this arm now refuses, loudly, rather than passing
+over a question it cannot see); **(b)** ask whether the observable is *conditional on luck* — a 1-ULP nudge that
+only shows near a rounding boundary is a witness when it fires and silent when it does not, so "it did not fire"
+cannot mean "the mechanism is absent" (here the `0 × inf` case proves the mechanism is present at the very rows
+where the sign trace is invisible). Same family as `gate.py`'s `--scope form` row and `attn_tile_model.py`'s
+"check whose reference side is derived from the thing under test" row in `AGENTS.md`: in all three the
+adjudicator was fine and the *question it was handed* came from somewhere else. Sibling, one layer over: the
+rig's `row_at_moved` counter was kept as a cross-check rather than as the verdict, because a counter printed by
+the program under test is a number nobody can re-check (`ISOLATED.md`'s one recorded disagreement).
+
+### Tree state for this pass
+
+`prototype/mtp_verify/zero_gate.py` (arm B rewritten: `sinf_kind`, `sinf_case_table`, `row_diff`,
+`adjudicate_sinfzero`, `sinf_points`, `run_sinfzero`, `selftest_sinfzero`; the `--sinf-row` flag is gone,
+replaced by `--sinf-rows` / `--sinf-layers` / `--sinf-probes` / `--sinf-lvalid`) and this file. **No engine
+file, threshold, band, floor, pin, `engine/performance-status.md`, `engine/generation-limits.md`, `README.md` or
+`progress/` file was touched, and nothing is committed.** `engine/gate.py` was not re-run: nothing it reads
+changed, and the main agent's own PASS at `797b0a5` for `dec8` and `wide1024f` stands.
