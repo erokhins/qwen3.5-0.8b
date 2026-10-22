@@ -106,6 +106,9 @@ prototype/attn_m2/attn_m2
 prototype/attn_m2/attn_m16
 prototype/attn_m2/attn_m16_grp*
 prototype/attn_valu_slim/attn_valu_slim
+# One line per new op's binary, exact path (the block above explains why a `prototype/**/<op>`
+# pattern silently untracks the whole source directory).
+prototype/mtp_headbatch/mtp_headbatch
 # engine/build.sh writes its binary next to the sources; name the file exactly, never a
 # `engine/**/loader_test` pattern (that matches directories — see the block above).
 engine/loader_test
