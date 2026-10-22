@@ -153,3 +153,12 @@ prototype/launch_price/s1_launch_price
 # never `prototype/**/wave_shape`, which would match the directory and hide the whole rig (AGENTS trap).
 prototype/wave_shape/wave_shape
 prototype/wave_shape/out/
+# prefetch_tier (route P1 rig + device query): binaries do NOT share the directory name, so these
+# exact paths cannot hide the sources — unlike the prototype/<op>/<op> case in the trap row above.
+prototype/prefetch_tier/p1c_query
+prototype/prefetch_tier/p1_rig
+# the timed matrix output; the results belong in a report, not in the tree
+prototype/prefetch_tier/out/
+# D3 delta rig: raw per-arm rig stdout (the numbers that matter get quoted into
+# D3-HANDOVER.md; components.py reads this directory, so it is regenerable, not source)
+prototype/mtp_delta/evidence/
