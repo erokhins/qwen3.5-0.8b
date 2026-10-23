@@ -15,6 +15,7 @@
 
 #include "engine/kernels.h"
 #include "engine/loader.h"
+#include "engine/mtp_meter.h"   // the default-off per-phase round meter; that header owns the semantics
 
 #define ACCEPT_CK(x)                                                              \
     do {                                                                          \
@@ -130,18 +131,42 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
         // request's own state, appending its own two KV lanes. `submit_wave_body` advances
         // `prefix_len` to anchor + 2, which is the accepted answer; the reject branch below takes it
         // back to anchor + 1.
-        submit_wave_body(weights, st, sc, tokens, kRows);
+        //
+        // `phase=body` here carries the mid-round checkpoint's own submissions (2 per GDN layer), and it
+        // is NOT split out: the capture is interleaved per layer inside this one call, so a boundary would
+        // mean 18 device drains inside the body whose pipelining is the thing being priced. The meter
+        // prints that as `status=not_metered` rather than guessing at it — see `engine/mtp_meter.h`.
+        {
+            const engine::mtpmeter::PhaseGuard body(engine::mtpmeter::kBody);
+            submit_wave_body(weights, st, sc, tokens, kRows);
+        }
 
         // ONE pass over the 485 MiB table for both rows, then ONE 16-byte readback: the verdict kernel
         // argmaxes both rows and resolves the accept test on device, so the round's whole
         // vocabulary-sized download is four ints (`engine/mtp_verdict_kernels.h` for why the tie rule
         // is the hard part, not the reduction).
-        kernels::lm_head_batched_xbf16((const uint16_t*)weights.at(kHead).device, sc.norm,
-                                       side.logits, kVocab, kRows);
-        kernels::mtp_accept_verdict(side.logits, kVocab, kRows, candidate, side.verdict_dev);
-        ACCEPT_CK(hipMemcpy(side.verdict_host, side.verdict_dev,
-                            (size_t)engine::kernels::kVerdictWords * sizeof(int),
-                            hipMemcpyDeviceToHost));
+        //
+        // Three phases, not one, because the funding question is exactly this split: `head` and
+        // `verdict_kernel` close on an ADDED sync (`sync_added=1` — they are pure submissions today, and
+        // without a wait their device time would be charged to the readback that happens to block), while
+        // `verdict_readback` is a blocking D2H already (`sync_added=0`) and is the round's ENTIRE
+        // vocabulary-sized download: four ints, not 2 MB. That contrast is what `--mtp-verify`'s
+        // `logits_d2h` line is the counterpoint to.
+        {
+            const engine::mtpmeter::PhaseGuard head(engine::mtpmeter::kHead);
+            kernels::lm_head_batched_xbf16((const uint16_t*)weights.at(kHead).device, sc.norm,
+                                           side.logits, kVocab, kRows);
+        }
+        {
+            const engine::mtpmeter::PhaseGuard verdict(engine::mtpmeter::kVerdict);
+            kernels::mtp_accept_verdict(side.logits, kVocab, kRows, candidate, side.verdict_dev);
+        }
+        {
+            const engine::mtpmeter::PhaseGuard readback(engine::mtpmeter::kReadback);
+            ACCEPT_CK(hipMemcpy(side.verdict_host, side.verdict_dev,
+                                (size_t)engine::kernels::kVerdictWords * sizeof(int),
+                                hipMemcpyDeviceToHost));
+        }
     } catch (...) {
         restore_knobs();
         throw;
@@ -153,15 +178,21 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
     // (`ACCEPT-BUILD.md` §4e trap 1, whose witness is this build's own duplicate-`__device_stub__` link
     // error), and `engine/kernels_lmhead.cpp` is that TU for the verdict kernel. This file launches it
     // through `kernels::mtp_accept_verdict` and reads its word back, and needs no kernel of its own.
-    r.verifier_token = side.verdict_host[engine::kernels::kVerdictRow0Token];
-    r.bonus_token = side.verdict_host[engine::kernels::kVerdictRow1Token];
-    r.accepted = side.verdict_host[engine::kernels::kVerdictAccept] != 0;
-    // The word the kernel echoed is the word it was given. Cheap, and it is the only field that can
-    // prove the comparison used THIS round's candidate rather than a stale one.
-    if (side.verdict_host[engine::kernels::kVerdictCandidate] != candidate) {
-        throw std::runtime_error("accept_round: the verdict echoes candidate " +
-                                 std::to_string(side.verdict_host[engine::kernels::kVerdictCandidate]) +
-                                 ", asked " + std::to_string(candidate));
+    {
+        // `accept_path` is the host tail of the round on BOTH branches: decoding the verdict words and the
+        // candidate-echo check. It is metered on its own so an accept's near-zero host cost is a printed
+        // fact next to a reject's restore, rather than a paragraph about it.
+        const engine::mtpmeter::PhaseGuard accept_path(engine::mtpmeter::kAcceptPath);
+        r.verifier_token = side.verdict_host[engine::kernels::kVerdictRow0Token];
+        r.bonus_token = side.verdict_host[engine::kernels::kVerdictRow1Token];
+        r.accepted = side.verdict_host[engine::kernels::kVerdictAccept] != 0;
+        // The word the kernel echoed is the word it was given. Cheap, and it is the only field that can
+        // prove the comparison used THIS round's candidate rather than a stale one.
+        if (side.verdict_host[engine::kernels::kVerdictCandidate] != candidate) {
+            throw std::runtime_error("accept_round: the verdict echoes candidate " +
+                                     std::to_string(side.verdict_host[engine::kernels::kVerdictCandidate]) +
+                                     ", asked " + std::to_string(candidate));
+        }
     }
 
     if (r.accepted) {
@@ -182,19 +213,26 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
         // which §08.6 inv. 4 makes unread, and the next round's row 0 re-stages it with the real
         // token's K/V. That is the same 0-bytes argument `engine/mtp_verify.h` makes for the probe, and
         // here it is load-bearing rather than a witness.
-        ACCEPT_CK(hipMemcpyAsync(st.gdn_state, side.ck.mid_gdn, (size_t)side.bytes_gdn,
-                                 hipMemcpyDeviceToDevice));
-        ACCEPT_CK(hipMemcpyAsync(st.conv_window, side.ck.mid_conv, (size_t)side.bytes_conv,
-                                 hipMemcpyDeviceToDevice));
-        st.prefix_len = anchor + 1;
-        r.emitted = 1;
-        r.anchor_after = anchor + 1;
-        r.restored_bytes = side.bytes();
+        {
+            const engine::mtpmeter::PhaseGuard rollback(engine::mtpmeter::kRollback);
+            ACCEPT_CK(hipMemcpyAsync(st.gdn_state, side.ck.mid_gdn, (size_t)side.bytes_gdn,
+                                     hipMemcpyDeviceToDevice));
+            ACCEPT_CK(hipMemcpyAsync(st.conv_window, side.ck.mid_conv, (size_t)side.bytes_conv,
+                                     hipMemcpyDeviceToDevice));
+            st.prefix_len = anchor + 1;
+            r.emitted = 1;
+            r.anchor_after = anchor + 1;
+            r.restored_bytes = side.bytes();
+        }
     }
 
     // §08.6's invariants, on the host, after EITHER branch. A restore that landed a shifted region or
     // a prefix that disagrees with the state is exactly the failure a plausible-looking next round hides.
-    const std::string broken = st.check_invariants();
+    std::string broken;
+    {
+        const engine::mtpmeter::PhaseGuard lane(engine::mtpmeter::kLaneBookkeeping);
+        broken = st.check_invariants();
+    }
     if (!broken.empty()) {
         throw std::runtime_error("accept_round: §08.6 invariant broken after the " +
                                  std::string(r.accepted ? "accept" : "reject") + ": " + broken);

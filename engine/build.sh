@@ -71,7 +71,7 @@ echo "built $BIN/loader_test"
 # must be present to be measured in one window. The engine never has both routes live at once.
 hipcc "${FLAGS[@]}" \
   engine/decode_run.cpp engine/decode_step.cpp engine/prefill.cpp engine/state.cpp engine/loader.cpp \
-  engine/mtp_draft.cpp engine/mtp_verify.cpp engine/mtp_accept.cpp \
+  engine/mtp_draft.cpp engine/mtp_verify.cpp engine/mtp_accept.cpp engine/mtp_meter.cpp \
   engine/launch_stats.cpp engine/stage_clock.cpp \
   engine/kernels_glue.cpp engine/kernels_proj.cpp engine/kernels_mlp.cpp \
   engine/kernels_gdn.cpp engine/kernels_attn.cpp engine/kernels_lmhead.cpp \

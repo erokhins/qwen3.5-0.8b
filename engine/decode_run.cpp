@@ -53,6 +53,7 @@
 #include "engine/mtp_draft.h"
 #include "engine/mtp_verify.h"
 #include "engine/mtp_accept.h"
+#include "engine/mtp_meter.h"
 #include "engine/prefill.h"
 #include "engine/stage_clock.h"
 #include "engine/state.h"
@@ -153,6 +154,20 @@ struct Options {
     // of a generation step, which is why it refuses every option whose per-step semantics it does not
     // own — see the refusals below rather than half-supporting them.
     int mtp_accept = 0;
+    // B0 of `prototype/mtp_accept/BEAT-MTP.md`: the per-phase ROUND METER (`engine/mtp_meter.h`). Default
+    // OFF, and off is one null-pointer read per guard object — no allocation, no sync, no line, so a
+    // flag-off run is byte-identical to a binary that does not contain the instrument. On, it prints one
+    // `MTPMETER` line per phase of the round shape this run is in and folds a `meter=ok … coverage=…`
+    // verdict onto the run's own `RESULT` line.
+    //
+    // It is a MEASURING instrument with a price: several phases can only be bounded by a device sync the
+    // shipping path does not perform, and those lines say `sync_added=1` because such a phase SERIALIZES
+    // and therefore INFLATES. That is why it refuses `--time-stages`/`--time-waves` (two instruments, each
+    // draining the queue, would price neither shape) and why the metered round's total is an upper bound
+    // on a production round rather than the round itself. `prototype/mtp_accept/METER-PLAN.md` states what
+    // each phase can under- or over-report; the harness refuses to tabulate a run whose coverage says the
+    // phases do not account for the window.
+    int mtp_meter = 0;
     // Which round sequence the side computation walks: `loop` reproduces speccheck's greedy_mtp(k=1)
     // round geometry (the one the carried accept rate was measured on), `every` drafts after every
     // step. See `engine::mtpdraft::Schedule`; refused-and-parsed, never defaulted into.
@@ -622,6 +637,14 @@ Options parse_args(int argc, char** argv) {
                                          " arm: the second body runs UNSPLIT), got '" + v + "'");
             }
             o.mtp_midsplit = std::atoi(v.c_str());
+        } else if (a == "--mtp-meter") {
+            // Parses or throws, like every flag that names which side of a measurement a run is on.
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--mtp-meter takes 0 (off, the default) or 1 (print the round's "
+                                         "per-phase milliseconds; see engine/mtp_meter.h)");
+            }
+            o.mtp_meter = std::atoi(v.c_str());
         } else if (a == "--mtp-route") {
             // Parses or throws: this names which side of the route A/B the run is, and a typo that silently
             // became `hand` would price the hand route twice and report the second price as the amortised
@@ -1175,6 +1198,30 @@ Options parse_args(int argc, char** argv) {
         throw std::runtime_error("--mtp-verify (or QWEN_MTP_VERIFY=1) probes a run's generation steps;"
                                  " --session has no such list and --sizes-only prefills nothing");
     }
+    // ---- the round meter's refusals (`engine/mtp_meter.h`) -----------------------------------------
+    // Placed ABOVE the `--mtp-verify`/`--mtp-accept` refusals of these same flags, deliberately: both of
+    // those already refuse `--time-stages`, so a meter refusal written below them could never be reached.
+    // A refusal that cannot fire is the failure shape this tree keeps recording, and the specific reason a
+    // round meter and a step clock collide is worth printing rather than folding into the older message.
+    if (o.mtp_meter && !o.mtp_verify && !o.mtp_accept) {
+        // The meter has no object otherwise. A plain one-row step is `--time-stages`' subject, and metering
+        // it here would produce a second, differently-serialized answer to a question that clock answers.
+        throw std::runtime_error("--mtp-meter 1 meters an MTP round and there is none: name --mtp-verify 1"
+                                 " (the read-only side pass) or --mtp-draft 1 --mtp-accept 1 (the accept"
+                                 " loop) with it. A plain one-row step is --time-stages' subject, not"
+                                 " this flag's");
+    }
+    if (o.mtp_meter && (o.time_stages || o.time_waves)) {
+        // The stage clock prices a STEP's launch plan by draining the queue at §07 family boundaries; this
+        // meter prices a ROUND by draining it at phase boundaries. Armed together they drain each other's
+        // subject and neither report describes a shape the engine runs — a round is not a §07 family, which
+        // is what the two refusals below already say for the side pass and the accept loop.
+        throw std::runtime_error("--mtp-meter and --time-stages/--time-waves cannot share a run: the"
+                                 " stage clock drains the queue at §07 family boundaries to price a"
+                                 " STEP, this meter drains it at phase boundaries to price a ROUND, and"
+                                 " armed together each serializes the other's subject. Run them as two"
+                                 " passes (see prototype/mtp_accept/METER-PLAN.md)");
+    }
     if (o.mtp_verify && (o.time_stages || o.time_waves)) {
         // Same rule the draft states above: the verify body's submissions belong to no family of §07's
         // launch bill, and the stage clock would charge them to whatever segment preceded them.
@@ -1540,6 +1587,11 @@ void verify_round(VerifySide& v, const engine::WeightStore& store, engine::Decod
     engine::mtpverify::StateBytes live_before;
     engine::mtpverify::PoisonReport poison;
     if (v.guard) {
+        // `witness` (`engine/mtp_meter.h`): the guard's own downloads and byte-compares. This is the phase
+        // that reads 0.000 on a TIMING arm and hundreds of milliseconds on an admission arm, and printing it
+        // is what stops a reader from having to guess which kind of run produced the table. The guard is
+        // left OFF by every timing pass precisely because of what it costs here.
+        const engine::mtpmeter::PhaseGuard witness(engine::mtpmeter::kWitness);
         live_before = engine::mtpverify::capture_state_bytes(st, -1);
         engine::mtpverify::poison_kv_lane(st, poison_lane);
     }
@@ -1554,19 +1606,23 @@ void verify_round(VerifySide& v, const engine::WeightStore& store, engine::Decod
     v.stats.restored_bytes += v.snap.bytes();   // the shadow is seeded every round, not only on a reject
     v.stats.lane_bytes += r.lane_bytes;         // the anchor-lane revert, both directions, this round
     v.stats.kv_bytes_left = engine::mtpverify::kv_bytes_above_prefix(st);
-    std::printf("VERIFY2 step=%d anchor_pos=%d fed=%d candidate=%d row0=%d row1=%d row0_top=%.9g"
-                " row1_top=%.9g row0_eq_step=%d head_passes=%d d2h=%d logits_bytes=%lld"
-                " checkpoint_bytes=%lld lane_revert_bytes=%lld guard=%d"
-                " mtp_route=%s gemm=%s gdn_scan=%s\n",
-                step, anchor_pos, fed, candidate, r.token[0], r.token[1], r.top[0], r.top[1],
-                r.token[0] == step_token ? 1 : 0, r.head_passes, r.d2h_count,
-                (long long)r.bytes_read_back, (long long)v.snap.bytes(), (long long)r.lane_bytes,
-                v.guard ? 1 : 0,
-                engine::mtpverify::route_name(v.route),
-                engine::kernels::wave_gemm_name(r.gemm_ran),
-                engine::kernels::gdn_scan_name(r.scan_ran));
-    std::fflush(stdout);
+    {
+        const engine::mtpmeter::PhaseGuard prints(engine::mtpmeter::kReportPrints);
+        std::printf("VERIFY2 step=%d anchor_pos=%d fed=%d candidate=%d row0=%d row1=%d row0_top=%.9g"
+                    " row1_top=%.9g row0_eq_step=%d head_passes=%d d2h=%d logits_bytes=%lld"
+                    " checkpoint_bytes=%lld lane_revert_bytes=%lld guard=%d"
+                    " mtp_route=%s gemm=%s gdn_scan=%s\n",
+                    step, anchor_pos, fed, candidate, r.token[0], r.token[1], r.top[0], r.top[1],
+                    r.token[0] == step_token ? 1 : 0, r.head_passes, r.d2h_count,
+                    (long long)r.bytes_read_back, (long long)v.snap.bytes(), (long long)r.lane_bytes,
+                    v.guard ? 1 : 0,
+                    engine::mtpverify::route_name(v.route),
+                    engine::kernels::wave_gemm_name(r.gemm_ran),
+                    engine::kernels::gdn_scan_name(r.scan_ran));
+        std::fflush(stdout);
+    }
     if (v.guard) {
+        const engine::mtpmeter::PhaseGuard witness(engine::mtpmeter::kWitness);
         const engine::mtpverify::StateBytes live_after =
             engine::mtpverify::capture_state_bytes(st, -1);        const std::string operands = engine::mtpverify::first_state_diff(*step_reads, body_reads);
         const std::string leak = engine::mtpverify::first_state_diff(live_before, live_after);
@@ -1865,6 +1921,7 @@ void print_usage(FILE* out) {
                  " [--mtp-draft 0|1] [--mtp-sched loop|every] [--mtp-cap N]"
                  " [--mtp-verify 0|1] [--verify-candidate ID|sampled] [--verify-guard 0|1]"
                  " [--mtp-midsplit 0|1|2] [--mtp-accept 0|1] [--mtp-route hand|amortised]"
+                 " [--mtp-meter 0|1]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -2320,6 +2377,42 @@ void print_usage(FILE* out) {
                  " default). The one-pass attention form refuses beyond `mtp_attn_max_lanes()`, and a"
                  " round past the ceiling is counted as `DRAFT-SKIP reason=...` rather than served a"
                  " shorter cache, because a silently shorter run reads as a lower accept rate\n"
+                 "  --mtp-meter 0|1  per-phase milliseconds of the MTP ROUND this run is in"
+                 " (`engine/mtp_meter.h`). Default 0, and off means every guard in the engine reads one"
+                 " null pointer: no allocation, no added wait, no line, so a flag-off run stays"
+                 " byte-identical to a binary without the instrument (verified as an emitted-token and"
+                 " `MTPSTAT` diff, not assumed). On, it prints one `MTPMETER role= phase= ms_total="
+                 " runs= ms_per_round= status= sync_added= note=` line per phase, plus a derived"
+                 " `overhead` line and a `summary` line, and appends `meter=ok rounds="
+                 " sum_ms_per_round= wall_ms_per_round= coverage=` to this run's own `RESULT` line, which"
+                 " stays the last line of stdout. Two shapes, because the two rounds are different machines:"
+                 " `--mtp-verify 1 --mtp-meter 1` meters the read-only side pass (snapshot take, shadow"
+                 " seed, witness, lane save, body, lane revert, head, logits D2H, argmax), and"
+                 " `--mtp-draft 1 --mtp-accept 1 --gdn-loop 1 --mtp-meter 1` meters the accept loop (body,"
+                 " head, verdict kernel, verdict readback, accept path, rollback, lane bookkeeping, the next"
+                 " round's draft), with the accept and reject paths as separate phases carrying separate"
+                 " run counts. EVERY boundary is labelled: a phase whose close is a call that already"
+                 " blocks today prints `sync_added=0` and bounds itself honestly; a phase that is pure"
+                 " async submissions prints `sync_added=1` because bounding it needs a device wait the"
+                 " shipping path does not perform. What such a wait costs is the OVERLAP it removes, not"
+                 " the wait itself — an empty `hipDeviceSynchronize()` is sub-microsecond on this part, the"
+                 " run measures its own floor and prints it on the instrument line as `idle_sync_us=` — so"
+                 " a `sync_added=1` figure is a bound inflated by serialization, and a phase whose own wait"
+                 " fails is reported as `meter=sync_failed` rather than as a zero. The"
+                 " accept loop's mid-round checkpoint is printed `status=not_metered` rather than guessed"
+                 " at: it is 2 extra submissions per GDN layer INSIDE the body, and a boundary for it would"
+                 " need 18 waits inside the call whose pipelining is the thing being priced; it is"
+                 " measurable instead as role=verify's `body_with_checkpoint` minus `body` under"
+                 " --mtp-midsplit 1. `coverage` is the measured phases over the round's wall, and the"
+                 " harness refuses to tabulate a run whose coverage is outside 0.8-1.2, because a phase"
+                 " list that does not account for the window is a list with a phase missing. Refused"
+                 " without --mtp-verify or --mtp-accept (no round to meter, and a plain step is"
+                 " --time-stages' subject), and refused with --time-stages/--time-waves: the stage clock"
+                 " drains the queue at §07 family boundaries to price a STEP and this drains it at phase"
+                 " boundaries to price a ROUND, so armed together each serializes the other's subject."
+                 " What each phase can under- or over-report is written up in"
+                 " `prototype/mtp_accept/METER-PLAN.md`; that file, not these milliseconds, is what B1 and"
+                 " B2 are sized from\n"
                  "  --dump-proj-plan  print the projection plan one row-priced body would submit (PROJPLAN"
                  " plus one PROJJOB line per tensor) and exit WITHOUT loading the model or touching the GPU,"
                  " so a geometry claim can be checked while another agent holds the device lock\n"
@@ -3385,6 +3478,34 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
         }
 
+        // ---- the per-phase round meter (`engine/mtp_meter.h`) -------------------------------------
+        // One instrument per run, armed here and disarmed after the report, and constructed only when the
+        // flag is on: flag-off, every `PhaseGuard`/`WindowGuard` in the engine reads one null pointer and
+        // does nothing, which is what keeps a `--mtp-meter 0` run byte-identical to a binary that was not
+        // compiled with this line. The role is whichever round shape this run is in — the two are mutually
+        // exclusive by the refusals above, so there is exactly one subject to meter and `--mtp-meter` alone
+        // is refused rather than metering the plain step.
+        //
+        // `stage_clock` is deliberately NOT reused. It prices a STEP's §07 launch-plan families and
+        // cross-checks them against the compiled plan; a round's phases are not families, and a round's body
+        // is one `submit_wave_body` call whose per-token bill is already accounted elsewhere. Folding the
+        // two together would bill the body's rows twice and name the second billing as the round.
+        std::unique_ptr<engine::mtpmeter::Meter> meter;
+        if (o.mtp_meter) {
+            meter = std::make_unique<engine::mtpmeter::Meter>(
+                o.mtp_accept ? engine::mtpmeter::Role::kAccept : engine::mtpmeter::Role::kVerify);
+            engine::mtpmeter::arm(meter.get());
+            // The canary line the harness greps for, printed BEFORE the calibration that the report takes:
+            // `on=1` has to be a true statement about the run that is about to happen, not about its summary.
+            // The idle-sync floor is deliberately NOT measured here — 64 empty waits is a good millisecond of
+            // device time, and taking it here would put the instrument's own calibration inside the prefill
+            // window every other number in this run is read against. It is taken after the loop instead.
+            std::printf("MTPMETER role=%s on=1 sync_added_phases_inflate=1"
+                        " plan=prototype/mtp_accept/METER-PLAN.md\n",
+                        engine::mtpmeter::Role::kAccept == meter->role() ? "accept" : "verify");
+            std::fflush(stdout);
+        }
+
         // ---- the prompt phase: ONE prefill wave (§06.1) ---------------------------------------
         // This was the front of the loop below: a `decode_step` per prompt token, its sample thrown
         // away except at the last position. `prefill_wave` makes the same launches in the same order
@@ -3545,6 +3666,12 @@ int main(int argc, char** argv) {
                 // step. Same fallback shape as "no proposal pending", for a different reason.
                 const bool room_for_round =
                     st.prefix_len + engine::mtpaccept::kRows <= st.cap;
+                // The meter's window covers THIS branch's whole round: the round itself, the next
+                // proposal's draft, and the run's own per-round prints. A plain one-row iteration is not a
+                // round and is counted in `plain_steps=` instead of being metered, because pricing it here
+                // would mix a step's cost into a round's denominator. `meter_round` says whether a window
+                // is open, and it is closed on every exit path below — including the stop-token break.
+                bool meter_round = false;
                 if (pending_candidate < 0 || !room_for_round) {
                     if (pending_candidate >= 0 && !room_for_round) {
                         std::printf("ROUND-SKIP reason=context_limit anchor=%d cap=%lld rows=%d\n",
@@ -3556,10 +3683,16 @@ int main(int argc, char** argv) {
                     draft_norm_row = sc.norm;              // row 0 is the row this step priced
                     gen_bodies++;
                     gen_plain++;
+                    if (meter) meter->note_plain_step();
                     // NOT gen_emitted++: this token goes out through the shared `emit_one` tail below, like
                     // a round's first token does. Counting it here as well double-counted every plain step of
                     // an accept run, and `DECWALL note=emitted_vs_verdict_tally` is what caught it.
                 } else {
+                    if (meter) {
+                        meter->round_begin();
+                        meter->open_window();
+                        meter_round = true;
+                    }
                     const engine::mtpaccept::Round ar =
                         engine::mtpaccept::accept_round(store, st, sc, *aside, token,
                                                        pending_candidate, o.mtp_route);
@@ -3582,16 +3715,21 @@ int main(int argc, char** argv) {
                         // The rejected proposal wrote a draft lane the target never consumed. Truncating
                         // it is a length field and moves 0 bytes (`engine/mtp_draft.h`), and it is what
                         // keeps the draft cache the accepted prefix rather than the attempted one — the
-                        // same move the read-only side pass makes on a reject.
+                        // same move the read-only side pass makes on a reject. Charged to
+                        // `lane_bookkeeping` beside the §08.6 check, because both are the round's length-
+                        // field bookkeeping and neither moves a byte.
+                        const engine::mtpmeter::PhaseGuard lane(engine::mtpmeter::kLaneBookkeeping);
                         engine::mtpdraft::truncate_lane(mtp->st);
                     }
-                    std::printf("ACCEPT round=%d anchor=%d fed=%d cand=%d cand_pos=%d accept=%d"
-                                " verifier=%d bonus=%d emitted=%d pos=%d->%d restored_bytes=%lld\n",
-                                step, ar.anchor_before, token, pending_candidate, pending_pos,
-                                ar.accepted ? 1 : 0, ar.verifier_token, ar.bonus_token, ar.emitted,
-                                ar.anchor_before, ar.anchor_after, ar.restored_bytes);
-                }
-                // The next proposal: ONE draft call per round, with the target's final-norm row of the
+                    {
+                        const engine::mtpmeter::PhaseGuard prints(engine::mtpmeter::kReportPrints);
+                        std::printf("ACCEPT round=%d anchor=%d fed=%d cand=%d cand_pos=%d accept=%d"
+                                    " verifier=%d bonus=%d emitted=%d pos=%d->%d restored_bytes=%lld\n",
+                                    step, ar.anchor_before, token, pending_candidate, pending_pos,
+                                    ar.accepted ? 1 : 0, ar.verifier_token, ar.bonus_token, ar.emitted,
+                                    ar.anchor_before, ar.anchor_after, ar.restored_bytes);
+                    }
+                }                // The next proposal: ONE draft call per round, with the target's final-norm row of the
                 // last position the body actually FED (row 1 on an accept, row 0 on a reject or a plain
                 // step), `y_next` the last token EMITTED, and the proposed position one past that token.
                 // That is `mtp_after_step`'s alignment (`h` at q, `y_next` at q+1, proposal at q+2) with
@@ -3606,6 +3744,11 @@ int main(int argc, char** argv) {
                 if (!why.empty()) {
                     std::printf("DRAFT-SKIP reason=%s would_propose_for=%d\n", why.c_str(), draft_pos);
                 } else {
+                    // `phase=draft` is the NEXT round's proposal, charged to this round's window because
+                    // that is where it is paid for. It ends in the draft block's own blocking vocabulary
+                    // D2H, so its close is `sync_added=1` only because the meter does not want the draft's
+                    // ~2 ms head pass landing on whichever phase happens to block next.
+                    const engine::mtpmeter::PhaseGuard draft(engine::mtpmeter::kDraft);
                     const engine::mtpdraft::Proposal p =
                         engine::mtpdraft::draft_round(store, mtp->w, mtp->st, draft_norm_row, tok_next,
                                                       draft_pos);
@@ -3624,34 +3767,59 @@ int main(int argc, char** argv) {
                     gen_emitted++;   // counted at the emit site, which is what `DECWALL` divides by
                     if (tok == engine::kStopToken && !o.no_stop) stop_fired = true;
                 };
-                emit_one(emitted_first, pos_first);
-                if (emitted_second >= 0 && !stop_fired) {
-                    emit_one(emitted_second, pos_second);
-                } else if (emitted_second >= 0) {
-                    // The bonus was priced by the body and never emitted, so `MTPSTAT`'s tally (what the
-                    // ROUND emitted) and this window (what the RUN emitted) differ by exactly this token.
-                    // Counting the difference is what lets `DECWALL` cross-check the two counts instead of
-                    // hoping they agree.
-                    gen_suppressed++;
+                {
+                    // The run's own per-round output, named rather than buried in `overhead`. `fflush` is
+                    // explicit here because an unflushed stdout lets the writes land in a pipe buffer for
+                    // the whole run, and that would be billed to whichever sync follows it.
+                    const engine::mtpmeter::PhaseGuard prints(engine::mtpmeter::kReportPrints);
+                    emit_one(emitted_first, pos_first);
+                    if (emitted_second >= 0 && !stop_fired) {
+                        emit_one(emitted_second, pos_second);
+                    } else if (emitted_second >= 0) {
+                        // The bonus was priced by the body and never emitted, so `MTPSTAT`'s tally (what the
+                        // ROUND emitted) and this window (what the RUN emitted) differ by exactly this token.
+                        // Counting the difference is what lets `DECWALL` cross-check the two counts instead of
+                        // hoping they agree.
+                        gen_suppressed++;
+                    }
                 }
                 if (stop_fired) run_stopped = true;
                 if (stop_fired) gen_end = "stop_token";
                 sampled = emitted_second >= 0 && !stop_fired ? emitted_second : emitted_first;
+                if (meter_round) {
+                    // Closed here rather than at the top of the next iteration so a stop-terminated run
+                    // still has a closed window: an unclosed one throws in the report, and the run would
+                    // print a crash where it meant to print a result.
+                    meter->close_window();
+                    meter->round_end();
+                }
                 std::fflush(stdout);
                 if (run_stopped) break;
                 continue;
             }
+            // The meter's verify shape: TWO windows, not one. The checkpoint take happens before the plain
+            // step (it has to — the step is what destroys the state the body starts from) and the side pass
+            // happens after it, so the round's wall is the union of the two spans and the plain step between
+            // them is deliberately NOT round work. `overhead` therefore means "host and queue time inside
+            // those two spans that no phase owns", and the step's ~10 ms is not in it.
+            if (meter) meter->round_begin();
             // The witness's first half, in bytes and on the host: what the STEP is about to read. Held as a
             // copy rather than a pointer because the step is exactly what moves it, and because the whole
             // point of the comparison below is to say which operand the shadow body did not get.
             engine::mtpverify::StateBytes step_reads, step_after;
             if (verify && verify->guard) {
+                const engine::mtpmeter::WindowGuard win;
+                const engine::mtpmeter::PhaseGuard witness(engine::mtpmeter::kWitness);
                 step_reads = engine::mtpverify::capture_state_bytes(st, token);
             }
             // The checkpoint, taken BEFORE the body: it has to hold the state the verify body starts from,
             // and after the step that state is gone. This is the per-round cost D3 excluded as out of
             // scope rather than solved, and it is a device-to-device copy of `snapshot.bytes()`.
-            if (verify) engine::mtpverify::take_snapshot(st, verify->snap);
+            if (verify) {
+                const engine::mtpmeter::WindowGuard win;
+                const engine::mtpmeter::PhaseGuard take(engine::mtpmeter::kSnapTake);
+                engine::mtpverify::take_snapshot(st, verify->snap);
+            }
             const auto ts = std::chrono::steady_clock::now();
             const engine::StepResult r =
                 engine::decode_step(store, st, sc, token,
@@ -3668,6 +3836,8 @@ int main(int argc, char** argv) {
             // comparison across it that reads "same" is a comparator that cannot fail. Captured here,
             // adjudicated in `verify_round`, next to the two comparisons it vouches for.
             if (verify && verify->guard) {
+                const engine::mtpmeter::WindowGuard win;
+                const engine::mtpmeter::PhaseGuard witness(engine::mtpmeter::kWitness);
                 step_after = engine::mtpverify::capture_state_bytes(st, -1);
             }
             if (mtp) {
@@ -3678,6 +3848,7 @@ int main(int argc, char** argv) {
                 mtp_after_step(*mtp, store, sc.norm, pos_before, r.token);
             }
             if (verify) {
+                const engine::mtpmeter::WindowGuard win;
                 // AFTER the draft, because the draft reads `sc.norm` row 0 and the verify body overwrites
                 // rows 0..1 of the scratch. The candidate is the flag's, or the degenerate self-candidate
                 // (the token this step fed) when none was named — either way row 1 is a second row at the
@@ -3689,6 +3860,7 @@ int main(int argc, char** argv) {
                 verify_round(*verify, store, sc, st, pos_before, token, candidate, r.token, step,
                              o.out_dir, &step_reads, &step_after);
             }
+            if (meter) meter->round_end();
 
             const bool stop_match = r.token == engine::kStopToken;
             // §07.5 ends a FREE run, in this loop and nowhere else (see the prefill loop for the other
@@ -3934,12 +4106,39 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
         }
 
+        // ---- the meter's report, BEFORE `RESULT`, which stays the run's last stdout line ----------
+        // One line per phase in source order (the registry's order, not the accumulated map's), each
+        // carrying its own run count and its boundary label, then the derived `overhead` and the meter's own
+        // `summary`. Nothing here is printed as a rate over a denominator the line does not show.
+        if (meter) {
+            // The idle-sync floor, taken after the generation loop rather than before the prompt wave: it is
+            // 64 empty waits, and an instrument must not spend its calibration inside the window it calibrates.
+            // Reuses `stage_clock`'s calibration rather than inventing a second constant, so both instruments
+            // quote the same quantity — the cost of ONE empty `hipDeviceSynchronize()` on this run's own
+            // queue. It is printed because the number is conditional: measured on a drained queue after the
+            // last round it is well under a microsecond here, and the same wait taken mid-burst is what a
+            // `sync_added=1` phase actually pays, which is why the phase figures are bounds and the floor is
+            // quoted beside them rather than a constant carried in a header.
+            meter->set_idle_sync_ms(engine::stageclock::calibrate_idle_sync(64) / 1000.0);
+            meter->finalize();
+            std::printf("%s\n", meter->describe().c_str());
+            std::fflush(stdout);
+        }
+
+        // The meter rides the line it summarizes. A SECOND `RESULT` line would make every
+        // `grep -m1 '^RESULT'` harness in the tree read the wrong one — `engine/gate.py` keeps the LAST
+        // `RESULT` it sees, so a summary line after the run line would be the one it parsed. Hence fields
+        // on the run's own line, which also keeps `RESULT` the last line of stdout by construction.
+        const std::string meter_fields = meter ? meter->result_fields() : std::string();
         std::printf("RESULT mode=%s steps=%d ms_total=%.3f ms_per_step=%.3f last_sampled=%d"
-                    " prefix_len=%d stopped=%d\n",
+                    " prefix_len=%d stopped=%d%s\n",
                     o.feed.empty() ? "run" : "replay", total_steps, step_ms,
                     step_ms / (n > 0 ? n : 1), sampled,
-                    result_prefix_len, run_stopped ? 1 : 0);
+                    result_prefix_len, run_stopped ? 1 : 0, meter_fields.c_str());
         std::fflush(stdout);
+        // Disarmed before the destructor for the same reason `stage_clock` is disarmed after its report:
+        // anything printed from here on (nothing is, today) must not be able to charge a phase.
+        engine::mtpmeter::arm(nullptr);
         if (mtp) engine::mtpdraft::free_state(mtp->st);
         engine::kernels::gemm_route_shutdown();
         engine::free_scratch(sc);

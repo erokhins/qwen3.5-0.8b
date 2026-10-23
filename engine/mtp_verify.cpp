@@ -18,6 +18,7 @@
 
 #include "engine/kernels.h"
 #include "engine/loader.h"
+#include "engine/mtp_meter.h"   // the default-off per-phase round meter; that header owns the semantics
 
 #define VERIFY_CK(x)                                                                \
     do {                                                                            \
@@ -377,8 +378,15 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
     // GDN state, either of which is a *different operand* rather than a worse rounding, and both of which
     // propagate into the K/V this body stages. This is also the copy a reject would perform, so the cost is
     // the one `ARMS.md` arm C prices, not an extra.
-    restore_snapshot(snap);
+    // `shadow_seed` and `witness` in `engine/mtp_meter.h`. Both close on a call that ALREADY blocks today
+    // (`hipMemcpy` returns to the host once the copy is done), so these two lines carry `sync_added=0`:
+    // they cost the run nothing it was not paying and bound their own device work by construction.
+    {
+        const engine::mtpmeter::PhaseGuard seed(engine::mtpmeter::kShadowSeed);
+        restore_snapshot(snap);
+    }
     if (body_reads != nullptr) {
+        const engine::mtpmeter::PhaseGuard witness(engine::mtpmeter::kWitness);
         // What the shadow actually holds at the instant the body starts, in bytes. Taken here rather than
         // asserted here, because a witness that re-derives the value it is checking for is decoration.
         *body_reads = capture_state_bytes(sh, tokens[0]);
@@ -443,22 +451,39 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
         // at every anchor — i.e. a real candidate-to-row-0 path through the live cache, deterministic and far
         // too big to be rounding. Reverting every row's lane closes it: after a round the cache holds only what
         // the round was given.
-        for (int row = 0; row < lanes.lanes; ++row) {
-            copy_kv_lane(lanes.stage + (long long)row * lanes.bytes_per_lane, target,
-                         anchor_pos + row, /*to_cache=*/false);
+        {
+            const engine::mtpmeter::PhaseGuard save(engine::mtpmeter::kLaneSave);
+            for (int row = 0; row < lanes.lanes; ++row) {
+                copy_kv_lane(lanes.stage + (long long)row * lanes.bytes_per_lane, target,
+                             anchor_pos + row, /*to_cache=*/false);
+            }
         }
         // One body, two rows, positions q and q+1, over the populated KV. This is the funded shape and it
         // is the shipping order — `submit_token_body` is this call with n = 1.
-        submit_wave_body(weights, sh, sc, tokens, kRows);
+        //
+        // The phase name splits on ONE thing the caller can vary: whether a mid-round checkpoint is armed.
+        // `--mtp-midsplit 1` runs this body a second time with `ckpt` set and everything else identical,
+        // so `body_with_checkpoint - body` is that checkpoint's price at one anchor in one window — which
+        // is the only honest way to price it, because the capture itself is 2 submissions PER GDN LAYER
+        // interleaved inside `submit_wave_body` and no boundary exists for it at this level.
+        {
+            const engine::mtpmeter::PhaseGuard body(ckpt != nullptr ? engine::mtpmeter::kBodyCkpt
+                                                                    : engine::mtpmeter::kBody);
+            submit_wave_body(weights, sh, sc, tokens, kRows);
+        }
         if (tail_poison != nullptr) {
+            const engine::mtpmeter::PhaseGuard witness(engine::mtpmeter::kWitness);
             // Read BEFORE the revert, which puts the tail lane back and would otherwise erase the only evidence
             // that row 1 appended to a lane at all. The witness is about where the body wrote, and the revert
             // is about what the live cache ends up holding; ordering them here is the whole point.
             *tail_poison = poisoned_lane_report(target, anchor_pos + kRows - 1);
         }
-        for (int row = 0; row < lanes.lanes; ++row) {
-            copy_kv_lane(lanes.stage + (long long)row * lanes.bytes_per_lane, target,
-                         anchor_pos + row, /*to_cache=*/true);
+        {
+            const engine::mtpmeter::PhaseGuard revert(engine::mtpmeter::kLaneRevert);
+            for (int row = 0; row < lanes.lanes; ++row) {
+                copy_kv_lane(lanes.stage + (long long)row * lanes.bytes_per_lane, target,
+                             anchor_pos + row, /*to_cache=*/true);
+            }
         }
         r.lane_bytes = lanes.bytes;
         if (capture_end_state) {
@@ -466,6 +491,7 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
             // from the unsplit body, this is the half of the split admission the logits cannot make —
             // two routes can agree on a row and disagree on the state they hand the next step.
             r.end_state.resize((size_t)snap.bytes_gdn + (size_t)snap.bytes_conv);
+            const engine::mtpmeter::PhaseGuard witness(engine::mtpmeter::kWitness);
             VERIFY_CK(hipMemcpy(r.end_state.data(), sh.gdn_state, (size_t)snap.bytes_gdn,
                                 hipMemcpyDeviceToHost));
             VERIFY_CK(hipMemcpy(r.end_state.data() + snap.bytes_gdn, sh.conv_window,
@@ -476,6 +502,7 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
             // mixer state the shipping ONE-ROW step leaves after consuming the same token at the same
             // position? Nothing else can answer it, because nothing else knows what S_{p+1} is.
             r.mid_state.resize((size_t)snap.bytes_gdn + (size_t)snap.bytes_conv);
+            const engine::mtpmeter::PhaseGuard witness(engine::mtpmeter::kWitness);
             VERIFY_CK(hipMemcpy(r.mid_state.data(), ckpt->mid_gdn, (size_t)snap.bytes_gdn,
                                 hipMemcpyDeviceToHost));
             VERIFY_CK(hipMemcpy(r.mid_state.data() + snap.bytes_gdn, ckpt->mid_conv,
@@ -483,24 +510,39 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
         }
         // ONE pass over the 485 MiB table serving both norm rows, then ONE download of both logits rows.
         // `sc.norm`'s rows are contiguous at stride kHidden, which is the layout the kernel stages.
-        kernels::lm_head_batched_xbf16((const uint16_t*)weights.at(kHead).device, sc.norm,
-                                       logits_dev, kVocab, kRows);
+        //
+        // `head` gets a `sync_added=1` close. Without it the head's ~2 ms would be charged to whatever
+        // blocks next — today that is the logits D2H two lines below, which is exactly why `logits_d2h`
+        // would otherwise read as the vocabulary download when most of it is the head. The sync costs
+        // nothing the round was hiding: the D2H already waited for this launch on the same stream.
+        {
+            const engine::mtpmeter::PhaseGuard head(engine::mtpmeter::kHead);
+            kernels::lm_head_batched_xbf16((const uint16_t*)weights.at(kHead).device, sc.norm,
+                                           logits_dev, kVocab, kRows);
+        }
         r.head_passes = 1;
-        r.logits.assign((size_t)kRows * kVocab, 0.f);
-        VERIFY_CK(hipMemcpy(r.logits.data(), logits_dev, (size_t)kRows * kVocab * sizeof(float),
-                            hipMemcpyDeviceToHost));
+        {
+            const engine::mtpmeter::PhaseGuard d2h(engine::mtpmeter::kLogitsD2H);
+            r.logits.assign((size_t)kRows * kVocab, 0.f);
+            VERIFY_CK(hipMemcpy(r.logits.data(), logits_dev, (size_t)kRows * kVocab * sizeof(float),
+                                hipMemcpyDeviceToHost));
+        }
         r.d2h_count = 1;
         r.bytes_read_back = (long long)kRows * kVocab * sizeof(float);
-        for (int q = 0; q < kRows; ++q) {
-            const float* row = r.logits.data() + (size_t)q * kVocab;
-            r.token[q] = argmax_greedy(row, kVocab);   // §03.4's rule, the engine's only spelling
-            r.top[q] = row[r.token[q]];
+        {
+            const engine::mtpmeter::PhaseGuard argmax(engine::mtpmeter::kArgmax);
+            for (int q = 0; q < kRows; ++q) {
+                const float* row = r.logits.data() + (size_t)q * kVocab;
+                r.token[q] = argmax_greedy(row, kVocab);   // §03.4's rule, the engine's only spelling
+                r.top[q] = row[r.token[q]];
+            }
         }
         if (verdict_dev != nullptr) {
             // The device verdict, on the SAME tile the host argmaxes above just read. The admission is
             // `verdict[kRow0Token] == token[0] && verdict[kRow1Token] == token[1]` against §03.4's own
             // host spelling, tie rule included, on real logits from real content — not on a fixture an
             // argmax kernel could have been tuned to.
+            const engine::mtpmeter::PhaseGuard witness(engine::mtpmeter::kWitness);
             kernels::mtp_accept_verdict(logits_dev, kVocab, kRows, tokens[0], verdict_dev);
             VERIFY_CK(hipMemcpy(r.verdict, verdict_dev, sizeof(r.verdict), hipMemcpyDeviceToHost));
             r.verdict_bytes = (long long)sizeof(r.verdict);
