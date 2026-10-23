@@ -76,6 +76,16 @@ constexpr int kHeadCopies = 1;        // the one blocking logits D2H
 constexpr int kSubmissionsPerRound =
     kBlockCopies + kBlockLaunches + kHeadLaunches + kHeadCopies;
 
+// The same bill as `stageclock` counts it, which is NOT the same quantity, and the difference is one
+// submission. The stage clock's rows are launches and device-to-device copies; its `kHostTail` row is
+// noted with ZERO submissions precisely so that "launches" means the same thing on every row
+// (`engine/stage_clock.h`). So the blocking vocabulary D2H — the 16th submission, and the one thing about
+// a round that is guaranteed to synchronise — is billed nothing there and one here. A single constant
+// shared by both instruments would have made one of the two wrong, which is why there are two named ones
+// and the census line prints both spellings it is asked to.
+constexpr long long kStageSubsPerRound =
+    static_cast<long long>(kBlockCopies) + kBlockLaunches + kHeadLaunches;
+
 // The block's 15 tensors, as the shard stores them (BF16, [out, in] for every matrix). Resolved once
 // per run: `resolve()` re-reads each claim from the store and throws naming the FIRST mismatch, with
 // rank and both dims stated, because a shape claim written as a guess is a bug with a compile-time

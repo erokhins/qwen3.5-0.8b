@@ -405,6 +405,16 @@ void gdn_conv(const uint16_t* raw, const float* win, const float* conv_weight, f
 // `engine/gdn_conv_roll_kernels.h`; why the values are the same ones the copy used to move:
 // `prototype/glue_copy_fold/GLUECOPY-HANDOVER.md` §2.
 void gdn_conv_roll(const uint16_t* raw, float* win, const float* conv_weight, float* u);
+// The MTP accept round's window derivation (`prototype/mtp_accept/ACCEPT-BUILD.md` §4 cond. 1, option
+// (a)). `mid_win` is a caller-owned [K-1][CH] F32 slot and receives the window as it stood AFTER row 0
+// of a multi-row body — the quantity a batched conv does not leave addressable anywhere, because it
+// materialises only the END window. `win` must be the window as it stood before this body's conv, and
+// `raw` is the body's tile: the kernel reads its row 0, which is the row the accept round keeps on a
+// reject. Nothing here is recomputed with different arithmetic; the three stored values are
+// `conv_tap`'s own, evaluated where `conv_kernel`'s end condition would put them at `tokens = 1`, and
+// the shipped conv for this body runs untouched alongside it. Body and the address-level argument:
+// `engine/gdn_conv_mid_kernels.h`. Not called by the shipping path at all.
+void gdn_conv_mid_window(const uint16_t* raw, const float* win, float* mid_win);
 void gdn_gates(const uint16_t* a_raw, const uint16_t* b_raw, const float* a_log,
                const float* dt_bias, float* g, float* beta, int tokens = 1);
 // Which SPELLING of the sequential recurrence's state walks a `gdn_rec` launch runs
@@ -936,6 +946,34 @@ void lm_head_full_xbf16(const uint16_t* table, const uint16_t* h, float* logits,
 constexpr int kLmHeadBatchedRows = 2;
 void lm_head_batched_xbf16(const uint16_t* table, const uint16_t* h_rows, float* logits_rows,
                            int vocab, int nrows);
+
+// ---- the accept round's device verdict (M2, `engine/mtp_verdict_kernels.h`) ---------------------
+//
+// The status-word layout lives HERE rather than next to the kernel, and for one reason that is a link
+// rule, not a taste: a header whose namespace contains a `__global__` may be included by exactly one
+// translation unit (the `build.sh` note on `attn_decode_kernels.h`), and every host file that wants to
+// read the word needs the layout, not the kernel. So the integers are host-visible here and the kernel
+// includes this header to get them.
+//
+// Four ints, one D2H, one round: row 0's argmax, row 1's argmax, the accept bit, and the candidate
+// echoed back so a log line can prove which word was compared. `engine/mtp_verdict_kernels.h` carries
+// why the argmax's TIE RULE is the hard part (§03.4's strict `>`, lowest id wins) and why that is what
+// makes this kernel admissible against `argmax_greedy` by exact equality instead of by a band.
+constexpr int kVerdictWords = 4;
+constexpr int kVerdictRow0Token = 0;
+constexpr int kVerdictRow1Token = 1;
+constexpr int kVerdictAccept = 2;
+constexpr int kVerdictCandidate = 3;
+// The width this build reduces, and the only one the launcher accepts: the verify body's two rows.
+// A launcher that served any `nrows` from a kernel instantiated for two would be the silent
+// substitution this repo keeps recording, so a deeper verify stays a funding decision.
+constexpr int kVerdictRows = 2;
+
+// `logits_rows` is the tile `lm_head_batched_xbf16` just wrote; `candidate` arrives as a kernel
+// argument (uploading four bytes would be a second device operation for nothing), and `out_dev` has
+// room for `kVerdictWords` ints.
+void mtp_accept_verdict(const float* logits_rows, int vocab, int nrows, int candidate,
+                        int* out_dev);
 
 // ---- dtype adapters, engine's own (no model math here at all). These exist only because some
 // graduated kernels take F32 activations (`proj_gemv` with PACK_X=false, `mlp_gemv`, `lm_head_gemv`)

@@ -529,6 +529,19 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     // token-block of the grid (`last_token_only`) while every other block is still reading that
     // window, so a wide body keeps the scratch and the copy.
     const bool fold_copy = sc.copy_fold && (n == 1);
+    // V1's mid-body checkpoint (`engine/decode_step.h`'s `GdnCheckpoint`). The arming is the pointer and
+    // the rule is the width, both stated here because this is where `n` is — the same shape as every
+    // knob above. The throw is the guard: a caller that armed a checkpoint and then handed a wave of a
+    // different width would otherwise write a per-layer checkpoint nobody asked for into a prefill wave,
+    // which is the one thing this field is not allowed to do (`ACCEPT-BUILD.md` §4 cond. 1).
+    const DecodeScratch::GdnCheckpoint* ckpt = sc.gdn_ckpt;
+    if (ckpt != nullptr && n != DecodeScratch::kGdnCheckpointRows) {
+        throw std::runtime_error(
+            "submit_wave_body: a GDN checkpoint was armed for a body of " +
+            std::to_string(DecodeScratch::kGdnCheckpointRows) + " rows and asked to run " +
+            std::to_string(n) + ". 'After row 0' is a statement about the verify body's geometry;"
+            " arming it on any other body is a caller bug, not a wider checkpoint.");
+    }
     // One hand GEMV of one projection, whichever shape the run asked for. `proj_shape_available` is asked
     // per call because what can refuse is the width and the device's warp, not the flag; a refusal is
     // COUNTED (`sc.proj_fallbacks`) so the run's own log reports the side that silently fell back — a
@@ -758,7 +771,34 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // them. Cheaper than double-buffering 1.27 MiB of state per request, which is the
             // alternative §08.2's "in-place ring update" wording invites; results.md carries it.
             stageclock::note(stageclock::kGdnConv);
-            if (fold_copy) {
+            if (ckpt) {
+                // V1's window half, option (a) as authorised (`ACCEPT-BUILD.md` §4 cond. 1, §4a). The
+                // shipped batched conv runs FIRST AND UNTOUCHED, so `u` and the end window are the
+                // shipping launch's own bits and nothing about this body's arithmetic depends on the
+                // checkpoint at all. Then one derivation launch materialises the single quantity the
+                // batched launch leaves nowhere addressable — the window as it stood after row 0 — and
+                // it must be issued BEFORE the copy below, because it reads the window as this body
+                // found it.
+                //
+                // The first attempt instead called `conv_kernel` once per row and chained row 1's
+                // window through the checkpoint. That made the checkpoint part of the arithmetic, and
+                // the device admission found it: whole rows of logits differed (§4a), which is a
+                // changed-work-split signature. Deriving a window is a data-movement claim and is
+                // admissible by byte-compare; re-deriving a row's taps through a checkpointed operand
+                // is an arithmetic claim, and it is the one thing cond. 1 forbade editing the shipped
+                // kernel to reach.
+                kernels::gdn_conv(sc.g_raw, st.conv_window_layer(layer),
+                                  sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel,
+                                  sc.g_u, sc.conv_new, n);
+                stageclock::note(stageclock::kGdnConv);   // the derivation, its own submission
+                kernels::gdn_conv_mid_window(
+                    sc.g_raw, st.conv_window_layer(layer),
+                    sc.gdn_ckpt->mid_conv + (size_t)slot * kConvWindow * kConvChannels);
+                stageclock::note(stageclock::kCopy);
+                ENGINE_CK(hipMemcpyAsync(st.conv_window_layer(layer), sc.conv_new,
+                                         (size_t)kConvWindow * kConvChannels * sizeof(float),
+                                         hipMemcpyDeviceToDevice));
+            } else if (fold_copy) {
                 // One launch, no scratch row and no roll-back: `conv_roll_kernel` reads the window and
                 // writes its own rolled replacement at the same columns the same lane read, which is
                 // the property `conv_kernel`'s end-condition comment already claims and which its
@@ -888,7 +928,17 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // is the only reader and `resolve_gdn_loop` is a pure function of (flag, rows) — asking it
             // on a collapse body arms nothing, and having the number named once is what lets the two
             // sequential branches below read as the two spans they are.
-            const int gdn_span = kernels::resolve_gdn_loop(sc.gdn_loop, n);
+            //
+            // The checkpoint forces the span to 1, and that forcing is its second cost. At a span of 2
+            // ONE `gdn_rec` launch walks both rows inside one kernel, so "the state after row 0" exists
+            // in no register, buffer or address a copy could read — the finding `engine/mtp_verify.h`
+            // handed back. Walking one token-step per launch is what makes the gap exist, and
+            // span-invariance is admitted at BIT-identity, not adjacency
+            // (`prototype/gdn_rec_isa/gdn_rec_isa.hip.cpp --selftest-loop`; `engine/gate.py` section (j)
+            // re-proves it per fixture), so the walk moves submissions and no bit. It also means the
+            // caller must hold `kSeq`: `kCollapse` and `kChunk` below each submit one launch per body and
+            // so have no row-0 boundary to stop at either.
+            const int gdn_span = ckpt != nullptr ? 1 : kernels::resolve_gdn_loop(sc.gdn_loop, n);
             if (kernels::resolve_gdn_scan(sc.gdn_scan, n) == kernels::GdnScan::kCollapse) {
                 // Route A (D-12): the sequential recurrence, resident. ONE launch per layer per body,
                 // and the SAME arithmetic per step — see `engine/gdn_collapse_kernels.h` for why that is
@@ -1029,6 +1079,22 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                                      // above it, so both forms land on the same `gdn_rec` row of the
                                      // wave report and the A/B is a diff of one family line.
                                      sc.gdn_spell);
+                    if (ckpt != nullptr && t == 0) {
+                        // V1, the state half: this is the gap the span above was forced open to create.
+                        // The block this launch just advanced is this layer's contribution to S_{p+1},
+                        // and once row 1's launch runs it is gone — so one 1 MiB D2D per GDN layer per
+                        // round is what is paid so the round can be undone WITHOUT re-running the
+                        // recurrence. It bills on `copy` because that is what it is: a checkpoint that
+                        // hid on the `gdn_rec` row would make that row read as though the recurrence had
+                        // got slower, when what grew was the rollback bill.
+                        stageclock::note(stageclock::kCopy);
+                        ENGINE_CK(hipMemcpyAsync(
+                            sc.gdn_ckpt->mid_gdn
+                                + (size_t)gdn_slot(layer) * kNumValueHeads * kDk * kDv,
+                            st.gdn_state_layer(layer),
+                            (size_t)kNumValueHeads * kDk * kDv * sizeof(float),
+                            hipMemcpyDeviceToDevice));
+                    }
                 }
             }
         }  // the mixer

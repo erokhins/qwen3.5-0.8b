@@ -163,11 +163,34 @@ struct Result {
     int d2h_count = 0;              // must read 1
     long long bytes_read_back = 0;  // bytes of logits downloaded
     long long lane_bytes = 0;       // KV bytes reverted per round (each way), so a timing arm can bill it
+    // Filled ONLY when `capture_end_state` is set: the shadow's mixer state as the body left it, GDN
+    // then conv, in that order. The split admission needs it — "split and batched agree" is a claim
+    // about the END state as much as about the logits, and a body that reached the same logits by a
+    // different route would be the difference — and nothing else pays for it, because it is 19.27 MiB
+    // of D2H per round and no timing arm should be carrying that.
+    std::vector<char> end_state;
+    // Filled ONLY when `ckpt` is non-null: the mid-round checkpoint itself, GDN then conv. This is the
+    // half of S_{p+1} the split exists to produce, and the only way to ask, in bytes, whether it is the
+    // right half — the driver compares it against the mixer state the shipping one-row step left.
+    std::vector<char> mid_state;
+    // Filled ONLY when `verdict_dev` is non-null: the device verdict, in the
+    // `mtpverdict::VerdictWord` order, plus the bytes it cost to read back. The admission is that
+    // `verdict[kRow0Token] == token[0]` and `verdict[kRow1Token] == token[1]`, i.e. the device argmax
+    // agrees with `argmax_greedy` on the same tile, tie rule included.
+    int verdict[4] = {-1, -1, -1, -1};
+    long long verdict_bytes = 0;
 };
+// `ckpt`, when non-null, arms the M2 mid-round checkpoint for this body (`decode_step.h`'s
+// `GdnCheckpoint`): the conv rolls row 0's window into it and the recurrence hands it each layer's
+// state after row 0, which is the only way `S_{p+1}` can be produced without re-running the step. It
+// is a parameter rather than a field of `Snapshot` because the probe and the accept round own those
+// regions differently — the probe's are a witness's, the round's are its rollback.
 Result verify_body(const WeightStore& weights, const RequestState& target, DecodeScratch& sc,
                    const Snapshot& snap, int anchor_pos, const int* tokens, float* logits_dev,
                    LaneStage& lanes, StateBytes* body_reads = nullptr,
-                   PoisonReport* tail_poison = nullptr);
+                   PoisonReport* tail_poison = nullptr,
+                   const DecodeScratch::GdnCheckpoint* ckpt = nullptr,
+                   bool capture_end_state = false, int* verdict_dev = nullptr);
 
 // The restore witness: poison the shadow side with a pattern no body writes, restore, and compare every
 // byte of both regions against the checkpoint. A PARTIAL restore cannot pass this — the untouched bytes

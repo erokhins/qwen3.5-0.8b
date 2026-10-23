@@ -52,6 +52,7 @@
 #include "engine/loader.h"
 #include "engine/mtp_draft.h"
 #include "engine/mtp_verify.h"
+#include "engine/mtp_accept.h"
 #include "engine/prefill.h"
 #include "engine/stage_clock.h"
 #include "engine/state.h"
@@ -121,6 +122,22 @@ struct Options {
     // it was set, so a timing run can be shown to have run without it.
     int verify_guard = 0;
     bool verify_guard_given = false;
+    // M2's split admission, `--mtp-midsplit 1` (`prototype/mtp_accept/ACCEPT-BUILD.md` §4 cond. 2).
+    // On, the probe runs its 2-row body a SECOND time per anchor with V1's mid-round checkpoint armed,
+    // and the two runs are byte-compared against each other and against the step. It is a witness, not a
+    // route: it doubles the probe's work per round and prints one line, and it is refused with
+    // `--time-stages` for the same reason the probe itself is. Default 0 = the probe runs one body and
+    // submits nothing extra.
+    int mtp_midsplit = 0;
+
+    // §09 / M2: the ACCEPT loop (`engine/mtp_accept.h`). Speculative decoding at k = 1: the draft's
+    // proposal is verified by the 2-row body and accepted or rejected ON DEVICE, so a round emits one or
+    // two tokens. Default off, and off means this pointer is never allocated (§4g's inertness argument).
+    //
+    // It costs a third ~19.27 MiB region per request (the mid-round checkpoint) and it changes the shape
+    // of a generation step, which is why it refuses every option whose per-step semantics it does not
+    // own — see the refusals below rather than half-supporting them.
+    int mtp_accept = 0;
     // Which round sequence the side computation walks: `loop` reproduces speccheck's greedy_mtp(k=1)
     // round geometry (the one the carried accept rate was measured on), `every` drafts after every
     // step. See `engine::mtpdraft::Schedule`; refused-and-parsed, never defaulted into.
@@ -478,6 +495,18 @@ Options parse_args(int argc, char** argv) {
                                      " row (see engine/mtp_draft.h)");
         }
     }
+    if (const char* env = std::getenv("QWEN_MTP_ACCEPT"); env != nullptr && env[0] != '\0') {
+        const std::string v(env);
+        if (v == "1") {
+            o.mtp_accept = 1;
+        } else if (v == "0") {
+            o.mtp_accept = 0;
+        } else {
+            throw std::runtime_error("QWEN_MTP_ACCEPT takes 0 or 1, got '" + v +
+                                     "'; 0 is the default and runs no accept round at all (see"
+                                     " engine/mtp_accept.h)");
+        }
+    }
     if (const char* env = std::getenv("QWEN_MTP_VERIFY"); env != nullptr && env[0] != '\0') {
         const std::string v(env);
         if (v == "1") {
@@ -560,6 +589,24 @@ Options parse_args(int argc, char** argv) {
             }
             o.mtp_verify = std::atoi(v.c_str());
             o.mtp_verify_given = true;      // the flag outranks the environment, and it is the naming
+        } else if (a == "--mtp-accept") {
+            // Parses or throws. `0` is the shipping default and allocates nothing; `1` replaces the
+            // generation loop's steps with accept rounds (see `engine/mtp_accept.h`).
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--mtp-accept takes 0 (off, the default) or 1 (k=1 speculative"
+                                         " decoding on the draft block's proposals), got '" + v + "'");
+            }
+            o.mtp_accept = std::atoi(v.c_str());
+        } else if (a == "--mtp-midsplit") {
+            // Parses or throws, as the other M2 knobs. It is a witness knob and nothing else: it makes
+            // the probe run its body twice per anchor and byte-compare the two.
+            const std::string v = next();
+            if (v != "0" && v != "1" && v != "2") {
+                throw std::runtime_error("--mtp-midsplit takes 0 (off), 1 (split arm) or 2 (control"
+                                         " arm: the second body runs UNSPLIT), got '" + v + "'");
+            }
+            o.mtp_midsplit = std::atoi(v.c_str());
         } else if (a == "--verify-candidate") {
             o.verify_candidate = next();
             o.verify_candidate_given = true;
@@ -1029,18 +1076,37 @@ Options parse_args(int argc, char** argv) {
                                  std::string(engine::kernels::proj_shape_name(o.proj_shape)) +
                                  " for the pre-D1 pair, or drop --proj-shape for the shipped plan");
     }
-    if (o.mtp_draft && (o.time_stages || o.time_waves)) {
-        // The two timing instruments price the target path by draining the stream at each
-        // `stageclock::note` boundary, and the draft's submissions carry no note — they belong to no
-        // family of §07's bill. Running both would charge the draft to whichever stage preceded it and
-        // print the result as an attribution, which is the "one launch that is invisible" failure
-        // `engine/stage_clock.h` is written against. The draft is a correctness instrument in this
-        // increment; the timing question is a later one and needs its own family, not this flag.
-        throw std::runtime_error("--mtp-draft 1 with --time-stages/--time-waves would charge the draft's"
-                                 " submissions to whichever stage-clock segment preceded them, because"
-                                 " the draft belongs to no family of §07's launch bill. Run the"
-                                 " correctness pass without the timing flags (--mtp-draft prints its own"
-                                 " MTPDRAFT census line); timing the draft needs its own stage family.");
+    if (o.mtp_draft && o.time_waves) {
+        // The WAVE clock segments a prefill pass, and the draft does not run inside one: its rounds follow
+        // generation steps, and a step clock's `note()` outside a measured unit is ignored and counted
+        // (`engine/stage_clock.h`). So there is nothing for the `mtp` family to bill on a wave, and a wave
+        // report that printed no `mtp` row while the run drafted would read as an instrument gap. The
+        // family exists, is populated, and belongs to the STEP clock; the refusal stays for the unit that
+        // cannot use it, with the reason corrected to say so.
+        throw std::runtime_error("--mtp-draft 1 with --time-waves: the wave clock prices a prefill pass,"
+                                 " and a draft round follows a generation step, so no draft submission"
+                                 " falls inside the unit it measures and the `mtp` family would be"
+                                 " declared-and-empty. Use --time-stages (with --mtp-sched every, which"
+                                 " is the uniform schedule the clock can bill); --mtp-draft prints its"
+                                 " own MTPDRAFT census line either way.");
+    }
+    if (o.mtp_draft && o.time_stages &&
+        engine::mtpdraft::parse_schedule(o.mtp_sched) != engine::mtpdraft::Schedule::kEvery) {
+        // The `mtp` family IS declared now, and one real constraint came with declaring it: the clock's
+        // per-step division is exact (`Clock::describe()`: "uniform by construction … so an exact integer
+        // division is honest here"), and a `loop` round follows a step only when the previous round did
+        // not advance two positions, i.e. ~1 round per `1+a` steps. No integer per-step bill exists for
+        // that schedule, and billing `rounds x bill / steps` by truncation would print a `plan_per_step`
+        // that is neither the plan nor the observation. `every` makes exactly one round per step — and so
+        // does the accept loop, which drafts once per round whatever the schedule is printed under — so
+        // `every` is what the clock bills, and the default stays `loop` for every correctness pass.
+        throw std::runtime_error("--time-stages bills the `mtp` family one draft round per step, which"
+                                 " is the uniform shape the clock's per-step division requires;"
+                                 " --mtp-sched " + o.mtp_sched +
+                                 " makes ~1 round per 1+a steps and has no integer per-step bill. Name"
+                                 " --mtp-sched every for a timed run (it is also the accept loop's own"
+                                 " shape), or drop --time-stages: the correctness pass prints its own"
+                                 " MTPDRAFT census line under either schedule.");
     }
     if (o.mtp_sched_given && !o.mtp_draft) {
         // Naming a schedule for a path that does not run. Keyed on `given` deliberately: `loop` is the
@@ -1053,6 +1119,25 @@ Options parse_args(int argc, char** argv) {
     if (o.verify_candidate_given && !o.mtp_verify) {
         throw std::runtime_error("--verify-candidate feeds row 1 of a verify body that is not running;"
                                  " name --mtp-verify 1 with it, or drop it");
+    }
+    if (o.mtp_midsplit && !o.mtp_verify) {
+        // The split is an admission, and the thing it admits is a 2-row body. Arming it with no probe
+        // would arm a checkpoint nobody reads, so it is refused rather than silently dropped.
+        throw std::runtime_error("--mtp-midsplit witnesses the batched verify body, which is not"
+                                 " running; name --mtp-verify 1 with it, or drop it");
+    }
+    if (o.mtp_midsplit && o.gdn_loop != 1) {
+        // The checkpoint forces the recurrence to walk one token-step per launch, because that is the
+        // only form in which "the state after row 0" exists at an address. A reference arm left at the
+        // shipped `--gdn-loop 512` resolves to a span of 2 at n = 2 and therefore runs the LOOPED
+        // recurrence, so the byte-compare would be split-span-against-looped — a different recurrence on
+        // the two sides, and it reads as a wholesale logits disagreement (measured: 248 320 and 496 640
+        // differing elements, i.e. whole rows, at anchors 18-20, with `--gdn-loop 1` reading 0). Refuse
+        // the pair instead of printing a red result that is really a form mismatch, and say which flag
+        // makes the two sides the same computation (`ACCEPT-BUILD.md` §4c).
+        throw std::runtime_error("--mtp-midsplit pins the reference arm to --gdn-loop 1 (the split arms"
+                                 " a one-token-step recurrence, so any other span compares two different"
+                                 " recurrences); run it with --gdn-loop 1");
     }
     if (o.verify_guard_given && !o.mtp_verify) {
         // Keyed on `given`, the `--mtp-sched` precedent: the guard's default is 0, so a plain run must not
@@ -1081,6 +1166,56 @@ Options parse_args(int argc, char** argv) {
     if (o.mtp_verify && o.wave_rows < engine::mtpverify::kRows) {
         throw std::runtime_error("--mtp-verify needs a scratch at least " +
                                  std::to_string(engine::mtpverify::kRows) + " rows tall; this run's"
+                                 " --wave-rows is " + std::to_string(o.wave_rows));
+    }
+    // ---- the accept loop's refusals (`engine/mtp_accept.h`) --------------------------------------
+    // Each of these is a combination whose object the round does not own, not a limitation of the round.
+    if (o.mtp_accept && !o.mtp_draft) {
+        throw std::runtime_error("--mtp-accept verifies a proposal; with --mtp-draft 0 there is no draft"
+                                 " block to propose one. Name --mtp-draft 1 with it (the candidate"
+                                 " source is the §09 block, never a guess)");
+    }
+    if (o.mtp_accept && o.gdn_loop != 1) {
+        // Same PIN `--mtp-midsplit` states above, for the same reason: a round's rollback restores the
+        // mid-round checkpoint, and that address only exists when the recurrence walks one token-step per
+        // launch. A round at any other span would restore a state the body never wrote — which is a wrong
+        // token stream, not a red comparison, so it is refused at the flag rather than caught later.
+        throw std::runtime_error("--mtp-accept pins --gdn-loop 1 (the mid-round checkpoint it restores"
+                                 " from is a one-token-step recurrence's end state); run it with"
+                                 " --gdn-loop 1");
+    }
+    if (o.mtp_accept && (o.session || o.sizes_only)) {
+        throw std::runtime_error("--mtp-accept replaces a run's generation steps with rounds; --session"
+                                 " hands the token budget to its caller and --sizes-only runs no steps");
+    }
+    if (o.mtp_accept && (o.time_stages || o.time_waves)) {
+        // The stage clock's plan is a per-STEP bill (§07's 224 launches) and its replay replays steps.
+        // A round is one or two tokens and adds the checkpoint's own submissions, so there is no step
+        // record for it to replay and no §07 family to bill it to. The cost is taken as a paired
+        // wall-clock A/B by whoever owns timings, not by this flag.
+        throw std::runtime_error("--mtp-accept and --time-stages/--time-waves cannot share a run: a round"
+                                 " is not a step, so the clock has no per-step plan to replay or bill"
+                                 " (the round prints its own MTPSTAT cost instead)");
+    }
+    if (o.mtp_accept && !o.feed.empty()) {
+        // Teacher forcing feeds a token per step. A round consumes one or two, and its reject path emits
+        // the token the caller did NOT feed at that index, so a replay under this flag has no defined
+        // alignment. The accept path is judged by its own token stream against a free flag-off run.
+        throw std::runtime_error("--mtp-accept cannot be combined with --replay/--feed: a round emits 1"
+                                 " or 2 tokens, so the caller's per-step token list has no alignment"
+                                 " (judge the accept run as a free run)");
+    }
+    if (o.mtp_accept && o.mtp_verify) {
+        // Both arm the same scratch and the same 2-row body; the accept round IS the verify body plus a
+        // verdict and a rollback. Running the probe as well would price a third body per round and make
+        // the round's own printed cost wrong. `--mtp-midsplit` is the witness for the body's numerics.
+        throw std::runtime_error("--mtp-accept already runs the 2-row body as the round itself; the"
+                                 " read-only --mtp-verify side pass is not also armed (use"
+                                 " --mtp-midsplit for the body's numerics witness)");
+    }
+    if (o.mtp_accept && o.wave_rows < engine::mtpaccept::kRows) {
+        throw std::runtime_error("--mtp-accept needs a scratch at least " +
+                                 std::to_string(engine::mtpaccept::kRows) + " rows tall; this run's"
                                  " --wave-rows is " + std::to_string(o.wave_rows));
     }
     if (o.state_fp && (o.session || o.sizes_only)) {
@@ -1184,6 +1319,15 @@ struct MtpSide {
 
 // One generation step's worth of side computation.
 //
+// Returns whether a round was actually submitted (a refusal or a skipped step submits nothing), so the
+// stage clock's replay can state its own round count next to the `mtp` row it bills — see `stage_pass`.
+//
+// `quiet` suppresses the per-round lines. A timed replay of the step list is not the run's own accounting:
+// the `MTPDRAFT` census and the `DRAFT round=` lines that witness it are printed once, from the run's
+// generation loop, and a second copy from a replay would break the cross-check `gate.py::mtp_plan_verdicts`
+// runs (census `rounds=` against the number of `DRAFT` lines) while adding nothing a replay can measure.
+// The census counters still move, because they are the block's own and a replay really did run rounds.
+//
 // `pred_pos` is the position the step's row predicted — its `pos_before`, the same number the STEP /
 // GEN lines print — and `pred_token` the token it predicted. `h_norm_row` is the BF16 final-norm row
 // the step left in `sc.norm`, which is §09.1's `h` (post-final-norm; A-12's "pre-norm" reading was
@@ -1201,8 +1345,8 @@ struct MtpSide {
 // A proposal may BE the stop id (gate zero saw the restricted head propose it at dec8 step 0), and it
 // settles a round like any other id: §07.5's stop rule applies to tokens the TARGET emitted, in the
 // generation loop, and nothing in the side path is allowed to end a run.
-void mtp_after_step(MtpSide& m, const engine::WeightStore& store, const uint16_t* h_norm_row,
-                    int pred_pos, int pred_token) {
+bool mtp_after_step(MtpSide& m, const engine::WeightStore& store, const uint16_t* h_norm_row,
+                    int pred_pos, int pred_token, bool quiet = false) {
     const auto a = m.track.after_step(pred_pos, pred_token);
     if (a.alignment_broken) {
         // Cannot happen without a bug in this file's own bookkeeping, and if it does happen the accept
@@ -1215,28 +1359,35 @@ void mtp_after_step(MtpSide& m, const engine::WeightStore& store, const uint16_t
     if (a.adjudicated) {
         m.adjudicated++;
         if (a.accept) m.accepted++;
-        std::printf("MTPACCEPT settled_pos=%d proposal=%d target_pred=%d accept=%d\n", a.settled_pos,
-                    a.settled_proposal, pred_token, a.accept ? 1 : 0);
+        if (!quiet)
+            std::printf("MTPACCEPT settled_pos=%d proposal=%d target_pred=%d accept=%d\n", a.settled_pos,
+                        a.settled_proposal, pred_token, a.accept ? 1 : 0);
     }
     if (a.drop_lane) engine::mtpdraft::truncate_lane(m.st);
-    if (!a.draft) return;                    // kLoop skips the step after an accept: q advanced by 2
+    if (!a.draft) return false;          // kLoop skips the step after an accept: q advanced by 2
 
     const std::string why = engine::mtpdraft::refusal(m.st);
     if (!why.empty()) {
         m.refused++;
+        // Printed even under `quiet`, because it is not accounting: a refused round is a step the `mtp`
+        // stage row billed and did not get, and a `plan_match=0` with no explanation beside it is the
+        // silent-shorter-run failure this driver keeps refusing.
         std::printf("DRAFT-SKIP reason=%s would_adjudicate_at=%d\n", why.c_str(), pred_pos + 1);
-        return;
+        return false;
     }
     const engine::mtpdraft::Proposal p =
         engine::mtpdraft::draft_round(store, m.w, m.st, h_norm_row, pred_token, pred_pos + 2);
     m.track.pending(pred_pos + 1, p.token);
     m.made++;
     if (m.st.lanes_max > m.lanes_max) m.lanes_max = m.st.lanes_max;
-    std::printf("DRAFT round=%lld draft_pos=%d adjudicated_by_pred_pos=%d y_next=%d proposal=%d"
-                " top_logit=%.9g lanes=%d\n",
-                (long long)p.round, pred_pos + 2, pred_pos + 1, pred_token, p.token, p.top_logit,
-                p.nlanes);
-    std::fflush(stdout);
+    if (!quiet) {
+        std::printf("DRAFT round=%lld draft_pos=%d adjudicated_by_pred_pos=%d y_next=%d proposal=%d"
+                    " top_logit=%.9g lanes=%d\n",
+                    (long long)p.round, pred_pos + 2, pred_pos + 1, pred_token, p.token, p.top_logit,
+                    p.nlanes);
+        std::fflush(stdout);
+    }
+    return true;
 }
 
 // The proposal the last round made and no later step settled. Counted and explained, never dropped: it
@@ -1279,6 +1430,18 @@ struct VerifySide {
     engine::mtpverify::Stats stats;
     float* logits_dev = nullptr;      // [kRows][kVocab] F32, the shadow's own logits tile
     bool guard = false;               // `--verify-guard 1`: see `engine/mtp_verify.h`'s witness section
+    // `--mtp-midsplit 1`: V1's mid-round checkpoint regions, and the device status word the verdict
+    // kernel writes. Allocated only under the flag, because a witness that costs memory when off is a
+    // witness that will be left on by accident.
+    bool midsplit_mode = false;         // any non-zero mode: the second body runs and is compared
+    int midsplit = 0;                   // 1 = split arm, 2 = control arm (second body unsplit)
+    engine::DecodeScratch::GdnCheckpoint mid;
+    int* verdict_dev = nullptr;
+    long long mid_bytes = 0;
+    long long split_logit_diffs = 0;   // floats that disagreed, split vs batched, whole run
+    long long split_end_diffs = 0;     // bytes of end state that disagreed
+    long long split_rounds = 0;
+    long long verdict_bad = 0;         // rounds where the device verdict disagreed with `argmax_greedy`
 };
 
 // One round, run AFTER the step and after the draft have taken everything they need from `sc` (the verify
@@ -1324,9 +1487,10 @@ void verify_round(VerifySide& v, const engine::WeightStore& store, engine::Decod
         live_before = engine::mtpverify::capture_state_bytes(st, -1);
         engine::mtpverify::poison_kv_lane(st, poison_lane);
     }
-    const engine::mtpverify::Result r = engine::mtpverify::verify_body(
-        store, st, sc, v.snap, anchor_pos, tokens, v.logits_dev, v.lanes,
-        v.guard ? &body_reads : nullptr, v.guard ? &poison : nullptr);
+            const engine::mtpverify::Result r = engine::mtpverify::verify_body(
+                store, st, sc, v.snap, anchor_pos, tokens, v.logits_dev, v.lanes,
+                v.guard ? &body_reads : nullptr, v.guard ? &poison : nullptr, nullptr,
+                v.midsplit != 0);
     v.stats.rounds++;
     v.stats.snapshot_bytes += v.snap.bytes();
     v.stats.restored_bytes += v.snap.bytes();   // the shadow is seeded every round, not only on a reject
@@ -1342,8 +1506,7 @@ void verify_round(VerifySide& v, const engine::WeightStore& store, engine::Decod
     std::fflush(stdout);
     if (v.guard) {
         const engine::mtpverify::StateBytes live_after =
-            engine::mtpverify::capture_state_bytes(st, -1);
-        const std::string operands = engine::mtpverify::first_state_diff(*step_reads, body_reads);
+            engine::mtpverify::capture_state_bytes(st, -1);        const std::string operands = engine::mtpverify::first_state_diff(*step_reads, body_reads);
         const std::string leak = engine::mtpverify::first_state_diff(live_before, live_after);
         const std::string selftest =
             engine::mtpverify::first_mixer_diff(*step_reads, *step_after);
@@ -1358,6 +1521,100 @@ void verify_round(VerifySide& v, const engine::WeightStore& store, engine::Decod
                     poison.survivors, poison.lane_bytes, selftest.empty() ? 0 : 1,
                     operands.empty() ? "-" : operands.c_str(), leak.empty() ? "-" : leak.c_str(),
                     engine::mtpverify::state_diff_summary(live_before, live_after).c_str());
+        std::fflush(stdout);
+    }
+    // ---- `--mtp-midsplit 1`: V1's admission, three byte-compares and no metric -------------------
+    //
+    // The same body, the same anchor, the same two tokens, run a SECOND time with the mid-round
+    // checkpoint armed. The split changes the SUBMISSIONS the GDN layers make (conv per row, recurrence
+    // per row, a state copy in the gap) and is owed bit-identity, so what this prints is equality of
+    // bytes, in three places, each answering a different question:
+    //
+    //   split_eq_batch   the split body and the batched body agree on BOTH logits and end state. The
+    //                    logits alone would not be enough: two routes that disagreed about the state
+    //                    they hand the next step could still agree about this step's row.
+    //   mid_vs_step      what the captured checkpoint differs from, relative to the mixer state the
+    //                    shipping ONE-ROW step left after consuming the same token at the same position.
+    //                    Printed as a MEASUREMENT, not an admission: row 0 of a 2-row body runs wave
+    //                    attention at rows = 2 while the one-row step runs the fused single-row form, so
+    //                    bit equality against the one-row state was never an admissible ask. What IS
+    //                    owed bitwise is `split_eq_batch` (the split against the batched body, which is
+    //                    the same form on both sides); the argmax-level claim against the step is
+    //                    `mtp_verify`'s existing `row0_eq_step`. Printing the difference rather than
+    //                    dropping it is deliberate — if that ever becomes zero, the two forms converged.
+    //   verdict_eq_host  the device argmax and the accept bit agree with `argmax_greedy` on the same
+    //                    logits tile, tie rule included (§03.4's strict `>` / lowest-id-wins).
+    //
+    // A near-match here is a FAIL, not a band: `ACCEPT-BUILD.md` §4 cond. 2 says so in those words.
+    if (v.midsplit != 0) {
+        // Mode 2 is the CONTROL: the second body runs UNSPLIT, so a nonzero `logits_ndiff` there is a
+        // witness bug — the second call seeing inputs the first did not — and not a result about the
+        // split. Running it is what makes mode 1's number readable, and it costs one more body.
+        const engine::mtpverify::Result s = engine::mtpverify::verify_body(
+            store, st, sc, v.snap, anchor_pos, tokens, v.logits_dev, v.lanes,
+            nullptr, nullptr, v.midsplit == 1 ? &v.mid : nullptr,
+            /*capture_end_state=*/true, v.verdict_dev);
+        v.split_rounds++;
+        // Per row, not pooled: `ndiff == kVocab exactly` is a whole-row difference, and which ROW
+        // differs is the diagnosis (row 0 = the step's twin is broken; row 1 = the chained conv
+        // window is broken; both = something upstream of the mixer).
+        long long logit_diff0 = 0, logit_diff1 = 0;
+        for (int q = 0; q < engine::mtpverify::kRows; ++q) {
+            for (int i = 0; i < engine::kVocab; ++i) {
+                const size_t idx = (size_t)q * engine::kVocab + i;
+                if (std::memcmp(&s.logits[idx], &r.logits[idx], sizeof(float)) != 0) {
+                    (q == 0 ? logit_diff0 : logit_diff1)++;
+                }
+            }
+        }
+        const long long logit_diff = logit_diff0 + logit_diff1;
+        long long end_diff = 0;
+        if (s.end_state.size() != r.end_state.size()) {
+            end_diff = -1;
+        } else {
+            for (size_t i = 0; i < s.end_state.size(); ++i) {
+                if (s.end_state[i] != r.end_state[i]) ++end_diff;
+            }
+        }
+        // The mid checkpoint against the state the shipping ONE-ROW step left, as a MEASUREMENT and not an
+        // admission. The body's row 0 runs the wave attention path (`rows = 2` reaches `attn_prep` plus the
+        // staged core) while the step ran the fused single-row form, so the two row-0 mixer states are
+        // argmax-equivalent and were never bit-equal — `VERIFY2 row0_eq_step=1` is argmax-level by design.
+        // Byte equality against `step_after` was therefore not an admissible ask; a non-`-` value here says
+        // the two forms' row-0 states differ in bytes, which is expected, and `split_eq_batch` above is
+        // what adjudicates the split.
+        std::string mid_diff = "no_step_after";
+        if (v.midsplit != 1) {
+            mid_diff = "control";   // the control arm captures no checkpoint; there is nothing to ask
+        } else if (step_after != nullptr) {
+            mid_diff = "-";
+            const char* mid_g = s.mid_state.data();
+            const char* mid_c = s.mid_state.data() + step_after->gdn.size();
+            if (s.mid_state.size() != step_after->gdn.size() + step_after->conv.size()) {
+                mid_diff = "size";
+            } else if (std::memcmp(mid_g, step_after->gdn.data(), step_after->gdn.size()) != 0) {
+                mid_diff = "gdn_state_differs";
+            } else if (std::memcmp(mid_c, step_after->conv.data(), step_after->conv.size()) != 0) {
+                mid_diff = "conv_window_differs";
+            }
+        }
+        const bool verdict_ok = s.verdict[engine::kernels::kVerdictRow0Token] == s.token[0] &&
+                                s.verdict[engine::kernels::kVerdictRow1Token] == s.token[1] &&
+                                s.verdict[engine::kernels::kVerdictAccept] ==
+                                    (s.token[0] == tokens[0] ? 1 : 0);
+        v.split_logit_diffs += logit_diff;
+        v.split_end_diffs += end_diff;
+        if (!verdict_ok) v.verdict_bad++;
+        std::printf("MIDSPLIT step=%d anchor_pos=%d mode=%d split_eq_batch=%d logits_ndiff=%lld"
+                    " logits_ndiff_row0=%lld logits_ndiff_row1=%lld end_ndiff=%lld mid_vs_step=%s"
+                    " verdict_eq_host=%d row0=%d row1=%d candidate=%d accept=%d"
+                    " status_bytes=%lld\n",
+                    step, anchor_pos, v.midsplit,
+                    (logit_diff == 0 && end_diff == 0) ? 1 : 0, (long long)logit_diff,
+                    (long long)logit_diff0, (long long)logit_diff1, (long long)end_diff,
+                    mid_diff.c_str(),
+                    verdict_ok ? 1 : 0, s.token[0], s.token[1], tokens[0],
+                    s.verdict[engine::kernels::kVerdictAccept], (long long)s.verdict_bytes);
         std::fflush(stdout);
     }
     if (!out_dir.empty()) {
@@ -1542,6 +1799,7 @@ void print_usage(FILE* out) {
                  " [--gdn-geom block|wf4|wf2|reg16]"
                  " [--mtp-draft 0|1] [--mtp-sched loop|every] [--mtp-cap N]"
                  " [--mtp-verify 0|1] [--verify-candidate ID|sampled] [--verify-guard 0|1]"
+                 " [--mtp-midsplit 0|1|2] [--mtp-accept 0|1]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -1933,6 +2191,32 @@ void print_usage(FILE* out) {
                  " timing on"
                  " purpose: it is tens of MiB of downloads per round, so `prototype/mtp_verify/ARMS.md`"
                  " runs it off and the admission gate runs it on. Refused unless --mtp-verify is on.\n"
+                 "  --mtp-accept 0|1  k=1 SPECULATIVE DECODING on the draft block's proposals"
+                 " (`engine/mtp_accept.h`; `QWEN_MTP_ACCEPT=0|1` does the same from the environment)."
+                 " Default 0, and off means the side state is never allocated and the generation loop is"
+                 " the one that shipped without this flag — the inertness claim is a byte-compare, not a"
+                 " band. On, one round replaces one step: the round feeds the funded 2-row body"
+                 " [cur at p, candidate at p+1], prices both norm rows in ONE pass over the tied head,"
+                 " and accepts iff argmax(row 0) == candidate, decided ON DEVICE and read back as 4 ints"
+                 " (16 B) rather than a vocabulary. An accept emits both tokens and restores nothing; a"
+                 " reject emits the verifier's token and restores the body's per-layer mid-round"
+                 " checkpoint (20,201,472 B in two bulk copies), which is the state a reject needs and is"
+                 " why the recurrence is pinned to --gdn-loop 1 (§4b of prototype/mtp_accept/"
+                 " ACCEPT-BUILD.md). Refused with --time-stages/--time-waves, --replay/--feed, --session,"
+                 " --sizes-only and --mtp-verify, because a round is not a step and those flags name a"
+                 " per-step object it does not own; and it needs --mtp-draft 1, since the candidate must"
+                 " come from the draft block rather than a guess. Prints one `ACCEPT round= anchor= fed="
+                 " cand= cand_pos= accept= verifier= bonus= emitted= pos=-> restored_bytes=` line per"
+                 " round, one `ACCEMIT step= pos= token=` line per EMITTED token (§07.5's stop rule runs"
+                 " per emitted token, including the accepted candidate), and a closing `MTPSTAT` line"
+                 " with rounds / accepted / rejected / emitted / accept_rate / mean_emit / body_rows /"
+                 " captured_bytes / restored_bytes / status_bytes / split_subs. With --out it writes"
+                 " `emitted.txt` (one token per line) instead of `sampled.txt` + `logits<N>.bin`, because"
+                 " a round has two logits rows and no single top-logit value, and inventing one for a"
+                 " five-column row would be a fake number. Note that ON, --steps counts ROUNDS, so a run"
+                 " reaches further than --steps tokens; the last lane of the request has room for one row"
+                 " only, so there the driver pays a plain step and prints `ROUND-SKIP reason=context_limit`"
+                 " rather than refusing the run.\n"
                  "  --mtp-sched loop|every  which round sequence --mtp-draft 1 walks. `loop` (the"
                  " default) reproduces `speccheck/mtp.py`'s `greedy_mtp(k=1)` round geometry on a plain"
                  " greedy stream — draft at q+1, next round at q+2 after an accept and q+1 after a"
@@ -2240,9 +2524,13 @@ Spread summarize(const std::vector<double>& v) {
 }
 
 // One granularity, priced and printed. `ref` is the run's own step list.
+//
+// `mtp`, when non-null, is replayed as part of the step it followed — see the note above the loop for why
+// the draft has to be INSIDE the measured span rather than beside it, and why the pass counts its own
+// rounds instead of borrowing the run's.
 PassResult stage_pass(const Options& o, const engine::WeightStore& store, engine::RequestState& st,
                       engine::DecodeScratch& sc, const std::vector<StepRec>& ref,
-                      engine::stageclock::Mode mode) {
+                      engine::stageclock::Mode mode, MtpSide* mtp) {
     using engine::stageclock::Clock;
     using engine::stageclock::Mode;
     PassResult out;
@@ -2273,6 +2561,21 @@ PassResult stage_pass(const Options& o, const engine::WeightStore& store, engine
     // `decode_step.cpp`'s `fold_copy` is the dispatch side, and it too is a one-row rule, which a STEP
     // clock satisfies by construction because a step IS a one-row body.
     if (clock) clock->set_plan_copy_fold(o.copy_fold);
+    // §09 / P7: the draft's declared per-step bill. Set from the §09 constants the `MTPDRAFT` census line
+    // prints, and set ONLY when the flag is on: left at 0 the plan is §07's exactly as it was before the
+    // `mtp` row existed, which is what makes flag-off `--time-stages` output byte-identical to a pre-MTP
+    // binary rather than a run with an extra row and a bigger plan total. The refusals in `validate()`
+    // guarantee the uniformity this setter assumes (one round per step), and `mtp_rounds=` below is the
+    // in-pass witness that it held.
+    if (clock && mtp) clock->set_plan_mtp(engine::mtpdraft::kStageSubsPerRound);
+    // The draft's own state starts the pass the way the request's does: a fresh cache and a fresh round
+    // tracker, so the replayed schedule is the run's schedule and not a continuation of the previous
+    // pass. Without this the second pass would inherit the first pass's lanes and its accept bookkeeping.
+    long long pass_rounds = 0;
+    if (mtp) {
+        engine::mtpdraft::reset(mtp->st);
+        mtp->track.clear();
+    }
     engine::stageclock::arm(clock.get());
     for (const StepRec& want : ref) {
         if (clock) clock->begin_step();
@@ -2281,6 +2584,14 @@ PassResult stage_pass(const Options& o, const engine::WeightStore& store, engine
         // still downloaded and argmaxed by `finish_token`, which is the point — a pass that skipped the
         // D2H would be measuring a step the production path never submits.
         const engine::StepResult r = engine::decode_step(store, st, sc, want.fed, nullptr);
+        // INSIDE the measured span, on purpose. A round is submissions the run makes per step, and billing
+        // them from a span that ended at `decode_step`'s return would charge them to the host gap between
+        // steps — the same misattribution the flag used to be refused for, now priced instead. `sc.norm`
+        // row 0 is the step's final-norm row and the tail only reads it, so it is still the right operand
+        // here, exactly as it is in the run's own loop.
+        if (mtp && mtp_after_step(*mtp, store, sc.norm, st.prefix_len - 1, r.token, /*quiet=*/true)) {
+            ++pass_rounds;
+        }
         if (clock) clock->end_step();
         out.step_ms.push_back(std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - t0).count());
@@ -2303,6 +2614,18 @@ PassResult stage_pass(const Options& o, const engine::WeightStore& store, engine
                 out.first_mismatch < 0 ? "none" : std::to_string(out.first_mismatch).c_str(),
                 (out.tokens_ok && out.logits_ok) ? "" : " note=COMPARISON_VOID");
     if (clock) std::printf("%s\n", clock->describe().c_str());
+    // The `mtp` row's own witness, and it is the row that can lie most quietly: `plan_per_step` bills one
+    // round per step, and the one way that can stop being true mid-run is a `DRAFT-SKIP` at the cache
+    // ceiling, which subtracts 15 submissions from one step and reads as an unexplained `plan_match=0`.
+    // So the pass prints its own round count and says whether it equals its own step count. `uniform=0`
+    // with `plan_match=0` is a ceiling, and the `DRAFT-SKIP` line above names it; `uniform=1` with
+    // `plan_match=0` is a broken declaration, which is the case the wrong-count witness is for.
+    if (mtp) {
+        std::printf("STAGEMTP gran=%s steps=%zu rounds=%lld bill_per_round=%lld uniform=%d\n",
+                    out.gran, ref.size(), pass_rounds,
+                    (long long)engine::mtpdraft::kStageSubsPerRound,
+                    pass_rounds == (long long)ref.size() ? 1 : 0);
+    }
     for (size_t i = 0; i < ref.size(); ++i) {
         std::printf("STAGESTEP gran=%s step=%d fed=%d sampled=%d ms=%.4f\n", out.gran, ref[i].step,
                     ref[i].fed, ref[i].sampled, i < out.step_ms.size() ? out.step_ms[i] : 0.0);
@@ -2476,7 +2799,7 @@ void wave_report(const Options& o, const engine::WeightStore& store, engine::Req
 // about its state, because every pass here MUTATES `st` (reset + re-prefill), and after the run's own
 // dumps are closed, because a pass writes nothing.
 void time_stages_report(const Options& o, const engine::WeightStore& store, engine::RequestState& st,
-                        engine::DecodeScratch& sc, const std::vector<StepRec>& base) {
+                        engine::DecodeScratch& sc, const std::vector<StepRec>& base, MtpSide* mtp) {
     if (base.empty()) {
         std::printf("STAGE gran=calib note=no_generation_steps_ran\n");
         return;
@@ -2488,11 +2811,11 @@ void time_stages_report(const Options& o, const engine::WeightStore& store, engi
                 " note=one_of_these_sits_inside_every_serialized_segment\n", idle_sync_us);
 
     const PassResult burst =
-        stage_pass(o, store, st, sc, base, engine::stageclock::Mode::kBurst);
+        stage_pass(o, store, st, sc, base, engine::stageclock::Mode::kBurst, mtp);
     const PassResult stage =
-        stage_pass(o, store, st, sc, base, engine::stageclock::Mode::kStage);
+        stage_pass(o, store, st, sc, base, engine::stageclock::Mode::kStage, mtp);
     const PassResult kernel =
-        stage_pass(o, store, st, sc, base, engine::stageclock::Mode::kKernel);
+        stage_pass(o, store, st, sc, base, engine::stageclock::Mode::kKernel, mtp);
 
     // `exposed` is the finding this whole instrument was built for: what one extra wait per stage (or
     // per kernel) costs, on the same launches at the same lanes. ~0 means there was no overlap to lose
@@ -2882,8 +3205,32 @@ int main(int argc, char** argv) {
         if (o.mtp_verify) {
             verify = std::make_unique<VerifySide>();
             verify->guard = o.verify_guard != 0;
+            verify->midsplit = o.mtp_midsplit;
+            verify->midsplit_mode = o.mtp_midsplit != 0;
+            // The mid compare needs the mixer state the step left, and that is captured by the guard, so
+            // the witness implies the guard rather than asking for it to be spelled twice. It is stated
+            // on the MIDSPLIT lines' own terms: this is a correctness run and it says so.
+            if (verify->midsplit_mode) verify->guard = true;
             verify->snap = engine::mtpverify::allocate_snapshot(st);
             verify->lanes = engine::mtpverify::make_lane_stage(st);
+            if (verify->midsplit_mode) {
+                // V1's third region pair: the mid-round checkpoint, sized from `state_sizes()` so the
+                // memory arithmetic is derived, not asserted (per-request model state is 18.66 MiB, so
+                // this is a third of that again — fine for this model, and recorded in ACCEPT-BUILD §4).
+                const engine::StateSizes sz = st.sizes();
+                verify->mid_bytes = (long long)sz.gdn_state_bytes + (long long)sz.conv_window_bytes;
+                if (hipMalloc((void**)&verify->mid.mid_gdn, sz.gdn_state_bytes) != hipSuccess ||
+                    hipMalloc((void**)&verify->mid.mid_conv, sz.conv_window_bytes) != hipSuccess) {
+                    throw std::runtime_error("cannot allocate the mid-round checkpoint");
+                }
+                if (hipMalloc((void**)&verify->verdict_dev,
+                              (size_t)engine::kernels::kVerdictWords * sizeof(int)) !=
+                    hipSuccess) {
+                    throw std::runtime_error("cannot allocate the verdict status word");
+                }
+                std::printf("MIDSPLIT on=1 checkpoint_bytes=%lld status_bytes=%zu\n",
+                            verify->mid_bytes, (size_t)engine::kernels::kVerdictWords * sizeof(int));
+            }
             const hipError_t le = hipMalloc((void**)&verify->logits_dev,
                                             (size_t)engine::mtpverify::kRows * engine::kVocab *
                                             sizeof(float));
@@ -2909,10 +3256,38 @@ int main(int argc, char** argv) {
         }
 
         std::FILE* log = nullptr;
-        if (!o.out_dir.empty()) {
+        // A round is not a step, so the per-step dumps (`sampled.txt`, `logits<step>.bin`) are not what an
+        // accept run produces: a round prices two logits rows and its verdict carries no top-logit value,
+        // and writing a five-column row with a made-up top value would be exactly the fake number this
+        // driver keeps refusing. With the flag on, `sampled.txt` is not opened and `emitted.txt` — one
+        // emitted token per line, in order — is, because that is the object the losslessness claim is
+        // about: the token stream, compared against a flag-off free run.
+        if (!o.out_dir.empty() && !o.mtp_accept) {
             log = std::fopen((o.out_dir + "/sampled.txt").c_str(), "w");
             if (!log) throw std::runtime_error("cannot open " + o.out_dir + "/sampled.txt");
             std::fprintf(log, "# step input_token sampled_token top_logit prefix_len_before\n");
+        }
+
+        // ---- the accept loop's own side state (`engine/mtp_accept.h`) ------------------------------
+        // Allocated on the flag and nowhere else: with `--mtp-accept 0` this pointer is null, no region is
+        // reserved, and the generation loop below takes the branch it took before the flag existed.
+        std::unique_ptr<engine::mtpaccept::Side> aside;
+        engine::mtpaccept::Stats astats;
+        std::FILE* emit_log = nullptr;
+        int pending_candidate = -1;   // the draft's proposal for the next position; -1 = nothing pending
+        int pending_pos = -1;         // the position that proposal is for, echoed on the round line
+        if (o.mtp_accept) {
+            aside = std::make_unique<engine::mtpaccept::Side>(engine::mtpaccept::allocate_side(st));
+            if (!o.out_dir.empty()) {
+                emit_log = std::fopen((o.out_dir + "/emitted.txt").c_str(), "w");
+                if (!emit_log) throw std::runtime_error("cannot open " + o.out_dir + "/emitted.txt");
+                std::fprintf(emit_log, "# emitted_token\n");
+            }
+            std::printf("MTPACCEPT on=1 rows=%d checkpoint_bytes=%lld status_bytes=%zu"
+                        " draft_sched=%s per_step_dumps=0\n",
+                        engine::mtpaccept::kRows, aside->bytes(),
+                        (size_t)engine::kernels::kVerdictWords * sizeof(int), o.mtp_sched.c_str());
+            std::fflush(stdout);
         }
 
         // ---- the prompt phase: ONE prefill wave (§06.1) ---------------------------------------
@@ -3024,6 +3399,114 @@ int main(int argc, char** argv) {
             // which is what a free run does and what A-18 says cannot be pinned past ~8 tokens.
             const int token = o.feed.empty() ? sampled : o.feed[i];
             const int pos_before = st.prefix_len;
+            if (aside) {
+                // ---- one accept round, in place of this step (§09 / M2, `engine/mtp_accept.h`) ------
+                // `pending_candidate` is the draft block's proposal for position `pos_before + 1`. Where
+                // there is none — the first step of every run, and every step after a draft refusal — the
+                // run pays a plain one-row step, so speculation is never a precondition for progress.
+                //
+                // What a round OWES and what it gets for free is in `engine/mtp_accept.h`: an accept costs
+                // no restore at all (the body's end state IS the accepted state) and a reject restores the
+                // mid-round checkpoint in two bulk copies. Nothing here is printed as a rate without the
+                // counters that produced it; `MTPSTAT` at the end carries the same numbers.
+                // End of context, handled as an end condition rather than as a throw. `--steps` sizes the
+                // request's `cap` for one lane per step, and a round consumes one or two, so a run that
+                // speculates successfully can reach `cap` with steps left in its budget — where the plain
+                // loop cannot. `submit_wave_body` and `decode_step` both refuse to write past `cap` (that
+                // refusal is `§08.6`'s), so the caller owns the stop, same as §07.5's rule.
+                if (st.prefix_len >= st.cap) {
+                    std::printf("RUN-END reason=context_exhausted pos=%d cap=%d budget_left=%d\n",
+                                st.prefix_len, (int)st.cap, o.steps - i - 1);
+                    run_stopped = true;
+                    break;
+                }
+                const uint16_t* draft_norm_row = nullptr;   // the norm row of the last position FED
+                int emitted_first = -1, emitted_second = -1;
+                int pos_first = -1, pos_second = -1;
+                // Headroom first: a round appends TWO KV lanes, and the last lane of the request has room
+                // for one. `accept_round` refuses that case (writing past `cap` is a memory fault), and a
+                // refusal thrown at the end of an otherwise good run would report a failure where the run
+                // simply ran out of context — so the driver asks before it calls, and pays a plain one-row
+                // step. Same fallback shape as "no proposal pending", for a different reason.
+                const bool room_for_round =
+                    st.prefix_len + engine::mtpaccept::kRows <= st.cap;
+                if (pending_candidate < 0 || !room_for_round) {
+                    if (pending_candidate >= 0 && !room_for_round) {
+                        std::printf("ROUND-SKIP reason=context_limit anchor=%d cap=%d rows=%d\n", st.prefix_len,
+                                    st.cap, engine::mtpaccept::kRows);
+                    }
+                    const engine::StepResult r = engine::decode_step(store, st, sc, token, nullptr);
+                    emitted_first = r.token;
+                    pos_first = st.prefix_len;
+                    draft_norm_row = sc.norm;              // row 0 is the row this step priced
+                } else {
+                    const engine::mtpaccept::Round ar =
+                        engine::mtpaccept::accept_round(store, st, sc, *aside, token, pending_candidate);
+                    engine::mtpaccept::tally(astats, *aside, ar);
+                    mtp->adjudicated++;
+                    if (ar.accepted) {
+                        mtp->accepted++;
+                        emitted_first = pending_candidate;
+                        emitted_second = ar.bonus_token;
+                        pos_first = ar.anchor_after - 1;
+                        pos_second = ar.anchor_after;
+                        draft_norm_row = sc.norm + engine::kHidden;   // row 1 is position p+1's row
+                    } else {
+                        emitted_first = ar.verifier_token;
+                        pos_first = ar.anchor_after;
+                        draft_norm_row = sc.norm;
+                        // The rejected proposal wrote a draft lane the target never consumed. Truncating
+                        // it is a length field and moves 0 bytes (`engine/mtp_draft.h`), and it is what
+                        // keeps the draft cache the accepted prefix rather than the attempted one — the
+                        // same move the read-only side pass makes on a reject.
+                        engine::mtpdraft::truncate_lane(mtp->st);
+                    }
+                    std::printf("ACCEPT round=%d anchor=%d fed=%d cand=%d cand_pos=%d accept=%d"
+                                " verifier=%d bonus=%d emitted=%d pos=%d->%d restored_bytes=%lld\n",
+                                step, ar.anchor_before, token, pending_candidate, pending_pos,
+                                ar.accepted ? 1 : 0, ar.verifier_token, ar.bonus_token, ar.emitted,
+                                ar.anchor_before, ar.anchor_after, ar.restored_bytes);
+                }
+                // The next proposal: ONE draft call per round, with the target's final-norm row of the
+                // last position the body actually FED (row 1 on an accept, row 0 on a reject or a plain
+                // step), `y_next` the last token EMITTED, and the proposed position one past that token.
+                // That is `mtp_after_step`'s alignment (`h` at q, `y_next` at q+1, proposal at q+2) with
+                // q = the last fed position, and it is one call rather than one per emitted token because
+                // an accept's second token was never fed, so no final-norm row of the target exists
+                // behind it (`ACCEPT-BUILD.md` §4g.1).
+                pending_candidate = -1;
+                pending_pos = -1;
+                const int tok_next = emitted_second >= 0 ? emitted_second : emitted_first;
+                const int draft_pos = (emitted_second >= 0 ? pos_second : pos_first) + 1;
+                const std::string why = engine::mtpdraft::refusal(mtp->st);
+                if (!why.empty()) {
+                    std::printf("DRAFT-SKIP reason=%s would_propose_for=%d\n", why.c_str(), draft_pos);
+                } else {
+                    const engine::mtpdraft::Proposal p =
+                        engine::mtpdraft::draft_round(store, mtp->w, mtp->st, draft_norm_row, tok_next,
+                                                      draft_pos);
+                    pending_candidate = p.token;
+                    pending_pos = draft_pos;
+                    mtp->made++;
+                }
+                // §07.5, applied per EMITTED token and in order. The accept's first token is a token the
+                // plain loop would never have emitted — it was the draft's guess — and it is exactly as
+                // entitled to end the run, because it is now a token the target emitted for real. A bonus
+                // behind a stop is not emitted: it was only ever conditional on its predecessor.
+                bool stop_fired = false;
+                const auto emit_one = [&](int tok, int pos) {
+                    if (emit_log) std::fprintf(emit_log, "%d\n", tok);
+                    std::printf("ACCEMIT step=%d pos=%d token=%d\n", step, pos, tok);
+                    if (tok == engine::kStopToken && !o.no_stop) stop_fired = true;
+                };
+                emit_one(emitted_first, pos_first);
+                if (emitted_second >= 0 && !stop_fired) emit_one(emitted_second, pos_second);
+                if (stop_fired) run_stopped = true;
+                sampled = emitted_second >= 0 && !stop_fired ? emitted_second : emitted_first;
+                std::fflush(stdout);
+                if (run_stopped) break;
+                continue;
+            }
             // The witness's first half, in bytes and on the host: what the STEP is about to read. Held as a
             // copy rather than a pointer because the step is exactly what moves it, and because the whole
             // point of the comparison below is to say which operand the shadow body did not get.
@@ -3134,6 +3617,31 @@ int main(int argc, char** argv) {
             verify_census_line(*verify, witness);
             engine::mtpverify::free_snapshot(verify->snap);
             engine::mtpverify::free_lane_stage(verify->lanes);
+            if (verify->midsplit_mode) {
+                // The admission's own close: what it compared, and whether every comparison came out
+                // clean. `clean=1` is the conjunction of the three comparisons this admission can make —
+                // split-vs-batched logits, split-vs-batched mixer end state, and the device verdict against
+                // `argmax_greedy` — so a reader does not have to re-derive it from three counters, and a
+                // run that compared zero rounds cannot read as clean. The mid-vs-step byte drift is NOT in
+                // the conjunction: the body's row 0 runs the wave attention path at `rows = 2` while the
+                // one-row step ran the fused single-row form, so bit-equality against the step's state was
+                // never an admissible ask (the probe's own claim is argmax-level, `row0_eq_step=1`). It is
+                // still printed per round as `mid_drift_bytes`, because a drift that grew would be the first
+                // evidence of a real rollback bug and a deleted check tells you nothing.
+                const bool clean = verify->split_rounds > 0 && verify->split_logit_diffs == 0 &&
+                                   verify->split_end_diffs == 0 && verify->verdict_bad == 0 &&
+                                   verify->midsplit == 1;
+                std::printf("MIDSPLITDONE rounds=%lld split_eq_batch=%d logits_ndiff_total=%lld"
+                            " end_ndiff_total=%lld verdict_eq_host_bad=%lld"
+                            " checkpoint_bytes_per_round=%lld clean=%d\n",
+                            verify->split_rounds,
+                            (verify->split_logit_diffs == 0 && verify->split_end_diffs == 0) ? 1 : 0,
+                            verify->split_logit_diffs, verify->split_end_diffs, verify->verdict_bad,
+                            verify->mid_bytes, clean ? 1 : 0);
+                if (verify->mid.mid_gdn != nullptr) (void)hipFree(verify->mid.mid_gdn);
+                if (verify->mid.mid_conv != nullptr) (void)hipFree(verify->mid.mid_conv);
+                if (verify->verdict_dev != nullptr) (void)hipFree(verify->verdict_dev);
+            }
             if (verify->logits_dev) (void)hipFree(verify->logits_dev);   // nodiscard, per
                                                                         // `mtp_draft.cpp`'s teardown
             verify->logits_dev = nullptr;
@@ -3203,8 +3711,19 @@ int main(int argc, char** argv) {
         // Their lines sit between `LAUNCHSTAT` and `RESULT`, which keeps the last line of a run the
         // result line.
         if (o.time_stages) {
-            time_stages_report(o, store, st, sc, step_records);
+            time_stages_report(o, store, st, sc, step_records, mtp.get());
         }
+
+        // The accept loop's own accounting, printed between `LAUNCHSTAT` and `RESULT` so the last line of
+        // a run stays the result line. `describe()` refuses a tally whose counters disagree, so a rate on
+        // this line is an arithmetically consistent rate or nothing (`engine/mtp_accept.h`).
+        if (aside) {
+            if (pending_candidate >= 0) mtp->unadjudicated++;   // proposed, never settled: no next round
+            std::printf("MTPSTAT %s\n", engine::mtpaccept::describe(astats).c_str());
+            std::fflush(stdout);
+            engine::mtpaccept::free_side(*aside);
+        }
+        if (emit_log) std::fclose(emit_log);
 
         std::printf("RESULT mode=%s steps=%d ms_total=%.3f ms_per_step=%.3f last_sampled=%d"
                     " prefix_len=%d stopped=%d\n",

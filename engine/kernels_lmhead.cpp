@@ -10,6 +10,7 @@
 
 #include "engine/lm_head_batched_kernels.h"  // the N-rows-from-one-table-read form (P7's verify body)
 #include "engine/lm_head_xbf16_kernels.h"   // the BF16-staged form (route S1 item 1)
+#include "engine/mtp_verdict_kernels.h"    // the accept round's device verdict (M2, D-b)
 #include "prototype/lm_head_gemv/lm_head_gemv_kernels.h"
 
 namespace engine::kernels {
@@ -96,6 +97,29 @@ void lm_head_batched_xbf16(const uint16_t* table, const uint16_t* h_rows, float*
     const int blocks = (vocab + kRowsPerBlock - 1) / kRowsPerBlock;
     engine::lmheadbatched::lm_head_gemv_batched<kLmHeadBatchedRows><<<blocks, threads>>>(
         (const hip_bfloat16*)table, (const hip_bfloat16*)h_rows, logits_rows, vocab, kRowsPerBlock);
+}
+
+// The accept round's verdict (M2, D-b): one block per logits row, and the round's whole readback is
+// `kVerdictWords` ints — two ids, the accept bit, and the candidate it was compared
+// against. `nrows` is the verify body's width and nothing else is accepted, for the same reason
+// `lm_head_batched_xbf16` refuses other widths: the shape that was priced is the shape that ships.
+//
+// Deliberately NOT billed on a stage-clock row by this launcher: it belongs to the accept round, and
+// the round states its own per-round submission bill (`MTPSTAT`'s `subs_per_round`) rather than
+// pretending to be one of §07's nine families.
+void mtp_accept_verdict(const float* logits_rows, int vocab, int nrows, int candidate,
+                        int* out_dev) {
+    if (vocab <= 0) throw std::runtime_error("mtp_accept_verdict: vocab must be > 0");
+    if (nrows != kVerdictRows) {
+        throw std::runtime_error("mtp_accept_verdict: this build reduces " +
+                                 std::to_string(kVerdictRows) +
+                                 " logits rows, asked for " + std::to_string(nrows) +
+                                 ". A deeper verify is a funding decision, not a grid dimension.");
+    }
+    if (logits_rows == nullptr || out_dev == nullptr)
+        throw std::runtime_error("mtp_accept_verdict: logits or out is null");
+    engine::mtpverdict::accept_verdict_kernel<<<nrows, engine::mtpverdict::kVerdictThreads>>>(
+        logits_rows, vocab, candidate, out_dev);
 }
 
 }  // namespace engine::kernels

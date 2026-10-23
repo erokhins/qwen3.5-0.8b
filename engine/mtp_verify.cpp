@@ -325,7 +325,9 @@ long long kv_bytes_above_prefix(const RequestState& st) {
 
 Result verify_body(const WeightStore& weights, const RequestState& target, DecodeScratch& sc,
                    const Snapshot& snap, int anchor_pos, const int* tokens, float* logits_dev,
-                   LaneStage& lanes, StateBytes* body_reads, PoisonReport* tail_poison) {
+                   LaneStage& lanes, StateBytes* body_reads, PoisonReport* tail_poison,
+                   const DecodeScratch::GdnCheckpoint* ckpt, bool capture_end_state,
+                   int* verdict_dev) {
     if (tokens == nullptr || logits_dev == nullptr) {
         throw std::runtime_error("mtp_verify: verify_body needs a token array and a logits tile");
     }
@@ -368,8 +370,12 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
     // throw, or the driver's own following steps would silently run the verify arm's route.
     const kernels::WaveGemm gemm = sc.wave_gemm;
     const kernels::GdnScan scan = sc.gdn_scan;
+    const DecodeScratch::GdnCheckpoint* saved_ckpt = sc.gdn_ckpt;
     sc.wave_gemm = kernels::WaveGemm::kHand;
     sc.gdn_scan = kernels::GdnScan::kSeq;
+    // Arming the split, when the caller asked for it. Null here is today's launch sequence with one
+    // null test per GDN layer, which is why the probe's flag-off byte-identity is unaffected.
+    sc.gdn_ckpt = ckpt;
 
     Result r;
     try {
@@ -420,6 +426,26 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
                          anchor_pos + row, /*to_cache=*/true);
         }
         r.lane_bytes = lanes.bytes;
+        if (capture_end_state) {
+            // What the shadow holds when the body finishes: S_{q+2}. Compared against the same capture
+            // from the unsplit body, this is the half of the split admission the logits cannot make —
+            // two routes can agree on a row and disagree on the state they hand the next step.
+            r.end_state.resize((size_t)snap.bytes_gdn + (size_t)snap.bytes_conv);
+            VERIFY_CK(hipMemcpy(r.end_state.data(), sh.gdn_state, (size_t)snap.bytes_gdn,
+                                hipMemcpyDeviceToHost));
+            VERIFY_CK(hipMemcpy(r.end_state.data() + snap.bytes_gdn, sh.conv_window,
+                                (size_t)snap.bytes_conv, hipMemcpyDeviceToHost));
+        }
+        if (ckpt != nullptr) {
+            // The checkpoint itself, in bytes, so the driver can ask the decisive question: is this the
+            // mixer state the shipping ONE-ROW step leaves after consuming the same token at the same
+            // position? Nothing else can answer it, because nothing else knows what S_{p+1} is.
+            r.mid_state.resize((size_t)snap.bytes_gdn + (size_t)snap.bytes_conv);
+            VERIFY_CK(hipMemcpy(r.mid_state.data(), ckpt->mid_gdn, (size_t)snap.bytes_gdn,
+                                hipMemcpyDeviceToHost));
+            VERIFY_CK(hipMemcpy(r.mid_state.data() + snap.bytes_gdn, ckpt->mid_conv,
+                                (size_t)snap.bytes_conv, hipMemcpyDeviceToHost));
+        }
         // ONE pass over the 485 MiB table serving both norm rows, then ONE download of both logits rows.
         // `sc.norm`'s rows are contiguous at stride kHidden, which is the layout the kernel stages.
         kernels::lm_head_batched_xbf16((const uint16_t*)weights.at(kHead).device, sc.norm,
@@ -435,13 +461,24 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
             r.token[q] = argmax_greedy(row, kVocab);   // §03.4's rule, the engine's only spelling
             r.top[q] = row[r.token[q]];
         }
+        if (verdict_dev != nullptr) {
+            // The device verdict, on the SAME tile the host argmaxes above just read. The admission is
+            // `verdict[kRow0Token] == token[0] && verdict[kRow1Token] == token[1]` against §03.4's own
+            // host spelling, tie rule included, on real logits from real content — not on a fixture an
+            // argmax kernel could have been tuned to.
+            kernels::mtp_accept_verdict(logits_dev, kVocab, kRows, tokens[0], verdict_dev);
+            VERIFY_CK(hipMemcpy(r.verdict, verdict_dev, sizeof(r.verdict), hipMemcpyDeviceToHost));
+            r.verdict_bytes = (long long)sizeof(r.verdict);
+        }
     } catch (...) {
         sc.wave_gemm = gemm;
         sc.gdn_scan = scan;
+        sc.gdn_ckpt = saved_ckpt;
         throw;
     }
     sc.wave_gemm = gemm;
     sc.gdn_scan = scan;
+    sc.gdn_ckpt = saved_ckpt;
     return r;
 }
 

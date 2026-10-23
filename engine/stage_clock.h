@@ -154,6 +154,16 @@ enum Stage : uint8_t {
     kGdnGatedNorm,
     kMlpGateup,
     kMlpDown,
+    // §09 / P7: the MTP side computation's own bill row. It is NOT one of §07's nine, and it is not a
+    // launcher family either — it is the row a draft round (and, from the accept loop onward, a verify
+    // round) is billed to, and its plan value is DECLARED per step by the driver (`set_plan_mtp`) rather
+    // than derived from §07's layer counts. Why a row has to exist at all: `decode_run` refused
+    // `--mtp-draft 1` with `--time-stages` because the draft belonged to no family, and charging its
+    // submissions to whatever segment preceded them would bill the wrong stage and print a plausible
+    // wrong tok/s (`prototype/mtp_accept/ACCEPT-PLAN.md`, "What is missing", item 2). Giving it a row is
+    // what makes `plan_match=1` mean something with the flag on instead of a run that quietly exceeds the
+    // plan by 15 submissions a round.
+    kMtp,
     kStageCount,
 };
 const char* stage_name(Stage s);
@@ -162,6 +172,10 @@ const char* stage_name(Stage s);
 // every other stage is its own row. A STEP clock folds at `note()` time — before the segment comparison,
 // which is what keeps `--time-stages`' segments, sync count and nine report rows byte-for-byte what they
 // were before the fine names existed — and a WAVE clock does not fold.
+//
+// `kMtp` is deliberately in the `default` arm: it folds to itself. Folding it into `kGdn` or `kProj`
+// because a draft round launches glues and projections would put the side computation's milliseconds
+// inside the target's bill rows, which is the misattribution the row exists to prevent.
 Stage coarse_stage(Stage s);
 
 // The three submission granularities. `kBurst` is not a clock mode — it is the production path, timed
@@ -305,6 +319,23 @@ public:
     // clock, and a clock that silently billed 0 for a run that folded nothing would hide a lost launch.
     void set_plan_copy_fold(bool copy_fold) { plan_copy_fold_ = copy_fold; }
 
+    // §09 / P7: the draft's declared per-STEP bill, in submissions. The clock cannot derive it — the
+    // draft is a side computation and adds launches without adding a token, so no layer count implies
+    // it — so the driver states it, from the same §09 constants `MTPDRAFT` prints (`mtp_draft.h`'s
+    // `kStageSubsPerRound`), and `gate.py::mtp_stage_plan()` re-counts it independently in Python.
+    //
+    // ONE ROUND PER STEP, and that is a constraint rather than a preference: `describe()` divides the
+    // observed submissions by the step count with exact integer arithmetic, and its own comment says the
+    // uniformity is structural. A `loop`-scheduled draft makes ~1 round per `1+a` steps, so no integer
+    // per-step bill exists for it and `decode_run` refuses that pair instead of printing a truncated
+    // `plan_per_step`; `every` — and the accept loop, which drafts once per round whatever the schedule —
+    // is uniform by construction and is what this setter bills.
+    //
+    // Left 0 (flag off, or a clock that never saw the draft), the bill is §07's exactly as it was before
+    // this row existed, which is what makes flag-off `--time-stages` output byte-identical to a pre-MTP
+    // binary rather than a run with an empty row appended.
+    void set_plan_mtp(long long subs_per_step) { plan_mtp_ = subs_per_step; }
+
     Clock(const Clock&) = delete;
     Clock& operator=(const Clock&) = delete;
 
@@ -355,6 +386,7 @@ private:
     int plan_proj_ = 0;        // 0 = derive §07's split bill; see `set_plan_proj`
     bool plan_cast_fold_ = false;   // see `set_plan_cast_fold`
     bool plan_copy_fold_ = false;   // see `set_plan_copy_fold`
+    long long plan_mtp_ = 0;        // 0 = no MTP side computation; see `set_plan_mtp`
     bool in_step_ = false;
     bool open_ = false;
     Stage stage_ = kStageCount;

@@ -194,6 +194,36 @@ struct DecodeScratch {
     // feature of the grouped kernel — and `decode_run` refuses that pair instead of echoing it.
     kernels::ProjPlan proj_plan = kernels::ProjPlan::kSplit;
     kernels::ProjShape proj_shape = kernels::ProjShape::kShipped;
+    // V1's MID-BODY CHECKPOINT (`--mtp-accept`, `prototype/mtp_accept/ACCEPT-BUILD.md` §4). Both null
+    // except for an MTP accept round's verify body, and non-null is the whole arming: a null test per
+    // GDN layer is all the shipping path pays.
+    //
+    // WHY IT EXISTS. A k=1 round feeds [cur at position p, candidate d at p+1]. On a reject the emitted
+    // token is the verifier's own prediction for p+1, so the request has to sit at S_{p+1} — every
+    // layer's mixer state AFTER row 0 consumed `cur` and before the candidate was seen. A pre-body
+    // snapshot holds S_p and the body's end holds S_{p+2}, and because `submit_wave_body` is
+    // layer-major there is no single point in the batched stream where "every layer, after row 0"
+    // exists (`engine/mtp_verify.h` states this as the finding it was obliged to hand back). Per layer
+    // it does have a home: the gap between that layer's row-0 mixer work and its row-1 work. Non-null
+    // submits that gap — see the `gdn_ckpt` notes in `decode_step.cpp` — and the copy is the whole cost
+    // of the round: +54 submissions (18 of them the 1 MiB state copies) and 19.27 MiB written, with a
+    // further 36 submissions / 19.27 MiB restored on a reject.
+    //
+    // IT IS A RUNTIME POINTER, NOT A BUILD FLAG, for the standing reason: both sides live in one binary
+    // so the byte-compare admission (`ACCEPT-BUILD.md` §4 cond. 2 — split row0+row1 must be
+    // BIT-IDENTICAL to the batched launches at the same width) is one window, not two builds.
+    struct GdnCheckpoint {
+        float* mid_gdn = nullptr;    // [kNumGdnLayers][kNumValueHeads][kDk][kDv], layer strides as in `state.h`
+        float* mid_conv = nullptr;   // [kNumGdnLayers][kConvWindow][kConvChannels]
+    };
+    const GdnCheckpoint* gdn_ckpt = nullptr;
+    // The one rule the field above cannot express, and `submit_wave_body` enforces it by throwing: the
+    // checkpoint is only ever armed for a body of exactly `kRows` rows (`engine/mtp_verify.h`), because
+    // "after row 0" is a statement about a two-row geometry. A wave of any other width armed by
+    // mistake — a prefill wave, which is the shipping path this must not touch — is a bug, and it says
+    // so instead of quietly writing a checkpoint nobody asked for.
+    static constexpr int kGdnCheckpointRows = 2;
+
     // How many one-row projection launches asked for a shape this device/width cannot offer and took the
     // shipped kernel instead. Counted, not assumed: `decode_run` prints it, so a run whose A/B side
     // silently fell back says so in its own log instead of reading as a null (`AGENTS.md`: a check whose

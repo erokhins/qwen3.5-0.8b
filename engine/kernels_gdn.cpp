@@ -5,6 +5,7 @@
 #include "engine/launch_stats.h"
 #include "engine/state.h"   // kQkvRows / kValueDim: the tile row strides the call site walks
 #include "engine/gdn_collapse_kernels.h"
+#include "engine/gdn_conv_mid_kernels.h"
 #include "engine/gdn_conv_roll_kernels.h"
 #include "engine/gdn_rec_fused_kernels.h"
 #include "engine/gdn_rec_hoist_kernels.h"
@@ -61,6 +62,19 @@ void gdn_conv_roll(const uint16_t* raw, float* win, const float* conv_weight, fl
     static_assert(CH % (256 * CONV_VEC) == 0, "conv_roll_kernel's grid must match conv_kernel's");
     conv_roll_kernel<<<CH / (256 * CONV_VEC), 256>>>((const hip_bfloat16*)raw, win, conv_weight, u);
     launchstats::gdn_conv().record(1);
+}
+
+// The MTP accept round's window derivation. Same strip, same lane-to-column map as `gdn_conv`'s at
+// tokens = 1 — restated from the same constants rather than taken from it, for the reason
+// `gdn_conv_roll` states: a derivation that covered fewer channels than the roll it stands in for
+// would look cheaper while leaving part of the checkpoint unwritten.
+void gdn_conv_mid_window(const uint16_t* raw, const float* win, float* mid_win) {
+    static_assert(CH % (256 * CONV_VEC) == 0,
+                  "conv_mid_window_kernel's grid must match conv_kernel's");
+    conv_mid_window_kernel<<<CH / (256 * CONV_VEC), 256>>>((const hip_bfloat16*)raw, win, mid_win);
+    // Billed to the caller's stage note, not to `gdn_conv`'s launch-stats row: this launch exists only
+    // on an accept round, and folding it into the family row an A/B reads would move a shipped-path
+    // number by the cost of the witness. `ACCEPT-BUILD.md` §4a itemises it as its own line.
 }
 
 // §04.3: `<<<tokens, NH>>>`, one thread per (token, value head), so a decode step is still the

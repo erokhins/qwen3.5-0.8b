@@ -23,6 +23,7 @@
 #include "engine/decode_step.h"
 #include "engine/kernels.h"
 #include "engine/loader.h"
+#include "engine/stage_clock.h"
 #include "engine/state.h"
 
 #define MTP_CK(x)                                                                     \
@@ -44,6 +45,50 @@ constexpr const char* kEmbedding = "lm.embed_tokens.weight";
 constexpr const char* kHead = "lm_head.weight";
 
 [[noreturn]] void die(const std::string& m) { throw std::runtime_error("mtp_draft: " + m); }
+
+// The round's own submission tally, and the reason it is an object rather than a bare marker call at
+// each site.
+//
+// `stageclock` bills the `mtp` row from a DECLARED per-step total (`Clock::set_plan_mtp`), because the
+// clock has nothing to derive a side computation's bill from. A declaration that drifts from the sites is
+// the failure this repo keeps recording — a plan that agrees with itself while the dispatch does something
+// else — so the sites themselves are counted here and required to add up to the same number the census
+// line prints. It is a runtime check with a name, not a comment: it runs on every round, armed or not, so
+// a launch added, dropped or double-marked fails the run that did it rather than a later gate.
+//
+// Marking a site is two things at once and the helper does both: tell the clock which family the
+// submissions that FOLLOW belong to (`engine/stage_clock.h`: the marker precedes the submission, and
+// getting that order wrong silently charges every segment to its predecessor), and add to the tally the
+// round is then checked against. A site that launched without being marked shows up as a tally BELOW the
+// declared total; a site marked twice shows up as one ABOVE. Both name themselves at the round that did
+// it, on the host, before any number is printed.
+class RoundTally {
+public:
+    void mark(stageclock::Stage s, int submissions) {
+        stageclock::note(s, submissions);
+        subs_ += submissions;
+        ++sites_;
+    }
+
+    // Called at the end of a round, after the D2H (which is marked with zero submissions, the way
+    // `kHostTail` is, so that "launches" means one thing on every row of the report).
+    void check(const char* what) const {
+        if (subs_ == kStageSubsPerRound) return;
+        std::ostringstream os;
+        os << what << ": marked " << subs_ << " billed submissions across " << sites_
+           << " site(s), but the declared §09 bill is " << kStageSubsPerRound << " (block "
+           << kBlockCopies << " copies + " << kBlockLaunches << " launches, head " << kHeadLaunches
+           << " launch; the " << kHeadCopies << " blocking D2H is billed 0 here and 1 on the census"
+              " line — see kStageSubsPerRound). A launch added or dropped inside the round without the"
+              " plan being told: the stage clock's `mtp` row and the `MTPDRAFT` census would both still"
+              " agree with themselves.";
+        die(os.str());
+    }
+
+private:
+    int subs_ = 0;
+    int sites_ = 0;
+};
 
 // One arena region. The layout and the named pointers are both derived from this table, so a resize
 // cannot leave a short buffer behind and `arena_bytes` is not a typed-in total.
@@ -203,8 +248,16 @@ Proposal draft_round(const WeightStore& weights, const Weights& w, State& st,
 
     const uint16_t* table = (const uint16_t*)weights.at(kEmbedding).device;
 
+    // Every site below is marked into the `mtp` stage family — see `RoundTally`: the marker names the
+    // family the FOLLOWING submissions belong to, and the tally is what the round is checked against at
+    // the end. The marks are in the order of the block, which is §09's order as spelled in the header;
+    // nothing here reorders a launch, so the clock's segments tile the round the way `decode_step.cpp`'s
+    // markers tile a step.
+    RoundTally tally;
+
     // 1  E[y_next]. A 2 KiB D2D — the mechanism `submit_wave_body` uses for a one-row body when the
     // copy fold is off, so this is the engine's own embedding lookup rather than a third shape.
+    tally.mark(stageclock::kMtp, 1);
     MTP_CK(hipMemcpyAsync(st.e, table + (size_t)y_next * kHidden, (size_t)kHidden * 2,
                           hipMemcpyDeviceToDevice, nullptr));
 
@@ -213,16 +266,23 @@ Proposal draft_round(const WeightStore& weights, const Weights& w, State& st,
     // against `W_fc [1024, 2048]`, and `speccheck/mtp.py`'s `fc_order` knob measures it (0.642 accept
     // for "eh" against 0.014 for "he", §09.5). An order bug here is invisible to any max-ULP check on
     // `u` and blindingly obvious to the pinned golden, which is why it is spelled twice.
+    tally.mark(stageclock::kMtp, 1);
     kernels::glue_add_norm(st.e, nullptr, w.n_emb, nullptr, st.pair);
+    tally.mark(stageclock::kMtp, 1);
     kernels::glue_add_norm(h_norm_row, nullptr, w.n_hid, nullptr, st.pair + kHidden);
 
     // 4  the fusion fc: [1, 2048] -> [1, 1024]
+    tally.mark(stageclock::kMtp, 1);
     kernels::proj_gemv_xbf16(w.fc, st.pair, st.u, 1024, 2048);
 
     // 5-8  the §05 block's operands
+    tally.mark(stageclock::kMtp, 1);
     kernels::glue_add_norm(st.u, nullptr, w.n_in, nullptr, st.nrm);
+    tally.mark(stageclock::kMtp, 1);
     kernels::proj_gemv_xbf16(w.q, st.nrm, st.qg, kQprojRows, kHidden);
+    tally.mark(stageclock::kMtp, 1);
     kernels::proj_gemv_xbf16(w.k, st.nrm, st.kg, kKvProjRows, kHidden);
+    tally.mark(stageclock::kMtp, 1);
     kernels::proj_gemv_xbf16(w.v, st.nrm, st.vg, kKvProjRows, kHidden);
 
     // 9  the attention row, over the block's OWN cache, at the drafted ABSOLUTE position. The append
@@ -236,30 +296,41 @@ Proposal draft_round(const WeightStore& weights, const Weights& w, State& st,
     ar.nlanes = st.nlanes + 1;
     ar.self_lane = st.nlanes;
     ar.pos = draft_pos;
+    tally.mark(stageclock::kMtp, 1);
     kernels::mtp_attn_row(ar);
     st.nlanes += 1;
     if (st.nlanes > st.lanes_max) st.lanes_max = st.nlanes;
 
     // 10-11  o_proj, then §03.2's add fused with the next norm
+    tally.mark(stageclock::kMtp, 1);
     kernels::proj_gemv_xbf16(w.o, st.gout, st.attn_o, kHidden, kQwidth);
+    tally.mark(stageclock::kMtp, 1);
     kernels::glue_add_norm(st.u, st.attn_o, w.n_paln, st.z1, st.u2);
 
     // 12-14  the MLP (the target's shapes verbatim, so the gated pair applies with no new kernel),
     // then the second add fused with `mtp.norm`, whose output IS x_d (§09.2).
     const kernels::MlpGateMap map = kernels::resolve_mlp_gate_map(kernels::MlpGateMap::kAuto, 1);
+    tally.mark(stageclock::kMtp, 1);
     kernels::mlp_gateup_xbf16(w.gate, w.up, st.u2, st.act, kIntermediate, kHidden, map);
+    tally.mark(stageclock::kMtp, 1);
     kernels::mlp_down_xbf16(w.down, st.act, st.mlp_o, kHidden, kIntermediate);
+    tally.mark(stageclock::kMtp, 1);
     kernels::glue_add_norm(st.z1, st.mlp_o, w.n_mtp, st.z2, st.xd);
 
     // 15  the tied head over x_d — a second full pass over the same table, which is what `c` is made
     // of (§09's largest single term). Read-only on the table, and the ONLY writer of `st.logits`.
+    tally.mark(stageclock::kMtp, 1);
     kernels::lm_head_full_xbf16((const uint16_t*)weights.at(kHead).device, st.xd, st.logits, kVocab);
 
     // 16  one blocking D2H and §03.4's argmax — the same function `finish_token` uses, so the draft's
-    // proposal cannot be produced by a second standard.
+    // proposal cannot be produced by a second standard. Marked with ZERO billed submissions: a D2H is not
+    // a launch, which is exactly how `kHostTail` is handled in a step, and the census line still counts it
+    // (see `kStageSubsPerRound`).
+    tally.mark(stageclock::kMtp, 0);
     Proposal p;
     std::vector<float> host(kVocab);
     MTP_CK(hipMemcpy(host.data(), st.logits, kVocab * sizeof(float), hipMemcpyDeviceToHost));
+    tally.check("draft_round");
     p.token = argmax_greedy(host.data(), kVocab);
     p.top_logit = host[p.token];
     p.nlanes = st.nlanes;

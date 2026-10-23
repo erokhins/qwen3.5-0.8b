@@ -40,8 +40,13 @@ void drain() {
 // drift. `copy` is `other` minus the lm_head launch (the 19 D2D copies), `host_tail` is a D2H and a host
 // argmax and therefore not a launch, and every row is per TOKEN — which is what `Clock::describe()`
 // divides the observed counts by before comparing.
+//
+// `mtp_per_step` is the one row that is not §07's. It is the §09 side computation's declared per-step
+// bill (`Clock::set_plan_mtp`), and it is a parameter for the same reason `proj_override` is: the clock
+// has nothing to derive it from, and a plan that silently omitted it would report a correct flag-on run
+// as a broken clock. Zero is the flag-off value and leaves the bill exactly §07's.
 std::array<int, kStageCount> plan_bill(int proj_override = 0, bool cast_fold = false,
-                                      bool copy_fold = false) {
+                                      bool copy_fold = false, long long mtp_per_step = 0) {
     const LaunchCounts c = planned_launch_counts(cast_fold, copy_fold);
     std::array<int, kStageCount> p{};
     p[kGlue] = c.glue;
@@ -58,6 +63,7 @@ std::array<int, kStageCount> plan_bill(int proj_override = 0, bool cast_fold = f
     p[kCopy] = c.other - 1;
     p[kLmHead] = 1;
     p[kHostTail] = 0;
+    p[kMtp] = static_cast<int>(mtp_per_step);
     return p;
 }
 
@@ -304,6 +310,11 @@ const char* stage_name(Stage s) {
         case kGdnGatedNorm: return "gdn_gated_norm";
         case kMlpGateup: return "mlp_gateup";
         case kMlpDown: return "mlp_down";
+        // §09's side computation. Spelled `mtp` because it is one bill row covering the whole side
+        // computation — a draft round today, a draft round plus a verify body once the accept loop lands
+        // — and the row's plan value is declared, not derived, so splitting it into per-piece rows here
+        // would need per-piece declared totals for pieces that do not exist yet.
+        case kMtp: return "mtp";
         case kStageCount: break;
     }
     return "invalid";
@@ -420,7 +431,7 @@ void Clock::close_segment() {
 
 std::string Clock::describe() const {
     const std::array<int, kStageCount> plan =
-        plan_bill(plan_proj_, plan_cast_fold_, plan_copy_fold_);
+        plan_bill(plan_proj_, plan_cast_fold_, plan_copy_fold_, plan_mtp_);
 
     std::string out;
     char buf[512];

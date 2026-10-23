@@ -108,7 +108,10 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       on (`QWEN_MTP_DRAFT=1`) its declared per-round bill (`mtp_draft_plan()`, cross-checked against the
       engine's own `MTPDRAFT` census line) joins the expectation, so flag-on is judged against a declared
       plan rather than against a bill it cannot satisfy by construction
-      (`prototype/mtp_accept/ACCEPT-RESULT.md`; `selftest_mtp_census` is its wrong-count witness).
+      (`prototype/mtp_accept/ACCEPT-RESULT.md`; `selftest_mtp_census` is its wrong-count witness). The
+      same §09 count also projects onto the stage clock's `mtp` row (`mtp_stage_plan()`), which the engine
+      bills from a number IT declares to itself (`Clock::set_plan_mtp`), so this is the only check on that
+      figure that is not inside the binary whose `plan_match` it would otherwise be vouching for.
 
   (i) THE PREFILL ROWS — every pinned row of the prompt wave against the engine's own per-row dump
       (`logits<i>.bin` ↔ row *i*, §06.5's pairing), judged by the floors section (b) already uses and by
@@ -4173,6 +4176,37 @@ MTP_DRAFT_UNCOUNTED = {
 MTP_DRAFT_COPIES = {"block_d2d": 1, "head_d2h": 1}   # E[y_next] upload, and the one blocking logits read
 
 
+def mtp_stage_plan() -> int:
+    """The submissions ONE draft round adds to the stage clock's `mtp` row (§09, `engine/stage_clock.h`).
+
+    Derived from the same two tables section (h) already derives the launcher families from, so there is
+    one Python count of §09 and this is a different PROJECTION of it, not a second tally that can drift:
+
+        sum(mtp_draft_plan())                12   the launches `launch_stats.h` can see (5 glue, 5 proj,
+                                                gateup, down)
+      + block_attn_site                       1   `mtp_attn_row` — a launch with no launcher family
+      + head_lm                               1   `lm_head_full_xbf16` — ditto, family `other`
+      + block_d2d                             1   the E[y_next] device-to-device copy, which the clock
+                                                bills as a submission exactly as it bills a step's copies
+      =                                        15
+
+    `head_d2h` is deliberately NOT in the sum: the stage clock's `host_tail` row is noted with zero
+    submissions "so the totals still mean launches" (`engine/stage_clock.h`), so the round's blocking
+    vocabulary read is billed 1 on the `MTPDRAFT` census line (`per_round=16`) and 0 here (`15`). Two
+    spellings of one round, each named, because the one thing neither can afford is a single shared
+    constant that would have to be wrong for one of the two instruments.
+
+    Why this lives in the gate at all: the clock bills this row from a number the DRIVER declares
+    (`Clock::set_plan_mtp`) and `plan_match` is an in-binary self-consistency check, which means a stale
+    or wrong declaration agrees with itself (`AGENTS.md`: a plan that cannot fail is not a proof). This
+    function is the independent side of it.
+    """
+    return (sum(mtp_draft_plan().values())
+            + MTP_DRAFT_UNCOUNTED["block_attn_site"]
+            + MTP_DRAFT_UNCOUNTED["head_lm"]
+            + MTP_DRAFT_COPIES["block_d2d"])
+
+
 def mtp_plan_verdicts(echo: dict, draft_lines: int,
                       bill: dict | None = None) -> list[tuple[str, bool, str]]:
     """Does the run's declared `MTPDRAFT` census agree with §09 as Python counts it?
@@ -4228,6 +4262,28 @@ def mtp_plan_verdicts(echo: dict, draft_lines: int,
                 f"+ {MTP_DRAFT_UNCOUNTED['head_lm']} blocking vocabulary D2H"))
     out.append(("draft per_round is its own parts", per_round == sum(block) + sum(head),
                 f"per_round={per_round} vs block+head={sum(block) + sum(head)}"))
+    # The stage clock's row, and the reason it needs its own verdict rather than riding on the one above:
+    # `per_round == block + head` is an internal sum, so a declaration that is one launch too big on BOTH
+    # sides of its own arithmetic passes it — and the same wrong number is what `Clock::set_plan_mtp`
+    # bills `plan_per_step` with, in the same binary whose `plan_match` would then read 1. This is the one
+    # check on that quantity that lives outside the binary being judged. What comes off `per_round` is the
+    # run's OWN declared blocking reads (`head[0]`), not Python's constant: the clock bills every
+    # submission except the ones that wait for the device, so a declaration that swaps a launch for a read
+    # (`head 2+0`, totals unchanged) must lose a billed launch here — subtracting the constant instead
+    # would let it through, and that is the mis-declaration this row exists to catch.
+    stage_bill = mtp_stage_plan() if bill is None else (
+        sum(bill.values()) + MTP_DRAFT_UNCOUNTED["block_attn_site"]
+        + MTP_DRAFT_UNCOUNTED["head_lm"] + MTP_DRAFT_COPIES["block_d2d"])
+    out.append(("draft stage bill matches §09",
+                per_round - head[0] == stage_bill,
+                f"declared per_round={per_round} less the {head[0]} submission(s) this run declares as"
+                f" blocking reads is {per_round - head[0]}, against Python's §09 stage bill {stage_bill}"
+                f" ({sum(want.values())} launcher-visible + "
+                f"{MTP_DRAFT_UNCOUNTED['block_attn_site']} attn site + "
+                f"{MTP_DRAFT_UNCOUNTED['head_lm']} lm_head + "
+                f"{MTP_DRAFT_COPIES['block_d2d']} D2D). This is the number the `--time-stages` `mtp` row"
+                " is billed with, and a mismatch means the stage clock and the census were declared from"
+                " two different readings of §09"))
     out.append(("draft rounds witnessed by the per-round lines", rounds == draft_lines,
                 f"census says rounds={rounds}, the run printed {draft_lines} `DRAFT round=` line(s)."
                 " These are two call sites in `engine/decode_run.cpp`; the round count is the ONE input "
@@ -4415,6 +4471,19 @@ def selftest_mtp_census() -> list[str]:
         bad.append(f"draft-census selftest: derived flag-on bill drifts from the measured dec8 census: {drift}")
 
     case("the declared plan as the engine prints it is accepted", plan_failing(clean_echo, round_n), [])
+    # The stage clock's row, same function, so the selftest aims at the comparison section (h) runs.
+    # The must-catch set here is DERIVED, not hand-listed: a per-round declaration that is one launch too
+    # big on BOTH sides of its own sums (`block` and `per_round` moved together) is exactly the mis-
+    # declaration that keeps `per_round == block + head` true and therefore keeps the in-binary
+    # `plan_match` reading 1 — so this is the only check that can catch it, and the case proves it bites.
+    case("a mis-declared stage bill (a 14th block launch declared consistently into block AND per_round)"
+         " goes red on the stage row and on §09's block count, not on its own sums",
+         plan_failing({**clean_echo, "block": "1+14", "per_round": "17"}, round_n),
+         ["draft block launches match §09", "draft stage bill matches §09"])
+    case("a D2H declared where a launch belongs (head 1+1 becomes 2+0) goes red on the stage row and"
+         " on §09's head row alone",
+         plan_failing({**clean_echo, "head": "2+0"}, round_n),
+         ["draft head matches §09", "draft stage bill matches §09"])
     case("a block that declares a 14th launch, uncounted by §09's Python row",
          plan_failing({**clean_echo, "block": "1+14"}, round_n),
          ["draft block launches match §09", "draft per_round is its own parts"])
@@ -4426,7 +4495,7 @@ def selftest_mtp_census() -> list[str]:
          ["draft census line is parseable"])
     case("a declared bill that disagrees with the declared block total names itself",
          plan_failing(clean_echo, round_n, {**plan, "glue": 6}),
-         ["draft block launches match §09"])
+         ["draft block launches match §09", "draft stage bill matches §09"])
 
     # The grouped-tensor fold's half of the 15 failures: the draft's width-1 sites are not body members,
     # so they must come out of the divisibility test — and the OLD spelling must be shown to break, or the
