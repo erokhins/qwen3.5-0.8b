@@ -57,7 +57,7 @@ body's own census, read from the same stdout as the milliseconds:
 * `VERIFY2 row0_eq_step=1` on every round. **This is the canary that is red today** (it read 0 at the
   first anchor), and until it is green there is nothing to time;
 * `VERIFY2DONE restore_witness=identical` and `gemm=hand gdn_scan=seq` — if the forced route did not
-  take, the arm is pricing a different body than the one §1 priced;
+  take, the arm is pricing a different body than the one §1 priced. Since `--mtp-route` (`prototype/mtp_accept/ROUTE-FLAG.md`) the echo reports the route that RAN, so on the amortised arm it reads `gemm=lt` by design and only `hand` expects `hand`.
 * and the rows-served/bytes-demanded statement the brief asks for: arm B serves two query rows per body
   where arm A serves one, so `demanded bytes per row served` must fall. Derive it from the engine's own
   lines (`LAUNCHSTAT rows_total`, `logits_bytes=`, the KV lane figure) rather than asserting it.
