@@ -1102,7 +1102,7 @@ faster at the same widths; that is the dispatch-bound bimodality §6 warns about
 one to trust at 64 and 256 lanes.
 
 **Decode — unchanged, exactly as the construction says it must be.** A decode body is one query row, and a
-one-row body runs the fused single-row form under either flag (`engine/decode_run.cpp:104-116`), so the tile
+one-row body runs the fused single-row form under either flag (`engine/decode_run.cpp:105-117`), so the tile
 form cannot move it. The ruler agrees: | lanes | ms/token | tok/s | was | | 128 | **11.155** | 89.6 | 11.482 /
 87.1 | | 512 | 12.538 | 79.8 | 12.591 / 79.4 | | 1024 | 12.625 | 79.2 | 12.785 / 78.2 | | 2048 | 12.839 |
 77.9 | 13.039 / 76.7 |. Every row is inside the ledger's usual ±2–3 % spread; there is no decode claim here in

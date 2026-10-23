@@ -105,7 +105,7 @@ the engine's own operating point — engine launch pattern, 340 launches, same g
 **5.29 us per sync**, linear to 4 %. The rig's 1.61 ms for 305 syncs independently reproduces the
 stage-total-vs-burst gap (14.2057 vs 12.4036 = 1.80 ms) to within 10 %.
 
-**And the shipping path pays none of it.** `decode_run.cpp:325` defaults `time_stages = false`, `:2403`
+**And the shipping path pays none of it.** `decode_run.cpp:340` defaults `time_stages = false`, `:2496`
 engages the clock only under the flag, and `decode_step.cpp:423`'s sync is one-time adapter prep. So:
 
 * Per-family stage rows are correct as an **ordering** and as byte-traffic attribution, and inflated by

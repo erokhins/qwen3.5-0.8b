@@ -110,7 +110,7 @@ not a library call:
 
 `--rows` defaults to **512, 1024, 4096**. The brief asked for 1024 and 4096, and the first of the
 three is the one that matters today: **the shipped per-call cap is 512 rows** —
-`engine/decode_step.h:49 kMaxWaveRows = 512`, and `engine/decode_run.cpp:279` refuses a larger
+`engine/decode_step.h:49 kMaxWaveRows = 512`, and `engine/decode_run.cpp:294` refuses a larger
 `--wave-rows`. A 1024-lane prompt is therefore two 512-row bodies, and 4096 lanes is `512 × 8`
 (`engine/results.md` ceiling note). So:
 

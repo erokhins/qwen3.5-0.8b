@@ -55,7 +55,7 @@
  *
  * BIT-IDENTICAL, AND WHERE IT CANNOT BE. `down_ship` is a character-for-character transcription of the
  * shipped `mlp_down<FF>` (`prototype/mlp_gemv/mlp_gemv_kernels.h:191-211`, with the F32 act that ships
- * today because `Options::cast_fold` defaults false — `engine/decode_run.cpp:336`), and it is required
+ * today because `Options::cast_fold` defaults false — `engine/decode_run.cpp:351`), and it is required
  * to reproduce the CPU mirror bit for bit. `down_intra<1>` is required to reproduce `down_ship` bit for
  * bit, which is the template's own degenerate case and therefore a real witness that the parameterised
  * form degenerates correctly. **wpr>1 and two:S cannot be bit-identical to the shipped form**, and this

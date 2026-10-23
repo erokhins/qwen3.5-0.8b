@@ -201,14 +201,14 @@ graph contents; no timing]** Draft and target share no KV: `is_mem_shared` is
    a slot instead of restoring bytes (`llama-memory-recurrent.cpp:211-216`). **Obstacle:** our state
    is one live buffer per (layer, head) and `engine/mtp_verify.h:110-125` models rollback as
    full-size copies — snapshot planes are a state-geometry change, and reject must also un-append
-   the row-1 lane (`engine/mtp_verify.cpp:437-448`).
+   the row-1 lane (`engine/mtp_verify.cpp:445-458`).
 2. **Several query rows per block over one streamed K/V pass.** Ours: the wide form is
    32-query-positions/block but for prefill, and `engine/attn_wide_llama_kernels.h`'s own header
    lists what it did **not** take (no padded stage stride, no double-buffered K, no mask tile,
    epilogue carried not shared); `engine/attn_fattn_kernels.h` holds the fragment maps. The missing
    llama property is not the swizzle but per-tile `KV_max` truncation plus wide tiles on the
    **one-to-few-row** path (`fattn-tile.cuh:1186-1224`). **Obstacle:** our prep appends per-row lanes
-   unconditionally and the next round anchors on them (`engine/mtp_verify.cpp:437-448`), so a 2-row
+   unconditionally and the next round anchors on them (`engine/mtp_verify.cpp:445-458`), so a 2-row
    body's lanes are cache positions, not a query tile, and the causal bound must become per-row
    instead of one `j < lanes_of(...)` scalar.
 3. **Round-level costs paid once** (graph reuse, one ubatch, one mask fill, one state gather, one

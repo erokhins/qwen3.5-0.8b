@@ -272,7 +272,7 @@ and `new-off`, with the width the byte claim covers stated rather than dropped.
 
 ## 9. The rotted coordinates (for whoever re-points them)
 
-`engine/decode_run.cpp:397`, `:1797`; `engine/decode_step.cpp:524`, `:527`, `:530`, `:537`, `:540`,
+`engine/decode_run.cpp:412`, `:1853`; `engine/decode_step.cpp:524`, `:542`, `:545`, `:552`, `:555`,
 `:596`, `:599`, `:653`, `:654`, `:687`, `:692`, `:697`, `:732`; `engine/kernels_gdn.cpp:32`, `:40`;
 `engine/kernels.h:414`. Cited by `progress/2026-10-12/plan-prefill-2026-10-12.md`,
 `progress/2026-10-16/prefill-decision-log-2026-10-16.md`,

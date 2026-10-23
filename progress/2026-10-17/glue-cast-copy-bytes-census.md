@@ -28,7 +28,7 @@ Consequences, before any item is opened:
   only deleting the operations can.
 - **`cast` is a bytes item and D30 4.1 was framed as one — but the bytes it can retire are the wrong
   ones.** 56.1 % of the family's bytes are stores that **nothing reads** under the shipped
-  `--gemm lt --gemm-pins all` default (`engine/decode_run.cpp:106,110`). That is not a fusion, it is
+  `--gemm lt --gemm-pins all` default (`engine/decode_run.cpp:107,111`). That is not a fusion, it is
   a deletion.
 - **`glue` is bound by neither**, and that is why it has no prize: 5.2 % of its row is dispatch, its
   demanded rate is 55 % of the copy probe, and the only byte it writes that nobody reads is worth

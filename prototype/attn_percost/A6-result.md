@@ -125,7 +125,7 @@ measures only what was scanned). **Only the two `attn_fattn_wave` kernels move:*
    attn_fattn_wave_two                 200/0/0/32768  220/0/0/32768  221/0/0/20480  200/0/0/65536
 ```
 
-The shipping default roll is `single` (`engine/decode_run.cpp:161` `kSingle`), so `attn_fattn_wave` at **185** is
+The shipping default roll is `single` (`engine/decode_run.cpp:176` `kSingle`), so `attn_fattn_wave` at **185** is
 the kernel the bet is about. Worth recording anyway because a device A/B might want the other side: the
 `--attn-fattn-roll two` instantiation costs +40 VGPR just from un-staging (200 → 220, and `sgpr 24 → 26`) and +1
 more from the narrower epilogue (220 → 221), and stays spill-free — the narrower epilogue is cheap, the global-Q

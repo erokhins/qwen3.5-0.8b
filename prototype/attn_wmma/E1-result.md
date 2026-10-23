@@ -286,5 +286,5 @@ be said out loud in whatever log records it.
   a text that cannot compile at three warps, for the exact reason §4 gives. When the census learns the un-stage it
   must learn that `lds_B` does **not** fall, and `geometry()` must stop deriving a per-warp LDS saving from the
   absence of a Q stage.
-* **`--attn-fattn` defaults to 1** (`engine/decode_run.cpp:152`), so this kernel is on the shipping path, and the
+* **`--attn-fattn` defaults to 1** (`engine/decode_run.cpp:153`), so this kernel is on the shipping path, and the
   known-red ship census is a live gate on that path. Neither fact is changed by anything in this file.
