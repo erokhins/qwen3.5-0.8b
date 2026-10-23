@@ -99,10 +99,53 @@ struct PrefillResult {
     bool empty() const { return rows.empty(); }
 };
 
+// ---- retaining final-norm rows past the wave split ------------------------------------------------
+//
+// WHY THIS EXISTS. `sc.norm` is `sc.wave_rows` rows tall and every wave rewrites it from row 0, so when a
+// prompt is several waves long the only prompt norm rows that survive the call are the LAST wave's —
+// `last_wave_rows`, which is 46 rows for a 4,142-token prompt split at 512. A caller that wants the
+// post-final-norm row of an ARBITRARY prompt position cannot get it out of the scratch. The §09 draft
+// block's cache seeding is such a caller: it pairs the token at position `p` with the target's `h` at
+// `p-1`, so one seeded lane needs one row, and a seed wider than the last wave was structurally
+// impossible however large the caller asked `--mtp-prompt-lanes` to be. That clamp is what this retains.
+//
+// WHAT IT IS: a caller-owned device buffer and one stream-ordered D2D per wave that intersects the window.
+// No new kernel, no arithmetic, no sync — `submit_wave_body` never waits and the engine submits on the
+// legacy default stream, so a copy issued after the body is ordered behind it by the same rule that
+// orders every other pair of submissions inside a body.
+//
+// WHY A WINDOW AND NOT A MANDATORY WHOLE-PROMPT COPY. Nothing should pay to keep rows it will not read, and
+// `rows` is therefore the caller's. The draft block's own attention is the one-pass form and refuses more
+// than `kernels::mtp_attn_max_lanes()` lanes, so the deepest window any caller can *use* is that ceiling;
+// a caller may still ask for the whole prompt, and bytes are not the constraint (`kHidden` BF16 = 2 KiB a
+// row, so 4,142 rows = 8.5 MiB, against a device pool this model uses ~4 % of — `AGENTS.md`, SCOPE).
+//
+// OFF IS INERT, and that is the contract rather than a hope: `buf == nullptr` — what every existing caller
+// gets by omitting the argument — copies nothing, allocates nothing and submits nothing, so the target's
+// output is byte-for-byte what a binary without this struct produced. The retention READS `sc.norm` and
+// WRITES only this buffer, which nothing on the target path reads.
+struct NormTailRetention {
+    // ---- set by the CALLER before the call ----
+    uint16_t* buf = nullptr;   // device [rows][kHidden] BF16, caller-allocated and caller-freed
+    int rows = 0;              // rows allocated == how many prompt positions to keep (the TAIL)
+
+    // ---- filled in by `prefill_wave`, read after it ----
+    // `first_pos` is written BEFORE the wave loop rather than recovered after it: a caller that needs to
+    // know which position row 0 holds must not re-derive the wave split, which is this file's property
+    // (the same reason `last_wave_rows` exists).
+    int first_pos = -1;        // prompt position held by row 0 of `buf`; -1 when nothing was retained
+    int rows_written = 0;      // rows actually copied, == `rows` unless the prompt is shorter
+    long long copies = 0;      // D2D submissions made (one per wave intersecting the window)
+    long long bytes = 0;       // bytes actually copied, so a cost line states a counted figure
+};
+
 // Feed `tokens` through the stack as one prefill wave (§06.1), mutating `st` in place: its GDN
 // state, conv window and KV advance token by token, and `prefix_len` ends at
 // `prefix_len_before + tokens.size()` (§06.5's "nothing but the §08.1 state and `prefix_len` crosses
 // the boundary" is precisely the rule this function is not allowed to violate).
+//
+// `keep`, when non-null, receives the tail of the prompt's final-norm rows as `NormTailRetention`
+// describes. Null (what every pre-existing caller passes by omitting the argument) is the shipped path.
 //
 // Throws what `submit_token_body`/`finish_token` throw: a HIP failure, a position outside the
 // allocation, attention's lane ceiling, or a token outside `[0, vocab)`. A throw leaves the state
@@ -110,6 +153,7 @@ struct PrefillResult {
 // throw as fatal (the session poisons the turn, the run exits), which is the same rule a failed
 // `decode_step` has always followed.
 PrefillResult prefill_wave(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
-                           const std::vector<int>& tokens, PrefillLogits mode);
+                           const std::vector<int>& tokens, PrefillLogits mode,
+                           NormTailRetention* keep = nullptr);
 
 }  // namespace engine

@@ -17,7 +17,18 @@
 // The wave split. P4 gave the scratch `[T_w]` rows, so a prompt longer than the scratch is several
 // waves; splitting lives here so no caller changed. Under `kAll` a wave prices its own rows before
 // the next wave overwrites the tile, which is why pricing sits inside the loop rather than after it.
+//
+// A third thing was added later and is worth the same attention: the `NormTailRetention` copy. It is the
+// ONE submission in this file that is not somebody else's kernel, and it is a copy for exactly that
+// reason — it moves `sc.norm` rows the wave is about to overwrite into a caller-owned buffer, and any
+// arithmetic in here would be a second implementation of something `decode_step.cpp` already owns. It is
+// a read of the scratch and a write of a foreign buffer, so it cannot move a target byte, and it is stream-
+// ordered behind the body that wrote those rows because `submit_wave_body` never waits and everything here
+// rides the legacy default stream. `keep == nullptr` — every caller that existed before it — submits
+// nothing.
 #include "engine/prefill.h"
+
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <stdexcept>
@@ -25,6 +36,15 @@
 #include <vector>
 
 #include "engine/decode_step.h"
+
+#define PREFILL_CK(x)                                                                    \
+    do {                                                                                 \
+        hipError_t e_ = (x);                                                             \
+        if (e_ != hipSuccess) {                                                          \
+            throw std::runtime_error(std::string("hip: ") + hipGetErrorString(e_) +      \
+                                     " at " __FILE__ ":" + #x);                          \
+        }                                                                                \
+    } while (0)
 
 namespace engine {
 
@@ -41,7 +61,8 @@ const char* prefill_logits_name(PrefillLogits mode) {
 }
 
 PrefillResult prefill_wave(const WeightStore& weights, RequestState& st, DecodeScratch& sc,
-                           const std::vector<int>& tokens, PrefillLogits mode) {
+                           const std::vector<int>& tokens, PrefillLogits mode,
+                           NormTailRetention* keep) {
     PrefillResult out;
     out.logits_mode = mode;
     out.rows.reserve(tokens.size());
@@ -55,6 +76,24 @@ PrefillResult prefill_wave(const WeightStore& weights, RequestState& st, DecodeS
     // `wave_rows` = 512 is a multiple of 64, so the second half of the sentence is satisfied by
     // construction. Raising the lane ceiling is P7's, not this file's.
     const size_t wave_cap = (size_t)sc.wave_rows;
+    // The retention window, decided once here rather than per wave. `keep->rows` asks for the TAIL of the
+    // prompt, so the window is the last `keep->rows` positions of the token list this call is feeding —
+    // positions counted in §02.4's `P`, which is why they are anchored on the state's `prefix_len` BEFORE
+    // the first wave moves it. Writing `first_pos` here (not after the loop) is what lets a caller read
+    // `buf[i]` as position `first_pos + i` without knowing anything about the split.
+    if (keep != nullptr && keep->buf != nullptr && keep->rows > 0) {
+        const int first_possible = st.prefix_len;
+        const int last_pos = st.prefix_len + (int)tokens.size() - 1;
+        keep->first_pos = std::max(first_possible, last_pos - keep->rows + 1);
+        keep->rows_written = 0;
+        keep->copies = 0;
+        keep->bytes = 0;
+    } else if (keep != nullptr) {
+        keep->first_pos = -1;
+        keep->rows_written = 0;
+        keep->copies = 0;
+        keep->bytes = 0;
+    }
     for (size_t begin = 0; begin < tokens.size(); begin += wave_cap) {
         const int n = (int)std::min(wave_cap, tokens.size() - begin);
         out.last_wave_rows = n;   // the last iteration's value is the one that survives in sc.norm
@@ -72,6 +111,26 @@ PrefillResult prefill_wave(const WeightStore& weights, RequestState& st, DecodeS
         // Submits the whole wave and waits for nothing, so the stream keeps filling. This is where the
         // position advances (`prefix_len = pos0 + n`) and where §08.6's invariants are re-checked.
         submit_wave_body(weights, st, sc, tokens.data() + begin, n);
+
+        // The retention copy — one D2D per wave that intersects the window, ordered behind the body above
+        // by the default stream. `sc.norm[r]` holds the norm row of wave-local row `r`, i.e. of absolute
+        // position `pos0 + r`, so the intersecting slice is contiguous on BOTH sides and one copy suffices;
+        // a wave entirely before the window copies nothing, which is why a narrow window on a long prompt
+        // costs a window's worth of bytes rather than a prompt's.
+        if (keep != nullptr && keep->buf != nullptr && keep->rows > 0 && keep->first_pos >= 0) {
+            const int lo = std::max(pos0, keep->first_pos);
+            const int hi = pos0 + n;                       // exclusive
+            if (lo < hi) {
+                const long long rows = (long long)(hi - lo);
+                const long long nbytes = rows * kHidden * (long long)sizeof(uint16_t);
+                PREFILL_CK(hipMemcpyAsync(keep->buf + (size_t)(lo - keep->first_pos) * kHidden,
+                                          sc.norm + (size_t)(lo - pos0) * kHidden, (size_t)nbytes,
+                                          hipMemcpyDeviceToDevice, nullptr));
+                keep->copies++;
+                keep->bytes += nbytes;
+                keep->rows_written += (int)rows;
+            }
+        }
 
         // The LAST row of the whole prompt is always priced — §06.5's `y0` has to come from somewhere
         // — and under `kAll` so is every other one. Pricing a row now reads that row out of the wave's
