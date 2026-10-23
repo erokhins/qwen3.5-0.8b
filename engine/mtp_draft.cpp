@@ -23,6 +23,7 @@
 #include "engine/decode_step.h"
 #include "engine/kernels.h"
 #include "engine/loader.h"
+#include "engine/mtp_meter.h"   // the default-off round meter; that header owns the sub-phase semantics
 #include "engine/stage_clock.h"
 #include "engine/state.h"
 
@@ -350,10 +351,21 @@ Proposal draft_round(const WeightStore& weights, const Weights& w, State& st,
     tally.mark(stageclock::kMtp, 0);
     Proposal p;
     std::vector<float> host(kVocab);
-    MTP_CK(hipMemcpy(host.data(), st.logits, kVocab * sizeof(float), hipMemcpyDeviceToHost));
+    {
+        // The two BREAKDOWNS of the round's `draft` phase (`engine/mtp_meter.h`, `Kind::kSubphase`):
+        // this copy is 993,280 B and the scan below is 248,320 floats on one host core, which together are
+        // the vocabulary crossing `prototype/mtp_accept/ROUND-TAX.md` §1 puts inside the 3.639 ms the meter
+        // bills as `draft`. Both are inert with the meter off and excluded from the meter's sum, so they
+        // price the crossing without changing what the enclosing phase bounds.
+        const engine::mtpmeter::SubPhaseGuard d2h(engine::mtpmeter::kDraftVocabD2H);
+        MTP_CK(hipMemcpy(host.data(), st.logits, kVocab * sizeof(float), hipMemcpyDeviceToHost));
+    }
     tally.check("draft_round", kStageSubsPerRound);
-    p.token = argmax_greedy(host.data(), kVocab);
-    p.top_logit = host[p.token];
+    {
+        const engine::mtpmeter::SubPhaseGuard scan(engine::mtpmeter::kDraftArgmaxHost);
+        p.token = argmax_greedy(host.data(), kVocab);
+        p.top_logit = host[p.token];
+    }
     p.nlanes = st.nlanes;
     p.round = ++st.rounds;
     if (logits_out) *logits_out = std::move(host);

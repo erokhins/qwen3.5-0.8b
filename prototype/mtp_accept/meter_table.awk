@@ -19,6 +19,12 @@
 # `not_metered` and `derived` rows are excluded from the sum by design: the first has no milliseconds at all,
 # the second IS the residual. A sum that included `overhead` would make coverage 1.000 by construction, which
 # is the failure shape `AGENTS.md` records for every gate that cannot fail.
+#
+# `subphase` rows are excluded for a THIRD reason: they are a breakdown of milliseconds an enclosing phase
+# already contributed (`draft_vocab_d2h` and `draft_argmax_host` live inside `draft`), so summing them bills
+# one span twice — and the identity check below is what would notice, which is exactly why
+# `meter_round_selftest.sh` carries both the good log that carries sub-phase rows and the one-field mutation
+# that prints such a row as `measured`.
 BEGIN { FS = " "; nrows = 0 }
 /^MTPMETER role=.* phase=instrument/ {
     for (i = 1; i <= NF; i++) { n = $i; sub(/=.*/, "", n); v = $i; sub(/^[^=]*=/, "", v); ins[n] = v }
@@ -60,7 +66,10 @@ END {
     for (i = 1; i <= nrows; i++) {
         if (stv[i] == "not_metered") { printf "   %-21s %12s %6s %11s %5s %12s\n", name[i], "-", "-", "-", "-", "not_metered"; continue }
         printf "   %-21s %12.4f %6s %11.4f %5s %12s\n", name[i], prv[i] + 0, runsv[i], sprv[i] + 0, sav[i], (stv[i] == "" ? "measured" : stv[i])
-        if (stv[i] != "derived") sum += prv[i] + 0
+        # A sub-phase row is a breakdown of the phase above it, not a sibling: its milliseconds are already
+        # in the sum under that phase's own name, so adding them here would double-charge the span and the
+        # identity check below would (correctly) refuse the table.
+        if (stv[i] != "derived" && stv[i] != "subphase") sum += prv[i] + 0
     }
     if ((sum + ov) - wall > 0.002 || wall - (sum + ov) > 0.002) {
         printf "NO-TABLE: sum(phases)=%.4f + overhead=%.4f != wall=%.4f — the meter is double-charging a phase or dropping one\n", sum, ov, wall

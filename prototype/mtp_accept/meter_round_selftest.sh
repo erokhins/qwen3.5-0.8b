@@ -21,20 +21,25 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 # A well-formed accept-role run: measured phases 3.75 ms/round, derived overhead 0.25, wall 4.00, coverage
-# 0.9375 — inside the band, and sum + overhead == wall exactly.
+# 0.9375 — inside the band, and sum + overhead == wall exactly. It carries two `status=subphase` rows
+# (draft_vocab_d2h + draft_argmax_host, 0.1500 + 0.1000 of `draft`'s own 0.2500): a sub-phase is a breakdown
+# of milliseconds its parent already contributed, so it is out of the sum for a different reason than
+# `derived` is, and `subphase_charged_into_sum` below is the case that shows the exclusion is checked.
 good_accept() { cat <<'LOG'
 MTPACCEPT on=1 rows=2 checkpoint_bytes=20201472 status_bytes=16 draft_sched=loop per_step_dumps=0
 MTPMETER role=accept on=1 idle_sync_us=24.00 sync_added_phases_inflate=1 plan=prototype/mtp_accept/METER-PLAN.md
 ACCEPT round=1 anchor=8 fed=100 cand=200 cand_pos=9 accept=1 verifier=100 bonus=200 emitted=2 pos=8->10 restored_bytes=0
 MTPMETER role=accept phase=body ms_total=8.0000 rounds=4 ms_per_round=2.0000 sync_added=1 runs=4 ms_per_run=2.0000 note=submit_wave_body
 MTPMETER role=accept phase=mid_checkpoint status=not_metered note=2_extra_submissions_per_GDN_layer
-MTPMETER role=accept phase=head ms_total=4.0000 rounds=4 ms_per_round=1.0000 sync_added=1 runs=4 ms_per_run=1.0000 note=one_pass_over_the_tied_table
+MTPMETER role=accept phase=head ms_total=3.0000 rounds=4 ms_per_round=0.7500 sync_added=1 runs=4 ms_per_run=0.7500 note=one_pass_over_the_tied_table
 MTPMETER role=accept phase=verdict_kernel ms_total=1.0000 rounds=4 ms_per_round=0.2500 sync_added=1 runs=4 ms_per_run=0.2500 note=on_device
 MTPMETER role=accept phase=verdict_readback ms_total=1.0000 rounds=4 ms_per_round=0.2500 sync_added=0 runs=4 ms_per_run=0.2500 note=four_ints
 MTPMETER role=accept phase=accept_path ms_total=0.5000 rounds=4 ms_per_round=0.1250 sync_added=0 runs=2 ms_per_run=0.2500 note=ran_on_an_accept_only
 MTPMETER role=accept phase=rollback ms_total=0.5000 rounds=4 ms_per_round=0.1250 sync_added=1 runs=2 ms_per_run=0.2500 note=ran_on_a_reject_only
 MTPMETER role=accept phase=lane_bookkeeping ms_total=0.0000 rounds=4 ms_per_round=0.0000 sync_added=0 runs=4 ms_per_run=0.0000 note=moves_0_bytes
-MTPMETER role=accept phase=draft ms_total=0.0000 rounds=4 ms_per_round=0.0000 sync_added=1 runs=4 ms_per_run=0.0000 note=next_round_proposal
+MTPMETER role=accept phase=draft ms_total=1.0000 rounds=4 ms_per_round=0.2500 sync_added=1 runs=4 ms_per_run=0.2500 note=next_round_proposal
+MTPMETER role=accept phase=draft_vocab_d2h ms_total=0.6000 rounds=4 ms_per_round=0.1500 sync_added=0 runs=4 ms_per_run=0.1500 status=subphase inside=draft note=the_vocabulary_download
+MTPMETER role=accept phase=draft_argmax_host ms_total=0.4000 rounds=4 ms_per_round=0.1000 sync_added=0 runs=4 ms_per_run=0.1000 status=subphase inside=draft note=the_host_argmax
 MTPMETER role=accept phase=report_prints ms_total=0.0000 rounds=4 ms_per_round=0.0000 sync_added=0 runs=4 ms_per_run=0.0000 note=the_run_prints
 MTPMETER role=accept phase=overhead ms_total=1.0000 rounds=4 ms_per_round=0.2500 sync_added=0 runs=4 ms_per_run=0.2500 status=derived note=derived_not_timed
 MTPMETER role=accept phase=summary ms_total=15.0000 rounds=4 ms_per_round=3.7500 sync_added=0 runs=4 ms_per_run=3.7500 status=derived wall_ms_per_round=4.0000 coverage=0.9375 note=the_meter_verdict
@@ -56,6 +61,11 @@ run_case() { # $1 name $2 want(NORMAL|NO-TABLE) $3 want-fragment $4 role $5 gene
         bad_coverage)   good_accept | sed 's/coverage=0.9375/coverage=0.5000/g' > "$log" ;;
         bad_identity)   good_accept | sed 's/^MTPMETER role=accept phase=overhead ms_total=1.0000 rounds=4 ms_per_round=0.2500/MTPMETER role=accept phase=overhead ms_total=2.0000 rounds=4 ms_per_round=0.5000/' > "$log" ;;
         bad_sum)        good_accept | sed '/^RESULT mode=/ s/sum_ms_per_round=3.7500/sum_ms_per_round=4.2500/' > "$log" ;;
+        # The SAME two breakdown rows, with one field changed: `status=subphase` dropped, so the awk reads
+        # them as ordinary measured phases. This is the must-catch for the exclusion — if the exclusion were
+        # broken (or the engine charged a sub-phase into its parent's total as well), this is what the table
+        # would look like, and the identity check must refuse it rather than publish a 4.15 ms round.
+        subphase_charged_into_sum) good_accept | sed 's/^MTPMETER role=accept phase=draft_vocab_d2h \(.*\) status=subphase inside=draft/MTPMETER role=accept phase=draft_vocab_d2h \1/' > "$log" ;;
         bad_meter)      good_accept | sed 's/meter=ok/meter=out_of_band/' > "$log" ;;
         no_coverage_field) good_accept | sed 's/ coverage=0.9375//' > "$log" ;;
         wrong_role)     good_accept | sed 's/^MTPMETER role=accept/MTPMETER role=verify/' > "$log" ;;
@@ -89,6 +99,12 @@ echo "ok   good_accept (and its mid_checkpoint row carries no millisecond figure
 run_case bad_coverage       NO-TABLE "outside 0.8-1.2"           accept good
 run_case bad_identity       NO-TABLE "double-charging a phase"   accept good
 run_case bad_sum            NO-TABLE "charged and not printed"   accept good
+# The positive half of the sub-phase exclusion: the good log above carries two `status=subphase` rows
+# totalling 0.2500 ms/round INSIDE `draft`, and the table still balances at wall 4.000. If the awk summed
+# them the identity check below would fire, so `subphase_charged_into_sum` is the same log with that status
+# field removed and is refused for exactly that reason. Pair, not solo claim.
+run_case subphase_rows_excluded NORMAL   "identity ok"            accept good
+run_case subphase_charged_into_sum NO-TABLE "double-charging a phase" accept good
 run_case bad_meter          NO-TABLE "meter=out_of_band"         accept good
 run_case no_coverage_field  NO-TABLE "no coverage= field"        accept good
 run_case wrong_role         NO-TABLE "printed no phase lines"    accept good

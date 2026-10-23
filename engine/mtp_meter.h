@@ -66,6 +66,13 @@
 // 0.8-1.2. Double counting cannot reach coverage > 1 either: `Meter::begin()` refuses a nested phase
 // rather than charging a window twice, and a window opened inside a window is refused the same way.
 //
+// TWO ROWS ARE OUT OF THE SUM BESIDES `overhead`: `summary`, and any `Kind::kSubphase` row. A sub-phase is
+// a BREAKDOWN of milliseconds an enclosing phase already owns (`draft_vocab_d2h` and `draft_argmax_host`
+// inside `draft`, which is where `prototype/mtp_accept/ROUND-TAX.md` §1 says the draft's vocabulary
+// crossing lives), so charging one into the sum would bill the same span twice and redden the identity
+// check in `meter_table.awk` — which is how that awk's own selftest proves the exclusion is load-bearing
+// rather than decorative.
+//
 // WHAT CANNOT BE METERED WITH TODAY'S STRUCTURE, said rather than guessed:
 //
 //   * role=accept `mid_checkpoint`. The mid-round checkpoint is not a copy at the round's level: it is
@@ -120,6 +127,10 @@ enum PhaseId : uint8_t {
     kRollback,       // ran on a reject only: two bulk D2D restores
     kLaneBookkeeping,  // §08.6 invariant check + the draft lane's length field; moves 0 bytes
     kDraft,          // the NEXT round's draft submissions
+    // BREAKDOWNS inside `kDraft`, not siblings of it. See `Kind::kSubphase` for why they cannot be
+    // siblings, and `prototype/mtp_accept/ROUND-TAX.md` §1 for why they exist at all.
+    kDraftVocabD2H,  // the draft's vocabulary-sized download (a sub-phase of `kDraft`)
+    kDraftArgmaxHost,// the host §03.4 scan over the downloaded row (a sub-phase of `kDraft`)
     // shared by both roles
     kBody,           // `submit_wave_body`; carries the mid-checkpoint when one is armed
     kBodyCkpt,       // the `--mtp-midsplit 1` second body: the body WITH the checkpoint armed
@@ -138,6 +149,13 @@ enum class Kind : uint8_t {
     kSyncAdded,     // the meter adds a hipDeviceSynchronize(): serializes, so it INFLATES
     kNotMetered,    // no honest boundary exists for this at today's call sites
     kDerived,       // computed from the windows, not timed
+    // A BREAKDOWN of one span of a `kSyncAdded`/`kNativeBlock` phase, charged inside that phase rather
+    // than beside it, and therefore EXCLUDED from the sum exactly like `kDerived` — a nested span added
+    // to the sum would make coverage exceed the window it lives in and turn the coverage check into a
+    // number that cannot be read. `parent` on the registry row names the phase it breaks down; the
+    // printer prints it as `inside=`, so a reader never has to guess which line owns the milliseconds.
+    // Its close adds no wait: whatever makes the enclosing phase's close meaningful already covers it.
+    kSubphase,
 };
 
 // The registry row. `note` is printed on the phase's line, so a reader never has to open this header to
@@ -147,6 +165,11 @@ struct PhaseSpec {
     const char* name;
     Kind kind;
     const char* note;
+    // Only read for `Kind::kSubphase` rows: the phase this one is a breakdown of. Left defaulted on
+    // every other row, and `sub_begin` refuses a sub-phase whose declared parent is not the open phase,
+    // so a sub-phase row that forgot to name its parent fails the run that arms it rather than silently
+    // charging its milliseconds to whoever happened to be open.
+    PhaseId parent = kPhaseCount;
 };
 
 const PhaseSpec* specs();   // `kPhaseCount` rows, indexable by `PhaseId`
@@ -172,6 +195,18 @@ public:
 
     void begin(PhaseId p);
     void end(PhaseId p);
+
+    // A sub-phase: a span inside the phase that is currently open, named by the registry row's `parent`.
+    // Throws unless (a) `p` is declared a sub-phase, (b) its declared parent IS the open phase, and
+    // (c) no other sub-phase is open — a sub-phase nested in a sub-phase would charge one span twice and
+    // is refused for the same reason `begin()` refuses a nested phase.
+    void sub_begin(PhaseId p);
+    void sub_end(PhaseId p);
+
+    // True when `p` is the phase currently open. The sub-phase guard uses it to stay inert where a
+    // sub-phase has no owner in this run (a draft submitted outside a metered round), which is the one
+    // case where silence is honest rather than a missing row.
+    bool phase_open(PhaseId p) const { return open_phase_ == p; }
 
     // A one-row step taken where a round could have been: counted, never metered.
     void note_plain_step() { plain_steps_++; }
@@ -210,7 +245,10 @@ private:
     bool window_open_ = false;
     std::chrono::steady_clock::time_point window_t0_{};
     std::chrono::steady_clock::time_point phase_t0_{};
+    std::chrono::steady_clock::time_point sub_t0_{};   // its own, or a breakdown would re-start the clock
+                                                       // of the phase that owns it and shorten that phase
     PhaseId open_phase_ = kPhaseCount;   // kPhaseCount = none open
+    PhaseId open_sub_ = kPhaseCount;     // the same, for the one sub-phase slot
     bool in_round_ = false;
     long long rounds_ = 0;
     long long plain_steps_ = 0;
@@ -232,7 +270,8 @@ Meter* armed();
 
 // RAII, so a `throw` on a guard path cannot leave a phase open and mis-charge the next one. Both guards
 // are inert when no meter is armed; `PhaseGuard` is also inert when no window is open, which is what lets
-// the accept loop wrap a draft call that plain iterations make too.
+// the accept loop wrap a draft call that plain iterations make too. `SubPhaseGuard` is inert in addition
+// when the phase its registry row names as its parent is not the open one.
 class WindowGuard {
 public:
     WindowGuard();
@@ -250,6 +289,21 @@ public:
     ~PhaseGuard();
     PhaseGuard(const PhaseGuard&) = delete;
     PhaseGuard& operator=(const PhaseGuard&) = delete;
+
+private:
+    Meter* m_;
+    PhaseId p_;
+};
+
+// One breakdown span inside an enclosing phase (`Kind::kSubphase`). Same discipline as `PhaseGuard`, and
+// inert unless a meter is armed, a window is open, and the phase its registry row names as its parent is
+// the one open.
+class SubPhaseGuard {
+public:
+    explicit SubPhaseGuard(PhaseId p);
+    ~SubPhaseGuard();
+    SubPhaseGuard(const SubPhaseGuard&) = delete;
+    SubPhaseGuard& operator=(const SubPhaseGuard&) = delete;
 
 private:
     Meter* m_;

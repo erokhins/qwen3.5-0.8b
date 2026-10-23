@@ -124,6 +124,7 @@ rather than at the call sites, so a line cannot be printed with a label its auth
 | `kHostOnly` | pure host work; nothing to drain | 0 | exact |
 | `kSyncAdded` | the phase ends in async submissions, so the meter adds **one** `hipDeviceSynchronize()` | 1 | **upper bound**: it serializes work the round would have overlapped |
 | `kNotMetered` | no honest boundary exists at today's call sites | — | no number is printed, by design |
+| `kSubphase` | a **breakdown of a span another phase already owns**; its own close adds no wait | 0 | exact for what it times, but it is NOT in the sum: `draft` already contains it, and `meter_table.awk` excludes it for the same reason it excludes `derived` (`meter_round_selftest.sh` reddens a log where that exclusion is broken) |
 
 Only `kSyncAdded` phases pay a wait — that is the content of "do not add a sync to a phase that has none
 today without labelling it" — and `phase=instrument` prints `syncs_added=` so the count is auditable. What a
@@ -165,6 +166,8 @@ One window per round, spanning the round branch: the round, the next round's dra
 | `rollback` | the reject branch's two bulk D2D restores of the mid-checkpoint (19.27 MiB here) | **sync added** | **inflates hardest of any phase**: these are `hipMemcpyAsync` today and the round deliberately lets them overlap the next round's draft, so the meter's wait serializes a copy the real round hides. Read with the accept rate, never alone. `runs=` is the reject count, so `ms_per_round` is diluted by accepts while `ms_per_run` is the price of an actual reject |
 | `lane_bookkeeping` | §08.6 `check_invariants` after either branch, plus the rejected round's draft-lane truncate in the driver | host-only | exact; moves 0 bytes. `runs=` = rounds + rejects, which is the honest count of the two sites |
 | `draft` | the **next** round's draft round, charged to this round's window because that is where it is paid for; ends in the draft's own blocking vocabulary D2H | **sync added** | mildly over-reports (the D2H already waited for the draft's head pass, so most of the wait is relocated). Plain one-row iterations also draft, and those drafts are charged **nowhere** — a plain iteration is not a round |
+| `draft_vocab_d2h` | the draft's blocking download of its own logits row — today `kVocab` F32 = 993,280 B per round | sub-phase of `draft`, native | exact, and out of the sum because `draft` already carries it. This is the second of the two vocabulary crossings `ROUND-TAX.md` §1 names; after the argmax is resolved on device the line bills one small status word, and a 0.000 there **is** the result rather than a missing phase |
+| `draft_argmax_host` | the host `argmax_greedy` over that downloaded row: 248,320 F32 scanned on one CPU core | sub-phase of `draft`, host-only | exact. `runs=0` means the site is gone (the device argmax removed it), not that it was missed |
 | `report_prints` | the `ACCEPT` line and the `ACCEMIT` emit block | host-only | exact |
 | `overhead`, `summary` | **derived** | — | route forcing inside `accept_round`, driver tallies, the draft-cache refusal probe |
 

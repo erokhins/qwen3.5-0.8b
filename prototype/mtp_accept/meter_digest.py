@@ -56,6 +56,12 @@ def parse(path):
             status = f.get("status", "measured")
             if phase == "mid_checkpoint":
                 out["mid"] = status
+            # The statuses are NAMED rather than defaulted: `derived` (the residual) and `subphase` (a
+            # breakdown of milliseconds another row already owns, e.g. `draft_vocab_d2h` inside `draft`) are
+            # deliberately NOT kept, because a digest that folded a breakdown into its phase list would
+            # double-count the span — the same exclusion `meter_table.awk` makes for the same reason. A new
+            # status added to `engine/mtp_meter.h` lands here as dropped-and-unlisted, so if it ever carries
+            # milliseconds worth digesting, this line is where it gets named.
             if status in ("measured", "native"):
                 out["phases"][phase] = dict(
                     mpr=float(f["ms_per_round"]), runs=int(f.get("runs", 0)),

@@ -35,6 +35,18 @@ const PhaseSpec kSpecs[] = {
     {Role::kAccept, "rollback",        Kind::kSyncAdded,   "RAN_ON_A_REJECT_ONLY:_two_bulk_D2D_restores_of_the_mid-checkpoint_(19.27_MiB_here)._INFLATES_HARD:_these_are_hipMemcpyAsync_today_and_the_round_lets_them_overlap_the_next_draft,_so_the_meter's_wait_serializes_a_copy_the_real_round_hides._Read_with_accept_rate,_never_alone"},
     {Role::kAccept, "lane_bookkeeping", Kind::kHostOnly,   "the_§08.6_invariant_check_and_the_draft_lane's_length-field_truncate._Moves_0_bytes;_host-only,_so_no_wait"},
     {Role::kAccept, "draft",           Kind::kSyncAdded,   "the_NEXT_round's_draft_round_submissions,_ending_in_the_draft's_own_blocking_vocabulary_D2H._Sync_added_so_the_draft's_head_pass_does_not_land_on_whichever_phase_happens_to_block_next;_the_D2H_already_would,_so_the_inflation_is_small"},
+    // The two BREAKDOWNS of `draft`, added so the vocabulary crossing `ROUND-TAX.md` §1 names is priced
+    // before it is optimized rather than after. Both are excluded from the sum (`Kind::kSubphase`), so
+    // they cannot move coverage and cannot double-charge: whatever they print, `draft` already printed.
+    // After the device argmax lands, `draft_vocab_d2h` bills a small status word instead of 993,280 B and
+    // `draft_argmax_host` loses its site — a 0.000 line with runs=0 there IS the result of that change,
+    // which is why the rows stay in the registry instead of being deleted with the host scan.
+    {Role::kAccept, "draft_vocab_d2h",  Kind::kSubphase,
+     "BREAKDOWN_inside_phase=draft._The_draft's_blocking_download_of_its_own_logits_row:_today_kVocab_F32_=_993,280_B_per_round,_which_is_the_second_of_the_two_vocabulary_crossings_ROUND-TAX.md_§1_names_(the_first_is_verify's_logits_d2h)._sync_added=0_because_the_copy_already_blocks._After_the_device_argmax_this_line_bills_one_small_status_word_and_a_0.000_there_is_the_result_not_a_missing_phase",
+     kDraft},
+    {Role::kAccept, "draft_argmax_host", Kind::kSubphase,
+     "BREAKDOWN_inside_phase=draft_and_inside_the_span_draft_vocab_d2h_closes._The_host_§03.4_argmax_over_the_downloaded_row:_248,320_f32_scanned_on_one_CPU_core,_pure_host_work,_sync_added=0._Removed_by_resolving_the_argmax_on_device;_runs=0_means_the_site_is_gone,_not_that_it_was_missed",
+     kDraft},
     {Role::kRoleCount, "body",                  Kind::kSyncAdded, "submit_wave_body_at_the_round's_row_count._INFLATES:today_the_body's_submissions_flow_into_the_head_launch_and_the_next_wait,_so_a_wait_at_its_close_removes_pipelining_the_engine_relies_on._It_also_carries_the_mid-checkpoint's_extra_submissions_when_one_is_armed"},
     {Role::kRoleCount, "body_with_checkpoint",  Kind::kSyncAdded, "the_--mtp-midsplit_1_second_body:_same_anchor,_same_tokens,_WITH_the_mid-checkpoint_armed._MINUS_phase=body_it_is_that_checkpoint's_price_measured_in_ONE_window_at_ONE_anchor,_which_is_the_only_honest_way_to_ask"},
     {Role::kRoleCount, "head",                  Kind::kSyncAdded, "one_lm_head_batched_xbf16_pass_over_the_485_MiB_tied_table,_serving_both_rows._INFLATES_in_a_pipelined_round_by_the_wait,_but_NOT_for_free_in_a_serial_one:_on_the_verify_path_the_logits_D2H_already_waited_for_this_launch_on_the_same_stream,_so_the_wait_it_replaces_was_already_paid"},
@@ -52,7 +64,7 @@ const PhaseId kVerifyOrder[] = {
 };
 const PhaseId kAcceptOrder[] = {
     kBody, kMidCheckpoint, kHead, kVerdict, kReadback, kAcceptPath, kRollback, kLaneBookkeeping,
-    kDraft, kReportPrints, kOverhead, kSummary,
+    kDraft, kDraftVocabD2H, kDraftArgmaxHost, kReportPrints, kOverhead, kSummary,
 };
 
 // The wait. Unlike `stage_clock`'s drain this does NOT throw: a faulted queue must still let the run print
@@ -152,11 +164,57 @@ void Meter::end(PhaseId p) {
     r.runs++;
 }
 
+void Meter::sub_begin(PhaseId p) {
+    const PhaseSpec& s = kSpecs[p];
+    if (s.kind != Kind::kSubphase) {
+        throw std::runtime_error(std::string("mtp meter: sub_begin(") + s.name
+                                 + ") on a phase the registry does not declare a breakdown; a sub-phase"
+                                     " is out of the sum by kind, so a real phase opened this way would"
+                                     " vanish from coverage");
+    }
+    if (open_phase_ != s.parent) {
+        // The guard stays inert rather than reaching here unless its parent is open, so arriving with the
+        // wrong parent means a call site that bypassed the guard. Charging the span to whatever happened
+        // to be open is the mis-attribution this instrument refuses everywhere else.
+        throw std::runtime_error(std::string("mtp meter: sub_begin(") + s.name + ") declares its parent as "
+                                 + (s.parent == kPhaseCount ? std::string("<none>") : kSpecs[s.parent].name)
+                                 + " but "
+                                 + (open_phase_ == kPhaseCount ? std::string("<no phase>")
+                                                               : kSpecs[open_phase_].name)
+                                 + " is open");
+    }
+    if (open_sub_ != kPhaseCount) {
+        throw std::runtime_error(std::string("mtp meter: sub-phase ") + s.name
+                                 + " opened while " + kSpecs[open_sub_].name
+                                 + " was still open; a nested breakdown would charge one span twice");
+    }
+    open_sub_ = p;
+    sub_t0_ = std::chrono::steady_clock::now();
+}
+
+void Meter::sub_end(PhaseId p) {
+    if (open_sub_ != p) {
+        throw std::runtime_error(std::string("mtp meter: sub_end(") + kSpecs[p].name
+                                 + ") with no such sub-phase open");
+    }
+    open_sub_ = kPhaseCount;
+    // No drain, and that is not an oversight: a sub-phase lives inside a span whose close is already made
+    // meaningful, and its own two sites are a blocking copy and a host loop (`ROUND-TAX.md` §1). Adding a
+    // wait here would serialize inside a phase the enclosing meter already bounds.
+    Rec& r = recs_[p];
+    r.ms += ms_since(sub_t0_);
+    r.runs++;
+}
+
 double Meter::sum_ms() const {
     double total = 0.0;
     for (int i = 0; i < kPhaseCount; ++i) {
         const Kind k = kSpecs[i].kind;
-        if (k == Kind::kNotMetered || k == Kind::kDerived) continue;
+        // `kSubphase` is out of the sum for the same reason `kDerived` is: its milliseconds belong to a
+        // phase that is already in there, so adding them would bill one span twice and push coverage past
+        // the window it lives in. `meter_table.awk` excludes the same rows for the same reason, and its
+        // selftest reddens a log where that exclusion is broken.
+        if (k == Kind::kNotMetered || k == Kind::kDerived || k == Kind::kSubphase) continue;
         total += recs_[i].ms;
     }
     return total;
@@ -222,6 +280,12 @@ std::string Meter::describe() const {
                       s.kind == Kind::kSyncAdded ? 1 : 0, (long long)runs, per_run);
         out += buf;
         if (s.kind == Kind::kDerived) out += " status=derived";
+        if (s.kind == Kind::kSubphase) {
+            // `inside=` names the phase whose milliseconds this row breaks down, so the line is readable
+            // on its own and a reader never has to know that `draft_vocab_d2h` lives under `draft`.
+            out += " status=subphase inside=";
+            out += kSpecs[s.parent].name;
+        }
         if (p == kSummary) {
             std::snprintf(buf, sizeof buf, " wall_ms_per_round=%.4f coverage=%.4f", wall_per_round_,
                           coverage_);
@@ -287,6 +351,22 @@ PhaseGuard::PhaseGuard(PhaseId p) : m_(nullptr), p_(p) {
 
 PhaseGuard::~PhaseGuard() {
     if (m_) m_->end(p_);
+}
+
+SubPhaseGuard::SubPhaseGuard(PhaseId p) : m_(nullptr), p_(p) {
+    Meter* m = armed();
+    // Inert, in this order: no meter, no window, or the phase this breakdown belongs to is not the one
+    // open. The last case is not an error — a draft submitted outside a metered round (the side pass, a
+    // `--mtp-draft-k` ladder row) has no round window to charge it to — and the phase line's own `runs=`
+    // is what shows a breakdown that never got an owner anywhere in the run.
+    if (m != nullptr && m->window_open() && m->phase_open(kSpecs[p].parent)) {
+        m->sub_begin(p);
+        m_ = m;
+    }
+}
+
+SubPhaseGuard::~SubPhaseGuard() {
+    if (m_) m_->sub_end(p_);
 }
 
 }  // namespace engine::mtpmeter
