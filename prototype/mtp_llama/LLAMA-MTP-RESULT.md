@@ -151,13 +151,14 @@ the traps index.
   result; `engine/performance-status.md` is untouched. llama.cpp's numbers are a *reference point*, not our
   ledger, and its base decode (~92.0 tok/s at 4,152 lanes) and ours (88.6–89.3 today, 94.2–94.9 in the
   ledger) are different windows and are not a paired claim in either direction.
-- **The route is alive, and it has exactly one object.** M2's accept loop does not need more accept-loop
-  work, and it does not need a better-drafted token: it needs the round to run on the route the rest of the
-  engine already uses. Measured per-row cost on that route is **+0.25 step for a second row short, +0.43 at
-  4k, and ~0 beyond that** (`ROW-SCALE.md` §2), so a 3-row k=2 round sizes at **≈ 1.3–1.4 steps** and
-  **+23 % to +45 %** at 4k on plausible accept rates — which is what `ROW-SCALE.md` §4 pre-registers lines
-  against. That is a sizing, not a forecast: it presumes the route switch can be made without losing whatever
-  row-0 bit-comparability the loop's admission needs.
+- **The route was tested and it is not enough.** This section first said the round needed "the route the rest
+  of the engine already uses"; that switch was then built (`--mtp-route hand|amortised`,
+  `prototype/mtp_accept/ROUTE-FLAG.md`) and priced: **2.133 → 1.964 steps at 4,032 lanes**, a 7.9 % cut
+  against the ≤ 1.55 route gate, so the gate **failed** and speculation at k ≥ 2 is not built on this round.
+  The per-row cost at 4k is **0.96 of a step** where llama.cpp pays **0.078** — 12×, and it is not in the
+  GEMM axis (which is what the switch moved) but in per-row traffic: the long-context attention scan and
+  `gdn_rec`, which is one row per launch by construction. Closing it is a kernel programme (multi-query
+  attention sharing one KV scan across query rows; a multi-token GDN scan), not a loop change.
 - **The next measurement is named, and it is small.** Attribute the width-2 body by kernel family. The
   obvious instrument refuses: `decode_run.cpp:1157` refuses `--mtp-verify` together with `--time-stages`,
   because a side pass has no honest per-step stage bill. So the cheap version is the one already here:

@@ -1,5 +1,13 @@
 # Row scale: what an extra row actually costs, and why that reopens speculation at k = 2
 
+> **CORRECTED THE SAME DAY — read `ROUTE-FLAG.md` §6 before using the long-context column.** The pre-registered
+> route gate came back **FAILED (1.964 steps measured at 4k against a ≤ 1.55 line)**, and the reason is a flaw
+> in this file's `long` column: a 4,032-token pass chunked into n-row bodies prices those bodies **averaged
+> over their position**, most of them at a few hundred lanes, whereas a decode round sits at 4,032 — and the
+> term that dominates a round is precisely the one that grows with position. The short-KV column and the
+> per-family attribution stand, and so does the finding that the *GEMM axis* is not where the round's cost
+> lives; the claim that a 2–8 row body costs 1.09–1.13 steps **at 4k** does not.
+
 Measured 2026-10-23 by `prototype/mtp_accept/row_scale.sh`, evidence in
 `evidence/row_scale-2026-10-23.txt`. This **corrects** §2 of `prototype/mtp_llama/LLAMA-MTP-RESULT.md` and
 the D3 row of `AGENTS.md`: the mechanism named there ("our width-2 wave re-pays the weight walk and the KV
@@ -25,7 +33,7 @@ sums exceed the burst wall by the `exposed_ms` shown per row); in the long case 
 
 Cost per body, `burst_wall / bodies`, ms:
 
-| rows | short KV (weight walk) | 4k KV (long) | long, as a multiple of the 4k step (11.22 ms) |
+| rows | short KV (weight walk) | 4k KV — **ramp-averaged, see the banner** | long, as a multiple of the 4k step (11.22 ms) — **not a round at 4k** |
 |---|---|---|---|
 | 1 | 9.18 | 7.47 | 0.67 |
 | 2 | **11.48** | **12.25** | **1.09** |
@@ -71,6 +79,10 @@ the noise of this instrument, free.
    before any other decode route.
 
 ## 4. Pre-registered lines, written before any k = 2 number exists
+
+> **OUTCOME (2026-10-23, main agent, `route_ab-2026-10-23.txt`): the route gate FAILED — 1.964 steps at
+> 4,032 lanes on the amortising route against the ≤ 1.55 line below.** The lines are kept verbatim because
+> they were written before the number arrived, which is the only reason a failed gate means something.
 
 - **Route gate.** The accept round, amortising route, must reach **≤ 1.55 steps at 4,000 lanes** (today
   2.085). If it does not, the route work is insufficient and the row argument dies with it — no k=2 loop is

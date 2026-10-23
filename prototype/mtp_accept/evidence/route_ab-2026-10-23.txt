@@ -1,0 +1,121 @@
+# route A/B pricing — verify_body_scale.sh, same script, same fixture, medians of 3, one lock hold per invocation
+# taken 2026-10-23 by the MAIN AGENT, blocking, zero subagents active; util recorded by each invocation at both ends and discounted.
+# invocation 1: REPS=3 verify_body_scale.sh 128 1024 4032                  (default route = hand, i.e. the pre-flag behaviour)
+# invocation 2: EXTRA='--mtp-route amortised' REPS=3 verify_body_scale.sh 128 1024 4032
+# route canaries passed (0 ABORT lines in either log); route echoes read back off the logs themselves:
+#   4032 accept arm:  MTPSTAT route=amortised gemm=lt gdn_scan=seq
+#   4032 verify arm:  VERIFY2 ... mtp_route=amortised gemm=lt gdn_scan=seq  (row0_eq_step=1, logits_bytes=1986560, checkpoint_bytes=20201472)
+# NOTE the .log files in tmp/verify_body_scale/ belong to the LAST invocation only (the script wipes them at start).
+
+################## ARM 1: route=hand (default) ##################
+== util at acquire: gpu use: 5%; steps=32 reps=3 src=/tmp/dec8_ids.csv
+
+=== lanes=128 (ids file tmp/verify_body_scale/ids128.csv, 128 fields, cap 428) ===
+base   rep 1 decode   319.88 ms / 32 steps  emitted  32     9.996 ms per step
+verify rep 1 decode   856.24 ms / 32 steps  emitted  32    26.757 ms per step
+accept rep 1 decode   517.57 ms / 31 rounds  emitted  57    16.696 ms per round
+base   rep 2 decode   320.29 ms / 32 steps  emitted  32    10.009 ms per step
+verify rep 2 decode   855.03 ms / 32 steps  emitted  32    26.720 ms per step
+accept rep 2 decode   513.75 ms / 31 rounds  emitted  57    16.573 ms per round
+base   rep 3 decode   312.60 ms / 32 steps  emitted  32     9.769 ms per step
+verify rep 3 decode   792.46 ms / 32 steps  emitted  32    24.764 ms per step
+accept rep 3 decode   519.96 ms / 31 rounds  emitted  57    16.773 ms per round
+  -- medians, lanes=128 --
+   base      9.996 ms/step
+   verify   26.720 ms/step  =>  one 2-row BODY = 16.723 ms = 1.673 steps
+   accept   16.696 ms/round =>  round OVERHEAD beyond the body = -10.024 ms
+   round/step = 1.670   (body alone = 1.673 of it)
+
+=== lanes=1024 (ids file tmp/verify_body_scale/ids1024.csv, 1024 fields, cap 1324) ===
+base   rep 1 decode   331.87 ms / 32 steps  emitted  32    10.371 ms per step
+verify rep 1 decode   865.09 ms / 32 steps  emitted  32    27.034 ms per step
+accept rep 1 decode   560.55 ms / 31 rounds  emitted  58    18.082 ms per round
+base   rep 2 decode   332.11 ms / 32 steps  emitted  32    10.378 ms per step
+verify rep 2 decode   863.75 ms / 32 steps  emitted  32    26.992 ms per step
+accept rep 2 decode   560.14 ms / 31 rounds  emitted  58    18.069 ms per round
+base   rep 3 decode   328.46 ms / 32 steps  emitted  32    10.264 ms per step
+verify rep 3 decode   859.63 ms / 32 steps  emitted  32    26.864 ms per step
+accept rep 3 decode   560.69 ms / 31 rounds  emitted  58    18.087 ms per round
+  -- medians, lanes=1024 --
+   base     10.371 ms/step
+   verify   26.992 ms/step  =>  one 2-row BODY = 16.621 ms = 1.603 steps
+   accept   18.082 ms/round =>  round OVERHEAD beyond the body = -8.910 ms
+   round/step = 1.744   (body alone = 1.603 of it)
+
+=== lanes=4032 (ids file tmp/verify_body_scale/ids4032.csv, 4032 fields, cap 4332) ===
+base   rep 1 decode   347.87 ms / 32 steps  emitted  32    10.871 ms per step
+verify rep 1 decode  1042.74 ms / 32 steps  emitted  32    32.586 ms per step
+accept rep 1 decode   717.54 ms / 31 rounds  emitted  57    23.147 ms per round
+base   rep 2 decode   349.85 ms / 32 steps  emitted  32    10.933 ms per step
+verify rep 2 decode  1046.99 ms / 32 steps  emitted  32    32.718 ms per step
+accept rep 2 decode   718.85 ms / 31 rounds  emitted  57    23.189 ms per round
+base   rep 3 decode   344.84 ms / 32 steps  emitted  32    10.776 ms per step
+verify rep 3 decode  1035.92 ms / 32 steps  emitted  32    32.373 ms per step
+accept rep 3 decode   721.78 ms / 31 rounds  emitted  57    23.283 ms per round
+  -- medians, lanes=4032 --
+   base     10.871 ms/step
+   verify   32.586 ms/step  =>  one 2-row BODY = 21.715 ms = 1.998 steps
+   accept   23.189 ms/round =>  round OVERHEAD beyond the body = -9.397 ms
+   round/step = 2.133   (body alone = 1.998 of it)
+== util at release: gpu use: 74%
+
+################## ARM 2: route=amortised ##################
+== util at acquire: gpu use: 68%; steps=32 reps=3 src=/tmp/dec8_ids.csv
+
+=== lanes=128 (ids file tmp/verify_body_scale/ids128.csv, 128 fields, cap 428) ===
+   note: base arm drops --mtp-route: no body runs, so there is no route to choose (a one-row body resolves to the hand GEMV either way, `resolve_wave_gemm`), and the engine refuses the flag with no verify/accept running
+base   rep 1 decode   311.73 ms / 32 steps  emitted  32     9.742 ms per step
+verify rep 1 decode   756.32 ms / 32 steps  emitted  32    23.635 ms per step
+accept rep 1 decode   474.34 ms / 31 rounds  emitted  57    15.301 ms per round
+   note: base arm drops --mtp-route: no body runs, so there is no route to choose (a one-row body resolves to the hand GEMV either way, `resolve_wave_gemm`), and the engine refuses the flag with no verify/accept running
+base   rep 2 decode   314.01 ms / 32 steps  emitted  32     9.813 ms per step
+verify rep 2 decode   761.82 ms / 32 steps  emitted  32    23.807 ms per step
+accept rep 2 decode   478.33 ms / 31 rounds  emitted  57    15.430 ms per round
+   note: base arm drops --mtp-route: no body runs, so there is no route to choose (a one-row body resolves to the hand GEMV either way, `resolve_wave_gemm`), and the engine refuses the flag with no verify/accept running
+base   rep 3 decode   310.05 ms / 32 steps  emitted  32     9.689 ms per step
+verify rep 3 decode   768.63 ms / 32 steps  emitted  32    24.020 ms per step
+accept rep 3 decode   477.74 ms / 31 rounds  emitted  57    15.411 ms per round
+  -- medians, lanes=128 --
+   base      9.742 ms/step
+   verify   23.807 ms/step  =>  one 2-row BODY = 14.065 ms = 1.444 steps
+   accept   15.411 ms/round =>  round OVERHEAD beyond the body = -8.396 ms
+   round/step = 1.582   (body alone = 1.444 of it)
+
+=== lanes=1024 (ids file tmp/verify_body_scale/ids1024.csv, 1024 fields, cap 1324) ===
+   note: base arm drops --mtp-route: no body runs, so there is no route to choose (a one-row body resolves to the hand GEMV either way, `resolve_wave_gemm`), and the engine refuses the flag with no verify/accept running
+base   rep 1 decode   338.48 ms / 32 steps  emitted  32    10.578 ms per step
+verify rep 1 decode   851.23 ms / 32 steps  emitted  32    26.601 ms per step
+accept rep 1 decode   530.42 ms / 31 rounds  emitted  58    17.110 ms per round
+   note: base arm drops --mtp-route: no body runs, so there is no route to choose (a one-row body resolves to the hand GEMV either way, `resolve_wave_gemm`), and the engine refuses the flag with no verify/accept running
+base   rep 2 decode   340.22 ms / 32 steps  emitted  32    10.632 ms per step
+verify rep 2 decode   831.17 ms / 32 steps  emitted  32    25.974 ms per step
+accept rep 2 decode   529.51 ms / 31 rounds  emitted  58    17.081 ms per round
+   note: base arm drops --mtp-route: no body runs, so there is no route to choose (a one-row body resolves to the hand GEMV either way, `resolve_wave_gemm`), and the engine refuses the flag with no verify/accept running
+base   rep 3 decode   335.05 ms / 32 steps  emitted  32    10.470 ms per step
+verify rep 3 decode   846.48 ms / 32 steps  emitted  32    26.452 ms per step
+accept rep 3 decode   530.19 ms / 31 rounds  emitted  58    17.103 ms per round
+  -- medians, lanes=1024 --
+   base     10.578 ms/step
+   verify   26.452 ms/step  =>  one 2-row BODY = 15.875 ms = 1.501 steps
+   accept   17.103 ms/round =>  round OVERHEAD beyond the body = -9.349 ms
+   round/step = 1.617   (body alone = 1.501 of it)
+
+=== lanes=4032 (ids file tmp/verify_body_scale/ids4032.csv, 4032 fields, cap 4332) ===
+   note: base arm drops --mtp-route: no body runs, so there is no route to choose (a one-row body resolves to the hand GEMV either way, `resolve_wave_gemm`), and the engine refuses the flag with no verify/accept running
+base   rep 1 decode   358.00 ms / 32 steps  emitted  32    11.188 ms per step
+verify rep 1 decode  1039.00 ms / 32 steps  emitted  32    32.469 ms per step
+accept rep 1 decode   692.06 ms / 31 rounds  emitted  57    22.324 ms per round
+   note: base arm drops --mtp-route: no body runs, so there is no route to choose (a one-row body resolves to the hand GEMV either way, `resolve_wave_gemm`), and the engine refuses the flag with no verify/accept running
+base   rep 2 decode   362.82 ms / 32 steps  emitted  32    11.338 ms per step
+verify rep 2 decode  1001.04 ms / 32 steps  emitted  32    31.282 ms per step
+accept rep 2 decode   688.70 ms / 31 rounds  emitted  57    22.216 ms per round
+   note: base arm drops --mtp-route: no body runs, so there is no route to choose (a one-row body resolves to the hand GEMV either way, `resolve_wave_gemm`), and the engine refuses the flag with no verify/accept running
+base   rep 3 decode   362.21 ms / 32 steps  emitted  32    11.319 ms per step
+verify rep 3 decode  1033.20 ms / 32 steps  emitted  32    32.288 ms per step
+accept rep 3 decode   689.29 ms / 31 rounds  emitted  57    22.235 ms per round
+  -- medians, lanes=4032 --
+   base     11.319 ms/step
+   verify   32.288 ms/step  =>  one 2-row BODY = 20.968 ms = 1.852 steps
+   accept   22.235 ms/round =>  round OVERHEAD beyond the body = -10.052 ms
+   round/step = 1.964   (body alone = 1.852 of it)
+== util at release: gpu use: 72%
