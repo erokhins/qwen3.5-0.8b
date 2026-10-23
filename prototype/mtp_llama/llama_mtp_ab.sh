@@ -40,6 +40,12 @@ REPS=${REPS:-2}
 NGEN=${NGEN:-128}
 ARMS=${ARMS:-none mtp1 mtp2 mtp3 mtp4}
 CTX=${CTX:-5120}
+# NOCNV=1 runs the prompt as a RAW continuation instead of letting llama-cli apply the model's chat template.
+# llama-cli's `-cnv` defaults to AUTO, so because this GGUF carries a template, every number taken with this
+# harness so far decoded CHAT-TEMPLATE THINKING PROSE -- more stereotyped than a raw continuation, which
+# flatters the accept rate (the caveat named in LLAMA-MTP-RESULT.md "Caveats, named"). Set it to compare
+# acceptance against this repo's engine on the same raw ids.
+NOCNV=${NOCNV:-}
 
 mkdir -p "$OUT"; rm -f "$OUT"/*.tsv "$OUT"/*.log 2>/dev/null
 
@@ -66,7 +72,7 @@ run_arm() { # $1 prompt-file $2 arm $3 rep -> logfile
   # measurement to a guess. The trace lines cost both arms host I/O (~1 line per draft call), same order
   # on both sides. -p "$(cat file)" rather than -f for the same reason: -f drops to the REPL.
   timeout "${TMO:-420}" "$BIN" -m "$MODEL" -ngl 99 -fa on -c "$CTX" --temp 0 -s 42 \
-      -p "$(cat "$pf")" -n "$NGEN" "${spec[@]}" --log-verbose > "$log" 2>&1
+      ${NOCNV:+-no-cnv} -p "$(cat "$pf")" -n "$NGEN" "${spec[@]}" --log-verbose > "$log" 2>&1
   echo "$log"
 }
 
