@@ -9,6 +9,8 @@ MODEL=${MODEL:-models/Qwen3.5-0.8B}
 IDS=${IDS:-tmp/glue_copy_fold/ab/ids4032.csv}
 STEPS=${STEPS:-32}
 REPS=${REPS:-3}
+ARMS=${ARMS:-base draft accept}
+EXTRA=${EXTRA:-}
 OUT=tmp/mtp_speed
 BIN=${BIN:-engine/build/decode_run}
 mkdir -p "$OUT"
@@ -20,16 +22,15 @@ tools/gpu_lock.sh acquire main-agent mtp-speed || exit 1
 trap 'tools/gpu_lock.sh release main-agent >/dev/null 2>&1' EXIT
 echo "== util at acquire: $(tools/gpu_lock.sh util 2>&1 | tail -1)"
 
-for arm in base draft verify both; do
+for arm in $ARMS; do
   case "$arm" in
-    base)   envline="env" ;;
-    draft)  envline="env QWEN_MTP_DRAFT=1" ;;
-    verify) envline="env QWEN_MTP_VERIFY=1" ;;
-    both)   envline="env QWEN_MTP_DRAFT=1 QWEN_MTP_VERIFY=1" ;;
+    base)    envline="env" ;;
+    draft)   envline="env QWEN_MTP_DRAFT=1" ;;
+    accept)  envline="env QWEN_MTP_DRAFT=1 QWEN_MTP_VERIFY=1 QWEN_MTP_ACCEPT=1" ;;
   esac
   for r in $(seq 1 "$REPS"); do
     log="$OUT/${arm}_${r}.log"; od="$OUT/out_${arm}_${r}"; mkdir -p "$od"
-    $envline "$BIN" --model "$MODEL" --ids-file "$IDS" --steps "$STEPS" --time-stages --out "$od" > "$log" 2>&1
+    $envline "$BIN" --model "$MODEL" --ids-file "$IDS" --steps "$STEPS" --time-stages --out "$od" $EXTRA > "$log" 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then echo "ARM $arm rep $r: rc=$rc (see $log)"; tail -3 "$log" | sed 's/^/    /'; continue; fi
     tk=$(grep -E '^PREFILL' "$log" | head -1 | sed -E 's/.*tokens=([0-9]+).*/\1/')
@@ -37,9 +38,11 @@ for arm in base draft verify both; do
     parity=$(grep -c 'STAGEPARITY .*tokens_identical=1 logits_bitidentical=1' "$log")
     burst=$(grep -E 'gran=burst' "$log" | head -1)
     stage=$(grep 'STAGE gran=stage TOTAL' "$log" | head -1)
+    mtpstat=$(grep '^MTPSTAT' "$log" | head -1)
     echo "ARM $arm rep $r: tokens=$tk parity=$parity"
     echo "    $burst"
     echo "    $stage"
+    [ -n "$mtpstat" ] && echo "    $mtpstat" || echo "    (no MTPSTAT line: arm is off, as expected for base/draft)"
   done
 done
 echo "== util at release: $(tools/gpu_lock.sh util 2>&1 | tail -1)"
