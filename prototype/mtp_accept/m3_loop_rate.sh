@@ -20,6 +20,10 @@ ARGS=()
 [ -n "${LIMIT:-}" ] && ARGS+=(--limit "$LIMIT")
 [ -n "${LOSSLESS:-}" ] && ARGS+=(--lossless "$LOSSLESS")
 [ -n "${MIN_ROUNDS:-}" ] && ARGS+=(--min-rounds "$MIN_ROUNDS")
+# Draft-side conditioning knobs for the accept arm, e.g. EXTRA="--mtp-dense 1". Passed as ONE argv entry
+# with `=` so argparse does not read a leading `--` as the next option. Never applied to the flag-off pair
+# run, which is the greedy reference the stream is adjudicated against.
+[ -n "${EXTRA:-}" ] && ARGS+=(--extra="$EXTRA")
 OUT=${OUT:-/tmp/m3_loop_rate}
 ARGS+=(--out "$OUT" --json "$OUT/m3_loop_rate.json")
 ARGS+=("$@")

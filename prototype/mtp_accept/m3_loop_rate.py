@@ -263,6 +263,12 @@ def main() -> int:
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--limit", type=int, default=0, help="0 = to the end of the population")
     ap.add_argument("--lossless", type=int, default=1, choices=(0, 1))
+    ap.add_argument("--extra", default="",
+                    help="extra accept-arm flags, e.g. '--mtp-dense 1'. Appended to the ACCEPT arm only, "
+                         "never to the flag-off pair run — that run is the greedy reference the stream is "
+                         "adjudicated against, and a draft-side flag must not reach it. Used by "
+                         "prototype/mtp_accept/draft_cond_probe.py's follow-up adjudication of a "
+                         "draft-conditioning knob on the corpus population.")
     ap.add_argument("--min-rounds", type=int, default=400)
     ap.add_argument("--out", default="/tmp/m3_loop_rate")
     ap.add_argument("--json", default="")
@@ -281,6 +287,8 @@ def main() -> int:
           f"(rounds), lossless={args.lossless} ===")
     print(f"population: {len(prompts)} lines from speccheck/fixtures/corpus.txt, cross-checked against "
           f"data/refs/corpus48/manifest.json; driving lines {args.start}..{end - 1}")
+    print(f"accept-arm extra flags: {args.extra if args.extra else '(none — the shipping loop)'}"
+          f"  [appended to the accept arm only, never to the flag-off pair run]")
 
     tot = {"rounds": 0, "accepted": 0, "rejected": 0, "emitted": 0, "plain": 0, "suppressed": 0,
            "bodies": 0}
@@ -298,7 +306,8 @@ def main() -> int:
         tag = f"line {li}"
         ad, bd = out / f"acc{li:02d}", out / f"base{li:02d}"
         rc, log = run_binary(args.binary, args.model, ids_file, ad,
-                             ["--steps", str(args.steps), "--mtp-draft", "1", "--mtp-accept", "1"])
+                             ["--steps", str(args.steps), "--mtp-draft", "1", "--mtp-accept", "1"]
+                             + args.extra.split())
         if rc != 0:
             die(f"{tag}: accept run rc={rc}\n" + "\n".join(log.splitlines()[-6:]))
         if args.lossless:
