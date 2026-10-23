@@ -58,3 +58,36 @@ on different prose. On matched prose there is no accept gap, so **no further dra
 funded**, and the only thing between us and llama.cpp's +9.5 % is 1.3 ms in the round body — which `B1`/`B2`
 already priced the pieces of and came up short on. That is the number to attack next, with the meter, not the
 draft.
+
+## Addendum: why the gain is +2.9 % and llama.cpp's is +9.5 % (meter, same window, templated 4,152)
+
+The `+1.02 %` above came from a 32-round wall, which this repo should not have trusted. Re-run at 128 steps,
+three arms in one lock hold: base 89.798 tok/s (11.136 ms/step), loop 90.062 (+0.29 %, `a` 0.6299), `dense+fan146`
+**92.356 (+2.85 %, `a` 0.7008)**. The long-window accept at 256 rounds was 0.7349, so short windows are
+systematically pessimistic for this knob and any future adopt run must say how many rounds it ran.
+
+The meter on the loop route at this fixture (per round): body **11.914**, head **2.204**, draft **3.639**,
+verdict kernel 0.308, readback 0.014, rollback 0.037 — sum 18.115 ms, against `DECWALL`'s 10.826 ms/token
+× 1.68 tokens/round = 18.19. Against llama.cpp's split (draft 3.423, verify-including-its-own-head 13.738,
+round 17.161, step 10.865):
+
+| term | ours, as a fraction of OUR step | llama.cpp, as a fraction of ITS step |
+|---|---|---|
+| verify side (2-row body + head pass) | 14.118 = **1.268** | 13.738 = **1.264** |
+| draft (incl. its own head pass) | 3.639 = **0.327** | 3.423 = **0.315** |
+| verdict machinery (kernel + readback + rollback/round) | **0.359** | folded into its verify |
+| round/step | **1.65** | **1.579** |
+
+So there is no 1.3 ms bug to find: the verify side and the draft are each within 1–4 % of llama.cpp's, and the
+difference is the 0.36 ms of verdict/rollback work llama hides inside its graph, plus our base step being ~2 %
+slower. Both head passes (verify 2.204, and ~2 ms inside the draft) are bandwidth floors on the same tied
+485 MiB table and llama.cpp pays both too — they cannot be merged, because the candidate the draft emits is an
+*input* to the next body.
+
+Two consequences, in order of size. (1) **k=1 has a hard ceiling of `2/1.65 = +21 %`** and every 0.01 of accept
+is worth ~0.6 %, so at `a` 0.70 the arithmetic allows only what it allows; llama.cpp's headline **+13.6 % was
+`mtp2`** (three candidates per round), which this engine does not implement. (2) k=2 is not automatically the
+answer: the draft cost scales linearly with k (llama's went 3.423 → 6.778), so a 3-row round here would cost
+≈22.7 ms = 2.04 step and needs `tok/round > 2.14` to beat what k=1 does today — which needs the *second*
+position's accept near 0.5, a number nobody in this repo has measured. That is the next experiment, not more
+draft conditioning.
