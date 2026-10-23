@@ -66,7 +66,7 @@ void free_side(Side& s) {
 }
 
 Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& sc, Side& side,
-                   int cur, int candidate) {
+                   int cur, int candidate, engine::mtpverify::Route route) {
     if (sc.wave_rows < kRows) {
         throw std::runtime_error("accept_round: the scratch is " + std::to_string(sc.wave_rows) +
                                  " rows tall and the round needs " + std::to_string(kRows));
@@ -87,18 +87,36 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
     Round r;
     r.anchor_before = anchor;
 
-    // THE ROUTE FORCING, for the same reason and with the same words as `mtp_verify.cpp`: a one-row
-    // decode body is the hand GEMV and the sequential scan BY RULE, so those are the bits row 0 has to
-    // be, and a width-2 body left on the library route would take hipBLAS's N=2 solution — legal,
-    // in-band, and not the kernel chain the shipping step ran. The forced `kSeq` is also what the
-    // checkpoint requires: `kCollapse` and `kChunk` submit one recurrence launch per body and so have
-    // no row-0 boundary for the copy to sit at.
+    // THE ROUTE FORCING, for the same reason and with the same words as `mtp_verify.cpp`: under `kHand` a
+    // one-row decode body is the hand GEMV and the sequential scan BY RULE, so those are the bits row 0 has
+    // to be, and a width-2 body left on the library route would take hipBLAS's N=2 solution — legal,
+    // in-band, and not the kernel chain the shipping step ran. Under `kAmortised` the scratch's own resolved
+    // route stands, which is the route `prototype/mtp_accept/ROW-SCALE.md` measured at 1.09-1.13 of a step
+    // and therefore the route the round has to be priced on.
     const kernels::WaveGemm gemm = sc.wave_gemm;
     const kernels::GdnScan scan = sc.gdn_scan;
     const DecodeScratch::GdnCheckpoint* saved_ckpt = sc.gdn_ckpt;
-    sc.wave_gemm = kernels::WaveGemm::kHand;
-    sc.gdn_scan = kernels::GdnScan::kSeq;
+    if (route == engine::mtpverify::Route::kHand) {
+        sc.wave_gemm = kernels::WaveGemm::kHand;
+        sc.gdn_scan = kernels::GdnScan::kSeq;
+    } else if (sc.gdn_scan != kernels::GdnScan::kSeq) {
+        // The other half of the forcing the route switch does NOT reach, and deliberately a refusal rather
+        // than a silent override: this round always arms the mid-round checkpoint, and that checkpoint only
+        // exists as an address when the recurrence walks one token-step per launch (`kCollapse` submits one
+        // recurrence launch per body, so there is no row-0 boundary for the copy to sit at). Serving a
+        // `collapse` round a seq scan would make a named flag inert; restoring a state the body never wrote
+        // would emit wrong tokens. `decode_run.cpp` refuses the pair at the flag; this is the guard for any
+        // caller that did not come through the flag.
+        throw std::runtime_error("accept_round: an amortised round restores a mid-round checkpoint, which"
+                                 " is a one-token-step sequential recurrence's end state; the driver"
+                                 " resolved gdn_scan="
+                                 + std::string(kernels::gdn_scan_name(sc.gdn_scan)));
+    }
     sc.gdn_ckpt = &side.ck;
+    // The route in force for this round, read off the scratch AFTER the decision above and before anything
+    // restores it, so the driver's `MTPSTAT` echo reports the launch sequence rather than the flag.
+    r.gemm_ran = sc.wave_gemm;
+    r.scan_ran = sc.gdn_scan;
 
     const auto restore_knobs = [&sc, gemm, scan, saved_ckpt] {
         sc.wave_gemm = gemm;

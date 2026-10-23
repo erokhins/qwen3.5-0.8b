@@ -130,6 +130,21 @@ struct Options {
     // submits nothing extra.
     int mtp_midsplit = 0;
 
+    // Which weight walk and which GDN scan the MTP body runs — `--mtp-route hand|amortised`
+    // (`engine/mtp_verify.h`'s "WHY THAT FORCING IS A FLAG NOW"). `hand` is the default and keeps today's
+    // launch sequence byte for byte: the body forces the hand GEMV and the sequential scan so its row 0 is
+    // the same kernel chain the one-row step ran, which is what makes `row0_eq_step` a claim at all.
+    // `amortised` leaves the scratch's own resolved route in place — the route a wide body takes everywhere
+    // else, which `prototype/mtp_accept/ROW-SCALE.md` measured at 1.09–1.13 of a step against the forced
+    // route's 2.085 — so the round can be priced on the route that makes speculation pay, before anyone
+    // builds a k=2 loop on top of the expensive one. It is not owed bit-identity with the step and gains no
+    // new band: the existing gates judge it and its divergence is REPORTED. Parse-or-throw like every flag
+    // that names a side of an A/B, and echoed on `VERIFY2`/`MTPSTAT` together with the route that ACTUALLY
+    // ran, because a flag that silently did not take would price one route twice and report the second
+    // price as the other route's (`AGENTS.md`: a stale binary agrees with itself).
+    engine::mtpverify::Route mtp_route = engine::mtpverify::Route::kHand;
+    bool mtp_route_given = false;
+
     // §09 / M2: the ACCEPT loop (`engine/mtp_accept.h`). Speculative decoding at k = 1: the draft's
     // proposal is verified by the 2-row body and accepted or rejected ON DEVICE, so a round emits one or
     // two tokens. Default off, and off means this pointer is never allocated (§4g's inertness argument).
@@ -607,6 +622,12 @@ Options parse_args(int argc, char** argv) {
                                          " arm: the second body runs UNSPLIT), got '" + v + "'");
             }
             o.mtp_midsplit = std::atoi(v.c_str());
+        } else if (a == "--mtp-route") {
+            // Parses or throws: this names which side of the route A/B the run is, and a typo that silently
+            // became `hand` would price the hand route twice and report the second price as the amortised
+            // one — the exact null this repo has been bitten by before.
+            o.mtp_route = engine::mtpverify::parse_route(next());
+            o.mtp_route_given = true;
         } else if (a == "--verify-candidate") {
             o.verify_candidate = next();
             o.verify_candidate_given = true;
@@ -1223,6 +1244,30 @@ Options parse_args(int argc, char** argv) {
                                  std::to_string(engine::mtpaccept::kRows) + " rows tall; this run's"
                                  " --wave-rows is " + std::to_string(o.wave_rows));
     }
+    // ---- the route switch's refusals (`engine/mtp_verify.h`'s Route) -------------------------------
+    if (o.mtp_route_given && !o.mtp_verify && !o.mtp_accept) {
+        // The `--mtp-sched` precedent, keyed on `given` so a bare run is never refused: `--mtp-route`
+        // chooses the route of a body, and with no body running there is nothing for it to choose. Saying so
+        // beats echoing a knob that did nothing.
+        throw std::runtime_error("--mtp-route chooses which route a verify/accept body runs; with"
+                                 " --mtp-verify 0 and --mtp-accept 0 there is no such body. Name one of"
+                                 " them with it, or drop it");
+    }
+    if (o.mtp_route == engine::mtpverify::Route::kAmortised &&
+        o.gdn_scan != engine::kernels::GdnScan::kSeq && (o.mtp_accept || o.mtp_midsplit)) {
+        // The route switch moves the route; it does not move the mid-round CHECKPOINT's requirement, which is
+        // that the recurrence walk one token-step per launch so "the state after row 0" exists at an address
+        // a restore can read — the same reason `--mtp-accept` pins `--gdn-loop 1` above. An amortised round on
+        // `collapse` would restore a state the body never wrote, which is a wrong token stream rather than a
+        // red comparison, so it is refused at the flag instead of being served a silently re-forced seq scan.
+        // `seq` is the default, so the amortised route still moves the GEMM, which is where the cost is.
+        throw std::runtime_error("--mtp-route amortised with --gdn-scan " +
+                                 std::string(engine::kernels::gdn_scan_name(o.gdn_scan)) +
+                                 " cannot also arm a mid-round checkpoint (--mtp-accept / --mtp-midsplit):"
+                                 " that checkpoint is a one-token-step sequential recurrence's end state."
+                                 " Drop --gdn-scan (seq is the default) to price the amortised route, or"
+                                 " keep the scan and use --mtp-route hand");
+    }
     if (o.state_fp && (o.session || o.sizes_only)) {
         // A session has no single end condition to fingerprint — `feed` and `gen` boundaries are the
         // caller's, and a resident process cannot know which one a gate wants — and --sizes-only
@@ -1434,6 +1479,12 @@ struct VerifySide {
     engine::mtpverify::LaneStage lanes;
     engine::mtpverify::Stats stats;
     float* logits_dev = nullptr;      // [kRows][kVocab] F32, the shadow's own logits tile
+    // Which route this run asked the body to run (`--mtp-route`), and the route the bodies ACTUALLY ran,
+    // recorded off the first round's `Result`. Both are printed: the first says what was asked, the second
+    // is the canary that it happened (`AGENTS.md`: a stale binary agrees with itself).
+    engine::mtpverify::Route route = engine::mtpverify::Route::kHand;
+    engine::kernels::WaveGemm gemm_ran = engine::kernels::WaveGemm::kHand;
+    engine::kernels::GdnScan scan_ran = engine::kernels::GdnScan::kSeq;
     bool guard = false;               // `--verify-guard 1`: see `engine/mtp_verify.h`'s witness section
     // `--mtp-midsplit 1`: V1's mid-round checkpoint regions, and the device status word the verdict
     // kernel writes. Allocated only under the flag, because a witness that costs memory when off is a
@@ -1493,9 +1544,11 @@ void verify_round(VerifySide& v, const engine::WeightStore& store, engine::Decod
         engine::mtpverify::poison_kv_lane(st, poison_lane);
     }
             const engine::mtpverify::Result r = engine::mtpverify::verify_body(
-                store, st, sc, v.snap, anchor_pos, tokens, v.logits_dev, v.lanes,
+                store, st, sc, v.route, v.snap, anchor_pos, tokens, v.logits_dev, v.lanes,
                 v.guard ? &body_reads : nullptr, v.guard ? &poison : nullptr, nullptr,
                 v.midsplit != 0);
+    v.gemm_ran = r.gemm_ran;
+    v.scan_ran = r.scan_ran;
     v.stats.rounds++;
     v.stats.snapshot_bytes += v.snap.bytes();
     v.stats.restored_bytes += v.snap.bytes();   // the shadow is seeded every round, not only on a reject
@@ -1503,11 +1556,15 @@ void verify_round(VerifySide& v, const engine::WeightStore& store, engine::Decod
     v.stats.kv_bytes_left = engine::mtpverify::kv_bytes_above_prefix(st);
     std::printf("VERIFY2 step=%d anchor_pos=%d fed=%d candidate=%d row0=%d row1=%d row0_top=%.9g"
                 " row1_top=%.9g row0_eq_step=%d head_passes=%d d2h=%d logits_bytes=%lld"
-                " checkpoint_bytes=%lld lane_revert_bytes=%lld guard=%d\n",
+                " checkpoint_bytes=%lld lane_revert_bytes=%lld guard=%d"
+                " mtp_route=%s gemm=%s gdn_scan=%s\n",
                 step, anchor_pos, fed, candidate, r.token[0], r.token[1], r.top[0], r.top[1],
                 r.token[0] == step_token ? 1 : 0, r.head_passes, r.d2h_count,
                 (long long)r.bytes_read_back, (long long)v.snap.bytes(), (long long)r.lane_bytes,
-                v.guard ? 1 : 0);
+                v.guard ? 1 : 0,
+                engine::mtpverify::route_name(v.route),
+                engine::kernels::wave_gemm_name(r.gemm_ran),
+                engine::kernels::gdn_scan_name(r.scan_ran));
     std::fflush(stdout);
     if (v.guard) {
         const engine::mtpverify::StateBytes live_after =
@@ -1556,7 +1613,7 @@ void verify_round(VerifySide& v, const engine::WeightStore& store, engine::Decod
         // witness bug — the second call seeing inputs the first did not — and not a result about the
         // split. Running it is what makes mode 1's number readable, and it costs one more body.
         const engine::mtpverify::Result s = engine::mtpverify::verify_body(
-            store, st, sc, v.snap, anchor_pos, tokens, v.logits_dev, v.lanes,
+            store, st, sc, v.route, v.snap, anchor_pos, tokens, v.logits_dev, v.lanes,
             nullptr, nullptr, v.midsplit == 1 ? &v.mid : nullptr,
             /*capture_end_state=*/true, v.verdict_dev);
         v.split_rounds++;
@@ -1634,12 +1691,15 @@ void verify_census_line(const VerifySide& v, const std::string& restore_witness)
     std::printf("VERIFY2DONE on=1 rows=%d rounds=%lld checkpoint_bytes_per_round=%lld"
                 " restored_bytes=%lld lane_revert_bytes_per_round=%lld lane_revert_bytes=%lld"
                 " kv_bytes_above_prefix=%lld head=batched d2h_per_round=1"
-                " gemm=hand gdn_scan=seq guard=%d guard_bytes=%lld restore_witness=%s\n",
+                " mtp_route=%s gemm=%s gdn_scan=%s guard=%d guard_bytes=%lld restore_witness=%s\n",
                 engine::mtpverify::kRows, (long long)v.stats.rounds, (long long)v.snap.bytes(),
                 (long long)v.stats.restored_bytes,
                 v.stats.rounds ? (long long)v.stats.lane_bytes / (long long)v.stats.rounds : 0LL,
                 (long long)v.stats.lane_bytes,
                 (long long)v.stats.kv_bytes_left,
+                engine::mtpverify::route_name(v.route),
+                engine::kernels::wave_gemm_name(v.gemm_ran),
+                engine::kernels::gdn_scan_name(v.scan_ran),
                 v.guard ? 1 : 0, (long long)v.stats.guard_bytes,
                 restore_witness.empty() ? "identical" : restore_witness.c_str());
     std::fflush(stdout);
@@ -1804,7 +1864,7 @@ void print_usage(FILE* out) {
                  " [--gdn-geom block|wf4|wf2|reg16]"
                  " [--mtp-draft 0|1] [--mtp-sched loop|every] [--mtp-cap N]"
                  " [--mtp-verify 0|1] [--verify-candidate ID|sampled] [--verify-guard 0|1]"
-                 " [--mtp-midsplit 0|1|2] [--mtp-accept 0|1]"
+                 " [--mtp-midsplit 0|1|2] [--mtp-accept 0|1] [--mtp-route hand|amortised]"
                  " [--time-stages] [--time-waves] [--load-verify] [--sizes-only]\n"
                  "  --gemm library|hand  which GEMM a WIDE body runs (route (c)). `library` is the"
                  " default and sends the ten fat prefill"
@@ -2160,10 +2220,12 @@ void print_usage(FILE* out) {
                  " (`lm_head_batched_xbf16`) and ONE logits download, and argmaxes both with §03.4's rule."
                  " The target's own state is never the shadow, so there is nothing to commit: this is the"
                  " body and its cost, NOT the accept loop, and it changes no emitted token (that loop is"
-                 " the next increment). It forces the hand GEMM and the sequential GDN scan for its own"
-                 " body, because a one-row decode step runs those by rule and row 0 has to reproduce them"
-                 " bit for bit. Prints `VERIFY2 step= anchor_pos= fed= candidate= row0= row1= row0_top="
-                 " row1_top= row0_eq_step= head_passes= d2h= logits_bytes= checkpoint_bytes= guard=` per"
+                 " the next increment). Under --mtp-route hand (the default) it forces the hand GEMM and"
+                 " the sequential GDN scan for its own body, because a one-row decode step runs those by"
+                 " rule and row 0 has to reproduce them bit for bit; --mtp-route amortised leaves the"
+                 " run's own resolved route in place (see below). Prints `VERIFY2 step= anchor_pos= fed="
+                 " candidate= row0= row1= row0_top= row1_top= row0_eq_step= head_passes= d2h="
+                 " logits_bytes= checkpoint_bytes= guard= mtp_route= gemm= gdn_scan=` per"
                  " round, writes `verify2_<step>.bin` (F32, [2][vocab]) beside the other dumps when --out"
                  " is given, and ends with a `VERIFY2DONE` census line carrying the per-round checkpoint"
                  " bytes, the bytes left above `prefix_len`, and the restore witness. Refused with"
@@ -2238,6 +2300,22 @@ void print_usage(FILE* out) {
                  " — more context than the loop ever gives a draft, and the gap between the two numbers"
                  " is that difference measured rather than assumed. Parsed or throws; refused if"
                  " --mtp-draft is off\n"
+                 "  --mtp-route hand|amortised  which weight walk and which GDN scan the MTP body runs"
+                 " (`engine/mtp_verify.h`'s Route). `hand` is the DEFAULT and is today's launch sequence"
+                 " byte for byte: the body forces the hand GEMV and the sequential scan so its row 0 is"
+                 " the kernel chain the one-row step ran, which is what makes `row0_eq_step` an admissible"
+                 " ask. `amortised` leaves the run's own resolved route in place — the route a wide body"
+                 " takes everywhere else — which `prototype/mtp_accept/ROW-SCALE.md` measured at 1.09-1.13"
+                 " of a step against the forced route's 2.085, i.e. the route the round has to be priced"
+                 " on. It is NOT owed bit-identity with the step, gains no new band, and widens no gate"
+                 " threshold: the existing gates judge it and its divergence is reported"
+                 " (`prototype/mtp_verify/rowdiff.py`). Refused when neither --mtp-verify nor --mtp-accept"
+                 " is on (there is no body to route), and refused together with `--gdn-scan collapse`"
+                 " under either, because the round's mid-round checkpoint is a one-token-step sequential"
+                 " recurrence's end state. Echoed as `mtp_route=` beside `gemm=`/`gdn_scan=` on every"
+                 " `VERIFY2` line, on `VERIFY2DONE`, and on `MTPSTAT` — the latter two name the route that"
+                 " ACTUALLY ran, not the flag, so a switch that never took cannot report the arm it did"
+                 " not run\n"
                  "  --mtp-cap N  lanes allocated for the draft block's own 1-layer KV cache (512 by"
                  " default). The one-pass attention form refuses beyond `mtp_attn_max_lanes()`, and a"
                  " round past the ceiling is counted as `DRAFT-SKIP reason=...` rather than served a"
@@ -3215,6 +3293,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<VerifySide> verify;
         if (o.mtp_verify) {
             verify = std::make_unique<VerifySide>();
+            verify->route = o.mtp_route;
             verify->guard = o.verify_guard != 0;
             verify->midsplit = o.mtp_midsplit;
             verify->midsplit_mode = o.mtp_midsplit != 0;
@@ -3284,6 +3363,11 @@ int main(int argc, char** argv) {
         // reserved, and the generation loop below takes the branch it took before the flag existed.
         std::unique_ptr<engine::mtpaccept::Side> aside;
         engine::mtpaccept::Stats astats;
+        // The route the rounds actually ran, off each round's `Round` (it cannot vary within a run: the flag
+        // and the scratch are fixed before the first round). Printed on `MTPSTAT` beside the flag so a binary
+        // that ignored the switch cannot report the amortised arm while launching the hand chain.
+        const char* accept_gemm_ran = "-";
+        const char* accept_scan_ran = "-";
         std::FILE* emit_log = nullptr;
         int pending_candidate = -1;   // the draft's proposal for the next position; -1 = nothing pending
         int pending_pos = -1;         // the position that proposal is for, echoed on the round line
@@ -3477,7 +3561,10 @@ int main(int argc, char** argv) {
                     // an accept run, and `DECWALL note=emitted_vs_verdict_tally` is what caught it.
                 } else {
                     const engine::mtpaccept::Round ar =
-                        engine::mtpaccept::accept_round(store, st, sc, *aside, token, pending_candidate);
+                        engine::mtpaccept::accept_round(store, st, sc, *aside, token,
+                                                       pending_candidate, o.mtp_route);
+                    accept_gemm_ran = engine::kernels::wave_gemm_name(ar.gemm_ran);
+                    accept_scan_ran = engine::kernels::gdn_scan_name(ar.scan_ran);
                     engine::mtpaccept::tally(astats, *aside, ar);
                     gen_bodies++;   // one round is one 2-row body, whatever it emits
                     mtp->adjudicated++;
@@ -3782,7 +3869,9 @@ int main(int argc, char** argv) {
         // this line is an arithmetically consistent rate or nothing (`engine/mtp_accept.h`).
         if (aside) {
             if (pending_candidate >= 0) mtp->unadjudicated++;   // proposed, never settled: no next round
-            std::printf("MTPSTAT %s\n", engine::mtpaccept::describe(astats).c_str());
+            std::printf("MTPSTAT route=%s gemm=%s gdn_scan=%s %s\n",
+                        engine::mtpverify::route_name(o.mtp_route), accept_gemm_ran, accept_scan_ran,
+                        engine::mtpaccept::describe(astats).c_str());
             std::fflush(stdout);
             engine::mtpaccept::free_side(*aside);
         }

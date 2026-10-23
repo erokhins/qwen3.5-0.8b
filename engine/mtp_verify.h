@@ -61,6 +61,26 @@
 // take hipBLAS's own solution for N=2 — legal, in-band, and NOT bit-identical (that is what D-11's band
 // is for). Forcing hand + seq makes the verify body's row 0 the same kernel chain the decode step ran,
 // which is what makes "row 0 bit-identical to today's step" a claim that can be true at all.
+//
+// WHY THAT FORCING IS A FLAG NOW, AND WHAT EACH SIDE OWES. `prototype/mtp_accept/ROW-SCALE.md` measured
+// that the forcing — not the row count — is the round's cost: the same body over a populated 4k cache runs
+// at 1.09–1.13 of a step on the amortising route and at 2.085 on the forced one. So the choice is named
+// (`--mtp-route hand|amortised`, `Route` below) rather than baked in.
+//
+//   `hand` is the DEFAULT and is today's launch sequence bit for bit: the forcing is applied, so flag-off
+//       byte-identity against a pre-flag binary stays a byte-compare rather than an argument.
+//   `amortised` leaves the scratch's own resolved route in place, i.e. the body runs the route a wide body
+//       takes everywhere else. It is NOT owed bit-identity with the one-row step — that is `hand`'s claim,
+//       and giving it to both sides would make the switch a no-op. The bands already in `engine/gate.py`
+//       judge it; no band is widened and no gate threshold moved for it. Its divergence, whatever it is,
+//       is reported (see `prototype/mtp_verify/rowdiff.py`), not gated away.
+//
+// ONE FORCING THE SWITCH DOES NOT REACH, because it is not a route choice: the mid-round CHECKPOINT
+// (`--mtp-accept`, and `--mtp-midsplit 1`) needs a one-token-step `kSeq` recurrence, because at any other
+// span one launch walks both rows inside one kernel and "the state after row 0" exists at no address a
+// restore could read (`decode_step.cpp`'s `gdn_span` forcing says the same thing from the launcher side).
+// So an amortised round over a non-seq scan is refused at the flag rather than silently served a seq scan —
+// `decode_run.cpp`'s refusal, and `verify_body`/`accept_round` throw if a checkpoint is ever armed over one.
 
 #include <cstdint>
 #include <string>
@@ -74,6 +94,18 @@ namespace engine::mtpverify {
 // The funded width. One value, because one shape was priced; `kernels::lm_head_batched_xbf16` refuses any
 // other and says so.
 constexpr int kRows = 2;
+
+// Which weight walk and which GDN scan a body of this shape runs — see "WHY THAT FORCING IS A FLAG NOW"
+// above for what each side is and owes. One spelling, shared by `verify_body` and `accept_round` (the same
+// reason `kRows` is shared rather than duplicated), so the flag and the two bodies cannot drift to three
+// different meanings of "the cheap route".
+enum class Route { kHand, kAmortised };
+
+// `hand` / `amortised`, parsed or thrown. A value that silently became the default would price one route
+// twice and report the second price as the other route's, which is the standing reason every A/B-naming
+// flag in this engine parses-or-throws rather than coercing.
+Route parse_route(const std::string& name);
+const char* route_name(Route r);
 
 // The per-round checkpoint: device buffers the size of everything a second row can dirty and a length
 // field cannot undo. Allocated once per run, reused per round, exactly like the draft's arena.
@@ -155,6 +187,9 @@ void free_lane_stage(LaneStage& ls);
 // and with `body_reads` non-null the driver also gets back, in bytes, what the shadow actually held at the
 // moment the body started, which is the only witness of that claim that is not a restatement of it.
 // `logits_dev` is a device buffer of at least kRows*kVocab floats owned by the caller (allocated once).
+// `route` decides whether the hand-GEMV / seq-scan forcing is applied (`kHand`, today's launch sequence)
+// or the scratch's own resolved route is left in place (`kAmortised`); whatever ended in force comes back
+// on `Result::gemm_ran` / `scan_ran`, so the caller prints what ran, not what was asked for.
 struct Result {
     std::vector<float> logits;      // [kRows][kVocab], downloaded in ONE blocking D2H
     int token[kRows] = {-1, -1};    // §03.4's argmax per row, ties to the LOWEST id
@@ -179,6 +214,12 @@ struct Result {
     // agrees with `argmax_greedy` on the same tile, tie rule included.
     int verdict[4] = {-1, -1, -1, -1};
     long long verdict_bytes = 0;
+    // The route the body ACTUALLY ran, read off the scratch inside the call. Not a restatement of the
+    // flag: the flag proves the parse, these prove the launch sequence, and a stale or inert binary agrees
+    // with itself on everything except a field taken from the object the kernels were configured from
+    // (`AGENTS.md`: a paired A/B against a stale binary reads as a clean null).
+    kernels::WaveGemm gemm_ran = kernels::WaveGemm::kHand;
+    kernels::GdnScan scan_ran = kernels::GdnScan::kSeq;
 };
 // `ckpt`, when non-null, arms the M2 mid-round checkpoint for this body (`decode_step.h`'s
 // `GdnCheckpoint`): the conv rolls row 0's window into it and the recurrence hands it each layer's
@@ -186,7 +227,8 @@ struct Result {
 // is a parameter rather than a field of `Snapshot` because the probe and the accept round own those
 // regions differently — the probe's are a witness's, the round's are its rollback.
 Result verify_body(const WeightStore& weights, const RequestState& target, DecodeScratch& sc,
-                   const Snapshot& snap, int anchor_pos, const int* tokens, float* logits_dev,
+                   Route route, const Snapshot& snap, int anchor_pos, const int* tokens,
+                   float* logits_dev,
                    LaneStage& lanes, StateBytes* body_reads = nullptr,
                    PoisonReport* tail_poison = nullptr,
                    const DecodeScratch::GdnCheckpoint* ckpt = nullptr,

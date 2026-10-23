@@ -34,6 +34,25 @@ namespace {
 constexpr const char* kHead = "lm_head.weight";   // the tied table, same name `decode_step.cpp` resolves
 }  // namespace
 
+Route parse_route(const std::string& name) {
+    if (name == "hand") return Route::kHand;
+    if (name == "amortised") return Route::kAmortised;
+    throw std::runtime_error("--mtp-route takes `hand` (the forced hand GEMV + sequential scan, the"
+                             " default and today's launch sequence byte for byte) or `amortised` (the"
+                             " scratch's own resolved route, i.e. what a wide body runs everywhere else);"
+                             " got '" + name + "'. Refusing rather than guessing, because this names"
+                             " which side of the route A/B the run is"
+                             " (`prototype/mtp_accept/ROW-SCALE.md`)");
+}
+
+const char* route_name(Route r) {
+    switch (r) {
+        case Route::kHand: return "hand";
+        case Route::kAmortised: return "amortised";
+    }
+    return "invalid";
+}
+
 Snapshot allocate_snapshot(const RequestState& st) {
     const StateSizes s = st.sizes();
     Snapshot sn;
@@ -324,7 +343,8 @@ long long kv_bytes_above_prefix(const RequestState& st) {
 }
 
 Result verify_body(const WeightStore& weights, const RequestState& target, DecodeScratch& sc,
-                   const Snapshot& snap, int anchor_pos, const int* tokens, float* logits_dev,
+                   Route route, const Snapshot& snap, int anchor_pos, const int* tokens,
+                   float* logits_dev,
                    LaneStage& lanes, StateBytes* body_reads, PoisonReport* tail_poison,
                    const DecodeScratch::GdnCheckpoint* ckpt, bool capture_end_state,
                    int* verdict_dev) {
@@ -364,20 +384,35 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
         *body_reads = capture_state_bytes(sh, tokens[0]);
     }
 
-    // THE ROUTE FORCING — see the header's last paragraph. A one-row decode body is the hand GEMV and the
-    // sequential scan by rule, so a 2-row body that took hipBLAS or the chunked scan could not be
-    // bit-compared against the step it is supposed to reproduce. Restored on every exit path, including a
-    // throw, or the driver's own following steps would silently run the verify arm's route.
+    // THE ROUTE FORCING — see the header's "WHY THE BODY FORCES…" and "WHY THAT FORCING IS A FLAG NOW"
+    // paragraphs. Under `kHand` a 2-row body is forced to the hand GEMV and the sequential scan, which is
+    // what makes row 0 the same kernel chain the decode step ran and keeps the pre-flag launch sequence
+    // byte for byte. Under `kAmortised` nothing is overridden: the scratch already carries the route the
+    // driver resolved, i.e. the one a wide body takes everywhere else. Restored on every exit path,
+    // including a throw, or the driver's own following steps would silently run the verify arm's route.
     const kernels::WaveGemm gemm = sc.wave_gemm;
     const kernels::GdnScan scan = sc.gdn_scan;
     const DecodeScratch::GdnCheckpoint* saved_ckpt = sc.gdn_ckpt;
-    sc.wave_gemm = kernels::WaveGemm::kHand;
-    sc.gdn_scan = kernels::GdnScan::kSeq;
+    if (route == Route::kHand) {
+        sc.wave_gemm = kernels::WaveGemm::kHand;
+        sc.gdn_scan = kernels::GdnScan::kSeq;
+    } else if (ckpt != nullptr && sc.gdn_scan != kernels::GdnScan::kSeq) {
+        // Loud, not silent: the checkpoint IS a one-token-step recurrence's end state, so an amortised body
+        // on `collapse` would capture a state the round never wrote and hand the caller a plausible restore.
+        // `decode_run.cpp` refuses this pair at the flag; this is the guard for any other caller.
+        throw std::runtime_error(std::string("mtp_verify: an amortised body with a mid-round checkpoint")
+                                 + " must run the sequential scan; the driver resolved gdn_scan="
+                                 + kernels::gdn_scan_name(sc.gdn_scan));
+    }
     // Arming the split, when the caller asked for it. Null here is today's launch sequence with one
     // null test per GDN layer, which is why the probe's flag-off byte-identity is unaffected.
     sc.gdn_ckpt = ckpt;
 
     Result r;
+    // What is in force for THIS body, read off the scratch it was just configured from rather than
+    // restated from the flag, so the driver's echo cannot be satisfied by a flag that never took.
+    r.gemm_ran = sc.wave_gemm;
+    r.scan_ran = sc.gdn_scan;
     try {
         // THE ANCHOR-LANE REVERT. A 2-row body re-stages row 0's own KV lane, and that lane is inside the
         // live prefix: the step that produced the fed token already wrote those bytes. It cannot simply be

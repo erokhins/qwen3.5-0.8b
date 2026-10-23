@@ -99,6 +99,11 @@ struct Round {
     long long restored_bytes = 0;
     int anchor_before = 0;     // the position the round started at
     int anchor_after = 0;      // p+2 on an accept, p+1 on a reject
+    // The route the round ACTUALLY ran, off the scratch the body was configured from, not off the flag —
+    // the same canary `mtpverify::Result` carries, for the same reason: a stale or inert binary agrees
+    // with itself about everything except what its launchers were told.
+    kernels::WaveGemm gemm_ran = kernels::WaveGemm::kHand;
+    kernels::GdnScan scan_ran = kernels::GdnScan::kSeq;
 };
 
 // Run one accept round on the LIVE state. `candidate` is the draft block's proposal for position
@@ -109,8 +114,14 @@ struct Round {
 // not be the kernel chain the one-row decode step runs, and the whole claim that row 0 is the shipping
 // step rests on that forcing (`engine/mtp_verify.h`'s last paragraph). The knobs are restored on every
 // exit path including a throw, for the same reason.
+//
+// `route` is `mtpverify::Route` rather than a second spelling: `kHand` applies that forcing (the default,
+// and today's launch sequence byte for byte); `kAmortised` leaves the scratch's own resolved route alone,
+// which is what `prototype/mtp_accept/ROW-SCALE.md` needs priced. The mid-round checkpoint this round
+// restores from is a one-token-step recurrence's product, so an amortised round over a non-`seq` scan
+// throws rather than restoring a state the body never wrote.
 Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& sc, Side& side,
-                   int cur, int candidate);
+                   int cur, int candidate, engine::mtpverify::Route route);
 
 // Round counters, printed as one line so the cost and the accept rate are both numbers a reviewer can
 // re-derive. `mean_emit` is the headline: tokens emitted per round, which is what the plan's `(1+a)`
