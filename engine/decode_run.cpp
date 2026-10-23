@@ -37,6 +37,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <array>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -177,6 +179,22 @@ struct Options {
     // `mtp_attn_max_lanes()` of them, so the usable ceiling is the smaller of the two and a round past
     // it is REFUSED and counted (`DRAFT-SKIP`), not silently served a shorter cache.
     int mtp_cap = 512;
+    // How many draft-block ROWS one drafted position gets. `1` is the shipped path and the default: one
+    // block call, one proposal. `k>1` feeds each proposal back into the block as the next row's `y_next`
+    // and the block's OWN output row `x_d` as the next row's `h` — there is no target row to read behind
+    // a token the target never fed — which is the feedback llama.cpp's draft-mtp uses
+    // (`engines/llama.cpp/common/speculative.cpp:1770-1783`: `id_sampled` plus
+    // `llama_get_embeddings_nextn_ith(ctx_dft, i_last)`, at position `pos0 + i + 1`). Every row is a
+    // whole round: 16 submissions including its own head pass and vocabulary D2H
+    // (`kSubmissionsPerRound`), so this is a cost of k x 16 per drafted position, not k x a fraction.
+    //
+    // It exists to MEASURE the second position's accept rate — the number that decides whether a k=2
+    // round is worth building — and not to ship speculation: `--mtp-accept` still consumes exactly one
+    // candidate per round (its body is `kRows` = 2) and refuses k>1 rather than price rows nothing
+    // verifies. Default-off and named-by-flag: with the flag absent nothing below allocates, runs or
+    // prints, which is what keeps flag-off byte identity a fact about the code path.
+    int mtp_draft_k = 1;
+    bool mtp_draft_k_given = false;
     // On an ACCEPT the round consumes two positions and the loop appends one draft lane, so the draft
     // cache skips a position and every lane behind it sits one rope step further from its neighbour than
     // the block was trained to see. llama.cpp's draft context has no such hole: its catch-up feeds
@@ -634,6 +652,20 @@ Options parse_args(int argc, char** argv) {
         } else if (a == "--mtp-cap") {
             o.mtp_cap = std::atoi(next().c_str());
             if (o.mtp_cap < 1) throw std::runtime_error("--mtp-cap needs at least one lane");
+        } else if (a == "--mtp-draft-k") {
+            // Parses or throws, like every flag that names which side of an A/B a run is on: a `5` that
+            // silently became the default would print a k=1 ladder under a k=5 label. Capped at 4 because
+            // the `DRAFTK` line carries exactly four (t,c,hit) triples and a reader that silently got
+            // fewer fields than it asked for is this repo's oldest failure.
+            const std::string v = next();
+            const int kk = std::atoi(v.c_str());
+            if (kk < 1 || kk > 4) {
+                throw std::runtime_error("--mtp-draft-k takes 1 (the shipped single proposal), 2, 3 or 4"
+                                         " draft-block rows per drafted position, got '" +
+                                         v + "'");
+            }
+            o.mtp_draft_k = kk;
+            o.mtp_draft_k_given = true;
         } else if (a == "--mtp-dense") {
             // Parses or throws, like every flag that names which side of an A/B a run is on.
             const std::string v = next();
@@ -1249,6 +1281,56 @@ Options parse_args(int argc, char** argv) {
                                  " retain (the flag could only be inert). Run it as one prompt with"
                                  " --ids-file instead");
     }
+    // ---- the multi-row draft ladder's refusals (`--mtp-draft-k`) ----------------------------------
+    // Each refusal is a combination in which the extra rows have no object, not a limitation of the rows.
+    // All of them are keyed on `given` except the k>1 ones, so a bare run is never refused for a flag it
+    // never named (the `--mtp-sched` precedent).
+    if (o.mtp_draft_k_given && !o.mtp_draft) {
+        throw std::runtime_error("--mtp-draft-k runs extra rows of the draft block, and with --mtp-draft 0"
+                                 " there is no draft block to run; name --mtp-draft 1 with it, or drop it");
+    }
+    if (o.mtp_draft_k_given && o.session) {
+        // The ladder's targets are the run's OWN later steps: the proposal made at anchor q is adjudicated
+        // by the step at q+1, the second one by q+2, and so on. A session re-anchors the position map at
+        // every `feed` and hands the `gen` budget to its caller, so a record opened in one turn would be
+        // settled by a token of the next turn and the tail of every ladder would be silently adjudicated
+        // against a different sequence. Same family as `--mtp-prompt-lanes` above: inert is bad, but
+        // wrong-by-construction is worse, so the flag is refused rather than half-supported.
+        throw std::runtime_error("--mtp-draft-k adjudicates each draft row against the run's own later"
+                                 " steps; --session re-anchors the position map at every `feed`, so a row"
+                                 " from one turn would be settled by a token of the next. Run it as one"
+                                 " prompt with --ids-file --steps N instead");
+    }
+    if (o.mtp_draft_k_given && !o.feed.empty()) {
+        // Under `--replay` the per-step tokens are the CALLER's, so `tN` would be a byte of the pin rather
+        // than the model's own continuation and the ladder would measure agreement with a transcript. That
+        // is a different quantity (and `--mtp-accept` refuses `--feed` for the neighbouring reason); say
+        // which one this flag measures instead of letting the same name mean both.
+        throw std::runtime_error("--mtp-draft-k's targets are the run's own greedy continuation; --replay"
+                                 " feeds the caller's tokens, so the ladder would score the draft against a"
+                                 " transcript rather than against this model. Run it free (no --replay)");
+    }
+    if (o.mtp_draft_k > 1 && o.mtp_accept) {
+        // An accept round is a `kRows` = 2 body: one candidate row beside the anchor. A second and third
+        // proposal has no row in the body and no verdict, so the extra rounds would be paid for and never
+        // adjudicated — priced, not measured. Building k=2 speculation means widening that body, which is
+        // the funded experiment this probe exists to price rather than pre-empt.
+        throw std::runtime_error("--mtp-accept consumes ONE candidate per round (its body is 2 rows), so a"
+                                 " second draft proposal would be drafted, paid for, and never verified;"
+                                 " --mtp-draft-k measures those proposals on the side pass. Name"
+                                 " --mtp-accept 0 with it (or drop --mtp-accept)");
+    }
+    if (o.mtp_draft_k > 1 && o.time_stages) {
+        // The stage clock's `mtp` family is declared as one round per step precisely so its per-step
+        // division is exact (`engine/stage_clock.h`, and the same argument `--mtp-sched loop` already
+        // gives). k rows per anchor has no integer per-step bill, and a truncated one prints a plan that is
+        // neither the plan nor the observation. This is a rate probe; it is judged on the ladder.
+        throw std::runtime_error("--time-stages bills the `mtp` family one draft round per step;"
+                                 " --mtp-draft-k " + std::to_string(o.mtp_draft_k) + " runs " +
+                                 std::to_string(o.mtp_draft_k) + " per drafted position and has no integer"
+                                 " per-step bill. Drop --time-stages: this knob is judged on its ladder,"
+                                 " and a worker device pass takes no timing anyway");
+    }
     if (o.verify_candidate_given && !o.mtp_verify) {
         throw std::runtime_error("--verify-candidate feeds row 1 of a verify body that is not running;"
                                  " name --mtp-verify 1 with it, or drop it");
@@ -1505,7 +1587,85 @@ struct MtpSide {
     // the census line can be reconciled against `lanes_max`, which a round-only tally cannot explain.
     long long prompt_lanes = 0;
     int lanes_max = 0;
+
+    // ---- `--mtp-draft-k`: more than one draft row per drafted position -----------------------------
+    // `k_given` is what arms the ladder, not `k`: naming `--mtp-draft-k 1` must run EXACTLY the shipped
+    // path (one row per anchor, no truncation, nothing extra billed) while still printing the `DRAFTK`
+    // lines, because that is how the control "k=1 reproduces the side pass we already quote" is adjudicable
+    // rather than tautological.
+    int k = 1;
+    bool k_given = false;
+    long long extra_rows = 0;    // block rows run beyond an anchor's first (each costs a whole round)
+    long long row_refused = 0;   // extra rows the cache ceiling refused (`DRAFTK-SKIP`)
+    long long lines_printed = 0; // `DRAFTK` lines emitted, closed mid-run or flushed at the end
+
+    // One anchor's proposals, held until the target tokens that adjudicate them have been sampled.
+    // The engine cannot print `t1` at draft time: the proposal made at anchor q is settled by the step at
+    // q+1, i.e. by a token that does not exist yet — the shipped k=1 path handles this by printing
+    // `adjudicated_by_pred_pos` and letting the harness join. Here the join happens in the engine and the
+    // line is printed once it can carry every field, so no reader ever sees a short line.
+    struct LadderRow {
+        int anchor;                 // `pos_before` of the step whose row started the chain
+        int pos;                    // the position the FIRST proposal proposes (anchor + 2)
+        int rows;                   // rows actually run (fewer than k only if the ceiling refused one)
+        std::array<int, 4> c{{-1, -1, -1, -1}};   // the draft's proposals
+        std::array<int, 4> t{{-1, -1, -1, -1}};   // the target's tokens, filled as later steps arrive
+    };
+    std::deque<LadderRow> open;   // ascending in `anchor`; entries leave once `t[rows-1]` arrives
 };
+
+// One `DRAFTK` line: every field present on every line, and `-1` meaning "does not exist for this row"
+// (past the run's last step for a `t`, refused or not asked for on this `k` for a `c`, and therefore
+// `-1` for the corresponding `hit`). A reader that treats `-1` as a token id would be reading a
+// different fixture than the one that was run; the harness counts it out of the denominator and prints
+// how many it excluded.
+void print_ladder_row(const MtpSide::LadderRow& r) {
+    std::printf("DRAFTK pos=%d anchor=%d k=%d", r.pos, r.anchor, r.rows);
+    for (int n = 0; n < 4; ++n) {
+        const int t = n < r.rows ? r.t[n] : -1;
+        const int c = n < r.rows ? r.c[n] : -1;
+        const int hit = (t >= 0 && c >= 0) ? (c == t ? 1 : 0) : -1;
+        std::printf(" t%d=%d c%d=%d hit%d=%d", n + 1, t, n + 1, c, n + 1, hit);
+    }
+    std::printf("\n");
+    std::fflush(stdout);
+}
+
+// Feed this step's prediction to every open ladder row and print the ones that are now complete.
+// Called once per generation step with the same `(pred_pos, pred_token)` pair the shipped adjudication
+// uses, so the ladder and `MTPACCEPT` are joined on one index rather than two that happen to agree.
+void ladder_observe(MtpSide& m, int pred_pos, int pred_token) {
+    if (!m.k_given) return;
+    for (auto& r : m.open) {
+        const int n = pred_pos - r.anchor;      // 1-based position within this anchor's ladder
+        if (n >= 1 && n <= r.rows) r.t[n - 1] = pred_token;
+    }
+    // Compact rather than pop the front: a plain run advances one position per step, so rows do close in
+    // order, but a check that only works when the ordering assumption holds is a check that fails silently
+    // the day it does not.
+    auto it = m.open.begin();
+    while (it != m.open.end()) {
+        if (it->t[it->rows - 1] >= 0) {
+            print_ladder_row(*it);
+            m.lines_printed++;
+            it = m.open.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// The run's last `k-1` anchors have no target behind some of their rows. They are printed with `-1` in
+// those fields and counted out of that column's denominator by the reader — a shorter run would be the
+// silently-shorter-population failure this driver keeps refusing.
+void ladder_flush(MtpSide& m) {
+    if (!m.k_given) return;
+    for (const auto& r : m.open) {
+        print_ladder_row(r);
+        m.lines_printed++;
+    }
+    m.open.clear();
+}
 
 // Owns the prompt-norm-row retention buffer (`engine/prefill.h::NormTailRetention`) for one run. It exists
 // so a throw between the allocation and the seeding cannot leak device memory, and so the free is not a
@@ -1554,6 +1714,9 @@ bool mtp_after_step(MtpSide& m, const engine::WeightStore& store, const uint16_t
             std::to_string(m.track.pending_pred_pos()) + " was handed the prediction of position " +
             std::to_string(pred_pos) + ". Do not read an accept rate out of this run.");
     }
+    // Any ladder row this step just settled. Before the adjudication prints, so the two joins of the same
+    // `(pred_pos, pred_token)` pair cannot diverge by being written against different orderings.
+    ladder_observe(m, pred_pos, pred_token);
     if (a.adjudicated) {
         m.adjudicated++;
         if (a.accept) m.accepted++;
@@ -1585,6 +1748,73 @@ bool mtp_after_step(MtpSide& m, const engine::WeightStore& store, const uint16_t
                     p.nlanes);
         std::fflush(stdout);
     }
+
+    // ---- `--mtp-draft-k`: rows 2..k, the block feeding itself ---------------------------------------
+    //
+    // WHY `h` IS `x_d` HERE AND NOT A TARGET ROW. Row 1's `h` is the target's final-norm row at `pred_pos`
+    // (`sc.norm`, §09.1 as A-12 corrected). Behind a token the target never fed there is no target row to
+    // read — `sc.norm` holds only the rows the step actually priced — so row n reads the draft block's own
+    // output row, `mtp.norm`'s output `x_d` (§09.2), which is what the block's own head just read and is
+    // therefore the same *kind* of object (post-norm, same width, same arena). This is llama.cpp's feedback
+    // verbatim in role: `common/speculative.cpp:1770-1783` re-adds `id_sampled` with
+    // `llama_get_embeddings_nextn_ith(ctx_dft, i_last)` as the embedding state at position `pos0 + i + 1`.
+    // It is a DIFFERENT `h` from the accept loop's (D8 in `prototype/mtp_accept/DRAFT-COND.md`), so every
+    // rate printed from here is a side-pass rate and is labelled that way.
+    //
+    // ALIASING, safe by construction and not by luck: `st.xd` is written only by stage 14
+    // (`glue_add_norm(st.z1, st.mlp_o, w.n_mtp, st.z2, st.xd)`) and read only by stage 15's head pass, so
+    // passing it as the NEXT call's `h_norm_row` means it is read at that call's stage 3 and overwritten at
+    // its own stage 14 — strictly after every read. One stream, in issue order, so no sync is needed and
+    // none is taken (a sync here would be a silent rate-changer, since the read is of the previous row).
+    //
+    // LANES, and the truncation that keeps them a sequence. Each row appends its own lane at position
+    // `pos + n - 1`, ascending, which is what `mtp_attn_row` requires (`self_lane` is the newest). But the
+    // next anchor is at `pred_pos + 1` or `+ 2`, so its first lane would sit at a position one of THESE rows
+    // already used. After the chain, all but the first row's lane are dropped — a length field, 0 bytes
+    // (`engine/mtp_draft.h::truncate_lane`) — leaving the cache exactly the sequence the shipped k=1 path
+    // builds, one lane per visited anchor. So row n sees the accepted prefix's lanes plus its own anchor's
+    // speculative rows, which is what a real k-row round gives it, and the cache never holds a repeated or
+    // descending position. Note this leaves the kLoop reject's `truncate_lane` removing precisely the first
+    // row's lane, as it does at k=1.
+    if (m.k_given) {
+        MtpSide::LadderRow row;
+        row.anchor = pred_pos;
+        row.pos = pred_pos + 2;
+        row.rows = 1;
+        row.c[0] = p.token;
+        const int lanes_after_first = m.st.nlanes;   // AFTER row 1 appended its lane: the frontier to return to
+        uint16_t* h_next = m.st.xd;
+        int y_next = p.token;
+        int lane_pos = row.pos + 1;
+        for (int n = 2; n <= m.k; ++n) {
+            const std::string row_why = engine::mtpdraft::refusal(m.st);
+            if (!row_why.empty()) {
+                // Printed, not swallowed: a ladder whose third column is short because the cache filled is a
+                // different population from one that is short because the run ended, and only this line says
+                // which. `c=-1` on the `DRAFTK` line is the machine-readable half of that statement.
+                std::printf("DRAFTK-SKIP row=%d would_propose_for=%d reason=%s\n", n, lane_pos,
+                            row_why.c_str());
+                m.row_refused++;
+                break;
+            }
+            const engine::mtpdraft::Proposal q =
+                engine::mtpdraft::draft_round(store, m.w, m.st, h_next, y_next, lane_pos);
+            m.extra_rows++;
+            row.c[n - 1] = q.token;
+            row.rows = n;
+            y_next = q.token;
+            lane_pos++;
+            if (m.st.lanes_max > m.lanes_max) m.lanes_max = m.st.lanes_max;
+        }
+        // Return the cache to the frontier row 1 left. Measured, not assumed: leaving ONE lane too many
+        // behind (this line read `> lanes_after_first + 1` in the first version) added a lane per anchor whose
+        // position sat ahead of the next anchor's own first lane, and the first column's rate moved
+        // 0.6641 -> 0.7100 on the corpus. The k=1 control CANNOT see that, because at k=1 the loop above
+        // never runs; the witness is that the first column is INVARIANT in k, which is what
+        // `prototype/mtp_accept/draftk_ladder.py` compares across the k=1 and k=4 passes.
+        while (m.st.nlanes > lanes_after_first) engine::mtpdraft::truncate_lane(m.st);
+        m.open.push_back(row);
+    }
     return true;
 }
 
@@ -1592,6 +1822,7 @@ bool mtp_after_step(MtpSide& m, const engine::WeightStore& store, const uint16_t
 // belongs in "proposals made" and not in the numerator, and a tally that cannot say where it ended
 // reads as a rate that is simply lower.
 void mtp_close_run(MtpSide& m) {
+    ladder_flush(m);
     if (m.track.has_pending()) {
         m.unadjudicated++;
         std::printf("DRAFT-UNADJUDICATED adjudicated_by_pred_pos=%d proposal=%d"
@@ -1615,6 +1846,37 @@ void mtp_census_line(const MtpSide& m, const char* mode, const char* sched) {
                 (long long)m.st.lane_appends, (long long)m.prompt_lanes, m.st.pos_shift,
                 m.w.bytes);
     std::fflush(stdout);
+}
+
+// The `--mtp-draft-k` census, printed after `MTPDRAFT` at run close and only when the flag was named.
+// `rows = anchors + extra_rows` is asserted, not assumed: `draft_round` bumps the block's own row counter
+// for every row it runs while the driver's `made` stays one per anchor, so this is the one place the two
+// tallies of the same work meet, and a row that ran without being billed or was billed twice fails here
+// rather than quietly shifting a denominator (`MTPDRAFT rounds=` still means "one per `DRAFT` line", which
+// is what `gate.py`'s census cross-check counts).
+void mtp_draftk_line(const MtpSide& m, const char* mode, const char* sched) {
+    if (!m.k_given) return;
+    const long long rows = m.st.rounds;
+    const bool ok = rows == m.made + m.extra_rows && m.lines_printed == m.made;
+    std::printf("MTPDRAFTK on=1 k=%d mode=%s sched=%s row_subs=%d extra_subs_per_anchor=%d"
+                " lines=%lld anchors=%lld extra_rows=%lld rows=%lld row_refused=%lld lanes_max=%d"
+                " identity=%s\n",
+                m.k, mode, sched, engine::mtpdraft::kSubmissionsPerRound,
+                (m.k - 1) * engine::mtpdraft::kSubmissionsPerRound,
+                (long long)m.lines_printed, (long long)m.made, (long long)m.extra_rows,
+                (long long)rows, (long long)m.row_refused, m.lanes_max, ok ? "ok" : "BAD");
+    std::fflush(stdout);
+    if (!ok) {
+        // The identity is the ladder's own admission: a BAD here means the per-row tally and the per-anchor
+        // tally disagree, so every count in the ladder is suspect. Saying it after printing the line, and
+        // then throwing, keeps the evidence on the wire.
+        throw std::runtime_error("MTPDRAFTK identity is BAD: the block ran " + std::to_string(rows) +
+                                 " rows but the driver billed " + std::to_string(m.made) +
+                                 " anchors + " + std::to_string(m.extra_rows) +
+                                 " extra rows, or printed " + std::to_string(m.lines_printed) +
+                                 " ladder lines for " + std::to_string(m.made) +
+                                 " anchors. Do not read a ladder out of this run.");
+    }
 }
 
 // ---- §09 / P7: the batched verify body, driver side -----------------------------------------------
@@ -2022,7 +2284,7 @@ void print_usage(FILE* out) {
                  " [--attn-split-cap N]"
                  " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
                  " [--gdn-geom block|wf4|wf2|reg16]"
-                 " [--mtp-draft 0|1] [--mtp-sched loop|every] [--mtp-cap N]"
+                 " [--mtp-draft 0|1] [--mtp-sched loop|every] [--mtp-cap N] [--mtp-draft-k 1|2|3|4]"
                  " [--mtp-dense 0|1] [--mtp-prompt-lanes N] [--mtp-pos-shift N]"
                  " [--mtp-verify 0|1] [--verify-candidate ID|sampled] [--verify-guard 0|1]"
                  " [--mtp-midsplit 0|1|2] [--mtp-accept 0|1] [--mtp-route hand|amortised]"
@@ -2490,6 +2752,27 @@ void print_usage(FILE* out) {
                  " default). The one-pass attention form refuses beyond `mtp_attn_max_lanes()`, and a"
                  " round past the ceiling is counted as `DRAFT-SKIP reason=...` rather than served a"
                  " shorter cache, because a silently shorter run reads as a lower accept rate\n"
+                 "  --mtp-draft-k 1|2|3|4  run the draft block k ROWS per drafted position, feeding each"
+                 " row's own proposal back as the next row's `y_next` and the block's own output row `x_d`"
+                 " as its `h` — there is no target row behind a token the target never fed (llama.cpp's"
+                 " draft-mtp feeds the same two objects back, `engines/llama.cpp/common/speculative.cpp:"
+                 "1770-1783`). Default 1 = the shipped single proposal, and naming `1` changes no device"
+                 " work at all while still printing the ladder fields, which is what makes `k=1` a control"
+                 " rather than an assumption. Each row is a whole round — 16 submissions including its own"
+                 " head pass and vocabulary D2H — so k costs k x 16 per drafted position. Every row"
+                 " appends a draft-cache lane at its own position and all but the first are dropped again,"
+                 " so the cache stays the one-lane-per-visited-position sequence the shipped path builds"
+                 " (lanes must stay ascending in position: `mtp_attn_row` treats the last as newest)."
+                 " Prints one `DRAFTK pos= anchor= k= t1= c1= hit1= ... t4= c4= hit4=` line per drafted"
+                 " position — every field on every line, `-1` meaning that field does not exist (past the"
+                 " run's last step for a `t`, refused or not asked for on this `k` for a `c`), and one"
+                 " `MTPDRAFTK` census line whose `identity=` asserts rows = anchors + extra rows. This"
+                 " MEASURES the second position's accept rate on the side pass; it is not speculation and"
+                 " it changes no emitted token. Refused with --mtp-accept (its body is 2 rows and would"
+                 " verify one candidate while paying for k), --session (positions re-anchor at every"
+                 " `feed`, so a row from one turn would be settled by a token of the next), --replay (the"
+                 " targets must be this run's own continuation, not a transcript) and --time-stages (k"
+                 " rows per anchor has no integer per-step `mtp` bill)\n"
                  "  --mtp-dense 0|1  on an accept, also stage the draft-cache lane for the accepted"
                  " candidate row (default 0). A round appends ONE lane but consumes TWO positions on an"
                  " accept, so the shipped cache skips a position every time one is accepted and the"
@@ -3513,6 +3796,12 @@ int main(int argc, char** argv) {
             mtp->st.pos_shift = o.mtp_pos_shift;
             mtp->track =
                 engine::mtpdraft::RoundTracker(engine::mtpdraft::parse_schedule(o.mtp_sched));
+            // The ladder's width, and whether it was asked for at all. `k_given` — not `k` — is what arms
+            // the extra rows and the `DRAFTK`/`MTPDRAFTK` lines, so an unnamed flag leaves the side pass
+            // submitting exactly what it shipped with, and `--mtp-draft-k 1` runs that same path while
+            // still printing the ladder fields (which is what makes the k=1 control a measurement).
+            mtp->k = o.mtp_draft_k;
+            mtp->k_given = o.mtp_draft_k_given;
             // The launch census, stated as its own line rather than smuggled into `LAUNCH`:
             // `planned_launch_counts()` is §07's bill and `gate.py` section (d) re-derives it in Python,
             // so a bill that moved with a flag would make that cross-check a tautology — the `--attn-tile`
@@ -4233,6 +4522,8 @@ int main(int argc, char** argv) {
         if (mtp) {
             mtp_close_run(*mtp);
             mtp_census_line(*mtp, o.feed.empty() ? "run" : "replay",
+                            engine::mtpdraft::schedule_name(mtp->track.sched));
+            mtp_draftk_line(*mtp, o.feed.empty() ? "run" : "replay",
                             engine::mtpdraft::schedule_name(mtp->track.sched));
         }
 
