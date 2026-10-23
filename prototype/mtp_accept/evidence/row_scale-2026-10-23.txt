@@ -1,0 +1,31 @@
+# row_scale.sh — the marginal cost of an extra row, per family, on the amortising route
+# taken 2026-10-23, main agent, blocking, one gpu_lock hold per invocation (tag main-agent/row-scale), one pass per row count; util recorded at both ends and discounted.
+# per-body cost = burst_wall / bodies. The wave clock SERIALIZES the stream, so the family ms are for ATTRIBUTION only (their sums exceed the burst wall); the burst wall is the column to quote as a cost.
+
+== util at acquire: gpu use: 90%; row counts: 1 2 3 4 8 16
+=== SHORT KV: a body of n rows over an empty-ish cache (weight-walk behaviour) ===
+short  rows 1   burst     9.178 ms /     1 bodies =   9.1777 ms/body   (serialized exposes 1.154 ms)
+          proj=2.6252 mlp_gateup=2.2938 mlp_down=1.0090 attn=0.1145 gdn_rec=0.3012 gdn_conv=0.1880 glue=0.6012 lm_head=2.1232
+short  rows 2   burst    11.478 ms /     1 bodies =  11.4781 ms/body   (serialized exposes 1.921 ms)
+          proj=4.2124 mlp_gateup=2.4745 mlp_down=1.2678 attn=0.6681 gdn_rec=0.3850 gdn_conv=0.2180 glue=0.5760 lm_head=2.1289
+short  rows 3   burst    11.799 ms /     1 bodies =  11.7991 ms/body   (serialized exposes 1.676 ms)
+          proj=4.1451 mlp_gateup=2.5252 mlp_down=1.2529 attn=0.7076 gdn_rec=0.4108 gdn_conv=0.2041 glue=0.6062 lm_head=2.1357
+short  rows 4   burst    11.674 ms /     1 bodies =  11.6744 ms/body   (serialized exposes 2.498 ms)
+          proj=4.4155 mlp_gateup=2.5804 mlp_down=1.3501 attn=0.7542 gdn_rec=0.4422 gdn_conv=0.2039 glue=0.6395 lm_head=2.1413
+short  rows 8   burst    13.125 ms /     1 bodies =  13.1252 ms/body   (serialized exposes 0.499 ms)
+          proj=4.2126 mlp_gateup=2.4806 mlp_down=1.2879 attn=0.7623 gdn_rec=0.5018 gdn_conv=0.2134 glue=0.5549 lm_head=2.1359
+short  rows 16  burst    12.851 ms /     1 bodies =  12.8513 ms/body   (serialized exposes 1.021 ms)
+          proj=4.1975 mlp_gateup=2.4808 mlp_down=1.2758 attn=0.7752 gdn_rec=0.6487 gdn_conv=0.2232 glue=0.5808 lm_head=2.1423
+== util at release: gpu use: 20%
+
+== util at acquire: gpu use: 19%; row counts: 1 2 4 8
+=== LONG KV: a 4,032-token pass chunked into bodies of n rows (KV scan is live) ===
+long   rows 1   burst 30103.597 ms /  4032 bodies =   7.4662 ms/body   (serialized exposes 6152.162 ms)
+          proj=11008.8433 mlp_gateup=9191.8132 mlp_down=4243.2075 attn=5675.4055 gdn_rec=1309.4895 gdn_conv=790.5079 glue=2468.4508 lm_head=2.1400
+long   rows 2   burst 24691.676 ms /  2016 bodies =  12.2479 ms/body   (serialized exposes 4540.569 ms)
+          proj=8617.5671 mlp_gateup=5113.7453 mlp_down=2640.7932 attn=8469.2740 gdn_rec=865.7374 gdn_conv=492.0900 glue=1409.0809 lm_head=2.9888
+long   rows 4   burst 12513.185 ms /  1008 bodies =  12.4139 ms/body   (serialized exposes 2271.867 ms)
+          proj=4329.0869 mlp_gateup=2532.4075 mlp_down=1339.0593 attn=4340.1115 gdn_rec=473.8951 gdn_conv=245.4933 glue=708.6927 lm_head=2.1469
+long   rows 8   burst  6388.801 ms /   504 bodies =  12.6762 ms/body   (serialized exposes 1071.429 ms)
+          proj=2176.6329 mlp_gateup=1286.5759 mlp_down=660.4957 attn=2170.2665 gdn_rec=281.1492 gdn_conv=127.2167 glue=346.9801 lm_head=2.1436
+== util at release: gpu use: 85%
