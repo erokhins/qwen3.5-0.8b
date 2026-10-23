@@ -122,19 +122,23 @@ Three conclusions, in order of how much they cost to learn:
    checkpoint + verdict + readback cannot be what costs us 1.0 extra step. And on our side the *read-only
    side pass*, which runs the same 2-row body with **no** checkpoint, **no** verdict kernel and **no** draft,
    already costs ≈ 2 steps at 4k. **The cost is in the body.**
-3. **What our body does not buy is row amortisation.** Our round/step *grows* with context (1.722 → 1.786 →
-   2.085) while llama.cpp's 2-row verify is 1.203 steps at 362 lanes and 1.264 at 4,152 — a 5 % growth for a
-   37× growth in KV. Growing with lanes is the signature of work that is per row instead of per body: our
-   §07.1 wave body at width 2 re-reads what a width-1 step reads (the ledger's stage clocks put `attn` alone
-   at 3.02 ms of an 11.2 ms step at 4k, so reading the KV per row is worth ~0.27 step of the ~0.39 step we
-   gain between 128 and 4,032 lanes). llama.cpp's attention at 4k is an order of magnitude cheaper per step, so it has much less per-row traffic
-   to double in the first place.
+3. **What costs the extra step is the verify body's ROUTE, not its geometry.** — *corrected the same day by
+   `prototype/mtp_accept/ROW-SCALE.md`, which is the file to believe.* This section originally read the growth
+   (1.722 → 1.786 → 2.085) as the signature of per-row traffic, since llama.cpp's 2-row verify grows only
+   1.203 → 1.264 steps for a 37× growth in KV. Priced directly, the same `submit_wave_body` at 2–8 rows over
+   a populated 4k cache costs **1.09–1.13 of a step** on the amortising route — cheaper per row than
+   llama.cpp's 1.26–1.50 — so our engine can amortise fine and the accept path simply is not allowed to: the
+   verify body forces `WaveGemm::kHand` + `GdnScan::kSeq` so row 0 stays bit-comparable to the one-row step,
+   and that forcing is what costs the ~1.0 step. The observation that motivated it (round cost grows with
+   context) stands; the mechanism named here first did not, and the correction is the useful part.
 
 **And a carried number dies with this.** `prototype/mtp_delta/D3-RESULT.md` priced plan A — the batched
 2-row body — at **0.1505 of a step**, and that bill is what funded P7 and M2. Measured on this box the same
 body's marginal is **between +0.72 and +1.98 steps** (round − step at 4k = 1.086; side-pass − step at 4k =
 1.983, the upper bound, because the side pass also pays a shadow-state copy and an argmax report). Either way
-it is an order of magnitude above the bill, and the bill is what the route was priced on. This is the same
+it is an order of magnitude above the bill, and the bill is what the route was priced on. The reason the bill
+missed is now measured rather than guessed (`ROW-SCALE.md`): the geometry is cheap, and what is not cheap is
+the hand-route forcing the verify body carries. This is the same
 failure as `prototype/gdn_collapse/results.md` §4–§5 (a bottom-up instruction bill 9.8 × under the machine):
 a static launch bill cannot see that a width-2 wave re-pays a weight walk and a KV pass. It is recorded in
 the traps index.
@@ -148,12 +152,12 @@ the traps index.
   ledger, and its base decode (~92.0 tok/s at 4,152 lanes) and ours (88.6–89.3 today, 94.2–94.9 in the
   ledger) are different windows and are not a paired claim in either direction.
 - **The route is alive, and it has exactly one object.** M2's accept loop does not need more accept-loop
-  work; it needs a verify body whose second row costs `≈ 0.08` of a step instead of `≈ 1.0`. If the body
-  reached llama.cpp's 1.264-step verify while keeping our draft (measured at ~0.44 ms ≈ 0.04 step, i.e.
-  ~8× cheaper than llama.cpp's 0.30-step draft), then at our corpus accept rate a k=1 round would cost
-  ≈ 1.31 steps against `1 + a = 1.656` tokens and land near **+26 %** — above the pre-registered +10 % adopt
-  line. That is a target, not a forecast: it presumes the per-row traffic can be made per-body, which is the
-  open question.
+  work, and it does not need a better-drafted token: it needs the round to run on the route the rest of the
+  engine already uses. Measured per-row cost on that route is **+0.25 step for a second row short, +0.43 at
+  4k, and ~0 beyond that** (`ROW-SCALE.md` §2), so a 3-row k=2 round sizes at **≈ 1.3–1.4 steps** and
+  **+23 % to +45 %** at 4k on plausible accept rates — which is what `ROW-SCALE.md` §4 pre-registers lines
+  against. That is a sizing, not a forecast: it presumes the route switch can be made without losing whatever
+  row-0 bit-comparability the loop's admission needs.
 - **The next measurement is named, and it is small.** Attribute the width-2 body by kernel family. The
   obvious instrument refuses: `decode_run.cpp:1157` refuses `--mtp-verify` together with `--time-stages`,
   because a side pass has no honest per-step stage bill. So the cheap version is the one already here:
