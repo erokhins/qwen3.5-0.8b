@@ -1188,6 +1188,11 @@ Options parse_args(int argc, char** argv) {
         throw std::runtime_error("--mtp-accept replaces a run's generation steps with rounds; --session"
                                  " hands the token budget to its caller and --sizes-only runs no steps");
     }
+    // The boundary this refusal also draws for `DECWALL`: the session REPL prints NO `DECWALL` line, because
+    // a session has no run end — `gen` budgets come from the caller and the state is re-anchored at every
+    // `feed`, so the honest object there is per-`gen` and belongs to the session protocol, not to a
+    // per-run window. Stated here because "the engine prints a decode wall per run" is otherwise true with
+    // one silent exception, and a missing line is the worst way for a check to be out of scope.
     if (o.mtp_accept && (o.time_stages || o.time_waves)) {
         // The stage clock's plan is a per-STEP bill (§07's 224 launches) and its replay replays steps.
         // A round is one or two tokens and adds the checkpoint's own submissions, so there is no step
@@ -2210,7 +2215,13 @@ void print_usage(FILE* out) {
                  " round, one `ACCEMIT step= pos= token=` line per EMITTED token (§07.5's stop rule runs"
                  " per emitted token, including the accepted candidate), and a closing `MTPSTAT` line"
                  " with rounds / accepted / rejected / emitted / accept_rate / mean_emit / body_rows /"
-                 " captured_bytes / restored_bytes / status_bytes / split_subs. With --out it writes"
+                 " captured_bytes / restored_bytes / status_bytes / split_subs. Every run — this flag or"
+                 " not — also prints a `DECWALL mode= prefill_ms= decode_ms= bodies= rounds= plain="
+                 " accepted= rejected= suppressed= emitted= stop= ended= ms_per_token= tok_per_s= census=` line:"
+                 " the wall of THIS run's generation window divided by the tokens that window emitted,"
+                 " which is the only decode-rate denominator an accept run has, because --steps counts"
+                 " rounds and the loop can end early. It prints NO-RATE rather than a rate over counters"
+                 " that disagree. With --out it writes"
                  " `emitted.txt` (one token per line) instead of `sampled.txt` + `logits<N>.bin`, because"
                  " a round has two logits rows and no single top-logit value, and inventing one for a"
                  " five-column row would be a fake number. Note that ON, --steps counts ROUNDS, so a run"
@@ -3305,10 +3316,13 @@ int main(int argc, char** argv) {
         const engine::PrefillResult wave =
             engine::prefill_wave(store, st, sc, o.prompt, o.prefill_logits);
         // Added to the same accumulator the per-step timings went into, so RESULT's `ms_total` still
-        // means "this run" rather than silently becoming generation-only.
-        step_ms +=
+        // means "this run" rather than silently becoming generation-only. Kept as its own number as well
+        // (and not left inside the accumulator) so `DECWALL` can show the prefill leg rather than make a
+        // reader recover it by subtracting one run from another — the mistake `DECWALL` exists to retire.
+        const double prefill_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wave)
                 .count();
+        step_ms += prefill_ms;
         std::printf("PREFILL tokens=%zu logits=%s prefix_len=%d wave_rows=%d", wave.size(),
                     engine::prefill_logits_name(wave.logits_mode), st.prefix_len, sc.wave_rows);
         if (!wave.empty()) {
@@ -3380,11 +3394,27 @@ int main(int argc, char** argv) {
             if (o.steps > 0) emit_state_fp("prefill", prompt_end, nullptr);
         }
 
+        // ---- the run's own decode window (`DECWALL`, closed and printed after the loop) -------------
+        // One wall clock around the generation loop, and the counts that make its rate mean something.
+        // Why the counts are here rather than recovered afterwards: a round can end the loop early (§07.5's
+        // stop, `RUN-END reason=context_exhausted`, `ROUND-SKIP reason=context_limit`), so `--steps` is not
+        // the work a run did, and no arithmetic across two runs can make it so.
+        const auto t_decode = std::chrono::steady_clock::now();
+        long long gen_emitted = 0;     // tokens handed to the stream, counted AT THE EMIT SITE
+        long long gen_bodies = 0;      // bodies executed: one per plain step, one per accept round
+        long long gen_plain = 0;       // bodies that were single-row steps (every body, with no flag on)
+        long long gen_suppressed = 0;  // an accept's bonus behind a stop: priced, not emitted
+
         int fed = 0;
         // §06.5: the first token fed here is the wave's own `y0`, produced inside the last wave row,
         // so no extra decode step is spent on the first sampled token.
         int sampled = wave.empty() ? -1 : wave.rows.back().sampled;
         bool run_stopped = false;   // §07.5 reached in the GENERATION phase; see the rule below
+        // Which exit the loop actually took. `RESULT stopped=` cannot say: it is one boolean, and both §07.5's
+        // stop and a request that ran out of context set it. `DECWALL ended=` names the reason, because a
+        // short run is normal for an accept loop (a round consumes one or two lanes) and a reader has to be
+        // able to tell "emitted everything there was room for" from "the model ended the turn".
+        const char* gen_end = "steps_exhausted";
         // One row per generation step the run actually took, for `--time-stages`, which replays exactly
         // these steps at the other two submission granularities. Inert when the flag is off: a vector of
         // PODs filled from values the loop already had, no device work and no sync.
@@ -3418,6 +3448,7 @@ int main(int argc, char** argv) {
                     std::printf("RUN-END reason=context_exhausted pos=%d cap=%d budget_left=%d\n",
                                 st.prefix_len, (int)st.cap, o.steps - i - 1);
                     run_stopped = true;
+                    gen_end = "context_exhausted";
                     break;
                 }
                 const uint16_t* draft_norm_row = nullptr;   // the norm row of the last position FED
@@ -3432,17 +3463,23 @@ int main(int argc, char** argv) {
                     st.prefix_len + engine::mtpaccept::kRows <= st.cap;
                 if (pending_candidate < 0 || !room_for_round) {
                     if (pending_candidate >= 0 && !room_for_round) {
-                        std::printf("ROUND-SKIP reason=context_limit anchor=%d cap=%d rows=%d\n", st.prefix_len,
-                                    st.cap, engine::mtpaccept::kRows);
+                        std::printf("ROUND-SKIP reason=context_limit anchor=%d cap=%lld rows=%d\n",
+                                    st.prefix_len, (long long)st.cap, engine::mtpaccept::kRows);
                     }
                     const engine::StepResult r = engine::decode_step(store, st, sc, token, nullptr);
                     emitted_first = r.token;
                     pos_first = st.prefix_len;
                     draft_norm_row = sc.norm;              // row 0 is the row this step priced
+                    gen_bodies++;
+                    gen_plain++;
+                    // NOT gen_emitted++: this token goes out through the shared `emit_one` tail below, like
+                    // a round's first token does. Counting it here as well double-counted every plain step of
+                    // an accept run, and `DECWALL note=emitted_vs_verdict_tally` is what caught it.
                 } else {
                     const engine::mtpaccept::Round ar =
                         engine::mtpaccept::accept_round(store, st, sc, *aside, token, pending_candidate);
                     engine::mtpaccept::tally(astats, *aside, ar);
+                    gen_bodies++;   // one round is one 2-row body, whatever it emits
                     mtp->adjudicated++;
                     if (ar.accepted) {
                         mtp->accepted++;
@@ -3497,11 +3534,21 @@ int main(int argc, char** argv) {
                 const auto emit_one = [&](int tok, int pos) {
                     if (emit_log) std::fprintf(emit_log, "%d\n", tok);
                     std::printf("ACCEMIT step=%d pos=%d token=%d\n", step, pos, tok);
+                    gen_emitted++;   // counted at the emit site, which is what `DECWALL` divides by
                     if (tok == engine::kStopToken && !o.no_stop) stop_fired = true;
                 };
                 emit_one(emitted_first, pos_first);
-                if (emitted_second >= 0 && !stop_fired) emit_one(emitted_second, pos_second);
+                if (emitted_second >= 0 && !stop_fired) {
+                    emit_one(emitted_second, pos_second);
+                } else if (emitted_second >= 0) {
+                    // The bonus was priced by the body and never emitted, so `MTPSTAT`'s tally (what the
+                    // ROUND emitted) and this window (what the RUN emitted) differ by exactly this token.
+                    // Counting the difference is what lets `DECWALL` cross-check the two counts instead of
+                    // hoping they agree.
+                    gen_suppressed++;
+                }
                 if (stop_fired) run_stopped = true;
+                if (stop_fired) gen_end = "stop_token";
                 sampled = emitted_second >= 0 && !stop_fired ? emitted_second : emitted_first;
                 std::fflush(stdout);
                 if (run_stopped) break;
@@ -3526,6 +3573,9 @@ int main(int argc, char** argv) {
                 std::chrono::steady_clock::now() - ts).count();
             step_ms += wall_ms;
             step_records.push_back({step, token, r.token, r.top_logit});
+            gen_bodies++;
+            gen_plain++;
+            gen_emitted++;   // this step's sample goes to the stream, stop token included
             sampled = r.token;
             // The witness's own control: the step is required to have moved the mixer state, so a mixer
             // comparison across it that reads "same" is a comparator that cannot fail. Captured here,
@@ -3585,10 +3635,23 @@ int main(int argc, char** argv) {
             }
             if (stop_fired && step + 1 < total_steps) {
                 std::printf("stopped at step %d (§07.5: id %d)\n", step, engine::kStopToken);
+                gen_end = "stop_token";
                 break;
             }
             fed++;
         }
+        // The window closes here, and with an explicit device sync: a reject's restore is a
+        // `hipMemcpyAsync` issued AFTER the round's status readback, so without this the last round's two
+        // bulk copies would be retired by teardown and billed to nothing. A failed sync is not a reason to
+        // lose a finished run's output, so it is recorded and reported, not thrown.
+        std::string decode_sync_err;
+        {
+            const hipError_t se = hipDeviceSynchronize();
+            if (se != hipSuccess) decode_sync_err = hipGetErrorString(se);
+        }
+        const double decode_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_decode)
+                .count();
         if (log) std::fclose(log);
 
         // The side computation's own close: the last round's proposal, if the run ended before a later
@@ -3724,6 +3787,63 @@ int main(int argc, char** argv) {
             engine::mtpaccept::free_side(*aside);
         }
         if (emit_log) std::fclose(emit_log);
+
+        // ---- `DECWALL`: the run's own decode window, and the only rate this binary can honestly give ---
+        // Why this line exists: an accept run's wall time cannot be recovered by subtracting a `--steps 0`
+        // run from a `--steps N` run. The loop can end early (§07.5's stop, `RUN-END`, `ROUND-SKIP`), so the
+        // two windows do not cover the same work, and the first harness that did that arithmetic printed
+        // 20,689 tok/s for a stream of 45 tokens. The honest object is ONE window around the generation
+        // loop, divided by the tokens the loop itself emitted — which is what was closed above.
+        //
+        // In the window: every body the loop ran, plus the driver's own host work per body (its `STEP`/
+        // `ACCEMIT` lines and their fflush) — which is what a server would pay anyway, and is the same
+        // order of host work on both arms of an A/B. Out of it: the prefill wave (printed separately as
+        // `prefill_ms`, so the split is shown rather than subtracted), the `--state-fp` prompt-end snapshot,
+        // and every measurement report below this line: `--time-stages` replays the whole run three more
+        // times and none of that may enter a wall that claims to be the run's.
+        //
+        // Like every other time here this is a by-product of the run, never a measurement (§6): no warm-up,
+        // no best-of-N. It is printed on every run with a generation phase and not behind a flag, because a
+        // wall an author can switch off is a wall that gets switched off. `census=` is the auditable part:
+        // `emitted` is counted at the emit site while `MTPSTAT`'s comes from the device verdicts, so the two
+        // agreeing is a cross-check between independent sources rather than an echo. A zero window, a failed
+        // sync, a disagreement, or an empty denominator prints NO-RATE instead of a number.
+        {
+            const double billed_ms = step_ms - prefill_ms;   // the nested per-step timers, if any ran
+            std::string bad;
+            if (o.steps <= 0) {
+                bad = "no_generation_bodies";
+            } else if (!decode_sync_err.empty()) {
+                bad = "sync_failed:" + decode_sync_err;
+            } else if (gen_bodies <= 0) {
+                bad = "no_bodies_ran";
+            } else if (gen_emitted <= 0) {
+                bad = "nothing_emitted";
+            } else if (gen_bodies != gen_plain + (aside ? astats.rounds : 0)) {
+                bad = "bodies_disagree";
+            } else if (!aside && gen_emitted != (long long)step_records.size()) {
+                bad = "emitted_vs_step_records";
+            } else if (aside && gen_emitted != astats.emitted + gen_plain - gen_suppressed) {
+                bad = "emitted_vs_verdict_tally";
+            } else if (decode_ms <= 0.0) {
+                bad = "zero_window";   // `hipEventElapsedTime`'s 0.000 ms trap, host-side twin
+            } else if (decode_ms < billed_ms) {
+                bad = "window_smaller_than_billed";
+            }
+            std::printf("DECWALL mode=%s prefill_ms=%.3f decode_ms=%.3f bodies=%lld rounds=%lld plain=%lld"
+                        " accepted=%lld rejected=%lld suppressed=%lld emitted=%lld stop=%d ended=%s",
+                        o.feed.empty() ? "run" : "replay", prefill_ms, decode_ms, gen_bodies,
+                        aside ? astats.rounds : 0LL, gen_plain, aside ? astats.accepted : 0LL,
+                        aside ? astats.rejected : 0LL, gen_suppressed, gen_emitted,
+                        run_stopped ? 1 : 0, gen_end);
+            if (bad.empty()) {
+                std::printf(" ms_per_token=%.4f tok_per_s=%.3f census=ok\n",
+                            decode_ms / (double)gen_emitted, 1000.0 * (double)gen_emitted / decode_ms);
+            } else {
+                std::printf(" note=%s NO-RATE\n", bad.c_str());
+            }
+            std::fflush(stdout);
+        }
 
         std::printf("RESULT mode=%s steps=%d ms_total=%.3f ms_per_step=%.3f last_sampled=%d"
                     " prefix_len=%d stopped=%d\n",
