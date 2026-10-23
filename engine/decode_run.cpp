@@ -191,6 +191,13 @@ struct Options {
     // rows still in the wave scratch exist, hence the cap. 0 = the shipped behaviour, empty cache.
     int mtp_prompt_lanes = 0;
     bool mtp_prompt_lanes_given = false;
+    // Added to every rope position the draft block sees, uniformly across the whole cache. The engine's
+    // convention (§09.1, and what speccheck/mtp.py and the pinned §09 gates measured) puts the drafted
+    // token's position on the row; llama.cpp puts the fed token's position there, one less. Because the
+    // block's attention is rope-RELATIVE, a uniform shift must be an exact null — this knob exists to
+    // measure that rather than assume it, and to make the alternative convention one flag away if a
+    // measurement ever asks for it. Default 0 = the shipped convention.
+    int mtp_pos_shift = 0;
     // Which logits a prompt wave gives back (§06.5 / `engine/prefill.h`). `last` is the spec's shape
     // and the default; `all` is the gate's byte-identity mode, which asks for the rows §06.5 throws
     // away so they can be `cmp`'d against what the per-token prompt loop used to write.
@@ -638,6 +645,10 @@ Options parse_args(int argc, char** argv) {
             if (o.mtp_prompt_lanes < 0)
                 throw std::runtime_error("--mtp-prompt-lanes takes 0 or more lanes");
             o.mtp_prompt_lanes_given = true;
+        } else if (a == "--mtp-pos-shift") {
+            o.mtp_pos_shift = std::atoi(next().c_str());
+            if (o.mtp_pos_shift < -100000 || o.mtp_pos_shift > 100000)
+                throw std::runtime_error("--mtp-pos-shift is a small offset, not a position");
         } else if (a == "--mtp-verify") {
             // Parses or throws, same rule as `--mtp-draft`: this names which side of an A/B the run is on.
             const std::string v = next();
@@ -1571,14 +1582,15 @@ void mtp_close_run(MtpSide& m) {
 void mtp_census_line(const MtpSide& m, const char* mode, const char* sched) {
     std::printf("MTPDRAFT on=1 sched=%s mode=%s block=%d+%d head=%d+%d per_round=%d"
                 " rounds=%lld adjudicated=%lld accepted=%lld refused=%lld unadjudicated=%lld"
-                " lanes_max=%d cap=%d lane_appends=%lld prompt_lanes=%lld tensors=15 block_bytes=%lld\n",
+                " lanes_max=%d cap=%d lane_appends=%lld prompt_lanes=%lld pos_shift=%d"
+                " tensors=15 block_bytes=%lld\n",
                 sched, mode,
                 engine::mtpdraft::kBlockCopies, engine::mtpdraft::kBlockLaunches,
                 engine::mtpdraft::kHeadLaunches, engine::mtpdraft::kHeadCopies,
                 engine::mtpdraft::kSubmissionsPerRound,
                 (long long)m.made, (long long)m.adjudicated, (long long)m.accepted,
                 (long long)m.refused, (long long)m.unadjudicated, m.lanes_max, m.st.cap,
-                (long long)m.st.lane_appends, (long long)m.prompt_lanes,
+                (long long)m.st.lane_appends, (long long)m.prompt_lanes, m.st.pos_shift,
                 m.w.bytes);
     std::fflush(stdout);
 }
@@ -1989,7 +2001,7 @@ void print_usage(FILE* out) {
                  " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
                  " [--gdn-geom block|wf4|wf2|reg16]"
                  " [--mtp-draft 0|1] [--mtp-sched loop|every] [--mtp-cap N]"
-                 " [--mtp-dense 0|1] [--mtp-prompt-lanes N]"
+                 " [--mtp-dense 0|1] [--mtp-prompt-lanes N] [--mtp-pos-shift N]"
                  " [--mtp-verify 0|1] [--verify-candidate ID|sampled] [--verify-guard 0|1]"
                  " [--mtp-midsplit 0|1|2] [--mtp-accept 0|1] [--mtp-route hand|amortised]"
                  " [--mtp-meter 0|1]"
@@ -2473,6 +2485,13 @@ void print_usage(FILE* out) {
                  " after reserving room for this run's own rounds, and the clamping is printed on"
                  " `MTPPROMPT` rather than assumed, because a silently smaller population is this repo's"
                  " recurring failure. Refused with --time-stages for the reason above\n"
+                 "  --mtp-pos-shift N  add N to every rope position the draft block sees, uniformly over"
+                 " the whole cache (default 0). §09.1 puts the position of the DRAFTED token on the row;"
+                 " llama.cpp puts the position of the token the row FEEDS there, one less"
+                 " (`engines/llama.cpp/common/speculative.cpp:1830`). Because `mtp_attn_row` rotates q and"
+                 " every cached k with the same rope, a score depends only on the DIFFERENCE of positions,"
+                 " so a uniform shift must be an exact null — this knob exists to measure that rather than"
+                 " assume it. Printed as `pos_shift=` on `MTPDRAFT`\n"
                  "  --mtp-meter 0|1  per-phase milliseconds of the MTP ROUND this run is in"
                  " (`engine/mtp_meter.h`). Default 0, and off means every guard in the engine reads one"
                  " null pointer: no allocation, no added wait, no line, so a flag-off run stays"
@@ -3461,6 +3480,9 @@ int main(int argc, char** argv) {
             mtp = std::make_unique<MtpSide>();
             mtp->w = engine::mtpdraft::resolve(store);
             mtp->st = engine::mtpdraft::allocate_state(o.mtp_cap);
+            // Set before the first `MTPDRAFT` line, so the census can state the convention it used rather
+            // than leaving a reader to assume the default. `0` is §09.1's shipped reading.
+            mtp->st.pos_shift = o.mtp_pos_shift;
             mtp->track =
                 engine::mtpdraft::RoundTracker(engine::mtpdraft::parse_schedule(o.mtp_sched));
             // The launch census, stated as its own line rather than smuggled into `LAUNCH`:
