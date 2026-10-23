@@ -238,8 +238,12 @@ def main() -> int:
         if spec == "none":
             controls = []
             break
-        name, _, extra = spec.partition("=")
-        controls.append((name, extra.replace(",", " ") if extra else ""))
+        if isinstance(spec, tuple):        # a DEFAULT_CONTROL entry, already split
+            name, extra = spec
+        else:                              # a `--control name=KNOBS` from the command line
+            name, _, extra = spec.partition("=")
+            extra = extra.replace(",", " ") if extra else ""
+        controls.append((name, extra))
 
     print(f"=== draft-conditioning rate probe — fixture={args.fixture} ids={n_ids}"
           f" steps={args.steps} binary={args.binary}")
