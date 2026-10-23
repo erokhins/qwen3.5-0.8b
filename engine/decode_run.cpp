@@ -187,8 +187,10 @@ struct Options {
     bool mtp_dense_given = false;
     // Seed the draft cache with the last N prompt positions' lanes before generation starts, so the
     // drafter's attention sees the tail of the prompt instead of starting from an empty cache. llama.cpp
-    // gets this for free (its catch-up runs over the prompt ubatches); we have to stage it, and only the
-    // rows still in the wave scratch exist, hence the cap. 0 = the shipped behaviour, empty cache.
+    // gets this for free (its catch-up runs over the prompt ubatches); we have to stage it, and the norm
+    // rows it needs only exist if they were retained out of the wave scratch — see
+    // `engine/prefill.h::NormTailRetention` and the sizing at the prefill call site. 0 = the shipped
+    // behaviour, empty cache.
     int mtp_prompt_lanes = 0;
     bool mtp_prompt_lanes_given = false;
     // Added to every rope position the draft block sees, uniformly across the whole cache. The engine's
@@ -1235,6 +1237,18 @@ Options parse_args(int argc, char** argv) {
         throw std::runtime_error("--mtp-prompt-lanes seeds a draft cache that is not allocated; name"
                                  " --mtp-draft 1 with it, or drop it");
     }
+    if (o.mtp_prompt_lanes > 0 && o.session) {
+        // The seeding retains ONE prompt wave and its last position is what makes the seeded lanes
+        // contiguous with the first generated lane. A session prefills one `feed` line at a time
+        // (`session_loop`), so there is no such wave and no such position, and the flag would sit there
+        // doing nothing while a reader assumed it had taken — the inert-flag-as-a-measurement case
+        // `--mtp-dense` without `--mtp-accept` is refused for, and `--mtp-accept` already refuses
+        // `--session` for the same family of reason.
+        throw std::runtime_error("--mtp-prompt-lanes seeds the draft cache from one prompt wave; --session"
+                                 " prefills one `feed` line at a time and has no single prompt wave to"
+                                 " retain (the flag could only be inert). Run it as one prompt with"
+                                 " --ids-file instead");
+    }
     if (o.verify_candidate_given && !o.mtp_verify) {
         throw std::runtime_error("--verify-candidate feeds row 1 of a verify body that is not running;"
                                  " name --mtp-verify 1 with it, or drop it");
@@ -1491,6 +1505,14 @@ struct MtpSide {
     // the census line can be reconciled against `lanes_max`, which a round-only tally cannot explain.
     long long prompt_lanes = 0;
     int lanes_max = 0;
+};
+
+// Owns the prompt-norm-row retention buffer (`engine/prefill.h::NormTailRetention`) for one run. It exists
+// so a throw between the allocation and the seeding cannot leak device memory, and so the free is not a
+// line someone has to remember at the next early exit.
+struct NormTailBuf {
+    uint16_t* p = nullptr;
+    ~NormTailBuf() { if (p) (void)hipFree(p); }
 };
 
 // One generation step's worth of side computation.
@@ -2478,13 +2500,19 @@ void print_usage(FILE* out) {
                  " --mtp-accept (no round, no skip) and with --time-stages (no integer per-step bill)."
                  " Printed as `lane_appends=` on `MTPDRAFT`\n"
                  "  --mtp-prompt-lanes N  seed the draft cache with the last N prompt positions before"
-                 " generation, one lane per position from the norm rows still living in the wave scratch"
-                 " (default 0 = the shipped empty cache; llama.cpp's draft sees the prompt because its"
-                 " catch-up runs over the prompt ubatches, and this is our counterpart). N is clamped to"
-                 " the rows the last prefill wave left in `sc.norm` and to what the cache ceiling leaves"
-                 " after reserving room for this run's own rounds, and the clamping is printed on"
-                 " `MTPPROMPT` rather than assumed, because a silently smaller population is this repo's"
-                 " recurring failure. Refused with --time-stages for the reason above\n"
+                 " generation, one lane per position (default 0 = the shipped empty cache; llama.cpp's draft"
+                 " sees the prompt because its catch-up runs over the prompt ubatches, and this is our"
+                 " counterpart). The norm rows those lanes need do not survive the wave split — `sc.norm`"
+                 " keeps only the LAST wave's 46 rows of a 4,142-token prompt — so the rows the fan needs"
+                 " are retained out of the scratch during the wave (one D2D per intersecting wave, 2 KiB a"
+                 " row; `engine/prefill.h::NormTailRetention`). N is clamped to the retained rows and to"
+                 " what the cache ceiling leaves after reserving room for this run's own rounds, and the"
+                 " fan that ACTUALLY got staged is printed on `MTPPROMPT` with both clamps, the old"
+                 " `last_wave_rows` one beside them, because a silently smaller population is this repo's"
+                 " recurring failure. The hard ceiling is the draft attention's one-pass form"
+                 " (`mtp_attn_max_lanes()` = 512 lanes), so a whole 4k prompt cannot be seeded at all and a"
+                 " wide fan costs 9 submissions a lane once per request. Refused with --time-stages for the"
+                 " reason above, and with --session, which has no single prompt wave to retain\n"
                  "  --mtp-pos-shift N  add N to every rope position the draft block sees, uniformly over"
                  " the whole cache (default 0). §09.1 puts the position of the DRAFTED token on the row;"
                  " llama.cpp puts the position of the token the row FEEDS there, one less"
@@ -3634,11 +3662,62 @@ int main(int argc, char** argv) {
         // prices only the last row, which is all §06.5 uses.
         const int prompt_len = (int)o.prompt.size();
         const int total_steps = prompt_len + o.steps;
+        // ---- the prompt-norm-row retention the draft-cache seeding reads (`--mtp-prompt-lanes`) --------
+        // The seeding needs one post-final-norm row per seeded lane and `sc.norm` only ever holds the LAST
+        // wave's rows (`PrefillResult::last_wave_rows` — 46 of them for a 4,142-token prompt split at 512),
+        // so the rows are copied out of the scratch DURING the wave. The depth is decided here, before the
+        // prompt is fed, because the ceiling and the run's own reserve are both known here and nowhere else:
+        // sizing the window is the same arithmetic the clamp below applies, and a second spelling of it in
+        // a second place is the two-copies-of-one-geometry-fact failure `AGENTS.md` records.
+        //
+        // OFF IS SILENTLY ABSENT: with `--mtp-prompt-lanes 0` (the default) nothing below allocates and
+        // `prefill_wave` receives a null sink, so the prompt phase submits exactly what it used to.
+        engine::NormTailRetention keep;
+        NormTailBuf keep_mem;
+        int seed_ceiling = 0, seed_reserve = 0, seed_room = 0;
+        const char* seed_clamp = "none";
+        if (mtp && o.mtp_prompt_lanes > 0 && prompt_len > 0) {
+            // Lanes this run still needs for its own rounds. A round appends at most two (its own draft
+            // lane plus a dense lane when the accept path is on and the round is accepted), and it emits at
+            // least one token, so rounds <= steps/(1+a) and the smallest `a` this project admits is the
+            // 0.40 M3 kill line, hence 2*steps/1.4. Conservative by construction — a round that is REJECTED
+            // appends a lane and then truncates it — and it is what keeps seeding from turning the run into
+            // a `DRAFT-SKIP` halfway through, which would be a population change dressed as a rate.
+            seed_reserve = (o.steps * 20 + 13) / 14;
+            seed_ceiling = engine::mtpdraft::usable_lanes(mtp->st);   // the cache is empty here
+            seed_room = seed_ceiling - seed_reserve;
+            if (seed_room < 0) seed_room = 0;
+            // The draft block's attention is the one-pass form and refuses more than
+            // `kernels::mtp_attn_max_lanes()` lanes, so a fan wider than the cache is unreachable however
+            // large a prompt is retained; `seed_room` is that ceiling minus what the run still needs.
+            const int depth = std::min(prompt_len, std::min(o.mtp_prompt_lanes, seed_room));
+            // WHY the window is narrower than the request, decided HERE because this is where the three
+            // limits are all visible, and printed below as `clamped=`. Reporting `norm_rows_retained` when
+            // the real cause was the cache ceiling would blame the retention for a limit it did not apply.
+            seed_clamp = "none";
+            if (depth < o.mtp_prompt_lanes) {
+                seed_clamp = (seed_room < o.mtp_prompt_lanes) ? "cache_ceiling_minus_reserve"
+                                                             : "prompt_shorter_than_request";
+            }
+            if (depth > 0) {
+                if (hipMalloc((void**)&keep_mem.p, (size_t)depth * engine::kHidden * sizeof(uint16_t)) !=
+                    hipSuccess) {
+                    throw std::runtime_error("--mtp-prompt-lanes: cannot allocate " +
+                                             std::to_string((long long)depth * engine::kHidden *
+                                             (long long)sizeof(uint16_t)) +
+                                             " B for " + std::to_string(depth) +
+                                             " retained prompt norm rows");
+                }
+                keep.buf = keep_mem.p;
+                keep.rows = depth;
+            }
+        }
         std::vector<float> logits;
         double step_ms = 0.0;   // the run's step time, by-product not measurement (§6)
         const auto t_wave = std::chrono::steady_clock::now();
         const engine::PrefillResult wave =
-            engine::prefill_wave(store, st, sc, o.prompt, o.prefill_logits);
+            engine::prefill_wave(store, st, sc, o.prompt, o.prefill_logits,
+                                 keep.buf ? &keep : nullptr);
         // Added to the same accumulator the per-step timings went into, so RESULT's `ms_total` still
         // means "this run" rather than silently becoming generation-only. Kept as its own number as well
         // (and not left inside the accumulator) so `DECWALL` can show the prefill leg rather than make a
@@ -3727,32 +3806,43 @@ int main(int argc, char** argv) {
         // tok/s line mean something other than what it usually means.
         //
         // The lane for prompt position p pairs the token AT p with the target's norm row at p-1, and is
-        // rope-staged at position p+1 — the same content-to-position map `draft_round` uses, so the seeded
-        // lanes and the round lanes are the same kind of object (see `engine/mtp_draft.h`). The last
-        // prompt position's lane uses the wave's own `y0` as the token, which is what makes the seeded
-        // run contiguous with the first generated lane rather than one position short.
+        // rope-staged at position p+1 — the same content-to-position map `draft_round` uses (the lane's rope
+        // position is the position of the token it DRAFTS, one past the token it feeds; §09.1, and
+        // `--mtp-pos-shift` exists because that convention was measured against llama.cpp's one-less and
+        // found to be a null), so the seeded lanes and the round lanes are the same kind of object. The last
+        // prompt position's lane uses the wave's own `y0` as the token, which is what makes the seeded run
+        // contiguous with the first generated lane rather than one position short.
         //
-        // N is CLAMPED, loudly: only the rows the last prefill wave left in `sc.norm` exist, and the cache
-        // ceiling has to leave room for this run's own rounds (a full cache means `DRAFT-SKIP`, i.e. a run
-        // that stops speculating, which would be a population change dressed as a rate).
+        // THE ROWS COME FROM THE RETENTION, not from `sc.norm`. They used to come from `sc.norm`, which is
+        // why the widest seed that ever existed was one wave: the fan was clamped to
+        // `PrefillResult::last_wave_rows` — 46 lanes on a 4,142-token prompt, and the reason a
+        // `--mtp-prompt-lanes 128` run silently meant 46. Now the rows the wave would otherwise drop are
+        // copied into a window before they are overwritten, and what limits the fan is the draft block's own
+        // attention form (`mtp_attn_max_lanes()`, the one-pass staging) minus the room this run still needs
+        // for its own rounds. Every one of those three numbers is printed, and the old clamp is printed
+        // beside them as `last_wave_rows=` so a reader can see WHICH clamp bound this run rather than
+        // inferring it.
         if (mtp && o.mtp_prompt_lanes > 0 && !wave.empty()) {
-            const int norm_rows = wave.last_wave_rows;
-            const int h_lo = prompt_len - norm_rows;      // first position with a norm row in sc.norm
-            const int p_lo = std::max(h_lo + 1, 1);
+            const int norm_rows = keep.rows_written;     // retained rows that actually exist
+            const int h_lo = keep.first_pos;             // prompt position held by retention row 0
             const engine::PrefillRow* y0row = wave.y0();
             const int y0 = y0row ? y0row->sampled : -1;
             const int p_hi = y0 >= 0 ? prompt_len : prompt_len - 1;
-            // Lanes this run still needs for its own rounds. A round appends at most two (its own draft
-            // lane plus a dense lane when the accept path is on and the round is accepted), and it emits at
-            // least one token, so rounds <= cap-lanes; the tighter bound is rounds <= steps/(1+a) and the
-            // smallest `a` this project admits is the 0.40 M3 kill line, hence 2*steps/1.4.
-            const int reserve = (o.steps * 20 + 13) / 14;
-            const int ceiling = engine::mtpdraft::usable_lanes(mtp->st);
+            const int p_lo = norm_rows > 0 ? std::max(h_lo + 1, 1) : p_hi + 1;
             const int avail = p_hi - p_lo + 1;
+            // `seed_ceiling`/`seed_reserve`/`seed_room` were computed above, before the prompt was fed —
+            // the same numbers that sized the retention, so the clamp and the allocation cannot disagree.
             int count = o.mtp_prompt_lanes;
             const char* clamped = "none";
-            if (count > avail) { count = avail; clamped = "norm_rows_in_scratch"; }
-            const int room = ceiling - (int)mtp->st.nlanes - reserve;
+            if (count > avail) {
+                count = avail;
+                // The retention was sized by the same three limits, so if one of them cut the window the
+                // reason was decided at sizing and `seed_clamp` already names it. Only claim the rows
+                // themselves when nothing upstream bound.
+                clamped = (seed_clamp[0] == 'n') ? (norm_rows > 0 ? "norm_rows_retained" : "nothing_retained")
+                                                 : seed_clamp;
+            }
+            const int room = seed_ceiling - (int)mtp->st.nlanes - seed_reserve;
             if (count > room) { count = room; clamped = "cache_ceiling_minus_reserve"; }
             if (count < 0) count = 0;
             for (int p = p_hi - count + 1; p <= p_hi; ++p) {
@@ -3760,23 +3850,31 @@ int main(int argc, char** argv) {
                 const int hrow_idx = (p - 1) - h_lo;
                 // An off-by-one here reads the WRONG norm row — a plausible lane built from the neighbouring
                 // position's hidden state, which no device check would present as a fault. So the bound is
-                // asserted, not assumed, and the two operands it depends on are printed on `MTPPROMPT`.
+                // asserted, not assumed, and the operands it depends on are printed on `MTPPROMPT`.
                 if (hrow_idx < 0 || hrow_idx >= norm_rows) {
                     throw std::runtime_error(
-                        "--mtp-prompt-lanes: lane for position " + std::to_string(p) + " wants norm row " +
-                        std::to_string(hrow_idx) + " but the last prefill wave left " +
-                        std::to_string(norm_rows) + " rows in the scratch (first position " +
-                        std::to_string(h_lo) + "). Refusing rather than staging a lane from the wrong row.");
+                        "--mtp-prompt-lanes: lane for position " + std::to_string(p) + " wants retained row " +
+                        std::to_string(hrow_idx) + " but the retention holds " + std::to_string(norm_rows) +
+                        " rows from position " + std::to_string(h_lo) + " (window asked: " +
+                        std::to_string(keep.rows) + "). Refusing rather than staging a lane from the wrong row.");
                 }
-                const uint16_t* hrow = sc.norm + (size_t)hrow_idx * engine::kHidden;
+                const uint16_t* hrow = keep.buf + (size_t)hrow_idx * engine::kHidden;
                 engine::mtpdraft::draft_lane(store, mtp->w, mtp->st, hrow, tok, p + 1);
             }
             mtp->prompt_lanes = count;
             if (mtp->st.lanes_max > mtp->lanes_max) mtp->lanes_max = mtp->st.lanes_max;
-            std::printf("MTPPROMPT wanted=%d fitted=%d norm_rows=%d pos=%d..%d lanes_after=%d"
-                        " ceiling=%d reserve=%d clamped=%s\n",
-                        o.mtp_prompt_lanes, count, norm_rows, p_hi - count + 1, p_hi,
-                        mtp->st.nlanes, ceiling, reserve, clamped);
+            // The cost of this, in COUNTS and not milliseconds (which are not this run's to report):
+            // `retain_copies`/`retain_bytes` is what the wave paid to keep the rows — one D2D per wave that
+            // intersected the window — and `lane_subs` is the block submissions the staging paid, 9 per
+            // lane with no head pass (`engine/mtp_draft.h::kLaneStageSubs`). Against what it is amortised:
+            // `rounds=` on this run's own `MTPDRAFT` line.
+            std::printf("MTPPROMPT wanted=%d fitted=%d fan=%d norm_rows=%d retained_rows=%d"
+                        " retain_copies=%lld retain_bytes=%lld last_wave_rows=%d pos=%d..%d"
+                        " lanes_after=%d ceiling=%d reserve=%d lane_subs=%lld clamped=%s\n",
+                        o.mtp_prompt_lanes, count, count, norm_rows, keep.rows_written,
+                        (long long)keep.copies, (long long)keep.bytes, wave.last_wave_rows,
+                        p_hi - count + 1, p_hi, mtp->st.nlanes, seed_ceiling, seed_reserve,
+                        (long long)count * engine::mtpdraft::kLaneStageSubs, clamped);
             std::fflush(stdout);
         }
 
