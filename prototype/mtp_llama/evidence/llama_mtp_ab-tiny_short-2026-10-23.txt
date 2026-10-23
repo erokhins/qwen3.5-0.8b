@@ -1,0 +1,25 @@
+# llama_mtp_ab.sh — shape=tiny (prompt 'The capital of France is', 15 template tokens) and shape=short (speccheck/fixtures/corpus.txt, 362 tokens)
+# taken 2026-10-23, main agent, blocking, one gpu_lock hold per invocation, REPS=2, medians; util 90% at acquire / 55% at release (not a gate, discounted).
+# llama.cpp b11716 HIP build; model tmp/mtp_llama/Qwen3.5-0.8B.mtp.bf16.gguf (this repo's HF checkpoint converted with its MTP head: blk.24.nextn.*, 335 tensors).
+
+== util at acquire: gpu use: 90%; model=tmp/mtp_llama/Qwen3.5-0.8B.mtp.bf16.gguf ngen=128 reps=2 ctx=5120 arms='none mtp1 mtp2 mtp3 mtp4'
+
+=== shape=tiny (prompt file tmp/mtp_llama/run/p_tiny.txt, 24 bytes) ===
+none  rep 1  pp    15 tok    106.8 ms  eval  1346.48 ms /  128 tok    95.063 tok/s
+mtp1  rep 1  pp    15 tok    108.9 ms  eval  1073.11 ms /  128 tok   119.279 tok/s  rounds  67 acc_tok  61  draft  229.2 ms (21% of eval)
+mtp2  rep 1  pp    15 tok    120.9 ms  eval  1012.88 ms /  128 tok   126.372 tok/s  rounds  48 acc_tok  80  draft  318.9 ms (31% of eval)
+mtp3  rep 1  pp    15 tok    112.7 ms  eval  1015.55 ms /  128 tok   126.040 tok/s  rounds  40 acc_tok  88  draft  391.9 ms (39% of eval)
+mtp4  rep 1  pp    15 tok    119.0 ms  eval   924.61 ms /  128 tok   138.437 tok/s  rounds  32 acc_tok  96  draft  414.7 ms (45% of eval)
+none  rep 2  pp    15 tok    106.1 ms  eval  1349.22 ms /  128 tok    94.870 tok/s
+mtp1  rep 2  pp    15 tok    119.8 ms  eval  1100.08 ms /  128 tok   116.355 tok/s  rounds  67 acc_tok  61  draft  227.6 ms (21% of eval)
+mtp2  rep 2  pp    15 tok    121.3 ms  eval   989.12 ms /  128 tok   129.408 tok/s  rounds  48 acc_tok  80  draft  321.0 ms (32% of eval)
+mtp3  rep 2  pp    15 tok    119.3 ms  eval   994.49 ms /  128 tok   128.709 tok/s  rounds  40 acc_tok  88  draft  390.0 ms (39% of eval)
+mtp4  rep 2  pp    15 tok    115.4 ms  eval   925.60 ms /  128 tok   138.289 tok/s  rounds  32 acc_tok  96  draft  416.8 ms (45% of eval)
+  prompt tokens seen:      11 15 
+  -- medians, shape=tiny --
+   none    95.063 tok/s   step cost  10.519 ms   (the denominator for every ratio below)
+   mtp1   119.279 tok/s   round  16.017 ms (draft 3.396)  round/step = 1.523  tok/round = 1.91  accept-tok/round = 0.91  -> 1.255 x base (+25.5 %);  parity needs tok/round >= 1.523
+   mtp2   129.408 tok/s   round  20.607 ms (draft 6.644)  round/step = 1.959  tok/round = 2.67  accept-tok/round = 1.67  -> 1.361 x base (+36.1 %);  parity needs tok/round >= 1.959
+   mtp3   128.709 tok/s   round  24.862 ms (draft 9.749)  round/step = 2.363  tok/round = 3.20  accept-tok/round = 2.20  -> 1.354 x base (+35.4 %);  parity needs tok/round >= 2.363
+   mtp4   138.437 tok/s   round  28.894 ms (draft 12.961)  round/step = 2.747  tok/round = 4.00  accept-tok/round = 3.00  -> 1.456 x base (+45.6 %);  parity needs tok/round >= 2.747
+== util at release: gpu use: 55%

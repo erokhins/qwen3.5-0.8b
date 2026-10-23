@@ -1,0 +1,31 @@
+# llama_mtp_ab.sh — llama.cpp's own accept statistics, one line per (shape, n_max), from the trace-level
+# `statistics draft-mtp:` line of the same runs as llama_mtp_ab-short_long-2026-10-23.txt.
+# `#acc rate/pos` is per draft POSITION: position 1 is the first drafted token, so at n_max=1 it IS the
+# k=1 accept rate, and the ladder below is llama.cpp's marginal value of each further drafted token.
+# Dumped with:
+#   grep -oE "statistics +draft-mtp:.*" $f | grep -oE "(#mean acc len = [0-9.]+|#acc rate/pos = \([^)]*\)|#gen tokens = *[0-9]+, #acc tokens = *[0-9]+)"
+# (a single sed over the same line failed, because `rate/pos` contains the sed delimiter — recorded here so
+# nobody re-derives the ladder and concludes the counters are flaky.)
+
+shape=short (speccheck/fixtures/corpus.txt, 362 template tokens, 128 emitted)
+  short_mtp1_1   #gen tokens =     69, #acc tokens =    57 #mean acc len = 1.83 #acc rate/pos = (0.826)
+  short_mtp2_1   #gen tokens =    106, #acc tokens =    73 #mean acc len = 2.38 #acc rate/pos = (0.774, 0.604)
+  short_mtp3_1   #gen tokens =    131, #acc tokens =    82 #mean acc len = 2.86 #acc rate/pos = (0.818, 0.591, 0.455)
+  short_mtp4_1   #gen tokens =    161, #acc tokens =    85 #mean acc len = 3.07 #acc rate/pos = (0.829, 0.561, 0.415, 0.268)
+
+shape=long (head -c 10200 of the ledger doc, 4,152 template tokens, 128 emitted)
+  long_mtp1_1    #gen tokens =     72, #acc tokens =    54 #mean acc len = 1.75 #acc rate/pos = (0.750)
+  long_mtp2_1    #gen tokens =    112, #acc tokens =    71 #mean acc len = 2.27 #acc rate/pos = (0.750, 0.518)
+  long_mtp3_1    #gen tokens =    140, #acc tokens =    80 #mean acc len = 2.70 #acc rate/pos = (0.723, 0.532, 0.447)
+  long_mtp4_1    #gen tokens =    170, #acc tokens =    84 #mean acc len = 2.95 #acc rate/pos = (0.698, 0.512, 0.419, 0.326)
+
+shape=tiny ("The capital of France is", 15 tokens — kept ONLY as a warning: a trivially predictable prompt
+  inflates every column. Its k=4 run reached #acc rate/pos = (0.889, 0.778, 0.778) and +45.6 % tok/s, and
+  none of that is a claim about real requests.)
+
+READ OUT: position 1 accepts at 0.75-0.83 on real prose and every further position is worth less
+(0.52-0.60, then 0.42-0.46, then 0.27-0.33), which is why the speedup peaks at n_max=2 and is already
+falling by n_max=4. Our engine's own corpus accept rate for the same first position is 0.6556
+(`prototype/mtp_accept/M3-RESULT.md` §2) — same ballpark, different prompt/response pair, and llama.cpp's
+responses here are chat-template thinking prose (see the doc's caveats), so this ladder is NOT a
+claim that llama.cpp drafts better than we do.

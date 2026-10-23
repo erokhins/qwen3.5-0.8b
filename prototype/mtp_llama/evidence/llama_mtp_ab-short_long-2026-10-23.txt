@@ -1,0 +1,44 @@
+# llama_mtp_ab.sh — shape=short (362 tokens) and shape=long (head -c 10200 progress/2026-10-21/performance-status-2026-10-21.md = 4,152 tokens after the chat template)
+# taken 2026-10-23, main agent, blocking, ONE gpu_lock hold covering both shapes, REPS=2, medians; util 89% at acquire / 72% at release.
+# the long-shape pp parity line (prompt tokens seen: 10 4152) is what licenses every ratio below: all five arms priced the same request.
+
+== util at acquire: gpu use: 91%; model=tmp/mtp_llama/Qwen3.5-0.8B.mtp.bf16.gguf ngen=128 reps=2 ctx=5120 arms='none mtp1 mtp2 mtp3 mtp4'
+
+=== shape=short (prompt file tmp/mtp_llama/run/p_short.txt, 1618 bytes) ===
+none  rep 1  pp   362 tok    136.2 ms  eval  1359.90 ms /  128 tok    94.125 tok/s
+mtp1  rep 1  pp   362 tok    143.6 ms  eval  1180.97 ms /  128 tok   108.385 tok/s  rounds  71 acc_tok  57  draft  236.9 ms (20% of eval)
+mtp2  rep 1  pp   362 tok    154.4 ms  eval  1143.98 ms /  128 tok   111.890 tok/s  rounds  55 acc_tok  73  draft  361.2 ms (32% of eval)
+mtp3  rep 1  pp   362 tok    155.8 ms  eval  1161.23 ms /  128 tok   110.228 tok/s  rounds  46 acc_tok  82  draft  443.0 ms (38% of eval)
+mtp4  rep 1  pp   362 tok    151.0 ms  eval  1239.06 ms /  128 tok   103.304 tok/s  rounds  43 acc_tok  85  draft  557.7 ms (45% of eval)
+none  rep 2  pp   362 tok    132.9 ms  eval  1352.51 ms /  128 tok    94.639 tok/s
+mtp1  rep 2  pp   362 tok    152.6 ms  eval  1139.39 ms /  128 tok   112.341 tok/s  rounds  71 acc_tok  57  draft  238.2 ms (21% of eval)
+mtp2  rep 2  pp   362 tok    153.3 ms  eval  1123.24 ms /  128 tok   113.956 tok/s  rounds  55 acc_tok  73  draft  362.5 ms (32% of eval)
+mtp3  rep 2  pp   362 tok    152.0 ms  eval  1158.05 ms /  128 tok   110.531 tok/s  rounds  46 acc_tok  82  draft  442.1 ms (38% of eval)
+mtp4  rep 2  pp   362 tok    154.1 ms  eval  1222.68 ms /  128 tok   104.688 tok/s  rounds  43 acc_tok  85  draft  547.1 ms (45% of eval)
+  prompt tokens seen:      10 362 
+  -- medians, shape=short --
+   none    94.639 tok/s   step cost  10.566 ms   (the denominator for every ratio below)
+   mtp1   112.341 tok/s   round  16.048 ms (draft 3.337)  round/step = 1.519  tok/round = 1.80  accept-tok/round = 0.80  -> 1.187 x base (+18.7 %);  parity needs tok/round >= 1.519
+   mtp2   113.956 tok/s   round  20.423 ms (draft 6.567)  round/step = 1.933  tok/round = 2.33  accept-tok/round = 1.33  -> 1.204 x base (+20.4 %);  parity needs tok/round >= 1.933
+   mtp3   110.531 tok/s   round  25.175 ms (draft 9.610)  round/step = 2.383  tok/round = 2.78  accept-tok/round = 1.78  -> 1.168 x base (+16.8 %);  parity needs tok/round >= 2.383
+   mtp4   104.688 tok/s   round  28.434 ms (draft 12.724)  round/step = 2.691  tok/round = 2.98  accept-tok/round = 1.98  -> 1.106 x base (+10.6 %);  parity needs tok/round >= 2.691
+
+=== shape=long (prompt file tmp/mtp_llama/run/p_long.txt, 10200 bytes) ===
+none  rep 1  pp  4152 tok    546.0 ms  eval  1390.73 ms /  128 tok    92.038 tok/s
+mtp1  rep 1  pp  4152 tok    613.0 ms  eval  1269.88 ms /  128 tok   100.797 tok/s  rounds  74 acc_tok  54  draft  257.2 ms (20% of eval)
+mtp2  rep 1  pp  4152 tok    618.8 ms  eval  1223.99 ms /  128 tok   104.576 tok/s  rounds  57 acc_tok  71  draft  387.4 ms (32% of eval)
+mtp3  rep 1  pp  4152 tok    603.5 ms  eval  1238.97 ms /  128 tok   103.312 tok/s  rounds  48 acc_tok  80  draft  480.6 ms (39% of eval)
+mtp4  rep 1  pp  4152 tok    622.5 ms  eval  1318.18 ms /  128 tok    97.104 tok/s  rounds  44 acc_tok  84  draft  583.7 ms (44% of eval)
+none  rep 2  pp  4152 tok    548.2 ms  eval  1407.33 ms /  128 tok    90.952 tok/s
+mtp1  rep 2  pp  4152 tok    608.3 ms  eval  1287.47 ms /  128 tok    99.420 tok/s  rounds  74 acc_tok  54  draft  253.3 ms (20% of eval)
+mtp2  rep 2  pp  4152 tok    622.1 ms  eval  1266.77 ms /  128 tok   101.044 tok/s  rounds  57 acc_tok  71  draft  386.3 ms (30% of eval)
+mtp3  rep 2  pp  4152 tok    619.6 ms  eval  1232.71 ms /  128 tok   103.836 tok/s  rounds  48 acc_tok  80  draft  480.7 ms (39% of eval)
+mtp4  rep 2  pp  4152 tok    618.7 ms  eval  1299.99 ms /  128 tok    98.462 tok/s  rounds  44 acc_tok  84  draft  583.8 ms (45% of eval)
+  prompt tokens seen:      10 4152 
+  -- medians, shape=long --
+   none    92.038 tok/s   step cost  10.865 ms   (the denominator for every ratio below)
+   mtp1   100.797 tok/s   round  17.161 ms (draft 3.423)  round/step = 1.579  tok/round = 1.73  accept-tok/round = 0.73  -> 1.095 x base (+9.5 %);  parity needs tok/round >= 1.579
+   mtp2   104.576 tok/s   round  21.474 ms (draft 6.778)  round/step = 1.976  tok/round = 2.25  accept-tok/round = 1.25  -> 1.136 x base (+13.6 %);  parity needs tok/round >= 1.976
+   mtp3   103.836 tok/s   round  25.681 ms (draft 10.012)  round/step = 2.364  tok/round = 2.67  accept-tok/round = 1.67  -> 1.128 x base (+12.8 %);  parity needs tok/round >= 2.364
+   mtp4    98.462 tok/s   round  29.545 ms (draft 13.266)  round/step = 2.719  tok/round = 2.91  accept-tok/round = 1.91  -> 1.070 x base (+7.0 %);  parity needs tok/round >= 2.719
+== util at release: gpu use: 66%
