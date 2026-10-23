@@ -1,0 +1,46 @@
+# verify_body_scale.sh — one batched 2-row body vs one one-row step, at three widths
+# taken 2026-10-23, main agent, blocking, ONE gpu_lock hold (tag main-agent/verify-body-scale), REPS=2, medians, --steps 32 --no-stop --gdn-loop 1 on every arm; util 89% at acquire / 72% at release (recorded, discounted, not a gate).
+# fixture: ids cycled from /tmp/dec8_ids.csv to exactly 128/1024/4032 comma-separated fields (field count asserted against PREFILL tokens= per rep).
+# NOTE this is a DIFFERENT fixture from mtp_wall_ab's ids4032.csv, which is why 4032 reads 2.085 here and 2.029 there: the round cost is accept-rate-sensitive (a reject restores state), the SHAPE is what this file is for.
+
+== util at acquire: gpu use: 92%; steps=32 reps=2 src=/tmp/dec8_ids.csv
+
+=== lanes=128 (ids file tmp/verify_body_scale/ids128.csv, 128 fields, cap 428) ===
+base   rep 1 decode   311.88 ms / 32 steps  emitted  32     9.746 ms per step
+verify rep 1 decode   800.33 ms / 32 steps  emitted  32    25.010 ms per step
+accept rep 1 decode   516.46 ms / 31 rounds  emitted  57    16.660 ms per round
+base   rep 2 decode   309.51 ms / 32 steps  emitted  32     9.672 ms per step
+verify rep 2 decode   800.75 ms / 32 steps  emitted  32    25.024 ms per step
+accept rep 2 decode   516.40 ms / 31 rounds  emitted  57    16.658 ms per round
+  -- medians, lanes=128 --
+   base      9.672 ms/step
+   verify   25.010 ms/step  =>  one 2-row BODY = 15.338 ms = 1.586 steps
+   accept   16.658 ms/round =>  round OVERHEAD beyond the body = -8.352 ms
+   round/step = 1.722   (body alone = 1.586 of it)
+
+=== lanes=1024 (ids file tmp/verify_body_scale/ids1024.csv, 1024 fields, cap 1324) ===
+base   rep 1 decode   329.72 ms / 32 steps  emitted  32    10.304 ms per step
+verify rep 1 decode   888.22 ms / 32 steps  emitted  32    27.757 ms per step
+accept rep 1 decode   571.12 ms / 31 rounds  emitted  58    18.423 ms per round
+base   rep 2 decode   338.10 ms / 32 steps  emitted  32    10.566 ms per step
+verify rep 2 decode   886.12 ms / 32 steps  emitted  32    27.691 ms per step
+accept rep 2 decode   570.41 ms / 31 rounds  emitted  58    18.400 ms per round
+  -- medians, lanes=1024 --
+   base     10.304 ms/step
+   verify   27.691 ms/step  =>  one 2-row BODY = 17.388 ms = 1.687 steps
+   accept   18.400 ms/round =>  round OVERHEAD beyond the body = -9.291 ms
+   round/step = 1.786   (body alone = 1.687 of it)
+
+=== lanes=4032 (ids file tmp/verify_body_scale/ids4032.csv, 4032 fields, cap 4332) ===
+base   rep 1 decode   359.41 ms / 32 steps  emitted  32    11.232 ms per step
+verify rep 1 decode  1078.27 ms / 32 steps  emitted  32    33.696 ms per step
+accept rep 1 decode   725.33 ms / 31 rounds  emitted  57    23.398 ms per round
+base   rep 2 decode   359.13 ms / 32 steps  emitted  32    11.223 ms per step
+verify rep 2 decode  1071.24 ms / 32 steps  emitted  32    33.476 ms per step
+accept rep 2 decode   730.31 ms / 31 rounds  emitted  57    23.558 ms per round
+  -- medians, lanes=4032 --
+   base     11.223 ms/step
+   verify   33.476 ms/step  =>  one 2-row BODY = 22.253 ms = 1.983 steps
+   accept   23.398 ms/round =>  round OVERHEAD beyond the body = -10.079 ms
+   round/step = 2.085   (body alone = 1.983 of it)
+== util at release: gpu use: 72%
