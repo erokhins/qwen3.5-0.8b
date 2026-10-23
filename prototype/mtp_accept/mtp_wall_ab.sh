@@ -36,6 +36,11 @@ CAP=${CAP:-4300}
 BIN=${BIN:-engine/build/decode_run}
 OUT=${OUT:-tmp/mtp_speed_wall}
 ADOPT_PCT=${ADOPT_PCT:-10}
+# Extra flags for the ACCEPT arm only — the thing being priced. Empty by default, which leaves the pair
+# exactly as M3-RESULT took it. Unlike `--gdn-loop 1` (a required flag, therefore on both arms), this one
+# IS the difference between the arms, so arm-specific is correct here: e.g.
+#   ACCEPT_EXTRA="--mtp-dense 1" IDS=tmp/glue_copy_fold/ab/ids4032.csv prototype/mtp_accept/mtp_wall_ab.sh
+ACCEPT_EXTRA=${ACCEPT_EXTRA:-}
 
 want_tk=$(awk -F',' '{print NF}' "$IDS") || { echo "no ids file $IDS"; exit 1; }
 [ "$want_tk" -ge 8 ] || { echo "$IDS has $want_tk fields; too few to be a fixture"; exit 1; }
@@ -48,6 +53,7 @@ tools/gpu_lock.sh acquire main-agent mtp-wall-ab || exit 1
 trap 'tools/gpu_lock.sh release main-agent >/dev/null 2>&1' EXIT
 echo "== util at acquire: $(tools/gpu_lock.sh util | tail -1); ids fields=$want_tk steps=$STEPS reps=$REPS cap=$CAP"
 echo "== binary: $BIN ($(git log -1 --format=%h -- engine/ 2>/dev/null))  fixture: $IDS"
+echo "== accept-arm extra flags: ${ACCEPT_EXTRA:-(none — the shipping loop)}  [priced difference, so arm-specific on purpose]"
 
 run() { # $1 arm $2 rep -> log path
   local arm="$1" rep="$2" extra="--gdn-loop 1" log
@@ -55,7 +61,7 @@ run() { # $1 arm $2 rep -> log path
   # if only one side ran it the pair would differ in the recurrence kernel as well as in speculation — and
   # the first take of this A/B showed exactly that, a 300 ms prefill difference that had nothing to do with
   # the accept loop. One variable per A/B, or the number describes the wrong thing.
-  [ "$arm" = accept ] && extra="$extra --mtp-draft 1 --mtp-accept 1"
+  [ "$arm" = accept ] && extra="$extra --mtp-draft 1 --mtp-accept 1 $ACCEPT_EXTRA"
   log="$OUT/${arm}_${rep}.log"; mkdir -p "$OUT/out_${arm}_${rep}"
   $BIN --model "$MODEL" --ids-file "$IDS" --steps "$STEPS" --cap "$CAP" --out "$OUT/out_${arm}_${rep}" \
       $extra > "$log" 2>&1
