@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+"""M3 — the accept rate of the SHIPPING LOOP, adjudicated on the corpus-49 population.
+
+WHY THIS EXISTS AND `run_accept.py` DOES NOT COVER IT. `run_accept.py` measures the accept rate of the
+read-only SIDE PASS (`--mtp-draft`, which prices a proposal and settles it against the next ordinary
+step). `--mtp-accept` is a different object: a round consumes one or two positions, drafts from the last
+FED row of the round that consumed the previous proposal, and owns the token stream. The kill line
+(`ACCEPT-PLAN.md`: kill if measured `a` on the shipping path falls below 0.4568) is stated about THE
+SHIPPING PATH, so it has to be adjudicated on this loop, not on the side pass whose 0.6641 was carried.
+`ACCEPT-BUILD.md` §4i.3 hands over exactly this measurement, and notes the geometry difference that makes
+exact agreement with 0.6641 not owed.
+
+THE POPULATION IS DERIVED, NEVER TYPED. It comes from `run_accept.load_population()`, which cross-checks
+`speccheck/fixtures/corpus.txt` against `data/refs/corpus48/manifest.json` (same count, same texts). The
+AGENTS.md trap row about an admission over a list typed from memory is the reason this file imports that
+function instead of reimplementing it: two populations that drift apart produce a plausible rate on
+neither corpus.
+
+THREE INDEPENDENT COUNTS OF THE SAME RUN, per line. `MTPSTAT`'s fields come from the device verdicts,
+`DECWALL`'s from the host emit sites, `emitted.txt` from the file, and the `ACCEPT round=` lines from the
+transcript. The harness re-derives every relation the engine asserts (rounds == accepted + rejected,
+DECWALL.emitted == MTPSTAT.emitted + plain - suppressed, DECWALL.rounds == MTPSTAT.rounds, emitted.txt
+lines == DECWALL.emitted, ACCEPT lines == MTPSTAT.rounds) because a check that lives only inside the thing
+under test is blind to the one failure that matters — the same reason `run_accept.sh` refuses a green
+gate whose `MTPDRAFT` line is missing.
+
+LOSSLESSNESS IS RE-ADJUDICATED ON EVERY LINE, not just on `dec8`, and it is adjudicated as a DECISION
+QUESTION rather than as byte equality. `ACCEPT-BUILD.md` §4g names the failure mode a wrong candidate
+would produce: the stream moves and nothing else does. So every line also runs flag-off and the two streams
+are compared. What was NOT known in advance is that they will not always be equal: the accept arm prices
+row 0 in the 2-row wave body and the flag-off arm prices it in the 1-row step, and `ACCEPT-PLAN.md` already
+records that those two forms are not bit-identical (argmax SAME, sub-band magnitudes) — which is A-18's
+chaos floor wearing a different hat. Byte equality at depth was therefore never an admissible ask, and
+"DIFFERS" at depth cannot tell a re-associated summation from dropped work.
+
+So the discriminator is mechanical, and it is the flag-off run's OWN logits at the flip position:
+
+  a flip is a legal tie-break iff the token the accept arm emitted is the flag-off run's RUNNER-UP, and
+  the top1-top2 margin at that row is below ONE BF16 ULP of the winning logit — i.e. the two candidates
+  are closer than the format they were computed in can express.
+
+Anything else — a token from further down the ranking, or a margin a legal form difference cannot reach —
+is a bookkeeping bug and exits non-zero, which by the standing fix-first rule outranks every speed item.
+The criterion is computed from the format (bf16 mantissa 8 bits -> relative 2^-8), NOT from the observed
+flips; the raw margins, ranks and each line's own margin distribution are printed regardless, so any
+reader can re-adjudicate with a different threshold. Stated plainly because it happened: the first flip
+(corpus line 3) was inspected BEFORE this criterion was written down, and it passed it (margin 0.0311 vs
+ULP bound 0.0853, token = runner-up, tightest tie of its line's 32 steps).
+
+THE DENOMINATOR IS PART OF THE VERDICT. The carried 0.6641 adjudicated 926 proposals; a "rate" from a
+handful of rounds cannot trip or clear a kill line drawn at four digits, so below `--min-rounds` (default
+400) this prints INSUFFICIENT-SAMPLE instead of a verdict. A rate of exactly 0.0000 is reported as a bug,
+not a low rate: a loop that never accepts is a broken loop.
+
+GPU: this does NOT take the lock. Run it under `m3_loop_rate.sh`, which acquires and releases
+`tools/gpu_lock.sh` in one long-lived shell (a short-lived subprocess would record a dead holder pid, and
+`gpu_lock.sh` deliberately reclaims a dead holder's lock).
+
+USAGE
+    prototype/mtp_accept/m3_loop_rate.sh                       # all 49 lines, both arms
+    prototype/mtp_accept/m3_loop_rate.sh --limit 8 --steps 32  # a slice, for a short window
+    PROXY of the same for a manual run: see the printed command line per line.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import re
+import subprocess
+import sys
+import time
+
+import numpy as np
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from run_accept import DEPTH_BUCKETS, die, load_population  # noqa: E402
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+# The kill line and the carried figure, imported by value from the documents that own them rather than
+# restated per run. Both live in ACCEPT-PLAN.md / ACCEPT-RESULT.md; changing one here would be moving a
+# band in a script that is supposed to be judged by it.
+KILL_LINE = 0.4568
+CARRIED_SIDE_PASS = 0.6641
+CARRIED_SIDE_PASS_FRAC = "615/926"
+
+# `key=value` pairs, values being any non-space run: `census=ok` and `ended=context_exhausted` are fields
+# too, and a numeric-only pattern silently dropped them, which read as "the engine refused to bill the run"
+# when in fact the harness had failed to parse a word.
+KV = re.compile(r"(\w+)=([^\s]+)")
+VOCAB = 248320          # asserted against the dump's byte size, never assumed
+BF16_REL_ULP = 2.0 ** -8  # bf16 keeps 8 mantissa bits: one ULP of x is x * 2^-8
+# `ACCEPT round=.. anchor=.. fed=.. cand=.. cand_pos=.. accept=.. verifier=.. bonus=.. emitted=.. pos=A->B
+#  restored_bytes=..`
+ROUND_RE = re.compile(
+    r"^ACCEPT round=(\d+) anchor=\d+ fed=\d+ cand=(-?\d+) cand_pos=(-?\d+) accept=(\d)"
+    r" verifier=(-?\d+) bonus=(-?\d+) emitted=(\d+) pos=\d+->(\d+) restored_bytes=(\d+)")
+
+
+def fields(line: str) -> dict[str, str]:
+    return {k: v for k, v in KV.findall(line)}
+
+
+def run_binary(binary: str, model: str, ids_file: pathlib.Path, out: pathlib.Path,
+               extra: list[str]) -> tuple[int, str]:
+    out.mkdir(parents=True, exist_ok=True)
+    cmd = [binary, "--model", model, "--ids-file", str(ids_file), "--gdn-loop", "1",
+           "--no-stop", "--out", str(out)] + extra
+    # The command line is printed so any single line of this pass is re-runnable by hand, and so the
+    # device population is auditable from the log rather than from this script's argparse defaults.
+    print("    $ " + " ".join(cmd), flush=True)
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    return p.returncode, p.stdout + p.stderr
+
+
+def logits_row(d: pathlib.Path, step: int) -> np.ndarray:
+    """One flag-off logits row, dtype read off the file size, not assumed.
+
+    The engine's `--out` rows are F32 (AGENTS.md: read a dump's dtype off its byte size — read as BF16 they
+    give half the elements and NaN aggregates with a plausible `ndiff` attached). Size is asserted against
+    the vocab, so a truncated dump is an error and not a short row.
+    """
+    p = d / f"logits{step}.bin"
+    if not p.exists():
+        die(f"no {p} — the flag-off run did not dump the row the comparison needs")
+    n = p.stat().st_size
+    if n == 4 * VOCAB:
+        a = np.fromfile(p, dtype=np.float32)
+    elif n == 2 * VOCAB:
+        raise SystemExit(f"{p}: BF16-sized logits ({n} B); this probe knows how to read F32 only")
+    else:
+        raise SystemExit(f"{p}: {n} B is neither {4 * VOCAB} (F32) nor {2 * VOCAB} (BF16) for vocab "
+                         f"{VOCAB}; refusing to guess a dtype")
+    assert a.size == VOCAB, (p, a.size)
+    return a
+
+
+def flip_witness(base_dir: pathlib.Path, base_steps: list[int], flip: int,
+                 acc_token: str, greedy_token: str) -> dict:
+    """Adjudicate ONE stream flip against the flag-off run's own logits at that position.
+
+    Returns the margin, the rank of the token the accept arm emitted, the line's own margin distribution,
+    and the verdict. See the module docstring for why runner-up + sub-ULP margin is the criterion.
+    """
+    step = base_steps[flip]
+    r = logits_row(base_dir, step)
+    order = np.argsort(r)[::-1]
+    top1, top2 = int(order[0]), int(order[1])
+    margin = float(r[top1] - r[top2])
+    try:
+        rank = int(np.where(order == int(acc_token))[0][0])
+    except IndexError:
+        rank = -1
+    ms = []
+    for s in base_steps:
+        x = logits_row(base_dir, s)
+        part = np.partition(x, x.size - 2)[-2:]
+        ms.append(float(part.max() - part.min()))
+    ulp = abs(float(r[top1])) * BF16_REL_ULP
+    ok = rank == 1 and margin < ulp
+    return {"flip": flip, "step": step, "greedy": greedy_token, "accept": acc_token,
+            "top1": top1, "top2": top2, "margin": margin, "ulp_bound": ulp, "rank": rank,
+            "line_median_margin": float(np.median(ms)), "line_min_margin": float(min(ms)),
+            "line_steps": len(ms), "near_tie": bool(ok)}
+
+
+def check_line(tag: str, acc_log: str, acc_dir: pathlib.Path, base_dir: pathlib.Path | None,
+               base_log: str | None, want_ids: int) -> dict:
+    """Re-derive every relation from ONE accept run, plus its lossless pair. Dies on a broken one."""
+    decwall = [ln for ln in acc_log.splitlines() if ln.startswith("DECWALL")]
+    mtpstat = [ln for ln in acc_log.splitlines() if ln.startswith("MTPSTAT")]
+    rounds_lines = [ln for ln in acc_log.splitlines() if ROUND_RE.match(ln)]
+    if len(decwall) != 1:
+        die(f"{tag}: {len(decwall)} DECWALL lines, expected exactly 1 "
+            "(a run that printed none never reached the window)")
+    if len(mtpstat) != 1:
+        die(f"{tag}: {len(mtpstat)} MTPSTAT lines, expected exactly 1 — no accept tally means the "
+            "flag did not reach the engine, so nothing below this line is a rate")
+    d, m = fields(decwall[0]), fields(mtpstat[0])
+    for k in ("bodies", "rounds", "plain", "accepted", "rejected", "suppressed", "emitted"):
+        if k not in d:
+            die(f"{tag}: DECWALL has no `{k}` field: {decwall[0]}")
+    if "note" in d:
+        die(f"{tag}: DECWALL note={d['note']} NO-RATE — the engine refused to bill this run")
+    if d.get("census") != "ok":
+        die(f"{tag}: DECWALL census={d.get('census', 'MISSING')} — the engine itself refused to bill "
+            "this run; a rate from it would be a number the binary told us not to read")
+
+    # The checks. Each names the two sources that disagree, because "mismatch" without provenance is
+    # the reader doing the forensics the harness should have done.
+    def eq(got, want, what):
+        if int(got) != int(want):
+            die(f"{tag}: {what}: {got} != {want}")
+
+    eq(int(m["rounds"]), int(m["accepted"]) + int(m["rejected"]), "MTPSTAT rounds vs accepted+rejected")
+    eq(int(m["emitted"]), 2 * int(m["accepted"]) + int(m["rejected"]),
+       "MTPSTAT emitted vs 2*accepted+rejected")
+    eq(int(d["rounds"]), int(m["rounds"]), "DECWALL rounds vs MTPSTAT rounds")
+    eq(int(d["accepted"]), int(m["accepted"]), "DECWALL accepted vs MTPSTAT accepted")
+    eq(int(d["rejected"]), int(m["rejected"]), "DECWALL rejected vs MTPSTAT rejected")
+    eq(int(d["emitted"]),
+       int(m["emitted"]) + int(d["plain"]) - int(d["suppressed"]),
+       "DECWALL emitted (host emit sites) vs MTPSTAT tally + plain steps - suppressed bonus")
+    eq(int(d["bodies"]), int(m["rounds"]) + int(d["plain"]), "DECWALL bodies vs rounds + plain")
+    eq(len(rounds_lines), int(m["rounds"]), "ACCEPT round lines vs MTPSTAT rounds")
+    n_accept_lines = sum(1 for ln in rounds_lines if ROUND_RE.match(ln).group(4) == "1")
+    eq(n_accept_lines, int(m["accepted"]), "ACCEPT accept=1 lines vs MTPSTAT accepted")
+
+    emitted_file = [ln.strip() for ln in (acc_dir / "emitted.txt").read_text().splitlines()
+                    if ln.strip() and not ln.startswith("#")]
+    eq(len(emitted_file), int(d["emitted"]), "emitted.txt lines vs DECWALL emitted")
+
+    # Losslessness, on this line: the accept arm's stream against the flag-off stream. The reference comes
+    # from the flag-off run's `STEP kind=decode` lines, NOT from its `sampled.txt`: that file also carries
+    # the prefill rows, and with the default `--prefill-logits last` those print `sampled=-1`, so a reader
+    # of column 3 compares the prompt against the generation and finds every position "different".
+    # `base_log is None` means the caller skipped the pair run (`--lossless 0`); that is recorded as None
+    # below, never as a passing comparison.
+    if base_log is None:
+        return {"d": d, "m": m, "rounds_lines": rounds_lines, "lossless_common": None,
+                "accept_len": len(emitted_file), "greedy_len": None, "prompt_ids": want_ids,
+                "identical": None, "flip": None}
+    base = [fields(ln)["sampled"] for ln in base_log.splitlines()
+            if ln.startswith("STEP kind=decode")]
+    base_steps = [int(fields(ln)["index"]) for ln in base_log.splitlines()
+                  if ln.startswith("STEP kind=decode")]
+    if not base:
+        die(f"{tag}: the flag-off run printed no `STEP kind=decode` line, so the lossless comparison has "
+            "no reference")
+    n = min(len(emitted_file), len(base))
+    bad = [i for i in range(n) if emitted_file[i] != base[i]]
+    # WHO emitted each token. An `ACCEMIT step=` whose step matches an `ACCEPT round=` came out of the
+    # 2-row body (row 0 on a reject, the candidate or row 1 on an accept); any other `ACCEMIT` came out of
+    # a plain 1-row `decode_step` — the same call the flag-off arm makes. That splits the two competing
+    # explanations for a flip: the body's arithmetic is a different legal form (row 0 of a wave at width 2
+    # vs the fused 1-row step), versus the loop's bookkeeping corrupting state that a plain step then
+    # reads. A flip on a plain step is the second one, and it is not explicable by the form gap.
+    emit_steps = [int(fields(ln)["step"]) for ln in acc_log.splitlines()
+                  if ln.startswith("ACCEMIT ")]
+    round_steps = {int(ROUND_RE.match(ln).group(1)): ROUND_RE.match(ln).group(4)
+                   for ln in rounds_lines}
+    flip = None
+    if bad:
+        # Only the FIRST flip is adjudicable: after a different token the two continuations are different
+        # texts, so every later position differs by construction and says nothing.
+        f = bad[0]
+        flip = flip_witness(base_dir, base_steps, f, emitted_file[f], base[f])
+        st = emit_steps[f] if f < len(emit_steps) else None
+        flip["emitted_by"] = ("plain_step(1-row)" if st not in round_steps
+                              else ("round_accept" if round_steps.get(st) == "1" else "round_reject"))
+    return {"d": d, "m": m, "rounds_lines": rounds_lines,
+            "lossless_common": n, "accept_len": len(emitted_file), "greedy_len": len(base),
+            "prompt_ids": want_ids, "identical": not bad, "flip": flip,
+            "n_div": len(bad)}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--binary", default="engine/build/decode_run")
+    ap.add_argument("--model", default="models/Qwen3.5-0.8B")
+    ap.add_argument("--steps", type=int, default=32)
+    ap.add_argument("--start", type=int, default=0)
+    ap.add_argument("--limit", type=int, default=0, help="0 = to the end of the population")
+    ap.add_argument("--lossless", type=int, default=1, choices=(0, 1))
+    ap.add_argument("--min-rounds", type=int, default=400)
+    ap.add_argument("--out", default="/tmp/m3_loop_rate")
+    ap.add_argument("--json", default="")
+    args = ap.parse_args()
+
+    prompts = load_population()
+    end = len(prompts) if args.limit == 0 else min(len(prompts), args.start + args.limit)
+    chunk = list(enumerate(prompts[args.start:end], start=args.start))
+    if not chunk:
+        die(f"empty slice: --start {args.start} --limit {args.limit} of {len(prompts)} lines")
+
+    out = pathlib.Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    print(f"=== the SHIPPING LOOP's accept rate — {len(chunk)} corpus lines x {args.steps} steps "
+          f"(rounds), lossless={args.lossless} ===")
+    print(f"population: {len(prompts)} lines from speccheck/fixtures/corpus.txt, cross-checked against "
+          f"data/refs/corpus48/manifest.json; driving lines {args.start}..{end - 1}")
+
+    tot = {"rounds": 0, "accepted": 0, "rejected": 0, "emitted": 0, "plain": 0, "suppressed": 0,
+           "bodies": 0}
+    by_depth: list[tuple[int, bool]] = []
+    per_line = []
+    flips: list[dict] = []
+    for li, p in chunk:
+        ids_file = out / f"line{li:02d}.csv"
+        ids_file.write_text(",".join(str(i) for i in p["ids"]) + "\n")
+        # `--ids-file` splits on COMMAS, so a space-joined file reads as one token and the run then
+        # "succeeds" at width 1 (AGENTS.md). Assert the field count off the file, not off the intent.
+        got = len(ids_file.read_text().strip().split(","))
+        if got != len(p["ids"]):
+            die(f"line {li}: wrote {len(p['ids'])} ids and the file has {got} comma fields")
+        tag = f"line {li}"
+        ad, bd = out / f"acc{li:02d}", out / f"base{li:02d}"
+        rc, log = run_binary(args.binary, args.model, ids_file, ad,
+                             ["--steps", str(args.steps), "--mtp-draft", "1", "--mtp-accept", "1"])
+        if rc != 0:
+            die(f"{tag}: accept run rc={rc}\n" + "\n".join(log.splitlines()[-6:]))
+        if args.lossless:
+            rc, blog = run_binary(args.binary, args.model, ids_file, bd,
+                                  ["--steps", str(args.steps)])
+            if rc != 0:
+                die(f"{tag}: flag-off pair run rc={rc}\n" + "\n".join(blog.splitlines()[-6:]))
+        else:
+            blog = None
+        info = check_line(tag, log, ad, bd if args.lossless else None, blog, got)
+        d, m = info["d"], info["m"]
+        for k in tot:
+            tot[k] += int(d[k])
+        for idx, ln in enumerate(info["rounds_lines"]):
+            mt = ROUND_RE.match(ln)
+            by_depth.append((idx, mt.group(4) == "1"))
+        fl = info["flip"]
+        if fl:
+            flips.append({"line": li, **fl})
+        per_line.append({"line": li, "prompt": got, "rounds": int(m["rounds"]),
+                         "accepted": int(m["accepted"]), "emitted": int(d["emitted"]),
+                         "plain": int(d["plain"]), "ended": d.get("ended", "?"),
+                         "rate": int(m["accepted"]) / int(m["rounds"]) if int(m["rounds"]) else None,
+                         "lossless_common": info["lossless_common"] if args.lossless else None,
+                         "identical": info["identical"], "first_flip": (fl or {}).get("flip"),
+                         "near_tie": (fl or {}).get("near_tie")})
+        status = ""
+        if args.lossless:
+            if info["identical"]:
+                status = f" stream=identical({info['lossless_common']}tok)"
+            elif fl:
+                status = (f" stream=FLIP@{fl['flip']} margin={fl['margin']:.4f}"
+                          f"<ulp{fl['ulp_bound']:.4f} rank={fl['rank']}"
+                          f" {'NEAR-TIE' if fl['near_tie'] else 'NOT-NEAR-TIE'}")
+            else:
+                status = " stream=DIFFERS"
+        print(f"  {tag:>8} prompt={got:>3} rounds={m['rounds']:>3} accepted={m['accepted']:>3}"
+              f" plain={d['plain']:>2} emitted={d['emitted']:>3} rate={per_line[-1]['rate']:.4f}"
+              f" ended={d.get('ended', '?')}{status}", flush=True)
+
+    rounds, accepted = tot["rounds"], tot["accepted"]
+    a = accepted / rounds if rounds else 0.0
+    print(f"\n--- harness wall {time.time() - t0:.0f}s (its own minutes, not an engine timing) ---")
+
+    # The stream admission, printed BEFORE the rate because it gates it: a rate from a loop that moved the
+    # target's stream is not a number (`run_accept.sh`'s NO-NUMBER rule), and the only way to know that is
+    # to compare the streams, which is what every line above did.
+    if args.lossless:
+        n_id = sum(1 for r in per_line if r["identical"])
+        hard = [f for f in flips if not f["near_tie"]]
+        print("=== ADMISSION: the accept arm's stream against the flag-off greedy stream ===")
+        print(f"lines compared {len(per_line)}   identical {n_id}   flipped {len(flips)}"
+              f"   of which outside the near-tie band {len(hard)}")
+        for f in flips:
+            print(f"  line {f['line']:>2}: first flip at emitted index {f['flip']:>2} (step {f['step']:>3}):"
+                  f" greedy={f['greedy']} accept={f['accept']} (rank {f['rank']} of that row)"
+                  f"  margin {f['margin']:.4f} vs bf16-ULP bound {f['ulp_bound']:.4f}"
+                  f"  | line median {f['line_median_margin']:.3f}, min {f['line_min_margin']:.4f},"
+                  f" {f['line_steps']} steps  emitted_by={f.get('emitted_by', '?')}  -> "
+                  + ("NEAR-TIE: a legal form gap" if f["near_tie"] else "NOT A NEAR-TIE: STRUCTURAL"))
+        if hard:
+            print(f"ADMISSION: FAIL — {len(hard)} flip(s) are not explicable as a tie between two legal"
+                  " bf16 forms. Per the fix-first rule this outranks every pending speed item.")
+            print("NO-NUMBER: the accept rate above this line is not printed, because the loop moved the"
+                  " target's stream in a way the form gap cannot reach.")
+            if args.json:
+                pathlib.Path(args.json).write_text(json.dumps(
+                    {"admission": "FAIL", "flips": flips, "per_line": per_line}, indent=2) + "\n")
+            return 1
+        print("ADMISSION: PASS — every divergence is the flag-off row's own runner-up at a margin below"
+              " one bf16 ULP of that row's top logit, i.e. the two candidates were not distinguishable in"
+              " the format they were computed in. That is the 2-row-body-vs-1-row-step form gap ACCEPT-PLAN"
+              " already carries, arriving as a token flip at depth rather than as a ULP count; byte"
+              " equality of the two streams at depth was never an admissible ask (§4i proved it to 16 tokens"
+              " on `dec8`, and A-18 says no bf16 implementation keeps token equality past a few dozen).")
+
+    print("=== VERDICT: the shipping loop's accept rate ===")
+    print(f"proposals adjudicated (rounds)   {rounds}")
+    print(f"accepted                         {accepted}   rejected {tot['rejected']}")
+    print(f"tokens emitted                   {tot['emitted']}   plain steps {tot['plain']},"
+          f" suppressed bonus {tot['suppressed']}")
+    print(f"mean tokens per round            {tot['emitted'] / rounds:.4f}" if rounds else "n/a")
+    print(f"a = accepted/rounds              {accepted}/{rounds} = {a:.4f}")
+    print(f"carried side-pass figure          {CARRIED_SIDE_PASS} ({CARRIED_SIDE_PASS_FRAC})"
+          f"  — geometry differs (§4i.3), agreement is expected and not owed")
+    print(f"kill line                         a < {KILL_LINE}")
+    if rounds == 0:
+        print("VERDICT: NO-DENOMINATOR — nothing was adjudicated; this run is an error, not a result")
+    elif rounds < args.min_rounds:
+        print(f"VERDICT: INSUFFICIENT-SAMPLE — {rounds} rounds is below the {args.min_rounds}-round floor"
+              f" for adjudicating a line drawn on {CARRIED_SIDE_PASS_FRAC}; run the full population")
+    elif a == 0.0:
+        print("VERDICT: BROKEN-LOOP — a = 0 exactly is a loop that never accepts, i.e. a bug report,"
+              " not a measured rate")
+    elif a < KILL_LINE:
+        print(f"VERDICT: KILL — the shipping loop measures {a:.4f} against the pre-registered kill line"
+              f" {KILL_LINE}. Per ACCEPT-PLAN.md this is not movable by the implementation.")
+    else:
+        print(f"VERDICT: the loop's measured {a:.4f} does not trip the kill line {KILL_LINE}"
+              f" (margin {a - KILL_LINE:+.4f}); the rate work may proceed to timing.")
+
+    print("\naccept by round ordinal in run (same buckets the carried profile used; the loop's ordinal"
+          " counts ROUNDS, the side pass counted proposals):")
+    for lo, hi in DEPTH_BUCKETS:
+        sel = [ok for (i, ok) in by_depth if lo <= i <= hi]
+        if sel:
+            print(f"  {lo:>3}-{hi if hi < 10**8 else '+':<3} n={len(sel):>4}"
+                  f" accept={sum(sel) / len(sel):.3f}")
+
+    if args.json:
+        pathlib.Path(args.json).write_text(json.dumps({
+            "binary": args.binary, "steps": args.steps, "lines": len(chunk),
+            "population": len(prompts), "totals": tot, "a": a, "kill_line": KILL_LINE,
+            "carried_side_pass": CARRIED_SIDE_PASS, "per_line": per_line, "flips": flips,
+            "bf16_rel_ulp": BF16_REL_ULP, "identical_lines": n_id if args.lossless else None,
+        }, indent=2) + "\n")
+        print(f"\njson: {args.json}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

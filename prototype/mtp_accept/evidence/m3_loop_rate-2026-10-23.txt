@@ -1,0 +1,181 @@
+== lock held as 'main-agent m3 loop accept rate'; util at acquire: gpu use: 91%
+== binaries: engine/build/decode_run  (2026-10-23T08:53:15Z)
+=== the SHIPPING LOOP's accept rate — 49 corpus lines x 32 steps (rounds), lossless=1 ===
+population: 49 lines from speccheck/fixtures/corpus.txt, cross-checked against data/refs/corpus48/manifest.json; driving lines 0..48
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line00.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc00 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line00.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base00 --steps 32
+    line 0 prompt=  5 rounds= 18 accepted= 13 plain= 2 emitted= 33 rate=0.7222 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line01.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc01 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line01.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base01 --steps 32
+    line 1 prompt=  8 rounds= 18 accepted= 13 plain= 2 emitted= 33 rate=0.7222 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line02.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc02 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line02.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base02 --steps 32
+    line 2 prompt=  6 rounds= 19 accepted= 13 plain= 1 emitted= 33 rate=0.6842 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line03.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc03 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line03.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base03 --steps 32
+    line 3 prompt=  6 rounds= 17 accepted= 14 plain= 2 emitted= 33 rate=0.8235 ended=context_exhausted stream=FLIP@22 margin=0.0311<ulp0.0853 rank=1 NEAR-TIE
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line04.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc04 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line04.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base04 --steps 32
+    line 4 prompt=  5 rounds= 20 accepted= 12 plain= 1 emitted= 33 rate=0.6000 ended=context_exhausted stream=FLIP@22 margin=0.0318<ulp0.0680 rank=1 NEAR-TIE
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line05.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc05 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line05.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base05 --steps 32
+    line 5 prompt=  8 rounds= 20 accepted= 12 plain= 1 emitted= 33 rate=0.6000 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line06.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc06 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line06.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base06 --steps 32
+    line 6 prompt=  5 rounds= 19 accepted= 12 plain= 2 emitted= 33 rate=0.6316 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line07.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc07 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line07.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base07 --steps 32
+    line 7 prompt=  9 rounds= 19 accepted= 13 plain= 1 emitted= 33 rate=0.6842 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line08.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc08 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line08.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base08 --steps 32
+    line 8 prompt=  7 rounds= 18 accepted= 13 plain= 2 emitted= 33 rate=0.7222 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line09.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc09 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line09.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base09 --steps 32
+    line 9 prompt=  6 rounds= 19 accepted= 13 plain= 1 emitted= 33 rate=0.6842 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line10.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc10 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line10.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base10 --steps 32
+   line 10 prompt=  9 rounds= 19 accepted= 12 plain= 2 emitted= 33 rate=0.6316 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line11.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc11 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line11.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base11 --steps 32
+   line 11 prompt=  8 rounds= 16 accepted= 16 plain= 1 emitted= 33 rate=1.0000 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line12.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc12 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line12.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base12 --steps 32
+   line 12 prompt=  6 rounds= 20 accepted= 11 plain= 2 emitted= 33 rate=0.5500 ended=context_exhausted stream=FLIP@5 margin=0.0346<ulp0.0808 rank=1 NEAR-TIE
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line13.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc13 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line13.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base13 --steps 32
+   line 13 prompt=  7 rounds= 20 accepted= 12 plain= 1 emitted= 33 rate=0.6000 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line14.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc14 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line14.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base14 --steps 32
+   line 14 prompt=  4 rounds= 17 accepted= 15 plain= 1 emitted= 33 rate=0.8824 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line15.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc15 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line15.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base15 --steps 32
+   line 15 prompt=  5 rounds= 18 accepted= 14 plain= 1 emitted= 33 rate=0.7778 ended=context_exhausted stream=FLIP@4 margin=0.0233<ulp0.0712 rank=1 NEAR-TIE
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line16.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc16 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line16.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base16 --steps 32
+   line 16 prompt=  6 rounds= 19 accepted= 12 plain= 2 emitted= 33 rate=0.6316 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line17.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc17 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line17.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base17 --steps 32
+   line 17 prompt= 10 rounds= 23 accepted=  9 plain= 1 emitted= 33 rate=0.3913 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line18.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc18 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line18.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base18 --steps 32
+   line 18 prompt=  5 rounds= 18 accepted= 14 plain= 1 emitted= 33 rate=0.7778 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line19.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc19 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line19.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base19 --steps 32
+   line 19 prompt=  4 rounds= 18 accepted= 14 plain= 1 emitted= 33 rate=0.7778 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line20.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc20 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line20.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base20 --steps 32
+   line 20 prompt=  4 rounds= 21 accepted= 11 plain= 1 emitted= 33 rate=0.5238 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line21.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc21 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line21.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base21 --steps 32
+   line 21 prompt= 10 rounds= 20 accepted= 11 plain= 2 emitted= 33 rate=0.5500 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line22.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc22 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line22.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base22 --steps 32
+   line 22 prompt=  8 rounds= 18 accepted= 13 plain= 2 emitted= 33 rate=0.7222 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line23.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc23 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line23.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base23 --steps 32
+   line 23 prompt=  4 rounds= 20 accepted= 11 plain= 2 emitted= 33 rate=0.5500 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line24.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc24 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line24.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base24 --steps 32
+   line 24 prompt=  7 rounds= 19 accepted= 12 plain= 2 emitted= 33 rate=0.6316 ended=context_exhausted stream=FLIP@6 margin=0.0336<ulp0.0758 rank=1 NEAR-TIE
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line25.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc25 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line25.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base25 --steps 32
+   line 25 prompt=  5 rounds= 19 accepted= 12 plain= 2 emitted= 33 rate=0.6316 ended=context_exhausted stream=FLIP@3 margin=0.0025<ulp0.0620 rank=1 NEAR-TIE
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line26.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc26 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line26.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base26 --steps 32
+   line 26 prompt=  5 rounds= 17 accepted= 14 plain= 2 emitted= 33 rate=0.8235 ended=context_exhausted stream=FLIP@7 margin=0.0583<ulp0.0932 rank=1 NEAR-TIE
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line27.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc27 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line27.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base27 --steps 32
+   line 27 prompt=  4 rounds= 18 accepted= 14 plain= 1 emitted= 33 rate=0.7778 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line28.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc28 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line28.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base28 --steps 32
+   line 28 prompt=  6 rounds= 20 accepted= 11 plain= 2 emitted= 33 rate=0.5500 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line29.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc29 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line29.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base29 --steps 32
+   line 29 prompt=  6 rounds= 20 accepted= 11 plain= 2 emitted= 33 rate=0.5500 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line30.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc30 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line30.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base30 --steps 32
+   line 30 prompt=  6 rounds= 17 accepted= 15 plain= 1 emitted= 33 rate=0.8824 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line31.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc31 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line31.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base31 --steps 32
+   line 31 prompt= 10 rounds= 17 accepted= 14 plain= 2 emitted= 33 rate=0.8235 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line32.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc32 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line32.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base32 --steps 32
+   line 32 prompt=  5 rounds= 18 accepted= 14 plain= 1 emitted= 33 rate=0.7778 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line33.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc33 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line33.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base33 --steps 32
+   line 33 prompt=  8 rounds= 18 accepted= 13 plain= 2 emitted= 33 rate=0.7222 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line34.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc34 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line34.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base34 --steps 32
+   line 34 prompt=  5 rounds= 18 accepted= 14 plain= 1 emitted= 33 rate=0.7778 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line35.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc35 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line35.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base35 --steps 32
+   line 35 prompt=  7 rounds= 19 accepted= 12 plain= 2 emitted= 33 rate=0.6316 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line36.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc36 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line36.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base36 --steps 32
+   line 36 prompt=  7 rounds= 19 accepted= 12 plain= 2 emitted= 33 rate=0.6316 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line37.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc37 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line37.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base37 --steps 32
+   line 37 prompt=  3 rounds= 19 accepted= 12 plain= 2 emitted= 33 rate=0.6316 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line38.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc38 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line38.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base38 --steps 32
+   line 38 prompt=  6 rounds= 20 accepted= 12 plain= 1 emitted= 33 rate=0.6000 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line39.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc39 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line39.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base39 --steps 32
+   line 39 prompt=  9 rounds= 23 accepted=  8 plain= 2 emitted= 33 rate=0.3478 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line40.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc40 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line40.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base40 --steps 32
+   line 40 prompt=  6 rounds= 21 accepted= 10 plain= 2 emitted= 33 rate=0.4762 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line41.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc41 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line41.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base41 --steps 32
+   line 41 prompt=  4 rounds= 20 accepted= 12 plain= 1 emitted= 33 rate=0.6000 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line42.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc42 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line42.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base42 --steps 32
+   line 42 prompt=  4 rounds= 19 accepted= 13 plain= 1 emitted= 33 rate=0.6842 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line43.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc43 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line43.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base43 --steps 32
+   line 43 prompt=  7 rounds= 21 accepted= 11 plain= 1 emitted= 33 rate=0.5238 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line44.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc44 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line44.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base44 --steps 32
+   line 44 prompt=  7 rounds= 19 accepted= 12 plain= 2 emitted= 33 rate=0.6316 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line45.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc45 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line45.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base45 --steps 32
+   line 45 prompt=  4 rounds= 21 accepted= 10 plain= 2 emitted= 33 rate=0.4762 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line46.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc46 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line46.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base46 --steps 32
+   line 46 prompt=  4 rounds= 19 accepted= 13 plain= 1 emitted= 33 rate=0.6842 ended=context_exhausted stream=identical(32tok)
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line47.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc47 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line47.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base47 --steps 32
+   line 47 prompt=  9 rounds= 19 accepted= 13 plain= 1 emitted= 33 rate=0.6842 ended=context_exhausted stream=FLIP@28 margin=0.0208<ulp0.0728 rank=1 NEAR-TIE
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line48.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/acc48 --steps 32 --mtp-draft 1 --mtp-accept 1
+    $ engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file /tmp/m3_full3/line48.csv --gdn-loop 1 --no-stop --out /tmp/m3_full3/base48 --steps 32
+   line 48 prompt=  5 rounds= 18 accepted= 14 plain= 1 emitted= 33 rate=0.7778 ended=context_exhausted stream=identical(32tok)
+
+--- harness wall 98s (its own minutes, not an engine timing) ---
+=== ADMISSION: the accept arm's stream against the flag-off greedy stream ===
+lines compared 49   identical 41   flipped 8   of which outside the near-tie band 0
+  line  3: first flip at emitted index 22 (step  28): greedy=1919 accept=2064 (rank 1 of that row)  margin 0.0311 vs bf16-ULP bound 0.0853  | line median 2.298, min 0.0311, 32 steps  emitted_by=round_accept  -> NEAR-TIE: a legal form gap
+  line  4: first flip at emitted index 22 (step  27): greedy=21254 accept=321 (rank 1 of that row)  margin 0.0318 vs bf16-ULP bound 0.0680  | line median 0.901, min 0.0318, 32 steps  emitted_by=round_accept  -> NEAR-TIE: a legal form gap
+  line 12: first flip at emitted index  5 (step  11): greedy=321 accept=314 (rank 1 of that row)  margin 0.0346 vs bf16-ULP bound 0.0808  | line median 0.924, min 0.0346, 32 steps  emitted_by=round_accept  -> NEAR-TIE: a legal form gap
+  line 15: first flip at emitted index  4 (step   9): greedy=16 accept=32 (rank 1 of that row)  margin 0.0233 vs bf16-ULP bound 0.0712  | line median 2.052, min 0.0233, 32 steps  emitted_by=round_accept  -> NEAR-TIE: a legal form gap
+  line 24: first flip at emitted index  6 (step  13): greedy=2434 accept=248068 (rank 1 of that row)  margin 0.0336 vs bf16-ULP bound 0.0758  | line median 2.410, min 0.0263, 32 steps  emitted_by=round_accept  -> NEAR-TIE: a legal form gap
+  line 25: first flip at emitted index  3 (step   8): greedy=11 accept=15 (rank 1 of that row)  margin 0.0025 vs bf16-ULP bound 0.0620  | line median 4.160, min 0.0025, 32 steps  emitted_by=round_reject  -> NEAR-TIE: a legal form gap
+  line 26: first flip at emitted index  7 (step  12): greedy=9175 accept=332 (rank 1 of that row)  margin 0.0583 vs bf16-ULP bound 0.0932  | line median 2.733, min 0.0583, 32 steps  emitted_by=round_accept  -> NEAR-TIE: a legal form gap
+  line 47: first flip at emitted index 28 (step  37): greedy=561 accept=21095 (rank 1 of that row)  margin 0.0208 vs bf16-ULP bound 0.0728  | line median 1.186, min 0.0208, 32 steps  emitted_by=round_reject  -> NEAR-TIE: a legal form gap
+ADMISSION: PASS — every divergence is the flag-off row's own runner-up at a margin below one bf16 ULP of that row's top logit, i.e. the two candidates were not distinguishable in the format they were computed in. That is the 2-row-body-vs-1-row-step form gap ACCEPT-PLAN already carries, arriving as a token flip at depth rather than as a ULP count; byte equality of the two streams at depth was never an admissible ask (§4i proved it to 16 tokens on `dec8`, and A-18 says no bf16 implementation keeps token equality past a few dozen).
+=== VERDICT: the shipping loop's accept rate ===
+proposals adjudicated (rounds)   932
+accepted                         611   rejected 321
+tokens emitted                   1617   plain steps 74, suppressed bonus 0
+mean tokens per round            1.7350
+a = accepted/rounds              611/932 = 0.6556
+carried side-pass figure          0.6641 (615/926)  — geometry differs (§4i.3), agreement is expected and not owed
+kill line                         a < 0.4568
+VERDICT: the loop's measured 0.6556 does not trip the kill line 0.4568 (margin +0.1988); the rate work may proceed to timing.
+
+accept by round ordinal in run (same buckets the carried profile used; the loop's ordinal counts ROUNDS, the side pass counted proposals):
+    0-7   n= 392 accept=0.594
+    8-15  n= 392 accept=0.686
+   16-31  n= 148 accept=0.736
+
+json: /tmp/m3_full3/m3_loop_rate.json
+== util at release: gpu use: 42%

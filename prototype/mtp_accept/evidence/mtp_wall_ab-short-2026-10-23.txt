@@ -1,0 +1,23 @@
+== util at acquire: gpu use: 91%; ids fields=17 steps=32 reps=5 cap=4300
+== binary: engine/build/decode_run (8633068)  fixture: /tmp/dec8_ids.csv
+base    rep 1  prefill     95.8 ms  decode   299.612 ms  emitted   32  bodies  32 rounds   0 plain 32  rate   tok/s  106.805  ended=steps_exhausted
+accept  rep 1  prefill     98.2 ms  decode   365.088 ms  emitted   38  bodies  23 rounds  22 plain  1  rate 0.727273  tok/s  104.085  ended=stop_token
+base    rep 2  prefill     98.9 ms  decode   300.446 ms  emitted   32  bodies  32 rounds   0 plain 32  rate   tok/s  106.508  ended=steps_exhausted
+accept  rep 2  prefill     98.8 ms  decode   362.874 ms  emitted   38  bodies  23 rounds  22 plain  1  rate 0.727273  tok/s  104.720  ended=stop_token
+base    rep 3  prefill    108.5 ms  decode   299.155 ms  emitted   32  bodies  32 rounds   0 plain 32  rate   tok/s  106.968  ended=steps_exhausted
+accept  rep 3  prefill     94.7 ms  decode   365.224 ms  emitted   38  bodies  23 rounds  22 plain  1  rate 0.727273  tok/s  104.046  ended=stop_token
+base    rep 4  prefill    100.7 ms  decode   298.435 ms  emitted   32  bodies  32 rounds   0 plain 32  rate   tok/s  107.226  ended=steps_exhausted
+accept  rep 4  prefill     95.2 ms  decode   363.489 ms  emitted   38  bodies  23 rounds  22 plain  1  rate 0.727273  tok/s  104.542  ended=stop_token
+base    rep 5  prefill    103.1 ms  decode   298.467 ms  emitted   32  bodies  32 rounds   0 plain 32  rate   tok/s  107.215  ended=steps_exhausted
+accept  rep 5  prefill     99.3 ms  decode   361.823 ms  emitted   38  bodies  23 rounds  22 plain  1  rate 0.727273  tok/s  105.024  ended=stop_token
+
+== medians of 5 reps, same lock hold, 17 lanes ==
+  base    tok/s  106.968   decode_ms   299.155   emitted     32
+  accept  tok/s  104.542   decode_ms   363.489   emitted     38
+  cost per body: base  9.349 ms/step   accept 15.804 ms/round
+  one round costs 1.691 x one step; k=1 emits at most 2 tokens per round, so the ceiling on any accept rate is 1.183 x base
+  parity would need accept rate a* = round/step - 1 = 0.691  (a is a rate: it cannot exceed 1.000)  — parity is reachable in principle if the measured a clears a*
+  accept vs base: -2.27 % tok/s at 17 lanes (pre-registered adopt line: >= +10 %)
+  VERDICT: does NOT clear the adopt line on wall time
+== util at release: gpu use: 44%
+== logs in tmp/mtp_speed_short (per-arm per-rep .log and .tsv); no number here is best-of-N and none is a burst

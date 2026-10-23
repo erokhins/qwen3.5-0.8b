@@ -1,0 +1,23 @@
+== util at acquire: gpu use: 89%; ids fields=4000 steps=32 reps=5 cap=4300
+== binary: engine/build/decode_run (8633068)  fixture: tmp/glue_copy_fold/ab/ids4032.csv
+base    rep 1  prefill    786.3 ms  decode   356.768 ms  emitted   32  bodies  32 rounds   0 plain 32  rate   tok/s   89.694  ended=steps_exhausted
+accept  rep 1  prefill    760.5 ms  decode   731.941 ms  emitted   34  bodies  32 rounds  31 plain  1  rate 0.0645161  tok/s   46.452  ended=steps_exhausted
+base    rep 2  prefill    770.1 ms  decode   361.234 ms  emitted   32  bodies  32 rounds   0 plain 32  rate   tok/s   88.585  ended=steps_exhausted
+accept  rep 2  prefill    763.9 ms  decode   733.724 ms  emitted   34  bodies  32 rounds  31 plain  1  rate 0.0645161  tok/s   46.339  ended=steps_exhausted
+base    rep 3  prefill    774.6 ms  decode   363.091 ms  emitted   32  bodies  32 rounds   0 plain 32  rate   tok/s   88.132  ended=steps_exhausted
+accept  rep 3  prefill    764.7 ms  decode   732.812 ms  emitted   34  bodies  32 rounds  31 plain  1  rate 0.0645161  tok/s   46.397  ended=steps_exhausted
+base    rep 4  prefill    778.4 ms  decode   361.611 ms  emitted   32  bodies  32 rounds   0 plain 32  rate   tok/s   88.493  ended=steps_exhausted
+accept  rep 4  prefill    787.2 ms  decode   733.947 ms  emitted   34  bodies  32 rounds  31 plain  1  rate 0.0645161  tok/s   46.325  ended=steps_exhausted
+base    rep 5  prefill    789.4 ms  decode   360.042 ms  emitted   32  bodies  32 rounds   0 plain 32  rate   tok/s   88.879  ended=steps_exhausted
+accept  rep 5  prefill    772.5 ms  decode   732.831 ms  emitted   34  bodies  32 rounds  31 plain  1  rate 0.0645161  tok/s   46.395  ended=steps_exhausted
+
+== medians of 5 reps, same lock hold, 4000 lanes ==
+  base    tok/s   88.585   decode_ms   361.234   emitted     32
+  accept  tok/s   46.395   decode_ms   732.831   emitted     34
+  cost per body: base 11.289 ms/step   accept 22.901 ms/round
+  one round costs 2.029 x one step; k=1 emits at most 2 tokens per round, so the ceiling on any accept rate is 0.986 x base
+  parity would need accept rate a* = round/step - 1 = 1.029  (a is a rate: it cannot exceed 1.000)  — so PARITY IS UNREACHABLE AT THIS WIDTH FOR k=1 AT ANY ACCEPT RATE
+  accept vs base: -47.63 % tok/s at 4000 lanes (pre-registered adopt line: >= +10 %)
+  VERDICT: does NOT clear the adopt line on wall time
+== util at release: gpu use: 69%
+== logs in tmp/mtp_speed_wall (per-arm per-rep .log and .tsv); no number here is best-of-N and none is a burst
