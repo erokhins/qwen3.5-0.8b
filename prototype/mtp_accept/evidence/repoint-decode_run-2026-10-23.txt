@@ -1,0 +1,33 @@
+    46 -> 46     unchanged    #include <vector>                                          <- progress/2026-10-12/plan-prefill-2026-10-12.md
+    61 ->  BLANK AT HEAD, cannot be matched by text; check by eye  <- progress/2026-10-12/plan-prefill-2026-10-12.md
+    64 -> 64     unchanged    // Slot count a `--session` allocates when `--cap` is not  <- progress/2026-10-17/HANDOFF_ceiling_raise.md,progress/2026-10-19/queue2-2026-10-19.md,prototype/glue_copy_fold/GLUECOPY-HANDOVER.md
+    90 -> 90     unchanged    // finished step's final-norm row and its emitted token an <- prototype/mtp_headbatch/MTP-IMPL.md
+   104 -> 104    unchanged    // accept loop: emitting two tokens per step is the next i <- progress/2026-10-16/performance-status-2026-10-16.md,prototype/attn_decode/results.md
+   106 -> 106    unchanged    int mtp_verify = 0;                                        <- progress/2026-10-17/glue-cast-copy-bytes-census.md
+   110 -> 110    unchanged    // predicted" — the TRUE next token, which makes one probe <- progress/2026-10-17/glue-cast-copy-bytes-census.md
+   152 -> 167    MOVED        // away so they can be `cmp`'d against what the per-token  <- prototype/attn_percost/A9-LC-impl.md,prototype/attn_wmma/E1-result.md
+   161 -> 176    MOVED        // Which weight walk the MLP's gate/up launches use (Q10's <- prototype/attn_percost/A6-result.md
+   190 -> 205    MOVED        // SHIPPED default since `prototype/attn_decode/results.md <- prototype/attn_percost/A9-LC-impl.md
+   247 -> 262    MOVED        // keyed on its value would manufacture a refusal for ever <- prototype/mtp_verify/causal_bound.cpp
+   279 -> 294    MOVED        // is never inert — it replaces the wave core — so the val <- prototype/gemm_algo_sweep/README.md,prototype/gemm_algo_sweep/gemm_algo_sweep.cpp
+   325 -> 340    MOVED        // for a 4,096-token prompt); `1` is the old one-launch-pe <- progress/2026-10-21/route-S1-segments-2026-10-21.md
+   336 -> 351    MOVED        // a run that asked for a span while running route A, not  <- prototype/wave_shape/wave_shape.hip.cpp
+   397 -> 412    MOVED        // environment gate.py already inherits, which means the f <- progress/2026-10-12/plan-prefill-2026-10-12.md,prototype/glue_copy_fold/GLUECOPY-HANDOVER.md
+   405 -> 420    MOVED        // a default, because an unset-by-typo variable reads exac <- progress/2026-10-12/plan-prefill-2026-10-12.md
+  1406 -> 1451   MOVED        m.track.pending_pred_pos(), m.track.pending_proposal());   <- prototype/perprompt/A7-CANDIDATES.md
+  1407 -> 1452   MOVED        m.track.clear();                                           <- prototype/perprompt/A7-CANDIDATES.md,prototype/perprompt/a7_host_split.sh
+  1460 -> 1511   MOVED, 29 identical lines, nearest-first=[1511, 1514, 1506] //                                                         <- prototype/perprompt/a7_lib.sh
+  1588 -> 1645   MOVED        // Byte equality against `step_after` was therefore not an <- prototype/perprompt/A7-CANDIDATES.md,prototype/perprompt/a7_scratch_bytes.py
+  1598 -> 1655   MOVED        if (s.mid_state.size() != step_after->gdn.size() + step_af <- prototype/perprompt/A7-CANDIDATES.md,prototype/perprompt/a7_scratch_bytes.py
+  1599 -> 1656   MOVED        mid_diff = "size";                                         <- prototype/perprompt/A7-CANDIDATES.md
+  1602 -> 1659   MOVED        } else if (std::memcmp(mid_c, step_after->conv.data(), ste <- prototype/perprompt/a7_lib.sh
+  1700 -> 1760   MOVED        std::printf("ERROR gen needs a token count\n");            <- prototype/perprompt/A7-CANDIDATES.md
+  1701 -> 1761   MOVED, 9 identical lines, nearest-first=[1761, 1755, 1748] std::fflush(stdout);                                       <- prototype/perprompt/A7-CANDIDATES.md
+  1726 -> 1786   MOVED        ++emitted;                                                 <- prototype/perprompt/A7-CANDIDATES.md
+  1753 -> 1813   MOVED        // rather than claiming the proposal is lost.              <- prototype/perprompt/A7-CANDIDATES.md
+  1797 -> 1857   MOVED        " [--prefill-logits last|all] [--wave-rows N]"             <- progress/2026-10-21/performance-status-2026-10-21.md,prototype/perprompt/A7-CANDIDATES.md,prototype/perprompt/a7_host_split.sh
+  1803 -> 1863   MOVED        " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hois <- prototype/perprompt/A7-CANDIDATES.md
+  1992 -> 2052   MOVED        " — BIT-identical (zero elements of `o` and of the state m <- prototype/perprompt/A7-CANDIDATES.md
+  1998 -> 2058   MOVED        " shared memory — 3 barriers instead of 8, −32 of 1,406 sl <- prototype/perprompt/A7-CANDIDATES.md
+
+engine/decode_run.cpp: HEAD 3863 lines, working tree 3952; 24 of 31 anchor(s) moved
