@@ -1,0 +1,412 @@
+loaded 335 tensors, 1.5457 GB resident in 399.0 ms (335 allocations)
+check_weights: PASS
+state: cap=428 GDN state 18.000 MiB + conv window 1.266 MiB + KV 5.016 MiB = 24.281 MiB (KV 12288 B/token, constant 19.266 MiB/request)
+STATE cap=428 gdn=18874368 conv=1327104 kv=5259264 total=25460736 per_token=12288
+LAUNCH glue=49 proj=48 gdn=72 attn=6 mlp=48 cast=97 other=20 total=340
+PROJPLAN plan=packed shape=unroll8 launches_per_step=48 rpb=8 threads=1024 warp=32 segs_max=4
+CASTFOLD on=1 env=QWEN_CAST_FOLD plan=97 folded=97 kept=0 sites=6 body=one-row full_wide=final-norm-only step_bill=243
+COPYFOLD on=1 env=QWEN_COPY_FOLD plan=19 folded=19 kept=0 sites=5 body=one-row full_wide=lm-head-only step_bill=224
+NUMERICS wave_rows_cap=512 wave_rows=512 gemm=lt hipblas=3.6.0 attn_tile=1 attn_touch=1 attn_fattn=1 attn_fattn_roll=single attn_fattn_qstage=unstaged8 attn_fattn_pvf16=f32 attn_fattn_wide=wide_llama gdn_scan=seq gdn_chunk=64 gdn_spell=fused gdn_loop=1 gdn_norm=inline gdn_geom=na-loop1-per-token-bodies proj_plan=packed proj_shape=unroll8
+GEMM route=hipblaslt handle=1 workspace_mib=128 version=10.4.1 algo_source=heuristic-rank-0-per-shape heur_width=8 pins=2/2 pin_names=down_proj,deep_gate_proj+up_proj cand=0/3 stream=default
+GEMM-LT shape=q_proj N=4096 K=1024 M=512 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=7a0400000000000000000000000000000000000800000000
+GEMM-LT shape=k_proj+v_proj N=512 K=1024 M=512 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=d40300000000000000000000000000000000000800000000
+GEMM-LT shape=o_proj+out_proj N=1024 K=2048 M=512 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=370400000000000000000000000000000000000800000000
+GEMM-LT shape=in_proj_qkv N=6144 K=1024 M=512 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=940400000000000000000000000000000000000800000000
+GEMM-LT shape=in_proj_z N=2048 K=1024 M=512 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=510300000000000000000000000000000000000800000000
+GEMM-LT shape=gate_proj+up_proj N=3584 K=1024 M=512 source=pin ws=134217728 waves=0 skipped_ws=0 skipped_state=0 heur_returned=0 algo=820400000000000000000000000000000000000800000000
+GEMM-LT shape=down_proj N=1024 K=3584 M=512 source=pin ws=134217728 waves=0 skipped_ws=0 skipped_state=0 heur_returned=0 algo=890300000000000000000000000000000000000800000000
+MTPMETER role=verify on=1 sync_added_phases_inflate=1 plan=prototype/mtp_accept/METER-PLAN.md
+GEMM-LT shape=in_proj_qkv N=6144 K=1024 M=128 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=620400000000000000000000000000000000000800000000
+GEMM-LT shape=in_proj_z N=2048 K=1024 M=128 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=510300000000000000000000000000000000000800000000
+GEMM-LT shape=o_proj+out_proj N=1024 K=2048 M=128 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=500400000000000000000000000000000000000800000000
+GEMM-LT shape=gate_proj+up_proj N=3584 K=1024 M=128 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=5b0400000000000000000000000000000000000800000000
+GEMM-LT shape=down_proj N=1024 K=3584 M=128 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=7f0400000000000000000000000000000000000800000000
+GEMM-LT shape=q_proj N=4096 K=1024 M=128 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=9a0300000000000000000000000000000000000800000000
+GEMM-LT shape=k_proj+v_proj N=512 K=1024 M=128 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=3c0400000000000000000000000000000000000800000000
+SPLITCAP split=1 cap=0 lanes=128 natural=1 rows=128 span=128
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,4) wide_rows=128/128 wave_rows=128 lanes_last=128 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+PREFILL tokens=128 logits=last prefix_len=128 wave_rows=512 pos=0..127
+prefill 0 | fed  248045 | sampled       - | top       - | P 0 -> 1
+STEP kind=prefill index=0 input=248045 sampled=-1 top_logit=none pos_before=0 pos_after=1 stop=0
+prefill 1 | fed     846 | sampled       - | top       - | P 1 -> 2
+STEP kind=prefill index=1 input=846 sampled=-1 top_logit=none pos_before=1 pos_after=2 stop=0
+prefill 2 | fed     198 | sampled       - | top       - | P 2 -> 3
+STEP kind=prefill index=2 input=198 sampled=-1 top_logit=none pos_before=2 pos_after=3 stop=0
+prefill 3 | fed     760 | sampled       - | top       - | P 3 -> 4
+STEP kind=prefill index=3 input=760 sampled=-1 top_logit=none pos_before=3 pos_after=4 stop=0
+prefill 4 | fed    6511 | sampled       - | top       - | P 4 -> 5
+STEP kind=prefill index=4 input=6511 sampled=-1 top_logit=none pos_before=4 pos_after=5 stop=0
+prefill 5 | fed     314 | sampled       - | top       - | P 5 -> 6
+STEP kind=prefill index=5 input=314 sampled=-1 top_logit=none pos_before=5 pos_after=6 stop=0
+prefill 6 | fed    9338 | sampled       - | top       - | P 6 -> 7
+STEP kind=prefill index=6 input=9338 sampled=-1 top_logit=none pos_before=6 pos_after=7 stop=0
+prefill 7 | fed     369 | sampled       - | top       - | P 7 -> 8
+STEP kind=prefill index=7 input=369 sampled=-1 top_logit=none pos_before=7 pos_after=8 stop=0
+prefill 8 | fed  248046 | sampled       - | top       - | P 8 -> 9
+STEP kind=prefill index=8 input=248046 sampled=-1 top_logit=none pos_before=8 pos_after=9 stop=0
+prefill 9 | fed     198 | sampled       - | top       - | P 9 -> 10
+STEP kind=prefill index=9 input=198 sampled=-1 top_logit=none pos_before=9 pos_after=10 stop=0
+prefill 10 | fed  248045 | sampled       - | top       - | P 10 -> 11
+STEP kind=prefill index=10 input=248045 sampled=-1 top_logit=none pos_before=10 pos_after=11 stop=0
+prefill 11 | fed   74455 | sampled       - | top       - | P 11 -> 12
+STEP kind=prefill index=11 input=74455 sampled=-1 top_logit=none pos_before=11 pos_after=12 stop=0
+prefill 12 | fed     198 | sampled       - | top       - | P 12 -> 13
+STEP kind=prefill index=12 input=198 sampled=-1 top_logit=none pos_before=12 pos_after=13 stop=0
+prefill 13 | fed  248068 | sampled       - | top       - | P 13 -> 14
+STEP kind=prefill index=13 input=248068 sampled=-1 top_logit=none pos_before=13 pos_after=14 stop=0
+prefill 14 | fed     271 | sampled       - | top       - | P 14 -> 15
+STEP kind=prefill index=14 input=271 sampled=-1 top_logit=none pos_before=14 pos_after=15 stop=0
+prefill 15 | fed  248069 | sampled       - | top       - | P 15 -> 16
+STEP kind=prefill index=15 input=248069 sampled=-1 top_logit=none pos_before=15 pos_after=16 stop=0
+prefill 16 | fed     271 | sampled       - | top       - | P 16 -> 17
+STEP kind=prefill index=16 input=271 sampled=-1 top_logit=none pos_before=16 pos_after=17 stop=0
+prefill 17 | fed  248045 | sampled       - | top       - | P 17 -> 18
+STEP kind=prefill index=17 input=248045 sampled=-1 top_logit=none pos_before=17 pos_after=18 stop=0
+prefill 18 | fed     846 | sampled       - | top       - | P 18 -> 19
+STEP kind=prefill index=18 input=846 sampled=-1 top_logit=none pos_before=18 pos_after=19 stop=0
+prefill 19 | fed     198 | sampled       - | top       - | P 19 -> 20
+STEP kind=prefill index=19 input=198 sampled=-1 top_logit=none pos_before=19 pos_after=20 stop=0
+prefill 20 | fed     760 | sampled       - | top       - | P 20 -> 21
+STEP kind=prefill index=20 input=760 sampled=-1 top_logit=none pos_before=20 pos_after=21 stop=0
+prefill 21 | fed    6511 | sampled       - | top       - | P 21 -> 22
+STEP kind=prefill index=21 input=6511 sampled=-1 top_logit=none pos_before=21 pos_after=22 stop=0
+prefill 22 | fed     314 | sampled       - | top       - | P 22 -> 23
+STEP kind=prefill index=22 input=314 sampled=-1 top_logit=none pos_before=22 pos_after=23 stop=0
+prefill 23 | fed    9338 | sampled       - | top       - | P 23 -> 24
+STEP kind=prefill index=23 input=9338 sampled=-1 top_logit=none pos_before=23 pos_after=24 stop=0
+prefill 24 | fed     369 | sampled       - | top       - | P 24 -> 25
+STEP kind=prefill index=24 input=369 sampled=-1 top_logit=none pos_before=24 pos_after=25 stop=0
+prefill 25 | fed  248046 | sampled       - | top       - | P 25 -> 26
+STEP kind=prefill index=25 input=248046 sampled=-1 top_logit=none pos_before=25 pos_after=26 stop=0
+prefill 26 | fed     198 | sampled       - | top       - | P 26 -> 27
+STEP kind=prefill index=26 input=198 sampled=-1 top_logit=none pos_before=26 pos_after=27 stop=0
+prefill 27 | fed  248045 | sampled       - | top       - | P 27 -> 28
+STEP kind=prefill index=27 input=248045 sampled=-1 top_logit=none pos_before=27 pos_after=28 stop=0
+prefill 28 | fed   74455 | sampled       - | top       - | P 28 -> 29
+STEP kind=prefill index=28 input=74455 sampled=-1 top_logit=none pos_before=28 pos_after=29 stop=0
+prefill 29 | fed     198 | sampled       - | top       - | P 29 -> 30
+STEP kind=prefill index=29 input=198 sampled=-1 top_logit=none pos_before=29 pos_after=30 stop=0
+prefill 30 | fed  248068 | sampled       - | top       - | P 30 -> 31
+STEP kind=prefill index=30 input=248068 sampled=-1 top_logit=none pos_before=30 pos_after=31 stop=0
+prefill 31 | fed     271 | sampled       - | top       - | P 31 -> 32
+STEP kind=prefill index=31 input=271 sampled=-1 top_logit=none pos_before=31 pos_after=32 stop=0
+prefill 32 | fed  248069 | sampled       - | top       - | P 32 -> 33
+STEP kind=prefill index=32 input=248069 sampled=-1 top_logit=none pos_before=32 pos_after=33 stop=0
+prefill 33 | fed     271 | sampled       - | top       - | P 33 -> 34
+STEP kind=prefill index=33 input=271 sampled=-1 top_logit=none pos_before=33 pos_after=34 stop=0
+prefill 34 | fed  248045 | sampled       - | top       - | P 34 -> 35
+STEP kind=prefill index=34 input=248045 sampled=-1 top_logit=none pos_before=34 pos_after=35 stop=0
+prefill 35 | fed     846 | sampled       - | top       - | P 35 -> 36
+STEP kind=prefill index=35 input=846 sampled=-1 top_logit=none pos_before=35 pos_after=36 stop=0
+prefill 36 | fed     198 | sampled       - | top       - | P 36 -> 37
+STEP kind=prefill index=36 input=198 sampled=-1 top_logit=none pos_before=36 pos_after=37 stop=0
+prefill 37 | fed     760 | sampled       - | top       - | P 37 -> 38
+STEP kind=prefill index=37 input=760 sampled=-1 top_logit=none pos_before=37 pos_after=38 stop=0
+prefill 38 | fed    6511 | sampled       - | top       - | P 38 -> 39
+STEP kind=prefill index=38 input=6511 sampled=-1 top_logit=none pos_before=38 pos_after=39 stop=0
+prefill 39 | fed     314 | sampled       - | top       - | P 39 -> 40
+STEP kind=prefill index=39 input=314 sampled=-1 top_logit=none pos_before=39 pos_after=40 stop=0
+prefill 40 | fed    9338 | sampled       - | top       - | P 40 -> 41
+STEP kind=prefill index=40 input=9338 sampled=-1 top_logit=none pos_before=40 pos_after=41 stop=0
+prefill 41 | fed     369 | sampled       - | top       - | P 41 -> 42
+STEP kind=prefill index=41 input=369 sampled=-1 top_logit=none pos_before=41 pos_after=42 stop=0
+prefill 42 | fed  248046 | sampled       - | top       - | P 42 -> 43
+STEP kind=prefill index=42 input=248046 sampled=-1 top_logit=none pos_before=42 pos_after=43 stop=0
+prefill 43 | fed     198 | sampled       - | top       - | P 43 -> 44
+STEP kind=prefill index=43 input=198 sampled=-1 top_logit=none pos_before=43 pos_after=44 stop=0
+prefill 44 | fed  248045 | sampled       - | top       - | P 44 -> 45
+STEP kind=prefill index=44 input=248045 sampled=-1 top_logit=none pos_before=44 pos_after=45 stop=0
+prefill 45 | fed   74455 | sampled       - | top       - | P 45 -> 46
+STEP kind=prefill index=45 input=74455 sampled=-1 top_logit=none pos_before=45 pos_after=46 stop=0
+prefill 46 | fed     198 | sampled       - | top       - | P 46 -> 47
+STEP kind=prefill index=46 input=198 sampled=-1 top_logit=none pos_before=46 pos_after=47 stop=0
+prefill 47 | fed  248068 | sampled       - | top       - | P 47 -> 48
+STEP kind=prefill index=47 input=248068 sampled=-1 top_logit=none pos_before=47 pos_after=48 stop=0
+prefill 48 | fed     271 | sampled       - | top       - | P 48 -> 49
+STEP kind=prefill index=48 input=271 sampled=-1 top_logit=none pos_before=48 pos_after=49 stop=0
+prefill 49 | fed  248069 | sampled       - | top       - | P 49 -> 50
+STEP kind=prefill index=49 input=248069 sampled=-1 top_logit=none pos_before=49 pos_after=50 stop=0
+prefill 50 | fed     271 | sampled       - | top       - | P 50 -> 51
+STEP kind=prefill index=50 input=271 sampled=-1 top_logit=none pos_before=50 pos_after=51 stop=0
+prefill 51 | fed  248045 | sampled       - | top       - | P 51 -> 52
+STEP kind=prefill index=51 input=248045 sampled=-1 top_logit=none pos_before=51 pos_after=52 stop=0
+prefill 52 | fed     846 | sampled       - | top       - | P 52 -> 53
+STEP kind=prefill index=52 input=846 sampled=-1 top_logit=none pos_before=52 pos_after=53 stop=0
+prefill 53 | fed     198 | sampled       - | top       - | P 53 -> 54
+STEP kind=prefill index=53 input=198 sampled=-1 top_logit=none pos_before=53 pos_after=54 stop=0
+prefill 54 | fed     760 | sampled       - | top       - | P 54 -> 55
+STEP kind=prefill index=54 input=760 sampled=-1 top_logit=none pos_before=54 pos_after=55 stop=0
+prefill 55 | fed    6511 | sampled       - | top       - | P 55 -> 56
+STEP kind=prefill index=55 input=6511 sampled=-1 top_logit=none pos_before=55 pos_after=56 stop=0
+prefill 56 | fed     314 | sampled       - | top       - | P 56 -> 57
+STEP kind=prefill index=56 input=314 sampled=-1 top_logit=none pos_before=56 pos_after=57 stop=0
+prefill 57 | fed    9338 | sampled       - | top       - | P 57 -> 58
+STEP kind=prefill index=57 input=9338 sampled=-1 top_logit=none pos_before=57 pos_after=58 stop=0
+prefill 58 | fed     369 | sampled       - | top       - | P 58 -> 59
+STEP kind=prefill index=58 input=369 sampled=-1 top_logit=none pos_before=58 pos_after=59 stop=0
+prefill 59 | fed  248046 | sampled       - | top       - | P 59 -> 60
+STEP kind=prefill index=59 input=248046 sampled=-1 top_logit=none pos_before=59 pos_after=60 stop=0
+prefill 60 | fed     198 | sampled       - | top       - | P 60 -> 61
+STEP kind=prefill index=60 input=198 sampled=-1 top_logit=none pos_before=60 pos_after=61 stop=0
+prefill 61 | fed  248045 | sampled       - | top       - | P 61 -> 62
+STEP kind=prefill index=61 input=248045 sampled=-1 top_logit=none pos_before=61 pos_after=62 stop=0
+prefill 62 | fed   74455 | sampled       - | top       - | P 62 -> 63
+STEP kind=prefill index=62 input=74455 sampled=-1 top_logit=none pos_before=62 pos_after=63 stop=0
+prefill 63 | fed     198 | sampled       - | top       - | P 63 -> 64
+STEP kind=prefill index=63 input=198 sampled=-1 top_logit=none pos_before=63 pos_after=64 stop=0
+prefill 64 | fed  248068 | sampled       - | top       - | P 64 -> 65
+STEP kind=prefill index=64 input=248068 sampled=-1 top_logit=none pos_before=64 pos_after=65 stop=0
+prefill 65 | fed     271 | sampled       - | top       - | P 65 -> 66
+STEP kind=prefill index=65 input=271 sampled=-1 top_logit=none pos_before=65 pos_after=66 stop=0
+prefill 66 | fed  248069 | sampled       - | top       - | P 66 -> 67
+STEP kind=prefill index=66 input=248069 sampled=-1 top_logit=none pos_before=66 pos_after=67 stop=0
+prefill 67 | fed     271 | sampled       - | top       - | P 67 -> 68
+STEP kind=prefill index=67 input=271 sampled=-1 top_logit=none pos_before=67 pos_after=68 stop=0
+prefill 68 | fed  248045 | sampled       - | top       - | P 68 -> 69
+STEP kind=prefill index=68 input=248045 sampled=-1 top_logit=none pos_before=68 pos_after=69 stop=0
+prefill 69 | fed     846 | sampled       - | top       - | P 69 -> 70
+STEP kind=prefill index=69 input=846 sampled=-1 top_logit=none pos_before=69 pos_after=70 stop=0
+prefill 70 | fed     198 | sampled       - | top       - | P 70 -> 71
+STEP kind=prefill index=70 input=198 sampled=-1 top_logit=none pos_before=70 pos_after=71 stop=0
+prefill 71 | fed     760 | sampled       - | top       - | P 71 -> 72
+STEP kind=prefill index=71 input=760 sampled=-1 top_logit=none pos_before=71 pos_after=72 stop=0
+prefill 72 | fed    6511 | sampled       - | top       - | P 72 -> 73
+STEP kind=prefill index=72 input=6511 sampled=-1 top_logit=none pos_before=72 pos_after=73 stop=0
+prefill 73 | fed     314 | sampled       - | top       - | P 73 -> 74
+STEP kind=prefill index=73 input=314 sampled=-1 top_logit=none pos_before=73 pos_after=74 stop=0
+prefill 74 | fed    9338 | sampled       - | top       - | P 74 -> 75
+STEP kind=prefill index=74 input=9338 sampled=-1 top_logit=none pos_before=74 pos_after=75 stop=0
+prefill 75 | fed     369 | sampled       - | top       - | P 75 -> 76
+STEP kind=prefill index=75 input=369 sampled=-1 top_logit=none pos_before=75 pos_after=76 stop=0
+prefill 76 | fed  248046 | sampled       - | top       - | P 76 -> 77
+STEP kind=prefill index=76 input=248046 sampled=-1 top_logit=none pos_before=76 pos_after=77 stop=0
+prefill 77 | fed     198 | sampled       - | top       - | P 77 -> 78
+STEP kind=prefill index=77 input=198 sampled=-1 top_logit=none pos_before=77 pos_after=78 stop=0
+prefill 78 | fed  248045 | sampled       - | top       - | P 78 -> 79
+STEP kind=prefill index=78 input=248045 sampled=-1 top_logit=none pos_before=78 pos_after=79 stop=0
+prefill 79 | fed   74455 | sampled       - | top       - | P 79 -> 80
+STEP kind=prefill index=79 input=74455 sampled=-1 top_logit=none pos_before=79 pos_after=80 stop=0
+prefill 80 | fed     198 | sampled       - | top       - | P 80 -> 81
+STEP kind=prefill index=80 input=198 sampled=-1 top_logit=none pos_before=80 pos_after=81 stop=0
+prefill 81 | fed  248068 | sampled       - | top       - | P 81 -> 82
+STEP kind=prefill index=81 input=248068 sampled=-1 top_logit=none pos_before=81 pos_after=82 stop=0
+prefill 82 | fed     271 | sampled       - | top       - | P 82 -> 83
+STEP kind=prefill index=82 input=271 sampled=-1 top_logit=none pos_before=82 pos_after=83 stop=0
+prefill 83 | fed  248069 | sampled       - | top       - | P 83 -> 84
+STEP kind=prefill index=83 input=248069 sampled=-1 top_logit=none pos_before=83 pos_after=84 stop=0
+prefill 84 | fed     271 | sampled       - | top       - | P 84 -> 85
+STEP kind=prefill index=84 input=271 sampled=-1 top_logit=none pos_before=84 pos_after=85 stop=0
+prefill 85 | fed  248045 | sampled       - | top       - | P 85 -> 86
+STEP kind=prefill index=85 input=248045 sampled=-1 top_logit=none pos_before=85 pos_after=86 stop=0
+prefill 86 | fed     846 | sampled       - | top       - | P 86 -> 87
+STEP kind=prefill index=86 input=846 sampled=-1 top_logit=none pos_before=86 pos_after=87 stop=0
+prefill 87 | fed     198 | sampled       - | top       - | P 87 -> 88
+STEP kind=prefill index=87 input=198 sampled=-1 top_logit=none pos_before=87 pos_after=88 stop=0
+prefill 88 | fed     760 | sampled       - | top       - | P 88 -> 89
+STEP kind=prefill index=88 input=760 sampled=-1 top_logit=none pos_before=88 pos_after=89 stop=0
+prefill 89 | fed    6511 | sampled       - | top       - | P 89 -> 90
+STEP kind=prefill index=89 input=6511 sampled=-1 top_logit=none pos_before=89 pos_after=90 stop=0
+prefill 90 | fed     314 | sampled       - | top       - | P 90 -> 91
+STEP kind=prefill index=90 input=314 sampled=-1 top_logit=none pos_before=90 pos_after=91 stop=0
+prefill 91 | fed    9338 | sampled       - | top       - | P 91 -> 92
+STEP kind=prefill index=91 input=9338 sampled=-1 top_logit=none pos_before=91 pos_after=92 stop=0
+prefill 92 | fed     369 | sampled       - | top       - | P 92 -> 93
+STEP kind=prefill index=92 input=369 sampled=-1 top_logit=none pos_before=92 pos_after=93 stop=0
+prefill 93 | fed  248046 | sampled       - | top       - | P 93 -> 94
+STEP kind=prefill index=93 input=248046 sampled=-1 top_logit=none pos_before=93 pos_after=94 stop=0
+prefill 94 | fed     198 | sampled       - | top       - | P 94 -> 95
+STEP kind=prefill index=94 input=198 sampled=-1 top_logit=none pos_before=94 pos_after=95 stop=0
+prefill 95 | fed  248045 | sampled       - | top       - | P 95 -> 96
+STEP kind=prefill index=95 input=248045 sampled=-1 top_logit=none pos_before=95 pos_after=96 stop=0
+prefill 96 | fed   74455 | sampled       - | top       - | P 96 -> 97
+STEP kind=prefill index=96 input=74455 sampled=-1 top_logit=none pos_before=96 pos_after=97 stop=0
+prefill 97 | fed     198 | sampled       - | top       - | P 97 -> 98
+STEP kind=prefill index=97 input=198 sampled=-1 top_logit=none pos_before=97 pos_after=98 stop=0
+prefill 98 | fed  248068 | sampled       - | top       - | P 98 -> 99
+STEP kind=prefill index=98 input=248068 sampled=-1 top_logit=none pos_before=98 pos_after=99 stop=0
+prefill 99 | fed     271 | sampled       - | top       - | P 99 -> 100
+STEP kind=prefill index=99 input=271 sampled=-1 top_logit=none pos_before=99 pos_after=100 stop=0
+prefill 100 | fed  248069 | sampled       - | top       - | P 100 -> 101
+STEP kind=prefill index=100 input=248069 sampled=-1 top_logit=none pos_before=100 pos_after=101 stop=0
+prefill 101 | fed     271 | sampled       - | top       - | P 101 -> 102
+STEP kind=prefill index=101 input=271 sampled=-1 top_logit=none pos_before=101 pos_after=102 stop=0
+prefill 102 | fed  248045 | sampled       - | top       - | P 102 -> 103
+STEP kind=prefill index=102 input=248045 sampled=-1 top_logit=none pos_before=102 pos_after=103 stop=0
+prefill 103 | fed     846 | sampled       - | top       - | P 103 -> 104
+STEP kind=prefill index=103 input=846 sampled=-1 top_logit=none pos_before=103 pos_after=104 stop=0
+prefill 104 | fed     198 | sampled       - | top       - | P 104 -> 105
+STEP kind=prefill index=104 input=198 sampled=-1 top_logit=none pos_before=104 pos_after=105 stop=0
+prefill 105 | fed     760 | sampled       - | top       - | P 105 -> 106
+STEP kind=prefill index=105 input=760 sampled=-1 top_logit=none pos_before=105 pos_after=106 stop=0
+prefill 106 | fed    6511 | sampled       - | top       - | P 106 -> 107
+STEP kind=prefill index=106 input=6511 sampled=-1 top_logit=none pos_before=106 pos_after=107 stop=0
+prefill 107 | fed     314 | sampled       - | top       - | P 107 -> 108
+STEP kind=prefill index=107 input=314 sampled=-1 top_logit=none pos_before=107 pos_after=108 stop=0
+prefill 108 | fed    9338 | sampled       - | top       - | P 108 -> 109
+STEP kind=prefill index=108 input=9338 sampled=-1 top_logit=none pos_before=108 pos_after=109 stop=0
+prefill 109 | fed     369 | sampled       - | top       - | P 109 -> 110
+STEP kind=prefill index=109 input=369 sampled=-1 top_logit=none pos_before=109 pos_after=110 stop=0
+prefill 110 | fed  248046 | sampled       - | top       - | P 110 -> 111
+STEP kind=prefill index=110 input=248046 sampled=-1 top_logit=none pos_before=110 pos_after=111 stop=0
+prefill 111 | fed     198 | sampled       - | top       - | P 111 -> 112
+STEP kind=prefill index=111 input=198 sampled=-1 top_logit=none pos_before=111 pos_after=112 stop=0
+prefill 112 | fed  248045 | sampled       - | top       - | P 112 -> 113
+STEP kind=prefill index=112 input=248045 sampled=-1 top_logit=none pos_before=112 pos_after=113 stop=0
+prefill 113 | fed   74455 | sampled       - | top       - | P 113 -> 114
+STEP kind=prefill index=113 input=74455 sampled=-1 top_logit=none pos_before=113 pos_after=114 stop=0
+prefill 114 | fed     198 | sampled       - | top       - | P 114 -> 115
+STEP kind=prefill index=114 input=198 sampled=-1 top_logit=none pos_before=114 pos_after=115 stop=0
+prefill 115 | fed  248068 | sampled       - | top       - | P 115 -> 116
+STEP kind=prefill index=115 input=248068 sampled=-1 top_logit=none pos_before=115 pos_after=116 stop=0
+prefill 116 | fed     271 | sampled       - | top       - | P 116 -> 117
+STEP kind=prefill index=116 input=271 sampled=-1 top_logit=none pos_before=116 pos_after=117 stop=0
+prefill 117 | fed  248069 | sampled       - | top       - | P 117 -> 118
+STEP kind=prefill index=117 input=248069 sampled=-1 top_logit=none pos_before=117 pos_after=118 stop=0
+prefill 118 | fed     271 | sampled       - | top       - | P 118 -> 119
+STEP kind=prefill index=118 input=271 sampled=-1 top_logit=none pos_before=118 pos_after=119 stop=0
+prefill 119 | fed  248045 | sampled       - | top       - | P 119 -> 120
+STEP kind=prefill index=119 input=248045 sampled=-1 top_logit=none pos_before=119 pos_after=120 stop=0
+prefill 120 | fed     846 | sampled       - | top       - | P 120 -> 121
+STEP kind=prefill index=120 input=846 sampled=-1 top_logit=none pos_before=120 pos_after=121 stop=0
+prefill 121 | fed     198 | sampled       - | top       - | P 121 -> 122
+STEP kind=prefill index=121 input=198 sampled=-1 top_logit=none pos_before=121 pos_after=122 stop=0
+prefill 122 | fed     760 | sampled       - | top       - | P 122 -> 123
+STEP kind=prefill index=122 input=760 sampled=-1 top_logit=none pos_before=122 pos_after=123 stop=0
+prefill 123 | fed    6511 | sampled       - | top       - | P 123 -> 124
+STEP kind=prefill index=123 input=6511 sampled=-1 top_logit=none pos_before=123 pos_after=124 stop=0
+prefill 124 | fed     314 | sampled       - | top       - | P 124 -> 125
+STEP kind=prefill index=124 input=314 sampled=-1 top_logit=none pos_before=124 pos_after=125 stop=0
+prefill 125 | fed    9338 | sampled       - | top       - | P 125 -> 126
+STEP kind=prefill index=125 input=9338 sampled=-1 top_logit=none pos_before=125 pos_after=126 stop=0
+prefill 126 | fed     369 | sampled       - | top       - | P 126 -> 127
+STEP kind=prefill index=126 input=369 sampled=-1 top_logit=none pos_before=126 pos_after=127 stop=0
+prefill 127 | fed  248046 | sampled     198 | top 35.231495 | P 127 -> 128
+STEP kind=prefill index=127 input=248046 sampled=198 top_logit=35.2314949 pos_before=127 pos_after=128 stop=0
+SPLITCAP split=1 cap=0 lanes=129 natural=1 rows=1 span=129
+GEMM-LT shape=in_proj_qkv N=6144 K=1024 M=2 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=190400000000000000000000000000000000000800000000
+GEMM-LT shape=in_proj_z N=2048 K=1024 M=2 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=1a0400000000000000000000000000000000000800000000
+GEMM-LT shape=o_proj+out_proj N=1024 K=2048 M=2 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=720400000000000000000000000000000000000800000000
+GEMM-LT shape=gate_proj+up_proj N=3584 K=1024 M=2 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=220400000000000000000000000000000000000800000000
+GEMM-LT shape=down_proj N=1024 K=3584 M=2 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=290400000000000000000000000000000000000800000000
+GEMM-LT shape=q_proj N=4096 K=1024 M=2 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=190400000000000000000000000000000000000800000000
+GEMM-LT shape=k_proj+v_proj N=512 K=1024 M=2 source=heuristic-rank-0 ws=0 waves=0 skipped_ws=0 skipped_state=0 heur_returned=8 algo=190400000000000000000000000000000000000800000000
+SPLITCAP split=1 cap=0 lanes=130 natural=1 rows=2 span=130
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=130 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=128 anchor_pos=128 fed=198 candidate=198 row0=248045 row1=248069 row0_top=27.6291103 row1_top=18.7899742 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 128 | fed     198 | sampled  248045 | top 27.634043 | P 128 -> 129
+STEP kind=decode index=128 input=198 sampled=248045 top_logit=27.6340427 pos_before=128 pos_after=129 stop=0
+SPLITCAP split=1 cap=0 lanes=130 natural=1 rows=1 span=130
+SPLITCAP split=1 cap=0 lanes=131 natural=1 rows=2 span=131
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=131 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=129 anchor_pos=129 fed=248045 candidate=248045 row0=74455 row1=74455 row0_top=22.4785252 row1_top=25.4388733 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 129 | fed  248045 | sampled   74455 | top 22.570950 | P 129 -> 130
+STEP kind=decode index=129 input=248045 sampled=74455 top_logit=22.5709496 pos_before=129 pos_after=130 stop=0
+SPLITCAP split=1 cap=0 lanes=131 natural=1 rows=1 span=131
+SPLITCAP split=1 cap=0 lanes=132 natural=1 rows=2 span=132
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=132 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=130 anchor_pos=130 fed=74455 candidate=74455 row0=198 row1=198 row0_top=29.3989372 row1_top=24.6297112 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 130 | fed   74455 | sampled     198 | top 29.337040 | P 130 -> 131
+STEP kind=decode index=130 input=74455 sampled=198 top_logit=29.3370399 pos_before=130 pos_after=131 stop=0
+SPLITCAP split=1 cap=0 lanes=132 natural=1 rows=1 span=132
+SPLITCAP split=1 cap=0 lanes=133 natural=1 rows=2 span=133
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=133 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=131 anchor_pos=131 fed=198 candidate=198 row0=248068 row1=248068 row0_top=32.099781 row1_top=20.6021004 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 131 | fed     198 | sampled  248068 | top 32.139668 | P 131 -> 132
+STEP kind=decode index=131 input=198 sampled=248068 top_logit=32.1396675 pos_before=131 pos_after=132 stop=0
+SPLITCAP split=1 cap=0 lanes=133 natural=1 rows=1 span=133
+SPLITCAP split=1 cap=0 lanes=134 natural=1 rows=2 span=134
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=134 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=132 anchor_pos=132 fed=248068 candidate=248068 row0=271 row1=271 row0_top=22.4876785 row1_top=21.677433 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 132 | fed  248068 | sampled     271 | top 22.513390 | P 132 -> 133
+STEP kind=decode index=132 input=248068 sampled=271 top_logit=22.5133896 pos_before=132 pos_after=133 stop=0
+SPLITCAP split=1 cap=0 lanes=134 natural=1 rows=1 span=134
+SPLITCAP split=1 cap=0 lanes=135 natural=1 rows=2 span=135
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=135 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=133 anchor_pos=133 fed=271 candidate=271 row0=248069 row1=248069 row0_top=30.4549255 row1_top=23.595686 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 133 | fed     271 | sampled  248069 | top 30.501143 | P 133 -> 134
+STEP kind=decode index=133 input=271 sampled=248069 top_logit=30.5011425 pos_before=133 pos_after=134 stop=0
+SPLITCAP split=1 cap=0 lanes=135 natural=1 rows=1 span=135
+SPLITCAP split=1 cap=0 lanes=136 natural=1 rows=2 span=136
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=136 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=134 anchor_pos=134 fed=248069 candidate=248069 row0=271 row1=271 row0_top=27.8611069 row1_top=19.3195992 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 134 | fed  248069 | sampled     271 | top 27.832403 | P 134 -> 135
+STEP kind=decode index=134 input=248069 sampled=271 top_logit=27.8324032 pos_before=134 pos_after=135 stop=0
+SPLITCAP split=1 cap=0 lanes=136 natural=1 rows=1 span=136
+SPLITCAP split=1 cap=0 lanes=137 natural=1 rows=2 span=137
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=137 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=135 anchor_pos=135 fed=271 candidate=271 row0=760 row1=248069 row0_top=21.6533756 row1_top=19.5384808 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 135 | fed     271 | sampled     760 | top 21.647625 | P 135 -> 136
+STEP kind=decode index=135 input=271 sampled=760 top_logit=21.647625 pos_before=135 pos_after=136 stop=0
+SPLITCAP split=1 cap=0 lanes=137 natural=1 rows=1 span=137
+SPLITCAP split=1 cap=0 lanes=138 natural=1 rows=2 span=138
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=138 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=136 anchor_pos=136 fed=760 candidate=760 row0=6511 row1=6511 row0_top=23.3632221 row1_top=18.3875332 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 136 | fed     760 | sampled    6511 | top 23.372040 | P 136 -> 137
+STEP kind=decode index=136 input=760 sampled=6511 top_logit=23.3720398 pos_before=136 pos_after=137 stop=0
+SPLITCAP split=1 cap=0 lanes=138 natural=1 rows=1 span=138
+SPLITCAP split=1 cap=0 lanes=139 natural=1 rows=2 span=139
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=139 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=137 anchor_pos=137 fed=6511 candidate=6511 row0=314 row1=314 row0_top=24.8950367 row1_top=19.9475594 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 137 | fed    6511 | sampled     314 | top 24.877632 | P 137 -> 138
+STEP kind=decode index=137 input=6511 sampled=314 top_logit=24.8776321 pos_before=137 pos_after=138 stop=0
+SPLITCAP split=1 cap=0 lanes=139 natural=1 rows=1 span=139
+SPLITCAP split=1 cap=0 lanes=140 natural=1 rows=2 span=140
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=140 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=138 anchor_pos=138 fed=314 candidate=314 row0=9338 row1=9338 row0_top=25.1057224 row1_top=19.2723465 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 138 | fed     314 | sampled    9338 | top 25.106667 | P 138 -> 139
+STEP kind=decode index=138 input=314 sampled=9338 top_logit=25.1066666 pos_before=138 pos_after=139 stop=0
+SPLITCAP split=1 cap=0 lanes=140 natural=1 rows=1 span=140
+SPLITCAP split=1 cap=0 lanes=141 natural=1 rows=2 span=141
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=141 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=139 anchor_pos=139 fed=9338 candidate=9338 row0=369 row1=369 row0_top=23.4024849 row1_top=17.0740318 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 139 | fed    9338 | sampled     369 | top 23.395378 | P 139 -> 140
+STEP kind=decode index=139 input=9338 sampled=369 top_logit=23.3953781 pos_before=139 pos_after=140 stop=0
+SPLITCAP split=1 cap=0 lanes=141 natural=1 rows=1 span=141
+SPLITCAP split=1 cap=0 lanes=142 natural=1 rows=2 span=142
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=142 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=140 anchor_pos=140 fed=369 candidate=369 row0=2972 row1=2972 row0_top=22.0577526 row1_top=18.9986019 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 140 | fed     369 | sampled    2972 | top 22.048061 | P 140 -> 141
+STEP kind=decode index=140 input=369 sampled=2972 top_logit=22.0480614 pos_before=140 pos_after=141 stop=0
+SPLITCAP split=1 cap=0 lanes=142 natural=1 rows=1 span=142
+SPLITCAP split=1 cap=0 lanes=143 natural=1 rows=2 span=143
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=143 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=141 anchor_pos=141 fed=2972 candidate=2972 row0=57590 row1=57590 row0_top=25.4219208 row1_top=20.2311172 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 141 | fed    2972 | sampled   57590 | top 25.385574 | P 141 -> 142
+STEP kind=decode index=141 input=2972 sampled=57590 top_logit=25.3855743 pos_before=141 pos_after=142 stop=0
+SPLITCAP split=1 cap=0 lanes=143 natural=1 rows=1 span=143
+SPLITCAP split=1 cap=0 lanes=144 natural=1 rows=2 span=144
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=144 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=142 anchor_pos=142 fed=57590 candidate=57590 row0=159034 row1=369 row0_top=25.7308044 row1_top=17.3801842 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 142 | fed   57590 | sampled  159034 | top 25.677227 | P 142 -> 143
+STEP kind=decode index=142 input=57590 sampled=159034 top_logit=25.677227 pos_before=142 pos_after=143 stop=0
+SPLITCAP split=1 cap=0 lanes=144 natural=1 rows=1 span=144
+SPLITCAP split=1 cap=0 lanes=145 natural=1 rows=2 span=145
+ATTN_WIDE form=wide128llama warps=8 threads=256 pos_per_block=32 rows_per_block=128 stage=64 ktiles=16 lgroups=4 acc=f16 vgpr=256 lds=32768 scratch=720 wf_per_cu=16 SPILL grid=(2,1,1) wide_rows=2/2 wave_rows=2 lanes_last=145 slim_wave=0 fattn_wave=0 combine=0 split=1 split_used=0
+VERIFY2 step=143 anchor_pos=143 fed=159034 candidate=159034 row0=248046 row1=248046 row0_top=20.2817612 row1_top=18.4925575 row0_eq_step=1 head_passes=1 d2h=1 logits_bytes=1986560 checkpoint_bytes=20201472 lane_revert_bytes=24576 guard=0 mtp_route=amortised gemm=lt gdn_scan=seq
+decode 143 | fed  159034 | sampled  248046 | top 20.251945 | P 143 -> 144
+STEP kind=decode index=143 input=159034 sampled=248046 top_logit=20.2519455 pos_before=143 pos_after=144 stop=0
+VERIFY2DONE on=1 rows=2 rounds=16 checkpoint_bytes_per_round=20201472 restored_bytes=323223552 lane_revert_bytes_per_round=24576 lane_revert_bytes=393216 kv_bytes_above_prefix=12288 head=batched d2h_per_round=1 mtp_route=amortised gemm=lt gdn_scan=seq guard=0 guard_bytes=0 restore_witness=identical
+LAUNCHSTAT family=glue calls=1617 calls_batched=833 rows_total=8624 rows_max=128
+LAUNCHSTAT family=proj calls=2706 calls_batched=1938 rows_total=19008 rows_max=128
+LAUNCHSTAT family=mlp_gateup calls=792 calls_batched=408 rows_total=4224 rows_max=128
+LAUNCHSTAT family=mlp_down calls=792 calls_batched=408 rows_total=4224 rows_max=128
+LAUNCHSTAT family=gdn_conv calls=594 calls_batched=306 rows_total=3168 rows_max=128
+LAUNCHSTAT family=gdn_gates calls=594 calls_batched=306 rows_total=3168 rows_max=128
+LAUNCHSTAT family=gdn_gated_norm calls=594 calls_batched=306 rows_total=3168 rows_max=128
+LAUNCHSTAT family=attn calls=198 calls_batched=102 rows_total=1056 rows_max=128
+DECWALL mode=run prefill_ms=114.945 decode_ms=373.526 bodies=16 rounds=0 plain=16 accepted=0 rejected=0 suppressed=0 emitted=16 stop=0 ended=steps_exhausted ms_per_token=23.3454 tok_per_s=42.835 census=ok
+MTPMETER role=verify phase=snapshot_take ms_total=0.3805 rounds=16 ms_per_round=0.0238 sync_added=0 runs=16 ms_per_run=0.0238 note=take_snapshot:_the_two_blocking_hipMemcpy_D2D_of_sizes()_bytes_(19.27_MiB_at_this_model).Already_blocking_today,_so_sync_added=0_and_the_line_bounds_its_own_device_work
+MTPMETER role=verify phase=shadow_seed ms_total=0.3476 rounds=16 ms_per_round=0.0217 sync_added=0 runs=16 ms_per_run=0.0217 note=restore_snapshot:_checkpoint_to_shadow,_same_bytes._This_is_what_a_reject_would_cost_and_the_side_pass_pays_unconditionally
+MTPMETER role=verify phase=witness ms_total=0.0000 rounds=16 ms_per_round=0.0000 sync_added=0 runs=0 ms_per_run=0.0000 note=the_--verify-guard_and_--mtp-midsplit_downloads_and_byte-compares._Reads_0.000_with_both_off,_which_is_the_only_arm_a_timing_pass_should_use:_it_is_tens_of_MiB_of_D2H_per_round
+MTPMETER role=verify phase=lane_save ms_total=0.7112 rounds=16 ms_per_round=0.0445 sync_added=0 runs=16 ms_per_run=0.0445 note=save_each_body_row's_KV_lane_out_of_the_live_cache:_24_blocking_512B_hipMemcpy_D2D_per_row_(6_attn_layers_x_2_kv_heads_x_2_buffers).Launch-count_bound,_not_byte_bound,_so_it_is_the_phase_a_fused_staging_kernel_targets
+MTPMETER role=verify phase=body ms_total=146.4992 rounds=16 ms_per_round=9.1562 sync_added=1 runs=16 ms_per_run=9.1562 note=submit_wave_body_at_the_round's_row_count._INFLATES:today_the_body's_submissions_flow_into_the_head_launch_and_the_next_wait,_so_a_wait_at_its_close_removes_pipelining_the_engine_relies_on._It_also_carries_the_mid-checkpoint's_extra_submissions_when_one_is_armed
+MTPMETER role=verify phase=body_with_checkpoint ms_total=0.0000 rounds=16 ms_per_round=0.0000 sync_added=1 runs=0 ms_per_run=0.0000 note=the_--mtp-midsplit_1_second_body:_same_anchor,_same_tokens,_WITH_the_mid-checkpoint_armed._MINUS_phase=body_it_is_that_checkpoint's_price_measured_in_ONE_window_at_ONE_anchor,_which_is_the_only_honest_way_to_ask
+MTPMETER role=verify phase=lane_revert ms_total=0.6395 rounds=16 ms_per_round=0.0400 sync_added=0 runs=16 ms_per_run=0.0400 note=put_those_lanes_back:_same_count_of_copies,_other_direction
+MTPMETER role=verify phase=head ms_total=36.3339 rounds=16 ms_per_round=2.2709 sync_added=1 runs=16 ms_per_run=2.2709 note=one_lm_head_batched_xbf16_pass_over_the_485_MiB_tied_table,_serving_both_rows._INFLATES_in_a_pipelined_round_by_the_wait,_but_NOT_for_free_in_a_serial_one:_on_the_verify_path_the_logits_D2H_already_waited_for_this_launch_on_the_same_stream,_so_the_wait_it_replaces_was_already_paid
+MTPMETER role=verify phase=logits_d2h ms_total=1.0006 rounds=16 ms_per_round=0.0625 sync_added=0 runs=16 ms_per_run=0.0625 note=the_blocking_vocabulary_download:_kRows_x_kVocab_F32_(1.99_MiB_here)_into_a_host_buffer._This_is_the_side_pass's_vocabulary_tax_and_the_accept_loop_has_none_of_it
+MTPMETER role=verify phase=argmax_report ms_total=22.0263 rounds=16 ms_per_round=1.3766 sync_added=0 runs=16 ms_per_run=1.3766 note=host_argmax_over_the_downloaded_rows._Pure_host_work,_so_no_wait_and_no_inflation;_2_rows_x_248320_f32_is_a_memory-bound_host_loop,_not_free
+MTPMETER role=verify phase=report_prints ms_total=0.0492 rounds=16 ms_per_round=0.0031 sync_added=0 runs=16 ms_per_run=0.0031 note=the_run's_own_per-round_lines_(printf_plus_explicit_fflush)._Named_rather_than_left_in_overhead_so_a_reader_can_see_whether_the_reporting_is_the_cost;_host-only,_no_wait
+MTPMETER role=verify phase=overhead ms_total=4.5807 rounds=16 ms_per_round=0.2863 sync_added=0 runs=16 ms_per_run=0.2863 status=derived note=DERIVED,_not_timed:_the_round's_windows_minus_every_measured_phase._Round_cost_that_no_site_owns._Excluded_from_the_sum,_which_is_what_makes_coverage_a_real_check_instead_of_1.000_by_construction
+MTPMETER role=verify phase=summary ms_total=207.9879 rounds=16 ms_per_round=12.9992 sync_added=0 runs=16 ms_per_run=12.9992 status=derived wall_ms_per_round=13.2855 coverage=0.9785 note=the_meter's_own_verdict_line:_wall,_sum,_coverage_and_the_sync_floor._Excluded_from_the_sum_like_overhead
+MTPMETER role=verify phase=instrument windows=32 rounds=16 plain_steps=0 syncs_added=32 idle_sync_us=0.10 sync_errors=0 note=windows_are_the_wall_and_are_disjoint_by_construction;idle_sync_us_is_the_floor_of_one_added_sync;plain_steps_are_one_row_steps_taken_instead_of_a_round_and_are_not_metered
+RESULT mode=run steps=144 ms_total=273.381 ms_per_step=1.898 last_sampled=248046 prefix_len=144 stopped=0 meter=ok rounds=16 sum_ms_per_round=12.9992 wall_ms_per_round=13.2855 coverage=0.9785

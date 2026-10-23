@@ -282,3 +282,16 @@ it.
   wrong by construction — stated in its header, as `launch_stats.h` and `stage_clock.h` state the same limit.
 * **`--verify-guard` and `--mtp-midsplit` change the shape as well as the witness.** They add windows and extra
   bodies; never mix a guard-on run's phases with a guard-off run's in one argument.
+
+**Why the table tool is in `prototype/` and not `tools/`.** A second digest was proposed for `tools/`; it
+was not promoted, and the reason is not style. Everything in `tools/` here is a **checker** that adjudicates
+a tree-wide invariant (`citation_rot_check.py`, `doc_ref_check.py`, `gate.py`-adjacent tools) or a **device
+probe** that owns a lock and a window (`mixed_bw`, `gpu_lock.sh`). `meter_digest.py` is neither: it reads one
+instrument's logs for one experiment directory, its verdicts are the instrument's own (`meter=ok` or refuse),
+and it touches no device. The live rule it enforces — **a refused arm is not a measurement** — is already
+enforced where the refusal happens, by `meter_round.awk`; this file re-checks it so a digest cannot smuggle
+an `out_of_band` arm into a table, which is a property of *this* experiment, not of the repo. Two copies of
+the same parse (awk for the gate, Python for the human view) is a real cost and it is named in the tool's own
+docstring; the mitigation is that both refuse on the same three fields (`meter=`, `coverage=`, `rounds=` vs
+`MTPSTAT rounds=`), so they cannot disagree about which arms count. If a second instrument ever emits
+`MTPMETER` lines, that is the moment this belongs in `tools/` — not before.
