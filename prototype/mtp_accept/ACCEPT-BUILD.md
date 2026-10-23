@@ -675,3 +675,27 @@ proposal against the next step, while the loop drafts from the last fed row of t
 previous proposal — so agreement with 0.6641 is expected but not guaranteed digit-for-digit, and a loop
 rate near but not equal to it is a geometry note, not a regression. No band, floor or pin was touched to
 get any of the above.
+
+## 4j. §4i.3's handover is DONE — in `M3-RESULT.md` (main-agent window, 2026-10-23)
+
+All three handed-over items landed, in that order, and each one moved a claim:
+
+- the engine now bills **its own decode window** (`DECWALL`: one wall around the generation loop, the
+  prefill leg shown rather than subtracted, the denominator counted at the emit sites, and a `census=`
+  that refuses a rate over disagreeing counters);
+- the loop's own accept rate is **611/932 = 0.6556** on the corpus-49 population, against the kill line
+  **0.4568** — **not tripped**, with the same rising-by-depth profile as the side pass. §4i.3's
+  "agreement with 0.6641 is expected but not owed" arrived as 0.6556, and the loop's losslessness was
+  re-adjudicated on all 49 lines rather than on `dec8` alone: 41 streams identical to the greedy stream
+  over the common 32-token prefix, 8 departures, every one of them the flag-off row's own runner-up at a
+  margin below one bf16 ULP of that row, and every one emitted by a round rather than by a plain step;
+- the loop **does not clear the adopt line**. At 4,000 lanes one round costs **2.029 decode steps**, so
+  k=1's ceiling at that width is **0.986× base at any accept rate** — measured −47.6 % on the timing
+  fixture, −18 % projected at the corpus rate; short prose is −2.3 % against a parity requirement of
+  a ≥ 0.691. `--mtp-accept` stays default-off and no ledger headline moves.
+
+What the pass leaves as the live question: at the corpus accept rate, +10 % at 4k needs the round to cost
+≤ 1.505 steps, and the known per-round extras (mid-checkpoint, restore, verdict readback, one draft) do
+not account for the gap. The next measurement is an **attribution of the round**, not more accept-loop code.
+Instruments: `prototype/mtp_accept/m3_loop_rate.{py,sh}`, `prototype/mtp_accept/mtp_wall_ab.sh`.
+Numbers, protocol and traps: `prototype/mtp_accept/M3-RESULT.md`.
