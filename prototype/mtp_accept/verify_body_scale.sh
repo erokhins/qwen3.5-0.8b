@@ -39,6 +39,13 @@ OUT=${OUT:-tmp/verify_body_scale}
 REPS=${REPS:-2}
 STEPS=${STEPS:-32}
 SRC_IDS=${SRC_IDS:-/tmp/dec8_ids.csv}
+# EXTRA: flags appended to every arm that RUNS A BODY (the base arm strips the route pair, for the reason
+# stated at `run()`). Its reason for
+# existing is `--mtp-route hand|amortised` (`engine/mtp_verify.h`'s Route): the round's cost is mostly the
+# route forcing, so the same arms have to be priceable on either route without editing this file.
+# Run the script twice in one lock hold, EXTRA empty and EXTRA="--mtp-route amortised", and compare the
+# per-width `round/step` medians the two prints produce.
+EXTRA=${EXTRA:-}
 mkdir -p "$OUT"; rm -f "$OUT"/*.tsv "$OUT"/*.log 2>/dev/null
 
 ids_of() { # $1 width -> a comma-separated ids file of EXACTLY that many fields, cycled from a real fixture
@@ -57,9 +64,20 @@ run() { # $1 arm $2 width $3 ids-file $4 rep -> log
     verify) extra="--mtp-verify 1" ;;
     accept) extra="--mtp-draft 1 --mtp-accept 1" ;;
   esac
+  # `$EXTRA` goes on every arm that runs a BODY, and the base arm carries the route pair dropped — see the
+  # note below. A flag one arm of a paired A/B requires still belongs on both sides, or the pair prices the
+  # flag and not the body (`AGENTS.md`, the `mtp_wall_ab.sh` row); what makes `--mtp-route` different is that
+  # the base arm has no body to route and the engine REFUSES the flag with no verify/accept running, so
+  # carrying it there is not caution, it is a parse error.
   log="$OUT/${w}_${arm}_${rep}.log"; mkdir -p "$OUT/out_${w}_${arm}_${rep}"
+  local x="$extra $EXTRA"
+  if [ "$arm" = base ]; then
+    local stripped; stripped=$(printf '%s' "$x" | sed 's/--mtp-route[= ]*[a-z]*//g')
+    [ "$stripped" = "$x" ] || printf '   note: base arm drops --mtp-route: no body runs, so there is no route to choose (a one-row body resolves to the hand GEMV either way, `resolve_wave_gemm`), and the engine refuses the flag with no verify/accept running\n' >&2
+    x="$stripped"
+  fi
   "$BIN" --model "$MODEL" --ids-file "$ids" --steps "$STEPS" --cap "$((w + 300))" \
-        --out "$OUT/out_${w}_${arm}_${rep}" --no-stop --gdn-loop 1 $extra > "$log" 2>&1
+        --out "$OUT/out_${w}_${arm}_${rep}" --no-stop --gdn-loop 1 $x > "$log" 2>&1
   echo "$log"
 }
 
@@ -72,6 +90,15 @@ echo "== util at acquire: $(tools/gpu_lock.sh util | tail -1); steps=$STEPS reps
 
 for w in $WIDTHS; do
   ids=$(ids_of "$w")
+  # What EXTRA asks the body to run, read off EXTRA rather than assumed, and left EMPTY when EXTRA names no
+  # route — an empty `want_route` means "do not assert", which is different from asserting nothing.
+  want_route=$(printf '%s' "$EXTRA" | sed -n 's/.*--mtp-route \([a-z]*\).*/\1/p')
+  case "$want_route" in
+    "")        want_gemm="" ;;                      # no route named: nothing to assert, and no vacuous grep
+    hand)      want_gemm="hand" ;;                   # the forcing: hand GEMV, whatever `--gemm` resolves to
+    amortised) want_gemm="${AMORTISED_GEMM:-lt}" ;;  # the scratch's own route; `--gemm lt` is the engine default
+    *) echo "ABORT: EXTRA names --mtp-route $want_route, which is not hand or amortised"; exit 1 ;;
+  esac
   echo
   echo "=== lanes=$w (ids file $ids, $(awk -F',' '{print NF}' "$ids") fields, cap $((w + 300))) ==="
   for rep in $(seq 1 "$REPS"); do
@@ -81,10 +108,23 @@ for w in $WIDTHS; do
       [ "$(kv DECWALL "$log" census)" = "ok" ] || { echo "ABORT: $w/$arm/rep$rep census=$(kv DECWALL "$log" census)"; exit 1; }
       tk=$(kv PREFILL "$log" tokens); [ "$tk" = "$w" ] || { echo "ABORT: $w/$arm/rep$rep prefilled $tk tokens, file has $w"; exit 1; }
       case "$arm" in
-        verify) grep -q '^VERIFY2' "$log" || { echo "ABORT: $w/$arm printed no VERIFY2 line: the side pass never ran, so this arm is a duplicate of base, not a slower one"; exit 1; } ;;
+        verify) grep -q '^VERIFY2' "$log" || { echo "ABORT: $w/$arm printed no VERIFY2 line: the side pass never ran, so this arm is a duplicate of base, not a slower one"; exit 1; }
+                [ -z "$want_route" ] || { grep '^VERIFY2 ' "$log" | grep -q "mtp_route=$want_route" \
+                    || { echo "ABORT: $w/$arm did not echo mtp_route=$want_route on its VERIFY2 lines; this arm is pricing the default route and would report it as $want_route"; exit 1; }
+                  grep '^VERIFY2 ' "$log" | grep -q "gemm=$want_gemm" \
+                    || { echo "ABORT: $w/$arm did not echo gemm=$want_gemm; --mtp-route $want_route never reached the GEMM seam (resolve_wave_gemm, decode_step.cpp)"; exit 1; }; } ;;
         base)   grep -q '^VERIFY2' "$log" && { echo "ABORT: the base arm printed VERIFY2 — the flag leaked"; exit 1; } ;;
-        accept) [ "$(kv MTPSTAT "$log" rounds)" -gt 0 ] 2>/dev/null || { echo "ABORT: $w/$arm rounds not > 0"; exit 1; } ;;
+        accept) [ "$(kv MTPSTAT "$log" rounds)" -gt 0 ] 2>/dev/null || { echo "ABORT: $w/$arm rounds not > 0"; exit 1; }
+                [ -z "$want_route" ] || { [ "$(kv MTPSTAT "$log" route)" = "$want_route" ] \
+                    || { echo "ABORT: $w/$arm MTPSTAT route=$(kv MTPSTAT "$log" route), asked $want_route — the round ran the other route"; exit 1; }
+                  [ "$(kv MTPSTAT "$log" gemm)" = "$want_gemm" ] \
+                    || { echo "ABORT: $w/$arm MTPSTAT gemm=$(kv MTPSTAT "$log" gemm), expected $want_gemm for route $want_route"; exit 1; }; } ;;
       esac
+      # The ROUTE CANARY above is the only check in this script that can see a stale binary: every other
+      # field it asserts is compiled into `decode_run`, so a build without the route switch agrees with
+      # itself (`AGENTS.md`, "a paired A/B against a stale binary reads as a clean null"). The echo names
+      # the route the body ACTUALLY ran, read off the scratch its launchers were configured from, and an
+      # empty `want_route` means "no route was asked for" rather than "assert nothing".
       dms=$(kv DECWALL "$log" decode_ms); em=$(kv DECWALL "$log" emitted); rd=$(kv DECWALL "$log" rounds)
       [ -n "$dms" ] || { echo "ABORT: $w/$arm/rep$rep decode_ms empty"; exit 1; }
       bodies=$([ "$arm" = accept ] && echo "$rd" || echo "$STEPS")
