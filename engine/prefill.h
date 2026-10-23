@@ -85,6 +85,14 @@ struct PrefillRow {
 struct PrefillResult {
     std::vector<PrefillRow> rows;
     PrefillLogits logits_mode = PrefillLogits::kLast;
+    // How many rows the FINAL wave fed. The wave scratch is `sc.wave_rows` rows tall and every wave
+    // overwrites `sc.norm` from row 0, so after the call the ONLY prompt norm rows still in existence
+    // are `sc.norm[0 .. last_wave_rows-1]`, at positions
+    // `prefix_len - last_wave_rows .. prefix_len - 1`. A caller that wants the norm rows of the tail of
+    // the prompt (the §09 draft cache seeding, `--mtp-prompt-lanes`) must read this field rather than
+    // re-derive the split — this file owns `wave_cap`, and a split recomputed at a call site is the
+    // two-copies-of-one-geometry-fact failure AGENTS.md records.
+    int last_wave_rows = 0;
 
     const PrefillRow* y0() const { return rows.empty() ? nullptr : &rows.back(); }
     size_t size() const { return rows.size(); }

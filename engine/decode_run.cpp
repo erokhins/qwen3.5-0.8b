@@ -177,6 +177,20 @@ struct Options {
     // `mtp_attn_max_lanes()` of them, so the usable ceiling is the smaller of the two and a round past
     // it is REFUSED and counted (`DRAFT-SKIP`), not silently served a shorter cache.
     int mtp_cap = 512;
+    // On an ACCEPT the round consumes two positions and the loop appends one draft lane, so the draft
+    // cache skips a position and every lane behind it sits one rope step further from its neighbour than
+    // the block was trained to see. llama.cpp's draft context has no such hole: its catch-up feeds
+    // `ctx_dft` one row per target row. `--mtp-dense 1` stages the accepted candidate row as a lane too
+    // (9 submissions, no head pass — `engine/mtp_draft.h:draft_lane`) so the cache stays dense. Default
+    // off: it is a draft-side conditioning change, judged on accept rate, not a shipped improvement.
+    int mtp_dense = 0;
+    bool mtp_dense_given = false;
+    // Seed the draft cache with the last N prompt positions' lanes before generation starts, so the
+    // drafter's attention sees the tail of the prompt instead of starting from an empty cache. llama.cpp
+    // gets this for free (its catch-up runs over the prompt ubatches); we have to stage it, and only the
+    // rows still in the wave scratch exist, hence the cap. 0 = the shipped behaviour, empty cache.
+    int mtp_prompt_lanes = 0;
+    bool mtp_prompt_lanes_given = false;
     // Which logits a prompt wave gives back (§06.5 / `engine/prefill.h`). `last` is the spec's shape
     // and the default; `all` is the gate's byte-identity mode, which asks for the rows §06.5 throws
     // away so they can be `cmp`'d against what the per-token prompt loop used to write.
@@ -611,6 +625,19 @@ Options parse_args(int argc, char** argv) {
         } else if (a == "--mtp-cap") {
             o.mtp_cap = std::atoi(next().c_str());
             if (o.mtp_cap < 1) throw std::runtime_error("--mtp-cap needs at least one lane");
+        } else if (a == "--mtp-dense") {
+            // Parses or throws, like every flag that names which side of an A/B a run is on.
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--mtp-dense takes 0 or 1, got '" + v + "'");
+            }
+            o.mtp_dense = std::atoi(v.c_str());
+            o.mtp_dense_given = true;
+        } else if (a == "--mtp-prompt-lanes") {
+            o.mtp_prompt_lanes = std::atoi(next().c_str());
+            if (o.mtp_prompt_lanes < 0)
+                throw std::runtime_error("--mtp-prompt-lanes takes 0 or more lanes");
+            o.mtp_prompt_lanes_given = true;
         } else if (a == "--mtp-verify") {
             // Parses or throws, same rule as `--mtp-draft`: this names which side of an A/B the run is on.
             const std::string v = next();
@@ -1160,6 +1187,43 @@ Options parse_args(int argc, char** argv) {
                                  " schedules rounds for a draft that is not running; name --mtp-draft 1"
                                  " with it, or drop it");
     }
+    if (o.mtp_dense && !o.mtp_accept) {
+        // The dense-lane append happens on an ACCEPT, and an accept only exists in the accept loop. The
+        // side pass settles a proposal against a later step but never consumes two positions in one
+        // round, so there is no skipped position to stage and the flag would be inert — which is a
+        // measurement of nothing, not a null result.
+        throw std::runtime_error("--mtp-dense stages the lane for the position an ACCEPTED round skipped,"
+                                 " and only --mtp-accept 1 runs rounds; name --mtp-accept 1 with it, or"
+                                 " drop it (the side pass never skips a position, so the flag cannot"
+                                 " have an effect there)");
+    }
+    if ((o.mtp_dense || o.mtp_prompt_lanes > 0) && o.time_stages) {
+        // Both knobs submit block work that is not part of the declared per-step `mtp` bill: a dense lane
+        // rides on an accept (so it is not 1-per-step) and prompt lanes ride once on the prompt phase
+        // (so they are not per-step at all). The stage clock's division is exact, and the same argument
+        // that refuses `--mtp-sched loop` under `--time-stages` refuses these: there is no integer
+        // per-step bill, and a truncated one prints a plan that is neither the plan nor the observation.
+        throw std::runtime_error("--time-stages bills the `mtp` family one draft round per step; " +
+                                 std::string(o.mtp_dense ? "--mtp-dense" : "") +
+                                 (o.mtp_dense && o.mtp_prompt_lanes > 0 ? " and " : "") +
+                                 (o.mtp_prompt_lanes > 0 ? "--mtp-prompt-lanes" : "") +
+                                 " adds block submissions that are not one-per-step (a dense lane rides"
+                                 " on an accept, prompt lanes ride on the prompt phase), so no integer"
+                                 " per-step bill exists. Drop --time-stages: these knobs are judged on"
+                                 " accept rate, and a worker device pass takes no timing anyway.");
+    }
+    if (o.mtp_dense && o.mtp_meter) {
+        // The meter's phase set has no name for a dense-lane append, so its cost would land in
+        // `overhead` — which `METER-PLAN.md` §9 names as "a phase waiting to be named, not a band to
+        // widen". Refusing is the honest answer until someone gives the phase a boundary and a bias.
+        throw std::runtime_error("--mtp-dense with --mtp-meter: the lane append is round work that no "
+                                 "metered phase owns, so it would be billed to `overhead`. Name one of "
+                                 "the two");
+    }
+    if (o.mtp_prompt_lanes_given && !o.mtp_draft) {
+        throw std::runtime_error("--mtp-prompt-lanes seeds a draft cache that is not allocated; name"
+                                 " --mtp-draft 1 with it, or drop it");
+    }
     if (o.verify_candidate_given && !o.mtp_verify) {
         throw std::runtime_error("--verify-candidate feeds row 1 of a verify body that is not running;"
                                  " name --mtp-verify 1 with it, or drop it");
@@ -1411,6 +1475,10 @@ struct MtpSide {
                                   // printed, never silently dropped — a skipped proposal is not a
                                   // rejected one, and the denominator has to be able to say so
     long long unadjudicated = 0;  // proposals left pending when the run ended (no later step)
+    // Draft-cache lanes that came from somewhere other than a round: the prompt seeding
+    // (`--mtp-prompt-lanes`) and the accepted-candidate lanes (`--mtp-dense`). Both are counted here so
+    // the census line can be reconciled against `lanes_max`, which a round-only tally cannot explain.
+    long long prompt_lanes = 0;
     int lanes_max = 0;
 };
 
@@ -1503,13 +1571,14 @@ void mtp_close_run(MtpSide& m) {
 void mtp_census_line(const MtpSide& m, const char* mode, const char* sched) {
     std::printf("MTPDRAFT on=1 sched=%s mode=%s block=%d+%d head=%d+%d per_round=%d"
                 " rounds=%lld adjudicated=%lld accepted=%lld refused=%lld unadjudicated=%lld"
-                " lanes_max=%d cap=%d tensors=15 block_bytes=%lld\n",
+                " lanes_max=%d cap=%d lane_appends=%lld prompt_lanes=%lld tensors=15 block_bytes=%lld\n",
                 sched, mode,
                 engine::mtpdraft::kBlockCopies, engine::mtpdraft::kBlockLaunches,
                 engine::mtpdraft::kHeadLaunches, engine::mtpdraft::kHeadCopies,
                 engine::mtpdraft::kSubmissionsPerRound,
                 (long long)m.made, (long long)m.adjudicated, (long long)m.accepted,
                 (long long)m.refused, (long long)m.unadjudicated, m.lanes_max, m.st.cap,
+                (long long)m.st.lane_appends, (long long)m.prompt_lanes,
                 m.w.bytes);
     std::fflush(stdout);
 }
@@ -1920,6 +1989,7 @@ void print_usage(FILE* out) {
                  " [--gdn-spell ship|unroll4|fused] [--gdn-norm inline|hoist]"
                  " [--gdn-geom block|wf4|wf2|reg16]"
                  " [--mtp-draft 0|1] [--mtp-sched loop|every] [--mtp-cap N]"
+                 " [--mtp-dense 0|1] [--mtp-prompt-lanes N]"
                  " [--mtp-verify 0|1] [--verify-candidate ID|sampled] [--verify-guard 0|1]"
                  " [--mtp-midsplit 0|1|2] [--mtp-accept 0|1] [--mtp-route hand|amortised]"
                  " [--mtp-meter 0|1]"
@@ -2386,6 +2456,23 @@ void print_usage(FILE* out) {
                  " default). The one-pass attention form refuses beyond `mtp_attn_max_lanes()`, and a"
                  " round past the ceiling is counted as `DRAFT-SKIP reason=...` rather than served a"
                  " shorter cache, because a silently shorter run reads as a lower accept rate\n"
+                 "  --mtp-dense 0|1  on an accept, also stage the draft-cache lane for the accepted"
+                 " candidate row (default 0). A round appends ONE lane but consumes TWO positions on an"
+                 " accept, so the shipped cache skips a position every time one is accepted and the"
+                 " rope distance between neighbouring draft lanes is 2 where the block expects 1. A"
+                 " dense lane costs 9 submissions and no head pass (`engine/mtp_draft.h:draft_lane`) and"
+                 " changes the PROPOSED token only: the body, the verdict and the emitted stream rules"
+                 " are untouched, so the accept-rate test is the whole test. Refused without"
+                 " --mtp-accept (no round, no skip) and with --time-stages (no integer per-step bill)."
+                 " Printed as `lane_appends=` on `MTPDRAFT`\n"
+                 "  --mtp-prompt-lanes N  seed the draft cache with the last N prompt positions before"
+                 " generation, one lane per position from the norm rows still living in the wave scratch"
+                 " (default 0 = the shipped empty cache; llama.cpp's draft sees the prompt because its"
+                 " catch-up runs over the prompt ubatches, and this is our counterpart). N is clamped to"
+                 " the rows the last prefill wave left in `sc.norm` and to what the cache ceiling leaves"
+                 " after reserving room for this run's own rounds, and the clamping is printed on"
+                 " `MTPPROMPT` rather than assumed, because a silently smaller population is this repo's"
+                 " recurring failure. Refused with --time-stages for the reason above\n"
                  "  --mtp-meter 0|1  per-phase milliseconds of the MTP ROUND this run is in"
                  " (`engine/mtp_meter.h`). Default 0, and off means every guard in the engine reads one"
                  " null pointer: no allocation, no added wait, no line, so a flag-off run stays"
@@ -3609,6 +3696,68 @@ int main(int argc, char** argv) {
             if (o.steps > 0) emit_state_fp("prefill", prompt_end, nullptr);
         }
 
+        // ---- the draft cache's prompt seeding (`--mtp-prompt-lanes`, default 0 = nothing happens) ----
+        // The shipped draft cache starts EMPTY: the block's first attention row sees one lane, and it
+        // only ever accumulates one lane per round. llama.cpp's draft context is not built that way — its
+        // catch-up `process()` runs over the prompt ubatches too, so its drafter attends over the whole
+        // prompt. This is the counterpart, and it is deliberately placed BEFORE the decode window opens:
+        // it is prompt-phase work, and billing it inside `DECWALL`'s window would make a rate probe's
+        // tok/s line mean something other than what it usually means.
+        //
+        // The lane for prompt position p pairs the token AT p with the target's norm row at p-1, and is
+        // rope-staged at position p+1 — the same content-to-position map `draft_round` uses, so the seeded
+        // lanes and the round lanes are the same kind of object (see `engine/mtp_draft.h`). The last
+        // prompt position's lane uses the wave's own `y0` as the token, which is what makes the seeded
+        // run contiguous with the first generated lane rather than one position short.
+        //
+        // N is CLAMPED, loudly: only the rows the last prefill wave left in `sc.norm` exist, and the cache
+        // ceiling has to leave room for this run's own rounds (a full cache means `DRAFT-SKIP`, i.e. a run
+        // that stops speculating, which would be a population change dressed as a rate).
+        if (mtp && o.mtp_prompt_lanes > 0 && !wave.empty()) {
+            const int norm_rows = wave.last_wave_rows;
+            const int h_lo = prompt_len - norm_rows;      // first position with a norm row in sc.norm
+            const int p_lo = std::max(h_lo + 1, 1);
+            const engine::PrefillRow* y0row = wave.y0();
+            const int y0 = y0row ? y0row->sampled : -1;
+            const int p_hi = y0 >= 0 ? prompt_len : prompt_len - 1;
+            // Lanes this run still needs for its own rounds. A round appends at most two (its own draft
+            // lane plus a dense lane when the accept path is on and the round is accepted), and it emits at
+            // least one token, so rounds <= cap-lanes; the tighter bound is rounds <= steps/(1+a) and the
+            // smallest `a` this project admits is the 0.40 M3 kill line, hence 2*steps/1.4.
+            const int reserve = (o.steps * 20 + 13) / 14;
+            const int ceiling = engine::mtpdraft::usable_lanes(mtp->st);
+            const int avail = p_hi - p_lo + 1;
+            int count = o.mtp_prompt_lanes;
+            const char* clamped = "none";
+            if (count > avail) { count = avail; clamped = "norm_rows_in_scratch"; }
+            const int room = ceiling - (int)mtp->st.nlanes - reserve;
+            if (count > room) { count = room; clamped = "cache_ceiling_minus_reserve"; }
+            if (count < 0) count = 0;
+            for (int p = p_hi - count + 1; p <= p_hi; ++p) {
+                const int tok = (p < prompt_len) ? o.prompt[p] : y0;
+                const int hrow_idx = (p - 1) - h_lo;
+                // An off-by-one here reads the WRONG norm row — a plausible lane built from the neighbouring
+                // position's hidden state, which no device check would present as a fault. So the bound is
+                // asserted, not assumed, and the two operands it depends on are printed on `MTPPROMPT`.
+                if (hrow_idx < 0 || hrow_idx >= norm_rows) {
+                    throw std::runtime_error(
+                        "--mtp-prompt-lanes: lane for position " + std::to_string(p) + " wants norm row " +
+                        std::to_string(hrow_idx) + " but the last prefill wave left " +
+                        std::to_string(norm_rows) + " rows in the scratch (first position " +
+                        std::to_string(h_lo) + "). Refusing rather than staging a lane from the wrong row.");
+                }
+                const uint16_t* hrow = sc.norm + (size_t)hrow_idx * engine::kHidden;
+                engine::mtpdraft::draft_lane(store, mtp->w, mtp->st, hrow, tok, p + 1);
+            }
+            mtp->prompt_lanes = count;
+            if (mtp->st.lanes_max > mtp->lanes_max) mtp->lanes_max = mtp->st.lanes_max;
+            std::printf("MTPPROMPT wanted=%d fitted=%d norm_rows=%d pos=%d..%d lanes_after=%d"
+                        " ceiling=%d reserve=%d clamped=%s\n",
+                        o.mtp_prompt_lanes, count, norm_rows, p_hi - count + 1, p_hi,
+                        mtp->st.nlanes, ceiling, reserve, clamped);
+            std::fflush(stdout);
+        }
+
         // ---- the run's own decode window (`DECWALL`, closed and printed after the loop) -------------
         // One wall clock around the generation loop, and the counts that make its rate mean something.
         // Why the counts are here rather than recovered afterwards: a round can end the loop early (§07.5's
@@ -3667,6 +3816,9 @@ int main(int argc, char** argv) {
                     break;
                 }
                 const uint16_t* draft_norm_row = nullptr;   // the norm row of the last position FED
+                // `--mtp-dense`: the lane for the position an accepted round consumed but did not stage.
+                // Left at -1 on a reject and on a plain step.
+                int dense_token = -1, dense_pos = -1;
                 int emitted_first = -1, emitted_second = -1;
                 int pos_first = -1, pos_second = -1;
                 // Headroom first: a round appends TWO KV lanes, and the last lane of the request has room
@@ -3719,6 +3871,16 @@ int main(int argc, char** argv) {
                         pos_first = ar.anchor_after - 1;
                         pos_second = ar.anchor_after;
                         draft_norm_row = sc.norm + engine::kHidden;   // row 1 is position p+1's row
+                        if (o.mtp_dense) {
+                            // The round fed `cur` at p and the candidate at p+1 and the next draft lane
+                            // stands for p+2, so position p+1 is the one the shipped loop skips. Its
+                            // content is exactly the row the body fed there — the candidate token with the
+                            // ROW-0 norm (h at p) — and both are still in hand: the body wrote row 0 and
+                            // row 1 of `sc.norm` and nothing has overwritten the tile since. Staging it is
+                            // 9 submissions and no head pass, and it touches no operand of the round.
+                            dense_token = pending_candidate;
+                            dense_pos = pos_first + 1;    // this engine's content->position map
+                        }
                     } else {
                         emitted_first = ar.verifier_token;
                         pos_first = ar.anchor_after;
@@ -3751,6 +3913,23 @@ int main(int argc, char** argv) {
                 pending_pos = -1;
                 const int tok_next = emitted_second >= 0 ? emitted_second : emitted_first;
                 const int draft_pos = (emitted_second >= 0 ? pos_second : pos_first) + 1;
+                // The skipped lane goes in BEFORE the round's own lane, because lane order has to stay
+                // ascending in position: the attention row treats `self_lane` (the last one) as the newest
+                // and reads everything before it.
+                if (dense_token >= 0) {
+                    const std::string lane_why = engine::mtpdraft::refusal(mtp->st);
+                    if (lane_why.empty()) {
+                        engine::mtpdraft::draft_lane(store, mtp->w, mtp->st, sc.norm, dense_token,
+                                                     dense_pos);
+                        if (mtp->st.lanes_max > mtp->lanes_max) mtp->lanes_max = mtp->st.lanes_max;
+                    } else {
+                        // Refused, not skipped silently: the round still runs, it just keeps the sparse
+                        // cache, and the run's rate is therefore a mixture. Printing it is the only way a
+                        // reader can tell that from the counters.
+                        std::printf("DENSE-SKIP reason=%s would_stage_for=%d\n", lane_why.c_str(),
+                                    dense_pos);
+                    }
+                }
                 const std::string why = engine::mtpdraft::refusal(mtp->st);
                 if (!why.empty()) {
                     std::printf("DRAFT-SKIP reason=%s would_propose_for=%d\n", why.c_str(), draft_pos);
@@ -3766,6 +3945,11 @@ int main(int argc, char** argv) {
                     pending_candidate = p.token;
                     pending_pos = draft_pos;
                     mtp->made++;
+                    // `lanes_max` is the census line's only evidence that the draft cache GREW, and in the
+                    // accept loop it used to stay 0 because only the side pass updated it — which made
+                    // `lanes_max=0 cap=512` a true statement about the counter and a false one about the
+                    // cache. Same high-water mark, same field, now from both callers.
+                    if (mtp->st.lanes_max > mtp->lanes_max) mtp->lanes_max = mtp->st.lanes_max;
                 }
                 // §07.5, applied per EMITTED token and in order. The accept's first token is a token the
                 // plain loop would never have emitted — it was the draft's guess — and it is exactly as

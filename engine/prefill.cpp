@@ -57,6 +57,7 @@ PrefillResult prefill_wave(const WeightStore& weights, RequestState& st, DecodeS
     const size_t wave_cap = (size_t)sc.wave_rows;
     for (size_t begin = 0; begin < tokens.size(); begin += wave_cap) {
         const int n = (int)std::min(wave_cap, tokens.size() - begin);
+        out.last_wave_rows = n;   // the last iteration's value is the one that survives in sc.norm
         const size_t base = out.rows.size();
         const int pos0 = st.prefix_len;   // §02.4: P of this wave's first token
         for (int t = 0; t < n; ++t) {

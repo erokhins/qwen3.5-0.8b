@@ -76,6 +76,16 @@ constexpr int kHeadCopies = 1;        // the one blocking logits D2H
 constexpr int kSubmissionsPerRound =
     kBlockCopies + kBlockLaunches + kHeadLaunches + kHeadCopies;
 
+// A LANE with no proposal: stages 1-9 of the block and nothing after them. The K/V a lane contributes
+// to the draft cache depends only on its own `(h, y_next)` pair — `k_p` and `v_p` are functions of
+// `u_p = fc(norm(e(y_p)) || norm(h_{p-1}))` and of nothing else — so a lane can be staged without
+// pricing `o_proj`, the MLP, the 485 MiB head pass or the vocabulary D2H. That is what makes it
+// affordable to keep the draft cache dense in positions (see `draft_lane`). Billed as its own constant
+// because it is neither a round nor a fraction of one, and checked at the site the same way.
+constexpr int kLaneCopies = 1;        // the E[y] D2D
+constexpr int kLaneLaunches = 8;      // 2 pre-norms + fc + input norm + q,k,v + attn append
+constexpr int kLaneStageSubs = kLaneCopies + kLaneLaunches;
+
 // The same bill as `stageclock` counts it, which is NOT the same quantity, and the difference is one
 // submission. The stage clock's rows are launches and device-to-device copies; its `kHostTail` row is
 // noted with ZERO submissions precisely so that "launches" means the same thing on every row
@@ -127,6 +137,14 @@ struct State {
     int cap = 0;            // lanes allocated per KV head
     int nlanes = 0;         // lanes in use; a reject truncates it, which moves 0 bytes
     int lanes_max = 0;      // the high-water mark, for the census line
+    // Added to every lane's rope position inside `submit_block_prefix`, and nowhere else, so the whole
+    // cache shifts together or not at all. WHY THAT IS THE ONLY HONEST SHAPE: the block's attention is
+    // rope-relative — `mtp_attn_row_kernel` rotates q and every k with the same `head_norm_rope`, so a
+    // score depends on (pos_query - pos_key) and a UNIFORM shift of every lane is an exact null. A knob
+    // that shifted only the newest lane would be a different experiment and would need its own spelling.
+    // `0` is the shipped convention (§09.1: p = position of the drafted token); `-1` is llama.cpp's (the
+    // position of the token the row feeds, `engines/llama.cpp/common/speculative.cpp:1830`).
+    int pos_shift = 0;
 
     // One arena of intermediates, sub-allocated from a table (`regions()` in the .cpp, so the layout
     // and the pointers cannot drift apart).
@@ -155,6 +173,9 @@ struct State {
     // rounds the caller asked for and this file refused (see `refusal()`).
     long long rounds = 0;
     long long refused = 0;
+    // Lane appends with no proposal (`draft_lane`). Printed on the census line, because a cache that
+    // grew without a round behind it would otherwise be invisible to every cross-check.
+    long long lane_appends = 0;
 };
 
 // `cap` lanes per KV head. The one-pass attention form can only serve `mtp_attn_max_lanes()` of them,
@@ -190,6 +211,25 @@ struct Proposal {
 Proposal draft_round(const WeightStore& weights, const Weights& w, State& st,
                      const uint16_t* h_norm_row, int y_next, int draft_pos,
                      std::vector<float>* logits_out = nullptr);
+
+// One lane append, no proposal: the block's stages 1-9 (embedding copy, both pre-norms, `fc`, the input
+// norm, q/k/v, and the cache append inside the attention row) and then a stop. `pos` is the ABSOLUTE
+// position this lane stands for, under the same convention `draft_round` uses for the lane it appends,
+// so a caller may interleave lane appends and rounds and the cache stays ascending in position — which
+// is what the attention's implicit ordering assumes (`self_lane` is always the newest).
+//
+// WHY THIS EXISTS. A round appends exactly one lane, so on an accept — which consumes TWO positions and
+// advances the target by two — the draft cache skips a position, and every lane behind it is one rope
+// step further from its neighbour than the block was trained to see. llama.cpp's draft context has no
+// such hole: its catch-up `process()` feeds `ctx_dft` one row per TARGET row
+// (`engines/llama.cpp/common/speculative.cpp:1625-1637`), so its draft KV is dense over every position.
+// This is the mechanism that makes ours dense too, at 9 submissions per lane instead of 16, and it
+// changes the PROPOSED token and nothing else: it reads a norm row the body already computed and writes
+// only draft-owned buffers.
+//
+// Same preconditions as `draft_round` (`refusal()` first), same throw contract.
+void draft_lane(const WeightStore& weights, const Weights& w, State& st,
+                const uint16_t* h_norm_row, int y_next, int pos);
 
 // ---- which generation steps get a draft -------------------------------------------------------------
 //

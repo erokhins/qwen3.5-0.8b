@@ -72,16 +72,16 @@ public:
 
     // Called at the end of a round, after the D2H (which is marked with zero submissions, the way
     // `kHostTail` is, so that "launches" means one thing on every row of the report).
-    void check(const char* what) const {
-        if (subs_ == kStageSubsPerRound) return;
+    void check(const char* what, int expected) const {
+        if (subs_ == expected) return;
         std::ostringstream os;
         os << what << ": marked " << subs_ << " billed submissions across " << sites_
-           << " site(s), but the declared §09 bill is " << kStageSubsPerRound << " (block "
+           << " site(s), but the declared bill is " << expected << " (for a §09 round: block "
            << kBlockCopies << " copies + " << kBlockLaunches << " launches, head " << kHeadLaunches
            << " launch; the " << kHeadCopies << " blocking D2H is billed 0 here and 1 on the census"
-              " line — see kStageSubsPerRound). A launch added or dropped inside the round without the"
-              " plan being told: the stage clock's `mtp` row and the `MTPDRAFT` census would both still"
-              " agree with themselves.";
+              " line — see kStageSubsPerRound; for a lane append: kLaneStageSubs)."
+              " A launch added or dropped inside the unit without the plan being told: the stage clock's"
+              " `mtp` row and the `MTPDRAFT` census would both still agree with themselves.";
         die(os.str());
     }
 
@@ -139,6 +139,82 @@ const uint16_t* want(const WeightStore& ws, const char* name, int rank, int d0, 
     const Weight& wt = ws.at(name);        // throws and names the tensor if it is not resident
     check_shape(wt, rank, d0, d1);
     return (const uint16_t*)wt.device;
+}
+
+// The guards every block submission needs, in ONE place so a lane append cannot be served a row or an id
+// that a round would have refused. `what` names the caller in the message, because a refusal thrown from
+// a shared helper and blamed on the wrong unit sends the reader to the wrong call site.
+void check_operands(const char* what, const State& st, const uint16_t* h_norm_row, int y_next) {
+    if (h_norm_row == nullptr) die(std::string(what) + ": h_norm_row is null");
+    const std::string why = refusal(st);
+    if (!why.empty()) die(std::string(what) + ": " + why);
+    if (y_next < 0 || y_next >= kVocab)
+        die(std::string(what) + ": y_next=" + std::to_string(y_next) + " is outside the tied table");
+}
+
+// The block's stages 1-9 — embedding copy, the two pre-FC norms, `fc`, the input norm, q/k/v, and the
+// attention row that APPENDS this step's lane. Shared by `draft_round` and `draft_lane` on purpose: two
+// spellings of the same nine submissions is how a lane and a round drift apart, and the drift would show
+// up as a draft cache whose lanes are not the same objects depending on which call made them.
+//
+// `tally` is the caller's, so each unit checks its own bill; `draft_round` continues with stages 10-16
+// afterwards and `draft_lane` stops here.
+void submit_block_prefix(const WeightStore& weights, const Weights& w, State& st,
+                         const uint16_t* h_norm_row, int y_next, int draft_pos,
+                         RoundTally& tally) {
+    const uint16_t* table = (const uint16_t*)weights.at(kEmbedding).device;
+
+    // Every site below is marked into the `mtp` stage family — see `RoundTally`: the marker names the
+    // family the FOLLOWING submissions belong to, and the tally is what the unit is checked against at
+    // the end. The marks are in the order of the block, which is §09's order as spelled in the header;
+    // nothing here reorders a launch, so the clock's segments tile the round the way `decode_step.cpp`'s
+    // markers tile a step.
+
+    // 1  E[y_next]. A 2 KiB D2D — the mechanism `submit_wave_body` uses for a one-row body when the
+    // copy fold is off, so this is the engine's own embedding lookup rather than a third shape.
+    tally.mark(stageclock::kMtp, 1);
+    MTP_CK(hipMemcpyAsync(st.e, table + (size_t)y_next * kHidden, (size_t)kHidden * 2,
+                          hipMemcpyDeviceToDevice, nullptr));
+
+    // 2-3  the two pre-FC norms, straight into the halves of the fc operand. `pair[0:1024]` is the
+    // EMBEDDING half and `pair[1024:2048]` the HIDDEN half: that is §09.2's `[emb || hidden]` order
+    // against `W_fc [1024, 2048]`, and `speccheck/mtp.py`'s `fc_order` knob measures it (0.642 accept
+    // for "eh" against 0.014 for "he", §09.5). An order bug here is invisible to any max-ULP check on
+    // `u` and blindingly obvious to the pinned golden, which is why it is spelled twice.
+    tally.mark(stageclock::kMtp, 1);
+    kernels::glue_add_norm(st.e, nullptr, w.n_emb, nullptr, st.pair);
+    tally.mark(stageclock::kMtp, 1);
+    kernels::glue_add_norm(h_norm_row, nullptr, w.n_hid, nullptr, st.pair + kHidden);
+
+    // 4  the fusion fc: [1, 2048] -> [1, 1024]
+    tally.mark(stageclock::kMtp, 1);
+    kernels::proj_gemv_xbf16(w.fc, st.pair, st.u, 1024, 2048);
+
+    // 5-8  the §05 block's operands
+    tally.mark(stageclock::kMtp, 1);
+    kernels::glue_add_norm(st.u, nullptr, w.n_in, nullptr, st.nrm);
+    tally.mark(stageclock::kMtp, 1);
+    kernels::proj_gemv_xbf16(w.q, st.nrm, st.qg, kQprojRows, kHidden);
+    tally.mark(stageclock::kMtp, 1);
+    kernels::proj_gemv_xbf16(w.k, st.nrm, st.kg, kKvProjRows, kHidden);
+    tally.mark(stageclock::kMtp, 1);
+    kernels::proj_gemv_xbf16(w.v, st.nrm, st.vg, kKvProjRows, kHidden);
+
+    // 9  the attention row, over the block's OWN cache, at the drafted ABSOLUTE position. The append
+    // slot is the dense lane index; `draft_pos` is only what rope sees.
+    kernels::MtpAttnRow ar;
+    ar.qg = st.qg; ar.kg = st.kg; ar.vg = st.vg;
+    ar.qn = w.n_q; ar.kn = w.n_k;
+    ar.kcache = st.kcache; ar.vcache = st.vcache;
+    ar.aout = st.aout; ar.gout = st.gout;
+    ar.cap = st.cap;
+    ar.nlanes = st.nlanes + 1;
+    ar.self_lane = st.nlanes;
+    ar.pos = draft_pos + st.pos_shift;   // `pos_shift` shifts every lane uniformly — see State
+    tally.mark(stageclock::kMtp, 1);
+    kernels::mtp_attn_row(ar);
+    st.nlanes += 1;
+    if (st.nlanes > st.lanes_max) st.lanes_max = st.nlanes;
 }
 
 }  // namespace
@@ -213,6 +289,7 @@ void reset(State& st) {
     st.lanes_max = 0;
     st.rounds = 0;
     st.refused = 0;
+    st.lane_appends = 0;
 }
 
 void truncate_lane(State& st) {
@@ -240,66 +317,10 @@ std::string refusal(const State& st) {
 Proposal draft_round(const WeightStore& weights, const Weights& w, State& st,
                      const uint16_t* h_norm_row, int y_next, int draft_pos,
                      std::vector<float>* logits_out) {
-    if (h_norm_row == nullptr) die("draft_round: h_norm_row is null");
-    const std::string why = refusal(st);
-    if (!why.empty()) die("draft_round: " + why);
-    if (y_next < 0 || y_next >= kVocab)
-        die("draft_round: y_next=" + std::to_string(y_next) + " is outside the tied table");
+    check_operands("draft_round", st, h_norm_row, y_next);
 
-    const uint16_t* table = (const uint16_t*)weights.at(kEmbedding).device;
-
-    // Every site below is marked into the `mtp` stage family — see `RoundTally`: the marker names the
-    // family the FOLLOWING submissions belong to, and the tally is what the round is checked against at
-    // the end. The marks are in the order of the block, which is §09's order as spelled in the header;
-    // nothing here reorders a launch, so the clock's segments tile the round the way `decode_step.cpp`'s
-    // markers tile a step.
     RoundTally tally;
-
-    // 1  E[y_next]. A 2 KiB D2D — the mechanism `submit_wave_body` uses for a one-row body when the
-    // copy fold is off, so this is the engine's own embedding lookup rather than a third shape.
-    tally.mark(stageclock::kMtp, 1);
-    MTP_CK(hipMemcpyAsync(st.e, table + (size_t)y_next * kHidden, (size_t)kHidden * 2,
-                          hipMemcpyDeviceToDevice, nullptr));
-
-    // 2-3  the two pre-FC norms, straight into the halves of the fc operand. `pair[0:1024]` is the
-    // EMBEDDING half and `pair[1024:2048]` the HIDDEN half: that is §09.2's `[emb || hidden]` order
-    // against `W_fc [1024, 2048]`, and `speccheck/mtp.py`'s `fc_order` knob measures it (0.642 accept
-    // for "eh" against 0.014 for "he", §09.5). An order bug here is invisible to any max-ULP check on
-    // `u` and blindingly obvious to the pinned golden, which is why it is spelled twice.
-    tally.mark(stageclock::kMtp, 1);
-    kernels::glue_add_norm(st.e, nullptr, w.n_emb, nullptr, st.pair);
-    tally.mark(stageclock::kMtp, 1);
-    kernels::glue_add_norm(h_norm_row, nullptr, w.n_hid, nullptr, st.pair + kHidden);
-
-    // 4  the fusion fc: [1, 2048] -> [1, 1024]
-    tally.mark(stageclock::kMtp, 1);
-    kernels::proj_gemv_xbf16(w.fc, st.pair, st.u, 1024, 2048);
-
-    // 5-8  the §05 block's operands
-    tally.mark(stageclock::kMtp, 1);
-    kernels::glue_add_norm(st.u, nullptr, w.n_in, nullptr, st.nrm);
-    tally.mark(stageclock::kMtp, 1);
-    kernels::proj_gemv_xbf16(w.q, st.nrm, st.qg, kQprojRows, kHidden);
-    tally.mark(stageclock::kMtp, 1);
-    kernels::proj_gemv_xbf16(w.k, st.nrm, st.kg, kKvProjRows, kHidden);
-    tally.mark(stageclock::kMtp, 1);
-    kernels::proj_gemv_xbf16(w.v, st.nrm, st.vg, kKvProjRows, kHidden);
-
-    // 9  the attention row, over the block's OWN cache, at the drafted ABSOLUTE position. The append
-    // slot is the dense lane index; `draft_pos` is only what rope sees.
-    kernels::MtpAttnRow ar;
-    ar.qg = st.qg; ar.kg = st.kg; ar.vg = st.vg;
-    ar.qn = w.n_q; ar.kn = w.n_k;
-    ar.kcache = st.kcache; ar.vcache = st.vcache;
-    ar.aout = st.aout; ar.gout = st.gout;
-    ar.cap = st.cap;
-    ar.nlanes = st.nlanes + 1;
-    ar.self_lane = st.nlanes;
-    ar.pos = draft_pos;
-    tally.mark(stageclock::kMtp, 1);
-    kernels::mtp_attn_row(ar);
-    st.nlanes += 1;
-    if (st.nlanes > st.lanes_max) st.lanes_max = st.nlanes;
+    submit_block_prefix(weights, w, st, h_norm_row, y_next, draft_pos, tally);
 
     // 10-11  o_proj, then §03.2's add fused with the next norm
     tally.mark(stageclock::kMtp, 1);
@@ -330,13 +351,25 @@ Proposal draft_round(const WeightStore& weights, const Weights& w, State& st,
     Proposal p;
     std::vector<float> host(kVocab);
     MTP_CK(hipMemcpy(host.data(), st.logits, kVocab * sizeof(float), hipMemcpyDeviceToHost));
-    tally.check("draft_round");
+    tally.check("draft_round", kStageSubsPerRound);
     p.token = argmax_greedy(host.data(), kVocab);
     p.top_logit = host[p.token];
     p.nlanes = st.nlanes;
     p.round = ++st.rounds;
     if (logits_out) *logits_out = std::move(host);
     return p;
+}
+
+void draft_lane(const WeightStore& weights, const Weights& w, State& st,
+                const uint16_t* h_norm_row, int y_next, int pos) {
+    check_operands("draft_lane", st, h_norm_row, y_next);
+    RoundTally tally;
+    submit_block_prefix(weights, w, st, h_norm_row, y_next, pos, tally);
+    // Stops at the append: no o_proj, no MLP, no head pass, no vocabulary D2H. The lane's K/V is a
+    // function of its own (h, y) pair only, so nothing after stage 9 can change a lane that is already
+    // in the cache — which is the whole reason this unit is allowed to stop early.
+    tally.check("draft_lane", kLaneStageSubs);
+    st.lane_appends++;
 }
 
 // ---- the round schedule ---------------------------------------------------------------------------
