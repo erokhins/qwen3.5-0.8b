@@ -168,6 +168,15 @@ def rate_summary(tag: str, info: dict, run: dict, n_ids: int) -> dict:
         "draft_skip": draft_skip, "dense_skip": dense_skip,
         "lane_appends": mtpdraft[0].get("lane_appends", "?"),
         "prompt_lanes_fitted": mp.get("fitted", "0"),
+        # What the seeding ACTUALLY staged, and why that number and not the one asked for. The clamp used to
+        # be invisible in the rate table (a `--mtp-prompt-lanes 128` arm silently meant the 46 rows the last
+        # prefill wave left in the scratch), so all three of fan / clamped-by / the old clamp's size are
+        # carried here and printed below.
+        "fan": mp.get("fan", mp.get("fitted", "0")),
+        "clamped": mp.get("clamped", "-"),
+        "last_wave_rows": mp.get("last_wave_rows", "-"),
+        "lane_subs": mp.get("lane_subs", "0"),
+        "retain_copies": mp.get("retain_copies", "0"),
         "lanes_max": mtpdraft[0].get("lanes_max", "?"),
         "ended": d.get("ended", "?"), "n_proposal_lines": len(prop),
         "identical_to_greedy": info["identical"],
@@ -183,6 +192,13 @@ def rate_summary(tag: str, info: dict, run: dict, n_ids: int) -> dict:
               (f" stream=near-tie-flip@{info['flip']['flip']}" if info["flip"] and info["flip"]["near_tie"]
                else " stream=STRUCTURAL-FLIP")))
           , flush=True)
+    # The fan line, separate because it is the seeding's whole story: how wide the draft cache started,
+    # what clamped it, the 46-row scratch clamp that used to be the binding one (shown even when it is NOT
+    # the binding one, so a reader can see which limit bound), and the submissions it cost.
+    if rec["prompt_lanes_fitted"] != "0":
+        print(f"  {'':>12} FAN fan={rec['fan']} fitted={rec['prompt_lanes_fitted']}"
+              f" clamped={rec['clamped']} last_wave_rows={rec['last_wave_rows']}"
+              f" lane_subs={rec['lane_subs']} retain_copies={rec['retain_copies']}", flush=True)
     print(f"  {'':>12} ladder (accept by round ordinal):", end="")
     for lo, hi in DEPTH_BUCKETS:
         sel = [ok for i, ok in enumerate(lad) if lo <= i <= hi]
