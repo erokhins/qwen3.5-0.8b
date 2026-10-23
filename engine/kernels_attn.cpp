@@ -926,6 +926,14 @@ const char* fattn_roll_name(FattnRoll r) {
     return r == FattnRoll::kTwo ? "two" : "single";
 }
 
+const char* attn_wide_name(int form) {
+    // The three names are the NUMERICS echo's existing vocabulary, moved rather than invented, so the run
+    // echo and a round echo cannot drift apart in spelling while meaning the same thing. `2` keeps its own
+    // name rather than riding on `wide` for the reason that comment gives: the two wide spellings are a
+    // byte-identity pair and a log that cannot tell them apart cannot witness that claim.
+    return form == 2 ? "wide_llama" : (form != 0 ? "wide" : "fattn");
+}
+
 // Parse-or-throw, `parse_fattn_roll`'s rule and for a sharper reason: this knob carries a NUMERICS claim (the
 // `unstaged8` side is owed byte identity with the default, `prototype/attn_percost/A6-G1-impl.md`), so a value
 // that silently fell back to the default would price the shipped form twice and report the second price as the

@@ -104,6 +104,11 @@ struct Round {
     // with itself about everything except what its launchers were told.
     kernels::WaveGemm gemm_ran = kernels::WaveGemm::kHand;
     kernels::GdnScan scan_ran = kernels::GdnScan::kSeq;
+    // Which attention CORE the round ran, for the same reason and printed on the same `MTPSTAT` line.
+    // Since `kMtpRoundAttnWide` the round's form is a compiled-in rule, not a flag, so an echo read off the
+    // scratch is the only thing that can show it took: a binary that predated the rule would otherwise
+    // print an identical run (`AGENTS.md`: assert a behavioural canary inside the window).
+    int attn_wide_ran = 0;
 };
 
 // Run one accept round on the LIVE state. `candidate` is the draft block's proposal for position

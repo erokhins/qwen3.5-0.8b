@@ -918,6 +918,14 @@ const char* fattn_roll_name(FattnRoll r);
 FattnQStage parse_fattn_qstage(const std::string& name);
 const char* fattn_qstage_name(FattnQStage s);
 
+// The wave core an `AttnLayerArgs::fattn_wide` value selects, in ONE spelling: `fattn` (the 16-row WMMA
+// wave block, the pre-A12 shipping wave), `wide` (A12), `wide_llama` (A13). The NUMERICS echo and the MTP
+// round echoes both print this vocabulary — `engine/gate.py` asserts the NUMERICS one against the flag it
+// passed, and `engine/decode_step.h`'s `kMtpRoundAttnWide` makes the round one need it because a rule that
+// is compiled in has no flag whose absence could witness it. Same reason `wave_gemm_name` and
+// `gdn_scan_name` exist: a log that cannot name which form ran cannot be compared against a pinned dump.
+const char* attn_wide_name(int form);
+
 // How many F32 elements `AttnLayerArgs::part` must hold for a body of `rows` query rows: one (max,
 // sum, acc[head_dim]) tuple per query head per split block, at the maximum split the engine serves.
 // Defined in `kernels_attn.cpp`, because the head width and the split cap are that op's constants and

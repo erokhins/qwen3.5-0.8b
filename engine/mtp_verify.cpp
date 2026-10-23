@@ -415,12 +415,18 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
     // Arming the split, when the caller asked for it. Null here is today's launch sequence with one
     // null test per GDN layer, which is why the probe's flag-off byte-identity is unaffected.
     sc.gdn_ckpt = ckpt;
+    // And arming the attention form. Not route-dependent, unlike the two above: a round's body is a
+    // speculation round whatever weight walk it rides, and the wide wave block was priced at PREFILL row
+    // counts only (`decode_step.h`'s `kMtpRoundAttnWide` carries the numbers and the reason a row-count
+    // predicate would not do). Restored below with the other two, on every exit path.
+    const int saved_wide = arm_mtp_round_attn_form(sc);
 
     Result r;
     // What is in force for THIS body, read off the scratch it was just configured from rather than
     // restated from the flag, so the driver's echo cannot be satisfied by a flag that never took.
     r.gemm_ran = sc.wave_gemm;
     r.scan_ran = sc.gdn_scan;
+    r.attn_wide_ran = sc.attn_fattn_wide;
     try {
         // THE ANCHOR-LANE REVERT. A 2-row body re-stages row 0's own KV lane, and that lane is inside the
         // live prefix: the step that produced the fed token already wrote those bytes. It cannot simply be
@@ -551,11 +557,13 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
         sc.wave_gemm = gemm;
         sc.gdn_scan = scan;
         sc.gdn_ckpt = saved_ckpt;
+        sc.attn_fattn_wide = saved_wide;
         throw;
     }
     sc.wave_gemm = gemm;
     sc.gdn_scan = scan;
     sc.gdn_ckpt = saved_ckpt;
+    sc.attn_fattn_wide = saved_wide;
     return r;
 }
 

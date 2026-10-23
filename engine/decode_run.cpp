@@ -1611,14 +1611,15 @@ void verify_round(VerifySide& v, const engine::WeightStore& store, engine::Decod
         std::printf("VERIFY2 step=%d anchor_pos=%d fed=%d candidate=%d row0=%d row1=%d row0_top=%.9g"
                     " row1_top=%.9g row0_eq_step=%d head_passes=%d d2h=%d logits_bytes=%lld"
                     " checkpoint_bytes=%lld lane_revert_bytes=%lld guard=%d"
-                    " mtp_route=%s gemm=%s gdn_scan=%s\n",
+                    " mtp_route=%s gemm=%s gdn_scan=%s attn_fattn_wide=%s\n",
                     step, anchor_pos, fed, candidate, r.token[0], r.token[1], r.top[0], r.top[1],
                     r.token[0] == step_token ? 1 : 0, r.head_passes, r.d2h_count,
                     (long long)r.bytes_read_back, (long long)v.snap.bytes(), (long long)r.lane_bytes,
                     v.guard ? 1 : 0,
                     engine::mtpverify::route_name(v.route),
                     engine::kernels::wave_gemm_name(r.gemm_ran),
-                    engine::kernels::gdn_scan_name(r.scan_ran));
+                    engine::kernels::gdn_scan_name(r.scan_ran),
+                    engine::kernels::attn_wide_name(r.attn_wide_ran));
         std::fflush(stdout);
     }
     if (v.guard) {
@@ -2083,7 +2084,15 @@ void print_usage(FILE* out) {
                  " fire computes the same value, and SCALE is 2^-4, which is exact. So its adjudicator is a"
                  " byte-compare against `1`, not a band. The ATTN_WIDE line prints form=wide128llama for it,"
                  " which is the behavioural canary: a stale binary cannot price `1` and be tabled as `2`. Still"
-                 " WAVE-ONLY and still default-off; passing it moves nothing about `0` or `1`.\n"
+                 " WAVE-ONLY, and `2` is the shipped default since A13 (`decode_run.cpp`'s own option field)"
+                 " while `1` stays opt-in and moves nothing about `0`.\n"
+                 " An MTP ROUND's body is the one wave that does not consult this flag:"
+                 " `engine/decode_step.h`'s `kMtpRoundAttnWide` pins a `--mtp-verify` or `--mtp-accept` body"
+                 " to the `0` core, because the block's win is measured at PREFILL row counts and the four-arm"
+                 " wall A/B (`prototype/mtp_accept/wide_body_ab.sh`) measured it as a large loss at a round's."
+                 " A rule that is compiled in has no flag to watch, so the round prints the core it RAN as"
+                 " `attn_fattn_wide=` on its `VERIFY2`/`MTPSTAT` line, off the scratch the body was"
+                 " configured from — the `gemm=`/`gdn_scan=` precedent. Prefill waves are untouched.\n"
                  "  --attn-split-cap N  an UPPER BOUND on how many lane blocks a wide query row may be cut"
                  " into (bet A9-L-c, prototype/attn_percost/A9-LONGCTX-CENSUS.md §4.2). The lane geometry"
                  " forces `split = ceil(lanes/MAXSC)` blocks per wide row (§07.3); N caps that count, so a"
@@ -3233,7 +3242,7 @@ int main(int argc, char** argv) {
                     // byte-identity pair and a log that cannot tell them apart cannot witness that claim; a
                     // gate that only knows 0 and 1 reading `wide_llama` is a gate being told about a form it
                     // never asked for, which is the failure the echo exists to catch, not a name to shorten.
-                    o.attn_fattn_wide == 2 ? "wide_llama" : (o.attn_fattn_wide ? "wide" : "fattn"),
+                    engine::kernels::attn_wide_name(o.attn_fattn_wide),
                     engine::kernels::gdn_scan_name(o.gdn_scan), o.gdn_chunk,
                     // Truthful, not decorative. `collapse` submits `gdn_rc::rec_collapse_kernel`, which
                     // never reads this flag, so an echo naming a spelling here would report a kernel that
@@ -3461,6 +3470,7 @@ int main(int argc, char** argv) {
         // that ignored the switch cannot report the amortised arm while launching the hand chain.
         const char* accept_gemm_ran = "-";
         const char* accept_scan_ran = "-";
+        const char* accept_attn_wide_ran = "-";
         std::FILE* emit_log = nullptr;
         int pending_candidate = -1;   // the draft's proposal for the next position; -1 = nothing pending
         int pending_pos = -1;         // the position that proposal is for, echoed on the round line
@@ -3698,6 +3708,7 @@ int main(int argc, char** argv) {
                                                        pending_candidate, o.mtp_route);
                     accept_gemm_ran = engine::kernels::wave_gemm_name(ar.gemm_ran);
                     accept_scan_ran = engine::kernels::gdn_scan_name(ar.scan_ran);
+                    accept_attn_wide_ran = engine::kernels::attn_wide_name(ar.attn_wide_ran);
                     engine::mtpaccept::tally(astats, *aside, ar);
                     gen_bodies++;   // one round is one 2-row body, whatever it emits
                     mtp->adjudicated++;
@@ -4041,8 +4052,9 @@ int main(int argc, char** argv) {
         // this line is an arithmetically consistent rate or nothing (`engine/mtp_accept.h`).
         if (aside) {
             if (pending_candidate >= 0) mtp->unadjudicated++;   // proposed, never settled: no next round
-            std::printf("MTPSTAT route=%s gemm=%s gdn_scan=%s %s\n",
+            std::printf("MTPSTAT route=%s gemm=%s gdn_scan=%s attn_fattn_wide=%s %s\n",
                         engine::mtpverify::route_name(o.mtp_route), accept_gemm_ran, accept_scan_ran,
+                        accept_attn_wide_ran,
                         engine::mtpaccept::describe(astats).c_str());
             std::fflush(stdout);
             engine::mtpaccept::free_side(*aside);

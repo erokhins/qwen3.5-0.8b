@@ -393,6 +393,45 @@ struct DecodeScratch {
     bool adapters_ready = false;
 };
 
+// ---- which attention core an MTP round's body runs, as ONE rule with ONE spelling -------------------
+//
+// THE VALUE is `kernels::AttnLayerArgs::fattn_wide`'s own vocabulary (`kernels::attn_wide_name`): 0 is
+// the 16-row WMMA wave block — i.e. what `--attn-fattn-wide 0` runs, the wave spelling that predates bet
+// A12 and is gated at every width — and 1|2 are the A12/A13 WIDE block. A round's body gets 0.
+//
+// WHY THE RULE EXISTS. The wide block was ported for PREFILL and priced there, where it won 27 % of the
+// 16k wave (`prototype/attn_wide/A13-RESULT.md`). At a round's row count it is a loss: the four-arm wall
+// A/B (`prototype/mtp_accept/wide_body_ab.sh`, tip af46c37) measured -4.93 ms / -29 % out of a 2-row
+// verify body at 4,032 lanes when it was taken away, and 98.690 tok/s against 78.444 on the accept loop
+// with BOTH accept arms accepting the same drafts (25 of 31 rounds). The mechanism is the one A12 was
+// retired for (`prototype/attn_wide/A12-WHY-NOT-FASTER.md`): `wide_rtiles_of(rows)` is one row-tile for
+// any body of at most `WIDE_POS_PER_BLOCK` = 32 rows, so a 2-row round submits `dim3(N_KV, 1, 1)` — two
+// workgroups on a 40-CU machine, 38 CUs idle, and no lane split anywhere to fill them — where the form it
+// replaces keeps the split and the combine route alive.
+//
+// WHY IT IS NOT A ROW-COUNT RULE, and this is the reason it is not a `resolve_*` function. `prefill_wave`
+// splits at `kMaxWaveRows`, so a prompt whose length is 2 mod 512 ENDS in a 2-row body, and
+// `--wave-rows 2` makes EVERY prefill body 2 rows; `submit_wave_body` sees `n`, a position and a state.
+// Nothing at the launcher distinguishes a round from a prefill tail, so any predicate on `rows` would move
+// prefill bits to buy a round's, and the prefill win above is measured and stands. What DOES distinguish
+// them is the caller: exactly two sites submit a round body — `mtpaccept::accept_round` and
+// `mtpverify::verify_body` — and both already force a body's route for the same class of reason
+// (`wave_gemm`/`gdn_scan` under `--mtp-route hand`, `engine/mtp_verify.h`'s last two paragraphs). This
+// rides beside them rather than inventing a geometry heuristic the launcher cannot check.
+//
+// WHAT IT MAKES INERT, precisely: `--attn-fattn-wide` on the ROUND path and nowhere else, the same way
+// `resolve_wave_gemm` overrides the GEMM for a one-row body whatever the flag says. Because there is no
+// flag to watch on this path, the form that RAN is echoed per round (`attn_fattn_wide=` on `MTPSTAT` and
+// `VERIFY2`), read off the scratch the body was configured from — the `gemm=`/`gdn_scan=` precedent, and
+// the AGENTS.md rule that a route must be read back off the run rather than inferred from a flag.
+constexpr int kMtpRoundAttnWide = 0;
+
+// Puts `kMtpRoundAttnWide` on the scratch and returns what it carried, so the caller restores it on every
+// exit path including a throw — the `wave_gemm`/`gdn_scan`/`gdn_ckpt` save-and-restore, one field wider.
+// Call it before the round's `submit_wave_body`; leaving it un-restored would re-route the caller's own
+// later prefill waves, which is the one thing this rule is not allowed to touch.
+int arm_mtp_round_attn_form(DecodeScratch& sc);
+
 DecodeScratch allocate_scratch(int wave_rows = kMaxWaveRows);
 void free_scratch(DecodeScratch& sc);
 

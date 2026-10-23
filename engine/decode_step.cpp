@@ -383,6 +383,16 @@ void free_scratch(DecodeScratch& sc) {
     sc = DecodeScratch{};
 }
 
+int arm_mtp_round_attn_form(DecodeScratch& sc) {
+    // The whole rule, in one assignment: an MTP round's body runs `kMtpRoundAttnWide`, and the caller gets
+    // back what the scratch carried so it can put it back. `decode_run --attn-fattn-wide` still decides what
+    // a PREFILL wave runs — this writes the scratch for the duration of one body, from the only two callers
+    // that can tell a round from a prefill body of the same width (`DecodeScratch`'s note above).
+    const int saved = sc.attn_fattn_wide;
+    sc.attn_fattn_wide = kMtpRoundAttnWide;
+    return saved;
+}
+
 void prepare_weight_adapters(const WeightStore& weights, DecodeScratch& sc) {
     // The shape contract of the two widenings, asserted where the flattened result is consumed.
     // `check_weights` already compares the store against these same two `Expected`s; the reason to

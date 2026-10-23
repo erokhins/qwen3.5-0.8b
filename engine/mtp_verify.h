@@ -220,6 +220,11 @@ struct Result {
     // (`AGENTS.md`: a paired A/B against a stale binary reads as a clean null).
     kernels::WaveGemm gemm_ran = kernels::WaveGemm::kHand;
     kernels::GdnScan scan_ran = kernels::GdnScan::kSeq;
+    // And which attention CORE the body ran, same reading and same reason, since
+    // `engine/decode_step.h`'s `kMtpRoundAttnWide` made it a compiled-in rule rather than a flag: the
+    // round's body takes the 16-row WMMA wave block whatever `--attn-fattn-wide` asked for, and this field
+    // is the only witness in the log that it did (`decode_run` prints it as `attn_fattn_wide=`).
+    int attn_wide_ran = 0;
 };
 // `ckpt`, when non-null, arms the M2 mid-round checkpoint for this body (`decode_step.h`'s
 // `GdnCheckpoint`): the conv rolls row 0's window into it and the recurrence hands it each layer's

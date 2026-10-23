@@ -114,15 +114,24 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
                                  + std::string(kernels::gdn_scan_name(sc.gdn_scan)));
     }
     sc.gdn_ckpt = &side.ck;
+    // And the attention form, which is not route-dependent: a round's body is a speculation round whatever
+    // weight walk it rides, and the wide wave block was priced at PREFILL row counts and is a loss here
+    // (`decode_step.h`'s `kMtpRoundAttnWide`, whose comment carries the wall A/B numbers and the reason a
+    // row-count predicate would have moved prefill bits instead). The flag arm cannot see this: the round
+    // reaches `attn_decode_layer` through the same `submit_wave_body` a prefill wave does, and the launcher
+    // has no other way to tell the two apart.
+    const int saved_wide = arm_mtp_round_attn_form(sc);
     // The route in force for this round, read off the scratch AFTER the decision above and before anything
     // restores it, so the driver's `MTPSTAT` echo reports the launch sequence rather than the flag.
     r.gemm_ran = sc.wave_gemm;
     r.scan_ran = sc.gdn_scan;
+    r.attn_wide_ran = sc.attn_fattn_wide;
 
-    const auto restore_knobs = [&sc, gemm, scan, saved_ckpt] {
+    const auto restore_knobs = [&sc, gemm, scan, saved_ckpt, saved_wide] {
         sc.wave_gemm = gemm;
         sc.gdn_scan = scan;
         sc.gdn_ckpt = saved_ckpt;
+        sc.attn_fattn_wide = saved_wide;
     };
 
     try {
