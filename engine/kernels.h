@@ -983,6 +983,10 @@ constexpr int kVerdictRows = 2;
 // be included by exactly one TU, while every host caller that sizes a partials buffer needs the number.
 // The launcher refuses a `vocab` it cannot split evenly, so this is a claim with a guard, not a wish.
 constexpr int kArgmaxChunks = 160;
+// The widest call the engine makes an argmax over: the verifier's tile is `[kRows][kVocab]`, i.e. 2 rows,
+// and the draft's proposal is 1. Every caller sizes its partials buffer with this, so the bound is stated
+// once next to `kArgmaxChunks` instead of being re-derived at each allocation site.
+constexpr int kMaxArgmaxRows = kVerdictRows;
 
 // One resolved argmax, in the shape BOTH sides of a device/host boundary need: the winning logit's VALUE
 // and the id it belongs to. It lives here rather than in the kernel header for the same link rule as the
@@ -998,10 +1002,15 @@ struct ArgmaxWord {
 };
 
 // `logits_rows` is the tile `lm_head_batched_xbf16` just wrote; `candidate` arrives as a kernel
-// argument (uploading four bytes would be a second device operation for nothing), and `out_dev` has
-// room for `kVerdictWords` ints.
+// argument (uploading four bytes would be a second device operation for nothing), `out_dev` has room
+// for `kVerdictWords` ints, and `partials_dev` has room for `kVerdictRows * kArgmaxChunks` words.
+//
+// WHY THE CALLER OWNS THE PARTIALS. The tile is an artifact of the reduction and nothing outside these
+// two launches reads it, but a `hipMalloc` inside a round is a synchronisation — which is the round tax
+// this work exists to delete — so the buffer belongs to whoever owns the verdict word already. See
+// `mtpaccept::Side::verdict_partials` and the `--verify-guard` witness in `decode_run.cpp`.
 void mtp_accept_verdict(const float* logits_rows, int vocab, int nrows, int candidate,
-                        int* out_dev);
+                        int* out_dev, ArgmaxWord* partials_dev);
 
 // ONE logits row, argmaxed on device and written as one `ArgmaxWord` (`argmax_partials_kernel` +
 // `row_argmax_combine_kernel` in `engine/mtp_verdict_kernels.h`).

@@ -348,7 +348,7 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
                    float* logits_dev,
                    LaneStage& lanes, StateBytes* body_reads, PoisonReport* tail_poison,
                    const DecodeScratch::GdnCheckpoint* ckpt, bool capture_end_state,
-                   int* verdict_dev) {
+                   int* verdict_dev, kernels::ArgmaxWord* verdict_partials) {
     if (tokens == nullptr || logits_dev == nullptr) {
         throw std::runtime_error("mtp_verify: verify_body needs a token array and a logits tile");
     }
@@ -543,13 +543,21 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
                 r.top[q] = row[r.token[q]];
             }
         }
-        if (verdict_dev != nullptr) {
+        if (verdict_dev != nullptr || verdict_partials != nullptr) {
+            // Both or neither. The device verdict is a PAIR of launches now and the second one reads the
+            // first's buffer, so half a witness would fault — and a witness that silently did not run would
+            // be read as a witness that passed (`AGENTS.md`: a check whose input can be empty cannot fail).
+            if (verdict_dev == nullptr || verdict_partials == nullptr) {
+                throw std::runtime_error(
+                    "mtp_verify: the device verdict needs its status word AND its partials tile");
+            }
             // The device verdict, on the SAME tile the host argmaxes above just read. The admission is
             // `verdict[kRow0Token] == token[0] && verdict[kRow1Token] == token[1]` against §03.4's own
             // host spelling, tie rule included, on real logits from real content — not on a fixture an
             // argmax kernel could have been tuned to.
             const engine::mtpmeter::PhaseGuard witness(engine::mtpmeter::kWitness);
-            kernels::mtp_accept_verdict(logits_dev, kVocab, kRows, tokens[0], verdict_dev);
+            kernels::mtp_accept_verdict(logits_dev, kVocab, kRows, tokens[0], verdict_dev,
+                                        verdict_partials);
             VERIFY_CK(hipMemcpy(r.verdict, verdict_dev, sizeof(r.verdict), hipMemcpyDeviceToHost));
             r.verdict_bytes = (long long)sizeof(r.verdict);
         }

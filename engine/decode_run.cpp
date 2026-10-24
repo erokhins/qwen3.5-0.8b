@@ -1910,6 +1910,10 @@ struct VerifySide {
     int midsplit = 0;                   // 1 = split arm, 2 = control arm (second body unsplit)
     engine::DecodeScratch::GdnCheckpoint mid;
     int* verdict_dev = nullptr;
+    // The verdict pair's partials tile (`kernels::kMaxArgmaxRows * kArgmaxChunks` words), allocated with
+    // `verdict_dev` for the same reason: the witness owns its own device regions, and the reduce launches
+    // need a buffer no caller outside them reads.
+    engine::kernels::ArgmaxWord* verdict_partials = nullptr;
     long long mid_bytes = 0;
     long long split_logit_diffs = 0;   // floats that disagreed, split vs batched, whole run
     long long split_end_diffs = 0;     // bytes of end state that disagreed
@@ -2042,7 +2046,7 @@ void verify_round(VerifySide& v, const engine::WeightStore& store, engine::Decod
         const engine::mtpverify::Result s = engine::mtpverify::verify_body(
             store, st, sc, v.route, v.snap, anchor_pos, tokens, v.logits_dev, v.lanes,
             nullptr, nullptr, v.midsplit == 1 ? &v.mid : nullptr,
-            /*capture_end_state=*/true, v.verdict_dev);
+            /*capture_end_state=*/true, v.verdict_dev, v.verdict_partials);
         v.split_rounds++;
         // Per row, not pooled: `ndiff == kVocab exactly` is a whole-row difference, and which ROW
         // differs is the diagnosis (row 0 = the step's twin is broken; row 1 = the chained conv
@@ -3851,6 +3855,12 @@ int main(int argc, char** argv) {
                     hipSuccess) {
                     throw std::runtime_error("cannot allocate the verdict status word");
                 }
+                if (hipMalloc((void**)&verify->verdict_partials,
+                              (size_t)engine::kernels::kMaxArgmaxRows *
+                                  engine::kernels::kArgmaxChunks *
+                                  sizeof(engine::kernels::ArgmaxWord)) != hipSuccess) {
+                    throw std::runtime_error("cannot allocate the verdict partials tile");
+                }
                 std::printf("MIDSPLIT on=1 checkpoint_bytes=%lld status_bytes=%zu\n",
                             verify->mid_bytes, (size_t)engine::kernels::kVerdictWords * sizeof(int));
             }
@@ -4574,6 +4584,7 @@ int main(int argc, char** argv) {
                 if (verify->mid.mid_gdn != nullptr) (void)hipFree(verify->mid.mid_gdn);
                 if (verify->mid.mid_conv != nullptr) (void)hipFree(verify->mid.mid_conv);
                 if (verify->verdict_dev != nullptr) (void)hipFree(verify->verdict_dev);
+                if (verify->verdict_partials != nullptr) (void)hipFree(verify->verdict_partials);
             }
             if (verify->logits_dev) (void)hipFree(verify->logits_dev);   // nodiscard, per
                                                                         // `mtp_draft.cpp`'s teardown

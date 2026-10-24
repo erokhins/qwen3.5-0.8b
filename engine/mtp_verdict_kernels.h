@@ -8,8 +8,9 @@
 // the row (993,280 B each) and scan it on the host. Two rows, twice per round-trip, and the round is
 // then on a per-step host sync for 2 MB of traffic to transport two comparisons. The plan's `c`
 // column and D-b's whole argument are that this comparison must not cost a vocabulary-sized download,
-// so it stops being a download: one block per row reduces the row to an id, row 0's id is compared
-// against the candidate in the same launch, and the round reads back `kVerdictWords` ints (16 B).
+// so it stops being a download: the tile is argmaxed ON DEVICE and the round reads back
+// `kVerdictWords` ints (16 B). The row is now split across `kernels::kArgmaxChunks` blocks rather than
+// walked by one block — see `verdict_combine_kernel` for why the one-block shape was the defect.
 //
 // THE TIE RULE IS THE CONTRACT. `decode_step.cpp::argmax_greedy` is §03.4's only spelling and it is
 // deliberately STRICT (`if (logits[i] > logits[best])`), so the FIRST, i.e. lowest, id wins a tie;
@@ -20,9 +21,11 @@
 //     better(a, b)  <=>  a.value > b.value  ||  (a.value == b.value && a.index < b.index)
 //
 // which is `argmax_greedy`'s scan restated as an associative fold: the maximum value, and among the
-// indices attaining it the least. Determinism is not luck here — the block reduction is a fixed
-// shared-memory tree with no atomics and no dependence on arrival order, so the same tile gives the
-// same id every run, which is what makes it legal for a pinned gate to be green twice.
+// indices attaining it the least. Determinism is not luck here — every reduction in this file is a fixed
+// shared-memory tree with no atomics and no dependence on arrival order, and `better` is a TOTAL ORDER on
+// finite logits, so the same tile gives the same id every run and from any split of the elements. That
+// second property is what makes it legal for a pinned gate to be green twice AND what makes splitting a
+// row across blocks a change that cannot move an id.
 //
 // FLOAT EQUALITY, not tolerance: the fold compares the same F32 values the host scan compares, so
 // "equal" means bit-equal here and `>` means bit-equal-and-greater there. No reassociation is involved
@@ -89,46 +92,32 @@ __device__ inline int clamp_index(int i, int n) {
 
 }  // namespace detail
 
-// One block per logits row: `blockIdx.x` is the row, `gridDim.x` is `nrows`, and row t starts at
-// `logits + t * vocab`. The strided walk visits each thread's indices in increasing order and the
-// fold below is tie-broken by the least index, so neither the block's own scan nor the tree that
-// combines it can prefer a higher id.
-__global__ void accept_verdict_kernel(const float* __restrict__ logits, int vocab, int candidate,
-                                      int* __restrict__ out) {
+// The verdict's own combine: one row's `nchunks` partials, reduced by the same `fold` the strips used,
+// and the accept test resolved in the same breath so the round still reads back exactly `kVerdictWords`
+// ints. THE OUTPUT CONTRACT IS UNCHANGED — two ids, the accept bit, the candidate echo — only the shape of
+// the reduction moved.
+//
+// WHY THE OLD SHAPE WAS WRONG: it was one block per row — 256 threads striding 970 times through 248,320
+// scalar floats, i.e. ONE of this part's 40 CUs doing all of the work, at 6.5 GB/s against the box's
+// measured 237 GB/s ceiling (`ROUND-TAX.md` §2) on data the head pass had just written and the big L2 tier
+// had therefore already fetched. The split gives each row `kernels::kArgmaxChunks` blocks, and the partials
+// kernel (`argmax_partials_kernel`, shared with the draft's proposal) reads each strip vectorised.
+//
+// WHY A SECOND KERNEL RATHER THAN AN ATOMIC OR A LAST-BLOCK COMBINE: both of those make the surviving value
+// depend on arrival order, and the entire licence for splitting at all is that a TOTAL order makes the fold
+// order-independent. The extra launch costs single-digit microseconds and keeps the argument intact.
+__global__ void verdict_combine_kernel(const detail::Best* __restrict__ partials, int nchunks,
+                                       int candidate, int* __restrict__ out) {
     __shared__ detail::Best best[kVerdictThreads];
 
     const int row = (int)blockIdx.x;
-    const float* row_logits = logits + (size_t)row * (size_t)vocab;
-
-    // Strided walk: thread t owns t, t+T, t+2T, ... Strict `>` keeps the first index seen, and the
-    // indices are seen in increasing order, so a tie inside one thread's own strip resolves to the
-    // least index before the tree ever runs. (The `=` form of the declaration is not a style choice:
-    // `detail::Best local{a, b}` parses as a function declaration, which is what this kernel's first
-    // compile said and what the brace-equals form does not.)
-    detail::Best local = {row_logits[threadIdx.x], (int)threadIdx.x};
-    for (int i = (int)threadIdx.x + kVerdictThreads; i < vocab; i += kVerdictThreads) {
-        const float v = row_logits[i];
-        if (v > local.value) {   // strict, for the same reason `argmax_greedy` is
-            local.value = v;
-            local.index = i;
-        }
-    }
-    best[threadIdx.x] = local;
-    __syncthreads();
-
-    // Fixed shared-memory tree. No atomics, so no arrival order and no run-to-run variation; the
-    // comparator does the tie-breaking that a `max` reduction would silently drop.
-    for (int stride = kVerdictThreads / 2; stride > 0; stride >>= 1) {
-        if ((int)threadIdx.x < stride) {
-            const detail::Best a = best[threadIdx.x];
-            const detail::Best b = best[threadIdx.x + stride];
-            best[threadIdx.x] = detail::better(a, b) ? a : b;
-        }
-        __syncthreads();
-    }
+    // `[row][chunk]`, the same expression `argmax_partials_kernel` wrote — one address form shared by the
+    // writer and the reader, per `prototype/attn_decode/results.md` §20.
+    const detail::Best* row_partials = partials + (size_t)row * (size_t)nchunks;
+    best[threadIdx.x] = row_partials[detail::clamp_index((int)threadIdx.x, nchunks)];
+    const int token = detail::block_reduce(best).index;
 
     if (threadIdx.x == 0) {
-        const int token = best[0].index;
         out[kernels::kVerdictRow0Token + row] = token;
         if (row == 0) {
             // THE COMPARISON, on device. One equality of two ints is the whole accept test, and it is

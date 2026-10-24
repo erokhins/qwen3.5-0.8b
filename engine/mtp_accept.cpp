@@ -42,18 +42,23 @@ Side allocate_side(const RequestState& st) {
     ACCEPT_CK(hipMalloc((void**)&side.logits, (size_t)kRows * kVocab * sizeof(float)));
     ACCEPT_CK(hipMalloc((void**)&side.verdict_dev,
                         (size_t)engine::kernels::kVerdictWords * sizeof(int)));
+    ACCEPT_CK(hipMalloc((void**)&side.verdict_partials,
+                        (size_t)engine::kernels::kMaxArgmaxRows *
+                            engine::kernels::kArgmaxChunks *
+                            sizeof(engine::kernels::ArgmaxWord)));
 
     // THE SPLIT'S BILL, derived from the same constants `decode_step.cpp`'s split sites use rather than
     // typed in, and corrected on this pass to the DERIVATION form (§4c): the shipped batched conv is
     // untouched, so per GDN layer the checkpoint costs exactly TWO extra submissions — the
-    // `conv_mid_window_kernel` derivation and the 1 MiB mid-state capture — plus two per round for the
-    // verdict kernel and its 16-byte status readback. A reject restores the two regions in two bulk D2Ds.
+    // `conv_mid_window_kernel` derivation and the 1 MiB mid-state capture — plus THREE per round for the
+    // verdict (its strip launch and its combine since `ROUND-TAX.md` (B) split the row across blocks) and
+    // its 16-byte status readback. A reject restores the two regions in two bulk D2Ds.
     //
     // The figure this replaces (`3 * kNumGdnLayers`) billed a recurrence launch the pinned form does not
     // add: an accept round runs the per-token recurrence, which is what the shipped one-row step runs and
     // what `--gdn-loop 1` pins the reference arm to, so there is no extra walk to pay for. If a future
     // round ever resolves a span of 2, add `kNumGdnLayers` back here and say so on the `MTPSTAT` line.
-    side.subs_per_round = 2 * kNumGdnLayers + 2;
+    side.subs_per_round = 2 * kNumGdnLayers + 3;
     side.subs_per_reject = 2;
     return side;
 }
@@ -63,6 +68,7 @@ void free_side(Side& s) {
     if (s.ck.mid_conv != nullptr) (void)hipFree(s.ck.mid_conv);
     if (s.logits != nullptr) (void)hipFree(s.logits);
     if (s.verdict_dev != nullptr) (void)hipFree(s.verdict_dev);
+    if (s.verdict_partials != nullptr) (void)hipFree(s.verdict_partials);
     s = Side{};
 }
 
@@ -168,7 +174,8 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
         }
         {
             const engine::mtpmeter::PhaseGuard verdict(engine::mtpmeter::kVerdict);
-            kernels::mtp_accept_verdict(side.logits, kVocab, kRows, candidate, side.verdict_dev);
+            kernels::mtp_accept_verdict(side.logits, kVocab, kRows, candidate, side.verdict_dev,
+                                        side.verdict_partials);
         }
         {
             const engine::mtpmeter::PhaseGuard readback(engine::mtpmeter::kReadback);

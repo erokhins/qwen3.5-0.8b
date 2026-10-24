@@ -77,6 +77,10 @@ struct Side {
     DecodeScratch::GdnCheckpoint ck;
     float* logits = nullptr;        // [kRows][kVocab] F32, device
     int* verdict_dev = nullptr;     // mtpverdict::kVerdictWords ints, device
+    // The verdict reduction's partials tile: `kernels::kMaxArgmaxRows * kernels::kArgmaxChunks` argmax
+    // words. Nothing outside the two verdict launches reads it, but the round may not `hipMalloc` it — a
+    // mid-round allocation is a sync, and the round tax is the thing being removed — so it lives here.
+    engine::kernels::ArgmaxWord* verdict_partials = nullptr;
     int verdict_host[4] = {0, 0, 0, 0};
     long long bytes_gdn = 0;        // DERIVED from `state_sizes()`, never typed in
     long long bytes_conv = 0;

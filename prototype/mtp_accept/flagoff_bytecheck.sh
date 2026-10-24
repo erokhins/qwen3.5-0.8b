@@ -115,6 +115,15 @@ if [ "$rc" = 0 ] && [ "$MODE" = accept ]; then
     for arm in old new; do
         grep -E '^(ACCEPT |ACCEMIT |MTPACCEPT |DRAFT |DRAFT-SKIP |DRAFTK |MTPSTAT )' "$OUT/$arm.log" \
             > "$OUT/$arm.decisions"
+        # Declared-bill fields come OUT, for the same reason `MTPDRAFT`'s whole line is absent: a round's
+        # submission bill is DECLARED PLAN — `engine/gate.py`'s §09 census adjudicates it — and a byte
+        # compare that reddens on the change it was built to make adjudicates nothing. Not a theory: defect
+        # (B) replaces the verdict's one launch with a strip pass and a combine, `split_subs` moved by
+        # exactly one per round (2420 -> 2483 over 63 rounds) while every `ACCEPT` line and `emitted.txt`
+        # stayed byte-identical, and the compare called that a divergence. Everything decision-bearing on
+        # the line stays in: `accepted=`, `rejected=`, `emitted=`, `accept_rate=`, `mean_tokens_per_round=`.
+        sed -E 's/[[:space:]](split_subs|stage_subs_per_round)=[0-9]+//; s/[[:space:]]+$//' \
+            "$OUT/$arm.decisions" > "$OUT/$arm.decisions.n" && mv "$OUT/$arm.decisions.n" "$OUT/$arm.decisions"
     done
     N_DEC=$(wc -l < "$OUT/old.decisions")
     N_ACCEPT=$(grep -c '^ACCEPT ' "$OUT/old.log")

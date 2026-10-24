@@ -237,7 +237,8 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
                    LaneStage& lanes, StateBytes* body_reads = nullptr,
                    PoisonReport* tail_poison = nullptr,
                    const DecodeScratch::GdnCheckpoint* ckpt = nullptr,
-                   bool capture_end_state = false, int* verdict_dev = nullptr);
+                   bool capture_end_state = false, int* verdict_dev = nullptr,
+                   kernels::ArgmaxWord* verdict_partials = nullptr);
 
 // The restore witness: poison the shadow side with a pattern no body writes, restore, and compare every
 // byte of both regions against the checkpoint. A PARTIAL restore cannot pass this — the untouched bytes
