@@ -39,7 +39,7 @@ in all three forms:
   * `attn_fattn_wave` stages `FATTN_MLANES = 16` lanes a round and its round loop runs
     `for (int base = lo_all; base < hi_all; base += FATTN_MLANES)` (`engine/attn_fattn_kernels.h:771`) — bounded
     by the row's own extent, **not** by any constant. Wider slice ⇒ more rounds. This is (i), and it is the
-    **shipping** path (`--attn-fattn` defaults to 1, `engine/decode_run.cpp:153`, `engine/decode_step.h`).
+    **shipping** path (`--attn-fattn` defaults to 1, `engine/decode_run.cpp:349`, `engine/decode_step.h`).
   * `attn_slim_wave` declares `__shared__ hip_bfloat16 s_sc[ATTN_TILE_G][MAXSC]`
     (`engine/attn_slim_kernels.h:157`) and writes it at `:232` with the slice-absolute index `rr`, where
     `rr < ns == span`; the frozen `attn_tile_body` has the same buffer
@@ -90,7 +90,7 @@ one use at the decision site; default inert; help text printed.
 | `engine/kernels_attn.cpp:428` | the VALU-route refusal (§3) |
 | `engine/kernels_attn.cpp:458` | `splitcap_echo(rows, lanes_last, split, split_eff, a.split_cap)` |
 | `engine/decode_step.h:116`, `.cpp:729` | `DecodeScratch::attn_split_cap` (default inert) → `a.split_cap`, both the wave and the single-row branch |
-| `engine/decode_run.cpp:248/397/1770`, usage `:878`, help `:985` | `--attn-split-cap N`: strict parse (rejects non-numeric, negative, and `1`), `0` = no cap |
+| `engine/decode_run.cpp:420/973/4042`, usage `:2490`, help `:2668` | `--attn-split-cap N`: strict parse (rejects non-numeric, negative, and `1`), `0` = no cap |
 
 Every downstream consumer moved to `split_eff`: the three grid builds (`attn_tile_wave` / `attn_slim_wave` /
 `attn_fattn_wave*`), `attn_core`'s `split=1` launch, `wave_fattn`'s `>= 2` test, `fattn_echo`, and the
