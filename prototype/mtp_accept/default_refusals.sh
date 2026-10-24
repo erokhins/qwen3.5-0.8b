@@ -10,11 +10,19 @@
 # branch (`engine/decode_run.cpp`'s note beside the `--mtp-k` block), and a refusal that was retired by
 # accident is the same failure with a green face.
 #
-# WHAT IS NOT HERE: any millisecond figure. Every case below exits at the flag parser, before the 1.55 GB
-# load, so this is a correctness gate and not a timing run — it takes a few seconds and no device window
-# is priced by it (`AGENTS.md`: short, correctness-only, device-gate rules). It also never runs a case to
-# completion: the two POSITIVE cases print the engine's mode echo from a `--sizes-only`-style early exit
-# or a one-token run, and everything else is a refusal.
+# WHAT IS NOT HERE: any millisecond figure. The refusal cases exit at the flag parser, before the 1.55 GB
+# load, so this is a correctness gate and not a timing run — no device window is priced by it (`AGENTS.md`:
+# short, correctness-only, device-gate rules). The POSITIVE cases do load the model and prefill 3 tokens,
+# because the mode echo they assert is printed after the load and before the first body; `--steps 0` is the
+# cheapest run that reaches it.
+#
+# CORRECTED 2026-10-25 (option C, `prototype/mtp_accept/DEFAULT-ON.md` §7). This file used to assert that a
+# round pins `--gdn-loop 1`, in both spellings. That pin was taken run-wide and taxed every prefill wave the
+# shipping default submitted, so the forcing moved onto the round's own bodies and the CLI refusal was
+# retired. A battery that demands a refusal the engine now correctly allows is a dead gate, so the span rows
+# became POSITIVE cases that assert the echoed spans. The last refusal in this file — `--mtp-midsplit` — is
+# the same requirement kept on purpose: that probe byte-compares a split body against an UNSPLIT one, and the
+# unsplit side arms no checkpoint, so nothing forces it and the flag still has to.
 #
 # Usage: prototype/mtp_accept/default_refusals.sh [path/to/decode_run]
 set -uo pipefail
@@ -98,7 +106,6 @@ refused "mtp-k 3 is unfunded"            "--mtp-k takes"                 --ids "
 refused "mtp-k with no round running"    "no round runs"                 --ids "$IDS" --steps 1 --mtp-accept 0 --mtp-k 2
 refused "k=2 needs a 3-row scratch"      "needs a scratch at least 3"    --ids "$IDS" --steps 1 --wave-rows 2 --mtp-accept 1 --mtp-k 2
 refused "a round needs a proposer"       "there is no draft block"       --ids "$IDS" --steps 1 --mtp-accept 1 --mtp-k 2 --mtp-draft 0
-refused "a round pins the gdn span"      "pins --gdn-loop 1"             --ids "$IDS" --steps 1 --mtp-accept 1 --mtp-k 2 --gdn-loop 512
 echo
 echo "-- the per-step instruments a round is not (the [sibling] rows of §7) --"
 # WHICH refusal fires changed with the default, and the harness records that rather than papering over it.
@@ -117,18 +124,27 @@ refused "round vs the verify probe"      "not also armed"                --ids "
 refused "round vs a drafted ladder"      "makes its own proposals"       --ids "$IDS" --steps 1 --mtp-accept 1 --mtp-k 2 --mtp-draft-k 2
 echo
 echo "-- what the DEFAULT FLIP added: the same refusals are reachable by default, and the defaults run --"
-# The span refusal now has to name BOTH halves: the flag that contradicts it, and the fact that an
-# unnamed span would have been resolved rather than refused.
-refused "a NAMED span still refuses"     "Drop the flag"                 --ids "$IDS" --steps 1 --gdn-loop 512
-# ...and the two positive cases are the point of the whole file: the bare command the brief calls the
-# shipping config must RUN, must say which mode it is in, and must say who chose the span. `--steps 0`
-# so nothing decodes: the mode echo is printed before the first body, and a 3-token prefill is the
-# cheapest run that reaches it.
+# THE GDN SPAN, as of 2026-10-25. Two batteries ago this file asserted `--gdn-loop 512 --mtp-accept 1`
+# REFUSED ("a round pins the gdn span", "a NAMED span still refuses"). The round still needs the
+# one-token-step span — its rollback restores a mid-round checkpoint, and at any wider span that state
+# exists at no address — but the requirement is the ROUND's, so the forcing moved to the round's bodies
+# (`engine/decode_step.h::kMtpRoundGdnSpan`, applied by `submit_wave_body` wherever the checkpoint is
+# armed) and the CLI-level refusal was RETIRED. Asserting the old refusal now would be a dead gate: it
+# would demand a refusal the engine correctly no longer gives. So the span cases below are POSITIVE, and
+# each one asserts the echoed spans rather than a mere exit code — a `runs` case that only checked rc=0
+# could not tell "legal" from "legal but silently re-pinned", which is the failure the echo exists to make
+# visible. What the echo CANNOT see is whether the round's body actually walked one step per launch; that
+# is witnessed numerically, not by a flag: an unforced round at span 3 writes no checkpoint slot, so a
+# reject restores uninitialised memory and the emitted stream diverges from the plain one — which is what
+# `prototype/mtp_accept/m3_loop_rate.sh` adjudicates on all 49 corpus lines.
+refused "the midsplit arm still needs span 1" "pins the reference arm"   --ids "$IDS" --steps 1 --mtp-accept 0 --mtp-verify 1 --mtp-midsplit 1 --gdn-loop 512
 runs "bare run is the accept path"       "MTP mode=accept k=2"           --ids "$IDS" --steps 0
-runs "bare run names who set the span"   "gdn_span=1 forced_by=--mtp-accept-default" --ids "$IDS" --steps 0
+runs "the default span is the caller's, not 1" "gdn_span_round=1 gdn_span_other=512 forced_by=default" --ids "$IDS" --steps 0
+runs "a NAMED span is legal and echoed"  "gdn_span_round=1 gdn_span_other=512 forced_by=--gdn-loop" --ids "$IDS" --steps 0 --mtp-accept 1 --mtp-k 2 --gdn-loop 512
+runs "any span is nameable, not just 1 and 512" "gdn_span_round=1 gdn_span_other=7 forced_by=--gdn-loop" --ids "$IDS" --steps 0 --mtp-accept 1 --mtp-k 2 --gdn-loop 7
+runs "an explicit span 1 is honoured"    "gdn_span_round=1 gdn_span_other=1 forced_by=--gdn-loop" --ids "$IDS" --steps 0 --gdn-loop 1
 runs "k=1 is still nameable"             "MTP mode=accept k=1"           --ids "$IDS" --steps 0 --mtp-k 1
-runs "accept off says so"                "MTP mode=off"                  --ids "$IDS" --steps 0 --mtp-accept 0
-runs "a named span is honoured, not forced" "gdn_span=1 forced_by=--gdn-loop" --ids "$IDS" --steps 0 --gdn-loop 1
+runs "accept off echoes ONE span"        "MTP mode=off draft=1 gdn_span=512" --ids "$IDS" --steps 0 --mtp-accept 0
 # The environment still overrides BOTH ways, which the flag cases cannot show (a flag always outranks it).
 env_runs "QWEN_MTP_ACCEPT=0 turns it off" "MTP mode=off" QWEN_MTP_ACCEPT=0 --ids "$IDS" --steps 0
 env_runs "QWEN_MTP_ACCEPT=0 at the default k" "MTP mode=off draft=1" QWEN_MTP_ACCEPT=0 --ids "$IDS" --steps 0
