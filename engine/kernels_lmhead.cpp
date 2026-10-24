@@ -122,4 +122,36 @@ void mtp_accept_verdict(const float* logits_rows, int vocab, int nrows, int cand
         logits_rows, vocab, candidate, out_dev);
 }
 
+// One logits row, argmaxed on device into one `ArgmaxWord`: `kArgmaxChunks` strip blocks, then one combine
+// block. No atomics anywhere, because the whole claim is that the fold's result does not depend on the order
+// its operands arrive in (`engine/mtp_verdict_kernels.h`), and an arrival-order-dependent combine would
+// trade a vocabulary download for a nondeterministic id — a bad trade in a build whose gates are admitted by
+// exact equality.
+//
+// Deliberately NOT billed on a stage-clock row by this launcher, exactly like `mtp_accept_verdict` above:
+// these belong to the round, and the round declares its own per-round bill (`kStageSubsPerRound` in
+// `engine/mtp_draft.h`, which counts these two launches).
+void mtp_argmax_row(const float* logits_row, int vocab, ArgmaxWord* out_dev, ArgmaxWord* partials_dev) {
+    if (vocab <= 0) throw std::runtime_error("mtp_argmax_row: vocab must be > 0");
+    if (vocab % (kArgmaxChunks * 4) != 0) {
+        throw std::runtime_error("mtp_argmax_row: vocab=" + std::to_string(vocab) + " does not split into "
+                                 + std::to_string(kArgmaxChunks)
+                                 + " strips of a whole number of float4s ("
+                                 + std::to_string(kArgmaxChunks * 4)
+                                 + " elements per strip). The strips are read vectorised, so an uneven split"
+                                   " is a wrong answer, not merely a slower one — refuse rather than"
+                                   " silently drop a tail.");
+    }
+    if (logits_row == nullptr || out_dev == nullptr || partials_dev == nullptr)
+        throw std::runtime_error("mtp_argmax_row: logits, out or partials is null");
+    const int per_chunk = vocab / kArgmaxChunks;
+    // grid.x = the chunk, grid.y = the row (one row here), which is the same (chunk, row) mapping the
+    // verdict path uses, so one kernel serves both shapes.
+    engine::mtpverdict::argmax_partials_kernel
+        <<<dim3(kArgmaxChunks, 1, 1), engine::mtpverdict::kVerdictThreads>>>(
+            logits_row, vocab, per_chunk, kArgmaxChunks, partials_dev);
+    engine::mtpverdict::row_argmax_combine_kernel<<<1, engine::mtpverdict::kVerdictThreads>>>(
+        partials_dev, kArgmaxChunks, out_dev);
+}
+
 }  // namespace engine::kernels

@@ -39,12 +39,19 @@
 // 14  add+norm z2, x_d = mtp.norm(z1 + mlp_o)  — x_d IS the draft's output row (§09.2)
 // ── then the proposal:
 // 15  lm_head  logits = x_d · Eᵀ             the same tied table, one more full pass
-// 16  D2H      one blocking read of the vocabulary, then §03.4's argmax via `argmax_greedy`
+// 16  argmax   resolved ON DEVICE over `st.logits` (two launches: split partials, then a combine) and one
+//              8-byte word comes back: the proposed id and the logit it won with. §03.4's tie rule — strict
+//              `>`, ties to the LOWEST id — is what the device fold implements, unchanged, because that
+//              total order is what makes a split fold answer the same question as the host scan
+//              (`engine/mtp_verdict_kernels.h`). This used to be "download 993,280 B and scan it on a CPU
+//              core", which is one of the two vocabulary crossings `prototype/mtp_accept/ROUND-TAX.md` §1
+//              names; `logits_out` is the only caller that still downloads the row and no shipping caller
+//              sets it.
 //
-// So 14 submissions for the block (1 copy + 13 kernel launches) and 2 more for the head, 16 per
-// round. `prototype/mtp_draft` counted 14 for the block too; its 14th was a gather KERNEL where this
-// uses the shipped one-row body's D2D, so "14 submissions" is the same bill by a different mechanism
-// and the engine's own line states which it paid.
+// So 14 submissions for the block (1 copy + 13 kernel launches), 1 more for the head, 2 for the device
+// argmax and 1 blocking status read: 18 per round. `prototype/mtp_draft` counted 14 for the block too; its
+// 14th was a gather KERNEL where this uses the shipped one-row body's D2D, so "14 submissions" is the same
+// bill by a different mechanism and the engine's own line states which it paid.
 //
 // Activations stay BF16 end to end, which is what deletes the cast launches: `hip_bfloat16 -> float`
 // is exact, and `prototype/mtp_draft`'s `stagecheck` arm MEASURED that the two stagings are
@@ -61,6 +68,8 @@
 #include <string>
 #include <vector>
 
+#include "engine/kernels.h"   // `kernels::ArgmaxWord`, the word the device argmax writes back
+
 namespace engine {
 
 class WeightStore;
@@ -72,9 +81,11 @@ constexpr int kBlockCopies = 1;       // the E[y_next] D2D
 constexpr int kBlockLaunches = 13;    // 2 norms + fc + norm + q,k,v + attn + o + add_norm + gateup
                                       // + down + add_norm
 constexpr int kHeadLaunches = 1;      // lm_head_full_xbf16
-constexpr int kHeadCopies = 1;        // the one blocking logits D2H
+constexpr int kArgmaxLaunches = 2;    // the split device argmax: the strip partials, then the combine
+constexpr int kHeadCopies = 1;        // the one blocking read that closes a round — 8 bytes, not a
+                                      // vocabulary (`ArgmaxWord`), since the argmax moved on device
 constexpr int kSubmissionsPerRound =
-    kBlockCopies + kBlockLaunches + kHeadLaunches + kHeadCopies;
+    kBlockCopies + kBlockLaunches + kHeadLaunches + kArgmaxLaunches + kHeadCopies;
 
 // A LANE with no proposal: stages 1-9 of the block and nothing after them. The K/V a lane contributes
 // to the draft cache depends only on its own `(h, y_next)` pair — `k_p` and `v_p` are functions of
@@ -89,12 +100,12 @@ constexpr int kLaneStageSubs = kLaneCopies + kLaneLaunches;
 // The same bill as `stageclock` counts it, which is NOT the same quantity, and the difference is one
 // submission. The stage clock's rows are launches and device-to-device copies; its `kHostTail` row is
 // noted with ZERO submissions precisely so that "launches" means the same thing on every row
-// (`engine/stage_clock.h`). So the blocking vocabulary D2H — the 16th submission, and the one thing about
-// a round that is guaranteed to synchronise — is billed nothing there and one here. A single constant
+// (`engine/stage_clock.h`). So the blocking status read — the last submission, and the one thing about a
+// round that is guaranteed to synchronise — is billed nothing there and one here. A single constant
 // shared by both instruments would have made one of the two wrong, which is why there are two named ones
 // and the census line prints both spellings it is asked to.
 constexpr long long kStageSubsPerRound =
-    static_cast<long long>(kBlockCopies) + kBlockLaunches + kHeadLaunches;
+    static_cast<long long>(kBlockCopies) + kBlockLaunches + kHeadLaunches + kArgmaxLaunches;
 
 // The block's 15 tensors, as the shard stores them (BF16, [out, in] for every matrix). Resolved once
 // per run: `resolve()` re-reads each claim from the store and throws naming the FIRST mismatch, with
@@ -169,6 +180,13 @@ struct State {
 
     float* logits = nullptr;    // [kVocab] F32, the draft's own logits row
 
+    // The device argmax's two buffers: one `ArgmaxWord` out, and the partials `kernels::mtp_argmax_row`
+    // combines. Allocated with the rest of the state rather than inside a round, because a `hipMalloc` in a
+    // round is a synchronisation in the middle of the cost being measured. The partials count is the
+    // launcher's own constant, so a resize on one side cannot leave a short buffer on the other.
+    kernels::ArgmaxWord* argmax = nullptr;
+    kernels::ArgmaxWord* argmax_partials = nullptr;
+
     // Counters for the census line. `rounds` is what this state actually drafted; `skipped` counts the
     // rounds the caller asked for and this file refused (see `refusal()`).
     long long rounds = 0;
@@ -200,11 +218,15 @@ std::string refusal(const State& st);
 // `sc.norm` (§09.1's `h`, post-final-norm); `y_next` the token that step emitted; `draft_pos` the
 // ABSOLUTE position being drafted. Advances `st.nlanes` by one on success.
 //
+// `logits_out`, when non-null, additionally downloads the whole logits row for the caller — a debug and
+// side-pass dumper only, and no shipping caller sets it, which is the point of it being a parameter rather
+// than a step: a round that only wants the proposal pays 8 bytes, not 993,280.
+//
 // Throws std::runtime_error on a HIP failure, on an out-of-range id, or on a cache the form cannot
 // serve (check `refusal()` first: it is the polite version).
 struct Proposal {
     int token = -1;         // §03.4's argmax over the draft's logits row (ties -> LOWEST id)
-    float top_logit = 0.0f;
+    float top_logit = 0.0f; // the logit that won it: read back beside the id, never re-derived on the host
     int nlanes = 0;         // cache lanes after this round's append
     long long round = 0;    // 1-based, per State
 };

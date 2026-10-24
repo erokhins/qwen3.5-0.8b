@@ -1839,7 +1839,12 @@ void mtp_census_line(const MtpSide& m, const char* mode, const char* sched) {
                 " tensors=15 block_bytes=%lld\n",
                 sched, mode,
                 engine::mtpdraft::kBlockCopies, engine::mtpdraft::kBlockLaunches,
-                engine::mtpdraft::kHeadLaunches, engine::mtpdraft::kHeadCopies,
+                // `head=` is `copies+launches`, the same order `block=` prints, because the gate reads the
+                // first number as the count of blocking reads (`engine/gate.py::mtp_plan_verdicts`'s stage
+                // row). With both head numbers at 1 the two orders were indistinguishable; the device
+                // argmax made them 1 and 3, so the order had to be stated instead of assumed.
+                engine::mtpdraft::kHeadCopies,
+                engine::mtpdraft::kHeadLaunches + engine::mtpdraft::kArgmaxLaunches,
                 engine::mtpdraft::kSubmissionsPerRound,
                 (long long)m.made, (long long)m.adjudicated, (long long)m.accepted,
                 (long long)m.refused, (long long)m.unadjudicated, m.lanes_max, m.st.cap,

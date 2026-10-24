@@ -4172,8 +4172,17 @@ def mtp_draft_plan() -> dict:
 MTP_DRAFT_UNCOUNTED = {
     "block_attn_site": 1,   # `mtp_attn_row`: a site with no counter, by `engine/kernels_attn.cpp`'s note
     "head_lm": 1,           # `lm_head_full_xbf16`: family `other`, which has no launcher counter
+    # The draft's proposal is resolved on device now (`kernels::mtp_argmax_row`: strip partials, then a
+    # combine), and those two launches are in the same class as `head_lm` — real submissions, no launcher
+    # family for `launch_stats.h` to see, so they are declared rather than counted. They are NOT a fourth
+    # surprise: this row exists precisely so that adding them is a named change to §09 rather than a +1 that
+    # some family has to absorb.
+    "head_argmax": 2,
 }
-MTP_DRAFT_COPIES = {"block_d2d": 1, "head_d2h": 1}   # E[y_next] upload, and the one blocking logits read
+MTP_DRAFT_COPIES = {"block_d2d": 1, "head_d2h": 1}   # E[y_next] upload, and the one blocking read that
+# closes a round. `head_d2h` kept its name when the read shrank from a whole vocabulary (993,280 B) to the
+# 8-byte (id, logit) pair, because what the arithmetic below cares about is that ONE blocking read closes
+# the round and is billed as a copy, not as a launch.
 
 
 def mtp_stage_plan() -> int:
@@ -4186,15 +4195,16 @@ def mtp_stage_plan() -> int:
                                                 gateup, down)
       + block_attn_site                       1   `mtp_attn_row` — a launch with no launcher family
       + head_lm                               1   `lm_head_full_xbf16` — ditto, family `other`
+      + head_argmax                           2   `mtp_argmax_row`'s two launches — ditto, no family
       + block_d2d                             1   the E[y_next] device-to-device copy, which the clock
                                                 bills as a submission exactly as it bills a step's copies
-      =                                        15
+      =                                        17
 
     `head_d2h` is deliberately NOT in the sum: the stage clock's `host_tail` row is noted with zero
-    submissions "so the totals still mean launches" (`engine/stage_clock.h`), so the round's blocking
-    vocabulary read is billed 1 on the `MTPDRAFT` census line (`per_round=16`) and 0 here (`15`). Two
-    spellings of one round, each named, because the one thing neither can afford is a single shared
-    constant that would have to be wrong for one of the two instruments.
+    submissions "so the totals still mean launches" (`engine/stage_clock.h`), so the round's blocking read is
+    billed 1 on the `MTPDRAFT` census line (`per_round=18`) and 0 here (`17`). Two spellings of one round,
+    each named, because the one thing neither can afford is a single shared constant that would have to be
+    wrong for one of the two instruments.
 
     Why this lives in the gate at all: the clock bills this row from a number the DRIVER declares
     (`Clock::set_plan_mtp`) and `plan_match` is an in-binary self-consistency check, which means a stale
@@ -4204,6 +4214,7 @@ def mtp_stage_plan() -> int:
     return (sum(mtp_draft_plan().values())
             + MTP_DRAFT_UNCOUNTED["block_attn_site"]
             + MTP_DRAFT_UNCOUNTED["head_lm"]
+            + MTP_DRAFT_UNCOUNTED["head_argmax"]
             + MTP_DRAFT_COPIES["block_d2d"])
 
 
@@ -4211,7 +4222,7 @@ def mtp_plan_verdicts(echo: dict, draft_lines: int,
                       bill: dict | None = None) -> list[tuple[str, bool, str]]:
     """Does the run's declared `MTPDRAFT` census agree with §09 as Python counts it?
 
-    `echo` is the parsed `MTPDRAFT` line (`block="1+13" head="1+1" per_round=16 rounds=5 …`) and
+    `echo` is the parsed `MTPDRAFT` line (`block="1+13" head="1+3" per_round=18 rounds=5 …`) and
     `draft_lines` the number of `DRAFT round=` lines the same stdout carried. Same extraction reason as
     `launch_plan_verdicts`: section (h) prints these verdicts and nothing else, so `--selftest` aims at
     the comparison the shipping path runs instead of at a second spelling of it.
@@ -4257,9 +4268,13 @@ def mtp_plan_verdicts(echo: dict, draft_lines: int,
                 f"declared {block[0]} vs §09.1's one E[y_next] D2D "
                 f"({MTP_DRAFT_COPIES['block_d2d']}); a copy is not a launch and must not join the launch "
                 "bill"))
-    out.append(("draft head matches §09", head == (MTP_DRAFT_COPIES["head_d2h"], MTP_DRAFT_UNCOUNTED["head_lm"]),
-                f"declared head={head[0]}+{head[1]} vs §09's {MTP_DRAFT_COPIES['head_d2h']} lm_head pass "
-                f"+ {MTP_DRAFT_UNCOUNTED['head_lm']} blocking vocabulary D2H"))
+    out.append(("draft head matches §09",
+                head == (MTP_DRAFT_COPIES["head_d2h"],
+                         MTP_DRAFT_UNCOUNTED["head_lm"] + MTP_DRAFT_UNCOUNTED["head_argmax"]),
+                f"declared head={head[0]}+{head[1]} (copies+launches, the order `block=` prints in) vs §09's "
+                f"{MTP_DRAFT_COPIES['head_d2h']} blocking read + "
+                f"{MTP_DRAFT_UNCOUNTED['head_lm']} lm_head + "
+                f"{MTP_DRAFT_UNCOUNTED['head_argmax']} device-argmax launches"))
     out.append(("draft per_round is its own parts", per_round == sum(block) + sum(head),
                 f"per_round={per_round} vs block+head={sum(block) + sum(head)}"))
     # The stage clock's row, and the reason it needs its own verdict rather than riding on the one above:
@@ -4273,7 +4288,8 @@ def mtp_plan_verdicts(echo: dict, draft_lines: int,
     # would let it through, and that is the mis-declaration this row exists to catch.
     stage_bill = mtp_stage_plan() if bill is None else (
         sum(bill.values()) + MTP_DRAFT_UNCOUNTED["block_attn_site"]
-        + MTP_DRAFT_UNCOUNTED["head_lm"] + MTP_DRAFT_COPIES["block_d2d"])
+        + MTP_DRAFT_UNCOUNTED["head_lm"] + MTP_DRAFT_UNCOUNTED["head_argmax"]
+        + MTP_DRAFT_COPIES["block_d2d"])
     out.append(("draft stage bill matches §09",
                 per_round - head[0] == stage_bill,
                 f"declared per_round={per_round} less the {head[0]} submission(s) this run declares as"
@@ -4281,6 +4297,7 @@ def mtp_plan_verdicts(echo: dict, draft_lines: int,
                 f" ({sum(want.values())} launcher-visible + "
                 f"{MTP_DRAFT_UNCOUNTED['block_attn_site']} attn site + "
                 f"{MTP_DRAFT_UNCOUNTED['head_lm']} lm_head + "
+                f"{MTP_DRAFT_UNCOUNTED['head_argmax']} device argmax + "
                 f"{MTP_DRAFT_COPIES['block_d2d']} D2D). This is the number the `--time-stages` `mtp` row"
                 " is billed with, and a mismatch means the stage clock and the census were declared from"
                 " two different readings of §09"))
@@ -4402,11 +4419,14 @@ def selftest_mtp_census() -> list[str]:
     prompt_len, steps, rows, round_n = 46, 8, 512, 5
     plan = mtp_draft_plan()
 
-    # The literal values `engine/mtp_draft.h`'s constants make the engine print today, quoted from
-    # `prototype/mtp_accept/ACCEPT-RESULT.md` rather than computed from `plan`, so that a change to
-    # Python's count of §09 without the matching C++ change (or the reverse) fails HERE instead of being
-    # absorbed silently on both sides.
-    clean_echo = {"block": "1+13", "head": "1+1", "per_round": "16", "rounds": str(round_n)}
+    # The literal values `engine/mtp_draft.h`'s constants make the engine print today. They were re-taken
+    # when the draft's argmax moved on device: two launches joined the head group and the head's blocking
+    # read became an 8-byte one, so `head` prints `1+3` and `per_round` 18 where the historical pair was
+    # `1+1`/`16` (`prototype/mtp_accept/ACCEPT-RESULT.md` records that older pair and is a verdict doc, so
+    # it was left alone rather than corrected in place). Still QUOTED rather than computed from `plan`, so
+    # that a change to Python's count of §09 without the matching C++ change (or the reverse) fails HERE
+    # instead of being absorbed silently on both sides.
+    clean_echo = {"block": "1+13", "head": "1+3", "per_round": "18", "rounds": str(round_n)}
 
     def observed(rounds: int, bill: dict) -> dict:
         out = {}
@@ -4478,11 +4498,11 @@ def selftest_mtp_census() -> list[str]:
     # `plan_match` reading 1 — so this is the only check that can catch it, and the case proves it bites.
     case("a mis-declared stage bill (a 14th block launch declared consistently into block AND per_round)"
          " goes red on the stage row and on §09's block count, not on its own sums",
-         plan_failing({**clean_echo, "block": "1+14", "per_round": "17"}, round_n),
+         plan_failing({**clean_echo, "block": "1+14", "per_round": "19"}, round_n),
          ["draft block launches match §09", "draft stage bill matches §09"])
-    case("a D2H declared where a launch belongs (head 1+1 becomes 2+0) goes red on the stage row and"
-         " on §09's head row alone",
-         plan_failing({**clean_echo, "head": "2+0"}, round_n),
+    case("a D2H declared where a launch belongs (head 1+3 becomes 2+2: same total, one launch traded for a"
+         " read) goes red on the stage row and on §09's head row alone",
+         plan_failing({**clean_echo, "head": "2+2"}, round_n),
          ["draft head matches §09", "draft stage bill matches §09"])
     case("a block that declares a 14th launch, uncounted by §09's Python row",
          plan_failing({**clean_echo, "block": "1+14"}, round_n),
@@ -4491,7 +4511,7 @@ def selftest_mtp_census() -> list[str]:
          plan_failing({**clean_echo, "rounds": "4"}, round_n),
          ["draft rounds witnessed by the per-round lines"])
     case("an unparseable census line refuses to price the draft at nothing",
-         plan_failing({"block": "1", "head": "1+1", "per_round": "16", "rounds": "5"}, 5),
+         plan_failing({"block": "1", "head": "1+3", "per_round": "18", "rounds": "5"}, 5),
          ["draft census line is parseable"])
     case("a declared bill that disagrees with the declared block total names itself",
          plan_failing(clean_echo, round_n, {**plan, "glue": 6}),

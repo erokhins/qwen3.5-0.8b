@@ -79,8 +79,9 @@ public:
         os << what << ": marked " << subs_ << " billed submissions across " << sites_
            << " site(s), but the declared bill is " << expected << " (for a §09 round: block "
            << kBlockCopies << " copies + " << kBlockLaunches << " launches, head " << kHeadLaunches
-           << " launch; the " << kHeadCopies << " blocking D2H is billed 0 here and 1 on the census"
-              " line — see kStageSubsPerRound; for a lane append: kLaneStageSubs)."
+           << " launch, device argmax " << kArgmaxLaunches
+           << " launches; the " << kHeadCopies << " blocking status read is billed 0 here and 1 on the"
+              " census line — see kStageSubsPerRound; for a lane append: kLaneStageSubs)."
               " A launch added or dropped inside the unit without the plan being told: the stage clock's"
               " `mtp` row and the `MTPDRAFT` census would both still agree with themselves.";
         die(os.str());
@@ -271,6 +272,12 @@ State allocate_state(int cap) {
     MTP_CK(hipMemset(st.kcache, 0, 2 * plane * 2));
     MTP_CK(hipMemset(st.vcache, 0, 2 * plane * 2));
     MTP_CK(hipMalloc((void**)&st.logits, (size_t)kVocab * sizeof(float)));
+    // The device argmax's out-word and its partials, sized from the launcher's own chunk constant so the
+    // two headers cannot disagree about how much scratch a round needs (`AGENTS.md`: a geometry fact that
+    // lives in two headers can be committed in one of them).
+    MTP_CK(hipMalloc((void**)&st.argmax, sizeof(kernels::ArgmaxWord)));
+    MTP_CK(hipMalloc((void**)&st.argmax_partials,
+                     (size_t)kernels::kArgmaxChunks * sizeof(kernels::ArgmaxWord)));
     st.lanes_max = 0;
     return st;
 }
@@ -282,6 +289,8 @@ void free_state(State& st) {
     (void)hipFree(st.kcache);
     (void)hipFree(st.vcache);
     (void)hipFree(st.logits);
+    (void)hipFree(st.argmax);
+    (void)hipFree(st.argmax_partials);
     st = State{};
 }
 
@@ -344,31 +353,41 @@ Proposal draft_round(const WeightStore& weights, const Weights& w, State& st,
     tally.mark(stageclock::kMtp, 1);
     kernels::lm_head_full_xbf16((const uint16_t*)weights.at(kHead).device, st.xd, st.logits, kVocab);
 
-    // 16  one blocking D2H and §03.4's argmax — the same function `finish_token` uses, so the draft's
-    // proposal cannot be produced by a second standard. Marked with ZERO billed submissions: a D2H is not
-    // a launch, which is exactly how `kHostTail` is handled in a step, and the census line still counts it
-    // (see `kStageSubsPerRound`).
+    // 16  §03.4's argmax, resolved ON DEVICE over `st.logits` and read back as one 8-byte pair. The rule is
+    // `argmax_greedy`'s — strict `>`, ties to the LOWEST id — and `mtpverdict::detail::better` is that rule
+    // restated as a TOTAL ORDER, which is what lets a fold split across chunks return the same id the host
+    // scan returned rather than an approximation of it (`engine/mtp_verdict_kernels.h` carries the argument,
+    // and the one case where it stops holding). The proposal therefore cannot be produced by a second
+    // standard, which is the property this stage was written to preserve when it was a host scan.
+    //
+    // Two launches, marked together. The read that follows is marked with ZERO billed submissions: a read is
+    // not a launch, which is exactly how `kHostTail` is handled in a step, and the census line still counts
+    // it (see `kStageSubsPerRound`). The meter's `draft_vocab_d2h` row now bounds an 8-byte read where it
+    // used to bound 993,280 B, and `draft_argmax_host` has no site left — its `runs=0` is the result of this
+    // stage, not a missing phase (`engine/mtp_meter.h`).
+    kernels::ArgmaxWord word = {};
+    tally.mark(stageclock::kMtp, kArgmaxLaunches);
+    kernels::mtp_argmax_row(st.logits, kVocab, st.argmax, st.argmax_partials);
     tally.mark(stageclock::kMtp, 0);
     Proposal p;
-    std::vector<float> host(kVocab);
     {
-        // The two BREAKDOWNS of the round's `draft` phase (`engine/mtp_meter.h`, `Kind::kSubphase`):
-        // this copy is 993,280 B and the scan below is 248,320 floats on one host core, which together are
-        // the vocabulary crossing `prototype/mtp_accept/ROUND-TAX.md` §1 puts inside the 3.639 ms the meter
-        // bills as `draft`. Both are inert with the meter off and excluded from the meter's sum, so they
-        // price the crossing without changing what the enclosing phase bounds.
-        const engine::mtpmeter::SubPhaseGuard d2h(engine::mtpmeter::kDraftVocabD2H);
-        MTP_CK(hipMemcpy(host.data(), st.logits, kVocab * sizeof(float), hipMemcpyDeviceToHost));
+        const engine::mtpmeter::SubPhaseGuard read(engine::mtpmeter::kDraftVocabD2H);
+        MTP_CK(hipMemcpy(&word, st.argmax, sizeof(kernels::ArgmaxWord), hipMemcpyDeviceToHost));
     }
     tally.check("draft_round", kStageSubsPerRound);
-    {
-        const engine::mtpmeter::SubPhaseGuard scan(engine::mtpmeter::kDraftArgmaxHost);
-        p.token = argmax_greedy(host.data(), kVocab);
-        p.top_logit = host[p.token];
-    }
+    p.token = word.index;
+    p.top_logit = word.value;
     p.nlanes = st.nlanes;
     p.round = ++st.rounds;
-    if (logits_out) *logits_out = std::move(host);
+    if (logits_out) {
+        // The debug/side-pass dumper keeps its own download, because it is the only thing in the engine that
+        // still wants a whole vocabulary on the host — and it is metered as the same crossing, so an arm that
+        // asks for it pays visibly instead of landing in `overhead`. No shipping caller sets this.
+        logits_out->resize(kVocab);
+        const engine::mtpmeter::SubPhaseGuard d2h(engine::mtpmeter::kDraftVocabD2H);
+        MTP_CK(hipMemcpy(logits_out->data(), st.logits, kVocab * sizeof(float),
+                         hipMemcpyDeviceToHost));
+    }
     return p;
 }
 
