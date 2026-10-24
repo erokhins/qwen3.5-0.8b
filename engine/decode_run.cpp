@@ -72,6 +72,11 @@ namespace {
 // geometry.
 constexpr int64_t kSessionDefaultCap = 4096;
 
+// The unresolved state of `--mtp-adaptive`. Not a third setting a caller can name: `parse_args` resolves it
+// (see `Options::mtp_adaptive`) before any refusal or consumer reads the field, and every consumer below
+// only ever sees 0 or 1.
+constexpr int kMtpAdaptiveUnset = -1;
+
 struct Options {
     std::string model_dir = "models/Qwen3.5-0.8B";
     std::string out_dir;             // where logits/sampled dumps go; empty means do not write
@@ -181,14 +186,26 @@ struct Options {
     // the per-step instruments do not own) and it refuses `--mtp-verify`, whose side pass is a 2-row body.
     int mtp_k = engine::mtpaccept::kDefaultK;
     bool mtp_k_given = false;
-    // §09 / M4: ADAPTIVE depth (`engine/mtp_adaptive.h`). Default 0 — this is a mechanism and a gate, not
-    // a decision; the main agent alone decides whether it becomes the default, from the paired A/B
-    // (`prototype/mtp_accept/ADAPTIVE.md` §6 lists the runs it needs and who takes them). On, the depth of
-    // each round is drawn from the policy's tracker instead of being fixed at `mtp_k` for the run's life:
-    // `mtp_k` becomes the CEILING and a round may run narrower or, once speculation is abandoned, not at
-    // all. Accepted only alongside `--mtp-accept`, because the policy spends what a round's verdict
-    // readback already returned and with no round there is nothing to spend.
-    int mtp_adaptive = 0;
+    // §09 / M4: ADAPTIVE depth (`engine/mtp_adaptive.h`). ON by default whenever a round runs
+    // (2026-10-25): the paired A/B is in `engine/performance-status.md` §9 and the reading is in
+    // `prototype/mtp_accept/ADAPTIVE.md` §7 — it costs about a point on the templated long-prose
+    // population, nothing on the corpus population, and it turns the near-zero-accept case at 4k from a
+    // −27 % tax into −4 %. `--mtp-adaptive 0` restores the fixed-depth run every byte-compared admission in
+    // this repo was taken with, and `QWEN_MTP_ADAPTIVE=0` does the same for a harness that cannot add a flag
+    // (the environment override is the pattern the other MTP knobs already use).
+    //
+    // The depth of each round is drawn from the policy's tracker instead of being fixed at `mtp_k` for the
+    // run's life: `mtp_k` becomes the CEILING and a round may run narrower or, once speculation is
+    // abandoned, not at all. Accepted only alongside `--mtp-accept`, because the policy spends what a
+    // round's verdict readback already returned and with no round there is nothing to spend.
+    //
+    // The stored default is `kMtpAdaptiveUnset`, NOT 1, and that is a load-bearing detail rather than
+    // tidiness: the flag's own refusal below is keyed on the VALUE ("naming `--mtp-adaptive 1` with no round
+    // running is a knob that cannot do anything"), so a flat default of 1 would make a bare
+    // `--mtp-accept 0` run refuse for a policy it never asked for and break every flag-off arm in this
+    // repo. `parse_args` therefore resolves the unset case to `--mtp-accept`'s final value, which keeps the
+    // field meaning exactly one thing at every use site: "a depth policy runs on this run".
+    int mtp_adaptive = kMtpAdaptiveUnset;
     bool mtp_adaptive_given = false;
     // NOTE (2026-10-25): there used to be a `mtp_span_forced` flag here, set when the accept default
     // resolved `--gdn-loop` to 1 for the WHOLE run. The requirement was the ROUND's and the forcing is now
@@ -617,6 +634,24 @@ Options parse_args(int argc, char** argv) {
                                      " engine/mtp_accept.h)");
         }
     }
+    if (const char* env = std::getenv("QWEN_MTP_ADAPTIVE"); env != nullptr && env[0] != '\0') {
+        const std::string v(env);
+        if (v == "1") {
+            o.mtp_adaptive = 1;
+        } else if (v == "0") {
+            o.mtp_adaptive = 0;
+        } else {
+            throw std::runtime_error("QWEN_MTP_ADAPTIVE takes 0 or 1, got '" + v +
+                                     "'; 1 is the default and lets each accept round's depth follow the"
+                                     " acceptance its own verdict already reported, 0 fixes every round at"
+                                     " --mtp-k (see engine/mtp_adaptive.h)");
+        }
+        // BOTH spellings set `_given`, unlike `QWEN_MTP_ACCEPT` above. The depth default below resolves to
+        // `--mtp-accept` only when nobody named it, and an env that named `0` is a named answer: treating it
+        // as "unasked" would let a control arm that set `QWEN_MTP_ADAPTIVE=0` silently run the policy
+        // anyway — the flag-that-silently-did-not-take failure this repo keeps being bitten by.
+        o.mtp_adaptive_given = true;
+    }
     if (const char* env = std::getenv("QWEN_MTP_VERIFY"); env != nullptr && env[0] != '\0') {
         const std::string v(env);
         if (v == "1") {
@@ -763,9 +798,10 @@ Options parse_args(int argc, char** argv) {
             o.mtp_k = kk;
             o.mtp_k_given = true;
         } else if (a == "--mtp-adaptive") {
-            // Parses or throws, like the other depth knobs. `0` (the default) leaves the run's depth fixed at
-            // `--mtp-k` for its whole life, which is what every byte-compared admission in this repo was
-            // taken with; `1` lets `engine/mtp_adaptive.h` lower the depth per round, and never raise it.
+            // Parses or throws, like the other depth knobs. `1` (the default whenever a round runs) lets
+            // `engine/mtp_adaptive.h` lower the depth per round, and never raise it; `0` leaves every round
+            // fixed at `--mtp-k` for the life of the run, which is what every byte-compared admission in
+            // this repo was taken with and is the spelling a flag-off control must name.
             const std::string v = next();
             if (v != "0" && v != "1") {
                 throw std::runtime_error("--mtp-adaptive takes 1 (draw each round's depth from the"
@@ -1591,12 +1627,23 @@ Options parse_args(int argc, char** argv) {
         throw std::runtime_error("--mtp-k says how many candidates an accept round verifies; with"
                                  " --mtp-accept 0 no round runs. Name --mtp-accept 1 with it, or drop it");
     }
-    // ---- the adaptive depth's own refusal (`--mtp-adaptive`, `engine/mtp_adaptive.h`) ---------------
+    // ---- the adaptive depth's default, and its own refusal (`--mtp-adaptive`, `engine/mtp_adaptive.h`) --
+    // THE DEFAULT RESOLVES HERE, once, after every source of the value has had its say: the env block and
+    // the argv loop above both leave `mtp_adaptive` at `kMtpAdaptiveUnset` unless someone named them, and
+    // an unnamed depth policy follows `--mtp-accept`. That is the whole rule "adaptive is the default WHEN a
+    // round runs": a run with no rounds cannot carry a policy, and a run that names `--mtp-adaptive 0` (or
+    // `QWEN_MTP_ADAPTIVE=0`) gets a fixed-depth run however accept is set. Placed above the refusal because
+    // the refusal reads the value, and a default resolved after the check that judges it would be a default
+    // that cannot be refused — and below it, where the arming site is, would be too late for the same
+    // reason. Nothing between the parse loop and here reads the field.
+    if (!o.mtp_adaptive_given) o.mtp_adaptive = o.mtp_accept;
     if (o.mtp_adaptive && !o.mtp_accept) {
         // The policy is a rule over the acceptance a round's verdict readback already reported, so with no
         // rounds running it has no input and no effect. Keyed on the VALUE rather than on `given`, unlike
         // `--mtp-k`: `--mtp-adaptive 0` alongside `--mtp-accept 0` is a truthful statement (no depth policy
-        // is running), while `--mtp-adaptive 1` there is a knob that cannot do anything.
+        // is running), while `--mtp-adaptive 1` there is a knob that cannot do anything. Since the default
+        // above follows accept, this branch is now only reachable by an EXPLICIT ask — which is exactly the
+        // case it should fire on, and the case `prototype/mtp_accept/default_refusals.sh` still asserts.
         throw std::runtime_error("--mtp-adaptive adapts the depth of an ACCEPT round to the acceptance its"
                                  " verdict already reported; with --mtp-accept 0 no round runs and there is"
                                  " nothing to adapt. Name --mtp-accept 1 with it, or pass"
@@ -2865,8 +2912,8 @@ void print_usage(FILE* out) {
                  " means the side state is never allocated and the generation loop is"
                  " the one that shipped without this flag — the inertness claim is a byte-compare, not a"
                  " band. Every run prints `MTP mode=accept k=N draft=D gdn_span_round=R"
-                 " gdn_span_other=S forced_by=F` or `MTP mode=off draft=D gdn_span=S` for exactly that"
-                 " reason: with the default on, silence would no"
+                 " gdn_span_other=S forced_by=F adaptive=A` or `MTP mode=off draft=D gdn_span=S` for that"
+                 " exact reason: with the default on, silence would no"
                  " longer mean \"off\", and `sampled.txt` versus `emitted.txt` is a different object."
                  " On, one round replaces one step: the round feeds the funded `k+1`-row body"
                  " [cur at p, candidate at p+1, ...], prices all its norm rows in ONE pass over the tied"
@@ -2932,9 +2979,15 @@ void print_usage(FILE* out) {
                  " the k=1 lines stay byte-for-byte the old ones.\n"
                  "  --mtp-adaptive 0|1  draw each round's depth from the acceptance the rounds have already"
                  " reported, instead of fixing it at --mtp-k for the whole run (`engine/mtp_adaptive.h`)."
-                 " Default 0, and the default is the main agent's to move, not this flag's: the mechanism"
-                 " and its gate are here, the decision is a measured one (prototype/mtp_accept/ADAPTIVE.md"
-                 " §6 lists the paired A/Bs it needs). `--mtp-k` becomes the CEILING: rounds may run"
+                 " Default 1 whenever a round runs (`QWEN_MTP_ADAPTIVE=0|1` does the same from the"
+                 " environment), and the funding for the default is `prototype/mtp_accept/ADAPTIVE.md §7`"
+                 " beside the paired rows in `engine/performance-status.md` §9: about a point given up on"
+                 " templated long prose, nothing on the corpus population, and the near-zero-accept case at"
+                 " 4k moved from a −27 %% tax to −4 %%. `0` fixes every round at --mtp-k, which is the shape"
+                 " every byte-compared admission in this repo was taken with, and it is what a flag-off"
+                 " control must name. The same default is mirrored by `engine/gate.py`'s"
+                 " MTP_ADAPT_DEFAULT and asserted by section (m)'s default witness, so the two cannot drift"
+                 " apart silently (the --attn-tile rule). `--mtp-k` becomes the CEILING: rounds may run"
                  " narrower (k=1) and, if speculation is abandoned, not at all — the loop then takes its"
                  " existing plain-step branch, which is the pre-MTP shipping path, and stays there for the"
                  " rest of the request. The estimate is the mean tokens per step-equivalent over the last"
@@ -2944,8 +2997,10 @@ void print_usage(FILE* out) {
                  " round-to-round oscillation is available), and the thresholds are 0.95 to demote and 0.90"
                  " to abandon, both below the 1.000 a plain step scores by definition. It rides the verdict"
                  " readback a round already pays, so it adds no device sync and no download. It changes"
-                 " GEOMETRY and never a verdict, so losslessness is its own across all three shapes. Needs"
-                 " --mtp-accept 1 (refused without it) and inherits --mtp-accept's other refusals rather"
+                 " GEOMETRY and never a verdict, so losslessness is its own across all three shapes. An"
+                 " explicit 1 needs --mtp-accept 1 (refused without it; the default follows accept, so a"
+                 " bare --mtp-accept 0 run never carries a policy it did not ask for) and inherits"
+                 " --mtp-accept's other refusals rather"
                  " than restating them. Prints `MTPADAPT on=1 k_start= …` once per run with every threshold"
                  " it will apply, one `MTPADAPT round= k= est= prev_k= window_rounds= plain=` line per"
                  " change, `MTPADAPT-PLAIN` once if it abandons, and `MTPADAPTSTAT`/`MTPADAPTATTR` beside"
@@ -3854,11 +3909,18 @@ int main(int argc, char** argv) {
         // `--gdn-loop` when it was named, `default` when it was not (nobody forces it anymore). Values are
         // the run's own, read from the same `Options` the launchers were built from, not from the flags, so
         // a flag that silently did not take cannot report a path it did not run (`AGENTS.md`: assert the
-        // canary inside the window).
+        // canary inside the window). `adaptive=` is the third thing a log used to be silent about: since
+        // 2026-10-25 the depth policy runs by default, so "it printed no `MTPADAPT` line" is no longer a
+        // statement about a run that never asked for one, and `MTP mode=accept k=2` now has to distinguish
+        // a static k=2 run from an adaptive one whose policy simply never fired (`ADAPTIVE.md` §7: the
+        // templated population is expected to change depth on no rounds at all, so the absence of an event
+        // line means nothing on its own). Printed on the accept line only: with no round running the policy
+        // is refused outright, so `MTP mode=off` cannot carry one.
         if (o.mtp_accept) {
-            std::printf("MTP mode=accept k=%d draft=%d gdn_span_round=%d gdn_span_other=%d forced_by=%s\n",
+            std::printf("MTP mode=accept k=%d draft=%d gdn_span_round=%d gdn_span_other=%d forced_by=%s"
+                        " adaptive=%s\n",
                         o.mtp_k, o.mtp_draft, engine::kMtpRoundGdnSpan, o.gdn_loop,
-                        o.gdn_loop_given ? "--gdn-loop" : "default");
+                        o.gdn_loop_given ? "--gdn-loop" : "default", o.mtp_adaptive ? "on" : "off");
         } else {
             std::printf("MTP mode=off draft=%d gdn_span=%d\n", o.mtp_draft, o.gdn_loop);
         }
@@ -4167,8 +4229,12 @@ int main(int argc, char** argv) {
         // the two are rows a part apart: the dense lane stands for the last EMITTED position (h two behind
         // it, i.e. row n_accepted-1) and the draft stands for the next one (h at row n_accepted).
         const uint16_t* draft_dense_row = nullptr;
-        // The adaptive depth's tracker, armed on the flag and only there. `--mtp-k` is its CEILING: the
-        // policy may run a round narrower than the run asked for, never wider, so `aside`'s buffers (sized
+        // The adaptive depth's tracker, armed wherever the resolved flag says a policy runs — which, since
+        // 2026-10-25, is the shipping default whenever accept is on (`Options::mtp_adaptive`: the unset
+        // default is resolved to `--mtp-accept` in `parse_args`, so this line reads a decided value and
+        // `--mtp-adaptive 0` still leaves `adapt` null and every pre-flip path intact). `--mtp-k` is its
+        // CEILING: the policy may run a round narrower than the run asked for, never wider, so `aside`'s
+        // buffers (sized
         // for `o.mtp_k`) are large enough for every depth it can choose and the geometry echo on `MTPGEOM`
         // keeps meaning "the widest body this run can emit" (`engine/mtp_accept.h`).
         std::unique_ptr<engine::mtpadapt::Tracker> adapt;
