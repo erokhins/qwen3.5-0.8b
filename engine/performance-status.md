@@ -453,3 +453,53 @@ another's ms and tok/s; at an even `--reps` it raised `ValueError` after finishi
 harness line `parity needs a* = round/step - 1` is the **k=1** identity (`tok/round = 1 + a`). At k=2 parity needs
 `p₁ + p₂ = round/step − 1`, so comparing the printed `a` with `a*` across k is the same nested-vs-marginal
 confusion that the llama comparison already documented. Quote the adopt line, not `a*`, for k > 1.
+
+## §10 Adaptive speculation depth is the shipping default (2026-10-24)
+
+The default path is now `--mtp-accept 1 --mtp-k 2 --mtp-draft 1 adaptive=on` (`44254e5`, `2c32776`, `8834930`,
+`3d57297`). The policy is echoed, not implied: `MTPADAPT on=1 k_start=2 floor=1 ceiling=2 plain=0 window=32
+min_observe=16 min_observe_abandon=24 demote_est=0.950 abandon_est=0.900 cost_k1=1.58 cost_k2=1.90 re_promote=0`,
+and every run's mode line ends `adaptive=on|off`. Design and thresholds: `prototype/mtp_accept/ADAPTIVE.md`.
+
+**Paired measurements** — corpus rows paired inside ONE lock hold, 3 reps, medians; the templated pair is
+cross-window (two `mtp_wall_ab` self-locked windows) and is quoted as such.
+
+| population | rounds | static k=2 | adaptive (the default) | a, static → adaptive |
+|---|---|---|---|---|
+| corpus, 12 cases, natural width | 32 | +17.64 % | **+18.16 %** | 0.5269 → 0.5376 |
+| templated long prose, 4,152 lanes | 256 | +20.28 % | **+20.90 %** | — |
+| near-zero-accept case at 4k | 160 | −28.36 % | **−5.55 %** | 0.0314 → 0.1750 |
+
+**Current headline: +18.2 % on the 12-case population and +17.6…+20.9 % on the long fixtures against our own plain
+path, where llama.cpp's best MTP configuration is +13.6 %** — and the default no longer loses 28 % on content
+that does not accept. What the policy did on the near-zero case, from its own census
+(`MTPADAPTSTAT rounds_k2=16 rounds_k1=24 plain=120 changes=2 final_k=0`): demoted at est 0.6908, abandoned at
+0.8175, then ran 120 of 160 rounds as plain steps and stopped drafting.
+
+**Four caveats that belong with these numbers.**
+- **The templated fixture's ratio moves a few points window to window.** §9 recorded +23.44/+22.29 for it, this
+  window reads +20.90/+20.28 — the pair moved *together*, so a single number quoted across sessions is
+  meaningless; quote the pair from the window that produced it.
+- **The rescue scales with generation length.** Abandonment cannot fire before round 40 (16 + 24 observation
+  minimums), so at the harness default of 32 rounds the same case reads −23.10 % adaptive vs −27.97 % static:
+  short generations keep most of the tax. Any adaptive number that does not state its round count is unusable.
+- **No re-promotion.** A request that starts cold and turns hot stays demoted; oscillation is inexpressible, which
+  is the point, but it is a real behavioural cost.
+- The cost constants (1.58 and 1.90 steps/round) are three-fixture midpoints and width-only, and k ∈ {1, 2} —
+  k=3 does not exist.
+- Carried figures in §8/§9 are **flag-off** figures. The corpus ladder read `a = 0.3755`, 743 rounds, 1,617 tokens,
+  2.176 tok/round before the flip and reads `a = 0.3799`, 745 rounds, 1,617 tokens, 2.170 tok/round at the
+  adaptive default. Gate (m) ran 91 rounds / 190 tokens at flag-off and now runs **572 rounds / 1,026 tokens**
+  over the same 18 fixtures, because its population now runs 56 bodies per case and the policy changed the depth
+  on **10 of the 18** and left 8 alone — a classification it recomputes from each run's own round lines rather
+  than from a name typed into the file.
+
+**Admission at the new default** (main agent, committed tree): `ENGINE GATE PASS`; `--selftest` PASS including the
+(m1) adaptive-mirror teeth and (m2) mode-echo teeth; `default_refusals.sh` 46 ok / 0 FAIL, with the default now
+proved *by presence* and silence repointed at the named-off arms; full-population losslessness at the default
+**lines compared 49, identical 49, flipped 0**; `speccheck/run_all.py --quick` 11 gates 0 failed.
+
+**Owed, recorded not fixed:** the 42 line-form citations from frozen `progress/` journals into `engine/gate.py` and
+`engine/decode_run.cpp` rotated when those files grew (+45/+66 lines), and `tools/citation_rot_check.py` cannot see
+that class of drift because its baseline is `HEAD` — the guard is a coordinate diff against the previous revision,
+not the tool.
