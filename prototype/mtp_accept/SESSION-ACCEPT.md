@@ -289,7 +289,11 @@ round agreed with the plain step.
   totally divergent when they are identical-but-shifted. Compare token SEQUENCES, and say which
   alignment you used — this repo has been bitten by that exact off-by-one before.
 
-**What is NOT established.** Which form a round's row owes to the step it replaces above `MAXSC`:
+**What is NOT established.** — superseded by §9, which ran the experiment named at the end of this paragraph.
+The comparison was made, on a session, with logits. What follows is kept as it was written (including the
+wrong guess that the multi-row lane/partial addressing was the live candidate) so the record shows what was
+known before the measurement.
+Which form a round's row owes to the step it replaces above `MAXSC`:
 the round body is a 3-row `submit_wave_body` and above the one-pass ceiling it runs the tiled/wide
 attention forms (`ATTN_WIDE form=wide128llama … split=2`, `ATTN_FATTN form=fattn16`) while a 1-row
 step does not, and `AGENTS.md` already bills "a path that exists only for `rows > 1` is invisible to
@@ -302,3 +306,216 @@ needs a logits dump on a session (the session ignores `--out` — a pre-existing
 **Consequences in force now.** `engine/chat.sh` / `chat.py` pass `--mtp-accept 0 --mtp-draft 0`
 unless `--mtp` is named, and both files say why. The engine's own default is unchanged (a run
 inherits speculation), because the run path is byte-witnessed; only the session default moved.
+
+## 9. THE ROOT CAUSE — a sub-ULP tie above `MAXSC`, decided by a round (worker, device, correctness-only)
+
+§8 ended with the experiment that was missing: compare a round's row against the same position's step row
+above the ceiling, which needed logits on a session path that had none (§5). That experiment has been run. The
+answer is **near-tie, not structural**, and the mechanism is narrower than §8 guessed.
+
+### 9.1 The instrument
+
+`decode_run --session --out DIR` plus a new session command `dump`:
+
+    dump <pos>            arm a single position
+    dump <min> <max>      arm a closed position range
+    dump off              disarm
+
+Nothing is written unless **both** `--out` and a `dump` command are present, so the protocol bytes of every
+existing gate are untouched (`session_lossless.sh`, `session_longturn.sh`, `default_refusals.sh` all compare
+transcripts, and a `dump`-less session prints exactly what it printed before). Each body that was priced
+writes the F32 `kVocab`-wide logits row it decided, one file per row, and reports it:
+
+    DUMP seq=<n> kind=<feed|step|round> pos=<p> emitted=<0|1> vocab=<n> bytes=<n> file=<name>
+
+The position key is **the position whose row decided the printed token** — for a round, the row at
+`anchor + i`; for a step, `prefix_len - 1`; for the `feed`'s own sample, the last fed position. That makes
+the two arms' dumps join on `pos` with no shift, which is the whole point: the trap this repo has been bitten
+by twice is comparing a stream against the wrong index. `emitted=0` marks a row that was priced and then
+thrown away by a reject; `session_rowdiff.py` refuses to adjudicate one and counts them (`priced-then-dropped`)
+so a window that covers nothing cannot read as agreement. `vocab`/`bytes` are echoed because a dtype read off
+the file size alone is this repo's other standing trap.
+
+`prototype/mtp_accept/session_rowdiff.py` is the comparator. It adjudicates every argmax flip in the tree's
+existing form (`m3_loop_rate.py::flip_witness`): a flip is a legal gap between two bf16 forms only if the
+token one arm emitted is the **runner-up** in the other arm's row **and** the top1−top2 margin is under one
+bf16 ULP of that row's own top logit (`BF16_REL_ULP = 2**-8`, format-derived, not fitted). It prints logits,
+margin, ULP, rank, both emitters, 1−cos, ndiff, max_abs, max_rel for each flip, prints `NO VERDICT` when
+there are no joined rows, refuses to adjudicate positions past the first divergence (after which the arms are
+fed different tokens), and `--selftest` proves the classifier can say STRUCTURAL (4 synthetic rows: a
+runner-up at a wide margin and a third-ranked token at a narrow one both must read structural).
+
+### 9.2 The verdict, in numbers (case B, reproduced with the instrument)
+
+    first differing GEN line: index 259  off=GEN 11041 556  on=GEN 3000 556
+    position 556  ABOVE the ceiling  emitted_by: off=step(seq 55) on=round(seq 70)
+      OFF row:  top1=11041 logit 17.915483   top2=3000 logit 17.910400   margin 0.005083
+      bf16 ULP of that top1 = 0.069982   margin/ULP = 0.0726
+      ON row emitted 3000: its rank in the OFF row = 1 (0 = top1, 1 = runner-up)
+      ON row's own top1=3000 logit 17.922333  margin 0.003332; the OFF token's rank there = 1
+      row vs row: 1-cos 3.336e-05  ndiff 248318  max_abs 1.786e-01 at idx 7370  max_rel 6.928e-01
+    -> NEAR-TIE
+
+The tie is symmetric — each arm's token is the other row's runner-up, and each row's own margin is under one
+ULP — so neither arm misread a distinguishable pair: **the pair was not distinguishable in the format it was
+computed in**. 1−cos 3.3e-05 with ndiff ≈ every element is the signature of a re-associated long dot, not of
+wrong operands (a wrong layout in exactly this family showed as cos 0.449 on ONE head-pair, not a gradient:
+see §20.1 of `prototype/attn_decode/results.md`).
+
+### 9.3 The controls that make that a verdict rather than a story
+
+* **The accept arm's state does not drift.** Of the 37 positions both arms decided with a plain step, 36 are
+  **bit-identical**; the exception is 557, one past the flip, where the arms are legitimately fed different
+  tokens. The turn-boundary `feed` row at 537 is bit-identical and its argmax agrees (3000 both).
+* **The flip is the tightest tie of the run by an order of magnitude.** Over the 18 positions the accept arm's
+  rounds decided, margins in ULP units are min 0.0726 / median 21.88 / max 117.88; exactly two are below 1 ULP
+  — 556 (0.0726, the flip) and 548 (0.9179, did not flip). Every other round row differed from the step row
+  by the same band and moved no token.
+* **The gap is not the GDN span the round forces.** With `--gdn-loop 1` on **both** arms (`session_trigger.sh
+  --config gdn1both`), the same geometry flips at 556 with margin/ULP 0.1605 — a different tie, same
+  reading. That is also why §8's case G swapped branches: a tie whose margin is a sixth of a ULP is broken by
+  whichever legal form is standing.
+* **The accept machinery does not touch a plain step.** `session_trigger.sh`'s first row, `no-rounds`, is a
+  one-token turn whose only body is necessarily a step (a fresh `feed` has no proposals yet): the two arms'
+  rows there are bit-identical (`step-pre 0/1`) in every config run. If the flag itself perturbed a step, that
+  row goes red and the near-tie reading would be void.
+
+### 9.4 What actually differs, and where
+
+The trigger sweep (`prototype/mtp_accept/session_trigger.sh`, one process pair per config, prompt derived
+from `data/refs/`, `cases == |case list|` asserted) says the form gap is **entirely a ceiling phenomenon**:
+
+    case              cross?   verdict          rnd  min/ULP  sub-ULP  flip/ULP  roundgap  step-pre step-post
+    no-rounds         no       LOSSLESS           0        -        0         -         -      0/1       -
+    at=400 feed=3     no       LOSSLESS          16   42.67       0         -   0.00e+00    0/1  0.00e+00
+    at=505 feed=3     no       LOSSLESS          17   24.61       0         -   2.63e-05    0/1  3.20e-05
+    at=510 feed=3     no       LOSSLESS          16   48.49       0         -   2.78e-05    0/1  2.83e-05
+    at=511 feed=3     no       LOSSLESS          16   39.37       0         -   2.87e-05    0/1  5.00e-05
+    at=512 feed=3     no       LOSSLESS          16   37.14       0         -   3.33e-05    0/1  2.37e-05
+    at=513 feed=3     crossed  LOSSLESS          17   29.64       0         -   3.14e-05    0/1  3.39e-05
+    at=520 feed=3     crossed  LOSSLESS          18    1.62       0         -   3.75e-05    0/1  4.67e-05
+    at=535 feed=3     crossed  DIFFERS at 556    18    0.0726      2     0.0726  3.55e-05    0/1       -
+    at=535 feed=1     crossed  LOSSLESS          16    1.98       0         -   2.73e-05    0/1  3.11e-05
+    at=535 feed=20    crossed  LOSSLESS          17   38.71       0         -   3.47e-05    0/1  2.66e-05
+    at=540 feed=3     crossed  LOSSLESS          16    1.32       0         -   2.96e-05    0/1  3.44e-05
+    at=535 config=fixed    crossed LOSSLESS      18    0.0726      2         -   3.36e-05    1/1  3.47e-05
+    at=535 config=k1fixed  crossed DIFFERS at 556 17   0.9179     1     0.0726  3.34e-05
+    at=535 config=k1     crossed DIFFERS at 556  17    0.9179     1     0.0726  3.32e-05
+    at=535 config=gdn1both crossed DIFFERS at 556 18   0.1605     1     0.1605  3.49e-05
+
+`roundgap` is the median 1−cos between a round's row and the flag-off step row at the same position;
+`step-post` is the same measure for step rows that come after a round has run; `sub-ULP` counts the
+round-decided positions whose margin is under one bf16 ULP of their own top logit; `flip/ULP` is that ratio
+at the flip. Read together:
+
+1. **Below the ceiling a 3-row body reproduces the 1-row step bit for bit.** `at=400`: 16 round-decided
+   positions, `roundgap` exactly 0, and the downstream step rows also 0. The batching itself costs no bits.
+2. **Above the ceiling the two forms differ, uniformly and by a hair.** 2.6–4.0e-05 1−cos at every
+   above-ceiling width tested, with no outlier, in every config. That is the streaming/tiled attention forms a
+   `rows > 1` body must take past `MAXSC` (the `ATTN_WIDE`/`ATTN_FATTN` forms §8 named) meeting the one-pass
+   form a single-row step takes.
+3. **The difference then lives in the state, not only in the row.** `step-post` is 0 below the ceiling and
+   ~3e-05 above it: a step that follows a round inherits the hair, because the row's writes are already the
+   wide form's. So the round is not "wrong above the ceiling" — it and the step are two legal spellings, and
+   the spelling persists.
+4. **Nothing flips unless there is a sub-ULP tie to flip.** Every geometry with `sub-ULP = 0` is LOSSLESS;
+   every geometry that differs had a sub-ULP position and flipped exactly there, at that position's ratio. It
+   is a necessary condition, not a sufficient one: `config=fixed` has two sub-ULP positions and never flipped,
+   because its rounds ran from the start of turn 1 and its own row broke those ties the same way the step did.
+   `--mtp-k` (1 / 2), the adaptive policy and the forced GDN span do not change the rule; they only change
+   which positions the rounds get to decide. The crossing itself is neither necessary nor sufficient — case A
+   crosses with 62 rounds and never met a tie, and `at=535` with a 1-token or a 20-token feed crossed and did
+   not. What decides whether a geometry has a tie at all is the **text**: the same crossing with the same feed
+   size but different fed ids has no sub-ULP position and stays lossless, which is why the fed ids are fixed
+   in this tool (`FEED_TOKENS`) rather than derived, so a table row is the case it names.
+
+So §8's symptom is not a session bug and not a crossing bug. Above `MAXSC` the accept round's row and the
+step's row are two legal bf16 spellings of the same quantity; a long turn eventually hands such a spelling
+a decision that is tied to within a seventh of a ULP, and the token flips. The session geometry is simply
+where a long turn, a re-armed tracker and a wide prefix happen to line up: the per-turn adaptive tracker is
+rebuilt at each `feed`, so in case B turn 1 abandoned speculation at round 62 (anchor 390, which is why its
+rows were bit-identical steps) and turn 2 speculated from 539 — above the ceiling — from the start.
+
+### 9.5 Why the run gates never saw it
+
+`engine/gate.py` section (m) does carry the above-ceiling fixtures — `wide640f` (640 ids), `wide1024f`,
+`wide4096f` are in `mtp_round_population()`, which is derived from `data/refs/` and names every exclusion — but
+each is pinnable for only `min(len(greedy_continuation) - 1, FREE_RUN_BOUND = 8)` tokens, i.e. about four
+rounds above the ceiling. Four rounds found no sub-ULP tie in any of them, and the probability is per-round
+(§9.3: two sub-ULP positions in 18 ≈ 11 %), so eight-token witnesses are structurally blind to this. The
+population gap was never "no wide fixture"; it was **no witness long enough above the ceiling**, plus three
+concrete holes, now closed:
+
+* `session_lossless.py` gains case **(f) `cross-then-feed`** — the crossing geometry the old case list could
+  not express, since every prior case builds its prefix with a `feed` and so crosses in prefill. It asserts
+  the turn really crossed (else `FAIL … never crossed`), that rounds ran, and that a round decided a position
+  at or above the ceiling (else `FAIL … none decided a position above MAXSC`), so it cannot sit in the
+  population as decoration. Measured: `crossed at 548 lanes (MAXSC=512)`, `65 rounds, 3 deciding at or above
+  the ceiling`, LOSSLESS.
+* `session_longturn.sh` no longer skips case E when its fixture is missing; a hole in the population prints
+  `DIFFER … NO VERDICT` and sets the exit code.
+* `session_gates.sh` is the entry point that runs `session_lossless.sh`, `session_longturn.sh` and
+  `session_trigger.sh` and aggregates their exit codes. It refuses to run a driver that does not self-lock,
+  because a caller holding `tools/gpu_lock.sh` around a self-locking driver parks the box silently.
+* `session_trigger.sh` is the gate with teeth for this class: it goes red if any flip's margin is **at or above**
+  one bf16 ULP of that row's top logit, or if the round-free control is not bit-exact, or if a flipped
+  position has no dumped row. Exact-stream equality is no longer the only session assertion, and it is still
+  asserted by the two drivers above.
+
+### 9.6 Device passes this worker ran
+
+All through the self-locking drivers, each under a minute per invocation, correctness only — **no timing
+taken**, no millisecond figure appears in any of these files. `tools/gpu_lock.sh util` read 84–93 % at
+acquire (the serving session's own polling; AGENTS.md says to record and discount it).
+
+    prototype/mtp_accept/session_trigger.sh --at …            (the table above, several slices)
+    prototype/mtp_accept/session_lossless.sh --only dec8      (6 cases incl. cross-then-feed: LOSSLESS)
+    prototype/mtp_accept/session_longturn.sh                  (red: B and G DIFFER at 556; A C D E F ok)
+    MODE=accept prototype/mtp_accept/flagoff_bytecheck.sh /tmp/hwt/engine/build/decode_run \
+        engine/build/decode_run /tmp/dcp/dec8.csv 32
+        CONTROL: IDENTICAL — emitted.txt byte-identical; DECISIONS IDENTICAL — 78 lines over 31 rounds.
+        rc=0, so the `dump` instrument moves nothing on the run path.
+
+### 9.7 The options, priced
+
+The band question is the user's, and nothing here has been widened to make a gate pass: §9's flips are
+reported by a gate that stays red.
+
+* **(a) Speculate only while `prefix_len <= MAXSC`.** In `mtp_accept.cpp::session_body`, refuse the round
+  branch when the turn's lanes have crossed — a handful of lines, and it restores exact-stream equality above
+  the ceiling by construction, because then every above-ceiling row on both arms is a one-pass step and those
+  are bit-identical (§9.3's control, and `at=400`'s zero `roundgap`). The price is the whole point of the
+  feature: the accept round is worth most exactly where the step is most expensive, and at 4,032 lanes the
+  step's attention term is 3.02 ms of the step (`engine/performance-status.md` §6, and `AGENTS.md`'s
+  "decode is measured at 4k"), so (a) removes the win from long requests and keeps it only for short ones.
+  It also makes the shipping default depend on prompt length in a way no other route does.
+* **(b) Make the multi-row body reproduce the 1-row step's form above the ceiling.** The only option that
+  keeps both exact equality and the speed. It means the wide/streaming attention forms must produce a
+  bit-identical row for a lane that the one-pass form also could have produced — i.e. identical summation
+  order and identical combine, per row, above `MAXSC` — while `MAXSC` exists precisely because one-pass above
+  it does not fit. §9.4 shows what is owed: nothing is wrong, the two forms simply re-associate, and the
+  difference (3e-05 1−cos) is the same class as the chaos floor in `specification/ASSUMPTIONS.md` A-18 (sdpa-vs-eager agrees 0.8776 of the way).
+  Priced honestly: this is the §20 lane/partial geometry work plus the same argument for every other kernel the
+  body batches, and it buys bit-identity that `specification/ASSUMPTIONS.md` A-18 says is not achievable past short depths. Not recommended.
+* **(c) Document the band and adjudicate with it (recommended).** Keep the engine as is; make the session
+  gates judge what they can judge: exact stream below the ceiling, decision-level equality above it — a flip is
+  admissible only if it is the other arm's runner-up at a sub-ULP margin, which is `flip_witness`'s existing
+  rule, format-derived and already the tree's standard. Concretely: `session_trigger.sh` enforces it (§9.5),
+  `session_longturn.sh`/`session_lossless.py` stay red on B/G/`cross-then-feed` **until the band is adopted in
+  those words**, `chat.py --mtp` help and `SESSION-ACCEPT.md` say that above 512 lanes a round can decide a
+  tie the plain step decides the other way, and `engine/gate.py` section (m) is left alone (its 8-token
+  witnesses stay exact). Cost: a documented band with an instrument that fails if a flip ever exceeds it. The
+  risk it carries is the honest one — long generations are not bit-reproducible between the two forms, which
+  A-18 already states as a property of bf16 on this checkpoint rather than a defect of this route.
+
+**Recommendation: (c)**, with (a) kept on the shelf as the fallback if a flip is ever measured at an ordinary
+margin — which `session_trigger.sh` would then report as `DIFFERS at an ordinary margin`, red, naming the row.
+
+### 9.8 Files this section added
+
+`engine/decode_run.cpp` (the `dump` command, `SessionDumper`), `engine/mtp_accept.{h,cpp}` (a priced body
+carries its logits row, its base position and how many rows were emitted — a pointer copy, zero cost when no
+dump is armed), `prototype/mtp_accept/session_rowdiff.py` (comparator + `--selftest`),
+`prototype/mtp_accept/session_trigger.{py,sh}` (the margin sweep, `--selftest`, derived population,
+round-free control), `prototype/mtp_accept/session_gates.sh` (entry point), plus `session_lossless.py` case
+(f), `session_longturn.sh`'s no-silent-skip, and this section.
