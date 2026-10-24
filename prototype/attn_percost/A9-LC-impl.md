@@ -90,7 +90,7 @@ one use at the decision site; default inert; help text printed.
 | `engine/kernels_attn.cpp:428` | the VALU-route refusal (§3) |
 | `engine/kernels_attn.cpp:458` | `splitcap_echo(rows, lanes_last, split, split_eff, a.split_cap)` |
 | `engine/decode_step.h:116`, `.cpp:729` | `DecodeScratch::attn_split_cap` (default inert) → `a.split_cap`, both the wave and the single-row branch |
-| `engine/decode_run.cpp:205/397/1770`, usage `:878`, help `:985` | `--attn-split-cap N`: strict parse (rejects non-numeric, negative, and `1`), `0` = no cap |
+| `engine/decode_run.cpp:248/397/1770`, usage `:878`, help `:985` | `--attn-split-cap N`: strict parse (rejects non-numeric, negative, and `1`), `0` = no cap |
 
 Every downstream consumer moved to `split_eff`: the three grid builds (`attn_tile_wave` / `attn_slim_wave` /
 `attn_fattn_wave*`), `attn_core`'s `split=1` launch, `wave_fattn`'s `>= 2` test, `fattn_echo`, and the
@@ -128,11 +128,11 @@ field is in the **host** struct `AttnLayerArgs`; every `__global__` in this fami
 
 * **`lane_ceiling()` needs no change.** It regexes `MAXSC` from `attn_decode_kernels.h`, `kAttnMaxSplit` from
   `kernels_attn.cpp`, multiplies them, and checks the run's `ceil(lanes/MAXSC) * MAXSC <= ceiling`
-  (`engine/gate.py:397-429`). None of those three numbers moved; the cap cannot raise the ceiling (§1). Editing
+  (`engine/gate.py:399-431`). None of those three numbers moved; the cap cannot raise the ceiling (§1). Editing
   it would have *weakened* the check it exists to make.
 * **If gate.py is ever asked to judge a capped run**, it needs the flag forwarded into every engine leg — that is
   gate policy, so it is handed over rather than applied. The pattern to copy is the `--attn-fattn-qstage`
-  forwarding: the parser (`engine/gate.py:7247`), the three argv inserts (`:5257`, `:7496`, `:8547`), and the
+  forwarding: the parser (`engine/gate.py:7997`), the three argv inserts (`:5257`, `:7496`, `:8547`), and the
   NUMERICS-echo assertion (`:7687-7699`) that refuses to judge a binary which did not echo the flag it was asked
   for. i.e.:
 
@@ -213,7 +213,7 @@ What that buys, and what it does not:
 
 * **PASS** — a binding cap runs to completion on the shipping form at a span of **576 > MAXSC = 512**: the slice
   widened, no fault, no NaN, the attention launch count unchanged. The last-row logits sit inside the published
-  band for a reassociating route (`engine/gate.py:892-902`'s `CASCADE_BAND`): `1-cos = 8.26e-4 ≤ 2.0e-3`,
+  band for a reassociating route (`engine/gate.py:894-904`'s `CASCADE_BAND`): `1-cos = 8.26e-4 ≤ 2.0e-3`,
   `meanrel = 1.376e-2 ≤ 3.0e-2`, top-1 id identical (82), zero non-finite on either side.
   Note which field carried the verdict: `cos ≥ 0.9995` (the §10.1 pin floor) is also met, but a whole-vector
   scale error would pass it — see the [E] note above.

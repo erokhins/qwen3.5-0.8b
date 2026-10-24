@@ -48,7 +48,7 @@
  *
  * WHAT IT LAUNCHES. The engine's own `__global__` kernels, included read-only, on the grids
  * `engine/kernels_attn.cpp` builds: `attn_wide_llama_wave` (`--attn-fattn-wide 2` — THE SHIPPING DEFAULT,
- * `engine/decode_run.cpp:262`), `attn_wide_wave` (`--attn-fattn-wide 1`), and `attn_slim_wave` (the
+ * `engine/decode_run.cpp:305`), `attn_wide_wave` (`--attn-fattn-wide 1`), and `attn_slim_wave` (the
  * `--attn-fattn-wide 0` core, the clean control; refused above MAXSC, where that route needs `part` plus
  * `attn_combine`, which this probe deliberately does not build — `crossrow_ladder.sh` is what covers
  * `--attn-fattn-wide 0` at streaming widths, on the engine, end to end). Nothing in `engine/` is edited.
@@ -1109,7 +1109,7 @@ int main(int argc, char** argv) {
            "WIDE_POS_PER_WARP=%d | body cap kBodyRows=%d (engine/decode_step.h:49)\n",
            N_Q, N_KV, GQA, DH, MAXSC, WIDE_POS_PER_BLOCK, WIDE_STAGE, WIDE_POS_PER_WARP, kBodyRows);
     printf("  oracle: causal_bound(lvalid,q) = lvalid+q (probe's own statement of §06.3; NOT lanes_of)\n");
-    printf("  shipping default form is wide_llama = --attn-fattn-wide 2 (engine/decode_run.cpp:262)\n");
+    printf("  shipping default form is wide_llama = --attn-fattn-wide 2 (engine/decode_run.cpp:305)\n");
 
     std::vector<Injection> injections;
     if (must_catch) {

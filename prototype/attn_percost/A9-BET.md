@@ -100,7 +100,7 @@ The cap removes partials, and `attn_combine` merges `a.split` of them; fewer par
 association of that F32 merge**. So:
 
 * **No bit-identity is owed and none is claimed.** The applicable published band is the one for a *reassociating
-  route*: `engine/gate.py:892-902`'s `CASCADE_BAND` — per-row `1 - cos ≤ 2.0e-3`, per-stage
+  route*: `engine/gate.py:894-904`'s `CASCADE_BAND` — per-row `1 - cos ≤ 2.0e-3`, per-stage
   `meanrel ≤ 3.0e-2`, and a flipped token admissible only with `< 1.5` BF16 ULP of top-1/top-2 room. The
   tighter pin floors (`specification/10-reference-dumps-and-gates.md` §10.1) are the other side of the judge, via
   `engine/gate.py`, `prototype/attn_tile_model.py`, and `prototype/attn_wmma/run_fattn_admission.sh` — all

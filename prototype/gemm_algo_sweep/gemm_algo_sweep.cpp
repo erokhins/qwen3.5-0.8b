@@ -2792,7 +2792,7 @@ int print_list() {
     std::printf("EXCLUDED M=1: engine/kernels_gemm.cpp:844-850 sends a one-row body to the hand "
                 "GEMV whatever the run asked for\n");
     std::printf("\nWave width: the shipped per-call cap is 512 rows (engine/decode_step.h:49 "
-                "kMaxWaveRows; engine/decode_run.cpp:294 refuses more), so M=1024 and M=4096 are "
+                "kMaxWaveRows; engine/decode_run.cpp:337 refuses more), so M=1024 and M=4096 are "
                 "route widths, not today's shipped call shape. README.md section 2.\n");
     return total == 150 ? 0 : 1;
 }

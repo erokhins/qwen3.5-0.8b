@@ -414,7 +414,7 @@ widened for any variant**. Two results matter more than a ms row:
 * **hipBLASLt at `M = 1` — unpriced, and blocked on a numerics-authority decision (a user call), not on
   a harness**, so a later pass should not re-litigate it with a cheaper probe. The engine keeps
   `M = 1` off the library path deliberately: `resolve_wave_gemm` **forces the hand GEMV at one row**
-  (`engine/gate.py:769`, which is why `gate.py` carries a separately measured `row_1cos_max_lt` band for
+  (`engine/gate.py:771`, which is why `gate.py` carries a separately measured `row_1cos_max_lt` band for
   the hand↔hipBLASLt pairing at all), and `engine/kernels_gemm.cpp:19` states the rule that band serves
   — a library-chosen kernel differs in **accumulation order**, so it "is gated by the same cascade band
   as `library` and not by byte-identity". Routing `M = 1` through hipBLASLt would move the decode

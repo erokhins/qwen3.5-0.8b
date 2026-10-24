@@ -18,7 +18,7 @@ kv() {
 }
 
 # wave_wall FILE GRAN LABEL — the `wall_ms` of one `WAVEPASS gran=<GRAN>` line, which is what
-# §49 subtracts. `wave_pass` prints exactly one per granularity (`engine/decode_run.cpp:1507`).
+# §49 subtracts. `wave_pass` prints exactly one per granularity (`engine/decode_run.cpp:1652`).
 wave_wall() {
     local f=$1 gran=$2 label=$3 v
     v=$(grep "^WAVEPASS gran=${gran} " "$f" | head -1 | sed -E 's/.*wall_ms=([0-9.]+).*/\1/')
@@ -27,7 +27,7 @@ wave_wall() {
 }
 
 # load_ms FILE — prose, not key=value: `loaded 335 tensors, 1.5457 GB resident in 524.3 ms
-# (335 allocations)` (`engine/decode_run.cpp:1658`). This is the wall the headline excludes.
+# (335 allocations)` (`engine/decode_run.cpp:1804`). This is the wall the headline excludes.
 load_ms() {
     local f=$1 v
     v=$(sed -n 's/^loaded .*resident in \([0-9.]*\) ms.*/\1/p' "$f" | tail -1)

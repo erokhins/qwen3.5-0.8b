@@ -85,7 +85,7 @@ self-locking drivers the AGENTS trap row tells operators to grep for (`prototype
 `prototype/proj_gemv/run.py` 5, `prototype/gdn_collapse/run.py` 2). And it is a build change, not a
 docs change: `tools/build.sh` computes `src="$t.cpp"` relative to `tools/` and gives
 `route_c_stages` a `../engine/*.cpp` list. Decisive: **`tools/` is a Python package to the gate as well
-as a command list** — `engine/gate.py:160` does `from tools import band_history`, and 18 `.py` files in
+as a command list** — `engine/gate.py:162` does `from tools import band_history`, and 18 `.py` files in
 `tools/` and `engine/` carry `tools/...` path strings — so a subdir split breaks an import, a build
 script, and the self-locking gate drivers at once. Verdict: document the four groups (A1), do not
 move them.
@@ -418,7 +418,7 @@ Two operational notes, both measured rather than assumed:
   the expected behavior of a path checker pointed at a plan: read `--list-broken` as a diff against
   the previous run, not as a pass/fail, until PLAN A's files exist. When A1–A3 land, the count drops
   back to the 14 above plus the `logs/README.md` line.
-* **`tools/` doubles as a Python package**: `engine/gate.py:160` does `from tools import band_history`,
+* **`tools/` doubles as a Python package**: `engine/gate.py:162` does `from tools import band_history`,
   and 50 tracked code files (9 `engine/`, 8 `prototype/`, 2 `speccheck/`, 3 cited `tmp/`, the rest in
   `tools/`) contain `tools/...` path strings. That is the concrete reason the §3 leave-it verdicts on
   `tools/` subdirs are not a matter of taste.

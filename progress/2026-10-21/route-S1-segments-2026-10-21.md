@@ -130,7 +130,7 @@ and it independently reproduces the gap I measured today between the serialized 
 the burst step (12.4036): 1.80 ms, against the rig's 1.61 ms for 305 syncs. Two different instruments
 agreeing to 10 % on the size of the thing.
 
-**And the shipping path never pays it.** `engine/decode_run.cpp:340` is `bool time_stages = false` and
+**And the shipping path never pays it.** `engine/decode_run.cpp:383` is `bool time_stages = false` and
 `:2403` is `if (o.time_stages) { time_stages_report(...); }`; the only per-segment `hipDeviceSynchronize`
 in the engine is `engine/stage_clock.cpp:32`, and the one at `engine/decode_step.cpp:423` is a one-time
 adapter-prep sync guarded by `sc.adapters_ready`. So `syncs_per_step=305` is a property of the

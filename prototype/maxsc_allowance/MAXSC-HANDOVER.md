@@ -48,7 +48,7 @@ not be built on the briefed version:
    per-fixture D-2) and is judged by it in `engine/gate.py` — yet it is still on the flag list, which is a
    second proof that the flag did not come from the allowance-vs-floor precedence in section (b).
 3. **`--split 18` is not reachable on the shipping path at all.** `engine/gate.py` has no `--split` flag
-   (its full `add_argument` set is at `engine/gate.py:7182-7640`); the engine's only lane-split knob is
+   (its full `add_argument` set is at `engine/gate.py:7932-8397`); the engine's only lane-split knob is
    `decode_run --attn-split-cap N`, and `cap_split()` is `min(split, cap)` — it can only make a cut
    SHALLOWER. The natural cut at these widths is `ceil(lanes/512)` = 1/2/3/9, so a cap of 18 is **inert at
    all four** and produces the default bits. `--attn-split-cap 1` is refused outright by both

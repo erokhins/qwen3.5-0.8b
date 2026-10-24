@@ -1476,7 +1476,7 @@ has it. The sub-`MAXSC` gain at 300 lanes is the block-level stage paying for it
 route, where the shipped form still reads each K row once per (row,head) pair.
 
 **Decode is unchanged, by construction rather than by measurement.** A decode body is one query row, and
-`attn_decode_layer` runs the fused single-row form under either flag (`engine/decode_run.cpp:105-110` says so
+`attn_decode_layer` runs the fused single-row form under either flag (`engine/decode_run.cpp:116-121` says so
 explicitly), so the ledger's decode ruler is untouched by this commit. The differential confirms it rather
 than contradicting it: prefill 1024 + 128 decode steps, `(ms_total(129) − ms_total(1)) / 128` = 12.46 / 12.38
 ms/token shipped vs 12.43 / 12.42 tiled — a difference inside the run-to-run noise, and in no case a

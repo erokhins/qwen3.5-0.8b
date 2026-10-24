@@ -19,8 +19,8 @@ This changes what the constant *is*, so it goes first.
 
 | fact | where |
 |---|---|
-| `RESULT ms_total` is `step_ms`, and `step_ms` receives exactly two contributions: the wall of `prefill_wave(...)` and the wall of each `decode_step(...)`. At `--steps 0` (what the llama-comparison leg runs) it is **the prompt wave and nothing else**. | [read] `engine/decode_run.cpp:1853-1851` (timer around `prefill_wave`), `:1943-1890` (per-step), printed at `:2047` |
-| The weight load is timed into a **separate** variable `load_ms`, printed as `loaded … in X ms`, and **never added** to `step_ms`. Same for `check_weights`, state/scratch allocation, the hipBLASLt route/plan, `prepare_weight_adapters`, the per-row printing loop and the `--time-waves` report. | [read] `engine/decode_run.cpp:1654-1649`, `:1655`, `:1756-1701`, `:1782-1740`, `:1809`, `:1859-1850`, `:2033` |
+| `RESULT ms_total` is `step_ms`, and `step_ms` receives exactly two contributions: the wall of `prefill_wave(...)` and the wall of each `decode_step(...)`. At `--steps 0` (what the llama-comparison leg runs) it is **the prompt wave and nothing else**. | [read] `engine/decode_run.cpp:1999-1997` (timer around `prefill_wave`), `:1943-1890` (per-step), printed at `:2047` |
+| The weight load is timed into a **separate** variable `load_ms`, printed as `loaded … in X ms`, and **never added** to `step_ms`. Same for `check_weights`, state/scratch allocation, the hipBLASLt route/plan, `prepare_weight_adapters`, the per-row printing loop and the `--time-waves` report. | [read] `engine/decode_run.cpp:1800-1795`, `:1655`, `:1756-1701`, `:1782-1740`, `:1809`, `:1859-1850`, `:2033` |
 | `WeightStore::load()` performs **phase 3: one GPU read pass over every resident page**, unconditionally, before `load()` returns — i.e. inside `load_ms`, outside `ms_total`. | [read] `engine/loader.cpp:626-644` (the `warm_read_kernel` loop, not gated by any option), `engine/loader.h:14-15` (the contract it implements), `loader.h:85` (`warm_ms`) |
 | `wall_ms` — the number §49 subtracts — is printed by `wave_pass`, which calls `st.reset()` and then **runs `prefill_wave` again on the same prompt** and times that. So `wall_ms` is the **second** (burst) pass of identical work; the `stage` pass right after it is the **third**. `WAVEPARITY … logits_bitidentical=1` is the engine's own witness that the re-pass is the same work and not a cheaper one. | [read] `engine/decode_run.cpp:1454-1468` (`st.reset()` at `:1453`, `prefill_wave` at `:1462-1416`, `out.wall_ms` at `:1468`), `:1543-1520` (`wave_report` runs burst then stage), `:1513-1472` (parity line) |
 
@@ -34,7 +34,7 @@ happens to be paid inside the first prompt's wave**, not per-prompt host work, a
 change can remove it — which is the one part of §49's conclusion that survives intact.
 
 The engine already prints a same-process first-vs-later pair, so the number is cheap to
-re-take cleanly: `engine/decode_run.cpp:2049` runs `wave_report` before the `RESULT` print at
+re-take cleanly: `engine/decode_run.cpp:2195` runs `wave_report` before the `RESULT` print at
 `:1990`, so one `--steps 0 --time-waves` invocation yields cold (`RESULT ms_total`), warm
 (`WAVEPASS gran=burst wall_ms`) and warm-serialised (`WAVEPASS gran=stage wall_ms`) in one
 process — and §36's ruler table is exactly that shape (§36 is `--steps 0`, per its own

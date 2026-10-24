@@ -45,7 +45,7 @@ the others carry their pre-fold values; they summed to an 11.175 ms step and the
 | `cast` | **97 → 0** | 0.371 MiB | 0.7775 → **0** | ~0.00 ms | — | **DELETED, 2026-10-21.** Widening BF16→F32 is exact, so all 6 sites fold into their consumers and the step saves **0.3008 ms** — which is also the answer to whether a launch costs anything: **3.10 us per launch**, a production cost, not an instrument artefact |
 | `gdn` | 72 | 22.6 r + 20.4 w MiB | 0.6458 | 0.190 ms | 30 % | **not the chain** (the recurrence kernel alone is 0.1243 of a 0.2790 shipped-shape rig row); ~0.07 ms is L2 residency of the 18.9 MiB state, saturating at 32 MiB; 47.4 % of its traffic is **writes**, so it is not a read stream |
 | `glue` | 49 | 0.407 MiB | 0.5593 | ~0 | 0 % | pure per-launch cost (49 × 11.16 us), same question as `cast` |
-| `host_tail` | 0 | — | 0.7163 | — | — | CPU work per step: one blocking D2H of the whole 993 KB logits row plus §03.4's argmax (`decode_step.cpp:1169`), sampling and bookkeeping. **On the critical path, not hidden**: greedy needs the token id before the next step can be submitted, so this is serial per token. Addressable part is bounded by what §07.4 already measured for fusing argmax (~1 %), not by the whole 0.72 ms — see queue P2 |
+| `host_tail` | 0 | — | 0.7163 | — | — | CPU work per step: one blocking D2H of the whole 993 KB logits row plus §03.4's argmax (`decode_step.cpp:1177`), sampling and bookkeeping. **On the critical path, not hidden**: greedy needs the token id before the next step can be submitted, so this is serial per token. Addressable part is bounded by what §07.4 already measured for fusing argmax (~1 %), not by the whole 0.72 ms — see queue P2 |
 | `copy` | 19 | 1.327 MiB r + 1.327 w | 0.2141 | ~0 | 0 % | pure per-launch cost (19 × 10.7 us); candidate work is folding the roll-back into the conv ring |
 
 **Read the table as a budget, not as a wish list.** Three families are effectively finished: `lm_head` at
@@ -105,7 +105,7 @@ the engine's own operating point — engine launch pattern, 340 launches, same g
 **5.29 us per sync**, linear to 4 %. The rig's 1.61 ms for 305 syncs independently reproduces the
 stage-total-vs-burst gap (14.2057 vs 12.4036 = 1.80 ms) to within 10 %.
 
-**And the shipping path pays none of it.** `decode_run.cpp:340` defaults `time_stages = false`, `:2496`
+**And the shipping path pays none of it.** `decode_run.cpp:383` defaults `time_stages = false`, `:2496`
 engages the clock only under the flag, and `decode_step.cpp:423`'s sync is one-time adapter prep. So:
 
 * Per-family stage rows are correct as an **ordering** and as byte-traffic attribution, and inflated by

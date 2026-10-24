@@ -24,7 +24,7 @@
  *     fixed) AND the iso-G columns (L moves at fixed G), which is what breaks the confound apart.
  *
  *   ARM 2 — split-K on the shape a one-token `down_proj` really presents, reproduced from source:
- *     `engine/decode_step.cpp:1109` calls `kernels::mlp_down(w_down, act_f32, delta, kHidden,
+ *     `engine/decode_step.cpp:1117` calls `kernels::mlp_down(w_down, act_f32, delta, kHidden,
  *     kIntermediate, n)` with `kHidden = 1024`, `kIntermediate = 3584` (`engine/state.h:53-54`) and
  *     `engine/kernels_mlp.cpp:240-241` sets threads = kRowsPerBlock × warp_width and blocks =
  *     ceil(rows / kRowsPerBlock) with `ROWS_PER_BLOCK 8`
@@ -55,7 +55,7 @@
  *
  * BIT-IDENTICAL, AND WHERE IT CANNOT BE. `down_ship` is a character-for-character transcription of the
  * shipped `mlp_down<FF>` (`prototype/mlp_gemv/mlp_gemv_kernels.h:191-211`, with the F32 act that ships
- * today because `Options::cast_fold` defaults false — `engine/decode_run.cpp:351`), and it is required
+ * today because `Options::cast_fold` defaults false — `engine/decode_run.cpp:394`), and it is required
  * to reproduce the CPU mirror bit for bit. `down_intra<1>` is required to reproduce `down_ship` bit for
  * bit, which is the template's own degenerate case and therefore a real witness that the parameterised
  * form degenerates correctly. **wpr>1 and two:S cannot be bit-identical to the shipped form**, and this

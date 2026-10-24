@@ -2263,7 +2263,7 @@ item, because no kernel-level attention or GDN work can reach it.
 §49's subtraction was measured correctly (both operands came from one `--steps 0 --time-waves` invocation, lock
 TAG `fixedcost`) but **interpreted wrongly by me**: I called `RESULT ms_total − wall_ms` "per-prompt host cost
 outside the wave". It is not. `prototype/perprompt/A7-CANDIDATES.md` §0 read the source and the worker's reading
-is confirmed line by line: `ms_total` is the wall of the **first** `prefill_wave` (`engine/decode_run.cpp:1853-1851`,
+is confirmed line by line: `ms_total` is the wall of the **first** `prefill_wave` (`engine/decode_run.cpp:1999-1997`,
 printed `:1990`), while `wall_ms` is printed by `wave_pass`, which calls `st.reset()` and runs **the same
 `prefill_wave` again** (`:1404-1421`), with `WAVEPARITY … logits_bitidentical=1` as the engine's own witness that
 the re-pass is identical work. Both operands are the same call in the same process, so the difference can only be

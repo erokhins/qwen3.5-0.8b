@@ -5,7 +5,7 @@ Why this exists. §49's ~65-71 ms per-prompt constant has been read as "first-to
 fresh pages at ~35 GB/s" (`devices/strix-halo-unified-memory.md`). To use that reading
 you need the byte count, and the byte count is NOT the checkpoint: `WeightStore::load()`
 runs a warm pass over every resident weight page (`engine/loader.cpp:626-644`) inside
-`load()`, which `decode_run` brackets separately (`engine/decode_run.cpp:1654-1649`) and
+`load()`, which `decode_run` brackets separately (`engine/decode_run.cpp:1800-1795`) and
 never adds to `RESULT ms_total`. The bytes that ARE cold at the first wave are the
 scratch, the KV, and the hipBLASLt workspace. This script sums them from the same
 constants `allocate_scratch` uses, so the page-warming hypothesis has a number attached.

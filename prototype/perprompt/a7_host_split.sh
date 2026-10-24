@@ -3,7 +3,7 @@
 # the wave's own `wall_ms`) into named causes, with both operands taken from ONE process.
 #
 # WHY THIS SHAPE. `RESULT ms_total` is the wall of `prefill_wave` plus the generation steps
-#   (engine/decode_run.cpp:1853-1851, printed at :2047) and NOTHING else — the weight load is
+#   (engine/decode_run.cpp:1999-1997, printed at :2047) and NOTHING else — the weight load is
 #   timed separately into `load_ms` (:1588-1593) and never added in. `wall_ms` is printed by
 #   `wave_pass`, which calls `st.reset()` and then runs `prefill_wave` AGAIN on the same
 #   prompt (engine/decode_run.cpp:1454-1468). So §49's subtraction is cold-first-pass minus
