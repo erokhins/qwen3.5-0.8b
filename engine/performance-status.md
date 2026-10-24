@@ -48,7 +48,7 @@ engine (§50). Cold numbers are still taken and still labelled.
 form flags** on purpose: after a default flip an explicit-flag run proves nothing about what ships;
 `WAVEPASS gran=burst wall_ms`, median of 3, one process per width, one `tools/gpu_lock.sh` hold,
 zero subagents). Taken 2026-10-20 on the tree that carries the A13 default, with the form echoed as
-`attn_fattn_wide=wide_llama` / `form=wide128llama` by every run.
+`attn_fattn_wide=wide_llama` / `form=wide128llama` by every run. **These rows are the PLAIN-PATH instrument**: the harness pins `--mtp-accept 0 --mtp-draft 0 --time-waves`, because the accept round refuses the wave clock by design (§7), so what ships is measured beside this table, not inside it — and §11 re-took it on today's tree at **11,130 tok/s at 4,096**, which is these rows within 0.6 %. That instrument is also **not** the paired one cited in §8: a warm-prompt burst wall and a run's billed prefill window are different quantities (11,070 here vs 9,004 there is a ruler difference, not a 19 % regression), so the two must never be subtracted.
 
 | prompt lanes | wall ms | warm prompt tok/s |
 |---|---|---|
@@ -67,17 +67,17 @@ Against §51's published figures that is **+9.4 % at 512, +6.8 % at 1,024, +13.1
 this engine is now the faster of the two at long context — **8.7 % at 16k, 12.4 % at 32k** — which
 is a cross-window comparison, not a paired A/B, and is quoted as such (§57's rule, §59's note).
 
-**Decode — marginal cost of one generated token** (`tools/context_sweep.py --lanes 96,128,512,1024,2048,4096
---steps 32 --runs 3`; differential by construction: two runs differing only in `--steps`, so the prompt wave
-cancels). **The headline decode row is the 4k one** (user, 2026-10-21): report decode at 4,032 lanes and quote
-shorter widths beside it, not instead — a short-context row hides the KV term, where most of the remaining headroom
-sits; at 4k it comes from the stage-clock burst, never `context_sweep.py` (§6). **The 512–2,048 rows below are the 2026-10-21
-window on the D1 tree** (projection flip, §5; on G4 §44 / G1 §48 / A13 §60); 96 lanes reads 9.619 ms = 104.0 tok/s,
-and 512's 11.36 % spread is §6's dispatch bimodality, not a regression. Paired, the step moved −13.0 % at 128 and −11.0 % at 4,032 (`proj` 4.1946 → 2.7284 and 4.177 → 2.745 ms/step, 7/7 reps separating).
+**Decode — TWO numbers, and the first is what ships.** The default is speculative (`--mtp-accept 1 --mtp-k 2
+--mtp-draft 1 adaptive=on`, §10): at templated **4,152 lanes** its paired wall A/B reads **+20.90 %** over its own plain arm
+(base 11.049 ms/step → ≈**111 tok/s**), and **+18.16 %** on the 12-case corpus population — against llama.cpp's best MTP
+configuration at **+13.6 %** on the same prompt (`prototype/mtp_llama/LLAMA-MTP-RESULT.md`). Its prefill cost is **nil** on
+the billed-window ruler (paired `DECWALL prefill_ms`: 9,004 vs 9,017 tok/s at 4,032, ±1 %, §8) and nil on the warm-burst
+ruler below (§11 re-take: **11,130 vs 11,070 tok/s** at 4,096). **The table below is the PLAIN PATH — the instrument, not the shipping speed**:
+every per-stage bill and attribution row in this file is priced against it, because speculation is additive and kernel work needs a per-step ruler. (`tools/context_sweep.py --lanes 96,128,512,1024,2048,4096 --steps 32 --runs 3`; differential by construction — two runs differing only in `--steps`, so the prompt wave cancels.) **The plain-path headline row is the 4k one** (user, 2026-10-21): report at 4,032 lanes and quote shorter widths beside it, not instead — a short row hides the KV term where most headroom sits; at 4k it comes from the stage-clock burst, never `context_sweep.py` (§6). **The 512–2,048 rows are the 2026-10-21 window on the D1 tree** (§5; G4 §44 / G1 §48 / A13 §60); 96 lanes reads 9.619 ms = 104.0 tok/s, and 512's 11.36 % spread is §6's dispatch bimodality, not a regression. Paired, the step moved −13.0 % at 128 and −11.0 % at 4,032 (`proj` 4.1946 → 2.7284 and 4.177 → 2.745 ms/step, 7/7 reps separating).
 
 | lanes at last step | marginal ms/token, best of 3 | spread | tok/s |
 |---|---|---|---|
-| **4,032** | **10.9357** (cast-fold paired window, 2026-10-21: stage-clock burst, never `context_sweep.py` — §6; the base arm in the SAME window read 11.2365 = 89.0 tok/s, so the step moved −0.3008 ms = −2.7 % by deleting all 97 per-token `cast` launches, which prices the per-launch residual at 3.10 µs against the ~3.8 µs predicted and thereby funds the `glue`/`copy` tail; the D3 row it overtakes read 11.175 = 89.5, and base-vs-ledger across windows is §6's ~2 % drift) | 0.34 % | **91.4** |
+| **4,032** | **10.9357** (**PLAIN-PATH INSTRUMENT** — the shipping default is ≈111 tok/s at 4,152 lanes, §10, measured on a different instrument; do not subtract the two. cast-fold paired window, 2026-10-21: stage-clock burst, never `context_sweep.py` — §6; the base arm in the SAME window read 11.2365 = 89.0 tok/s, so the step moved −0.3008 ms = −2.7 % by deleting all 97 per-token `cast` launches, which prices the per-launch residual at 3.10 µs against the ~3.8 µs predicted and thereby funds the `glue`/`copy` tail; the D3 row it overtakes read 11.175 = 89.5, and base-vs-ledger across windows is §6's ~2 % drift) | 0.34 % | **91.4** |
 | 128 | 9.7855 (same window; base 9.9782 = 100.2, so −1.93 %, and NO LINE was set here — D3/S1 §4 put short widths out of reach of this route in advance, so a move at 128 is a bonus, not the adjudicating row) | 1.64 % | 102.2 |
 | 512 | 10.609 | 11.36 % | 94.3 |
 | 1,024 | 11.028 | 3.98 % | 90.7 |
@@ -503,3 +503,38 @@ proved *by presence* and silence repointed at the named-off arms; full-populatio
 `engine/decode_run.cpp` rotated when those files grew (+45/+66 lines), and `tools/citation_rot_check.py` cannot see
 that class of drift because its baseline is `HEAD` — the guard is a coordinate diff against the previous revision,
 not the tool.
+
+## §11 Prefill on the §1 ruler, re-taken after the MTP default (2026-10-24)
+
+The question this settles is a fair one: §1 headlines **11,070 tok/s at 4,096 lanes** (warm prompt-wave burst,
+taken 2026-10-20), while §8 quotes **9,004 tok/s at 4,032** — which reads like an 18 % prefill regression that
+nobody announced. **There is no such regression, and the two numbers are different rulers.** §1's comes from
+`WAVEPASS gran=burst wall_ms` (the warm prompt-wave burst alone); §8's comes from `DECWALL prefill_ms`, the run's
+*billed prefill window*, which also carries the per-request work the burst excludes. They diverge by 1.22× at
+4k and ~1.9× at 1,024 — a fixed per-request cost showing larger as a share of a shorter prompt, which is the
+signature of a wider window, not of slower kernels. **Never subtract one from the other; quote pairs taken on one
+instrument in one window.**
+
+Re-taken on today's tree with the harness that produced §1's row — `prototype/attn_wide/a13_default_warm_headline.sh`,
+which pins `--mtp-accept 0 --mtp-draft 0 --time-waves` and asserts the run's own `attn_fattn_wide=wide_llama` /
+`form=wide128llama` echoes rather than trusting a flag (`WIDTHS="4096 1024" REPS=5`, medians):
+
+| lanes | §1 (2026-10-20) | today | Δ |
+|---|---|---|---|
+| 4,096 | 361.8 / 373.5 ms → 11,070 tok/s | **368.0 ms** [365.36, 371.12], 1.6 % spread → **11,130 tok/s** | **+0.6 %** |
+| 1,024 | 85.09 / 86.16 ms → 12,047 tok/s | 86.0 ms [85.92, 87.58] → 11,907 tok/s | −1.2 % |
+
+So prefill is where it was, within §6's window drift, and the interim GDN-span pin that really did cost +72 % at
+4k (§7) is retired (§8). The plain path remains the instrument §1 tabulates, because the accept round refuses the
+wave clock by design.
+
+**Two traps this measurement walked into, recorded because both are silent.** (1) **`a13_default_warm_headline.sh`
+self-acquires the GPU lock** — a fourth one after `prototype/glue/run.py`, `prototype/proj_gemv/run.py` and
+`prototype/gdn_gated_norm/run.py`. Holding the lock and then invoking it parks the child with no CPU and no GPU
+work, no message, and no exit: the first attempt sat 30 minutes and was killed by a timeout, and `gpu_lock.sh
+status` afterwards read `STALE (holder pid dead)`. `grep -c gpu_lock <script>` before acquiring is the whole
+defence. (2) **The deadlocked attempt's aftermath produced a plausible-looking wrong table**: the same width
+returned three reps reading 369.7 / 589.0 / 1208.9 ms, so its printed median was 589 ms = 6,954 tok/s — a number
+that would have "discovered" a prefill regression that does not exist. A median taken across a 3.3× spread
+describes nothing; the spread must be printed beside the median, and a window whose spread is far outside §6's
+~2 % is re-taken rather than quoted.
