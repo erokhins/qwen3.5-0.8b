@@ -519,3 +519,41 @@ dump is armed), `prototype/mtp_accept/session_rowdiff.py` (comparator + `--selft
 `prototype/mtp_accept/session_trigger.{py,sh}` (the margin sweep, `--selftest`, derived population,
 round-free control), `prototype/mtp_accept/session_gates.sh` (entry point), plus `session_lossless.py` case
 (f), `session_longturn.sh`'s no-silent-skip, and this section.
+
+## 10. THE BAND IS ADOPTED — (c), in words, on 2026-10-25
+
+The user's words were "take c", in the same request that asked for chat to run speculatively by default
+("I'm using chat in the longer prompt, so enable it"). That is the decision §9.7 asked for, so §9.7's
+proviso — "`session_longturn.sh` stays red on B/G **until the band is adopted in those words**" — is now
+spent, and what replaced it is a predicate, not a waiver.
+
+**What was adopted.** Below `MAXSC` the requirement is unchanged and exact: a round's deciding row is
+bit-identical to the plain step's row, so a stream difference there is a defect and nothing excuses it.
+Above `MAXSC` a difference is admissible exactly when `session_rowdiff.py` can witness it — every
+flipped position has dumped rows on **both** arms, the token one arm emitted is the runner-up in the
+other's row, and the top1−top2 margin is under one bf16 ULP of that row's top logit. `STRUCTURAL`,
+`NO-FLIP` and `NO VERDICT` are all red: the band admits a witnessed tie and nothing else, and a case
+whose window missed the flip fails rather than passing unexamined.
+
+**What changed as a result.**
+
+* `session_longturn.sh` now arms the session dump over each case's above-ceiling window (`%DUMP%`
+  placeholder, windows computed from the derived prompt length) and adjudicates a differing case
+  through `session_rowdiff.py`, printing `BAND` instead of `DIFFER` when the witness holds. Dumps are
+  deliberately **not** armed below the ceiling, so the below-ceiling path has no excuse available to it.
+* `session_gates.sh` now states three predicates instead of "this file is RED": lossless stays exact
+  (and holds — it has never needed a waiver, `cross-then-feed` included), longturn is exact-or-BAND,
+  trigger is the margin sweep. All three are green: A/C/D/E/F LOSSLESS, B and G BAND, trigger
+  `unexplained by a sub-ULP margin 0`.
+* `session_lossless.py` stays exact on purpose, with a note at case (f) saying that if it ever flips the
+  answer is to adjudicate it, not to loosen this file.
+* `engine/chat.{sh,py}`: speculation is the **default** and `--no-mtp` is the named plain arm
+  (`--mtp` remains as an explicit statement of the default for scripts). Verified on device: default
+  prints `MTP k=2 accept=0.416667 emit=2.33333/round`, `--no-mtp` prints no `MTP` field at all, and the
+  two agreed token-for-token on that short prompt — which is the band's below-ceiling half, seen live.
+
+**What this costs, stated plainly.** A long conversation can take a different branch than `--no-mtp` at
+a position the model could not call (the flip that sized this sat at 0.073 of one bf16 ULP). That is not
+reproducible between the two forms and no gate will make it so; A-18 already records it as a property of
+bf16 on this checkpoint. The thing that would reopen this is a `STRUCTURAL` from either gate, and per
+the fix-first rule that outranks speed work the moment it appears.
