@@ -1,0 +1,231 @@
+# Raw counters behind the MTP wall/meter claims on this date (main-agent runs, blocking, one lock hold per pair).
+# Each section: run dir, then every DECWALL/MTPSTAT/MTPMETER line its per-arm logs produced.
+# NOTE: the k=2 sweep of 2026-10-24 was run with the harness default OUT dir, so its per-rep logs
+# were overwritten between arms; the medians it produced are recorded in K2-RESULT.md 7 and are re-
+# captured with per-arm OUT dirs in the sweep that follows. What follows is the surviving evidence.
+
+===== tmp/mtp_speed_chat =====
+DECWALL mode=run prefill_ms=796.580 decode_ms=350.706 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=10.9596 tok_per_s=91.244 census=ok
+DECWALL mode=run prefill_ms=798.945 decode_ms=352.926 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=11.0289 tok_per_s=90.671 census=ok
+DECWALL mode=run prefill_ms=799.097 decode_ms=356.265 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=11.1333 tok_per_s=89.821 census=ok
+DECWALL mode=run prefill_ms=802.200 decode_ms=589.552 bodies=32 rounds=31 plain=1 accepted=22 rejected=9 suppressed=0 emitted=54 stop=0 ended=steps_exhausted ms_per_token=10.9176 tok_per_s=91.595 census=ok
+DECWALL mode=run prefill_ms=802.453 decode_ms=588.557 bodies=32 rounds=31 plain=1 accepted=22 rejected=9 suppressed=0 emitted=54 stop=0 ended=steps_exhausted ms_per_token=10.8992 tok_per_s=91.750 census=ok
+DECWALL mode=run prefill_ms=802.834 decode_ms=588.886 bodies=32 rounds=31 plain=1 accepted=22 rejected=9 suppressed=0 emitted=54 stop=0 ended=steps_exhausted ms_per_token=10.9053 tok_per_s=91.699 census=ok
+DECWALL mode=run prefill_ms=805.641 decode_ms=356.029 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=11.1259 tok_per_s=89.880 census=ok
+DECWALL mode=run prefill_ms=806.561 decode_ms=589.589 bodies=32 rounds=31 plain=1 accepted=22 rejected=9 suppressed=0 emitted=54 stop=0 ended=steps_exhausted ms_per_token=10.9183 tok_per_s=91.589 census=ok
+DECWALL mode=run prefill_ms=822.963 decode_ms=352.454 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=11.0142 tok_per_s=90.792 census=ok
+DECWALL mode=run prefill_ms=830.048 decode_ms=590.380 bodies=32 rounds=31 plain=1 accepted=22 rejected=9 suppressed=0 emitted=54 stop=0 ended=steps_exhausted ms_per_token=10.9330 tok_per_s=91.467 census=ok
+MTPSTAT route=hand gemm=hand gdn_scan=seq attn_fattn_wide=fattn rounds=31 accepted=22 rejected=9 emitted=53 accept_rate=0.709677 mean_tokens_per_round=1.70968 body_rows=62 captured_bytes=626245632 restored_bytes=181813248 status_d2h_bytes=496 split_subs=1196
+-- tsv --
+==> tmp/mtp_speed_chat/accept_1.tsv <==
+91.750 588.557 54 32
+
+==> tmp/mtp_speed_chat/accept_2.tsv <==
+91.699 588.886 54 32
+
+==> tmp/mtp_speed_chat/accept_3.tsv <==
+91.595 589.552 54 32
+
+==> tmp/mtp_speed_chat/accept_4.tsv <==
+91.467 590.380 54 32
+
+==> tmp/mtp_speed_chat/accept_5.tsv <==
+91.589 589.589 54 32
+
+==> tmp/mtp_speed_chat/base_1.tsv <==
+91.244 350.706 32 32
+
+==> tmp/mtp_speed_chat/base_2.tsv <==
+89.821 356.265 32 32
+
+===== tmp/mtp_speed_fan146 =====
+DECWALL mode=run prefill_ms=808.278 decode_ms=589.823 bodies=32 rounds=31 plain=1 accepted=20 rejected=11 suppressed=0 emitted=52 stop=0 ended=steps_exhausted ms_per_token=11.3428 tok_per_s=88.162 census=ok
+DECWALL mode=run prefill_ms=808.849 decode_ms=354.887 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=11.0902 tok_per_s=90.170 census=ok
+DECWALL mode=run prefill_ms=811.276 decode_ms=339.979 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=10.6243 tok_per_s=94.123 census=ok
+DECWALL mode=run prefill_ms=812.128 decode_ms=590.823 bodies=32 rounds=31 plain=1 accepted=20 rejected=11 suppressed=0 emitted=52 stop=0 ended=steps_exhausted ms_per_token=11.3620 tok_per_s=88.013 census=ok
+DECWALL mode=run prefill_ms=813.030 decode_ms=588.683 bodies=32 rounds=31 plain=1 accepted=20 rejected=11 suppressed=0 emitted=52 stop=0 ended=steps_exhausted ms_per_token=11.3208 tok_per_s=88.333 census=ok
+DECWALL mode=run prefill_ms=813.057 decode_ms=588.012 bodies=32 rounds=31 plain=1 accepted=20 rejected=11 suppressed=0 emitted=52 stop=0 ended=steps_exhausted ms_per_token=11.3079 tok_per_s=88.434 census=ok
+DECWALL mode=run prefill_ms=815.734 decode_ms=355.337 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=11.1043 tok_per_s=90.055 census=ok
+DECWALL mode=run prefill_ms=820.115 decode_ms=354.922 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=11.0913 tok_per_s=90.161 census=ok
+DECWALL mode=run prefill_ms=822.916 decode_ms=591.834 bodies=32 rounds=31 plain=1 accepted=20 rejected=11 suppressed=0 emitted=52 stop=0 ended=steps_exhausted ms_per_token=11.3814 tok_per_s=87.863 census=ok
+DECWALL mode=run prefill_ms=830.825 decode_ms=355.037 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=11.0949 tok_per_s=90.132 census=ok
+MTPSTAT route=hand gemm=hand gdn_scan=seq attn_fattn_wide=fattn rounds=31 accepted=20 rejected=11 emitted=51 accept_rate=0.645161 mean_tokens_per_round=1.64516 body_rows=62 captured_bytes=626245632 restored_bytes=222216192 status_d2h_bytes=496 split_subs=1200
+-- tsv --
+==> tmp/mtp_speed_fan146/accept_1.tsv <==
+88.333 588.683 52 32
+
+==> tmp/mtp_speed_fan146/accept_2.tsv <==
+88.434 588.012 52 32
+
+==> tmp/mtp_speed_fan146/accept_3.tsv <==
+88.013 590.823 52 32
+
+==> tmp/mtp_speed_fan146/accept_4.tsv <==
+87.863 591.834 52 32
+
+==> tmp/mtp_speed_fan146/accept_5.tsv <==
+88.162 589.823 52 32
+
+==> tmp/mtp_speed_fan146/base_1.tsv <==
+94.123 339.979 32 32
+
+==> tmp/mtp_speed_fan146/base_2.tsv <==
+90.161 354.922 32 32
+
+===== tmp/mtp_speed_wall_long =====
+DECWALL mode=run prefill_ms=799.599 decode_ms=734.738 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=15.3070 tok_per_s=65.329 census=ok
+DECWALL mode=run prefill_ms=800.884 decode_ms=737.212 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=15.3586 tok_per_s=65.110 census=ok
+DECWALL mode=run prefill_ms=802.347 decode_ms=351.930 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=10.9978 tok_per_s=90.927 census=ok
+DECWALL mode=run prefill_ms=802.755 decode_ms=339.967 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=10.6240 tok_per_s=94.127 census=ok
+DECWALL mode=run prefill_ms=802.758 decode_ms=736.095 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=15.3353 tok_per_s=65.209 census=ok
+DECWALL mode=run prefill_ms=804.757 decode_ms=350.851 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=10.9641 tok_per_s=91.207 census=ok
+DECWALL mode=run prefill_ms=807.036 decode_ms=353.631 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=11.0510 tok_per_s=90.490 census=ok
+DECWALL mode=run prefill_ms=808.626 decode_ms=737.692 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=15.3686 tok_per_s=65.068 census=ok
+DECWALL mode=run prefill_ms=809.331 decode_ms=354.305 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=11.0720 tok_per_s=90.318 census=ok
+DECWALL mode=run prefill_ms=817.737 decode_ms=736.184 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=15.3372 tok_per_s=65.201 census=ok
+MTPSTAT route=hand gemm=hand gdn_scan=seq rounds=31 accepted=16 rejected=15 emitted=47 accept_rate=0.516129 mean_tokens_per_round=1.51613 body_rows=62 captured_bytes=626245632 restored_bytes=303022080 status_d2h_bytes=496 split_subs=1208
+-- tsv --
+==> tmp/mtp_speed_wall_long/accept_1.tsv <==
+65.068 737.692 48 32
+
+==> tmp/mtp_speed_wall_long/accept_2.tsv <==
+65.110 737.212 48 32
+
+==> tmp/mtp_speed_wall_long/accept_3.tsv <==
+65.209 736.095 48 32
+
+==> tmp/mtp_speed_wall_long/accept_4.tsv <==
+65.201 736.184 48 32
+
+==> tmp/mtp_speed_wall_long/accept_5.tsv <==
+65.329 734.738 48 32
+
+==> tmp/mtp_speed_wall_long/base_1.tsv <==
+94.127 339.967 32 32
+
+==> tmp/mtp_speed_wall_long/base_2.tsv <==
+91.207 350.851 32 32
+
+===== tmp/mtp_speed_wall =====
+DECWALL mode=run prefill_ms=805.504 decode_ms=5218.164 bodies=256 rounds=255 plain=1 accepted=106 rejected=149 suppressed=0 emitted=541 stop=0 ended=steps_exhausted ms_per_token=9.6454 tok_per_s=103.676 census=ok
+DECWALL mode=run prefill_ms=808.586 decode_ms=2862.231 bodies=256 rounds=0 plain=256 accepted=0 rejected=0 suppressed=0 emitted=256 stop=0 ended=steps_exhausted ms_per_token=11.1806 tok_per_s=89.441 census=ok
+DECWALL mode=run prefill_ms=810.730 decode_ms=2860.569 bodies=256 rounds=0 plain=256 accepted=0 rejected=0 suppressed=0 emitted=256 stop=0 ended=steps_exhausted ms_per_token=11.1741 tok_per_s=89.493 census=ok
+DECWALL mode=run prefill_ms=812.429 decode_ms=5199.682 bodies=256 rounds=255 plain=1 accepted=106 rejected=149 suppressed=0 emitted=541 stop=0 ended=steps_exhausted ms_per_token=9.6112 tok_per_s=104.045 census=ok
+DECWALL mode=run prefill_ms=812.545 decode_ms=2876.289 bodies=256 rounds=0 plain=256 accepted=0 rejected=0 suppressed=0 emitted=256 stop=0 ended=steps_exhausted ms_per_token=11.2355 tok_per_s=89.004 census=ok
+DECWALL mode=run prefill_ms=812.600 decode_ms=2858.972 bodies=256 rounds=0 plain=256 accepted=0 rejected=0 suppressed=0 emitted=256 stop=0 ended=steps_exhausted ms_per_token=11.1679 tok_per_s=89.543 census=ok
+DECWALL mode=run prefill_ms=812.608 decode_ms=2866.883 bodies=256 rounds=0 plain=256 accepted=0 rejected=0 suppressed=0 emitted=256 stop=0 ended=steps_exhausted ms_per_token=11.1988 tok_per_s=89.296 census=ok
+DECWALL mode=run prefill_ms=814.489 decode_ms=5208.768 bodies=256 rounds=255 plain=1 accepted=106 rejected=149 suppressed=0 emitted=541 stop=0 ended=steps_exhausted ms_per_token=9.6280 tok_per_s=103.863 census=ok
+DECWALL mode=run prefill_ms=814.979 decode_ms=5215.198 bodies=256 rounds=255 plain=1 accepted=106 rejected=149 suppressed=0 emitted=541 stop=0 ended=steps_exhausted ms_per_token=9.6399 tok_per_s=103.735 census=ok
+DECWALL mode=run prefill_ms=825.360 decode_ms=5210.404 bodies=256 rounds=255 plain=1 accepted=106 rejected=149 suppressed=0 emitted=541 stop=0 ended=steps_exhausted ms_per_token=9.6311 tok_per_s=103.831 census=ok
+MTPSTAT rounds=0 accepted=0 rejected=0 emitted=0 accept_rate=0 mean_tokens_per_round=0 body_rows=0 captured_bytes=0 restored_bytes=0 status_d2h_bytes=0 split_subs=0
+MTPSTAT rounds=31 accepted=14 rejected=17 emitted=45 accept_rate=0.451613 mean_tokens_per_round=1.45161 body_rows=62 captured_bytes=626245632 restored_bytes=343425024 status_d2h_bytes=496 split_subs=1212
+MTPSTAT route=hand gemm=hand gdn_scan=seq attn_fattn_wide=fattn rounds=255 accepted=106 rejected=149 emitted=540 accept_rate=0.415686 mean_tokens_per_round=2.11765 body_rows=765 captured_bytes=10302750720 restored_bytes=3010019328 status_d2h_bytes=7140 split_subs=19423 k=2 depth1=179 depth1_rate=0.701961 candidates_accepted=285
+-- tsv --
+==> tmp/mtp_speed_wall/accept_1.tsv <==
+103.831 5210.404 541 256
+
+==> tmp/mtp_speed_wall/accept_2.tsv <==
+103.676 5218.164 541 256
+
+==> tmp/mtp_speed_wall/accept_3.tsv <==
+104.045 5199.682 541 256
+
+==> tmp/mtp_speed_wall/accept_4.tsv <==
+103.735 5215.198 541 256
+
+==> tmp/mtp_speed_wall/accept_5.tsv <==
+103.863 5208.768 541 256
+
+==> tmp/mtp_speed_wall/base_1.tsv <==
+89.543 2858.972 256 256
+
+==> tmp/mtp_speed_wall/base_2.tsv <==
+89.004 2876.289 256 256
+
+===== tmp/mtp_speed_llama_dense =====
+DECWALL mode=run prefill_ms=794.135 decode_ms=347.019 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=10.8444 tok_per_s=92.214 census=ok
+DECWALL mode=run prefill_ms=795.692 decode_ms=564.082 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=11.7517 tok_per_s=85.094 census=ok
+DECWALL mode=run prefill_ms=797.146 decode_ms=341.206 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=10.6627 tok_per_s=93.785 census=ok
+DECWALL mode=run prefill_ms=799.326 decode_ms=563.705 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=11.7439 tok_per_s=85.151 census=ok
+DECWALL mode=run prefill_ms=799.914 decode_ms=340.614 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=10.6442 tok_per_s=93.948 census=ok
+DECWALL mode=run prefill_ms=801.382 decode_ms=563.745 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=11.7447 tok_per_s=85.145 census=ok
+DECWALL mode=run prefill_ms=801.867 decode_ms=341.707 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=10.6783 tok_per_s=93.647 census=ok
+DECWALL mode=run prefill_ms=802.909 decode_ms=563.288 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=11.7352 tok_per_s=85.214 census=ok
+DECWALL mode=run prefill_ms=804.174 decode_ms=570.805 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=11.8918 tok_per_s=84.092 census=ok
+DECWALL mode=run prefill_ms=808.019 decode_ms=339.620 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=10.6131 tok_per_s=94.223 census=ok
+MTPSTAT route=hand gemm=hand gdn_scan=seq attn_fattn_wide=fattn rounds=31 accepted=16 rejected=15 emitted=47 accept_rate=0.516129 mean_tokens_per_round=1.51613 body_rows=62 captured_bytes=626245632 restored_bytes=303022080 status_d2h_bytes=496 split_subs=1208
+-- tsv --
+==> tmp/mtp_speed_llama_dense/accept_1.tsv <==
+85.151 563.705 48 32
+
+==> tmp/mtp_speed_llama_dense/accept_2.tsv <==
+85.094 564.082 48 32
+
+==> tmp/mtp_speed_llama_dense/accept_3.tsv <==
+85.214 563.288 48 32
+
+==> tmp/mtp_speed_llama_dense/accept_4.tsv <==
+84.092 570.805 48 32
+
+==> tmp/mtp_speed_llama_dense/accept_5.tsv <==
+85.145 563.745 48 32
+
+==> tmp/mtp_speed_llama_dense/base_1.tsv <==
+93.948 340.614 32 32
+
+==> tmp/mtp_speed_llama_dense/base_2.tsv <==
+94.223 339.620 32 32
+
+===== tmp/mtp_speed_short =====
+DECWALL mode=run prefill_ms=100.682 decode_ms=298.435 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=9.3261 tok_per_s=107.226 census=ok
+DECWALL mode=run prefill_ms=103.064 decode_ms=298.467 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=9.3271 tok_per_s=107.215 census=ok
+DECWALL mode=run prefill_ms=108.489 decode_ms=299.155 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=9.3486 tok_per_s=106.968 census=ok
+DECWALL mode=run prefill_ms=94.680 decode_ms=365.224 bodies=23 rounds=22 plain=1 accepted=16 rejected=6 suppressed=1 emitted=38 stop=1 ended=stop_token ms_per_token=9.6112 tok_per_s=104.046 census=ok
+DECWALL mode=run prefill_ms=95.233 decode_ms=363.489 bodies=23 rounds=22 plain=1 accepted=16 rejected=6 suppressed=1 emitted=38 stop=1 ended=stop_token ms_per_token=9.5655 tok_per_s=104.542 census=ok
+DECWALL mode=run prefill_ms=95.767 decode_ms=299.612 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=9.3629 tok_per_s=106.805 census=ok
+DECWALL mode=run prefill_ms=98.250 decode_ms=365.088 bodies=23 rounds=22 plain=1 accepted=16 rejected=6 suppressed=1 emitted=38 stop=1 ended=stop_token ms_per_token=9.6076 tok_per_s=104.085 census=ok
+DECWALL mode=run prefill_ms=98.845 decode_ms=362.874 bodies=23 rounds=22 plain=1 accepted=16 rejected=6 suppressed=1 emitted=38 stop=1 ended=stop_token ms_per_token=9.5493 tok_per_s=104.720 census=ok
+DECWALL mode=run prefill_ms=98.914 decode_ms=300.446 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=9.3889 tok_per_s=106.508 census=ok
+DECWALL mode=run prefill_ms=99.273 decode_ms=361.823 bodies=23 rounds=22 plain=1 accepted=16 rejected=6 suppressed=1 emitted=38 stop=1 ended=stop_token ms_per_token=9.5216 tok_per_s=105.024 census=ok
+MTPSTAT rounds=22 accepted=16 rejected=6 emitted=38 accept_rate=0.727273 mean_tokens_per_round=1.72727 body_rows=44 captured_bytes=444432384 restored_bytes=121208832 status_d2h_bytes=352 split_subs=848
+-- tsv --
+==> tmp/mtp_speed_short/accept_1.tsv <==
+104.085 365.088 38 23
+
+==> tmp/mtp_speed_short/accept_2.tsv <==
+104.720 362.874 38 23
+
+==> tmp/mtp_speed_short/accept_3.tsv <==
+104.046 365.224 38 23
+
+==> tmp/mtp_speed_short/accept_4.tsv <==
+104.542 363.489 38 23
+
+==> tmp/mtp_speed_short/accept_5.tsv <==
+105.024 361.823 38 23
+
+==> tmp/mtp_speed_short/base_1.tsv <==
+106.805 299.612 32 32
+
+==> tmp/mtp_speed_short/base_2.tsv <==
+106.508 300.446 32 32
+
+===== tmp/meter_rt_pre =====
+DECWALL mode=run prefill_ms=758.929 decode_ms=909.182 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=28.4119 tok_per_s=35.196 census=ok
+DECWALL mode=run prefill_ms=767.695 decode_ms=575.900 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=11.9979 tok_per_s=83.348 census=ok
+MTPMETER role=accept phase=body ms_total=368.6468 rounds=31 ms_per_round=11.8918 sync_added=1 runs=31 ms_per_run=11.8918 note=submit_wave_body_at_the_round's_row_count._INFLATES:today_the_body's_submissions_flow_into_the_head_launch_and_the_next_wait,_so_a_wait_at_its_close_removes_pipelining_the_engine_relies_on._It_also_carries_the_mid-checkpoint's_extra_submissions_when_one_is_armed
+MTPMETER role=accept phase=draft ms_total=112.8380 rounds=31 ms_per_round=3.6399 sync_added=1 runs=31 ms_per_run=3.6399 note=the_NEXT_round's_draft_round_submissions,_ending_in_the_draft's_own_blocking_vocabulary_D2H._Sync_added_so_the_draft's_head_pass_does_not_land_on_whichever_phase_happens_to_block_next;_the_D2H_already_would,_so_the_inflation_is_small
+MTPMETER role=accept phase=head ms_total=68.7203 rounds=31 ms_per_round=2.2168 sync_added=1 runs=31 ms_per_run=2.2168 note=one_lm_head_batched_xbf16_pass_over_the_485_MiB_tied_table,_serving_both_rows._INFLATES_in_a_pipelined_round_by_the_wait,_but_NOT_for_free_in_a_serial_one:_on_the_verify_path_the_logits_D2H_already_waited_for_this_launch_on_the_same_stream,_so_the_wait_it_replaces_was_already_paid
+MTPMETER role=accept phase=verdict_kernel ms_total=9.6724 rounds=31 ms_per_round=0.3120 sync_added=1 runs=31 ms_per_run=0.3120 note=mtp_accept_verdict_over_both_logits_rows_on_device._INFLATES:_submissions_only_today,_the_meter's_wait_makes_the_argmax_serial._Its_real_cost_is_bounded_below_by_this_and_above_by_the_readback_it_replaces
+MTPSTAT route=hand gemm=hand gdn_scan=seq attn_fattn_wide=fattn rounds=31 accepted=16 rejected=15 emitted=47 accept_rate=0.516129 mean_tokens_per_round=1.51613 body_rows=62 captured_bytes=626245632 restored_bytes=303022080 status_d2h_bytes=496 split_subs=1208
+
+===== tmp/meter_rt_new =====
+DECWALL mode=run prefill_ms=759.086 decode_ms=904.839 bodies=32 rounds=0 plain=32 accepted=0 rejected=0 suppressed=0 emitted=32 stop=0 ended=steps_exhausted ms_per_token=28.2762 tok_per_s=35.365 census=ok
+DECWALL mode=run prefill_ms=764.396 decode_ms=534.733 bodies=32 rounds=31 plain=1 accepted=16 rejected=15 suppressed=0 emitted=48 stop=0 ended=steps_exhausted ms_per_token=11.1403 tok_per_s=89.764 census=ok
+MTPMETER role=accept phase=body ms_total=365.0923 rounds=31 ms_per_round=11.7772 sync_added=1 runs=31 ms_per_run=11.7772 note=submit_wave_body_at_the_round's_row_count._INFLATES:today_the_body's_submissions_flow_into_the_head_launch_and_the_next_wait,_so_a_wait_at_its_close_removes_pipelining_the_engine_relies_on._It_also_carries_the_mid-checkpoint's_extra_submissions_when_one_is_armed
+MTPMETER role=accept phase=draft_argmax_host ms_total=0.0000 rounds=31 ms_per_round=0.0000 sync_added=0 runs=0 ms_per_run=0.0000 status=subphase inside=draft note=BREAKDOWN_inside_phase=draft_and_inside_the_span_draft_vocab_d2h_closes._The_host_§03.4_argmax_over_the_downloaded_row:_248,320_f32_scanned_on_one_CPU_core,_pure_host_work,_sync_added=0._Removed_by_resolving_the_argmax_on_device;_runs=0_means_the_site_is_gone,_not_that_it_was_missed
+MTPMETER role=accept phase=draft ms_total=80.8614 rounds=31 ms_per_round=2.6084 sync_added=1 runs=31 ms_per_run=2.6084 note=the_NEXT_round's_draft_round_submissions,_ending_in_the_draft's_own_blocking_vocabulary_D2H._Sync_added_so_the_draft's_head_pass_does_not_land_on_whichever_phase_happens_to_block_next;_the_D2H_already_would,_so_the_inflation_is_small
+MTPMETER role=accept phase=draft_vocab_d2h ms_total=79.7497 rounds=31 ms_per_round=2.5726 sync_added=0 runs=31 ms_per_run=2.5726 status=subphase inside=draft note=BREAKDOWN_inside_phase=draft._The_draft's_blocking_download_of_its_own_logits_row:_today_kVocab_F32_=_993,280_B_per_round,_which_is_the_second_of_the_two_vocabulary_crossings_ROUND-TAX.md_§1_names_(the_first_is_verify's_logits_d2h)._sync_added=0_because_the_copy_already_blocks._After_the_device_argmax_this_line_bills_one_small_status_word_and_a_0.000_there_is_the_result_not_a_missing_phase
+MTPMETER role=accept phase=head ms_total=70.3585 rounds=31 ms_per_round=2.2696 sync_added=1 runs=31 ms_per_run=2.2696 note=one_lm_head_batched_xbf16_pass_over_the_485_MiB_tied_table,_serving_both_rows._INFLATES_in_a_pipelined_round_by_the_wait,_but_NOT_for_free_in_a_serial_one:_on_the_verify_path_the_logits_D2H_already_waited_for_this_launch_on_the_same_stream,_so_the_wait_it_replaces_was_already_paid
+MTPMETER role=accept phase=verdict_kernel ms_total=1.0843 rounds=31 ms_per_round=0.0350 sync_added=1 runs=31 ms_per_run=0.0350 note=mtp_accept_verdict_over_both_logits_rows_on_device._INFLATES:_submissions_only_today,_the_meter's_wait_makes_the_argmax_serial._Its_real_cost_is_bounded_below_by_this_and_above_by_the_readback_it_replaces
+MTPSTAT route=hand gemm=hand gdn_scan=seq attn_fattn_wide=fattn rounds=31 accepted=16 rejected=15 emitted=47 accept_rate=0.516129 mean_tokens_per_round=1.51613 body_rows=62 captured_bytes=626245632 restored_bytes=303022080 status_d2h_bytes=496 split_subs=1239

@@ -166,3 +166,6 @@ prototype/prefetch_tier/out/
 # D3 delta rig: raw per-arm rig stdout (the numbers that matter get quoted into
 # D3-HANDOVER.md; components.py reads this directory, so it is regenerable, not source)
 prototype/mtp_delta/evidence/
+
+# raw, oversized cited artifacts and derived binaries: on disk, not in git
+archive/raw/
