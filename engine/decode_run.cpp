@@ -55,6 +55,7 @@
 #include "engine/mtp_draft.h"
 #include "engine/mtp_verify.h"
 #include "engine/mtp_accept.h"
+#include "engine/mtp_adaptive.h"   // the adaptive depth policy (`--mtp-adaptive`), header-only
 #include "engine/mtp_meter.h"
 #include "engine/prefill.h"
 #include "engine/stage_clock.h"
@@ -180,6 +181,15 @@ struct Options {
     // the per-step instruments do not own) and it refuses `--mtp-verify`, whose side pass is a 2-row body.
     int mtp_k = engine::mtpaccept::kDefaultK;
     bool mtp_k_given = false;
+    // §09 / M4: ADAPTIVE depth (`engine/mtp_adaptive.h`). Default 0 — this is a mechanism and a gate, not
+    // a decision; the main agent alone decides whether it becomes the default, from the paired A/B
+    // (`prototype/mtp_accept/ADAPTIVE.md` §6 lists the runs it needs and who takes them). On, the depth of
+    // each round is drawn from the policy's tracker instead of being fixed at `mtp_k` for the run's life:
+    // `mtp_k` becomes the CEILING and a round may run narrower or, once speculation is abandoned, not at
+    // all. Accepted only alongside `--mtp-accept`, because the policy spends what a round's verdict
+    // readback already returned and with no round there is nothing to spend.
+    int mtp_adaptive = 0;
+    bool mtp_adaptive_given = false;
     // NOTE (2026-10-25): there used to be a `mtp_span_forced` flag here, set when the accept default
     // resolved `--gdn-loop` to 1 for the WHOLE run. The requirement was the ROUND's and the forcing is now
     // in `submit_wave_body` against `decode_step.h::kMtpRoundGdnSpan`, so this file resolves no span for
@@ -752,6 +762,18 @@ Options parse_args(int argc, char** argv) {
             }
             o.mtp_k = kk;
             o.mtp_k_given = true;
+        } else if (a == "--mtp-adaptive") {
+            // Parses or throws, like the other depth knobs. `0` (the default) leaves the run's depth fixed at
+            // `--mtp-k` for its whole life, which is what every byte-compared admission in this repo was
+            // taken with; `1` lets `engine/mtp_adaptive.h` lower the depth per round, and never raise it.
+            const std::string v = next();
+            if (v != "0" && v != "1") {
+                throw std::runtime_error("--mtp-adaptive takes 1 (draw each round's depth from the"
+                                         " acceptance the rounds have already reported) or 0 (every round"
+                                         " runs at `--mtp-k`, the shipped behaviour), got '" + v + "'");
+            }
+            o.mtp_adaptive = std::atoi(v.c_str());
+            o.mtp_adaptive_given = true;
         } else if (a == "--mtp-midsplit") {
             // Parses or throws, as the other M2 knobs. It is a witness knob and nothing else: it makes
             // the probe run its body twice per anchor and byte-compare the two.
@@ -1568,6 +1590,17 @@ Options parse_args(int argc, char** argv) {
         // Echoing it would be a knob that did nothing, which is what the repo's flag rules refuse.
         throw std::runtime_error("--mtp-k says how many candidates an accept round verifies; with"
                                  " --mtp-accept 0 no round runs. Name --mtp-accept 1 with it, or drop it");
+    }
+    // ---- the adaptive depth's own refusal (`--mtp-adaptive`, `engine/mtp_adaptive.h`) ---------------
+    if (o.mtp_adaptive && !o.mtp_accept) {
+        // The policy is a rule over the acceptance a round's verdict readback already reported, so with no
+        // rounds running it has no input and no effect. Keyed on the VALUE rather than on `given`, unlike
+        // `--mtp-k`: `--mtp-adaptive 0` alongside `--mtp-accept 0` is a truthful statement (no depth policy
+        // is running), while `--mtp-adaptive 1` there is a knob that cannot do anything.
+        throw std::runtime_error("--mtp-adaptive adapts the depth of an ACCEPT round to the acceptance its"
+                                 " verdict already reported; with --mtp-accept 0 no round runs and there is"
+                                 " nothing to adapt. Name --mtp-accept 1 with it, or pass"
+                                 " --mtp-adaptive 0");
     }
     // There is deliberately NO further `--mtp-k` refusal block for --time-stages / --time-waves /
     // --session / --sizes-only / --replay / --mtp-verify, even though a k=2 round must not meet any of them
@@ -2897,6 +2930,26 @@ void print_usage(FILE* out) {
                  " cand2= cand2_pos= row2= restored_slot=` to each `ACCEPT` line, and ` k= depth1="
                  " depth1_rate= candidates_accepted=` to `MTPSTAT` — appended at the end, never inserted, so"
                  " the k=1 lines stay byte-for-byte the old ones.\n"
+                 "  --mtp-adaptive 0|1  draw each round's depth from the acceptance the rounds have already"
+                 " reported, instead of fixing it at --mtp-k for the whole run (`engine/mtp_adaptive.h`)."
+                 " Default 0, and the default is the main agent's to move, not this flag's: the mechanism"
+                 " and its gate are here, the decision is a measured one (prototype/mtp_accept/ADAPTIVE.md"
+                 " §6 lists the paired A/Bs it needs). `--mtp-k` becomes the CEILING: rounds may run"
+                 " narrower (k=1) and, if speculation is abandoned, not at all — the loop then takes its"
+                 " existing plain-step branch, which is the pre-MTP shipping path, and stays there for the"
+                 " rest of the request. The estimate is the mean tokens per step-equivalent over the last"
+                 " 32 rounds, where a round's step-equivalent is the measured cost of ITS OWN depth, so a"
+                 " mixed window compares fairly; the first decision needs 16 rounds and the sticky one 24,"
+                 " there is no re-promotion (depth is monotone, so at most two changes per request and no"
+                 " round-to-round oscillation is available), and the thresholds are 0.95 to demote and 0.90"
+                 " to abandon, both below the 1.000 a plain step scores by definition. It rides the verdict"
+                 " readback a round already pays, so it adds no device sync and no download. It changes"
+                 " GEOMETRY and never a verdict, so losslessness is its own across all three shapes. Needs"
+                 " --mtp-accept 1 (refused without it) and inherits --mtp-accept's other refusals rather"
+                 " than restating them. Prints `MTPADAPT on=1 k_start= …` once per run with every threshold"
+                 " it will apply, one `MTPADAPT round= k= est= prev_k= window_rounds= plain=` line per"
+                 " change, `MTPADAPT-PLAIN` once if it abandons, and `MTPADAPTSTAT`/`MTPADAPTATTR` beside"
+                 " `MTPSTAT` for the per-depth attribution.\n"
                  "  --mtp-sched loop|every  which round sequence --mtp-draft 1 walks. `loop` (the"
                  " default) reproduces `speccheck/mtp.py`'s `greedy_mtp(k=1)` round geometry on a plain"
                  " greedy stream — draft at q+1, next round at q+2 after an accept and q+1 after a"
@@ -4114,6 +4167,21 @@ int main(int argc, char** argv) {
         // the two are rows a part apart: the dense lane stands for the last EMITTED position (h two behind
         // it, i.e. row n_accepted-1) and the draft stands for the next one (h at row n_accepted).
         const uint16_t* draft_dense_row = nullptr;
+        // The adaptive depth's tracker, armed on the flag and only there. `--mtp-k` is its CEILING: the
+        // policy may run a round narrower than the run asked for, never wider, so `aside`'s buffers (sized
+        // for `o.mtp_k`) are large enough for every depth it can choose and the geometry echo on `MTPGEOM`
+        // keeps meaning "the widest body this run can emit" (`engine/mtp_accept.h`).
+        std::unique_ptr<engine::mtpadapt::Tracker> adapt;
+        if (o.mtp_accept && o.mtp_adaptive) {
+            adapt = std::make_unique<engine::mtpadapt::Tracker>(o.mtp_k);
+            // Printed BEFORE the first round, for the standing reason every canary here is printed before
+            // the work it describes: `on=1` has to be a statement about the run that is about to happen.
+            // It also carries every threshold the policy will apply, so the log states the rule that
+            // produced its own bits and `engine/gate.py` can parse the arithmetic off the engine instead
+            // of re-typing a constant that could drift from it.
+            std::printf("MTPADAPT %s\n", adapt->config_line().c_str());
+            std::fflush(stdout);
+        }
         if (o.mtp_accept) {
             aside = std::make_unique<engine::mtpaccept::Side>(
                 engine::mtpaccept::allocate_side(st, o.mtp_k));
@@ -4407,6 +4475,13 @@ int main(int argc, char** argv) {
         long long gen_bodies = 0;      // bodies executed: one per plain step, one per accept round
         long long gen_plain = 0;       // bodies that were single-row steps (every body, with no flag on)
         long long gen_suppressed = 0;  // an accept's bonus behind a stop: priced, not emitted
+        // The adaptive depth's own counters, kept in the driver because the driver is what knows which
+        // geometry each body ran. `MTPADAPTSTAT` prints them next to `MTPSTAT`, and `changes` is the count
+        // of `MTPADAPT` event lines this run printed — the two must agree, and the gate says so.
+        long long adapt_k2 = 0;      // rounds that ran the 3-row body (k=2)
+        long long adapt_k1 = 0;      // rounds that ran the 2-row body (k=1)
+        long long adapt_changes = 0;  // policy changes taken (monotone, so at most two per request)
+        bool adapt_said_plain = false;  // prints the abandonment once, not once per plain step
 
         int fed = 0;
         // §06.5: the first token fed here is the wave's own `y0`, produced inside the last wave row,
@@ -4468,14 +4543,24 @@ int main(int argc, char** argv) {
                 // How many draft proposals this round had to have before it could run at all: one per
                 // candidate, so a k=2 run with only its first proposal does not run a 2-row round behind
                 // the back of `--mtp-k` — it pays a plain step and says why.
-                const int need = engine::mtpaccept::kOfRows(aside ? aside->rows : 2);
+                //
+                // With `--mtp-adaptive 1` the depth is the TRACKER's, not the run's, so `need` and
+                // `round_k` are per-round quantities and a k=1 round needs one proposal where a k=2 round
+                // needs two. Flag-off this is exactly `kOfRows(aside->rows)`, i.e. today's line.
+                const int round_k = adapt ? adapt->k()
+                                          : engine::mtpaccept::kOfRows(aside->rows);
+                // `kPlain` is not a narrower round: it means the policy abandoned speculation for this
+                // request, and the loop then takes the branch it already had for "no proposal pending" —
+                // the pre-MTP shipping step, no new code path, no new numerics.
+                const bool speculate = round_k > engine::mtpadapt::kPlain;
+                const int need = round_k;
                 // Headroom first: a round appends `rows` KV lanes, and the last lane of the request has room
                 // for fewer than that. `accept_round` refuses that case (writing past `cap` is a memory
                 // fault), and a refusal thrown at the end of an otherwise good run would report a failure
                 // where the run simply ran out of context — so the driver asks before it calls, and pays a
                 // plain one-row step. Same fallback shape as "no proposal pending", for a different reason.
                 const bool room_for_round =
-                    st.prefix_len + (aside ? aside->rows : 1) <= st.cap;
+                    st.prefix_len + engine::mtpaccept::rows_of_k(round_k) <= st.cap;
                 // The meter's window covers THIS branch's whole round: the round itself, the next
                 // proposal's draft, and the run's own per-round prints. A plain one-row iteration is not a
                 // round and is counted in `plain_steps=` instead of being metered, because pricing it here
@@ -4483,8 +4568,8 @@ int main(int argc, char** argv) {
                 // is open, and it is closed on every exit path below — including the stop-token break.
                 bool meter_round = false;
                 int n_accepted = 0;     // candidates the round consumed; 0 for a plain step
-                if (pending_candidate < 0 || (need > 1 && pending2_candidate < 0) ||
-                    !room_for_round) {
+                if (!speculate || pending_candidate < 0 ||
+                    (need > 1 && pending2_candidate < 0) || !room_for_round) {
                     if (pending_candidate >= 0 && !room_for_round) {
                         std::printf("ROUND-SKIP reason=context_limit anchor=%d cap=%lld rows=%d\n",
                                     st.prefix_len, (long long)st.cap, aside ? aside->rows : 1);
@@ -4517,10 +4602,9 @@ int main(int argc, char** argv) {
                         meter->open_window();
                         meter_round = true;
                     }
-                    const engine::mtpaccept::Round ar =
-                        engine::mtpaccept::accept_round(store, st, sc, *aside, token,
-                                                       pending_candidate, pending2_candidate,
-                                                       o.mtp_route);
+                    const engine::mtpaccept::Round ar = engine::mtpaccept::accept_round(
+                        store, st, sc, *aside, round_k, token, pending_candidate,
+                        need > 1 ? pending2_candidate : -1, o.mtp_route);
                     accept_gemm_ran = engine::kernels::wave_gemm_name(ar.gemm_ran);
                     accept_scan_ran = engine::kernels::gdn_scan_name(ar.scan_ran);
                     accept_attn_wide_ran = engine::kernels::attn_wide_name(ar.attn_wide_ran);
@@ -4589,8 +4673,38 @@ int main(int argc, char** argv) {
                                         " restored_slot=%d", ar.k, ar.n_accepted, ar.hit[1],
                                         pending2_candidate, pending2_pos, ar.row_token[2],
                                         ar.restored_slot);
+                        } else if (adapt) {
+                            // The depth stamp on a k=1 round, printed ONLY with the policy armed. Without it
+                            // a k=1 line and a k=2 line are told apart by the ABSENCE of fields, which is
+                            // fine for a byte-comparison and useless for attribution: `--mtp-adaptive 1`
+                            // means the round's depth is now a per-round FACT the log has to state on every
+                            // round line, and `engine/gate.py` mirrors the policy off exactly these fields.
+                            // Flag-off this branch is unreachable, so the byte-compared k=1 line is unchanged.
+                            std::printf(" k=%d n_accepted=%d", ar.k, ar.n_accepted);
                         }
                         std::printf("\n");
+                    }
+                    // ---- the adaptive depth's one input, and its one output -------------------------
+                    // The verdict readback above is the ONLY thing the policy reads: `ar.emitted` and
+                    // `round_k` came out of the ints this round already downloaded, so the next round's
+                    // geometry is decided with no extra D2H and no extra wait
+                    // (`engine/mtp_adaptive.h`: "why no new sync"). `--mtp-adaptive 0` leaves `adapt` null
+                    // and this whole block is one pointer test, which is what keeps the shipped path's
+                    // bytes and its launch sequence untouched.
+                    if (adapt) {
+                        if (round_k >= 2) adapt_k2++; else adapt_k1++;
+                        const engine::mtpadapt::Change ch = adapt->note(round_k, ar.emitted);
+                        if (ch.fired) {
+                            adapt_changes++;
+                            // One line per POLICY CHANGE, never per round: an event an reader can point at
+                            // in the log, stamped with the round it was taken on, the depth every round from
+                            // here runs at, and the estimate that justified it. `est` is tokens per
+                            // step-equivalent, so 1.000 is break-even with a plain step by construction
+                            // (`--mtp-adaptive`'s config line echoes the thresholds it was judged against).
+                            std::printf("MTPADAPT round=%d k=%d est=%.4f prev_k=%d window_rounds=%d"
+                                        " plain=%d\n", step, ch.to, ch.est, ch.from, ch.seen,
+                                        ch.to == engine::mtpadapt::kPlain ? 1 : 0);
+                        }
                     }
                 }
                 // The next proposals: one draft call per candidate, the first with the target's final-norm
@@ -4604,65 +4718,84 @@ int main(int argc, char** argv) {
                 pending_pos = -1;
                 pending2_candidate = -1;
                 pending2_pos = -1;
-                const int tok_next = emit_tok[n_emit - 1];
-                const int draft_pos = emit_pos[n_emit - 1] + 1;
-                // The skipped lane goes in BEFORE the round's own lanes, because lane order has to stay
-                // ascending in position: the attention row treats `self_lane` (the last one) as the newest
-                // and reads everything before it.
-                if (dense_token >= 0) {
-                    const std::string lane_why = engine::mtpdraft::refusal(mtp->st);
-                    if (lane_why.empty()) {
-                        engine::mtpdraft::draft_lane(store, mtp->w, mtp->st, draft_dense_row,
-                                                     dense_token, dense_pos);
-                        if (mtp->st.lanes_max > mtp->lanes_max) mtp->lanes_max = mtp->st.lanes_max;
-                    } else {
-                        // Refused, not skipped silently: the round still runs, it just keeps the sparse
-                        // cache, and the run's rate is therefore a mixture. Printing it is the only way a
-                        // reader can tell that from the counters.
-                        std::printf("DENSE-SKIP reason=%s would_stage_for=%d\n", lane_why.c_str(),
-                                    dense_pos);
+                // The depth the NEXT round runs at, which is not necessarily the one this iteration just
+                // ran: the policy may have demoted or abandoned on the verdict it just read. The proposals
+                // drafted here are that round's, so `need_next` — not `need` — decides how many are made.
+                // With the policy off the two are the same number and every line below is what it was.
+                const int need_next = adapt
+                    ? (adapt->abandoned() ? 0 : adapt->k())
+                    : need;
+                // Abandonment means the draft block is not run at all: it exists to feed rounds, and a run
+                // that has stopped speculating would be paying draft work to propose candidates for no
+                // body. No proposal is pending after this point either, so the loop's own
+                // "no proposal pending" branch is what a plain step now takes — the pre-MTP path again.
+                if (need_next == 0) {
+                    if (!adapt_said_plain) {
+                        adapt_said_plain = true;   // once per run: an event, not a heartbeat
+                        std::printf("MTPADAPT-PLAIN reason=abandoned round=%d draft_work_stopped=%d\n",
+                                    step, 1);
                     }
-                }
-                const std::string why = engine::mtpdraft::refusal(mtp->st);
-                if (!why.empty()) {
-                    std::printf("DRAFT-SKIP reason=%s would_propose_for=%d\n", why.c_str(), draft_pos);
                 } else {
-                    // `phase=draft` is the NEXT round's proposal, charged to this round's window because
-                    // that is where it is paid for. It ends in the draft block's own blocking vocabulary
-                    // D2H, so its close is `sync_added=1` only because the meter does not want the draft's
-                    // ~2 ms head pass landing on whichever phase happens to block next.
-                    const engine::mtpmeter::PhaseGuard draft(engine::mtpmeter::kDraft);
-                    const engine::mtpdraft::Proposal p =
-                        engine::mtpdraft::draft_round(store, mtp->w, mtp->st, draft_norm_row, tok_next,
-                                                      draft_pos);
-                    pending_candidate = p.token;
-                    pending_pos = draft_pos;
-                    mtp->made++;
-                    // `lanes_max` is the census line's only evidence that the draft cache GREW, and in the
-                    // accept loop it used to stay 0 because only the side pass updated it — which made
-                    // `lanes_max=0 cap=512` a true statement about the counter and a false one about the
-                    // cache. Same high-water mark, same field, now from both callers.
-                    if (mtp->st.lanes_max > mtp->lanes_max) mtp->lanes_max = mtp->st.lanes_max;
-                    // The second proposal, if this round's geometry has one. `h` is the block's own output
-                    // row (`st.xd`), which is written at stage 14 and read here before any later call writes
-                    // it again — one stream, in issue order, so no sync is needed and none is taken (a sync
-                    // here would be a silent rate-changer, since this reads the PREVIOUS row's output). It is
-                    // counted as an extra draft ROW, not a draft round, exactly as the `--mtp-draft-k` ladder
-                    // counts its own feedback rows, so `MTPDRAFT rounds=` keeps its meaning.
-                    if (need > 1) {
-                        const std::string why2 = engine::mtpdraft::refusal(mtp->st);
-                        if (!why2.empty()) {
-                            std::printf("DRAFT-SKIP reason=%s would_propose_for=%d row=2\n",
-                                        why2.c_str(), draft_pos + 1);
+                    const int tok_next = emit_tok[n_emit - 1];
+                    const int draft_pos = emit_pos[n_emit - 1] + 1;
+                    // The skipped lane goes in BEFORE the round's own lanes, because lane order has to stay
+                    // ascending in position: the attention row treats `self_lane` (the last one) as the newest
+                    // and reads everything before it.
+                    if (dense_token >= 0) {
+                        const std::string lane_why = engine::mtpdraft::refusal(mtp->st);
+                        if (lane_why.empty()) {
+                            engine::mtpdraft::draft_lane(store, mtp->w, mtp->st, draft_dense_row,
+                                                         dense_token, dense_pos);
+                            if (mtp->st.lanes_max > mtp->lanes_max) mtp->lanes_max = mtp->st.lanes_max;
                         } else {
-                            const engine::mtpdraft::Proposal q =
-                                engine::mtpdraft::draft_round(store, mtp->w, mtp->st, mtp->st.xd,
-                                                              p.token, draft_pos + 1);
-                            pending2_candidate = q.token;
-                            pending2_pos = draft_pos + 1;
-                            mtp->extra_rows++;
-                            if (mtp->st.lanes_max > mtp->lanes_max) {
-                                mtp->lanes_max = mtp->st.lanes_max;
+                            // Refused, not skipped silently: the round still runs, it just keeps the sparse
+                            // cache, and the run's rate is therefore a mixture. Printing it is the only way a
+                            // reader can tell that from the counters.
+                            std::printf("DENSE-SKIP reason=%s would_stage_for=%d\n", lane_why.c_str(),
+                                        dense_pos);
+                        }
+                    }
+                    const std::string why = engine::mtpdraft::refusal(mtp->st);
+                    if (!why.empty()) {
+                        std::printf("DRAFT-SKIP reason=%s would_propose_for=%d\n", why.c_str(), draft_pos);
+                    } else {
+                        // `phase=draft` is the NEXT round's proposal, charged to this round's window because
+                        // that is where it is paid for. It ends in the draft block's own blocking vocabulary
+                        // D2H, so its close is `sync_added=1` only because the meter does not want the draft's
+                        // ~2 ms head pass landing on whichever phase happens to block next.
+                        const engine::mtpmeter::PhaseGuard draft(engine::mtpmeter::kDraft);
+                        const engine::mtpdraft::Proposal p =
+                            engine::mtpdraft::draft_round(store, mtp->w, mtp->st, draft_norm_row, tok_next,
+                                                          draft_pos);
+                        pending_candidate = p.token;
+                        pending_pos = draft_pos;
+                        mtp->made++;
+                        // `lanes_max` is the census line's only evidence that the draft cache GREW, and in the
+                        // accept loop it used to stay 0 because only the side pass updated it — which made
+                        // `lanes_max=0 cap=512` a true statement about the counter and a false one about the
+                        // cache. Same high-water mark, same field, now from both callers.
+                        if (mtp->st.lanes_max > mtp->lanes_max) mtp->lanes_max = mtp->st.lanes_max;
+                        // The second proposal, if this round's geometry has one. `h` is the block's own output
+                        // row (`st.xd`), which is written at stage 14 and read here before any later call writes
+                        // it again — one stream, in issue order, so no sync is needed and none is taken (a sync
+                        // here would be a silent rate-changer, since this reads the PREVIOUS row's output). It is
+                        // counted as an extra draft ROW, not a draft round, exactly as the `--mtp-draft-k` ladder
+                        // counts its own feedback rows, so `MTPDRAFT rounds=` keeps its meaning.
+                        if (need_next > 1) {
+                            const std::string why2 = engine::mtpdraft::refusal(mtp->st);
+                            if (!why2.empty()) {
+                                std::printf("DRAFT-SKIP reason=%s would_propose_for=%d row=2\n",
+                                            why2.c_str(), draft_pos + 1);
+                            } else {
+                                const engine::mtpdraft::Proposal q =
+                                    engine::mtpdraft::draft_round(store, mtp->w, mtp->st, mtp->st.xd,
+                                                                  p.token, draft_pos + 1);
+                                pending2_candidate = q.token;
+                                pending2_pos = draft_pos + 1;
+                                mtp->extra_rows++;
+                                if (mtp->st.lanes_max > mtp->lanes_max) {
+                                    mtp->lanes_max = mtp->st.lanes_max;
+                                }
                             }
                         }
                     }
@@ -4963,6 +5096,27 @@ int main(int argc, char** argv) {
                         accept_attn_wide_ran,
                         engine::mtpaccept::describe(astats).c_str());
             std::fflush(stdout);
+            // The depth attribution, on its OWN line for the same reason `MTPGEOM` is on its own line: the
+            // byte-compared admissions compare `MTPSTAT` and would see new bytes on a run whose whole claim
+            // is that nothing moved. Every number here says which geometry produced the run's bits, which is
+            // the thing a rate cannot be read without — a `mean_tokens_per_round` over a mixed population of
+            // 3-row and 2-row bodies is a mixture, and this line names the mixture.
+            if (adapt) {
+                std::printf("MTPADAPTSTAT %s\n",
+                            adapt->describe((int)gen_plain).c_str());
+                // The counters the driver kept and the ones the tracker kept answer for the same rounds, so
+                // they have to agree; a disagreement would mean a round ran at a depth neither of them was
+                // told about. Checked here, at the one place both are in scope, and printed as a field so a
+                // reader sees the check rather than trusting it.
+                const bool agree = (long long)adapt->rounds_at(2) == adapt_k2 &&
+                                   (long long)adapt->rounds_at(1) == adapt_k1 &&
+                                   adapt->changes() == adapt_changes;
+                std::printf("MTPADAPTATTR driver_k2=%lld driver_k1=%lld driver_changes=%lld"
+                            " tracker_k2=%lld tracker_k1=%lld tracker_changes=%lld agree=%d\n",
+                            adapt_k2, adapt_k1, adapt_changes, (long long)adapt->rounds_at(2),
+                            (long long)adapt->rounds_at(1), (long long)adapt->changes(),
+                            agree ? 1 : 0);
+            }
             engine::mtpaccept::free_side(*aside);
         }
         if (emit_log) std::fclose(emit_log);

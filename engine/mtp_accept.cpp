@@ -85,9 +85,28 @@ void free_side(Side& s) {
 }
 
 Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& sc, Side& side,
-                   int cur, int cand1, int cand2, engine::mtpverify::Route route) {
-    const int rows = side.rows;
-    const int k = side.k;
+                   int k, int cur, int cand1, int cand2, engine::mtpverify::Route route) {
+    // The per-round GEOMETRY, derived from the k THIS round was asked for and never from `side.rows`.
+    // `side` owns the buffers (allocated for the run's ceiling) and this block owns the widths, which is
+    // what makes one side legally serve both depths (`engine/mtp_accept.h`: "a prefix, except the slot
+    // count"). The ceiling check is a throw, not an assert: a round wider than the side would write past
+    // the logits tile and past the checkpoint, and only the caller would notice.
+    if (k < kMinK || k > side.k) {
+        throw std::runtime_error("accept_round: asked for a " + std::to_string(k) + "-candidate round on"
+                                 " a side allocated for " + std::to_string(side.k) + "; the widest round"
+                                 " a side can serve is the k it was allocated with, because the logits"
+                                 " tile, the checkpoint slots and the verdict words are all sized from it");
+    }
+    const int rows = rows_of_k(k);
+    const int words = engine::kernels::kVerdictWordsFor(rows);
+    // THE PER-ROUND CHECKPOINT VIEW, and the one piece of legality the allocation cannot express: the
+    // buffers hold the ceiling's slots, but `submit_wave_body` requires `slots == rows - 1` EXACTLY, so a
+    // k=1 round on a k=2 side has to arm one slot, not two. Slot 0 means the same thing at either width
+    // ("the state after row 0"), so sharing the buffers is correct rather than merely in-bounds.
+    DecodeScratch::GdnCheckpoint ck;
+    ck.mid_gdn = side.ck.mid_gdn;
+    ck.mid_conv = side.ck.mid_conv;
+    ck.slots = kMidSlotsFor(rows);
     if (sc.wave_rows < rows) {
         throw std::runtime_error("accept_round: the scratch is " + std::to_string(sc.wave_rows) +
                                  " rows tall and the round needs " + std::to_string(rows));
@@ -116,7 +135,6 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
                                  std::to_string(rows) + " rows is outside cap " +
                                  std::to_string(st.cap) + " — the run has reached its context limit");
     }
-
     Round r;
     r.anchor_before = anchor;
     r.rows = rows;
@@ -147,7 +165,7 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
                                  " resolved gdn_scan="
                                  + std::string(kernels::gdn_scan_name(sc.gdn_scan)));
     }
-    sc.gdn_ckpt = &side.ck;
+    sc.gdn_ckpt = &ck;
     // And the attention form, which is not route-dependent: a round's body is a speculation round whatever
     // weight walk it rides, and the wide wave block was priced at PREFILL row counts and is a loss here
     // (`decode_step.h`'s `kMtpRoundAttnWide`, whose comment carries the wall A/B numbers and the reason a
@@ -208,7 +226,7 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
         {
             const engine::mtpmeter::PhaseGuard readback(engine::mtpmeter::kReadback);
             ACCEPT_CK(hipMemcpy(side.verdict_host, side.verdict_dev,
-                                (size_t)side.words * sizeof(int), hipMemcpyDeviceToHost));
+                                (size_t)words * sizeof(int), hipMemcpyDeviceToHost));
         }
     } catch (...) {
         restore_knobs();
@@ -324,14 +342,22 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
 }
 
 void tally(Stats& s, const Side& side, const Round& r) {
+    // EVERY per-round figure comes off the ROUND, not off the side. With `--mtp-adaptive 1` one side serves
+    // both depths, so a cost read from `side.ck.slots` would bill a 2-row round the 3-row capture it did not
+    // pay for (`captured_bytes`, `status_d2h_bytes` and `split_subs` would each over-report, and the round
+    // tax that `ROUND-TAX.md` priced would stop being the round's). At flag-off and at a fixed
+    // `--mtp-k` the round's width IS the side's, so every line here is the number it was before.
+    const int slots = r.rows - 1;   // the mid-checkpoint this body actually captured
     s.rounds++;
     s.k = side.k;
+    if (s.k_low == 0 || r.k < s.k_low) s.k_low = r.k;
+    if (r.k > s.k_high) s.k_high = r.k;
     s.body_rows += r.rows;
     s.emitted += r.emitted;
     s.candidates += r.n_accepted;
-    s.captured_bytes += side.captured_bytes();
-    s.verdict_bytes += (long long)side.words * (long long)sizeof(int);
-    s.split_subs += side.subs_per_round;
+    s.captured_bytes += (long long)slots * side.slot_bytes();
+    s.verdict_bytes += (long long)engine::kernels::kVerdictWordsFor(r.rows) * (long long)sizeof(int);
+    s.split_subs += 2 * kNumGdnLayers * slots + 3;
     if (r.hit[0] != 0) s.depth1++;
     if (r.accepted) {
         s.accepted++;
@@ -379,6 +405,13 @@ std::string describe(const Stats& s) {
     if (s.k > 1) {
         os << " k=" << s.k << " depth1=" << s.depth1
            << " depth1_rate=" << s.depth1_rate() << " candidates_accepted=" << s.candidates;
+    }
+    // Appended only when the run's rounds did NOT all share one depth, which is `--mtp-adaptive 1`'s
+    // signature and never happens flag-off. Without it a reader would see `k=2` (the allocation) above a
+    // `mean_tokens_per_round` that belongs to a mixture of a 3-row and a 2-row body, and the rate-vs-cost
+    // arithmetic that judges this feature would be unreadable — the same reason `body_rows` exists at all.
+    if (s.k_low != s.k_high) {
+        os << " k_ran=" << s.k_low << ".." << s.k_high;
     }
     return os.str();
 }

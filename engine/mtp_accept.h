@@ -145,8 +145,10 @@ struct Side {
     DecodeScratch::GdnCheckpoint ck;
     // Both fields default to the SAME constant, and `rows` is DERIVED from it rather than typed: a default
     // `Side` whose `rows` and `k` disagreed would be a geometry bug that only a 3-row run could show.
-    int rows = rows_of_k(kDefaultK);  // the body width this side was allocated for: 2 (k=1) or 3 (k=2)
-    int k = kDefaultK;                // candidates per round = rows - 1
+    // With `--mtp-adaptive 1` these are the run's CEILING, not its schedule: a round of `k <= this k` runs
+    // on these buffers, and `accept_round` derives its own width/slot count from that per-round k.
+    int rows = rows_of_k(kDefaultK);  // widest body these buffers hold: 2 (k=1) or 3 (k=2)
+    int k = kDefaultK;                // candidates per round at the ceiling = rows - 1
     int words = engine::kernels::kVerdictWords;
     float* logits = nullptr;        // [rows][kVocab] F32, device
     int* verdict_dev = nullptr;     // `words` ints, device
@@ -170,9 +172,17 @@ struct Side {
     int subs_per_reject = 0;
 };
 
-// Allocate a side for a round of `k` candidates (`--mtp-k`). The width is fixed for the life of the Side
-// on purpose: a run whose geometry could change mid-flight would make `body_rows` a sum over mixed shapes
-// and the rate a mixture, which is the one thing the win bar may not be.
+// Allocate a side for rounds of AT MOST `k` candidates (`--mtp-k`, or the adaptive ceiling).
+//
+// The buffers are the widest a round of this run may EVER be, and one round may be narrower: with
+// `--mtp-adaptive 1` (`engine/mtp_adaptive.h`) a side allocated at k=2 also serves k=1 rounds, because
+// every region a round touches is a prefix of the k=2 one — one checkpoint slot is slot 0 of two and means
+// the same thing there ("the state after row 0"), the 2-row logits tile is the first two rows of the 3-row
+// tile, `kVerdictWordsFor(2) = 4` ints is the prefix of the 7 the k=2 verdict writes, and the argmax
+// partials are sized for `kernels::kMaxArgmaxRows` regardless. What is NOT a prefix is the CHECKPOINT'S
+// SLOT COUNT: `submit_wave_body` requires `slots == rows - 1` exactly, so `accept_round` arms a per-round
+// VIEW of these buffers with the slot count its own body width needs. That is the whole of what makes a
+// per-round k legal, and it is why `Side::k` reads as a ceiling rather than a schedule.
 Side allocate_side(const RequestState& st, int k = kDefaultK);
 void free_side(Side& s);
 
@@ -212,10 +222,15 @@ struct Round {
     int attn_wide_ran = 0;
 };
 
-// Run one accept round on the LIVE state. `cur` is the token the request was already going to feed, at
-// position `st.prefix_len`; `cand1` is the draft block's proposal for `st.prefix_len + 1`, and `cand2`
-// its proposal for `st.prefix_len + 2` — pass -1 for `cand2` on a 2-row (k=1) round, and it is refused on
-// a 3-row one. All must be in [0, kVocab) and the request must have room for `side.rows` more lanes.
+// Run one accept round of `k` candidates on the LIVE state. `k` is a PARAMETER rather than `side.k`
+// because the adaptive policy may draw a different depth each round; it must satisfy
+// `kMinK <= k <= side.k`, i.e. no round is wider than the side was allocated for (a wider one would write
+// past the logits tile and the checkpoint, which is why this is a check and not a comment).
+//
+// `cur` is the token the request was already going to feed, at position `st.prefix_len`; `cand1` is the
+// draft block's proposal for `st.prefix_len + 1`, and `cand2` its proposal for `st.prefix_len + 2` — pass
+// -1 for `cand2` on a 2-row (k=1) round, and it is refused on a 3-row one. All must be in [0, kVocab)
+// and the request must have room for `rows_of_k(k)` more lanes.
 //
 // Route forcing lives here, not in the driver: a body that took hipBLAS or a chunked scan would not be the
 // kernel chain the one-row decode step runs, and the whole claim that row 0 is the shipping step rests on
@@ -228,7 +243,7 @@ struct Round {
 // restores from is a one-token-step recurrence's product, so an amortised round over a non-`seq` scan
 // throws rather than restoring a state the body never wrote.
 Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& sc, Side& side,
-                   int cur, int cand1, int cand2, engine::mtpverify::Route route);
+                   int k, int cur, int cand1, int cand2, engine::mtpverify::Route route);
 
 // Round counters, printed as one line so the cost and the accept rate are both numbers a reviewer can
 // re-derive. `mean_emit` is the headline: tokens emitted per round, which is what the plan's `(1+a)`
@@ -251,9 +266,14 @@ struct Stats {
                                     // it is not a vocabulary
     long long body_rows = 0;        // rows the body was fed: `rows` per round, the `kRows` denominator
     long long split_subs = 0;       // the split's extra submissions over the whole run
-    // The geometry these counters describe, so `describe()` can say which fields mean what. A run has one
-    // width for its whole life (`allocate_side` fixes it), so this is a constant and not an average.
+    // The geometry these counters describe, so `describe()` can say which fields mean what. Without
+    // `--mtp-adaptive` a run has one width for its whole life (`allocate_side` fixes it and every round
+    // asks for it), so this is a constant and not an average. With adaptive ON the rounds may vary, so
+    // `k_min`/`k_max` record the range actually run and `describe()` says so instead of echoing the
+    // allocation (`k_low == k_high == side.k` is the flag-off case, byte for byte).
     int k = kDefaultK;
+    int k_low = kDefaultK;
+    int k_high = kDefaultK;
 
     double accept_rate() const { return rounds > 0 ? (double)accepted / (double)rounds : 0.0; }
     double depth1_rate() const { return rounds > 0 ? (double)depth1 / (double)rounds : 0.0; }
