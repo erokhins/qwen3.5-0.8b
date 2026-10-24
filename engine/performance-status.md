@@ -411,3 +411,45 @@ its unsplit arm arms no checkpoint.
 Still open, unchanged by this: the pathological 4,032 fixture is still a loss at k=2 (break-even accept p ≈ 0.40),
 so adaptive depth remains the next item; `k=3` unimplemented/ungated; `kArgmaxChunks` unswept; gate (m) depth
 bounded at 8 because `--mtp-accept` refuses `--replay`.
+
+## §9 Two §8 claims retracted, and the honest decode band (2026-10-24)
+
+§8 made two claims that do not survive measurement. Both are retracted here; the numbers that refute them are
+mine, taken in clean exclusive windows after §8 was committed.
+
+**(1) "Scoping the span raised the accept rate" — false.** It changed acceptance non-systematically. Same-fixture
+paired counts: templated 4,152 accepts **135/255** at shipping spans vs **117/255** at the whole-run pin (+18),
+but raw long 4,142 accepts **102/255** vs **106/255** (−4). Deterministic within a fixture, opposite in sign
+across fixtures — so the span used by non-round bodies changes *which* proposals the draft makes, with no
+direction to claim. The +23.44 % at templated width is therefore not a gain the scoping delivered; it is that
+fixture's luck of which rounds flipped, and the scoping's honest benefit is the prefill tax alone.
+
+**(2) §7's −27.37 % row was never a decode measurement.** `tmp/verify_body_scale/ids4032.csv` ends
+`stop=1 ended=stop_token` with `rounds=3 plain=1 accepted=0 emitted=5` — it stops at the end-of-turn token after
+**five** emitted tokens, so its `tok_per_s` is fixed cost divided by five tokens and never describes a decode
+loop. §7's break-even argument built on that row is retired with it.
+
+**The valid picture at the shipping default** (`--mtp-accept 1 --mtp-k 2`, `gdn_span_round=1 gdn_span_other=512`),
+each row a paired A/B in one lock hold, medians:
+
+| population | lanes | a | round/step | accept vs base |
+|---|---|---|---|---|
+| corpus, 12 cases, natural width | ~0.3k | 0.5269 | 1.971 | **+17.87 %** |
+| templated long prose | 4,152 | 0.529 | 1.829 | **+23.44 %** |
+| raw long prose | 4,142 | 0.400 | 1.841 | **+12.88 %** |
+| corpus case that fits 4k (1 case) | 4,032 | 0.0323 | 1.889 | **−28.28 %** |
+
+**Honest headline: +12.9 % to +23.4 % across the valid long-prose fixtures, +17.9 % on a 12-case population,
+against llama.cpp's best +13.6 % — parity to clear win.** The cost case is also now properly attributed: the loss
+appears at **near-zero accept** (a = 0.03 → −28 %), not at "pathological width". Two consequences: the default is
+only safe if acceptance is not near zero, so **adaptive depth is funded** (drop to k=1, then off, on a running
+accept estimate); and `corpus_wall_ab.py --ctx 4032` is nearly unusable as a population — the corpus prompts are
+short (narrowest 304 lanes), so asking for 12 cases at 4k yields **1** case, which the harness prints and which a
+reader would otherwise tabulate as twelve.
+
+Harness bug found while making these numbers, fixed in `9e711c7`: `corpus_wall_ab.py` indexed `per_rep` with a
+position taken from a *sorted* copy of the ratios, so the "medians" table could pair one rep's ratio with
+another's ms and tok/s; at an even `--reps` it raised `ValueError` after finishing all device work. Also: the
+harness line `parity needs a* = round/step - 1` is the **k=1** identity (`tok/round = 1 + a`). At k=2 parity needs
+`p₁ + p₂ = round/step − 1`, so comparing the printed `a` with `a*` across k is the same nested-vs-marginal
+confusion that the llama comparison already documented. Quote the adopt line, not `a*`, for k > 1.
