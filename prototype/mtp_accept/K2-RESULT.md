@@ -274,3 +274,44 @@ per-slot capture sites), `engine/decode_run.cpp` (`--mtp-k`, the rewritten accep
 draft row, the seed reserve), `engine/mtp_verify.cpp` (`cand2 = -1`), `engine/mtp_meter.cpp` (registry notes);
 `prototype/mtp_accept/m3_loop_rate.py` (the k=2 tally identity, the ladder print, and which quantity the
 pre-registered kill line judges).
+
+# §7 RESULT — the timing pass: k=2 beats llama.cpp's best MTP number
+
+Bars were fixed before any measurement: **win bar ≥ +13.6 % tok/s at the templated 4,152-lane fixture**
+(llama.cpp's `mtp2`, its best), **kill line `round/step ≥ 1.95`**. Main agent, blocking, zero subagents, each
+arm paired against base inside one lock hold, medians of 5 reps, `STEPS=256 --cap 5200`.
+
+| arm | round ms | round/step | vs base |
+|---|---|---|---|
+| k=2, sample 1 | 20.397 | 1.837 | **+16.53 %** |
+| k=2, sample 2 | 20.386 | 1.818 | **+17.76 %** |
+| k=2 + `--mtp-dense` + `--mtp-prompt-lanes 146` | 20.569 | 1.838 | **+20.68 %** |
+| k=2 on **raw** (non-stemplated) 4,142 prose | 20.353 | 1.820 | **+16.09 %** |
+
+Reference points: our k=1 after the round-tax removal was +9.75 %…+10.38 %; llama.cpp's `mtp1` is +9.5 % and
+`mtp2` **+13.6 %**; its base step is 10.865 ms against our 11.10–11.21 ms. So on matched templated prose this
+engine now speculates **~3 points better than llama.cpp's best**, and on raw prose — the check that keeps this
+honest, since llama's ladder is chat-template output — **+16.09 %** against that same +13.6 %.
+
+Kill line not hit: round/step landed at 1.818–1.838 against the 1.95 kill, so the 3-row geometry pays for
+itself. Projection versus measured, booked plainly: the funding argument said ~1.80 step and ≈ +19 %; measured
+1.82–1.84 step and +16.5/+17.8 % for k=2 alone, so the cost projection was right within 2 % and the gain
+projection was ~2 points optimistic. Adding the two draft-conditioning knobs then overran the projection at
++20.68 %, which is the ladder's own story: k=2 is starved by `n₂`, and everything that lifts the draft lifts it
+roughly twice.
+
+**Losslessness at full population, not subset** — `LOSSLESS=1 EXTRA="--mtp-k 2" prototype/mtp_accept/m3_loop_rate.sh`:
+**49/49 lines emitted stream identical to the plain greedy continuation**, 743 rounds, 1,617 emitted tokens =
+**2.176 tokens/round**, against the independently measured ladder's 2.143 (so invariant 4 holds at scale, and
+no expectation was moved). Per-depth accept histogram: rounds 0–7 → 0.615, 8–15 → 0.744, 16–31 → 0.478.
+`engine/gate.py --fixture dec8` → `ENGINE GATE PASS` on the committed tree.
+
+## What still stands between this and a default flip
+
+1. **Gate section (h).** No gate in `engine/gate.py` runs a round at all — the same gap that let a
+   route-dependent emitted-stream difference pass unnoticed for a session. Flipping `--mtp-accept` (at any k)
+   default-on without it repeats a known mistake.
+2. `kArgmaxChunks = 160` is an unswept guess.
+3. k=3 is unmeasured. Our nested ladder suggests `1+n₁+n₂+n₃ = 2.428` at maybe ~2.05 step ⇒ ≈ +18 %, i.e.
+   possibly the peak again, but the ladder decays by 0.285→0.179 per position and the draft cost is linear in
+   k, so this is a measurement, not an argument.
