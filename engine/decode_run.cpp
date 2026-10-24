@@ -97,7 +97,12 @@ struct Options {
     // Environment-defaulted like QWEN_CAST_FOLD, for the reason given there: a gate that runs the
     // shipping path must not have to remember to pass a flag, and the flag below is how an A/B names
     // the side it is on.
-    int mtp_draft = 0;
+    //
+    // ON by default since the accept loop became the default: a round verifies a PROPOSAL, so a run with
+    // the round running and no draft block has nothing to verify. It is a default, not a released
+    // requirement — `--mtp-draft 0` named alongside a round still refuses below, because turning the
+    // proposer off while asking for a verdict is a contradiction only the caller can resolve.
+    int mtp_draft = 1;
     bool mtp_draft_given = false;
     // §09 / P7: the batched 2-row VERIFY body, as a measured side pass (`engine/mtp_verify.h`). Default
     // OFF, and off means the binary does nothing differently: no allocation, no submission, no line.
@@ -148,15 +153,21 @@ struct Options {
     engine::mtpverify::Route mtp_route = engine::mtpverify::Route::kHand;
     bool mtp_route_given = false;
 
-    // §09 / M2: the ACCEPT loop (`engine/mtp_accept.h`). Speculative decoding at k = 1: the draft's
-    // proposal is verified by the 2-row body and accepted or rejected ON DEVICE, so a round emits one or
-    // two tokens. Default off, and off means this pointer is never allocated (§4g's inertness argument).
+    // §09 / M2: the ACCEPT loop (`engine/mtp_accept.h`). Speculative decoding: the draft's proposals are
+    // verified by the `k+1`-row body and accepted or rejected ON DEVICE, so a round emits 1..k+1 tokens.
+    // ON by default since `prototype/mtp_accept/K2-RESULT.md` §7 admitted the depth (the basis is
+    // `mtp_k` below and `prototype/mtp_accept/DEFAULT-ON.md`); `--mtp-accept 0` restores the pre-flip
+    // path exactly — off means this pointer is never allocated (§4g's inertness argument) and the per-step
+    // dumps (`sampled.txt`, `logits<step>.bin`) are what the run writes again.
     //
-    // It costs a third ~19.27 MiB region per request (the mid-round checkpoint) and it changes the shape
-    // of a generation step, which is why it refuses every option whose per-step semantics it does not
-    // own — see the refusals below rather than half-supporting them.
-    int mtp_accept = 0;
-    // How many CANDIDATES an accept round verifies: `--mtp-k`, default 1. The round's body is `k+1` rows,
+    // It costs one ~19.27 MiB region per candidate per request (the mid-round checkpoints) and it changes
+    // the shape of a generation step, which is why it refuses every option whose per-step semantics it
+    // does not own — see the refusals below rather than half-supporting them. A measurement tool that
+    // quietly changes what it measures is this repo's most-repeated failure, so those stay refusals: an
+    // instrumented caller names `--mtp-accept 0` and gets the per-step object back.
+    int mtp_accept = 1;
+    // How many CANDIDATES an accept round verifies: `--mtp-k`, default `engine::mtpaccept::kDefaultK` = 2.
+    // The round's body is `k+1` rows,
     // so 1 is the shipped 2-row round and 2 is `[cur at p, cand1 at p+1, cand2 at p+2]` — a longest-correct-
     // prefix accept, the semantics llama.cpp's `mtp` draft path implements
     // (`engines/llama.cpp/common/speculative.cpp:1858-1871`, with `verify_h[min(n_accepted, rows-1)]` at
@@ -165,10 +176,14 @@ struct Options {
     // candidate), and one more logits row through the batched head; the funding argument is
     // `prototype/mtp_accept/DRAFTK-RESULT.md` and the result is `K2-RESULT.md`.
     //
-    // Default-1 and refused wherever its siblings are: it inherits `--mtp-accept`'s refusals (a round shape
+    // Default-2 and refused wherever its siblings are: it inherits `--mtp-accept`'s refusals (a round shape
     // the per-step instruments do not own) and it refuses `--mtp-verify`, whose side pass is a 2-row body.
     int mtp_k = engine::mtpaccept::kDefaultK;
     bool mtp_k_given = false;
+    // True when the accept default resolved `--gdn-loop` to the one-token-step span because the caller
+    // named no span at all (the resolution sits beside the accept refusals). It exists so the mode echo can
+    // say which span the run got and who chose it: a NAMED span is never resolved, only honoured or refused.
+    bool mtp_span_forced = false;
     // B0 of `prototype/mtp_accept/BEAT-MTP.md`: the per-phase ROUND METER (`engine/mtp_meter.h`). Default
     // OFF, and off is one null-pointer read per guard object — no allocation, no sync, no line, so a
     // flag-off run is byte-identical to a binary that does not contain the instrument. On, it prints one
@@ -705,12 +720,13 @@ Options parse_args(int argc, char** argv) {
             o.mtp_verify = std::atoi(v.c_str());
             o.mtp_verify_given = true;      // the flag outranks the environment, and it is the naming
         } else if (a == "--mtp-accept") {
-            // Parses or throws. `0` is the shipping default and allocates nothing; `1` replaces the
-            // generation loop's steps with accept rounds (see `engine/mtp_accept.h`).
+            // Parses or throws. `1` is the default and replaces the generation loop's steps with accept
+            // rounds (see `engine/mtp_accept.h`); `0` allocates nothing and restores the per-step path.
             const std::string v = next();
             if (v != "0" && v != "1") {
-                throw std::runtime_error("--mtp-accept takes 0 (off, the default) or 1 (k=1 speculative"
-                                         " decoding on the draft block's proposals), got '" + v + "'");
+                throw std::runtime_error("--mtp-accept takes 1 (on, the default: speculative decoding on"
+                                         " the draft block's proposals, `--mtp-k` candidates per round) or"
+                                         " 0 (off, one plain step per token), got '" + v + "'");
             }
             o.mtp_accept = std::atoi(v.c_str());
         } else if (a == "--mtp-k") {
@@ -720,12 +736,15 @@ Options parse_args(int argc, char** argv) {
             try {
                 kk = std::stoi(v);
             } catch (const std::exception&) {
-                throw std::runtime_error("--mtp-k takes 1 (the shipped single candidate) or 2, got '" + v +
-                                         "'");
+                throw std::runtime_error("--mtp-k takes " + std::to_string(engine::mtpaccept::kMinK)
+                                         + " or " + std::to_string(engine::mtpaccept::kMaxK) + ", got '" + v
+                                         + "'");
             }
-            if (kk < engine::mtpaccept::kDefaultK || kk > engine::mtpaccept::kMaxK) {
-                throw std::runtime_error("--mtp-k takes 1 (the shipped single candidate, a 2-row body) or"
-                                         " 2 (two candidates, a 3-row body), got '" + v +
+            if (kk < engine::mtpaccept::kMinK || kk > engine::mtpaccept::kMaxK) {
+                throw std::runtime_error("--mtp-k takes " + std::to_string(engine::mtpaccept::kMinK)
+                                         + " (one candidate, a 2-row body) or "
+                                         + std::to_string(engine::mtpaccept::kMaxK)
+                                         + " (two candidates, a 3-row body, the default), got '" + v +
                                          "'. A deeper verify is unfunded: the body width, the checkpoint"
                                          " slots, the batched head's instantiation and the verdict word"
                                          " all derive from this number.");
@@ -1018,6 +1037,29 @@ Options parse_args(int argc, char** argv) {
     if (!o.sizes_only && !o.session && o.steps < 0) {
         throw std::runtime_error("decode_run needs --steps >= 0");
     }
+    // ---- the accept round's GDN span: RESOLVED when unnamed, REFUSED when contradicted ----------------
+    // `--mtp-accept` needs the one-token-step span, because the mid-round checkpoint it restores from is
+    // the state a per-token recurrence leaves behind after each row (`engine/mtp_accept.h`,
+    // `prototype/mtp_accept/ACCEPT-BUILD.md` §4b). Since accept became the default, that requirement would
+    // otherwise refuse every bare run, so an UNNAMED span resolves to 1 here — before every check that
+    // reads `gdn_loop`, so what the refusals below see is what the launchers will see, never a value the
+    // run has already overwritten. A NAMED span is different: `--gdn-loop 512 --mtp-accept 1` still exits 2,
+    // because retiring that refusal would change what the round's bits are admitted against (every wall
+    // number and every gate (m) run in this repo has span 1 throughout), and the run echoes which of the
+    // two happened on its `MTP mode=` line (`gdn_span=`, `forced_by=`).
+    //
+    // WHAT IT COSTS, stated rather than hidden: span 1 is the per-token launch form for EVERY body this run
+    // submits, including the prefill wave, and `--gdn-loop 512` became the default precisely because the
+    // span-1 form is slower there — `gdn_rec` 449.07 ms at span 1 against 266.03 ms at span 512 at 4,096
+    // lanes, the ledger row this file's `--gdn-loop` note carries, against a ~370 ms 4k prefill wall.
+    // DECODE IS UNAFFECTED BY CONSTRUCTION: `kernels.h:resolve_gdn_loop(want, rows)` collapses to 1 for a
+    // one-row body whatever `want` says, so a decode step already ran the span-1 form under the old
+    // default. The prefill cost of the new default is unmeasured and is the main agent's to take; the
+    // statement of it lives in `prototype/mtp_accept/DEFAULT-ON.md`.
+    if (o.mtp_accept && !o.gdn_loop_given) {
+        o.gdn_loop = 1;
+        o.mtp_span_forced = true;
+    }
     if (o.gdn_spell_given && o.gdn_spell != engine::kernels::GdnRecSpell::kShip &&
         o.gdn_scan == engine::kernels::GdnScan::kCollapse) {
         // The re-spelled walks belong to the SEQUENTIAL kernel; `collapse` submits
@@ -1234,9 +1276,12 @@ Options parse_args(int argc, char** argv) {
         throw std::runtime_error("--mtp-draft 1 with --time-waves: the wave clock prices a prefill pass,"
                                  " and a draft round follows a generation step, so no draft submission"
                                  " falls inside the unit it measures and the `mtp` family would be"
-                                 " declared-and-empty. Use --time-stages (with --mtp-sched every, which"
-                                 " is the uniform schedule the clock can bill); --mtp-draft prints its"
-                                 " own MTPDRAFT census line either way.");
+                                 " declared-and-empty. The draft is ON by default now, so this refusal"
+                                 " is what a bare --time-waves run meets; an instrumented run that wants"
+                                 " the pre-MTP wave bill names --mtp-draft 0 (with --mtp-accept 0), or"
+                                 " uses --time-stages with --mtp-sched every, which is the uniform"
+                                 " schedule the clock can bill; --mtp-draft prints its own MTPDRAFT"
+                                 " census line either way.");
     }
     if (o.mtp_draft && o.time_stages &&
         engine::mtpdraft::parse_schedule(o.mtp_sched) != engine::mtpdraft::Schedule::kEvery) {
@@ -1251,10 +1296,13 @@ Options parse_args(int argc, char** argv) {
         throw std::runtime_error("--time-stages bills the `mtp` family one draft round per step, which"
                                  " is the uniform shape the clock's per-step division requires;"
                                  " --mtp-sched " + o.mtp_sched +
-                                 " makes ~1 round per 1+a steps and has no integer per-step bill. Name"
-                                 " --mtp-sched every for a timed run (it is also the accept loop's own"
-                                 " shape), or drop --time-stages: the correctness pass prints its own"
-                                 " MTPDRAFT census line under either schedule.");
+                                 " makes ~1 round per 1+a steps and has no integer per-step bill. The"
+                                 " draft is ON by default now, so this is what a bare --time-stages run"
+                                 " meets: an instrumented run that wants the pre-MTP per-step bill names"
+                                 " --mtp-draft 0 (with --mtp-accept 0); a run that means to time the"
+                                 " draft names --mtp-sched every (it is also the accept loop's own"
+                                 " shape). Either way the correctness pass prints its own MTPDRAFT"
+                                 " census line under either schedule.");
     }
     if (o.mtp_sched_given && !o.mtp_draft) {
         // Naming a schedule for a path that does not run. Keyed on `given` deliberately: `loop` is the
@@ -1444,17 +1492,22 @@ Options parse_args(int argc, char** argv) {
     // Each of these is a combination whose object the round does not own, not a limitation of the round.
     if (o.mtp_accept && !o.mtp_draft) {
         throw std::runtime_error("--mtp-accept verifies a proposal; with --mtp-draft 0 there is no draft"
-                                 " block to propose one. Name --mtp-draft 1 with it (the candidate"
-                                 " source is the §09 block, never a guess)");
+                                 " block to propose one. The draft is on by default now, so this means the"
+                                 " run NAMED --mtp-draft 0 (or QWEN_MTP_DRAFT=0): name --mtp-draft 1 back"
+                                 " in, or --mtp-accept 0 to run the plain step"
+                                 " (the candidate source is the §09 block, never a guess)");
     }
     if (o.mtp_accept && o.gdn_loop != 1) {
         // Same PIN `--mtp-midsplit` states above, for the same reason: a round's rollback restores the
         // mid-round checkpoint, and that address only exists when the recurrence walks one token-step per
         // launch. A round at any other span would restore a state the body never wrote — which is a wrong
         // token stream, not a red comparison, so it is refused at the flag rather than caught later.
+        // Reachable only when the span was NAMED: an unnamed span was resolved to 1 above.
         throw std::runtime_error("--mtp-accept pins --gdn-loop 1 (the mid-round checkpoint it restores"
-                                 " from is a one-token-step recurrence's end state); run it with"
-                                 " --gdn-loop 1");
+                                 " from is a one-token-step recurrence's end state); it was given"
+                                 " --gdn-loop " + std::to_string(o.gdn_loop) + ". Drop the flag and the"
+                                 " accept default resolves the span to 1, name --gdn-loop 1, or run the"
+                                 " plain step with --mtp-accept 0");
     }
     if (o.mtp_accept && (o.session || o.sizes_only)) {
         throw std::runtime_error("--mtp-accept replaces a run's generation steps with rounds; --session"
@@ -1470,6 +1523,15 @@ Options parse_args(int argc, char** argv) {
         // A round is one or two tokens and adds the checkpoint's own submissions, so there is no step
         // record for it to replay and no §07 family to bill it to. The cost is taken as a paired
         // wall-clock A/B by whoever owns timings, not by this flag.
+        //
+        // WHICH HALF OF THIS IS REACHABLE changed with the default, and the harness records it. Because an
+        // accept run always carries the draft, and `--mtp-draft 1` is itself refused with `--time-waves`
+        // above, the `--time-waves` half of this condition can no longer be reached at all — the draft
+        // refusal always fires first. It stays, because a refusal that is merely shadowed is not a refusal
+        // that was removed, and because the message below is the one that explains the round-vs-clock
+        // boundary; `prototype/mtp_accept/default_refusals.sh` asserts the wave case by the message that
+        // ACTUALLY prints, which is the draft clock's, and says so in its own header. The `--time-stages`
+        // half is reachable through `--mtp-sched every`, which is how the harness reaches it.
         throw std::runtime_error("--mtp-accept and --time-stages/--time-waves cannot share a run: a round"
                                  " is not a step, so the clock has no per-step plan to replay or bill"
                                  " (the round prints its own MTPSTAT cost instead)");
@@ -2611,18 +2673,18 @@ void print_usage(FILE* out) {
                  " `--gdn-scan collapse` and `--gdn-norm hoist` are each REFUSED with a non-block"
                  " geom.\n"
                  "  --gdn-loop N  how many token-steps ONE `gdn_rec` launch carries (D53/D54, "
-                 "engine/gdn_rec_loop_kernels.h). `1`, the default, is the shipped one-launch-per-token"
-                 " form: 18 launches per token, 73,728 for a 4,096-token prompt, at the 1.72 us"
-                 " measured submission floor (§11). `512` walks a whole wave body inside one launch —"
-                 " 18 x bodies, i.e. 144 launches for the same prompt — with the SAME per-token"
-                 " arithmetic (the kernel is `rec_fused_kernel`'s body with the token index moved"
-                 " inside it, transcribed and checked by check_recloop_transcription.py in"
-                 " prototype/gdn_rec_isa), the same grid `<<<16,128>>>` and the same state"
-                 " addresses, so it is a launch-structure change and not a numerics one: spans"
-                 " 0/1/3/16 came back `ndiff_o_vs0=0 ndiff_state_vs0=0` (engine/performance-status.md"
-                 " §23). It is a KNOB, NOT a default — the loop bills +156 of 1,374 slots/token-step"
-                 " for recomputing its row addresses, and the paired in-situ A/B on the `gdn_rec`"
-                 " family row decides whether the default moves (D54, in D32 → D50's order). A span"
+                 "engine/gdn_rec_loop_kernels.h). `512` is the DEFAULT and walks a whole wave body"
+                 " inside one launch —"
+                 " 18 x bodies, i.e. 144 launches for a 4,096-token prompt. `1` is the"
+                 " one-launch-per-token form: 18 launches per token, 73,728 for that same prompt, at"
+                 " the 1.72 us"
+                 " measured submission floor (§11) — the form every pre-D54 number in this repo was"
+                 " taken with, and the one an accept round REQUIRES (its mid-round checkpoint is the"
+                 " state a per-token walk leaves after each row). Since `--mtp-accept` is on by"
+                 " default, an UNNAMED span resolves to 1 for such a run and the `MTP mode=` line says"
+                 " so; naming `--gdn-loop 512` alongside speculation is REFUSED, not silently"
+                 " rewritten, because the round's bits are admitted against span-1 provenance"
+                 " (`prototype/mtp_accept/DEFAULT-ON.md` states what that costs on a prefill). A span"
                  " below the body size means what it says (ceil(rows/span) launches, span-invariance"
                  " proved on CPU), and a ONE-ROW body takes the per-token loop whatever this says, so"
                  " no decode bit moves under it. Inert under `--gdn-scan collapse`, which already"
@@ -2685,8 +2747,12 @@ void print_usage(FILE* out) {
                  " `QWEN_CAST_FOLD`, and echoed as `COPYFOLD on=... plan=... folded=...`\n"
                  "  --mtp-draft 0|1  §09's MTP draft block as a READ-ONLY SIDE COMPUTATION"
                  " (`engine/mtp_draft.h`; `QWEN_MTP_DRAFT=0|1` does the same from the environment, and"
-                 " the flag outranks it). `0` is the DEFAULT and runs nothing: no allocation, no"
-                 " submission, no extra line of output, so an off run is the pre-MTP binary. `1` runs one"
+                 " the flag outranks it). `1` is the DEFAULT now because `--mtp-accept` is on by default"
+                 " and a round verifies a proposal this block makes; `0` still runs nothing — no"
+                 " allocation, no submission, no extra line of output — but it then REFUSES a run that"
+                 " left `--mtp-accept` at its default, because \"verify the proposal\" and \"make no"
+                 " proposal\" cannot both be asked of one run. Naming --mtp-accept 0 is how an"
+                 " instrumented caller asks for the pre-MTP binary. `1` runs one"
                  " draft round per generation step as the round schedule says — 13 kernel launches and 1"
                  " D2D for the block, 1 `lm_head_full_xbf16` and 1 logits D2H for the proposal, 16"
                  " submissions a round, all of it reading and writing only its own arena, cache and"
@@ -2750,21 +2816,30 @@ void print_usage(FILE* out) {
                  " timing on"
                  " purpose: it is tens of MiB of downloads per round, so `prototype/mtp_verify/ARMS.md`"
                  " runs it off and the admission gate runs it on. Refused unless --mtp-verify is on.\n"
-                 "  --mtp-accept 0|1  k=1 SPECULATIVE DECODING on the draft block's proposals"
+                 "  --mtp-accept 0|1  SPECULATIVE DECODING on the draft block's proposals"
                  " (`engine/mtp_accept.h`; `QWEN_MTP_ACCEPT=0|1` does the same from the environment)."
-                 " Default 0, and off means the side state is never allocated and the generation loop is"
+                 " Default 1, at the depth `--mtp-k` names, and the funding for the default is"
+                 " `prototype/mtp_accept/K2-RESULT.md` §7 (the arithmetic basis, in percentages and"
+                 " counts only) beside `prototype/mtp_accept/DEFAULT-ON.md` (what the flip moved). `0`"
+                 " means the side state is never allocated and the generation loop is"
                  " the one that shipped without this flag — the inertness claim is a byte-compare, not a"
-                 " band. On, one round replaces one step: the round feeds the funded 2-row body"
-                 " [cur at p, candidate at p+1], prices both norm rows in ONE pass over the tied head,"
-                 " and accepts iff argmax(row 0) == candidate, decided ON DEVICE and read back as 4 ints"
-                 " (16 B) rather than a vocabulary. An accept emits both tokens and restores nothing; a"
+                 " band. Every run prints `MTP mode=accept k=N gdn_span=S forced_by=F` or `MTP mode=off"
+                 " draft=D gdn_span=S` for exactly that reason: with the default on, silence would no"
+                 " longer mean \"off\", and `sampled.txt` versus `emitted.txt` is a different object."
+                 " On, one round replaces one step: the round feeds the funded `k+1`-row body"
+                 " [cur at p, candidate at p+1, ...], prices all its norm rows in ONE pass over the tied"
+                 " head, and accepts the longest correct prefix, decided ON DEVICE and read back as"
+                 " 3*rows-2 ints (16 B at k=1, 28 B at k=2) rather than a vocabulary. An accept emits"
+                 " its accepted candidates plus the verifier's next token and restores nothing; a"
                  " reject emits the verifier's token and restores the body's per-layer mid-round"
-                 " checkpoint (20,201,472 B in two bulk copies), which is the state a reject needs and is"
-                 " why the recurrence is pinned to --gdn-loop 1 (§4b of prototype/mtp_accept/"
-                 " ACCEPT-BUILD.md). Refused with --time-stages/--time-waves, --replay/--feed, --session,"
+                 " checkpoint (20,201,472 B per slot, in bulk copies), which is the state a reject needs"
+                 " and is why the recurrence is pinned to --gdn-loop 1 (§4b of prototype/mtp_accept/"
+                 " ACCEPT-BUILD.md): an unnamed --gdn-loop resolves to 1 for such a run and says so on"
+                 " the mode line, a NAMED one is refused rather than silently rewritten. Refused with"
+                 " --time-stages/--time-waves, --replay/--feed, --session,"
                  " --sizes-only and --mtp-verify, because a round is not a step and those flags name a"
-                 " per-step object it does not own; and it needs --mtp-draft 1, since the candidate must"
-                 " come from the draft block rather than a guess. Prints one `ACCEPT round= anchor= fed="
+                 " per-step object it does not own; and it needs the draft block, since the candidate must"
+                 " come from it rather than a guess. Prints one `ACCEPT round= anchor= fed="
                  " cand= cand_pos= accept= verifier= bonus= emitted= pos=-> restored_bytes=` line per"
                  " round, one `ACCEMIT step= pos= token=` line per EMITTED token (§07.5's stop rule runs"
                  " per emitted token, including the accepted candidate), and a closing `MTPSTAT` line"
@@ -2783,7 +2858,11 @@ void print_usage(FILE* out) {
                  " only, so there the driver pays a plain step and prints `ROUND-SKIP reason=context_limit`"
                  " rather than refusing the run.\n"
                  "  --mtp-k 1|2  how many CANDIDATES an accept round verifies (`engine/mtp_accept.h`)."
-                 " Default 1, and at 1 the round is exactly the shipped one: a 2-row body, one candidate,"
+                 " Default 2 — the measured optimum, not a preference: +16.53/+17.76 %% at 4,152 lanes"
+                 " (+20.68 %% with `--mtp-dense --mtp-prompt-lanes 146`) against k=1's +9.75…+10.38 %%,"
+                 " round/step 1.82-1.84 under the 1.95 kill line, lossless 49/49 on the full corpus"
+                 " (`prototype/mtp_accept/K2-RESULT.md` §7). At 1 the round is exactly the round this"
+                 " flag shipped with: a 2-row body, one candidate,"
                  " 4 words read back, and every compared line byte-identical to the binary that predates"
                  " this flag (`prototype/mtp_accept/K2-RESULT.md` invariant 1 is that claim and its harness)."
                  " At 2 the body is 3 rows, [cur at p, cand1 at p+1, cand2 at p+2], and the round accepts"
@@ -3699,6 +3778,22 @@ int main(int argc, char** argv) {
         // this repository changing. Printed in every mode, like LAUNCH — a statement about the code and
         // the library it is linked against, not about the run — and read by `gate.py`'s
         // `numerics_provenance_checks` against `engine/numerics_provenance.json`.
+        // WHICH MTP PATH RAN, on its own line, in EVERY run — including the ones where speculation is off.
+        // Before the default moved, a log's silence meant "off" and that was enough; now a log that prints
+        // nothing could be either path, and `sampled.txt` versus `emitted.txt` is the difference between a
+        // per-step object and a per-round one, so a reader must never infer it. `forced_by` names who chose
+        // the GDN span: the accept default (which is the penalty note above) or the caller. Field names are
+        // `mode=`/`k=`/`gdn_span=` and the values are the run's own, read from the same `Options` the
+        // launchers were built from — not from the flags, so a flag that silently did not take cannot report
+        // a path it did not run (`AGENTS.md`: assert the canary inside the window).
+        if (o.mtp_accept) {
+            std::printf("MTP mode=accept k=%d draft=%d gdn_span=%d forced_by=%s\n",
+                        o.mtp_k, o.mtp_draft, o.gdn_loop,
+                        o.mtp_span_forced ? "--mtp-accept-default" : "--gdn-loop");
+        } else {
+            std::printf("MTP mode=off draft=%d gdn_span=%d\n", o.mtp_draft, o.gdn_loop);
+        }
+        std::fflush(stdout);
         std::printf("NUMERICS wave_rows_cap=%d wave_rows=%d gemm=%s hipblas=%s attn_tile=%d"
                     " attn_touch=%d attn_fattn=%d attn_fattn_roll=%s attn_fattn_qstage=%s"
                     " attn_fattn_pvf16=%s attn_fattn_wide=%s gdn_scan=%s"

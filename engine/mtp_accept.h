@@ -87,7 +87,18 @@ constexpr int kRowsK2 = kRowsK1 + 1;
 // The widest round this build can run, and the only values `--mtp-k` may name: 1 and 2.
 constexpr int kMaxRows = kRowsK2;
 constexpr int kMaxK = kMaxRows - 1;      // at most two candidates
-constexpr int kDefaultK = 1;
+// The narrowest funded round, and the LOWER BOUND of what `--mtp-k` may name. Deliberately its own constant
+// rather than `kDefaultK`: the default moved to 2, and `--mtp-k 1` has to stay nameable or every wall A/B,
+// gate (m) run and lossless witness in this repo that names k=1 would be refused by the flag parser.
+// Two range checks read this (`decode_run.cpp`'s `--mtp-k` parse, `allocate_side`), so one edit moves both.
+constexpr int kMinK = 1;
+// The shipped round. k=2 is the measured optimum, not a guess and not a taste:
+// `prototype/mtp_accept/K2-RESULT.md` §7 — +16.53/+17.76 % at 4,152 lanes (+20.68 % with
+// `--mtp-dense --mtp-prompt-lanes 146`) against k=1's +9.75…+10.38 %, round/step 1.82-1.84 under the 1.95
+// kill line, lossless 49/49 on the full corpus, and gate (m) admits rounds at k=1 and k=2. k=3 projects
+// ≈ +18 % off the nested ladder, which is inside k=2's measured spread on a geometry that is not
+// implemented, not swept and not gated, so it is NOT the default.
+constexpr int kDefaultK = kMaxK;
 
 // The candidate count a body of `rows` rows speculates on, and the `--mtp-k` value it corresponds to.
 constexpr int kOfRows(int rows) { return rows - 1; }
@@ -112,7 +123,8 @@ constexpr int rows_of_k(int k) { return k + 1; }
 // you keep is the last row the target agreed with, and if it agreed with all of them that is the body's
 // last row, whose state is already live.
 constexpr int kVerdictRowsFor(int k) { return k + 1; }
-static_assert(kVerdictRowsFor(kDefaultK) == kRowsK1, "k=1 is the shipped 2-row round");
+static_assert(kVerdictRowsFor(kMinK) == kRowsK1, "k=1 is the 2-row round");
+static_assert(kVerdictRowsFor(kDefaultK) == kRowsK2, "the default round is the 3-row k=2 round");
 static_assert(kVerdictRowsFor(2) == kRowsK2, "k=2 is the 3-row round");
 // A mid-checkpoint slot per row except the last (`decode_step.h`'s rule), stated once so the side, the
 // body and the rollback cannot each invent their own count.
@@ -128,8 +140,10 @@ struct Side {
     // `ck.slots` is set by `allocate_side` and `submit_wave_body` refuses a body whose row count does not
     // match it, so the buffer count and the geometry are one fact.
     DecodeScratch::GdnCheckpoint ck;
-    int rows = kRowsK1;           // the body width this side was allocated for: 2 (k=1) or 3 (k=2)
-    int k = kDefaultK;            // candidates per round = rows - 1
+    // Both fields default to the SAME constant, and `rows` is DERIVED from it rather than typed: a default
+    // `Side` whose `rows` and `k` disagreed would be a geometry bug that only a 3-row run could show.
+    int rows = rows_of_k(kDefaultK);  // the body width this side was allocated for: 2 (k=1) or 3 (k=2)
+    int k = kDefaultK;                // candidates per round = rows - 1
     int words = engine::kernels::kVerdictWords;
     float* logits = nullptr;        // [rows][kVocab] F32, device
     int* verdict_dev = nullptr;     // `words` ints, device
@@ -161,7 +175,7 @@ void free_side(Side& s);
 
 // One round's result, as the driver needs it.
 struct Round {
-    int rows = kRowsK1;
+    int rows = rows_of_k(kDefaultK);
     int k = kDefaultK;
     // The device verdict, unpacked. `row_token[i]` is row i's argmax (§03.4's rule, on device) and
     // `hit[i]` is the device's `row_token[i] == cand(i+1)`; `n_accepted` is the leading run of hits,

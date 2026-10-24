@@ -33,9 +33,10 @@ constexpr const char* kHead = "lm_head.weight";   // the tied table, as `decode_
 }  // namespace
 
 Side allocate_side(const RequestState& st, int k) {
-    if (k < kDefaultK || k > kMaxK) {
+    if (k < kMinK || k > kMaxK) {
         throw std::runtime_error("allocate_side: --mtp-k " + std::to_string(k) + " is not a funded"
-                                 " width (1 or 2); the body width, the checkpoint slot count and the"
+                                 " width (" + std::to_string(kMinK) + " or " + std::to_string(kMaxK) +
+                                 "); the body width, the checkpoint slot count and the"
                                  " verdict word all derive from it, so an unfunded value is not a"
                                  " wider round but an unallocated one");
     }
