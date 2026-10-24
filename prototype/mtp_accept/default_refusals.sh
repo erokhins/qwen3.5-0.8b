@@ -24,6 +24,13 @@
 # the same requirement kept on purpose: that probe byte-compares a split body against an UNSPLIT one, and the
 # unsplit side arms no checkpoint, so nothing forces it and the flag still has to.
 #
+# CORRECTED AGAIN 2026-10-25 (`prototype/mtp_accept/ADAPTIVE.md` §7, `DEFAULT-ON.md` §8). The adaptive depth
+# became the shipping default, so its three `silent` cases — which proved default-OFF by the ABSENCE of the
+# policy's config line — are now `runs` cases asserting its PRESENCE on a bare run, at the default depth and
+# at a k=1 ceiling. `silent` did not leave the file: it judges the NAMED-off arms (`--mtp-adaptive 0`,
+# `QWEN_MTP_ADAPTIVE=0`, and a run with no round at all), which is the half the flag-off control depends on
+# and the half a presence-only battery could not see.
+#
 # Usage: prototype/mtp_accept/default_refusals.sh [path/to/decode_run]
 set -uo pipefail
 
@@ -99,12 +106,33 @@ env_runs() {
   pass=$((pass+1))
 }
 
-# silent CASE-NAME ABSENT-NEEDLE [args...] — must exit 0 AND must NOT print the needle. This is the only
-# shape that can admit a DEFAULT-OFF flag: `runs` proves a run happened, and a policy that armed itself on a
-# run that never asked would have happened too. The absence of the policy's own config line is what "default
-# 0" claims in the log, and a default that regressed to ON would change every shipping run by changing no
-# flag at all — which is the one thing this flag may not do until the main agent says so
-# (`prototype/mtp_accept/ADAPTIVE.md` §6 lists who decides what).
+# env_silent CASE-NAME ABSENT-NEEDLE ENVVAR=VALUE [args...] — the environment's half of the OFF side. The
+# env names the knob just as the flag does, and a control arm that set `QWEN_MTP_ADAPTIVE=0` while the binary
+# silently kept the policy would print a rate for a configuration that never ran.
+env_silent() {
+  local name="$1"; shift
+  local needle="$1"; shift
+  local assignment="$1"; shift
+  local out rc
+  out="$(env "$assignment" "$BIN" --model "$MODEL" "$@" 2>&1)"; rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "FAIL  $name: expected rc=0, got rc=$rc: $(head -1 <<<"$out")"; fail=$((fail+1)); return
+  fi
+  if [[ "$out" == *"$needle"* ]]; then
+    echo "FAIL  $name: rc=0 but the run printed '$needle' although $assignment named it off"
+    fail=$((fail+1)); return
+  fi
+  echo "ok    $name: rc=0 and no '$needle' line under $assignment"
+  pass=$((pass+1))
+}
+
+# silent CASE-NAME ABSENT-NEEDLE [args...] — must exit 0 AND must NOT print the needle. This is the shape
+# that admits a DEFAULT-OFF flag, and since 2026-10-25 it admits only the arms that are named off: the
+# adaptive policy is ON by default now, so ABSENCE proves "the caller named `--mtp-adaptive 0` and the engine
+# honoured it" and presence proves "the default armed it" (`runs` cases below). Keeping both shapes is what
+# keeps the flag honest in either direction: a battery that asserted absence by default is a dead gate that
+# goes red on the correct build, and one that asserted only presence could not see `--mtp-adaptive 0` stop
+# being honoured (`prototype/mtp_accept/ADAPTIVE.md` §7 owns the flip and its measurements).
 silent() {
   local name="$1"; shift
   local needle="$1"; shift
@@ -114,11 +142,12 @@ silent() {
     echo "FAIL  $name: expected rc=0, got rc=$rc: $(head -1 <<<"$out")"; fail=$((fail+1)); return
   fi
   if [[ "$out" == *"$needle"* ]]; then
-    echo "FAIL  $name: rc=0 but the run printed '$needle', so the policy armed on a run that never"
-    echo "        asked for it (the default moved): $(grep -m1 -F "$needle" <<<"$out" | cut -c1-140)"
+    echo "FAIL  $name: rc=0 but the run printed '$needle', so the policy armed on a run whose"
+    echo "        caller named it off: $(grep -m1 -F "$needle" <<<"$out" | cut -c1-140)"
     fail=$((fail+1)); return
   fi
-  echo "ok    $name: rc=0 and no '$needle' line — the default is off, and the log is what proves it"
+  echo "ok    $name: rc=0 and no '$needle' line — the caller named the policy off, and the log is what"
+  echo "        proves it honoured that (a silent run is the only witness an off arm leaves)"
   pass=$((pass+1))
 }
 
@@ -174,11 +203,14 @@ env_runs "QWEN_MTP_ACCEPT=0 at the default k" "MTP mode=off draft=1" QWEN_MTP_AC
 env_runs "QWEN_MTP_DRAFT=0 alone refuses" "there is no draft block" QWEN_MTP_DRAFT=0 --ids "$IDS" --steps 1
 env_runs "QWEN_MTP_DRAFT=0 with accept off runs" "MTP mode=off draft=0" QWEN_MTP_DRAFT=0 --ids "$IDS" --steps 0 --mtp-accept 0
 echo
-echo "-- the adaptive depth: --mtp-adaptive (engine/mtp_adaptive.h), default OFF --"
+echo "-- the adaptive depth: --mtp-adaptive (engine/mtp_adaptive.h), ON by default whenever a round runs --"
 # The refusal that defines the flag. The policy consumes the verdict readback a ROUND already pays, so with
 # no round running it has no input and no effect; it is keyed on the VALUE rather than on `given`, because
 # `--mtp-adaptive 0 --mtp-accept 0` is a truthful pair that must run (unlike `--mtp-k`, which is keyed on
-# `given` because naming a depth you never run is a knob that does nothing).
+# `given` because naming a depth you never run is a knob that does nothing). Note that the DEFAULT now
+# follows `--mtp-accept` rather than being a flat 1: `parse_args` resolves an unnamed policy to the accept
+# flag, so a bare `--mtp-accept 0` run is a run with no policy and no refusal, and this refusal is reached
+# only by an explicit ask — which is the case worth refusing and the one asserted here.
 refused "adaptive with no round running" "--mtp-adaptive adapts the depth" --ids "$IDS" --steps 1 --mtp-accept 0 --mtp-adaptive 1
 refused "adaptive is a 0/1 switch"      "--mtp-adaptive takes 1"          --ids "$IDS" --steps 1 --mtp-adaptive 2
 # The per-step instruments. These refuse for the ROUND's sake, not the policy's — the policy adds no
@@ -200,11 +232,24 @@ runs "adaptive on states its policy"     "MTPADAPT on=1 k_start=2"        --ids 
 runs "adaptive at a k=1 ceiling"         "MTPADAPT on=1 k_start=1"        --ids "$IDS" --steps 0 --mtp-adaptive 1 --mtp-k 1
 runs "adaptive leaves the geometry echo alone" "MTPGEOM k=2 rows=3 mid_slots=2" --ids "$IDS" --steps 0 --mtp-adaptive 1
 runs "adaptive echoes no re-promotion"   "re_promote=0"                   --ids "$IDS" --steps 0 --mtp-adaptive 1
-# And the default, proved by ABSENCE rather than asserted by prose. Three spellings, because the interesting
-# failures are different: a bare run, an explicit 0, and an explicit accept run at the default depth.
-silent "the DEFAULT runs no policy"              "MTPADAPT"          --ids "$IDS" --steps 0
+# THE DEFAULT, proved by PRESENCE. These three cases used to be `silent` cases proving the default was OFF,
+# and a battery asserting the old default is worse than no battery: it reddens the correct build and greens
+# the regressed one. The flip (`prototype/mtp_accept/ADAPTIVE.md` §7) makes the policy ship, so all three now
+# assert what the run PRINTS, at three different depths and by three different routes to them, because the
+# interesting regressions differ: a bare run (the shipping path), an explicit 1 at the default depth, and an
+# explicit 1 at a k=1 ceiling — where the policy is armed but may only abandon, never widen.
+runs "the DEFAULT arms the policy"        "MTPADAPT on=1 k_start=2"       --ids "$IDS" --steps 0
+runs "the DEFAULT echoes adaptive=on"     "adaptive=on"                   --ids "$IDS" --steps 0
+runs "an explicit --mtp-adaptive 1 is the same shape" "MTPADAPT on=1 k_start=2" --ids "$IDS" --steps 0 --mtp-adaptive 1
+runs "a k=1 default arms the policy at that ceiling" "MTPADAPT on=1 k_start=1"  --ids "$IDS" --steps 0 --mtp-k 1
+# And the OFF side, still proved by ABSENCE, because "nameable and honouring every existing path" is a claim
+# about the flag-off arm and the log is the only witness it leaves. The mode echo says `adaptive=off` so a
+# reader of an old log can still tell a static k=2 run from an adaptive one that never fired — with the
+# policy on by default, the ABSENCE of an event line no longer distinguishes them.
 silent "an explicit --mtp-adaptive 0 is silent"  "MTPADAPT"          --ids "$IDS" --steps 0 --mtp-adaptive 0
-silent "no policy line on a plain accept run"    "MTPADAPT"          --ids "$IDS" --steps 0 --mtp-accept 1 --mtp-k 1
+runs "an explicit --mtp-adaptive 0 echoes adaptive=off" "adaptive=off"   --ids "$IDS" --steps 0 --mtp-adaptive 0
+env_silent "QWEN_MTP_ADAPTIVE=0 is silent" "MTPADAPT" QWEN_MTP_ADAPTIVE=0 --ids "$IDS" --steps 0
+silent "no round, no policy line"               "MTPADAPT"          --ids "$IDS" --steps 0 --mtp-accept 0
 echo
 echo "== $pass ok, $fail FAIL"
 [[ $fail -eq 0 ]] || exit 1
