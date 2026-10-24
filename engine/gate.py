@@ -6758,7 +6758,9 @@ def selftest_mtp_round() -> list[str]:
     #        `loose` — top-1 40.5 over a body of 40.0s: margin 0.5 against a licensed element error of
     #                  0.05 x mean|pin| ≈ 1.0, so the pin cannot decide and any body id is a leader;
     #        `tight` — top-1 44.0 over the same body: margin 4.0 ≈ 16 BF16 ULP, outside the licensed error
-    #                  and outside the room rule's 0.10 ULP, so the pin decided.
+    #                  and outside the room rule's line (`CASCADE_BAND["flip_room_max_ulp"]`, cited by
+    #                  name because a hard-coded copy of a band value rots the day the band moves), so the
+    #                  pin decided.
     #      Values are BF16-exact on purpose: the slack reader prices the pin in its own format, and an
     #      off-grid value would make the case measure the reader's rounding instead of the rule.
     def pin_row(top1_val: float, top2_val: float) -> np.ndarray:
