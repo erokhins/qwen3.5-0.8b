@@ -26,7 +26,7 @@ ARMS="w512 512 0 -   w512 512 1 (2,1,16)   w2048 2048 1 (2,1,64)   w2048 2048 0 
 
 run() {   # run <bin> <rows> <wide> <want_grid> <lanes> -> ms
   local bin="$OUT/decode_run.$1" rows="$2" wide="$3" want="$4" lanes="$5"
-  "$bin" --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$lanes.txt" --steps 1 --wave-rows "$rows" \
+  "$bin" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$lanes.txt" --steps 1 --wave-rows "$rows" \
          --attn-fattn 1 --attn-fattn-wide "$wide" --out "$OUT/tmpout" > "$OUT/run.log" 2>&1 \
       || fail "run $1 rows=$rows wide=$wide lanes=$lanes rc=$?"
   local cap capwant=fattn got

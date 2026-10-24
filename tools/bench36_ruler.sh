@@ -20,7 +20,7 @@ echo "CLK@start: $(clk)"
 for R in $(seq 1 "$REPS"); do
     sleep 10
     echo "CLK@rep$R pre: $(clk)"
-    "$BIN" --model "$MODEL" --ids "$IDS" --steps 0 --time-waves --gemm lt \
+    "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$IDS" --steps 0 --time-waves --gemm lt \
         --gemm-pins all --gdn-loop 512 --out "$OUT/r$R" > "$OUT/r$R.log" 2>&1 \
         || { echo "ABORT: rep $R did not finish"; tools/gpu_lock.sh release "$TAG"; exit 1; }
     echo "CLK@rep$R post: $(clk)"

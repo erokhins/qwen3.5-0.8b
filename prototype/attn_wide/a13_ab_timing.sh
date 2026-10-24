@@ -32,7 +32,7 @@ want_form() { case "$1" in 0) echo - ;; 1) echo wide128 ;; 2) echo wide128llama 
 
 run() {   # run <knob> <lanes> -> ms ; appends the canary fields to $OUT/canaries.txt
   local k="$1" lanes="$2" log="$OUT/run_${k}_${lanes}.log"
-  "$BIN" --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$lanes.txt" --steps 1 \
+  "$BIN" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$lanes.txt" --steps 1 \
          --attn-fattn 1 --attn-fattn-wide "$k" --out "$OUT/tmpout" > "$log" 2>&1 \
       || fail "knob=$k lanes=$lanes rc=$? (see $log)"
   local core form scratch prev_scratch

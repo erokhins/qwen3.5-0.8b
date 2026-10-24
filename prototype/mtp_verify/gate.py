@@ -184,7 +184,7 @@ def run(binary: Path, model: str, ids_file: Path, steps: int, out: Path, extra: 
         label: str, env: dict | None = None) -> str:
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True, exist_ok=True)
-    cmd = [str(binary), "--model", model, "--ids-file", str(ids_file), "--steps", str(steps),
+    cmd = [str(binary), "--mtp-accept", "0", "--mtp-draft", "0", "--model", model, "--ids-file", str(ids_file), "--steps", str(steps),
            "--out", str(out), "--state-fp"] + extra
     shown = " ".join([f"{k}={v}" for k, v in (env or {}).items()] + cmd)
     print(f"  $ {shown}")

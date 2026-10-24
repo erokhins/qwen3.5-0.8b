@@ -80,7 +80,7 @@ def run_one(bin_path, model, ids, shape, side, out, log):
     inertness leg fail for the wrong reason, which is the difference between a refusal and a test.
     """
     rows, loop = shape
-    cmd = [str(bin_path), "--model", str(model), "--ids", ids, "--steps", "0",
+    cmd = [str(bin_path), "--mtp-accept", "0", "--mtp-draft", "0", "--model", str(model), "--ids", ids, "--steps", "0",
            "--prefill-logits", "all", "--state-fp",
            "--wave-rows", str(rows), "--gdn-loop", str(loop), "--out", str(out)]
     if side != "base":
@@ -149,7 +149,7 @@ def base_rejects_reg16(base_bin, model) -> bool:
     ACCEPTS `reg16` is not a pre-G4 tree, and byte-identity between it and the new default would be a
     tautology rather than a proof — AGENTS.md's "a check whose input can silently fail to arrive".
     """
-    probe = subprocess.run([str(ROOT / base_bin), "--model", str(ROOT / model), "--ids", "1,2,3",
+    probe = subprocess.run([str(ROOT / base_bin), "--mtp-accept", "0", "--mtp-draft", "0", "--model", str(ROOT / model), "--ids", "1,2,3",
                             "--steps", "0", "--gdn-geom", "reg16"],
                            capture_output=True, text=True)
     return probe.returncode != 0 and "--gdn-geom" in (probe.stdout + probe.stderr)
@@ -175,7 +175,7 @@ def sampled_ids(run_dir: Path):
 
 def run_steps(bin_path, model, ids, shape, side, out, log, steps):
     rows, loop = shape
-    cmd = [str(bin_path), "--model", str(model), "--ids", ids, "--steps", str(steps),
+    cmd = [str(bin_path), "--mtp-accept", "0", "--mtp-draft", "0", "--model", str(model), "--ids", ids, "--steps", str(steps),
            "--state-fp", "--wave-rows", str(rows), "--gdn-loop", str(loop), "--out", str(out)]
     if side != "base":
         cmd += ["--gdn-geom", side]

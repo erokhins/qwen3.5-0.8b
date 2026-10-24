@@ -50,8 +50,12 @@ def dec_fields(line: str) -> dict:
 
 def run(binary: str, model: str, ids: pathlib.Path, out: pathlib.Path, extra: list[str]):
     out.mkdir(parents=True, exist_ok=True)
-    cmd = [binary, "--model", model, "--ids-file", str(ids), "--gdn-loop", "1", "--no-stop",
+    cmd = [binary, "--mtp-accept", "0", "--mtp-draft", "0", "--model", model,
+           "--ids-file", str(ids), "--gdn-loop", "1", "--no-stop",
            "--out", str(out)] + extra
+    # The pin is on the shared shape, not on the base arm: the accept arm names `--mtp-accept 1` in `extra`
+    # and the last name wins, so `base` stays a plain-step run after the default flip and the
+    # `base ran rounds` guard below keeps its teeth instead of firing on every case.
     p = subprocess.run(cmd, capture_output=True, text=True)
     d = None
     for line in (p.stdout + p.stderr).splitlines():

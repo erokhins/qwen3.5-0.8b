@@ -11,7 +11,7 @@ work=${1:?workdir}; tag=${2:?pert tag}; shift 2
 cd "$root"
 run() {  # run <csv-stem> <outtag>
   stem=$1; out=$2; shift 2          # shift, or "$@" below re-feeds this function's own name to the binary
-  if ! ./engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file "$work/$stem.csv" \
+  if ! ./engine/build/decode_run --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$work/$stem.csv" \
         --steps 0 --prefill-logits all --dump-attn-rows --out "$work/dump-$out" "$@" \
         > "$work/dump-$out.log" 2>&1; then
     echo "RUN FAILED $out"; sed -n '1,3p' "$work/dump-$out.log"; return 1

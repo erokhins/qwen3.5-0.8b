@@ -201,7 +201,7 @@ PYIDS
         || fail "the numerics id file does not hold 640 ids"
     for SIDE in base single two; do
         BINX=$BIN_NEW; [ "$SIDE" = base ] && BINX=$BIN_OLD
-        "$BINX" --model "$MODEL" --ids "$(cat "$OUT/ids640.txt")" --steps 0 \
+        "$BINX" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$OUT/ids640.txt")" --steps 0 \
             --prefill-logits all --state-fp $(roll_of "$SIDE") --out "$OUT/bi_$SIDE" \
             > "$OUT/bi_$SIDE.log" 2>&1 || fail "numerics leg: $SIDE did not finish"
     done
@@ -228,7 +228,7 @@ PYIDS
         for SIDE in base single two; do
             sleep 5
             BINX=$BIN_NEW; [ "$SIDE" = base ] && BINX=$BIN_OLD
-            "$BINX" --model "$MODEL" --ids "$(cat "$IDS4096")" $ARGS $(roll_of "$SIDE") \
+            "$BINX" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$IDS4096")" $ARGS $(roll_of "$SIDE") \
                 --out "$OUT/$(tag_of "$SIDE")_$R" > "$OUT/$(tag_of "$SIDE")_$R.log" 2>&1 \
                 || fail "$SIDE run rep=$R did not finish"
         done
@@ -284,7 +284,7 @@ PYIDS
             sleep 5
             BINX=$BIN_NEW; [ "$SIDE" = base ] && BINX=$BIN_OLD
             "$PY" tools/prefill_kernel_trace.py --waves 8 --out "$OUT/trace_$(tag_of "$SIDE")_$R" -- \
-                "$BINX" --model "$MODEL" --ids "$(cat "$IDS4096")" $TRACE_ARGS $(roll_of "$SIDE") \
+                "$BINX" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$IDS4096")" $TRACE_ARGS $(roll_of "$SIDE") \
                 --out "$OUT/trace_$(tag_of "$SIDE")_${R}_out" \
                 > "$OUT/trace_$(tag_of "$SIDE")_$R.log" 2>&1 \
                 || fail "traced leg: the $SIDE rep=$R traced run did not finish"
@@ -304,7 +304,7 @@ PYIDS
             for SIDE in base single two; do
                 sleep 5
                 BINX=$BIN_NEW; [ "$SIDE" = base ] && BINX=$BIN_OLD
-                "$BINX" --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS $(roll_of "$SIDE") \
+                "$BINX" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS $(roll_of "$SIDE") \
                     --out "$OUT/wide${WID}_$(tag_of "$SIDE")_$R" \
                     > "$OUT/wide${WID}_$(tag_of "$SIDE")_$R.log" 2>&1 \
                     || fail "wide leg $WID: $SIDE rep=$R did not finish"

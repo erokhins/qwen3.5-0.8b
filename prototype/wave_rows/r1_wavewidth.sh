@@ -31,7 +31,7 @@ ARMS="w512:512 w1024:1024 w2048:2048 w2048c:512"
 run() {   # run <label> <wave_rows> <lanes>
   local bin="$OUT/decode_run.$1" rows="$2" lanes="$3" cap="${1#w}"
   [ "$1" = "w2048c" ] && { bin="$OUT/decode_run.w2048"; cap=2048; }
-  "$bin" --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$lanes.txt" --steps 1 \
+  "$bin" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$lanes.txt" --steps 1 \
          --wave-rows "$rows" --out "$OUT/tmpout" > "$OUT/run.log" 2>&1 || fail "run $1 rows=$rows lanes=$lanes rc=$?"
   # TWO canaries, both read off the run's own lines, before the number is kept:
   #   `NUMERICS wave_rows_cap=` is compiled into the binary, so it is what distinguishes the three

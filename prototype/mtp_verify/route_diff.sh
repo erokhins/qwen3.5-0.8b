@@ -49,7 +49,7 @@ arm() { # $1 width-namespace $2 label $3 ids-file $4 steps $5 extra
   local spec="$1" label="$2" ids="$3" steps="$4" extra="$5" d
   d="$OUT/$spec/$label"
   rm -rf "$d"; mkdir -p "$d"
-  "$BIN" --model "$MODEL" --ids-file "$ids" --steps "$steps" --out "$d" --no-stop --gdn-loop 1 \
+  "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$ids" --steps "$steps" --out "$d" --no-stop --gdn-loop 1 \
       $extra > "$d/stdout.txt" 2>&1 || { echo "ABORT: $label run failed (see $d/stdout.txt)"; return 1; }
   echo "$d"
 }

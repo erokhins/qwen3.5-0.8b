@@ -13,7 +13,7 @@ TAG=${TAG:-a12-why-cap}
 LANES=${LANES:-16384}
 fail() { echo "ABORT: $*" >&2; tools/gpu_lock.sh release "$TAG" >/dev/null 2>&1; exit 1; }
 run() {  # run <wide> <cap> -> ms_total
-  "$BIN" --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$LANES.txt" --steps 1 --attn-fattn 1 \
+  "$BIN" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$LANES.txt" --steps 1 --attn-fattn 1 \
          --attn-fattn-wide "$1" --attn-split-cap "$2" --out "$OUT/tmpout" > "$OUT/cap.log" 2>&1 \
       || fail "wide=$1 cap=$2 rc=$?"
   grep -E "^RESULT" "$OUT/cap.log" | sed -E 's/.*ms_total=([0-9.]+).*/\1/'

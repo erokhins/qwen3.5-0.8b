@@ -79,7 +79,7 @@ def drive(args) -> Path:
     if not binary.exists():
         raise SystemExit(f"corpus_freerun: engine binary {binary} missing — run engine/build.sh")
     proc = subprocess.Popen(
-        [str(binary), "--model", str(resolve(args.model)), "--session"],
+        [str(binary), "--mtp-accept", "0", "--mtp-draft", "0", "--model", str(resolve(args.model)), "--session"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
     try:
         return drive_prompts(args, ref, prompts, steps, proc)

@@ -65,7 +65,7 @@ STATEFP_RE = re.compile(r"^STATEFP phase=(\S+) family=(\S+) row=(\d+) layer=(\d+
 
 def run_one(bin_path, model, ids, shape, side, out, log):
     rows, loop = shape
-    cmd = [str(bin_path), "--model", str(model), "--ids", ids, "--steps", "0",
+    cmd = [str(bin_path), "--mtp-accept", "0", "--mtp-draft", "0", "--model", str(model), "--ids", ids, "--steps", "0",
            "--prefill-logits", "all", "--state-fp",
            "--wave-rows", str(rows), "--gdn-loop", str(loop),
            "--gdn-geom", side, "--out", str(out)]

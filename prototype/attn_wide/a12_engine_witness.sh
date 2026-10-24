@@ -44,11 +44,11 @@ echo "util at acquire: $(tools/gpu_lock.sh util)   (recorded for attribution, NO
 for arm in A B C; do rm -rf "$OUT/$arm"; mkdir -p "$OUT/$arm"; done
 
 echo "=== A: pre-change binary, default flags ==="
-"$PRE" --model "$MODEL" --ids "$IDS" --steps "$STEPS" --out "$OUT/A" > "$OUT/A/log.txt" 2>&1; echo "A exit=$?"
+"$PRE" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$IDS" --steps "$STEPS" --out "$OUT/A" > "$OUT/A/log.txt" 2>&1; echo "A exit=$?"
 echo "=== B: post-change binary, default flags (knob 0) ==="
-"$NEW" --model "$MODEL" --ids "$IDS" --steps "$STEPS" --out "$OUT/B" > "$OUT/B/log.txt" 2>&1; echo "B exit=$?"
+"$NEW" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$IDS" --steps "$STEPS" --out "$OUT/B" > "$OUT/B/log.txt" 2>&1; echo "B exit=$?"
 echo "=== C: post-change binary, --attn-fattn-wide 1 (knob 1) ==="
-"$NEW" --model "$MODEL" --ids "$IDS" --steps "$STEPS" --out "$OUT/C" --attn-fattn-wide 1 > "$OUT/C/log.txt" 2>&1; echo "C exit=$?"
+"$NEW" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$IDS" --steps "$STEPS" --out "$OUT/C" --attn-fattn-wide 1 > "$OUT/C/log.txt" 2>&1; echo "C exit=$?"
 
 echo "=== knob-0 inertness: every dumped file, A vs B ==="
 DIFFS=0; N=0

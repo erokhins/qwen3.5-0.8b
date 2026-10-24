@@ -77,10 +77,10 @@ for W in $WIDTHS; do
   IDS_W=$( [ "$W" = "4096" ] && printf '%s' "$IDS" || seq -s, 1 "$W" )
   for R in $(seq 1 "$REPS"); do
     sleep 5
-    "$BIN_OLD" --model "$MODEL" --ids "$IDS_W" $OLDARGS --out "$OUT/o_${W}_$R" > "$OUT/o_${W}_$R.log" 2>&1 \
+    "$BIN_OLD" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$IDS_W" $OLDARGS --out "$OUT/o_${W}_$R" > "$OUT/o_${W}_$R.log" 2>&1 \
         || fail "baseline run W=$W rep=$R did not finish"
     sleep 5
-    "$BIN_NEW" --model "$MODEL" --ids "$IDS_W" $COMMON --out "$OUT/n_${W}_$R" > "$OUT/n_${W}_$R.log" 2>&1 \
+    "$BIN_NEW" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$IDS_W" $COMMON --out "$OUT/n_${W}_$R" > "$OUT/n_${W}_$R.log" 2>&1 \
         || fail "shipping run W=$W rep=$R did not finish"
     # canary B: the shipping side must say which form it ran
     grep -q "ATTN_FATTN" "$OUT/n_${W}_$R.log" || fail "canary B: shipping log W=$W rep=$R has no ATTN_FATTN line; not timed"

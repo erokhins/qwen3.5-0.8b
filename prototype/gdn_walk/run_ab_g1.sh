@@ -80,7 +80,7 @@ for SIDE in base newinline newhoist; do
         newinline) BIN=$BIN_NEW;   NORM="--gdn-norm inline" ;;
         newhoist)  BIN=$BIN_NEW;   NORM="--gdn-norm hoist" ;;
     esac
-    "$BIN" --model "$MODEL" --ids "$(cat "$GATE_IDS")" --steps 0 --prefill-logits all --state-fp \
+    "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$GATE_IDS")" --steps 0 --prefill-logits all --state-fp \
         $NORM --wave-rows 16 --gdn-loop 8 --out "$OUT/bi_$SIDE" > "$OUT/bi_$SIDE.log" 2>&1 \
         || fail "bit-identity leg: $SIDE did not finish"
 done
@@ -101,13 +101,13 @@ echo "WINDOW $TAG util@acquire=$(tools/gpu_lock.sh util | tail -1)"
 echo "CLK@start: $(clk)"
 for R in $(seq 1 "$REPS"); do
     sleep 5
-    "$BIN_OLD" --model "$MODEL" --ids "$IDS" $ARGS --out "$OUT/base_$R" > "$OUT/base_$R.log" 2>&1 \
+    "$BIN_OLD" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$IDS" $ARGS --out "$OUT/base_$R" > "$OUT/base_$R.log" 2>&1 \
         || fail "baseline run rep=$R did not finish"
     sleep 5
-    "$BIN_NEW" --model "$MODEL" --ids "$IDS" $ARGS --gdn-norm inline --out "$OUT/inl_$R" > "$OUT/inl_$R.log" 2>&1 \
+    "$BIN_NEW" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$IDS" $ARGS --gdn-norm inline --out "$OUT/inl_$R" > "$OUT/inl_$R.log" 2>&1 \
         || fail "inline run rep=$R did not finish"
     sleep 5
-    "$BIN_NEW" --model "$MODEL" --ids "$IDS" $ARGS --gdn-norm hoist --out "$OUT/hoi_$R" > "$OUT/hoi_$R.log" 2>&1 \
+    "$BIN_NEW" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$IDS" $ARGS --gdn-norm hoist --out "$OUT/hoi_$R" > "$OUT/hoi_$R.log" 2>&1 \
         || fail "hoist run rep=$R did not finish"
     # canary B, inside the window: the sides must say which form they ran, and submit what the plan says.
     grep -q "gdn_norm=inline" "$OUT/inl_$R.log" || fail "canary B: rep=$R inline side did not echo gdn_norm=inline"

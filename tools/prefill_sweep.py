@@ -44,7 +44,7 @@ def main() -> int:
         for i in range(args.runs):
             out = Path(tempfile.mkdtemp(prefix=f"ttft_{lanes}_{i}_"))
             proc = subprocess.run(
-                [args.binary, "--model", args.model, "--ids", ",".join(ids), "--steps", "1",
+                [args.binary, "--mtp-accept", "0", "--mtp-draft", "0", "--model", args.model, "--ids", ",".join(ids), "--steps", "1",
                  "--out", str(out)],
                 capture_output=True, text=True,
             )

@@ -19,7 +19,7 @@ IDS=$($PY -c "print(','.join(['40'] * 2048))")
 run() { # tag binary extra...
   local tag=$1 bin=$2; shift 2
   local out=/tmp/pv_out/$tag; rm -rf "$out"; mkdir -p "$out"
-  "$bin" --model models/Qwen3.5-0.8B --ids "$IDS" --steps 4 --attn-fattn 1 --out "$out" "$@" \
+  "$bin" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids "$IDS" --steps 4 --attn-fattn 1 --out "$out" "$@" \
       >"$out/stdout.txt" 2>&1
   echo "=== $tag rc=$? fattn-owned-lines=$(grep -cv ATTN_FATTN_SKIP "$out/stdout.txt" 2>/dev/null) skip-lines=$(grep -c ATTN_FATTN_SKIP "$out/stdout.txt")"
 }

@@ -156,7 +156,7 @@ for w in 128 4032; do
     for arm in base new; do
         [ "$arm" = base ] && bin="$BASE_BIN" || bin="$NEW_BIN"
         mkdir -p "$OUT/byte_${w}_$arm"
-        "$bin" --model "$MODEL" --ids-file "$bids" --steps "$bsteps" --out "$OUT/byte_${w}_$arm" \
+        "$bin" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$bids" --steps "$bsteps" --out "$OUT/byte_${w}_$arm" \
             > "$OUT/byte_${w}_$arm.log" 2>&1 || fail "byte-identity run ($arm, $w lanes) failed"
     done
     ntok=$(want_n "$bids")
@@ -179,7 +179,7 @@ run() {   # run <arm> <idsfile> <steps> <want_split> <want_last_lanes> -> "attn_
     [ "$arm" = new ] && bin="$NEW_BIN"
     log="$OUT/run_${arm}_$(basename "$ids" .csv)_${REPCUR}.log"
     od="$OUT/out_${arm}_$(basename "$ids" .csv)_${REPCUR}"; mkdir -p "$od"
-    "$bin" --model "$MODEL" --ids-file "$ids" --steps "$steps" --time-stages --out "$od" \
+    "$bin" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$ids" --steps "$steps" --time-stages --out "$od" \
         > "$log" 2>&1 \
         || { echo "CANARY-FAIL: $arm run rc=$? (see $log)" >&2; return 1; }
     # --- the exercised-path canary, asserted on EVERY run, not just the first -------------------

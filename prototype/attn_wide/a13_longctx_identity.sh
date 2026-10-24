@@ -27,7 +27,7 @@ one() {   # one <knob> <lanes> <dir>
   local k="$1" lanes="$2" dir="$3" want_core want_form
   case "$k" in 0) want_core=fattn; want_form=- ;; 1) want_core=wide; want_form=wide128 ;; 2) want_core=wide_llama; want_form=wide128llama ;; esac
   rm -rf "$dir"; mkdir -p "$dir"
-  "$BIN" --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$lanes.txt" --steps 1 \
+  "$BIN" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$lanes.txt" --steps 1 \
          --attn-fattn 1 --attn-fattn-wide "$k" --out "$dir" > "$dir/log" 2>&1 \
       || { echo "run failed knob=$k lanes=$lanes (rc=$?)" >&2; return 1; }
   local got

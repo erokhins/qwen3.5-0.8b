@@ -158,7 +158,7 @@ plan_lines() {   # plan_lines <arm> -> the log it printed; returns 1 if the cana
         new-on) bin="$NEW_BIN"; env="QWEN_COPY_FOLD=1" ;;
         *) fail "plan_lines: unknown arm $arm" ;;
     esac
-    env $env "$bin" --model "$MODEL" --sizes-only > "$log" 2>&1 \
+    env $env "$bin" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --sizes-only > "$log" 2>&1 \
         || { echo "  plan $arm: run failed (see $log)" >&2; return 1; }
     local launch_other copy_plan
     launch_other=$(grep -E '^LAUNCH ' "$log" | head -1 | sed -E 's/.* other=([0-9]+).*/\1/')
@@ -227,7 +227,7 @@ for w in 128 4032; do
     for arm in base new-off new-on; do
         bin=$(arm_bin "$arm"); env=$(arm_env "$arm")
         od="$OUT/byte_${w}_$arm"; mkdir -p "$od"
-        env $env "$bin" --model "$MODEL" --ids-file "$ids" --steps "$steps" --state-fp \
+        env $env "$bin" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$ids" --steps "$steps" --state-fp \
             --out "$od" > "$OUT/byte_${w}_$arm.log" 2>&1 \
             || fail "byte-identity run ($arm, $w lanes) failed"
     done
@@ -265,7 +265,7 @@ run() {   # run <arm> <idsfile> <steps> -> "<burst_ms> <stage_total_ms> <copy_ms
     bin=$(arm_bin "$arm"); env=$(arm_env "$arm")
     log="$OUT/run_${arm}_$(basename "$ids" .csv)_${REPCUR}.log"
     od="$OUT/out_${arm}_$(basename "$ids" .csv)_${REPCUR}"; mkdir -p "$od"
-    env $env "$bin" --model "$MODEL" --ids-file "$ids" --steps "$steps" --time-stages --out "$od" \
+    env $env "$bin" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$ids" --steps "$steps" --time-stages --out "$od" \
         > "$log" 2>&1 || { echo "CANARY-FAIL: $arm run rc=$? (see $log)" >&2; return 1; }
     # --- exercised-path canaries, on EVERY run ----------------------------------------------------
     local want_tk tk cf plan folded kept bill burst stage copysub subs pm syncs

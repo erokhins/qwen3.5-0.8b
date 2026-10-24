@@ -21,7 +21,7 @@ for wide in 0 1; do
   d=$OUT/kt${LANES}_wide$wide
   rm -rf "$d" "${d}_out"
   .venv/bin/python tools/prefill_kernel_trace.py --waves "$WAVES" --out "$d" -- \
-      "$BIN" --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$LANES.txt" --steps 1 \
+      "$BIN" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$LANES.txt" --steps 1 \
              --attn-fattn 1 --attn-fattn-wide "$wide" --out "${d}_out" > "$d.log" 2>&1 \
       || fail "trace wide=$wide rc=$? (see $d.log)"
   echo "############ wide=$wide  lanes=$LANES  ($d.log) ############"

@@ -109,7 +109,7 @@ run() { # $1 arm $2 width $3 ids-file -> log path
     # it, so leaving it off the verify arm would compare a looped body against an unlooped one.
     log="$OUT/${w}_${ROUTE}_${arm}.log"
     mkdir -p "$OUT/out_${w}_${ROUTE}_${arm}"
-    "$BIN" --model "$MODEL" --ids-file "$ids" --steps "$STEPS" --cap "$((w + 300))" \
+    "$BIN" --mtp-accept 0 --model "$MODEL" --ids-file "$ids" --steps "$STEPS" --cap "$((w + 300))" \
            --out "$OUT/out_${w}_${ROUTE}_${arm}" --no-stop --gdn-loop 1 \
            --mtp-meter 1 --mtp-route "$ROUTE" $extra > "$log" 2>&1
     echo "$log"

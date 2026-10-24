@@ -410,7 +410,7 @@ def a2_run(out_root: Path, fixtures: list[str], binary: Path, model: str) -> int
             out.mkdir(parents=True, exist_ok=True)
             for stale in out.glob("logits*.bin"):
                 stale.unlink()
-            cmd = [str(binary), "--model", model, "--ids", ",".join(map(str, prompt)),
+            cmd = [str(binary), "--mtp-accept", "0", "--mtp-draft", "0", "--model", model, "--ids", ",".join(map(str, prompt)),
                    "--steps", str(n_decode), "--out", str(out),
                    "--prefill-logits", "all", "--gemm", route]
             if n_decode > FREE_RUN_BOUND:

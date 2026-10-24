@@ -99,7 +99,7 @@ if [[ " $LEGS " == *" bench "* ]]; then
   for W in $OURWIDTHS; do
     IDS_F=$(ids_file_for "$W")
     for R in $(seq 1 "$REPS"); do
-      "$BIN" --model "$MODEL" --ids-file "$IDS_F" --steps 0 --gemm lt --gemm-pins all --gdn-loop 512 \
+      "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$IDS_F" --steps 0 --gemm lt --gemm-pins all --gdn-loop 512 \
           --out "$OUT/our_${W}_$R" > "$OUT/our_${W}_$R.log" 2>&1 || fail "ours W=$W rep $R"
       sleep 3
     done
@@ -156,7 +156,7 @@ if [[ " $LEGS " == *" trace "* ]]; then
         "$LB" -m "$LM" -p "$W" -n 0 -ub 512 -fa on -ngl 99 -t 32 -b 2048 -r 1 -o csv \
         > "$OUT/llama_pp$W.stdout" 2>&1 || fail "llama trace at $W"
     timeout 2400 rocprofv3 --kernel-trace --memory-copy-trace -f csv -d "$OUT/our_pp$W" -o "pp$W" -- \
-        "$BIN" --model "$MODEL" --ids-file "$OUT/ids_$W.csv" --cap "$W" --steps 0 --time-waves --gemm lt --gemm-pins all --gdn-loop 512 \
+        "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$OUT/ids_$W.csv" --cap "$W" --steps 0 --time-waves --gemm lt --gemm-pins all --gdn-loop 512 \
         --out "$OUT/our_trace_$W" > "$OUT/our_pp$W.stdout" 2>&1 || fail "engine trace at $W"
     echo "traces at $W lanes in $OUT/{llama,our}_pp$W — parse with the §22 pass-count division (llama.cpp holds warmup+timed = /2; ours holds three passes = /3)."
   done

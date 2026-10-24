@@ -31,7 +31,7 @@ for lanes in LANES:
     for rep in range(REPS):
         for name, extra in ARMS:
             out = Path(tempfile.mkdtemp(prefix=f"pv_{name}_"))
-            proc = subprocess.run([BIN, "--model", MODEL, "--ids", ",".join(ids), "--steps", "1",
+            proc = subprocess.run([BIN, "--mtp-accept", "0", "--mtp-draft", "0", "--model", MODEL, "--ids", ",".join(ids), "--steps", "1",
                                    "--attn-fattn", "1", "--out", str(out)] + extra,
                                   capture_output=True, text=True)
             shutil.rmtree(out, ignore_errors=True)

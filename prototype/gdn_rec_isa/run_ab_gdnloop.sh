@@ -49,21 +49,21 @@ run_side() {  # $1=side(looped|base) $2=width $3=rep $4...=extra flags
     local side=$1 width=$2 rep=$3; shift 3
     local span=1
     [ "$side" = looped ] && span=$LOOP_SPAN
-    "$NEW_BIN" --model "$MODEL" --ids "$(ids_of "$width")" --steps 0 --time-waves \
+    "$NEW_BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of "$width")" --steps 0 --time-waves \
         --gemm lt --gemm-pins all --gdn-loop "$span" --out "$OUT/o_${side}_${width}_${rep}" \
         "$@" > "$OUT/run_${side}_${width}_${rep}.log" 2>&1 || return 1
     echo "$OUT/run_${side}_${width}_${rep}.log"
 }
 
 echo "== CANARY 1: the flag is live on this binary (a pre-port build aborts here, loudly)"
-"$NEW_BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --gdn-loop 512 >/dev/null 2>&1 \
+"$NEW_BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --gdn-loop 512 >/dev/null 2>&1 \
     || fail "this decode_run does not accept --gdn-loop: the port is not in the binary. Nothing is timed."
-"$NEW_BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --gdn-loop notanumber >/dev/null 2>&1 \
+"$NEW_BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --gdn-loop notanumber >/dev/null 2>&1 \
     && fail "--gdn-loop accepted a non-number: the flag is inert, not parsed. Refusing to time."
 echo "CANARY 1 OK — --gdn-loop is parsed and refused when wrong"
 # And the pair refusal, because an inert combination that masquerades is the failure this knob's whole
 # discipline exists to prevent: route A already submits one launch per (layer, body).
-"$NEW_BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --gdn-scan collapse --gdn-loop 512 \
+"$NEW_BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --gdn-scan collapse --gdn-loop 512 \
     >/dev/null 2>&1 \
     && fail "--gdn-loop 512 was accepted alongside --gdn-scan collapse: one of the two is inert "\
             "and the log would not say which. The port must REFUSE the pair (outline 6.4)"
@@ -105,10 +105,10 @@ echo "CANARY 2 OK - counted submissions fell $base_n -> $loop_n"
 echo
 echo "== CANARY 3: bit-identity on every prefill row, byte-compared, BEFORE any timing"
 rm -rf "$OUT/id_base" "$OUT/id_loop"
-"$NEW_BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --prefill-logits all \
+"$NEW_BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --prefill-logits all \
     --gemm lt --gemm-pins all --gdn-loop 1  --out "$OUT/id_base" > "$OUT/id_base.log" 2>&1 \
     || fail "identity run, per-token side"
-"$NEW_BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --prefill-logits all \
+"$NEW_BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --prefill-logits all \
     --gemm lt --gemm-pins all --gdn-loop "$LOOP_SPAN" --out "$OUT/id_loop" > "$OUT/id_loop.log" 2>&1 \
     || fail "identity run, looped side"
 nfiles=$(ls "$OUT/id_base"/logits*.bin 2>/dev/null | wc -l)
@@ -156,7 +156,7 @@ echo "== decode must be untouched: a one-row body keeps the per-token form by ru
 # `launches=` to diff. What is printed is the decode wall on both sides, which must be flat to noise.
 for rep in 1 2 3; do
     for span in 1 "$LOOP_SPAN"; do
-        "$NEW_BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 192 --wave-rows 1 \
+        "$NEW_BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 192 --wave-rows 1 \
             --gemm lt --gemm-pins all --gdn-loop "$span" --out "$OUT/o_dec_${span}_$rep" \
             > "$OUT/dec_${span}_$rep.log" 2>&1 || fail "decode run span=$span rep=$rep"
         grep -q "gdn_loop=$span" "$OUT/dec_${span}_$rep.log" \

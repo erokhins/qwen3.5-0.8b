@@ -103,13 +103,13 @@ tools/gpu_lock.sh util | tail -1
 
 # ---------------------------------------------------------------------------------------------
 echo "== CANARY A: the knob exists and refuses garbage (an unported binary aborts here)"
-"$BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-fattn 1 >/dev/null 2>&1 \
+"$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-fattn 1 >/dev/null 2>&1 \
     || fail "--attn-fattn is not accepted: the form is not ported (fattn_score_handover.md §5a). Nothing to time."
-"$BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-fattn 7 >/dev/null 2>&1 \
+"$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-fattn 7 >/dev/null 2>&1 \
     && fail "--attn-fattn accepted 7: the flag is parsed but inert. Refusing to time an inert knob."
 # A refusal is a canary too: the WMMA form is a staged-plan kernel, so a fused-plan request must be an ERROR
 # and not a quiet run of the shipped form. `--attn-touch 0` and `--attn-tile 0` are its other two refusals.
-"$BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-fattn 1 --attn-tile 0 >/dev/null 2>&1 \
+"$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-fattn 1 --attn-tile 0 >/dev/null 2>&1 \
     && fail "--attn-fattn 1 with --attn-tile 0 ran instead of refusing: the launcher would be routing rows to a kernel that has no rows to take."
 echo "CANARY A OK"
 
@@ -117,7 +117,7 @@ echo "CANARY A OK"
 echo
 echo "== CANARY B: the form banner, with fields that must match the listing being priced"
 for SIDE in 0 1; do
-    "$BIN" --model "$MODEL" --ids "$(ids_of 4096)" --steps 0 --attn-fattn "$SIDE" --time-waves \
+    "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 4096)" --steps 0 --attn-fattn "$SIDE" --time-waves \
         > "$OUT/canaryB_$SIDE.log" 2>&1 || fail "CANARY B side $SIDE did not finish"
 done
 grep -q "ATTN_FATTN" "$OUT/canaryB_1.log" \
@@ -159,7 +159,7 @@ echo "== CANARY C: a bit-difference witness on a COVERED row — identical bytes
 # nothing here (that is CANARY D, which asks the opposite question). `--prefill-logits last` keeps the dump
 # at one row per side; the last row is the widest and is certainly covered.
 for SIDE in 0 1; do
-    "$BIN" --model "$MODEL" --ids "$(ids_of 4096)" --steps 0 --attn-fattn "$SIDE" \
+    "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 4096)" --steps 0 --attn-fattn "$SIDE" \
         --out "$OUT/canC_$SIDE" > "$OUT/canC_$SIDE.log" 2>&1 || fail "CANARY C side $SIDE did not finish"
 done
 a=$(ls "$OUT"/canC_0/logits*.bin 2>/dev/null | tail -1)
@@ -172,7 +172,7 @@ echo "CANARY C OK ($a differs from $b)"
 echo
 echo "== CANARY D: inertness on a one-pass prompt — the coverage rule, asserted rather than trusted"
 for SIDE in 0 1; do
-    "$BIN" --model "$MODEL" --ids "$(ids_of "$INERT_IDS")" --steps 0 --attn-fattn "$SIDE" \
+    "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of "$INERT_IDS")" --steps 0 --attn-fattn "$SIDE" \
         --prefill-logits all --out "$OUT/canD_$SIDE" > "$OUT/canD_$SIDE.log" 2>&1 \
         || fail "CANARY D side $SIDE did not finish"
     grep -q "attn_fattn=$SIDE" "$OUT/canD_$SIDE.log" \
@@ -197,7 +197,7 @@ echo "== CLAIM (iii): the attn family row, paired inside one lock hold, best-of-
 for R in $(seq 1 "$REPS"); do
     for W in $WIDTHS; do
         for SIDE in 0 1; do
-            "$BIN" --model "$MODEL" --ids "$(ids_of "$W")" --steps 0 --time-waves --gemm lt \
+            "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of "$W")" --steps 0 --time-waves --gemm lt \
                 --gemm-pins all --attn-fattn "$SIDE" --out "$OUT/t_${W}_${SIDE}" \
                 > "$OUT/t_${W}_${SIDE}_r${R}.log" 2>&1 \
                 || fail "timing T=$W side=$SIDE rep=$R did not finish"

@@ -15,7 +15,7 @@ cd "$root"
 bash tools/gpu_lock.sh acquire fix-crossrow-sweep >/dev/null
 s=$(date +%s)
 for p in "$@"; do
-  if ! ./engine/build/decode_run --model models/Qwen3.5-0.8B --ids-file "$work/pert$p.csv" --steps 0 \
+  if ! ./engine/build/decode_run --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$work/pert$p.csv" --steps 0 \
         --prefill-logits all --dump-attn-rows --out "$work/dsw-p$p" > "$work/dsw-p$p.log" 2>&1; then
     echo "RUN FAILED pert$p"; sed -n '1,3p' "$work/dsw-p$p.log"; continue
   fi

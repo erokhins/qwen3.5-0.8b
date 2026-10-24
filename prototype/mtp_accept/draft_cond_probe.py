@@ -75,8 +75,8 @@ DEFAULT_ARMS = [
     ("pl32dense", "--mtp-prompt-lanes 32 --mtp-dense 1"),
 ]
 DEFAULT_CONTROL = [
-    ("side", "--mtp-draft 1 --mtp-sched every --gdn-loop 1 --no-stop"),
-    ("side-pl32", "--mtp-draft 1 --mtp-sched every --gdn-loop 1 --no-stop --mtp-prompt-lanes 32"),
+    ("side", "--mtp-accept 0 --mtp-draft 1 --mtp-sched every --gdn-loop 1 --no-stop"),
+    ("side-pl32", "--mtp-accept 0 --mtp-draft 1 --mtp-sched every --gdn-loop 1 --no-stop --mtp-prompt-lanes 32"),
 ]
 
 

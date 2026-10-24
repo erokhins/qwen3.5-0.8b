@@ -310,11 +310,11 @@ for R in $(seq 1 "$REPS"); do
             sleep 5
             LOG=$(LOGOF "$WID" "$SIDE" "$R")
             case $SIDE in
-                base) "$BIN_BASE" --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS \
+                base) "$BIN_BASE" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS \
                           --out "$OUT/wide${WID}_base_$R" > "$LOG" 2>&1 || fail "base rep=$R at $WID did not finish" ;;
-                cap)  "$BIN_NEW"  --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS$CAPARG \
+                cap)  "$BIN_NEW"  --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS$CAPARG \
                           --out "$OUT/wide${WID}_cap_$R"  > "$LOG" 2>&1 || fail "cap rep=$R at $WID did not finish" ;;
-                null) "$BIN_NEW"  --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS \
+                null) "$BIN_NEW"  --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS \
                           --out "$OUT/wide${WID}_null_$R" > "$LOG" 2>&1 || fail "null rep=$R at $WID did not finish" ;;
             esac
         done

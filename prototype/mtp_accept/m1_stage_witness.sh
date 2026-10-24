@@ -56,7 +56,7 @@ cmpdir() {   # cmpdir DIRA DIRB LABEL — byte-compare the dumps the two runs wr
 if want A; then
   echo "== A flag-off, new binary, --time-stages"
   mkdir -p "$OUT/off_new"; t=$SECONDS
-  "$BIN" --model "$MODEL" --ids-file "$IDS" --steps "$STEPS" --out "$OUT/off_new" --state-fp \
+  "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$IDS" --steps "$STEPS" --out "$OUT/off_new" --state-fp \
       --time-stages > "$OUT/off_new.txt" 2>&1
   counts "$OUT/off_new.txt"
   echo "   wall=$((SECONDS-t))s — no timing taken, counts only"
@@ -79,7 +79,9 @@ fi
 if want C; then
   echo "== C flag-ON (--mtp-sched every), --time-stages"
   mkdir -p "$OUT/on_new"; t=$SECONDS
-  QWEN_MTP_DRAFT=1 "$BIN" --model "$MODEL" --ids-file "$IDS" --steps "$STEPS" --out "$OUT/on_new" \
+  # No `--mtp-draft 0` here on purpose: this case IS the `QWEN_MTP_DRAFT=1` route, and an explicit
+  # `--mtp-draft 0` after the env would beat it and witness nothing.
+  QWEN_MTP_DRAFT=1 "$BIN" --mtp-accept 0 --model "$MODEL" --ids-file "$IDS" --steps "$STEPS" --out "$OUT/on_new" \
       --state-fp --time-stages --mtp-sched every > "$OUT/on_new.txt" 2>&1
   counts "$OUT/on_new.txt"
   echo "   wall=$((SECONDS-t))s"
@@ -95,7 +97,7 @@ if want D; then
   fi
   for pair in "--time-stages --mtp-sched loop" "--time-waves --mtp-sched every"; do
     # shellcheck disable=SC2086
-    if "$BIN" --model "$MODEL" --ids-file "$IDS" --steps 1 --mtp-draft 1 $pair >/dev/null 2>"$OUT/c2.txt"; then
+    if "$BIN" --mtp-accept 0 --model "$MODEL" --ids-file "$IDS" --steps 1 --mtp-draft 1 $pair >/dev/null 2>"$OUT/c2.txt"; then
         echo "   REFUSAL FAILED: --mtp-draft 1 $pair ran"
     else
         echo "   refusal OK for [$pair]: $(sed -n 1p "$OUT/c2.txt")"

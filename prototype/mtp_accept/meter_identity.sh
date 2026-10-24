@@ -52,7 +52,7 @@ echo "== meter identity: $IDS ($N fields), steps=$STEPS, bin=$BIN"
 run() { # $1 name $2... flags
     local name="$1"; shift
     mkdir -p "$OUT/$name"
-    "$BIN" --model "$MODEL" --ids-file "$IDS" --steps "$STEPS" --out "$OUT/$name" \
+    "$BIN" --mtp-accept 0 --model "$MODEL" --ids-file "$IDS" --steps "$STEPS" --out "$OUT/$name" \
            --no-stop --state-fp --gdn-loop 1 "$@" > "$OUT/$name.log" 2>&1
     local rc=$?
     [ "$rc" = 0 ] || { echo "ABORT: $name exited $rc"; tail -5 "$OUT/$name.log"; exit 1; }

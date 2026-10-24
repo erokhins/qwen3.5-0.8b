@@ -113,7 +113,7 @@ leg() {
         u8)    BX=$BIN_NEW;  QARG="--attn-fattn-qstage unstaged8"; BXK=attn_fattn_wave_u8 ;;
         *) fail "unknown side $SIDE" ;;
     esac
-    "$BX" --model "$MODEL" --ids "$(cat "$OUT/ids$N.csv")" --steps 0 \
+    "$BX" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$OUT/ids$N.csv")" --steps 0 \
           --prefill-logits all --state-fp $QARG --out "$OUT/s${N}_$SIDE" \
         > "$OUT/s${N}_$SIDE.log" 2>&1 || fail "shape $N side $SIDE: decode_run did not finish (see $OUT/s${N}_$SIDE.log)"
     # CANARY 2: the spelling that ran, the geometry it ran with, and the note block it must agree with.

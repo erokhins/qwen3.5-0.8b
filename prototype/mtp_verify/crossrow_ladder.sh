@@ -42,7 +42,7 @@ while IFS='|' read -r name flags; do
         d="$W/$name/$side"
         mkdir -p "$d"
         # shellcheck disable=SC2086
-        "$ROOT/engine/build/decode_run" --model "$ROOT/models/Qwen3.5-0.8B" \
+        "$ROOT/engine/build/decode_run" --mtp-accept 0 --model "$ROOT/models/Qwen3.5-0.8B" \
             --ids-file "$FIX/$side.csv" --steps 0 --prefill-logits all \
             $flags --out "$d" > "$d/log.txt" 2>&1 || { ok=0; reason=$(tail -1 "$d/log.txt"); }
     done

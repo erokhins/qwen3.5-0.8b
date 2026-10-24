@@ -28,7 +28,7 @@ want_form() { case "$1" in 0) echo - ;; 1) echo wide128 ;; 2) echo wide128llama 
 
 one() {   # one <knob> <width> -> "<cold_ms> <warm_ms>"
   local k="$1" w="$2" log="$OUT/warm_${k}_${w}_$RANDOM.log"
-  "$BIN" --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$w.txt" --steps 1 --time-waves \
+  "$BIN" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$w.txt" --steps 1 --time-waves \
          --attn-fattn 1 --attn-fattn-wide "$k" --out "$OUT/tmpout" > "$log" 2>&1 || return 1
   local want_tk; want_tk=$(awk -F',' '{print NF}' "$OUT/ids$w.txt")
   local got; got=$(grep -E "^PREFILL" "$log" | head -1 | sed -E 's/.*tokens=([0-9]+).*/\1/')

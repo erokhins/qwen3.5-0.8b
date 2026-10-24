@@ -17,7 +17,7 @@ run=$root/engine/build/decode_run
 
 arm=$outtag
 for v in ref pert5 pert4; do
-  if ! "$run" --model "$root/models/Qwen3.5-0.8B" --ids-file "$work/$v.csv" --steps 0 \
+  if ! "$run" --mtp-accept 0 --mtp-draft 0 --model "$root/models/Qwen3.5-0.8B" --ids-file "$work/$v.csv" --steps 0 \
         --prefill-logits all --out "$work/$arm-$v" "$@" > "$work/$arm-$v.log" 2>&1; then
     echo "ARM[$arm] RUN FAILED on $v"
     sed -n '1,4p' "$work/$arm-$v.log"

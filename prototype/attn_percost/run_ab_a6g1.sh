@@ -168,9 +168,9 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "  legs @4096 : REPS=$REPS  args [$ARGS]  and for u8 [$ARGS$QSTAGE_ARG]"
     for SIDE in base stage u8; do
         case $SIDE in
-            base)  EX="$BIN_BASE --model $MODEL --ids \$(cat $OUT/ids$W.csv) $ARGS --out $OUT/${SIDE}_R" ;;
-            stage) EX="$BIN_NEW --model $MODEL --ids \$(cat $OUT/ids$W.csv) $ARGS --out $OUT/${SIDE}_R" ;;
-            u8)    EX="$BIN_NEW --model $MODEL --ids \$(cat $OUT/ids$W.csv) $ARGS$QSTAGE_ARG --out $OUT/${SIDE}_R" ;;
+            base)  EX="$BIN_BASE --mtp-accept 0 --mtp-draft 0 --model $MODEL --ids \$(cat $OUT/ids$W.csv) $ARGS --out $OUT/${SIDE}_R" ;;
+            stage) EX="$BIN_NEW --mtp-accept 0 --mtp-draft 0 --model $MODEL --ids \$(cat $OUT/ids$W.csv) $ARGS --out $OUT/${SIDE}_R" ;;
+            u8)    EX="$BIN_NEW --mtp-accept 0 --mtp-draft 0 --model $MODEL --ids \$(cat $OUT/ids$W.csv) $ARGS$QSTAGE_ARG --out $OUT/${SIDE}_R" ;;
         esac
         echo "    $SIDE: $EX"
     done
@@ -178,7 +178,7 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "              then tools/trace_phase_split.py --calibrate attn_prep --per-pass 48 --tokens $W"
     echo "  wide      : REPS_WIDE=$REPS_WIDE widths [$WIDE_WIDTHS] via --ids-file (never argv: one argv slot caps at"
     echo "              131072 B — progress/2026-10-21/performance-status-2026-10-21.md §39)"
-    for WID in $WIDE_WIDTHS; do echo "    $WID: $BIN_NEW --model $MODEL --ids-file $OUT/ids$WID.csv --cap $WID $ARGS$QSTAGE_ARG --out $OUT/wide${WID}_u8_R"; done
+    for WID in $WIDE_WIDTHS; do echo "    $WID: $BIN_NEW --mtp-accept 0 --mtp-draft 0 --model $MODEL --ids-file $OUT/ids$WID.csv --cap $WID $ARGS$QSTAGE_ARG --out $OUT/wide${WID}_u8_R"; done
     echo "  verdict   : LIVE needs family<=$RAT_A_LIVE and walls<=$RAT_W_LIVE/$RAT_16_LIVE/$RAT_32_LIVE and traced<=$RAT_AT_LIVE;"
     echo "              DEAD if family>$RAT_A_DEAD or a ship gate > its dead line; otherwise UNRESOLVED (not shipped)."
     echo "              NULL leg |move| <= $NULL_TOL % on the family row and every ship gate, else UNPAIRED and no verdict."
@@ -256,9 +256,9 @@ if [ "${SUMMARIZE:-0}" != "1" ]; then
     run_leg() {
         local SIDE=$1 R=$2
         case $SIDE in
-            base)  "$BIN_BASE" --model "$MODEL" --ids "$(cat "$OUT/ids$W.csv")" $ARGS --out "$OUT/${SIDE}_$R" > "$OUT/${SIDE}_$R.log" 2>&1 ;;
-            stage) "$BIN_NEW"  --model "$MODEL" --ids "$(cat "$OUT/ids$W.csv")" $ARGS --out "$OUT/${SIDE}_$R" > "$OUT/${SIDE}_$R.log" 2>&1 ;;
-            u8)    "$BIN_NEW"  --model "$MODEL" --ids "$(cat "$OUT/ids$W.csv")" $ARGS$QSTAGE_ARG --out "$OUT/${SIDE}_$R" > "$OUT/${SIDE}_$R.log" 2>&1 ;;
+            base)  "$BIN_BASE" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$OUT/ids$W.csv")" $ARGS --out "$OUT/${SIDE}_$R" > "$OUT/${SIDE}_$R.log" 2>&1 ;;
+            stage) "$BIN_NEW"  --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$OUT/ids$W.csv")" $ARGS --out "$OUT/${SIDE}_$R" > "$OUT/${SIDE}_$R.log" 2>&1 ;;
+            u8)    "$BIN_NEW"  --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$OUT/ids$W.csv")" $ARGS$QSTAGE_ARG --out "$OUT/${SIDE}_$R" > "$OUT/${SIDE}_$R.log" 2>&1 ;;
         esac || fail "$SIDE rep=$R did not finish"
     }
     banner() { local SIDE=$1 R=$2; for F in q lds wf_per_cu vgpr; do printf "%s=%s " "$F" "$(grep -o "$F=[^ ]*" "$OUT/${SIDE}_$R.log" | head -1 | cut -d= -f2)"; done; }
@@ -311,7 +311,7 @@ if [ "${SUMMARIZE:-0}" != "1" ]; then
             # argument-quoting bug wearing the costume of a traced-leg failure.
             BX=$BIN_BASE; KX=""; [ "$SIDE" = u8 ] && { BX="$BIN_NEW"; KX="$QSTAGE_ARG"; }
             "$PY" tools/prefill_kernel_trace.py --waves 8 --out "$OUT/trace_${SIDE}_$R" -- \
-                "$BX" --model "$MODEL" --ids "$(cat "$OUT/ids$W.csv")" $TRACE_ARGS $KX \
+                "$BX" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$OUT/ids$W.csv")" $TRACE_ARGS $KX \
                 --out "$OUT/trace_${SIDE}_${R}_out" > "$OUT/trace_${SIDE}_$R.log" 2>&1 \
                 || fail "traced leg: the $SIDE rep=$R traced run did not finish"
             CSV=$(ls "$OUT/trace_${SIDE}_$R"/*_kernel_trace.csv 2>/dev/null | head -1)
@@ -333,9 +333,9 @@ if [ "${SUMMARIZE:-0}" != "1" ]; then
             for SIDE in base stage u8; do
                 sleep 5
                 case $SIDE in
-                    base)  "$BIN_BASE" --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS --out "$OUT/wide${WID}_${SIDE}_$R" > "$OUT/wide${WID}_${SIDE}_$R.log" 2>&1 ;;
-                    stage) "$BIN_NEW"  --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS --out "$OUT/wide${WID}_${SIDE}_$R" > "$OUT/wide${WID}_${SIDE}_$R.log" 2>&1 ;;
-                    u8)    "$BIN_NEW"  --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS$QSTAGE_ARG --out "$OUT/wide${WID}_${SIDE}_$R" > "$OUT/wide${WID}_${SIDE}_$R.log" 2>&1 ;;
+                    base)  "$BIN_BASE" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS --out "$OUT/wide${WID}_${SIDE}_$R" > "$OUT/wide${WID}_${SIDE}_$R.log" 2>&1 ;;
+                    stage) "$BIN_NEW"  --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS --out "$OUT/wide${WID}_${SIDE}_$R" > "$OUT/wide${WID}_${SIDE}_$R.log" 2>&1 ;;
+                    u8)    "$BIN_NEW"  --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS$QSTAGE_ARG --out "$OUT/wide${WID}_${SIDE}_$R" > "$OUT/wide${WID}_${SIDE}_$R.log" 2>&1 ;;
                 esac || fail "wide leg $WID: $SIDE rep=$R did not finish"
             done
         done

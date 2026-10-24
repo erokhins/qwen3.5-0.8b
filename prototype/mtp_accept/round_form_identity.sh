@@ -79,7 +79,7 @@ arm() {  # $1 label $2 binary $3 ids-file $4 steps $5 extra-flags
     local label="$1" bin="$2" ids="$3" steps="$4" extra="$5"
     local dir="$OUT/$label"
     rm -rf "$dir"; mkdir -p "$dir"
-    "$bin" --model "$MODEL" --ids-file "$ids" --steps "$steps" --cap 4332 --no-stop \
+    "$bin" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$ids" --steps "$steps" --cap 4332 --no-stop \
            --gdn-loop 1 --mtp-verify 1 $extra --out "$dir" > "$OUT/$label.log" 2>&1
     local rc=$?
     local n; n=$(grep -c '^VERIFY2 ' "$OUT/$label.log")

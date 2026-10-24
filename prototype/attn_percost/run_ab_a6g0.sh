@@ -178,7 +178,7 @@ band_leg() {
     ids_file_of "$N" "$OUT/ids${N}_band.csv"
     for SIDE in base g0; do
         BX=$BIN_BASE; [ "$SIDE" = g0 ] && BX=$BIN_G0
-        "$BX" --model "$MODEL" --ids "$(cat "$OUT/ids${N}_band.csv")" --steps 0 \
+        "$BX" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$OUT/ids${N}_band.csv")" --steps 0 \
             --prefill-logits all --state-fp --out "$OUT/band${N}_$SIDE" > "$OUT/band${N}_$SIDE.log" 2>&1 \
             || fail "numerics leg $N: $SIDE did not finish"
     done
@@ -237,7 +237,7 @@ if [ "${SUMMARIZE:-0}" != "1" ]; then
         for SIDE in base g0; do
             sleep 5
             BX=$BIN_BASE; [ "$SIDE" = g0 ] && BX=$BIN_G0
-            "$BX" --model "$MODEL" --ids "$(cat "$IDS4096")" $ARGS --out "$OUT/${SIDE}_$R" \
+            "$BX" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$IDS4096")" $ARGS --out "$OUT/${SIDE}_$R" \
                 > "$OUT/${SIDE}_$R.log" 2>&1 || fail "$SIDE run rep=$R did not finish"
         done
         # --- CANARY B: the geometry of the kernel that ACTUALLY RAN, from the launcher's own banner ------
@@ -292,7 +292,7 @@ if [ "${SUMMARIZE:-0}" != "1" ]; then
             sleep 5
             BX=$BIN_BASE; [ "$SIDE" = g0 ] && BX=$BIN_G0
             "$PY" tools/prefill_kernel_trace.py --waves 8 --out "$OUT/trace_${SIDE}_$R" -- \
-                "$BX" --model "$MODEL" --ids "$(cat "$IDS4096")" $TRACE_ARGS \
+                "$BX" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$IDS4096")" $TRACE_ARGS \
                 --out "$OUT/trace_${SIDE}_${R}_out" > "$OUT/trace_${SIDE}_$R.log" 2>&1 \
                 || fail "traced leg: the $SIDE rep=$R traced run did not finish"
             CSV=$(ls "$OUT/trace_${SIDE}_$R"/*_kernel_trace.csv 2>/dev/null | head -1)
@@ -314,7 +314,7 @@ if [ "${SUMMARIZE:-0}" != "1" ]; then
             for SIDE in base g0; do
                 sleep 5
                 BX=$BIN_BASE; [ "$SIDE" = g0 ] && BX=$BIN_G0
-                "$BX" --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS --out "$OUT/wide${WID}_${SIDE}_$R" \
+                "$BX" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$OUT/ids$WID.csv" --cap "$WID" $ARGS --out "$OUT/wide${WID}_${SIDE}_$R" \
                     > "$OUT/wide${WID}_${SIDE}_$R.log" 2>&1 || fail "wide leg $WID: $SIDE rep=$R did not finish"
             done
         done

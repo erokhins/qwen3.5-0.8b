@@ -19,7 +19,7 @@ fail() { echo "ABORT: $*" >&2; tools/gpu_lock.sh release "$TAG" >/dev/null 2>&1;
 
 # run <lanes> <wide> <wave_rows> -> prints ms_total
 run() {
-  "$BIN" --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$1.txt" --steps 1 \
+  "$BIN" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$1.txt" --steps 1 \
          --attn-fattn 1 --attn-fattn-wide "$2" --wave-rows "$3" \
          --out "$OUT/tmpout" > "$OUT/run.log" 2>&1 || fail "run lanes=$1 wide=$2 rows=$3 rc=$?"
   grep -E "^RESULT" "$OUT/run.log" | sed -E 's/.*ms_total=([0-9.]+).*/\1/'

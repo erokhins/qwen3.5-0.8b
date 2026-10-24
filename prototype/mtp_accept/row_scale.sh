@@ -42,7 +42,7 @@ trap 'tools/gpu_lock.sh release main-agent >/dev/null 2>&1' EXIT
 echo "== util at acquire: $(tools/gpu_lock.sh util | tail -1); row counts: $ROWCOUNTS"
 
 one() { # $1 label $2 ids-file $3 cap $4 wave_rows  -> one priced body pass
-  engine/build/decode_run --model "$MODEL" --ids-file "$2" --steps 0 --cap "$3" --time-waves \
+  engine/build/decode_run --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$2" --steps 0 --cap "$3" --time-waves \
       --wave-rows "$4" --out /tmp/row_scale/out 2>&1 |
   awk -v lbl="$1" -v wr="$4" '
     /^WAVEPASS gran=burst/ { for (i=1;i<=NF;i++) { if ($i ~ /^wall_ms=/) w=substr($i,9); if ($i ~ /^bodies=/) b=substr($i,8) } }

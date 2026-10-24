@@ -40,7 +40,7 @@ want_tk=$(awk -F',' '{print NF}' "$IDS") || { echo "no ids file $IDS"; exit 1; }
 [ "$want_tk" -ge 8 ] || { echo "$IDS has $want_tk fields; too few to be a fixture"; exit 1; }
 mkdir -p "$OUT"; rm -f "$OUT"/*.tsv
 
-COMMON="--model $MODEL --ids-file $IDS --steps $STEPS --cap $CAP --no-stop"
+COMMON="--mtp-accept 0 --model $MODEL --ids-file $IDS --steps $STEPS --cap $CAP --no-stop"
 ACC="--mtp-draft 1 --mtp-accept 1 --gdn-loop 1"
 
 arm() { case "$1" in

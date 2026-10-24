@@ -105,7 +105,7 @@ run_one() {  # run_one BIN LOG WIDTH [ENV=VAL]... -- [EXTRA ENGINE FLAGS]...
     local envs=()
     while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
     [ $# -gt 0 ] && shift
-    env "${envs[@]}" "$bin" --model "$MODEL" --ids-file "$(ids_file "$w")" \
+    env "${envs[@]}" "$bin" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$(ids_file "$w")" \
         "${ENG_FLAGS[@]}" "$@" --out "$OUT/dump" > "$log" 2>&1 \
         || die "run failed: $bin width=$w ${envs[*]} $* (see $log)"
     grep -q '^RESULT ' "$log" || die "no RESULT line in $log — nothing to attribute"

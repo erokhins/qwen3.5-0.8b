@@ -76,7 +76,7 @@ run() { # $1 arm $2 width $3 ids-file $4 rep -> log
     [ "$stripped" = "$x" ] || printf '   note: base arm drops --mtp-route: no body runs, so there is no route to choose (a one-row body resolves to the hand GEMV either way, `resolve_wave_gemm`), and the engine refuses the flag with no verify/accept running\n' >&2
     x="$stripped"
   fi
-  "$BIN" --model "$MODEL" --ids-file "$ids" --steps "$STEPS" --cap "$((w + 300))" \
+  "$BIN" --mtp-accept 0 --model "$MODEL" --ids-file "$ids" --steps "$STEPS" --cap "$((w + 300))" \
         --out "$OUT/out_${w}_${arm}_${rep}" --no-stop --gdn-loop 1 $x > "$log" 2>&1
   echo "$log"
 }

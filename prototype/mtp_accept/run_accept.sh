@@ -139,9 +139,9 @@ if has_stage identity; then
     for name in ad_dec8 ad_corpus0; do
         pf="$OUT/$name.txt"
         [ -s "$pf" ] || fail "could not write the prompt id file $pf"
-        "$BIN" --model "$MODEL" --ids-file "$pf" --steps 24 --out "$OUT/id_off_$name" \
+        "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$pf" --steps 24 --out "$OUT/id_off_$name" \
             --state-fp > "$OUT/id_off_$name.log" 2>&1 || fail "flag-off run failed on $name"
-        "$BIN" --model "$MODEL" --ids-file "$pf" --steps 24 --out "$OUT/id_on_$name" \
+        "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids-file "$pf" --steps 24 --out "$OUT/id_on_$name" \
             --state-fp --mtp-draft 1 --mtp-sched "$SCHED" > "$OUT/id_on_$name.log" 2>&1 \
             || fail "flag-on run failed on $name"
         cmp "$OUT/id_off_$name/sampled.txt" "$OUT/id_on_$name/sampled.txt" \

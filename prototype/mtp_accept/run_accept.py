@@ -265,7 +265,7 @@ def main() -> int:
     if not chunk:
         die(f"empty slice: --start {args.start} --limit {args.limit} of {len(prompts)} lines")
 
-    sess = Session([args.binary, "--model", args.model, "--session",
+    sess = Session([args.binary, "--mtp-accept", "0", "--mtp-draft", "0", "--model", args.model, "--session",
                     "--mtp-draft", "1", "--mtp-sched", args.sched])
     sess.read_until(lambda l: l.startswith("READY"))
 

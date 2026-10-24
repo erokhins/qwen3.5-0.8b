@@ -135,7 +135,7 @@ ids_file_of() {                           # the first N ids, in a FILE — and t
                                           # 32,768-id prompt (191,588 B) cannot be passed at all. See
                                           # `--ids-file` in engine/decode_run.cpp.
 id_at()  { cut -d, -f"$1"  "$IDS"; }      # the Nth id, 1-based
-run_engine() { local LOG=$1; shift; "$BIN" "$@" > "$LOG" 2>&1; }
+run_engine() { local LOG=$1; shift; "$BIN" --mtp-accept 0 --mtp-draft 0 "$@" > "$LOG" 2>&1; }
 
 make_fixtures() {   # make_fixtures clean|bad — a synthetic 1,024-lane pair of runs, for --selftest
     "$PY" - "$WORK/w1024" "$1" <<'PYFIX'

@@ -150,7 +150,7 @@ class EngineSession:
         self.load_tensors: str = "?"
         self.load_allocs: str = "?"
         self.p = subprocess.Popen(
-            [binary, "--model", model, "--session", "--cap", str(cap)],
+            [binary, "--mtp-accept", "0", "--mtp-draft", "0", "--model", model, "--session", "--cap", str(cap)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
         atexit.register(self.close)
         # The engine announces itself with `READY cap=<n>` before it will read a command.

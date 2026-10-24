@@ -61,11 +61,11 @@ tools/gpu_lock.sh util | tail -1
 
 # ---------------------------------------------------------------------------------------------
 echo "== CANARY 0: the two A/B knobs are live and refuse garbage (a pre-knob binary aborts here)"
-"$BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-touch 1 >/dev/null 2>&1 \
+"$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-touch 1 >/dev/null 2>&1 \
     || fail "--attn-touch is not accepted by this binary; W1/W2 have no two sides to compare"
-"$BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-touch 7 >/dev/null 2>&1 \
+"$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-touch 7 >/dev/null 2>&1 \
     && fail "--attn-touch accepted 7: the flag is inert, not parsed. Refusing to time."
-"$BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-tile 0 >/dev/null 2>&1 \
+"$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --attn-tile 0 >/dev/null 2>&1 \
     || fail "--attn-tile is not accepted either; the frozen witness side cannot be run"
 echo "CANARY 0 OK"
 
@@ -79,7 +79,7 @@ echo "== W1: paired in-situ A/B of the touch spelling, family row = the claim"
 # on 1,024 rows too.
 for W in 1024; do
     for SIDE in 0 1; do
-        "$BIN" --model "$MODEL" --ids "$(ids_of "$W")" --steps 0 --time-waves --gemm lt \
+        "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of "$W")" --steps 0 --time-waves --gemm lt \
             --gemm-pins all --attn-touch "$SIDE" --prefill-logits all \
             --out "$OUT/w1_logits_$W$SIDE" > "$OUT/w1_${W}_$SIDE.log" 2>&1 \
             || fail "W1 run T=$W side=--attn-touch $SIDE did not finish"
@@ -102,7 +102,7 @@ done
 for R in 1 2 3; do
   for W in 1024 4096; do
     for SIDE in 0 1; do
-        "$BIN" --model "$MODEL" --ids "$(ids_of "$W")" --steps 0 --time-waves --gemm lt \
+        "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of "$W")" --steps 0 --time-waves --gemm lt \
             --gemm-pins all --attn-touch "$SIDE" --out "$OUT/w1t_${W}_${SIDE}" \
             > "$OUT/w1t_${W}_${SIDE}_r${R}.log" 2>&1 \
             || fail "W1 timing run T=$W side=$SIDE rep=$R did not finish"
@@ -140,7 +140,7 @@ for SIDE in 0 1; do
     # split that every share in this attribution silently assumes.
     timeout 1200 rocprofv3 --kernel-include-regex "attn_" --pmc \
         SQ_INSTS SQ_INSTS_VALU SQ_WAVES -f csv -d "$OUT/pmc$SIDE" -o "pmc$SIDE" -- \
-        "$BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --time-waves --gemm lt \
+        "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --time-waves --gemm lt \
         --gemm-pins all --attn-touch "$SIDE" > "$OUT/w2_$SIDE.log" 2>&1
     echo "side $SIDE rc=$? -> $(find "$OUT/pmc$SIDE" -name '*counter*.csv' | head -1)"
 done
@@ -202,7 +202,7 @@ echo "== W3: realized occupancy witness (bounded; retract it if it cannot be cal
 rm -rf "$OUT/occ"
 timeout 1200 rocprofv3 --kernel-include-regex "attn_slim_wave" --pmc \
     SQ_LEVEL_WAVES SQ_WAVES SQ_BUSY_CYCLES SQ_WAVE_CYCLES GRBM_COUNT -f csv -d "$OUT/occ" \
-    -o occ -- "$BIN" --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --time-waves --gemm lt \
+    -o occ -- "$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 1024)" --steps 0 --time-waves --gemm lt \
     --gemm-pins all --attn-touch 1 > "$OUT/w3.log" 2>&1
 echo "rc=$? files: $(find "$OUT/occ" -name '*counter*.csv' | wc -l)"
 echo "HAND RULES (no threshold is invented here, and a counter that cannot reproduce a known"
@@ -223,7 +223,7 @@ for E in engine llama; do
     rm -rf "$OUT/trace_$E"
     timeout 1200 rocprofv3 --kernel-trace -f csv -d "$OUT/trace_$E" -o t -- \
         $( [ "$E" = engine ] && printf '%s' \
-            "$BIN --model $MODEL --ids $(ids_of 4096) --steps 0 --time-waves --gemm lt --gemm-pins all" \
+            "$BIN --mtp-accept 0 --mtp-draft 0 --model $MODEL --ids $(ids_of 4096) --steps 0 --time-waves --gemm lt --gemm-pins all" \
            || printf '%s' \
             'engines/llama.cpp/build-hip/bin/llama-bench -m models/gguf/Qwen3.5-0.8B.f16.gguf -p 4096 -n 0 -ub 512 -fa on -ngl 99 -t 32 -b 2048 -r 1 -o csv' \
            ) > "$OUT/w4_$E.stdout" 2>&1
@@ -257,7 +257,7 @@ done
 echo
 echo "== W5: refutation, not a measurement — kAttnMaxSplit is a lane CEILING, not a throttle"
 echo "   4,096 lanes runs (split = 8 of kAttnMaxSplit = 9); 4,609 must be REFUSED by name."
-"$BIN" --model "$MODEL" --ids "$(ids_of 20480)" --steps 0 > "$OUT/w5.log" 2>&1 \
+"$BIN" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(ids_of 20480)" --steps 0 > "$OUT/w5.log" 2>&1 \
     && echo "  UNEXPECTED: a 20,480-lane prompt was accepted - the lane ceiling moved, re-read the source"
 grep -qiE "kAttnMaxSplit|lane ceiling" "$OUT/w5.log" \
     && echo "  as expected: refused with the named lane-ceiling error ($(grep -m1 -oiE 'kAttnMaxSplit=[0-9]+' "$OUT/w5.log"))" \

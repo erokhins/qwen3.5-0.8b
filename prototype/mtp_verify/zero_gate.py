@@ -283,7 +283,7 @@ def run_sweep(fixture: str, work: Path, positions: list[int], form: list[str]) -
     def dump_run(csv: Path, out: Path) -> Path:
         if out.exists():
             shutil.rmtree(out)
-        cmd = ["./engine/build/decode_run", "--model", "models/Qwen3.5-0.8B", "--ids-file", str(csv),
+        cmd = ["./engine/build/decode_run", "--mtp-accept", "0", "--mtp-draft", "0", "--model", "models/Qwen3.5-0.8B", "--ids-file", str(csv),
                "--steps", "0", "--prefill-logits", "all", "--dump-attn-rows", "--out", str(out)] + form
         r = sh(cmd)
         if r.returncode != 0:

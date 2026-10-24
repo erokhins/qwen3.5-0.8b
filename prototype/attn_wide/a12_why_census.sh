@@ -17,7 +17,7 @@ tools/gpu_lock.sh util | tail -1
 for lanes in 4096 16384; do
   for wide in 0 1; do
     log=$OUT/echo_${lanes}_wide${wide}.log
-    /usr/bin/time -f "wall=%e s" "$BIN" --model models/Qwen3.5-0.8B \
+    /usr/bin/time -f "wall=%e s" "$BIN" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B \
         --ids-file "$OUT/ids$lanes.txt" --steps 1 --attn-fattn 1 --attn-fattn-wide "$wide" \
         --out "$OUT/out_${lanes}_wide${wide}" > "$log" 2>"$log.time" || fail "run lanes=$lanes wide=$wide rc=$?"
     echo "=== lanes=$lanes wide=$wide  ($(cat "$log.time" | tail -1)) ==="

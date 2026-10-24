@@ -19,7 +19,7 @@ fail() { echo "ABORT: $*" >&2; tools/gpu_lock.sh release "$TAG" >/dev/null 2>&1;
 
 one() {   # one <width> -> "<cold> <warm>"
   local w="$1" log="$OUT/default_warm_$w.log"
-  "$BIN" --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$w.txt" --steps 1 --time-waves \
+  "$BIN" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$OUT/ids$w.txt" --steps 1 --time-waves \
          --out "$OUT/tmpout" > "$log" 2>&1 || return 1
   local want_tk; want_tk=$(awk -F',' '{print NF}' "$OUT/ids$w.txt")
   local got; got=$(grep -E "^PREFILL" "$log" | head -1 | sed -E 's/.*tokens=([0-9]+).*/\1/')

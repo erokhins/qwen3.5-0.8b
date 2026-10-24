@@ -11,7 +11,7 @@ work=${1:-/tmp/cr_fix}
 cd "$root"
 run() {  # run <binary> <dir> [flag...]
   bin=$1; dir=$2; shift 2
-  if ! "$bin" --model models/Qwen3.5-0.8B --ids-file "$work/ref.csv" --steps 8 \
+  if ! "$bin" --mtp-accept 0 --mtp-draft 0 --model models/Qwen3.5-0.8B --ids-file "$work/ref.csv" --steps 8 \
         --out "/tmp/$dir" "$@" > "/tmp/$dir.log" 2>&1; then
     echo "RUN FAILED $dir"; sed -n '1,3p' "/tmp/$dir.log"; return 1
   fi

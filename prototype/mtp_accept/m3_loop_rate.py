@@ -105,8 +105,14 @@ def fields(line: str) -> dict[str, str]:
 def run_binary(binary: str, model: str, ids_file: pathlib.Path, out: pathlib.Path,
                extra: list[str]) -> tuple[int, str]:
     out.mkdir(parents=True, exist_ok=True)
-    cmd = [binary, "--model", model, "--ids-file", str(ids_file), "--gdn-loop", "1",
+    cmd = [binary, "--mtp-accept", "0", "--mtp-draft", "0", "--model", model,
+           "--ids-file", str(ids_file), "--gdn-loop", "1",
            "--no-stop", "--out", str(out)] + extra
+    # `--mtp-accept 0 --mtp-draft 0` here, on the SHAPE of every run this driver makes, not on one arm:
+    # the accept arm names `--mtp-accept 1` in `extra` and the last name wins, while the flag-off pair run
+    # gets the plain path explicitly instead of by default. The engine now defaults speculation ON, so a
+    # pair run that inherits the default would write `emitted.txt` and no `logits<N>.bin`, and the lossless
+    # comparison below would be reading a different object than it thinks it is.
     # The command line is printed so any single line of this pass is re-runnable by hand, and so the
     # device population is auditable from the log rather than from this script's argparse defaults.
     print("    $ " + " ".join(cmd), flush=True)

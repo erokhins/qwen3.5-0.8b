@@ -60,7 +60,7 @@ def parse_result(stdout: str) -> dict:
 
 def run_once(binary: str, model: str, ids: list[str], steps: int, out: Path) -> tuple[float, float]:
     cmd = [
-        binary, "--model", model, "--ids", ",".join(ids),
+        binary, "--mtp-accept", "0", "--mtp-draft", "0", "--model", model, "--ids", ",".join(ids),
         "--steps", str(steps), "--out", str(out),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)

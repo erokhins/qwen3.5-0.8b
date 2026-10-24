@@ -356,7 +356,7 @@ def main() -> int:
         population = [(f.stem, ids)]
         print(f"fixture {f}: {len(ids)} ids (asserted by field count, not by the filename)")
 
-    cmd_common = [args.binary, "--model", args.model, "--steps", str(args.steps),
+    cmd_common = [args.binary, "--mtp-accept", "0", "--mtp-draft", "0", "--model", args.model, "--steps", str(args.steps),
                   "--mtp-draft", "1", "--mtp-draft-k", str(args.k), "--mtp-sched", args.sched]
     if args.stop_rule == "no-stop":
         cmd_common.append("--no-stop")

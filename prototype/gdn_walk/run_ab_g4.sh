@@ -107,7 +107,7 @@ open('$GATE_IDS','w').write(','.join(str(int(x)) for x in ids))
 " || fail "could not build the gate ids from data/refs/p64/input_ids.npy"
     for SIDE in base block $NEW_SIDES; do
         if [ "$SIDE" = base ]; then BINX=$BIN_OLD; else BINX=$BIN_NEW; fi
-        "$BINX" --model "$MODEL" --ids "$(cat "$GATE_IDS")" --steps 0 --prefill-logits all --state-fp \
+        "$BINX" --mtp-accept 0 --mtp-draft 0 --model "$MODEL" --ids "$(cat "$GATE_IDS")" --steps 0 --prefill-logits all --state-fp \
             $(geom_of "$SIDE") --wave-rows 16 --gdn-loop 8 --out "$OUT/bi_$SIDE" \
             > "$OUT/bi_$SIDE.log" 2>&1 || fail "numerics leg: $SIDE did not finish"
     done
