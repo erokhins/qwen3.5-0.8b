@@ -61,6 +61,11 @@ run() { # $1 arm $2 rep -> log path
   # if only one side ran it the pair would differ in the recurrence kernel as well as in speculation — and
   # the first take of this A/B showed exactly that, a 300 ms prefill difference that had nothing to do with
   # the accept loop. One variable per A/B, or the number describes the wrong thing.
+  # Default-on means the BASE arm has to name the plain path explicitly: since `aceee97` the engine default is
+  # `--mtp-accept 1 --mtp-k 2`, so an unpinned base arm silently runs the accept loop and the A/B times the
+  # accept loop against itself. The MTPSTAT canary below is what caught this — it fired as "base rep 1 printed
+  # 1 MTPSTAT lines", which is exactly the class of silent-baseline bug this harness exists to prevent.
+  [ "$arm" = base ] && extra="$extra --mtp-accept 0 --mtp-draft 0"
   [ "$arm" = accept ] && extra="$extra --mtp-draft 1 --mtp-accept 1 $ACCEPT_EXTRA"
   log="$OUT/${arm}_${rep}.log"; mkdir -p "$OUT/out_${arm}_${rep}"
   $BIN --model "$MODEL" --ids-file "$IDS" --steps "$STEPS" --cap "$CAP" --out "$OUT/out_${arm}_${rep}" \
@@ -132,7 +137,15 @@ echo "  cost per body: base $(printf '%6.3f' "$bstep") ms/step   accept $(printf
 # contradicts the number beside it is worse than no print, because a reader tabulates the ceiling. The parity
 # test is the same generalisation: a round is at parity when tokens/round >= round/step, and it can never emit
 # more than kmax, so parity is unreachable iff round/step >= kmax.
-case "$ACCEPT_EXTRA" in *"--mtp-k 2"*) kmax=3 ;; *) kmax=2 ;; esac
+# How many tokens a round can emit is k+1, not a constant. Two bugs lived here: the line originally hardcoded
+# k=1's 2 and printed "ceiling 1.089 x base" above a measured +16.53 %; then the engine default became k=2, so
+# reading k out of ACCEPT_EXTRA alone went silently wrong again (an empty ACCEPT_EXTRA now means k=2, not k=1).
+# A print that contradicts the number beside it is worse than no print, because a reader tabulates the ceiling.
+# So: the default is 3 (k=2 shipped by aceee97), and only an explicit `--mtp-k 1` in ACCEPT_EXTRA lowers it.
+case "$ACCEPT_EXTRA" in
+  *"--mtp-k 1"*) kmax=2 ;;
+  *) kmax=3 ;;
+esac
 awk -v bs="$bstep" -v ar="$around" -v kmax="$kmax" 'BEGIN{
   if (bs=="nan" || ar=="nan") { print "  NO-COST-ARITHMETIC: a median came back missing"; exit }
   r = ar/bs;
