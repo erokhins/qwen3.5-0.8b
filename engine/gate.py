@@ -6105,6 +6105,11 @@ MTP_ENGINE_DEFAULT_K = 2
 # the same number: the requirement is that the gate admits the depth the engine runs by default, and one
 # constant expressing that leaves no second number to drift. `--mtp-k` still overrides it on the CLI.
 MTP_ROUND_K_DEFAULT = MTP_ENGINE_DEFAULT_K
+# Section (m)'s adaptive arm defaults OFF for the same reason the engine's flag does: the mechanism and its
+# gate landed together, and whether adaptive depth becomes the shipping default is a measured decision the
+# main agent takes (`prototype/mtp_accept/ADAPTIVE.md` §6). One constant means the gate's default and the
+# engine's default cannot drift apart silently — the `--attn-tile` rule again.
+MTP_ADAPT_DEFAULT = 0
 MTP_ROUND_ROUTE_NOTE = (
     "route coverage: `hand` ONLY (asserted off each run's `MTPSTAT route=` echo). `amortised` is not"
     " covered here and is not output-neutral, so it could not be judged by this section's stream"
@@ -6192,7 +6197,11 @@ def mtp_round_read_run(log: str, out_dir: Path) -> dict:
     rec = {"rc": None, "ran": False, "seed": seed, "seed_line": seed_line,
            "geom": {}, "geom_lines": 0, "accept_echo": {}, "mode": {},
            "stat": {}, "stat_lines": 0, "wall": {}, "wall_lines": 0, "no_rate": False,
-           "rounds": [], "emitted": [], "emitted_file": None}
+           "rounds": [], "emitted": [], "emitted_file": None,
+           # The adaptive-depth lines, empty unless the run armed the policy. Kept in the SAME record so
+           # one parse serves both arms and a case cannot be judged with half its lines unread.
+           "adapt_cfg": {}, "adapt_lines": 0, "adapt_events": [], "adapt_plain_lines": 0,
+           "adapt_stat": {}, "adapt_stat_lines": 0, "adapt_attr": {}, "adapt_attr_lines": 0}
     for line in log.splitlines():
         if line.startswith("MTPGEOM "):
             rec["geom_lines"] += 1
@@ -6213,6 +6222,23 @@ def mtp_round_read_run(log: str, out_dir: Path) -> dict:
             rec["no_rate"] = "NO-RATE" in line
         elif line.startswith("ACCEPT round="):
             rec["rounds"].append(_mtp_kv(line))
+        elif line.startswith("MTPADAPT on="):
+            # The policy's config echo. Parsed rather than ignored because EVERY threshold the mirror below
+            # adjudicates with is read off it: a Python copy of `engine/mtp_adaptive.h`'s constants would be
+            # a second spelling of the rule, and the two drifting apart is the `--attn-tile` trap in a new
+            # costume (a gate that judges a different rule than the engine applies cannot fail usefully).
+            rec["adapt_lines"] += 1
+            rec["adapt_cfg"] = _mtp_kv(line)
+        elif line.startswith("MTPADAPT round="):
+            rec["adapt_events"].append(_mtp_kv(line))
+        elif line.startswith("MTPADAPT-PLAIN"):
+            rec["adapt_plain_lines"] += 1
+        elif line.startswith("MTPADAPTSTAT "):
+            rec["adapt_stat_lines"] += 1
+            rec["adapt_stat"] = _mtp_kv(line)
+        elif line.startswith("MTPADAPTATTR "):
+            rec["adapt_attr_lines"] += 1
+            rec["adapt_attr"] = _mtp_kv(line)
     path = out_dir / "emitted.txt"
     rec["emitted_file"] = str(path)
     if path.exists():
@@ -6517,8 +6543,294 @@ def mtp_round_verdicts(rec: dict) -> list[tuple[str, bool, str]]:
     return rows
 
 
+# ---- the adaptive depth: the policy mirror, and the verdicts that judge it ---------------------------
+#
+# WHAT THE POLICY IS, in one line: each round's depth is drawn from the tokens-per-step-equivalent the
+# recent rounds already reported, it may only go DOWN (2 → 1 → plain steps), and the two decisions are
+# gated by a sample size. `engine/mtp_adaptive.h` is the implementation and `prototype/mtp_accept/
+# ADAPTIVE.md` is the arithmetic; this is the third spelling and the one that adjudicates, so it is a
+# MIRROR of the documented rule rather than a copy of the C++: it reads the thresholds off the run's own
+# `MTPADAPT on=1 …` line, so a threshold that moved in the C++ moves here with it and a mismatch is a
+# visible disagreement instead of a silent agreement between two stale numbers.
+#
+# WHY A MIRROR AT ALL, when the engine prints its own events: because an event line proves the engine did
+# what it does, not what it SHOULD do. The only way to adjudicate a policy is to compute the decision
+# independently and compare — the same reason section (m) compares the engine's stream against the PIN and
+# not against a flag-off run of itself (`AGENTS.md`: a check whose reference side is derived from the thing
+# under test cannot adjudicate it).
+#
+# WHY THE CLASSIFICATION IS DERIVED, NOT HANDED A NAME: which pinned fixture has near-zero acceptance is a
+# fact about the model's behaviour on that content, and a list of such names typed into this file would be
+# a claim about a measurement nobody took here (the admission trap: an admission list typed from memory).
+# So the classes come out of each case's own numbers — the run's rounds, the engine's own thresholds — and
+# the population assertion is that BOTH classes exist, not that a named fixture behaved.
+MTP_ADAPT_STEPS = 56   # the smallest budget that can reach BOTH decisions: `min_observe` (16) rounds to
+                       # the demote line, then `min_observe_abandon` (24) more to the sticky one, plus the
+                       # plain step every run pays first and slack for a `ROUND-SKIP` or two. The engine
+                       # echoes both minimums, so this constant is checked against the run rather than
+                       # trusted: `mtp_adapt_verdicts` reddens a case whose budget could not have reached
+                       # the decision it is being used to deny.
+
+
+def mtp_adapt_constants_from_source() -> dict:
+    """The policy's own constants, read out of `engine/mtp_adaptive.h`. NOT retyped here.
+
+    The mirror has to use the same numbers the binary uses, and the two ways to get that are a copy that can
+    rot and a read that cannot. So the header is the source: a `constexpr double kDemoteEst = 0.95;` moves
+    the mirror and the device comparison together, which is what lets `mtp_adapt_verdicts` use the echoed
+    config as a STALE-BINARY canary (echoed cfg != header cfg means the binary under test predates the
+    header it is being judged against — the same failure `AGENTS.md` records for `--attn-tile` and for a
+    gate that admits a depth the engine does not run).
+    """
+    src = (ROOT / "engine" / "mtp_adaptive.h").read_text()
+
+    def one(name: str) -> str:
+        m = re.search(rf"constexpr\s+(?:double|int)\s+{name}\s*=\s*([-0-9.eE+]+)\s*;", src)
+        if not m:
+            raise SystemExit(f"gate: cannot read `{name}` out of engine/mtp_adaptive.h, so the policy"
+                             " mirror has no defensible constants and section (m)'s adaptive arm must not"
+                             " run rather than guess them")
+        return m.group(1)
+
+    return {
+        "window": one("kWindowRounds"),
+        "min_observe": one("kMinObserveRounds"),
+        "min_observe_abandon": one("kMinObserveBeforeAbandon"),
+        "demote_est": one("kDemoteEst"),
+        "abandon_est": one("kAbandonEst"),
+        "cost_k1": one("kRoundCostStepsK1"),
+        "cost_k2": one("kRoundCostStepsK2"),
+        "plain": one("kPlain"),
+        "re_promote": "0",     # there is no re-promotion constant because there is no re-promotion
+    }
+
+
+def mtp_adapt_decide(k: int, est: float, cfg: dict):
+    """THE POLICY PREDICATE: given the depth in force and the window estimate, what depth comes next?
+
+    One named function, not an inline `if`, for the standing reason every predicate in this section is one:
+    `selftest_mtp_adapt` replaces it with an always-keep stub and requires a case to CHANGE COLOUR, because
+    an assertion about "it demoted" that cannot be made false is decoration (`AGENTS.md`: witness a check by
+    stubbing it to always pass). Returns the new depth, or None for "no change".
+    """
+    if k >= 2 and est < float(cfg["demote_est"]):
+        return k - 1
+    if k == 1 and est < float(cfg["abandon_est"]):
+        return int(cfg["plain"])
+    return None
+
+
+def mtp_adapt_mirror(rounds: list[dict], cfg: dict) -> dict:
+    """Recompute the policy's decisions from a run's round lines. Returns events, est, and coverage.
+
+    `rounds` is the parsed `ACCEPT round=…` list, each entry carrying `k=` (the depth that round ran at —
+    stamped on every round line by an adaptive run, which is why that stamp exists) and `emitted=`.
+    `cfg` is the parsed `MTPADAPT on=1 …` line. Deliberately has no access to the engine's own
+    `MTPADAPT round=` lines: the comparison in `mtp_adapt_verdicts` is the point.
+
+    Returns `{"events": [{round, k, est}], "final_k": int, "decision_points": int,
+    "rounds_after_plain": int, "est": float, "err": str|None}`. `est` is the window estimate AT THE LAST
+    DECISION POINT — the number a "did not demote" claim has to be measured against — and
+    `decision_points == 0` means the run was too short to ever be judged, which is reported as
+    unadjudicable rather than as a passing "no demotion".
+    """
+    try:
+        k = int(cfg["k_start"])
+        window = int(cfg["window"])
+        min_observe = int(cfg["min_observe"])
+        min_observe_abandon = int(cfg["min_observe_abandon"])
+        demote_est = float(cfg["demote_est"])
+        abandon_est = float(cfg["abandon_est"])
+        cost = {1: float(cfg["cost_k1"]), 2: float(cfg["cost_k2"])}
+        plain = int(cfg["plain"])
+    except (KeyError, TypeError, ValueError) as exc:
+        return {"events": [], "final_k": None, "decision_points": 0, "rounds_after_plain": 0,
+                "est": None, "err": f"the MTPADAPT config line does not carry the policy's fields: {exc}"}
+    emit: list[float] = []
+    cst: list[float] = []
+    events: list[dict] = []
+    decision_points = 0
+    rounds_after_plain = 0
+    est_last: float | None = None
+    err: str | None = None
+    pos = 0                       # the round ordinal in the transcript, which is what the policy's own
+    for line in rounds:         # events are stamped with
+        kr = _mtp_num(line, "k")
+        em = _mtp_num(line, "emitted")
+        if kr is None or em is None:
+            err = err or f"round line {line} carries no k=/emitted=, so the policy cannot be recomputed"
+            continue
+        if k == plain:
+            rounds_after_plain += 1     # a round ran after speculation was abandoned: a stickiness bug
+            continue
+        if kr not in cost:
+            err = err or f"a round reported depth k={kr}, outside the funded {sorted(cost)}"
+            continue
+        pos += 1
+        emit.append(float(em))
+        cst.append(cost[kr])
+        if len(emit) > window:
+            emit.pop(0)
+            cst.pop(0)
+        need = min_observe if k >= 2 else min_observe_abandon
+        if len(emit) < need:
+            continue
+        cost_sum = sum(cst)
+        est = (sum(emit) / cost_sum) if cost_sum > 0 else 0.0
+        est_last = est
+        decision_points += 1
+        to = mtp_adapt_decide(k, est, cfg)
+        if to is None:
+            continue
+        if to != k:
+            events.append({"round_index": pos, "round": line.get("round"), "k": str(to),
+                           "prev_k": str(k), "est": est, "seen": str(len(emit))})
+            k = to
+            emit, cst = [], []          # the window clears on a change: every window judges ONE geometry
+    return {"events": events, "final_k": k, "decision_points": decision_points,
+            "rounds_after_plain": rounds_after_plain, "est": est_last, "err": err}
+
+
+def mtp_adapt_verdicts(rec: dict) -> list[tuple[str, bool, str]]:
+    """The adaptive half of one case's assertions, as data. Same rows-not-checks shape, same reason."""
+    fx = rec["fixture"]
+    rows: list[tuple[str, bool, str]] = []
+
+    def row(name: str, ok: bool, detail: object = "") -> None:
+        rows.append((f"{fx}: {name}", bool(ok), detail if isinstance(detail, str) else repr(detail)))
+
+    cfg, events = rec.get("adapt_cfg") or {}, rec.get("adapt_events") or []
+    stat, attr = rec.get("adapt_stat") or {}, rec.get("adapt_attr") or {}
+    if rec.get("rc") != 0:
+        return rows
+    row("exactly one MTPADAPT config line", rec["adapt_lines"] == 1,
+        f"{rec['adapt_lines']} — with no config echo the run did not arm the policy, and the events below"
+        " would be a policy this file invented")
+    if rec["adapt_lines"] != 1:
+        return rows
+    want_ceiling = str(rec["k"])
+    row("the policy's ceiling is the depth this case asked for (`k_start`)",
+        cfg.get("k_start") == want_ceiling,
+        f"k_start={cfg.get('k_start')!r} vs --mtp-k {rec['k']}: the adaptive policy may run a round"
+        " NARROWER than the run asked for and never wider, so the ceiling it echoes has to be the asked"
+        " depth (the side buffers are sized from it too)")
+    row("the policy cannot re-promote (`re_promote=0`)", cfg.get("re_promote") == "0",
+        f"re_promote={cfg.get('re_promote')!r} — depth is monotone BY DESIGN, which is what makes"
+        " round-to-round oscillation impossible rather than merely discouraged")
+
+    # THE STALE-BINARY CANARY, and it is the only field set in this section that can see the binary and the
+    # header disagreeing: the thresholds come from the header, the echo comes from the process under test,
+    # and a build that predates a threshold edit agrees with ITSELF about everything else.
+    want_cfg = {k: v for k, v in mtp_adapt_constants_from_source().items() if k != "plain"}
+    got_cfg = {k: str(cfg.get(k)) for k in want_cfg}
+    # Numeric fields are compared as numbers, so `0.950` echoing `0.95` is not a false red.
+    def same(key: str) -> bool:
+        want, got = want_cfg[key], got_cfg[key]
+        try:
+            return abs(float(want) - float(got)) < 1e-9
+        except ValueError:
+            return want == got
+    drift = [f"{k}: header {want_cfg[k]} vs binary {got_cfg[k]}" for k in want_cfg if not same(k)]
+    row("the run's echoed policy thresholds are the ones in engine/mtp_adaptive.h", not drift,
+        "; ".join(drift) or f"all {len(want_cfg)} fields agree — so the binary under test carries the"
+        " policy this section is adjudicating it against",
+        )
+    if cfg.get("plain") != str(mtp_adapt_constants_from_source()["plain"]):
+        row("the run's `plain=` sentinel is the header's", False,
+            f"echoed {cfg.get('plain')!r} vs header {mtp_adapt_constants_from_source()['plain']!r}")
+
+    mir = mtp_adapt_mirror(rec["rounds"], cfg)
+    rec["adapt_mirror"] = mir
+    if mir["err"]:
+        row("every round line carries the depth it ran at and what it emitted", False, mir["err"])
+        return rows
+    row("no round ran after the policy abandoned speculation (stickiness)",
+        mir["rounds_after_plain"] == 0,
+        f"{mir['rounds_after_plain']} round(s) after plain — abandonment must be final for the request")
+
+    # THE ENGINE'S EVENTS AGAINST THE MIRROR'S. Compared on the ROUND ORDINAL rather than the step number,
+    # because the policy counts rounds and the run counts steps, and a plain step in between is not a
+    # decision the policy skipped. The est is compared to 4 decimals, which is what the engine prints.
+    got = [(e.get("round"), e.get("k"), e.get("est")) for e in events]
+    want = [(e["round"], e["k"], f"{e['est']:.4f}") for e in mir["events"]]
+    same_len = len(events) == len(mir["events"])
+    agree = same_len and all(w == g for g, w in zip(got, want))
+    row("the policy's event lines match this mirror's independent recomputation",
+        agree,
+        f"engine {got[:4]} vs mirror {want[:4]}"
+        + ("" if same_len else f" — counts differ: {len(events)} printed vs {len(mir['events'])} predicted")
+        + ("" if not mir["events"] else
+           " — a demotion the mirror does not predict, or one it predicts that the engine did not print,"
+           " is the policy disagreeing with its own documented rule. The round stamp is part of the tuple,"
+           " so an event at the wrong round cannot pass by naming the right depth."))
+
+    ks = [_mtp_num(r, "k") for r in rec["rounds"]]
+    missing_k = [i for i, v in enumerate(ks) if v is None]
+    row("every round line carries the depth it ran at (`k=`), which is what the mirror reads",
+        not missing_k,
+        f"missing on round lines {missing_k[:4]}" if missing_k else
+        f"{len(ks)} round lines stamped — an unstamped round is an unevidenced depth, and a policy judged"
+        " on an inferred geometry is judged on the gate's guess")
+    bad_up = [i for i in range(1, len(ks)) if ks[i] is not None and ks[i - 1] is not None
+              and ks[i] > ks[i - 1]]
+    row("the depth never rises (2 -> 1 -> plain is the only direction)", not bad_up,
+        f"depths {ks[:12]}… round {bad_up[:3]} — a k that comes back is the oscillation the design"
+        " refuses to allow")
+
+    row("exactly one MTPADAPTSTAT line", rec["adapt_stat_lines"] == 1, f"{rec['adapt_stat_lines']}")
+    if rec["adapt_stat_lines"] == 1:
+        st = rec.get("stat") or {}
+        both_k = (_mtp_num(stat, "rounds_k2") or 0) + (_mtp_num(stat, "rounds_k1") or 0)
+        row("MTPADAPTSTAT rounds_k2 + rounds_k1 == MTPSTAT rounds", both_k == _mtp_num(st, "rounds"),
+            f"{both_k} vs {_mtp_num(st, 'rounds')} — every round is attributed to exactly one depth, or"
+            " the per-run counters do not describe the run they are printed on")
+        row("MTPADAPTSTAT changes == the number of event lines",
+            _mtp_num(stat, "changes") == len(events),
+            f"{stat.get('changes')} vs {len(events)}")
+        row("MTPADAPTSTAT final_k is the depth the last round ran at",
+            (not ks or _mtp_num(stat, "final_k") in (ks[-1], 0)),
+            f"final_k={stat.get('final_k')} last round depth={ks[-1] if ks else 'none'}"
+            " (0 is legal: it means the run finished on plain steps)")
+    row("the engine's own driver/tracker cross-check agrees (MTPADAPTATTR agree=1)",
+        rec["adapt_attr_lines"] == 1 and attr.get("agree") == "1",
+        f"{rec['adapt_attr_lines']} ATTR lines, agree={attr.get('agree')!r} — two counters for the same"
+        " rounds, kept in different places on purpose")
+
+    # THE CLASSIFICATION, and it is derived from the case's own numbers. `decision_points == 0` is NOT
+    # silently a "keeps": a run too short to have been judged is reported as unadjudicable, exactly the
+    # convention the stream half uses for a fixture with no generation pin.
+    if mir["decision_points"] == 0:
+        rec["adapt_class"] = None
+        row("the adaptive policy had a decision point on this case", False,
+            "NOT ADJUDICABLE: with the thresholds this run echoed, no decision could be taken after"
+            f" {len(rec['rounds'])} round(s) (first one needs"
+            f" {cfg.get('min_observe')}), so 'it did not demote' would be a claim about an estimate that"
+            " was never computed. Ask for a deeper --mtp-adaptive case (MTP_ADAPT_STEPS) rather than"
+            " counting this one as coverage.")
+        return rows
+    changed = bool(events)
+    est = mir["est"]
+    demote = float(cfg["demote_est"])
+    rec["adapt_class"] = "demotes" if changed else "keeps"
+    if changed:
+        row("a demoted case's estimate at the decision was below the demote line",
+            est is not None and est < demote,
+            f"est={est} vs demote_est={demote} — the event line is only evidence of a demotion if the"
+            " number that justified it was under the line the run itself echoed")
+        if any(e.get("plain") == "1" for e in events):
+            row("an abandoned case says so once, on its own line (MTPADAPT-PLAIN)",
+                rec["adapt_plain_lines"] == 1, f"{rec['adapt_plain_lines']} lines")
+    else:
+        row("a case that did NOT demote had an estimate at or above the demote line",
+            est is not None and est >= demote,
+            f"est={est} vs demote_est={demote} — 'no demotion' means the estimate stayed above the line,"
+            " not that the run was too short to reach it")
+    return rows
+
+
 def mtp_round_run_case(name: str, man: dict, args, work: Path, *,
-                       k: int | None = None, forward_k: bool = True) -> dict:
+                       k: int | None = None, forward_k: bool = True,
+                       adaptive: bool | None = None) -> dict:
     """One fixture through the accept loop, and back as a record. No timing, and nothing here reads a
     millisecond field: `--steps` is a count of bodies, not a duration.
 
@@ -6528,6 +6840,7 @@ def mtp_round_run_case(name: str, man: dict, args, work: Path, *,
     case in the population.
     """
     k = int(args.mtp_k if k is None else k)
+    adaptive = bool(args.mtp_adaptive if adaptive is None else adaptive)
     greedy = man["greedy_continuation"]
     ids = man["sources"][0]["ids"]
     depth = mtp_round_depth(greedy)
@@ -6542,6 +6855,17 @@ def mtp_round_run_case(name: str, man: dict, args, work: Path, *,
     # is a guess the gate relies on: if a deeper k needed more bodies than this, `rounds > 0` would go RED
     # rather than pass over an empty transcript.
     steps = depth + k + 2
+    # THE POLICY'S OBSERVATION BUDGET, and it is a STEP budget rather than a token budget for one reason:
+    # the policy cannot be judged on 8 tokens. `FREE_RUN_BOUND` caps the PINNABLE stream at 8 tokens, but
+    # the first decision needs `min_observe` rounds and a sticky abandonment needs `min_observe_abandon`
+    # more (both echoed by the run), so an adaptive case runs MTP_ADAPT_STEPS bodies and its STREAM is
+    # still judged only over the pinnable depth — the extra bodies exist to give the policy a window, and
+    # nothing past the pinned prefix is adjudicated as a token claim (`AGENTS.md`: state which alignment,
+    # and which cases, a claim covers). A case that runs out of bodies before its first decision point is
+    # reported as NOT ADJUDICABLE by `mtp_adapt_verdicts` rather than counted as "did not demote", so a
+    # budget that is too small reddens the coverage denominator instead of passing quietly.
+    if adaptive:
+        steps = max(steps, MTP_ADAPT_STEPS)
     case_dir = work / "mtp_round" / name
     case_dir.mkdir(parents=True, exist_ok=True)
     stale = case_dir / "emitted.txt"
@@ -6552,7 +6876,8 @@ def mtp_round_run_case(name: str, man: dict, args, work: Path, *,
     # SUCCEEDS at width 1 (AGENTS.md). Assert the field count off the file, not off the intent.
     wrote = len(ids_file.read_text().strip().split(","))
     rec = {"fixture": name, "k": k, "depth": depth, "pin": list(greedy),
-           "prompt_ids": len(ids), "steps": steps, "k_forwarded": forward_k}
+           "prompt_ids": len(ids), "steps": steps, "k_forwarded": forward_k,
+           "adaptive": adaptive}
     if wrote != len(ids):
         rec.update({"rc": None, "ran": False, "geom": {}, "geom_lines": 0, "accept_echo": {},
                     "stat": {}, "stat_lines": 0, "wall": {}, "wall_lines": 0, "no_rate": False,
@@ -6583,6 +6908,10 @@ def mtp_round_run_case(name: str, man: dict, args, work: Path, *,
         # not be attributed to the depth this gate was asked to admit — and left off only by the witness
         # that exists to find out what the default is.
         cmd += ["--mtp-k", str(k)]
+    if adaptive:
+        # Named explicitly, never inherited: a case that ran with the policy off because the flag did not
+        # reach it would be judged as if it had run with it on, and the mirror would call that parity.
+        cmd += ["--mtp-adaptive", "1"]
     rec["argv"] = cmd
     proc = subprocess.run(cmd, capture_output=True, text=True)
     log = proc.stdout + proc.stderr
@@ -6624,6 +6953,10 @@ def mtp_round_checks(args, work: Path) -> None:
           f" above, so the population is {len(cases)}: " + ", ".join(n for n, _ in cases))
     totals = {"cases": 0, "ran": 0, "rounds": 0, "tokens": 0, "adjudicable": 0, "forked": 0}
     forks: list[str] = []
+    # The adaptive arm's per-class tally: `(name, class, stream_adjudicated, stream_ok)` per case. The
+    # coverage assertion below needs a case in EACH class whose stream was adjudicated, because "lossless"
+    # said about a case that could not be compared is the empty-parse failure in prose form.
+    adapt_cases: list[tuple[str, str | None, bool, bool]] = []
     for name, man in cases:
         # REFS moves to the case and stays there until its verdicts are in. Reading the pins AFTER
         # restoring the caller's fixture was the bug that made the first device pass print `pin top1
@@ -6650,12 +6983,21 @@ def mtp_round_checks(args, work: Path) -> None:
             totals["adjudicable"] += 1
         print(f"  $ {' '.join(rec['argv'])}")
         rows = mtp_round_verdicts(rec)
+        if args.mtp_adaptive:
+            rows += mtp_adapt_verdicts(rec)
         set_fixture(args.fixture)
         if rec.get("admitted_at") is not None:
             totals["forked"] += 1
             forks.append(f"{name} at stream index {rec['admitted_at']}")
         for nm, ok, detail in rows:
             check(ok, nm, detail)
+        if args.mtp_adaptive:
+            stream_row = next((r for r in rows if "stream == the pinned greedy continuation" in r[0]),
+                              None)
+            # `NOT ADJUDICABLE` rows are excluded by the fixture having no generation pin, which is what
+            # `mtp_round_depth` already says, so this is the stream predicate actually deciding something.
+            adapt_cases.append((name, rec.get("adapt_class"), rec["depth"] > 0,
+                                bool(stream_row and stream_row[1])))
     # THE SPAN CANARY, and it is read off the runs rather than asserted from the flags, for the standing
     # reason that a flag reaching the process is not the claim that the process honoured it (`AGENTS.md`:
     # a stale binary agrees with itself; assert the canary inside the window). Two spans are in play since
@@ -6721,6 +7063,47 @@ def mtp_round_checks(args, work: Path) -> None:
             f" --mtp-k {args.mtp_k}), ran {wrounds} round(s) and emitted"
             f" {len(wrec.get('emitted') or [])} token(s). The depth this section admits is the depth the"
             " engine runs when nothing is named.")
+    # THE ADAPTIVE ARM'S COVERAGE, and it is the part of this section that answers the funding question
+    # rather than the correctness one: a policy that never fired anywhere in the population would pass every
+    # per-case row above by doing nothing. So the population has to SHOW both behaviours, from its own
+    # measurements, and both of those cases have to be cases whose stream was actually compared to a pin.
+    if args.mtp_adaptive:
+        demote = [c for c in adapt_cases if c[1] == "demotes"]
+        keep = [c for c in adapt_cases if c[1] == "keeps"]
+        unadjudicated = [c[0] for c in adapt_cases if c[1] is None]
+        print(f"  policy classes, derived from each run's own estimate: "
+              f"{len(demote)} demoted ({', '.join(n for n, _, _, _ in demote) or 'none'}), "
+              f"{len(keep)} stayed at the ceiling ({', '.join(n for n, _, _, _ in keep) or 'none'}), "
+              f"{len(unadjudicated)} ran too few rounds to be judged"
+              f"{': ' + ', '.join(unadjudicated) if unadjudicated else ''}")
+        check(bool(demote),
+              "at least one case in the derived population has acceptance low enough to DEMOTE, and it"
+              " printed the event line",
+              f"{len(demote)} of {len(adapt_cases)} cases changed depth — a policy that never fires here"
+              " is not being tested by this section, and the near-zero case must be ADDED to the"
+              " population rather than this check relaxed. The per-case rows above still prove the"
+              " demotion arithmetic on synthetic histories (--selftest), but only a device case proves"
+              " the engine's own tracker fires on real content")
+        check(bool(keep),
+              "at least one case has acceptance high enough that the policy leaves it at the ceiling",
+              f"{len(keep)} of {len(adapt_cases)} — if every case demoted, the demote line is set too"
+              " high and the default would shed the win everywhere, which is the opposite failure and"
+              " just as much a coverage problem")
+        lossless_demote = [c for c in demote if c[2] and c[3]]
+        lossless_keep = [c for c in keep if c[2] and c[3]]
+        check(bool(lossless_demote) and bool(lossless_keep),
+              "losslessness was adjudicated against the PIN in BOTH classes (a demoted case and a stayed"
+              " case)",
+              f"demoted+compared={len(lossless_demote)} stayed+compared={len(lossless_keep)} — the policy"
+              " changes GEOMETRY and never a verdict, and that claim needs a compared stream on each side"
+              " of a change, not a counter. Deepen the case's --steps or add a pinned fixture rather than"
+              " accepting a class whose stream was never read")
+        notes.append(
+            f"section (m) ran its population with `--mtp-adaptive 1`: {len(adapt_cases)} case(s), "
+            f"{len(demote)} of which the policy changed and {len(keep)} of which it left alone, all "
+            "classifications recomputed in Python from each run's own round lines and thresholds off the "
+            "run's own config echo (no constant is typed here). Which case belongs to which class is a "
+            "measurement, not a name in this file.")
     # THE DENOMINATORS. A verdict that cannot name its denominator cannot fail, so each of these is the
     # population the loop above actually saw, and the first one is the admission check itself.
     check(totals["cases"] == len(cases),
@@ -6745,6 +7128,144 @@ def mtp_round_checks(args, work: Path) -> None:
         f" `min(len(greedy_continuation) - 1, FREE_RUN_BOUND = {FREE_RUN_BOUND})` because a FREE run"
         " cannot be pinned past A-18's bound and `--mtp-accept` refuses `--replay`. No millisecond figure"
         " appears in this section: it is a correctness gate, and the timing pass is the main agent's.")
+
+
+def mtp_adapt_synthetic(fixture: str, rounds_spec: list[tuple[int, int]],
+                        events_hand: list[tuple[int, str, str]], cfg: dict,
+                        plain_lines: int = 0) -> dict:
+    """An ADAPTIVE run record, with the policy's event lines supplied by HAND rather than by the mirror.
+
+    The selftest needs a case whose engine-side events are NOT produced by the code under test — a record
+    whose events were generated by `mtp_adapt_mirror` would make "engine agrees with mirror" a tautology,
+    which is the exact failure this repo calls the reference-derived-from-the-thing-under-test one. So the
+    caller hand-derives the events from the documented rule (a division by the round cost, a round count),
+    and this helper only assembles the record around them.
+
+    `rounds_spec` is the transcript: one `(depth, emitted)` pair per `ACCEPT` line, in order.
+    """
+    k_high = max(kk for kk, _ in rounds_spec) if rounds_spec else 2
+    rounds = [{"round": str(1000 + i), "k": str(kk), "emitted": str(em)}
+              for i, (kk, em) in enumerate(rounds_spec)]
+    events = [{"round": str(1000 + idx), "k": to, "est": est, "prev_k": None, "plain": "1" if to == "0"
+               else "0"} for idx, to, est in events_hand]
+    n_k2 = sum(1 for kk, _ in rounds_spec if kk >= 2)
+    n_k1 = sum(1 for kk, _ in rounds_spec if kk == 1)
+    final_k = int(events_hand[-1][1]) if events_hand else k_high
+    stat = {"rounds_k2": str(n_k2), "rounds_k1": str(n_k1), "changes": str(len(events)),
+            "final_k": str(final_k), "ceiling": str(k_high), "est": "0.000"}
+    return {"fixture": fixture, "k": k_high, "rc": 0, "ran": True, "depth": 0, "pin": [],
+            "seed": 1, "seed_line": "", "geom": {}, "geom_lines": 1, "accept_echo": {},
+            "stat": {"rounds": str(len(rounds))}, "stat_lines": 1,
+            "wall": {"census": "ok"}, "wall_lines": 1, "no_rate": False,
+            "rounds": rounds, "emitted": [], "emitted_file": f"<synthetic {fixture}>",
+            # `k_start` is the one policy field that is PER RUN rather than per build (it is the requested
+            # ceiling), so it is not one of the header constants and the record supplies it.
+            "adapt_cfg": dict(cfg, k_start=str(k_high)), "adapt_lines": 1,
+            "adapt_events": events,
+            "adapt_plain_lines": plain_lines, "adapt_stat": stat, "adapt_stat_lines": 1,
+            "adapt_attr": {"agree": "1"}, "adapt_attr_lines": 1}
+
+
+def selftest_mtp_adapt() -> list[str]:
+    """The adaptive policy's teeth: hand-derived events, a stubbed predicate, and a colour test.
+
+    Three things are proved, in this order, because each is a different way for a policy gate to be fake:
+    1. the mirror reproduces events DERIVED BY HAND from the documented arithmetic (so the mirror is not
+       merely agreeing with itself);
+    2. a clean high-acceptance case is green with NO events (so the section is not red-by-default);
+    3. stubbing the one predicate that decides anything flips the colour of exactly the case the stub
+       should break. Without (3) every row below could be printing PASS over a rule that never fires,
+       which is the failure mode `AGENTS.md` records for several gates that looked healthy.
+    """
+    bad: list[str] = []
+
+    def report(what: str, ok: bool, detail: str = "") -> None:
+        print(f"  [{'PASS' if ok else 'FAIL'}] {what}" + (f" — {detail}" if detail else ""))
+        if not ok:
+            bad.append(what)
+
+    cfg = mtp_adapt_constants_from_source()
+    c2, c1 = float(cfg["cost_k2"]), float(cfg["cost_k1"])
+    demote, abandon = float(cfg["demote_est"]), float(cfg["abandon_est"])
+    n_dem, n_abd = int(cfg["min_observe"]), int(cfg["min_observe_abandon"])
+    report("the policy constants were read out of engine/mtp_adaptive.h, not typed here",
+           all(cfg[k] for k in cfg), str(cfg))
+
+    # -- 1. the near-zero case, HAND-derived: reject every round and the arithmetic is a division.
+    #      k=2, every round emits exactly 1 token (nothing accepted), so the window estimate at the first
+    #      decision point is (n_dem x 1) / (n_dem x cost_k2) = 1 / cost_k2; that is under `demote_est`, so
+    #      depth 1 begins AFTER the n_dem-th round, i.e. on the transcript line with ordinal n_dem - 1
+    #      (0-based, which is how the run stamps them). Then n_abd rounds at depth 1 emit 1 each: est =
+    #      1 / cost_k1, under `abandon_est`, so plain begins on ordinal n_dem + n_abd - 1, and NO round
+    #      follows it — abandonment means the loop stops speculating, so the transcript ENDS there.
+    #      Hand-spelled on purpose: these are the numbers the mirror has to reproduce on its own.
+    est_dem = f"{1.0 / c2:.4f}"
+    est_abd = f"{1.0 / c1:.4f}"
+    hand = []
+    if 1.0 / c2 < demote:
+        hand.append((n_dem - 1, "1", est_dem))
+    if 1.0 / c1 < abandon:
+        hand.append((n_dem + n_abd - 1, "0", est_abd))
+    report(f"the hand arithmetic says a never-accepted run demotes to 1 and then to plain"
+           f" (est {est_dem} < {demote}, est {est_abd} < {abandon})",
+           [h[1] for h in hand] == ["1", "0"], f"hand events (ordinal, new depth, est): {hand}")
+    low = mtp_adapt_synthetic("nearzero", [(2, 1)] * n_dem + [(1, 1)] * n_abd,
+                              hand, cfg, plain_lines=1 if hand and hand[-1][1] == "0" else 0)
+    red_low = [n for n, ok, _ in mtp_adapt_verdicts(low) if not ok]
+    report("the near-zero case is GREEN against the hand-derived events (mirror, monotonicity,"
+           " stickiness, attribution all agree)", not red_low, "; ".join(red_low)[:240])
+
+    # -- 2. the high case: every round accepts both candidates and emits 3, so est = 3 / cost_k2 and no
+    #      decision is ever taken. Written as an inequality so a threshold edit cannot silently move this
+    #      case's class without the report line saying so.
+    est_hi = 3.0 / c2
+    report(f"the high case's estimate ({est_hi:.4f}) really is at or over the demote line"
+           f" ({demote}) — otherwise this case is not the high case it claims to be",
+           est_hi >= demote, f"3/cost_k2 = {est_hi:.4f}")
+    high = mtp_adapt_synthetic("high", [(2, 3)] * (n_dem + n_abd + 8), [], cfg)
+    red_hi = [n for n, ok, _ in mtp_adapt_verdicts(high) if not ok]
+    report("the high case is GREEN with no event line at all", not red_hi, "; ".join(red_hi)[:240])
+
+    # -- 3. the vacuity witness. Stub the ONE predicate that decides anything and require the colour to
+    #      move. An always-keep stub must redden the near-zero case (its printed events no longer match a
+    #      mirror that now predicts none); an always-demote stub must redden the high case (the mirror now
+    #      predicts an event the transcript does not carry). If either stub changes nothing, the row it was
+    #      supposed to bite is decoration and this selftest says so by failing here.
+    real_decide = globals()["mtp_adapt_decide"]
+    try:
+        globals()["mtp_adapt_decide"] = lambda k, est, cfg: None
+        stuck_low = [n for n, ok, _ in mtp_adapt_verdicts(mtp_adapt_synthetic(
+            "nearzero-stub", [(2, 1)] * n_dem + [(1, 1)] * n_abd, hand, cfg, plain_lines=1))
+            if not ok]
+        report("an always-KEEP stub reddens the near-zero case (so the demotion assertion bites)",
+               bool(stuck_low), f"reddened: {stuck_low[:2]} — if this stays green the section cannot"
+               " notice a policy that never demotes, which is the whole feature")
+        globals()["mtp_adapt_decide"] = lambda k, est, cfg: (k - 1 if k >= 2 else 0)
+        over_hi = [n for n, ok, _ in mtp_adapt_verdicts(high) if not ok]
+        report("an always-DEMOTE stub reddens the high case (so the no-demotion assertion bites)",
+               bool(over_hi), f"reddened: {over_hi[:2]} — if this stays green the section cannot notice"
+               " a policy that demotes content it should leave alone")
+    finally:
+        globals()["mtp_adapt_decide"] = real_decide
+        back_low = [n for n, ok, _ in mtp_adapt_verdicts(low) if not ok]
+        report("and the predicates are green again once the stub is removed (the stub is the variable,"
+               " nothing else)", not back_low, "; ".join(back_low)[:200])
+
+    # -- 4. the depth stamp and the ceiling are not decoration either: a round line with no `k=` makes the
+    #      mirror refuse rather than guess, and a ceiling that disagrees with the asked depth reddens.
+    nostamp = mtp_adapt_synthetic("nostamp", [(2, 1)] * n_dem, hand[:1], cfg)
+    for r in nostamp["rounds"]:
+        r.pop("k")
+    red_ns = [n for n, ok, _ in mtp_adapt_verdicts(nostamp) if not ok]
+    report("a round line without its depth stamp is REFUSED as evidence, not inferred",
+           any("carries the depth it ran at" in n for n in red_ns), f"reddened: {red_ns[:2]}")
+    wrong_ceil = mtp_adapt_synthetic("wrongceil", [(2, 3)] * 24, [], cfg)
+    wrong_ceil["adapt_cfg"] = dict(cfg, k_start="1")
+    wrong_ceil["k"] = 2          # the case asked for 2; the policy echoed a ceiling of 1
+    red_wc = [n for n, ok, _ in mtp_adapt_verdicts(wrong_ceil) if not ok]
+    report("a policy whose echoed ceiling is not the depth the case asked for reddens",
+           any("ceiling" in n for n in red_wc), f"reddened: {red_wc[:2]}")
+    return bad
 
 
 def mtp_round_synthetic(fixture: str, k: int, hits: list[int], pin: list[int],
@@ -8567,6 +9088,8 @@ def selftest(fixture: str = "dec8") -> int:
     bad += selftest_form_flags()
     section("(m) the accept-round section's own teeth — synthetic records, in process, no engine")
     bad += selftest_mtp_round()
+    section("(m1) the adaptive depth's own teeth — the policy mirror, in process, no engine")
+    bad += selftest_mtp_adapt()
     section("(m2) the MTP mode echo's own teeth — the flip's canary, in process, no engine")
     bad += selftest_mtp_mode()
     # The band history has to bite here too, and bite before anything runs: an unrecorded edit to `BAND`
@@ -9090,6 +9613,22 @@ def main() -> int:
                          " admit makes every case in the section fail with the engine's own refusal"
                          " message, which is a red gate rather than a silent skip — the"
                          " empty-parse failure class, refused in advance")
+    ap.add_argument("--mtp-adaptive", type=int, choices=(0, 1), default=MTP_ADAPT_DEFAULT,
+                    metavar="0|1",
+                    help="run section (m)'s population through the ADAPTIVE depth policy"
+                         " (`decode_run --mtp-adaptive`, `engine/mtp_adaptive.h`) instead of a fixed"
+                         " `--mtp-k`. Default 0, which is the engine's own default and keeps every"
+                         " existing section-(m) invocation judging the shipping path unchanged; 1 adds"
+                         " `--mtp-adaptive 1` to every case, deepens each case's `--steps` to"
+                         " MTP_ADAPT_STEPS so the policy can reach both of its decisions, and adds the"
+                         " adaptive verdicts: the run's own `MTPADAPT` config echo against an"
+                         " INDEPENDENT Python mirror of the rule, the event lines against that mirror,"
+                         " depth monotonicity, stickiness after abandonment, and the per-depth"
+                         " attribution against MTPSTAT. The losslessness predicate is unchanged and"
+                         " still compares against the PIN, so a policy that moved a verdict instead of a"
+                         " geometry is caught by the same row that catches everything else. Classifying"
+                         " which case demoted is DERIVED from each case's own estimate, never from a list"
+                         " of fixture names typed here.")
     ap.add_argument("--break-pins", type=int, default=-1, metavar="N",
                     help="with --dry-run: echo N as the in-force pin count instead of the one this"
                          " gate's own --gemm-pins spec implies. That is the bug the check exists to"
