@@ -48,6 +48,26 @@ ledger numbers: `engine/performance-status.md` §6 owns what a clean window take
 subagents, blocking, exclusive) and nothing printed here may be pasted into that ledger.
 See also `AGENTS.md`, "GPU execution is serialized and belongs to the main agent".
 
+SPECULATION IS OFF BY DEFAULT HERE, AND `--mtp` IS THE WAY IN - read this before changing it.
+The session path CAN run an MTP accept round (the defect and its repro are §8 of
+`prototype/mtp_accept/SESSION-ACCEPT.md`), but a session that crosses the one-pass attention
+ceiling (MAXSC = 512 lanes) during an early turn and then `feed`s a further turn emits a
+DIFFERENT token stream with speculation on than off, from the first round that decides a
+position above that ceiling onward. Root cause is NOT established, so this driver keeps the
+off-pins by default and `--mtp` opts in; `--no-mtp` stays accepted as the explicit statement of
+the default. Speculation is only a speed knob while it is lossless, and until it is, `--mtp` can
+change WHICH tokens a conversation gets.
+
+(For the record, what the implementation does: the engine replaces a plain decode step with an
+MTP accept round (`engine/mtp_accept.h`; on the session path `engine::mtpaccept::session_body`),
+so a turn emits two or three tokens wherever the draft's proposal agrees with the target. When
+speculation ran, the per-turn line ends with `| MTP k=2 accept=0.71 emit=2.05/round`, parsed
+from the engine's own anchored `^MTPSTAT` line for that turn; when it did not, that field is
+simply absent. Speculation changes no token inside the band the witnesses cover - it is lossless
+by construction (§09.4) - and §8 of `prototype/mtp_accept/SESSION-ACCEPT.md` is where that stops
+holding, so `--mtp` is not only a speed knob
+same contaminated wall-clock quantity as the rates, i.e. still not a ledger number.
+
 One device, one holder. The GPU must not be shared with a measurement, so this process
 takes `tools/gpu_lock.sh` for its whole life and refuses to start if the lock is already
 held (that is also why there is no thread knob here, unlike the torch CPU original: the
@@ -90,6 +110,16 @@ MASKED = (textio.THINK_START_ID, textio.THINK_END_ID, textio.EOS_PRIMARY_ID,
 # A driver that takes the first non-GEN line for the reply gets an algo hex back instead of `FED`,
 # generates zero tokens, and reports `prefix -1`. Anything not in this list is a diagnostic.
 TERMINAL = ("FED", "END", "RESET", "PREFIX", "ERROR", "BYE", "READY")
+# The accept loop's per-turn tally, printed by `decode_run --session --mtp-accept 1` at the end of a
+# `gen` (it is `engine/mtpaccept::describe()`, and it is a DIAGNOSTIC — not in `TERMINAL` above, so the
+# protocol is unchanged and an old driver ignores it). Parsed for the per-turn line so the rate says what
+# actually ran. ANCHORED on the line start on purpose: `--verbose` echoes the engine's usage block, which
+# mentions these field names, and an unanchored grep would read a rate out of help text (this repo's
+# oldest failure class). If the turn printed no `MTPSTAT` line — plain decode, or a turn with no round —
+# nothing is printed for it and nothing is invented.
+MTPSTAT_FIELDS = re.compile(r"\baccept_rate=([-\d.eE+]+)\b.*?\bmean_tokens_per_round=([-\d.eE+]+)")
+MTPSTAT_K = re.compile(r"\bk=(\d+)\b")
+
 # The loader's own report line, printed before `READY` (`engine/decode_run.cpp`, right after
 # `WeightStore::load`). Parsed rather than eyeballed so the load phase can be split into
 # "what loading 1.55 GB cost" and "what everything else about start-up cost" without
@@ -103,6 +133,26 @@ SUMMARY_INSTRUCTION = (
     "Start with one sentence saying what the document is about, then list its key points"
     " as bullet lines. Write in the same language as the document.\n\n"
     "Document:")
+
+
+def mtp_annotation(diag: list[str]) -> str:
+    """` | MTP k=2 accept=0.71 emit=2.05/round` from this turn's own `MTPSTAT` line, or ''.
+
+    Only lines that START with `MTPSTAT` count (see `MTPSTAT_FIELDS`), and the last one in the turn wins,
+    because the engine prints one per `gen`. A turn that ran no round prints no `MTPSTAT` at all, and
+    then this returns '' — the absence is the fact, and inventing a zero from it would read as "the draft
+    never accepts" rather than "no speculation was available".
+    """
+    for line in reversed(diag):
+        if not line.startswith("MTPSTAT"):
+            continue
+        f = MTPSTAT_FIELDS.search(line)
+        if not f:
+            continue
+        k = MTPSTAT_K.search(line)
+        return " | MTP%s accept=%s emit=%s/round" % (
+            " k=" + k.group(1) if k else "", f.group(1), f.group(2))
+    return ""
 
 
 def rate(n: int, secs: float) -> str:
@@ -140,8 +190,10 @@ class EngineSession:
     `prefix_len` advances last), and continuing on top of that is the quiet-corruption case.
     """
 
-    def __init__(self, binary: str, model: str, cap: int, verbose: bool = False):
+    def __init__(self, binary: str, model: str, cap: int, verbose: bool = False,
+                 mtp: bool = True):
         self.verbose = verbose
+        self.mtp = mtp
         self.diag: list[str] = []
         self.banner: list[str] = []
         # What the loader reported about itself, None if its line ever changes shape.
@@ -149,8 +201,14 @@ class EngineSession:
         self.load_gb: str = "?"
         self.load_tensors: str = "?"
         self.load_allocs: str = "?"
+        # OFF unless `--mtp` names it, and that default is load-bearing until §8 of
+        # `prototype/mtp_accept/SESSION-ACCEPT.md` is root-caused: a multi-turn session past MAXSC is
+        # NOT lossless with rounds on. `--mtp` inherits the engine's own speculative defaults
+        # (`--mtp-accept 1 --mtp-k 2`, adaptive on); anything else gets the explicit off-pins, which is
+        # also what every plain A/B arm in this repo names.
+        mtp_flags = [] if mtp else ["--mtp-accept", "0", "--mtp-draft", "0"]
         self.p = subprocess.Popen(
-            [binary, "--mtp-accept", "0", "--mtp-draft", "0", "--model", model, "--session", "--cap", str(cap)],
+            [binary] + mtp_flags + ["--model", model, "--session", "--cap", str(cap)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
         atexit.register(self.close)
         # The engine announces itself with `READY cap=<n>` before it will read a command.
@@ -294,6 +352,15 @@ def main() -> int:
     ap.add_argument("--ignore-lock", action="store_true",
                     help="start even if tools/gpu_lock.sh says the GPU is held (you will be"
                          " contending with someone's measurement)")
+    ap.add_argument("--mtp", action="store_true",
+                    help="opt IN to MTP speculation on the session path. OFF by default: a multi-turn"
+                         " session that crosses 512 lanes early is NOT lossless with rounds on"
+                         " (prototype/mtp_accept/SESSION-ACCEPT.md §8), so the plain step stays the"
+                         " default until that is root-caused")
+    ap.add_argument("--no-mtp", action="store_true",
+                    help="turn MTP speculation OFF and run the plain autoregressive step"
+                         " (`--mtp-accept 0 --mtp-draft 0`). This IS the default; kept so a named"
+                         " plain arm is always expressible for an A/B")
     args = ap.parse_args()
     verbose = args.verbose
     max_new = args.max_new if args.max_new is not None else (512 if args.summary else 128)
@@ -391,7 +458,8 @@ def main() -> int:
 
     t0 = time.perf_counter()
     try:
-        eng = EngineSession(str(binary), args.model, cap, verbose=verbose)
+        eng = EngineSession(str(binary), args.model, cap, verbose=verbose,
+                            mtp=args.mtp and not args.no_mtp)
     except (RuntimeError, ValueError) as exc:
         print(f"engine chat: the engine did not come up: {exc}", file=sys.stderr)
         return 1
@@ -587,9 +655,9 @@ def main() -> int:
         elif stats_line:
             # One line per turn in the REPL; --summary skips it and prints the full rate block
             # instead, so the same figures are never on screen twice.
-            print("  [%s tok prompt %.2fs %s %-11s | %s tok answer %.2fs %s | ttft %.2fs | %s]"
+            print("  [%s tok prompt %.2fs %s %-11s | %s tok answer %.2fs %s | ttft %.2fs | %s%s]"
                   % (f"{n_pre:,}", t_pre, rate(n_pre, t_pre), tag.strip(), f"{len(out):,}", dec_t,
-                     rate(n_dec, dec_t), ttft, stop), flush=True)
+                     rate(n_dec, dec_t), ttft, stop, mtp_annotation(eng.diag[n_diag0:])), flush=True)
         if prefix < 0:
             print(f"  [state] the END line carried no prefix_len: {end}")
         agg.update(pre_n=agg["pre_n"] + n_pre, pre_t=agg["pre_t"] + t_pre,

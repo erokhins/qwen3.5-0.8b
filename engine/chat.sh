@@ -7,8 +7,25 @@
 #   engine/chat.sh --summary a.md b.md --max-new 400
 #   engine/chat.sh --verbose            # also echo the engine's own diagnostic lines
 #   engine/chat.sh --max-new 32         # cap generation length
+#   engine/chat.sh --mtp                # opt IN to MTP speculation (off by default; see the note below)
+#   engine/chat.sh --no-mtp             # plain autoregressive decode: no MTP speculation (the default)
 #   engine/chat.sh --warmup 0           # no throwaway prefill: turn 1 is then the cold one
 #   engine/chat.sh --ignore-lock        # start even while the GPU lock is held
+#
+# SPECULATION IS OFF BY DEFAULT HERE, AND `--mtp` IS THE WAY IN - change this only after reading
+# §8 of `prototype/mtp_accept/SESSION-ACCEPT.md`. The engine CAN replace a plain decode step with an
+# MTP accept round wherever the draft block has a proposal the target agrees with
+# (`engine/mtp_accept.h`; on this path, `engine/mtpaccept::session_body`), so a turn prints two or
+# three tokens per body instead of one, and `session_lossless.sh` proves that stream identical to the
+# plain one on all 25 of its cases. But a session that crosses the one-pass attention ceiling
+# (MAXSC = 512 lanes) during an early turn and then feeds a further turn emits a DIFFERENT stream
+# with speculation on than off - reproducibly, root cause not established - so chat.sh passes
+# `--mtp-accept 0 --mtp-draft 0` unless you name `--mtp`. `--no-mtp` is still accepted and states the
+# default explicitly, which is also the named plain arm for any A/B. Speculation is only a speed knob
+# while it is lossless; until it is, `--mtp` can change WHICH tokens a conversation gets. When a turn
+# ran rounds its line ends with `| MTP k=2 accept=0.71 emit=2.05/round`, read off the engine's own
+# anchored `^MTPSTAT` line; a turn that ran none prints nothing rather than a zero.
+#
 #
 # This drives the COMPILED ENGINE — `engine/build/decode_run --session` — not the torch
 # CPU reference. The weights and the per-request state (GDN state + conv window + KV,
@@ -34,9 +51,10 @@
 # document 1,767 tok/s against 11,306 tok/s warm.
 #
 # The tok/s and TTFT this prints are the engine's own wall clock on a box that is also
-# serving this session's tokens. They are NOT ledger numbers: engine/performance-status.md
-# §6 defines the clean window a number has to come from (zero subagents, exclusive,
-# blocking), and a chat session is none of those.
+# serving this session's tokens, and that includes the accept rate on the `MTP ...` field.
+# They are NOT ledger numbers: engine/performance-status.md §6 defines the clean window a
+# number has to come from (zero subagents, exclusive, blocking), and a chat session is none
+# of those.
 #
 # One device, one holder: there is no thread knob here (the torch CPU original sets
 # OMP_NUM_THREADS because torch oversubscribes this box; the engine's parallelism is its
