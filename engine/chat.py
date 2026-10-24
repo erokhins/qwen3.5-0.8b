@@ -48,25 +48,29 @@ ledger numbers: `engine/performance-status.md` §6 owns what a clean window take
 subagents, blocking, exclusive) and nothing printed here may be pasted into that ledger.
 See also `AGENTS.md`, "GPU execution is serialized and belongs to the main agent".
 
-SPECULATION IS OFF BY DEFAULT HERE, AND `--mtp` IS THE WAY IN - read this before changing it.
-The session path CAN run an MTP accept round (the defect and its repro are §8 of
-`prototype/mtp_accept/SESSION-ACCEPT.md`), but a session that crosses the one-pass attention
-ceiling (MAXSC = 512 lanes) during an early turn and then `feed`s a further turn emits a
-DIFFERENT token stream with speculation on than off, from the first round that decides a
-position above that ceiling onward. Root cause is NOT established, so this driver keeps the
-off-pins by default and `--mtp` opts in; `--no-mtp` stays accepted as the explicit statement of
-the default. Speculation is only a speed knob while it is lossless, and until it is, `--mtp` can
-change WHICH tokens a conversation gets.
+SPECULATION IS ON BY DEFAULT HERE, AND `--no-mtp` IS THE WAY OUT - read this before changing it.
+The session path runs an MTP accept round (`engine::mtpaccept::session_body`), and the band that makes
+that legitimate was adopted on 2026-10-25 as option (c) of
+`prototype/mtp_accept/SESSION-ACCEPT.md` §9.7. Below the one-pass attention ceiling (MAXSC = 512
+lanes) a round's deciding row is BIT-IDENTICAL to the plain step's row, so a turn that never crosses
+512 lanes gets exactly the tokens the plain path gets. Above it, the multi-row body and the 1-row step
+are two legal bf16 spellings of the same computation and can break a top1/top2 tie the other way,
+which shows up as a different token from the first above-ceiling round onward. The flip that sized
+this measured 0.073 of one bf16 ULP - the two candidates were not distinguishable in the format they
+were computed in - so the alternative to accepting the band is to give up speculation exactly where
+decode is slowest. It is enforced, not merely documented: `prototype/mtp_accept/session_longturn.sh`
+accepts a differing case only when every flip is adjudicated from logits rows dumped on BOTH arms, and
+`session_trigger.sh` goes red if a flip ever sits at an ordinary margin. Practical consequence: on a
+long conversation the speculative chat can take a different branch than `--no-mtp` at a place the model
+could not call. If you need the plain autoregressive stream - bit-for-bit reproducibility of a long
+generation - pass `--no-mtp`.
 
-(For the record, what the implementation does: the engine replaces a plain decode step with an
-MTP accept round (`engine/mtp_accept.h`; on the session path `engine::mtpaccept::session_body`),
-so a turn emits two or three tokens wherever the draft's proposal agrees with the target. When
-speculation ran, the per-turn line ends with `| MTP k=2 accept=0.71 emit=2.05/round`, parsed
-from the engine's own anchored `^MTPSTAT` line for that turn; when it did not, that field is
-simply absent. Speculation changes no token inside the band the witnesses cover - it is lossless
-by construction (§09.4) - and §8 of `prototype/mtp_accept/SESSION-ACCEPT.md` is where that stops
-holding, so `--mtp` is not only a speed knob
-same contaminated wall-clock quantity as the rates, i.e. still not a ledger number.
+(For the record, what the implementation does: the engine replaces a plain decode step with an MTP
+accept round (`engine/mtp_accept.h`), so a turn emits two or three tokens wherever the draft's
+proposal agrees with the target. When speculation ran, the per-turn line ends with `| MTP k=2
+accept=0.71 emit=2.05/round`, parsed from the engine's own anchored `^MTPSTAT` line for that turn;
+when it did not, that field is simply absent. The `tok/s` printed beside it is the same contaminated
+wall-clock quantity as the rates, i.e. still not a ledger number.)
 
 One device, one holder. The GPU must not be shared with a measurement, so this process
 takes `tools/gpu_lock.sh` for its whole life and refuses to start if the lock is already
@@ -201,10 +205,11 @@ class EngineSession:
         self.load_gb: str = "?"
         self.load_tensors: str = "?"
         self.load_allocs: str = "?"
-        # OFF unless `--mtp` names it, and that default is load-bearing until §8 of
-        # `prototype/mtp_accept/SESSION-ACCEPT.md` is root-caused: a multi-turn session past MAXSC is
-        # NOT lossless with rounds on. `--mtp` inherits the engine's own speculative defaults
-        # (`--mtp-accept 1 --mtp-k 2`, adaptive on); anything else gets the explicit off-pins, which is
+        # Speculation ON by default (§9.7 band adopted 2026-10-25): the engine's own speculative
+        # defaults (`--mtp-accept 1 --mtp-k 2`, adaptive on) are what you get, and `--no-mtp` is the
+        # explicit plain arm - `--mtp-accept 0 --mtp-draft 0`, the off-pins that were the default while
+        # §8 was still an open defect. Above MAXSC a sub-ULP tie may break differently than the plain
+        # step; see this file's docstring.
         # also what every plain A/B arm in this repo names.
         mtp_flags = [] if mtp else ["--mtp-accept", "0", "--mtp-draft", "0"]
         self.p = subprocess.Popen(
@@ -353,14 +358,12 @@ def main() -> int:
                     help="start even if tools/gpu_lock.sh says the GPU is held (you will be"
                          " contending with someone's measurement)")
     ap.add_argument("--mtp", action="store_true",
-                    help="opt IN to MTP speculation on the session path. OFF by default: a multi-turn"
-                         " session that crosses 512 lanes early is NOT lossless with rounds on"
-                         " (prototype/mtp_accept/SESSION-ACCEPT.md §8), so the plain step stays the"
-                         " default until that is root-caused")
+                    help="explicit statement of the default (MTP speculation ON); kept so a script can"
+                         " name what it relies on. The band it runs under is this file's docstring.")
     ap.add_argument("--no-mtp", action="store_true",
                     help="turn MTP speculation OFF and run the plain autoregressive step"
-                         " (`--mtp-accept 0 --mtp-draft 0`). This IS the default; kept so a named"
-                         " plain arm is always expressible for an A/B")
+                         " (`--mtp-accept 0 --mtp-draft 0`). The arm to reach for when a long generation"
+                         " must reproduce bit for bit; below 512 lanes the two are identical anyway")
     args = ap.parse_args()
     verbose = args.verbose
     max_new = args.max_new if args.max_new is not None else (512 if args.summary else 128)
@@ -459,7 +462,7 @@ def main() -> int:
     t0 = time.perf_counter()
     try:
         eng = EngineSession(str(binary), args.model, cap, verbose=verbose,
-                            mtp=args.mtp and not args.no_mtp)
+                            mtp=not args.no_mtp)
     except (RuntimeError, ValueError) as exc:
         print(f"engine chat: the engine did not come up: {exc}", file=sys.stderr)
         return 1

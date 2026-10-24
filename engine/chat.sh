@@ -7,22 +7,24 @@
 #   engine/chat.sh --summary a.md b.md --max-new 400
 #   engine/chat.sh --verbose            # also echo the engine's own diagnostic lines
 #   engine/chat.sh --max-new 32         # cap generation length
-#   engine/chat.sh --mtp                # opt IN to MTP speculation (off by default; see the note below)
-#   engine/chat.sh --no-mtp             # plain autoregressive decode: no MTP speculation (the default)
+#   engine/chat.sh --no-mtp             # plain autoregressive decode: no MTP speculation
+#   engine/chat.sh --mtp                # explicit statement of the default (MTP speculation ON)
 #   engine/chat.sh --warmup 0           # no throwaway prefill: turn 1 is then the cold one
 #   engine/chat.sh --ignore-lock        # start even while the GPU lock is held
 #
-# SPECULATION IS OFF BY DEFAULT HERE, AND `--mtp` IS THE WAY IN - change this only after reading
-# §8 of `prototype/mtp_accept/SESSION-ACCEPT.md`. The engine CAN replace a plain decode step with an
-# MTP accept round wherever the draft block has a proposal the target agrees with
-# (`engine/mtp_accept.h`; on this path, `engine/mtpaccept::session_body`), so a turn prints two or
-# three tokens per body instead of one, and `session_lossless.sh` proves that stream identical to the
-# plain one on all 25 of its cases. But a session that crosses the one-pass attention ceiling
-# (MAXSC = 512 lanes) during an early turn and then feeds a further turn emits a DIFFERENT stream
-# with speculation on than off - reproducibly, root cause not established - so chat.sh passes
-# `--mtp-accept 0 --mtp-draft 0` unless you name `--mtp`. `--no-mtp` is still accepted and states the
-# default explicitly, which is also the named plain arm for any A/B. Speculation is only a speed knob
-# while it is lossless; until it is, `--mtp` can change WHICH tokens a conversation gets. When a turn
+# SPECULATION IS ON BY DEFAULT HERE, AND `--no-mtp` IS THE WAY OUT - change this only after reading
+# §9 of `prototype/mtp_accept/SESSION-ACCEPT.md`. The engine replaces a plain decode step with an MTP
+# accept round wherever the draft block has a proposal the target agrees with
+# (`engine/mtp_accept.h`; on this path, `engine::mtpaccept::session_body`), so a turn prints two or
+# three tokens per body instead of one. The band it runs under was adopted on 2026-10-25 as option (c)
+# of §9.7: below the one-pass attention ceiling (MAXSC = 512 lanes) a round's deciding row is bit-
+# identical to the plain step's, so short turns get exactly the plain tokens; above it the multi-row
+# body and the 1-row step are two legal bf16 spellings of one computation and can break a sub-ULP tie
+# the other way, so a long conversation may take a different branch than `--no-mtp` at a place the
+# model could not call. That is enforced by `prototype/mtp_accept/session_longturn.sh` (every flip must
+# be adjudicated from logits rows dumped on both arms) and `session_trigger.sh` (a flip at an ordinary
+# margin is red, not waived). `--no-mtp` passes `--mtp-accept 0 --mtp-draft 0` and is the named plain
+# arm for any A/B, and the one to use when a long generation must reproduce bit for bit. When a turn
 # ran rounds its line ends with `| MTP k=2 accept=0.71 emit=2.05/round`, read off the engine's own
 # anchored `^MTPSTAT` line; a turn that ran none prints nothing rather than a zero.
 #
