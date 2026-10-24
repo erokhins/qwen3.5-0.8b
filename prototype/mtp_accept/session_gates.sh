@@ -17,9 +17,15 @@
 #                         `no-rounds` control must be bit-exact. This is the driver that can say WHY the two
 #                         exact-equality gates are red, and it is red only if a flip is too wide to be a tie.
 #
-# KNOWN STATE OF THIS FILE: RED. `session_longturn.sh` case B/G and `session_lossless.sh` cross-then-feed
-# differ, and §9 established those flips are sub-ULP ties between two legal bf16 forms, not a bug. The band
-# decision in §9.7 is what changes this from red to green; do not "fix" the colour by loosening a predicate.
+# KNOWN STATE OF THIS FILE: the band is adopted (§9.7 taken as (c) on 2026-10-25), so the three drivers
+# now own three different predicates and a green run means all three are satisfied:
+#   session_lossless.sh  stays EXACT on every fixture. It holds: no derived-prompt case has ever needed a
+#                        waiver, including `cross-then-feed`. If it ever goes red, that is a new fact and
+#                        the answer is `session_rowdiff.py` on dumped rows, never a loosened predicate.
+#   session_longturn.sh  exact, OR BAND: a differing case must show EVERY flip adjudicated from logits
+#                        rows dumped on BOTH arms (runner-up in the other row, margin under one bf16 ULP).
+#   session_trigger.sh   the margin sweep; red if any flip sits at an ordinary margin or the no-rounds
+#                        control is not bit-exact.
 # Correctness only: no millisecond figure is printed by anything here.
 # SELF-LOCKING DRIVERS, DO NOT HOLD tools/gpu_lock.sh WHILE RUNNING THIS.
 set -uo pipefail

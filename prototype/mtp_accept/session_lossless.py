@@ -211,6 +211,10 @@ def main() -> int:
               " cross-then-feed case cannot be built (a missing population member is named, not skipped)")
         return 1
     cross_gen = max(args.cross_first, args.maxsc - len(cross_ids) + 25)
+    # This case stays an EXACT-equality case even after the band was adopted (§9.7 as (c), 2026-10-25):
+    # it passes byte-for-byte today, and an exact gate that has never needed a waiver is worth keeping
+    # exact. If it ever flips, the answer is to adjudicate it - `session_rowdiff.py` on rows dumped from
+    # both arms, or `session_longturn.sh`, which already carries the band - and NOT to loosen this file.
     plan.append(("cross-then-feed",
                  ["reset", f"feed {' '.join(map(str, cross_ids))}", f"gen {cross_gen}",
                   f"feed {' '.join(map(str, cross_ids[-3:]))}", f"gen {args.gen}", "stats"]))
