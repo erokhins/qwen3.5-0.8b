@@ -103,11 +103,22 @@ def fields(line: str) -> dict[str, str]:
 
 
 def run_binary(binary: str, model: str, ids_file: pathlib.Path, out: pathlib.Path,
-               extra: list[str]) -> tuple[int, str]:
+               extra: list[str], gdn_loop: str = "") -> tuple[int, str]:
     out.mkdir(parents=True, exist_ok=True)
+    # `--gdn-loop` is passed ONLY when the caller named one. Empty means "the engine default", which since
+    # 2026-10-25 is what the SHIPPING loop runs: the accept round's own bodies are forced to a one-token-step
+    # span by `submit_wave_body` (their mid-round checkpoint is a per-token recurrence's end state) and every
+    # other body — the prefill wave, the plain steps — keeps `--gdn-loop 512`. This file's own subject is the
+    # shipping loop, so inheriting the default is the honest shape and pinning 1 here would be pricing a
+    # configuration the engine no longer runs. `--gdn-loop 1` reproduces the whole-run-span record every
+    # carried number in `M3-RESULT.md` was taken with, and it goes on BOTH arms from one place below, so the
+    # pair can never differ in it (`AGENTS.md`: a required flag belongs on both arms or the pair prices the
+    # flag).
     cmd = [binary, "--mtp-accept", "0", "--mtp-draft", "0", "--model", model,
-           "--ids-file", str(ids_file), "--gdn-loop", "1",
-           "--no-stop", "--out", str(out)] + extra
+           "--ids-file", str(ids_file)]
+    if gdn_loop:
+        cmd += ["--gdn-loop", gdn_loop]
+    cmd += ["--no-stop", "--out", str(out)] + extra
     # `--mtp-accept 0 --mtp-draft 0` here, on the SHAPE of every run this driver makes, not on one arm:
     # the accept arm names `--mtp-accept 1` in `extra` and the last name wins, while the flag-off pair run
     # gets the plain path explicitly instead of by default. The engine now defaults speculation ON, so a
@@ -291,6 +302,12 @@ def main() -> int:
                          "adjudicated against, and a draft-side flag must not reach it. Used by "
                          "prototype/mtp_accept/draft_cond_probe.py's follow-up adjudication of a "
                          "draft-conditioning knob on the corpus population.")
+    ap.add_argument("--gdn-loop", default="",
+                    help="passed to the engine on BOTH arms; '' (the default) passes nothing, i.e. the "
+                         "engine default — the span the SHIPPING loop runs, since the round's own bodies "
+                         "are forced to 1 by the engine and everything else keeps 512. Pass '1' to "
+                         "re-take the whole-run-span record the carried M3-RESULT.md figures were taken "
+                         "with; a value here moves both arms together, never one.")
     ap.add_argument("--min-rounds", type=int, default=400)
     ap.add_argument("--out", default="/tmp/m3_loop_rate")
     ap.add_argument("--json", default="")
@@ -311,6 +328,10 @@ def main() -> int:
           f"data/refs/corpus48/manifest.json; driving lines {args.start}..{end - 1}")
     print(f"accept-arm extra flags: {args.extra if args.extra else '(none — the shipping loop)'}"
           f"  [appended to the accept arm only, never to the flag-off pair run]")
+    # Named on the record because BOTH arms ran at it and the carried figures were taken at the other one.
+    # The round's own bodies are at 1 either way; what this moves is the prefill wave and the plain steps.
+    print(f"gdn-loop on both arms: {args.gdn_loop if args.gdn_loop else '(engine default)'}"
+          "  [engine/gate.py section (m) asserts the engine's `MTP mode=` echo of the two spans]")
 
     tot = {"rounds": 0, "accepted": 0, "rejected": 0, "emitted": 0, "plain": 0, "suppressed": 0,
            "bodies": 0, "depth1": 0, "candidates": 0, "stat_emitted": 0}
@@ -329,12 +350,12 @@ def main() -> int:
         ad, bd = out / f"acc{li:02d}", out / f"base{li:02d}"
         rc, log = run_binary(args.binary, args.model, ids_file, ad,
                              ["--steps", str(args.steps), "--mtp-draft", "1", "--mtp-accept", "1"]
-                             + args.extra.split())
+                             + args.extra.split(), args.gdn_loop)
         if rc != 0:
             die(f"{tag}: accept run rc={rc}\n" + "\n".join(log.splitlines()[-6:]))
         if args.lossless:
             rc, blog = run_binary(args.binary, args.model, ids_file, bd,
-                                  ["--steps", str(args.steps)])
+                                  ["--steps", str(args.steps)], args.gdn_loop)
             if rc != 0:
                 die(f"{tag}: flag-off pair run rc={rc}\n" + "\n".join(blog.splitlines()[-6:]))
         else:
@@ -490,6 +511,10 @@ def main() -> int:
     if args.json:
         pathlib.Path(args.json).write_text(json.dumps({
             "binary": args.binary, "steps": args.steps, "lines": len(chunk),
+            # Which recurrence span BOTH arms ran at, spelled the way `draftk_ladder.py` spells it, so a
+            # reader can tell the shipping-default re-take from the carried whole-run-span figure. The
+            # round's bodies were at 1 in either case; this names the prefill and plain-step span.
+            "gdn_loop": args.gdn_loop or "engine-default",
             "population": len(prompts), "totals": tot, "a": a, "kill_line": KILL_LINE,
             "carried_side_pass": CARRIED_SIDE_PASS, "per_line": per_line, "flips": flips,
             "bf16_rel_ulp": BF16_REL_ULP, "identical_lines": n_id if args.lossless else None,

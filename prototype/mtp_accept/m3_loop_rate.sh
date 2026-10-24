@@ -7,8 +7,9 @@
 # Blocking by construction: no `&`, no `nohup`, no backgrounded run.
 #
 # Usage (env overrides pass through to the Python):
-#   prototype/mtp_accept/m3_loop_rate.sh                       # all 49 lines, both arms
+#   prototype/mtp_accept/m3_loop_rate.sh                       # all 49 lines, both arms, engine spans
 #   LIMIT=8 STEPS=32 prototype/mtp_accept/m3_loop_rate.sh      # a slice
+#   GDN=1 prototype/mtp_accept/m3_loop_rate.sh                 # the carried whole-run-span figure
 set -u
 export LC_ALL=C
 cd "$(dirname "$0")/../.." || exit 1
@@ -19,6 +20,11 @@ ARGS=()
 [ -n "${START:-}" ] && ARGS+=(--start "$START")
 [ -n "${LIMIT:-}" ] && ARGS+=(--limit "$LIMIT")
 [ -n "${LOSSLESS:-}" ] && ARGS+=(--lossless "$LOSSLESS")
+# `GDN=''` means "do not pass --gdn-loop at all", i.e. the engine default — which is what the SHIPPING loop
+# runs now that the round's span is forced inside the engine (`decode_step.h::kMtpRoundGdnSpan`) instead of
+# pinned run-wide. `GDN=1` re-takes the whole-run-span record the carried M3-RESULT.md figures came from.
+# One value, both arms (`AGENTS.md`: a required flag belongs on both sides or the pair prices the flag).
+if [ -n "${GDN+set}" ]; then ARGS+=(--gdn-loop "$GDN"); fi
 [ -n "${MIN_ROUNDS:-}" ] && ARGS+=(--min-rounds "$MIN_ROUNDS")
 # Draft-side conditioning knobs for the accept arm, e.g. EXTRA="--mtp-dense 1". Passed as ONE argv entry
 # with `=` so argparse does not read a leading `--` as the next option. Never applied to the flag-off pair
