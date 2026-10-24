@@ -6105,11 +6105,16 @@ MTP_ENGINE_DEFAULT_K = 2
 # the same number: the requirement is that the gate admits the depth the engine runs by default, and one
 # constant expressing that leaves no second number to drift. `--mtp-k` still overrides it on the CLI.
 MTP_ROUND_K_DEFAULT = MTP_ENGINE_DEFAULT_K
-# Section (m)'s adaptive arm defaults OFF for the same reason the engine's flag does: the mechanism and its
-# gate landed together, and whether adaptive depth becomes the shipping default is a measured decision the
-# main agent takes (`prototype/mtp_accept/ADAPTIVE.md` §6). One constant means the gate's default and the
-# engine's default cannot drift apart silently — the `--attn-tile` rule again.
-MTP_ADAPT_DEFAULT = 0
+# Section (m)'s default adaptive arm IS the engine's, for the same reason and by the same mechanism as
+# `MTP_ROUND_K_DEFAULT` above: the section exists to admit the run the engine ships, and one constant shared
+# by the gate's default and the engine's default leaves no second number to drift (`AGENTS.md`: `gate.py`'s
+# `--attn-tile` default and `decode_run.cpp`'s must move in one commit, or the gate silently judges a
+# different binary than the engine ships). The engine's default is "on whenever a round runs"
+# (`Options::mtp_adaptive`, resolved in `parse_args` to the value of `--mtp-accept`), and every case in this
+# section runs with accept on, so the mirror is 1. `--mtp-adaptive 0` still names the fixed-depth arm
+# explicitly and remains the shape every byte-compared admission in this repo was taken with; the default-k
+# witness below checks this number against the engine on device rather than trusting it.
+MTP_ADAPT_DEFAULT = 1
 MTP_ROUND_ROUTE_NOTE = (
     "route coverage: `hand` ONLY (asserted off each run's `MTPSTAT route=` echo). `amortised` is not"
     " covered here and is not output-neutral, so it could not be judged by this section's stream"
@@ -6830,14 +6835,15 @@ def mtp_adapt_verdicts(rec: dict) -> list[tuple[str, bool, str]]:
 
 def mtp_round_run_case(name: str, man: dict, args, work: Path, *,
                        k: int | None = None, forward_k: bool = True,
-                       adaptive: bool | None = None) -> dict:
+                       adaptive: bool | None = None, forward_adaptive: bool = True) -> dict:
     """One fixture through the accept loop, and back as a record. No timing, and nothing here reads a
     millisecond field: `--steps` is a count of bodies, not a duration.
 
     `k` overrides the depth this case runs at and `forward_k=False` leaves `--mtp-k` off the command line
     entirely, which is how the default-k witness below reaches the engine's own default instead of the
-    depth this gate was asked for. Both default to "do what the caller asked", which is every ordinary
-    case in the population.
+    depth this gate was asked for. `adaptive` picks the policy arm and `forward_adaptive=False` likewise
+    leaves `--mtp-adaptive` off, which is how the same witness reaches the engine's default DEPTH POLICY.
+    Both default to "do what the caller asked", which is every ordinary case in the population.
     """
     k = int(args.mtp_k if k is None else k)
     adaptive = bool(args.mtp_adaptive if adaptive is None else adaptive)
@@ -6864,7 +6870,9 @@ def mtp_round_run_case(name: str, man: dict, args, work: Path, *,
     # and which cases, a claim covers). A case that runs out of bodies before its first decision point is
     # reported as NOT ADJUDICABLE by `mtp_adapt_verdicts` rather than counted as "did not demote", so a
     # budget that is too small reddens the coverage denominator instead of passing quietly.
-    if adaptive:
+    # A witness that names nothing must still be able to REACH the policy if the default turns out to be the
+    # policy, so its budget is sized as though it had — without the record claiming the gate asked for one.
+    if adaptive or not forward_adaptive:
         steps = max(steps, MTP_ADAPT_STEPS)
     case_dir = work / "mtp_round" / name
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -6877,7 +6885,7 @@ def mtp_round_run_case(name: str, man: dict, args, work: Path, *,
     wrote = len(ids_file.read_text().strip().split(","))
     rec = {"fixture": name, "k": k, "depth": depth, "pin": list(greedy),
            "prompt_ids": len(ids), "steps": steps, "k_forwarded": forward_k,
-           "adaptive": adaptive}
+           "adaptive": adaptive, "adaptive_forwarded": forward_adaptive}
     if wrote != len(ids):
         rec.update({"rc": None, "ran": False, "geom": {}, "geom_lines": 0, "accept_echo": {},
                     "stat": {}, "stat_lines": 0, "wall": {}, "wall_lines": 0, "no_rate": False,
@@ -6908,10 +6916,12 @@ def mtp_round_run_case(name: str, man: dict, args, work: Path, *,
         # not be attributed to the depth this gate was asked to admit — and left off only by the witness
         # that exists to find out what the default is.
         cmd += ["--mtp-k", str(k)]
-    if adaptive:
+    if adaptive and forward_adaptive:
         # Named explicitly, never inherited: a case that ran with the policy off because the flag did not
         # reach it would be judged as if it had run with it on, and the mirror would call that parity.
         cmd += ["--mtp-adaptive", "1"]
+    # `forward_adaptive=False` prints nothing here, and that silence IS the ask: the witness below exists to
+    # find out what the engine does when no depth policy is named.
     rec["argv"] = cmd
     proc = subprocess.run(cmd, capture_output=True, text=True)
     log = proc.stdout + proc.stderr
@@ -7033,11 +7043,14 @@ def mtp_round_checks(args, work: Path) -> None:
     else:
         wname, wman = witness_case
         set_fixture(wname)
-        wrec = mtp_round_run_case(wname + "-defaultk", wman, args, work, forward_k=False)
+        wrec = mtp_round_run_case(wname + "-defaultk", wman, args, work,
+                                  forward_k=False, forward_adaptive=False)
         set_fixture(args.fixture)
         wgeom = wrec.get("geom") or {}
         wk = _mtp_num(wgeom, "k")
-        print(f"  $ {' '.join(wrec['argv'])}   # no --mtp-k: this is the engine's DEFAULT")
+        wmode = wrec.get("mode") or {}
+        wadapt = wrec.get("adapt_cfg") or {}
+        print(f"  $ {' '.join(wrec['argv'])}   # no --mtp-k and no --mtp-adaptive: the engine's DEFAULT")
         check(wrec.get("rc") == 0, "the default-k witness run exits 0",
               f"rc={wrec.get('rc')} " + str((wrec.get('argv') or [])[-1:])[:200])
         check(wk is not None, "the default-k witness echoed a geometry line at all",
@@ -7051,6 +7064,33 @@ def mtp_round_checks(args, work: Path) -> None:
               "the default the engine runs is the depth THIS run was asked to admit",
               f"engine default k={wk}, this gate ran --mtp-k {args.mtp_k}. Passing this section says"
               " nothing about the default unless the two are the same number")
+        # THE DEFAULT DEPTH POLICY, proved by the same witness and by the same discipline. Since
+        # 2026-10-25 the engine arms the adaptive depth whenever it arms a round
+        # (`decode_run.cpp`'s `Options::mtp_adaptive`, resolved to `--mtp-accept` when nobody names it), so
+        # a run that names neither flag must print the policy's config line and must say `adaptive=on` on its
+        # mode line. Three legs, and each pair moving alone reddens a row: the ENGINE's default (what the run
+        # echoed with nothing on its command line), this file's MIRROR (`MTP_ADAPT_DEFAULT`, which sizes every
+        # case's step budget and decides whether the population is admitted through the policy at all), and
+        # the run's own `MTP mode=adaptive=` echo. The last one is the only field that distinguishes a static
+        # k=2 run from an adaptive one whose policy never fired — with the policy shipping, the ABSENCE of an
+        # event line stopped meaning "no policy", so the assertion is on the echo and not on the events.
+        check(wrec.get("adapt_lines") == 1,
+              f"the engine's DEFAULT arms the depth policy this gate mirrors"
+              f" (gate.MTP_ADAPT_DEFAULT = {MTP_ADAPT_DEFAULT})",
+              f"the witness printed {wrec.get('adapt_lines')} `MTPADAPT on=` line(s) with no"
+              " `--mtp-adaptive` on its command line. engine/decode_run.cpp's default and gate.py's"
+              " MTP_ADAPT_DEFAULT move together or this section admits a depth POLICY the shipping"
+              " binary does not run by default — the `--attn-tile` trap, one knob over")
+        check(str(wmode.get("adaptive", "")) == ("on" if MTP_ADAPT_DEFAULT else "off"),
+              "the run's own `MTP mode=` echo states the same default the gate mirrors",
+              f"mode echo says adaptive={wmode.get('adaptive')!r}, the mirror says"
+              f" {MTP_ADAPT_DEFAULT}; a log must not be ambiguous about which depth rule produced its"
+              " bits, and a reader must be able to tell a static k=2 run from an adaptive one")
+        check(str(wadapt.get("k_start", "")) == str(MTP_ENGINE_DEFAULT_K),
+              "the default policy's ceiling is the default depth it starts under",
+              f"the policy echoed k_start={wadapt.get('k_start')!r} against an echoed depth of"
+              f" k={wk}. `--mtp-k` is the CEILING (`engine/mtp_adaptive.h`), so an unnamed run whose"
+              " ceiling disagrees with its depth is a default that half-applied itself")
         # The witness is NOT counted in `totals`. Every denominator below is "the derived population", and
         # a witness that inflated `cases` to |population| + 1 made `cases == len(cases)` fail on a run
         # where every real fixture HAD produced its case — a denominator that counts something other than
@@ -7058,11 +7098,13 @@ def mtp_round_checks(args, work: Path) -> None:
         wst = wrec.get("stat") or {}
         wrounds = _mtp_num(wst, "rounds") or 0
         notes.append(
-            f"section (m)'s default-k witness: `{wname}` re-ran with NO `--mtp-k` and echoed"
-            f" MTPGEOM k={wk} (gate.MTP_ENGINE_DEFAULT_K = {MTP_ENGINE_DEFAULT_K}; this run asked for"
-            f" --mtp-k {args.mtp_k}), ran {wrounds} round(s) and emitted"
-            f" {len(wrec.get('emitted') or [])} token(s). The depth this section admits is the depth the"
-            " engine runs when nothing is named.")
+            f"section (m)'s default witness: `{wname}` re-ran with NO `--mtp-k` and NO `--mtp-adaptive` and"
+            f" echoed MTPGEOM k={wk} (gate.MTP_ENGINE_DEFAULT_K = {MTP_ENGINE_DEFAULT_K}; this run asked"
+            f" for --mtp-k {args.mtp_k}) with the depth policy armed"
+            f" ({wrec.get('adapt_lines')} config line, mode echo adaptive={wmode.get('adaptive')!r}"
+            f" against gate.MTP_ADAPT_DEFAULT = {MTP_ADAPT_DEFAULT}), ran {wrounds} round(s) and emitted"
+            f" {len(wrec.get('emitted') or [])} token(s). The depth AND the depth rule this section admits"
+            " are the ones the engine runs when nothing is named.")
     # THE ADAPTIVE ARM'S COVERAGE, and it is the part of this section that answers the funding question
     # rather than the correctness one: a policy that never fired anywhere in the population would pass every
     # per-case row above by doing nothing. So the population has to SHOW both behaviours, from its own
@@ -9617,8 +9659,11 @@ def main() -> int:
                     metavar="0|1",
                     help="run section (m)'s population through the ADAPTIVE depth policy"
                          " (`decode_run --mtp-adaptive`, `engine/mtp_adaptive.h`) instead of a fixed"
-                         " `--mtp-k`. Default 0, which is the engine's own default and keeps every"
-                         " existing section-(m) invocation judging the shipping path unchanged; 1 adds"
+                         " `--mtp-k`. Default 1, which is the engine's own default since"
+                         " prototype/mtp_accept/ADAPTIVE.md §7 (the mirror constant is"
+                         " MTP_ADAPT_DEFAULT, and the default witness re-runs one fixture with BOTH"
+                         " depth flags omitted to prove the two are still the same answer); 0 names the"
+                         " fixed-depth arm every byte-compared admission was taken with. 1 adds"
                          " `--mtp-adaptive 1` to every case, deepens each case's `--steps` to"
                          " MTP_ADAPT_STEPS so the policy can reach both of its decisions, and adds the"
                          " adaptive verdicts: the run's own `MTPADAPT` config echo against an"
