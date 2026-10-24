@@ -156,6 +156,19 @@ struct Options {
     // of a generation step, which is why it refuses every option whose per-step semantics it does not
     // own — see the refusals below rather than half-supporting them.
     int mtp_accept = 0;
+    // How many CANDIDATES an accept round verifies: `--mtp-k`, default 1. The round's body is `k+1` rows,
+    // so 1 is the shipped 2-row round and 2 is `[cur at p, cand1 at p+1, cand2 at p+2]` — a longest-correct-
+    // prefix accept, the semantics llama.cpp's `mtp` draft path implements
+    // (`engines/llama.cpp/common/speculative.cpp:1858-1871`, with `verify_h[min(n_accepted, rows-1)]` at
+    // `tools/server/server-context.cpp:4590`). Each extra candidate costs one more draft round (18
+    // submissions), one more mid-checkpoint slot (19.27 MiB captured per round and one more restore
+    // candidate), and one more logits row through the batched head; the funding argument is
+    // `prototype/mtp_accept/DRAFTK-RESULT.md` and the result is `K2-RESULT.md`.
+    //
+    // Default-1 and refused wherever its siblings are: it inherits `--mtp-accept`'s refusals (a round shape
+    // the per-step instruments do not own) and it refuses `--mtp-verify`, whose side pass is a 2-row body.
+    int mtp_k = engine::mtpaccept::kDefaultK;
+    bool mtp_k_given = false;
     // B0 of `prototype/mtp_accept/BEAT-MTP.md`: the per-phase ROUND METER (`engine/mtp_meter.h`). Default
     // OFF, and off is one null-pointer read per guard object — no allocation, no sync, no line, so a
     // flag-off run is byte-identical to a binary that does not contain the instrument. On, it prints one
@@ -700,6 +713,25 @@ Options parse_args(int argc, char** argv) {
                                          " decoding on the draft block's proposals), got '" + v + "'");
             }
             o.mtp_accept = std::atoi(v.c_str());
+        } else if (a == "--mtp-k") {
+            // Parses or throws, like every knob that names which geometry a run is.
+            const std::string v = next();
+            int kk = 0;
+            try {
+                kk = std::stoi(v);
+            } catch (const std::exception&) {
+                throw std::runtime_error("--mtp-k takes 1 (the shipped single candidate) or 2, got '" + v +
+                                         "'");
+            }
+            if (kk < engine::mtpaccept::kDefaultK || kk > engine::mtpaccept::kMaxK) {
+                throw std::runtime_error("--mtp-k takes 1 (the shipped single candidate, a 2-row body) or"
+                                         " 2 (two candidates, a 3-row body), got '" + v +
+                                         "'. A deeper verify is unfunded: the body width, the checkpoint"
+                                         " slots, the batched head's instantiation and the verdict word"
+                                         " all derive from this number.");
+            }
+            o.mtp_k = kk;
+            o.mtp_k_given = true;
         } else if (a == "--mtp-midsplit") {
             // Parses or throws, as the other M2 knobs. It is a witness knob and nothing else: it makes
             // the probe run its body twice per anchor and byte-compare the two.
@@ -1311,14 +1343,15 @@ Options parse_args(int argc, char** argv) {
                                  " transcript rather than against this model. Run it free (no --replay)");
     }
     if (o.mtp_draft_k > 1 && o.mtp_accept) {
-        // An accept round is a `kRows` = 2 body: one candidate row beside the anchor. A second and third
-        // proposal has no row in the body and no verdict, so the extra rounds would be paid for and never
-        // adjudicated — priced, not measured. Building k=2 speculation means widening that body, which is
-        // the funded experiment this probe exists to price rather than pre-empt.
-        throw std::runtime_error("--mtp-accept consumes ONE candidate per round (its body is 2 rows), so a"
-                                 " second draft proposal would be drafted, paid for, and never verified;"
-                                 " --mtp-draft-k measures those proposals on the side pass. Name"
-                                 " --mtp-accept 0 with it (or drop --mtp-accept)");
+        // An accept round makes its own proposals: one candidate per candidate of its body, the second fed
+        // back through the block's own `x_d` (`--mtp-k 2`). The ladder is a SIDE-pass measurement of those
+        // same proposals at every anchor, so running both would draft each position twice, pay for both,
+        // and adjudicate only one of them — priced, not measured.
+        throw std::runtime_error("--mtp-accept makes its own proposals (one per candidate of its body,"
+                                 " widened by --mtp-k), so --mtp-draft-k would draft the same positions"
+                                 " twice and verify only one set; --mtp-draft-k measures those proposals"
+                                 " on the side pass. Name --mtp-accept 0 with it (or drop --mtp-accept,"
+                                 " or use --mtp-k 2 to have the round consume a second candidate)");
     }
     if (o.mtp_draft_k > 1 && o.time_stages) {
         // The stage clock's `mtp` family is declared as one round per step precisely so its per-step
@@ -1457,11 +1490,29 @@ Options parse_args(int argc, char** argv) {
                                  " read-only --mtp-verify side pass is not also armed (use"
                                  " --mtp-midsplit for the body's numerics witness)");
     }
-    if (o.mtp_accept && o.wave_rows < engine::mtpaccept::kRows) {
-        throw std::runtime_error("--mtp-accept needs a scratch at least " +
-                                 std::to_string(engine::mtpaccept::kRows) + " rows tall; this run's"
-                                 " --wave-rows is " + std::to_string(o.wave_rows));
+    if (o.mtp_accept && o.wave_rows < engine::mtpaccept::rows_of_k(o.mtp_k)) {
+        throw std::runtime_error("--mtp-accept --mtp-k " + std::to_string(o.mtp_k) + " needs a scratch at"
+                                 " least " + std::to_string(engine::mtpaccept::rows_of_k(o.mtp_k)) +
+                                 " rows tall (one body row per candidate, plus the row the step fed);"
+                                 " this run's --wave-rows is " + std::to_string(o.wave_rows));
     }
+    // ---- the k=2 round's own refusals (`--mtp-k`) -------------------------------------------------
+    if (o.mtp_k_given && !o.mtp_accept) {
+        // The `--mtp-draft-k` precedent, keyed on `given` so a bare run is never refused: `--mtp-k` says
+        // how many candidates a ROUND verifies, and with no rounds running there is nothing for it to say.
+        // Echoing it would be a knob that did nothing, which is what the repo's flag rules refuse.
+        throw std::runtime_error("--mtp-k says how many candidates an accept round verifies; with"
+                                 " --mtp-accept 0 no round runs. Name --mtp-accept 1 with it, or drop it");
+    }
+    // There is deliberately NO further `--mtp-k` refusal block for --time-stages / --time-waves /
+    // --session / --sizes-only / --replay / --mtp-verify, even though a k=2 round must not meet any of them
+    // either. It cannot be reached: every one of those is already refused for ANY `--mtp-accept` run above
+    // this point, and `--mtp-k` requires `--mtp-accept` (the refusal just above), so the combination the new
+    // message would name is refused by the sibling first, always. A second refusal for a combination no
+    // caller can reach is a branch that cannot be tested — the same reasoning
+    // `engine/kernels_attn.cpp` states for the wide-block pair — and the honest form is this note plus the
+    // harness check that each combination does exit non-zero with a message naming the mode
+    // (`prototype/mtp_accept/K2-RESULT.md`'s refusal table).
     // ---- the route switch's refusals (`engine/mtp_verify.h`'s Route) -------------------------------
     if (o.mtp_route_given && !o.mtp_verify && !o.mtp_accept) {
         // The `--mtp-sched` precedent, keyed on `given` so a bare run is never refused: `--mtp-route`
@@ -2731,6 +2782,31 @@ void print_usage(FILE* out) {
                  " reaches further than --steps tokens; the last lane of the request has room for one row"
                  " only, so there the driver pays a plain step and prints `ROUND-SKIP reason=context_limit`"
                  " rather than refusing the run.\n"
+                 "  --mtp-k 1|2  how many CANDIDATES an accept round verifies (`engine/mtp_accept.h`)."
+                 " Default 1, and at 1 the round is exactly the shipped one: a 2-row body, one candidate,"
+                 " 4 words read back, and every compared line byte-identical to the binary that predates"
+                 " this flag (`prototype/mtp_accept/K2-RESULT.md` invariant 1 is that claim and its harness)."
+                 " At 2 the body is 3 rows, [cur at p, cand1 at p+1, cand2 at p+2], and the round accepts"
+                 " the LONGEST CORRECT PREFIX: cand1 iff argmax(row 0)==cand1, cand2 only if that is true"
+                 " AND argmax(row 1)==cand2. It then emits its accepted candidates followed by row n's"
+                 " argmax (1, 2 or 3 tokens) and restores mid-checkpoint slot n — nothing on a full accept,"
+                 " slot 1 on a depth-2 reject, slot 0 on a depth-1 one. That is llama.cpp's `mtp` accept"
+                 " rule (common/speculative.cpp:1858-1871 with verify_h[min(n_accepted, rows-1)] at"
+                 " tools/server/server-context.cpp:4590), not an invention of this file's. Costs: one more"
+                 " draft round per round (18 submissions, from the block's own x_d as llama's feedback does),"
+                 " one more mid-checkpoint slot (39 more submissions and 20,201,472 B more captured per"
+                 " round), and a third logits row through the batched head (the NROWS=3 instantiation,"
+                 " priced as a shape by HEADBATCH at M=4 = 1.013x of the one-row pass). The verdict is still"
+                 " ONE on-device pass over the rows and still ONE readback, now 7 ints (28 B). Needs"
+                 " --mtp-accept 1 and a --wave-rows of at least 3; refused without --mtp-accept, and it"
+                 " inherits --mtp-accept's other refusals rather than restating them. A round with only one"
+                 " of its two proposals (the second draft row refused for want of a draft lane) skips whole"
+                 " with `ROUND-SKIP reason=short_proposal_set` rather than quietly running a 2-row round"
+                 " mid-run. Prints `MTPGEOM k= rows= mid_slots= status_words= subs_per_round="
+                 " captured_bytes= candidates_per_round=` once per run, appends ` k= n_accepted= accept2="
+                 " cand2= cand2_pos= row2= restored_slot=` to each `ACCEPT` line, and ` k= depth1="
+                 " depth1_rate= candidates_accepted=` to `MTPSTAT` — appended at the end, never inserted, so"
+                 " the k=1 lines stay byte-for-byte the old ones.\n"
                  "  --mtp-sched loop|every  which round sequence --mtp-draft 1 walks. `loop` (the"
                  " default) reproduces `speccheck/mtp.py`'s `greedy_mtp(k=1)` round geometry on a plain"
                  " greedy stream — draft at q+1, next round at q+2 after an accept and q+1 after a"
@@ -3846,6 +3922,10 @@ int main(int argc, char** argv) {
                 // this is a third of that again — fine for this model, and recorded in ACCEPT-BUILD §4).
                 const engine::StateSizes sz = st.sizes();
                 verify->mid_bytes = (long long)sz.gdn_state_bytes + (long long)sz.conv_window_bytes;
+                // ONE slot: the probe's body is 2 rows and a body of `n` rows owes `n - 1` slots
+                // (`submit_wave_body`'s width check reads the field, so a side that allocates a slot
+                // without declaring it is refused rather than silently armed).
+                verify->mid.slots = 1;
                 if (hipMalloc((void**)&verify->mid.mid_gdn, sz.gdn_state_bytes) != hipSuccess ||
                     hipMalloc((void**)&verify->mid.mid_conv, sz.conv_window_bytes) != hipSuccess) {
                     throw std::runtime_error("cannot allocate the mid-round checkpoint");
@@ -3915,8 +3995,17 @@ int main(int argc, char** argv) {
         std::FILE* emit_log = nullptr;
         int pending_candidate = -1;   // the draft's proposal for the next position; -1 = nothing pending
         int pending_pos = -1;         // the position that proposal is for, echoed on the round line
+        // The k=2 round's second proposal, and the position it is for. Unused (and left -1) at k=1, which
+        // is what makes a k=1 round take exactly the branches it took before this existed.
+        int pending2_candidate = -1;
+        int pending2_pos = -1;
+        // The norm row `--mtp-dense` stages its skipped lane from. Separate from `draft_norm_row` because
+        // the two are rows a part apart: the dense lane stands for the last EMITTED position (h two behind
+        // it, i.e. row n_accepted-1) and the draft stands for the next one (h at row n_accepted).
+        const uint16_t* draft_dense_row = nullptr;
         if (o.mtp_accept) {
-            aside = std::make_unique<engine::mtpaccept::Side>(engine::mtpaccept::allocate_side(st));
+            aside = std::make_unique<engine::mtpaccept::Side>(
+                engine::mtpaccept::allocate_side(st, o.mtp_k));
             if (!o.out_dir.empty()) {
                 emit_log = std::fopen((o.out_dir + "/emitted.txt").c_str(), "w");
                 if (!emit_log) throw std::runtime_error("cannot open " + o.out_dir + "/emitted.txt");
@@ -3924,8 +4013,19 @@ int main(int argc, char** argv) {
             }
             std::printf("MTPACCEPT on=1 rows=%d checkpoint_bytes=%lld status_bytes=%zu"
                         " draft_sched=%s per_step_dumps=0\n",
-                        engine::mtpaccept::kRows, aside->bytes(),
-                        (size_t)engine::kernels::kVerdictWords * sizeof(int), o.mtp_sched.c_str());
+                        aside->rows, aside->bytes(),
+                        (size_t)aside->words * sizeof(int), o.mtp_sched.c_str());
+            // The geometry line, and it is a NEW line rather than a field on one of the lines above: the
+            // byte-compare admission (`prototype/mtp_accept/flagoff_bytecheck.sh`, MODE=accept) compares
+            // `MTPACCEPT`/`MTPSTAT`/`ACCEPT` byte for byte at `--mtp-k 1`, so the only way to state the
+            // geometry on every run — including the shipped one — without touching a compared line is to
+            // say it somewhere new. Everything here is derived from the Side, so it cannot disagree with the
+            // allocation the rounds use.
+            std::printf("MTPGEOM k=%d rows=%d mid_slots=%d status_words=%d subs_per_round=%d"
+                        " captured_bytes=%lld candidates_per_round=%d\n",
+                        aside->k, aside->rows, aside->ck.slots, aside->words,
+                        aside->subs_per_round, (long long)aside->captured_bytes(),
+                        engine::mtpaccept::kOfRows(aside->rows));
             std::fflush(stdout);
         }
 
@@ -3981,13 +4081,17 @@ int main(int argc, char** argv) {
         int seed_ceiling = 0, seed_reserve = 0, seed_room = 0;
         const char* seed_clamp = "none";
         if (mtp && o.mtp_prompt_lanes > 0 && prompt_len > 0) {
-            // Lanes this run still needs for its own rounds. A round appends at most two (its own draft
-            // lane plus a dense lane when the accept path is on and the round is accepted), and it emits at
-            // least one token, so rounds <= steps/(1+a) and the smallest `a` this project admits is the
-            // 0.40 M3 kill line, hence 2*steps/1.4. Conservative by construction — a round that is REJECTED
-            // appends a lane and then truncates it — and it is what keeps seeding from turning the run into
-            // a `DRAFT-SKIP` halfway through, which would be a population change dressed as a rate.
-            seed_reserve = (o.steps * 20 + 13) / 14;
+            // Lanes this run still needs for its own rounds. A round appends one draft lane PER CANDIDATE
+            // (`--mtp-k`) plus a dense lane when the accept path is on and the round is accepted, i.e.
+            // `rows_of_k` lanes; it emits at least one token, so rounds <= steps/(1+a) and the smallest `a`
+            // this project admits is the 0.40 M3 kill line, hence rows*steps/1.4. At k=1 that is the same
+            // two lanes per round this line billed before `--mtp-k` existed, and the same integer value, so
+            // the seed lines of existing runs do not move. Conservative by construction — a round that is
+            // REJECTED appends its lanes and then truncates them — and it is what keeps seeding from turning
+            // the run into a `DRAFT-SKIP` halfway through, which would be a population change dressed as a
+            // rate. At k=2 the ceiling is reached about twice as fast, which is the caveat
+            // `prototype/mtp_accept/K2-RESULT.md` states rather than tunes away.
+            seed_reserve = (o.steps * 10 * engine::mtpaccept::rows_of_k(o.mtp_k) + 13) / 14;
             seed_ceiling = engine::mtpdraft::usable_lanes(mtp->st);   // the cache is empty here
             seed_room = seed_ceiling - seed_reserve;
             if (seed_room < 0) seed_room = 0;
@@ -4241,31 +4345,54 @@ int main(int argc, char** argv) {
                 }
                 const uint16_t* draft_norm_row = nullptr;   // the norm row of the last position FED
                 // `--mtp-dense`: the lane for the position an accepted round consumed but did not stage.
-                // Left at -1 on a reject and on a plain step.
+                // Left at -1 when nothing was accepted and on a plain step.
                 int dense_token = -1, dense_pos = -1;
-                int emitted_first = -1, emitted_second = -1;
-                int pos_first = -1, pos_second = -1;
-                // Headroom first: a round appends TWO KV lanes, and the last lane of the request has room
-                // for one. `accept_round` refuses that case (writing past `cap` is a memory fault), and a
-                // refusal thrown at the end of an otherwise good run would report a failure where the run
-                // simply ran out of context — so the driver asks before it calls, and pays a plain one-row
-                // step. Same fallback shape as "no proposal pending", for a different reason.
+                // What this iteration emits, in order. A round emits its accepted candidates and then the
+                // verifier's own token for the position after them, so 1..rows tokens; a plain step emits
+                // exactly one. The arrays exist because k=2 emits three, and a first/second pair would have
+                // been a third spelling of the emit rule next to `Round::emit`.
+                int emit_tok[engine::mtpaccept::kMaxRows] = {-1, -1, -1};
+                int emit_pos[engine::mtpaccept::kMaxRows] = {-1, -1, -1};
+                int n_emit = 0;
+                // How many draft proposals this round had to have before it could run at all: one per
+                // candidate, so a k=2 run with only its first proposal does not run a 2-row round behind
+                // the back of `--mtp-k` — it pays a plain step and says why.
+                const int need = engine::mtpaccept::kOfRows(aside ? aside->rows : 2);
+                // Headroom first: a round appends `rows` KV lanes, and the last lane of the request has room
+                // for fewer than that. `accept_round` refuses that case (writing past `cap` is a memory
+                // fault), and a refusal thrown at the end of an otherwise good run would report a failure
+                // where the run simply ran out of context — so the driver asks before it calls, and pays a
+                // plain one-row step. Same fallback shape as "no proposal pending", for a different reason.
                 const bool room_for_round =
-                    st.prefix_len + engine::mtpaccept::kRows <= st.cap;
+                    st.prefix_len + (aside ? aside->rows : 1) <= st.cap;
                 // The meter's window covers THIS branch's whole round: the round itself, the next
                 // proposal's draft, and the run's own per-round prints. A plain one-row iteration is not a
                 // round and is counted in `plain_steps=` instead of being metered, because pricing it here
                 // would mix a step's cost into a round's denominator. `meter_round` says whether a window
                 // is open, and it is closed on every exit path below — including the stop-token break.
                 bool meter_round = false;
-                if (pending_candidate < 0 || !room_for_round) {
+                int n_accepted = 0;     // candidates the round consumed; 0 for a plain step
+                if (pending_candidate < 0 || (need > 1 && pending2_candidate < 0) ||
+                    !room_for_round) {
                     if (pending_candidate >= 0 && !room_for_round) {
                         std::printf("ROUND-SKIP reason=context_limit anchor=%d cap=%lld rows=%d\n",
-                                    st.prefix_len, (long long)st.cap, engine::mtpaccept::kRows);
+                                    st.prefix_len, (long long)st.cap, aside ? aside->rows : 1);
+                    } else if (pending_candidate >= 0 && pending2_candidate < 0) {
+                        // The second proposal is what a k=2 round is made of, and the only way to be short
+                        // one is a refused second draft row (the draft cache's lane ceiling). Running a
+                        // 2-row round here would silently change the geometry mid-run, which is what
+                        // `body_rows=` and the win bar cannot absorb, so the round is skipped whole and its
+                        // one surviving proposal is dropped with its lane.
+                        std::printf("ROUND-SKIP reason=short_proposal_set anchor=%d pending=%d need=%d"
+                                    " rows=%d\n", st.prefix_len, 1, need,
+                                    aside ? aside->rows : 1);
+                        const engine::mtpmeter::PhaseGuard lane(engine::mtpmeter::kLaneBookkeeping);
+                        engine::mtpdraft::truncate_lane(mtp->st);   // the orphan proposal's lane
                     }
                     const engine::StepResult r = engine::decode_step(store, st, sc, token, nullptr);
-                    emitted_first = r.token;
-                    pos_first = st.prefix_len;
+                    emit_tok[0] = r.token;
+                    emit_pos[0] = st.prefix_len;
+                    n_emit = 1;
                     draft_norm_row = sc.norm;              // row 0 is the row this step priced
                     gen_bodies++;
                     gen_plain++;
@@ -4281,70 +4408,101 @@ int main(int argc, char** argv) {
                     }
                     const engine::mtpaccept::Round ar =
                         engine::mtpaccept::accept_round(store, st, sc, *aside, token,
-                                                       pending_candidate, o.mtp_route);
+                                                       pending_candidate, pending2_candidate,
+                                                       o.mtp_route);
                     accept_gemm_ran = engine::kernels::wave_gemm_name(ar.gemm_ran);
                     accept_scan_ran = engine::kernels::gdn_scan_name(ar.scan_ran);
                     accept_attn_wide_ran = engine::kernels::attn_wide_name(ar.attn_wide_ran);
                     engine::mtpaccept::tally(astats, *aside, ar);
-                    gen_bodies++;   // one round is one 2-row body, whatever it emits
+                    gen_bodies++;   // one round is one `rows`-row body, whatever it emits
                     mtp->adjudicated++;
-                    if (ar.accepted) {
-                        mtp->accepted++;
-                        emitted_first = pending_candidate;
-                        emitted_second = ar.bonus_token;
-                        pos_first = ar.anchor_after - 1;
-                        pos_second = ar.anchor_after;
-                        draft_norm_row = sc.norm + engine::kHidden;   // row 1 is position p+1's row
-                        if (o.mtp_dense) {
-                            // The round fed `cur` at p and the candidate at p+1 and the next draft lane
-                            // stands for p+2, so position p+1 is the one the shipped loop skips. Its
-                            // content is exactly the row the body fed there — the candidate token with the
-                            // ROW-0 norm (h at p) — and both are still in hand: the body wrote row 0 and
-                            // row 1 of `sc.norm` and nothing has overwritten the tile since. Staging it is
-                            // 9 submissions and no head pass, and it touches no operand of the round.
-                            dense_token = pending_candidate;
-                            dense_pos = pos_first + 1;    // this engine's content->position map
-                        }
-                    } else {
-                        emitted_first = ar.verifier_token;
-                        pos_first = ar.anchor_after;
-                        draft_norm_row = sc.norm;
-                        // The rejected proposal wrote a draft lane the target never consumed. Truncating
-                        // it is a length field and moves 0 bytes (`engine/mtp_draft.h`), and it is what
-                        // keeps the draft cache the accepted prefix rather than the attempted one — the
-                        // same move the read-only side pass makes on a reject. Charged to
-                        // `lane_bookkeeping` beside the §08.6 check, because both are the round's length-
-                        // field bookkeeping and neither moves a byte.
+                    n_accepted = ar.n_accepted;
+                    // The draft census's own accept tally: in an accept loop the round IS the adjudication,
+                    // and "accepted" means the whole prefix was consumed, which is what `ACCEPT accept2=`
+                    // reports at k=2 and what `accept=` alone meant at k=1.
+                    if (ar.accepted) mtp->accepted++;
+                    for (int i = 0; i < ar.n_emit; ++i) {
+                        emit_tok[i] = ar.emit[i];
+                        // The emitted tokens occupy the positions straight after the anchor, in order:
+                        // cand1 at p+1, cand2 at p+2, and the bonus at p+n+1 — which is where
+                        // `anchor_after` says the round ended. At k=1 this is exactly the old
+                        // `pos_first = anchor_after - 1`, `pos_second = anchor_after` pair.
+                        emit_pos[i] = ar.anchor_before + i + 1;
+                        n_emit++;
+                    }
+                    // The draft's `h` is the norm row of the LAST position the body FED and the target
+                    // agreed with — row `n_accepted` of the tile the round just wrote, which is llama.cpp's
+                    // `verify_h[min(n_accepted, rows-1)]` (`common/speculative.cpp:1858-1871` with
+                    // `tools/server/server-context.cpp:4590`) in the other engine's spelling, and the same
+                    // row the mid-checkpoint was restored from. At k=1 that is row 1 on an accept and row 0
+                    // on a reject, which is what this line did before k=2 existed.
+                    draft_norm_row = sc.norm + (size_t)n_accepted * engine::kHidden;
+                    if (n_accepted > 0 && o.mtp_dense) {
+                        // The round fed rows 0..k and the next draft lane stands for the position after the
+                        // last EMITTED token, so the position the round consumes without staging a lane is
+                        // the last emitted one — its content is exactly the row the body fed there, the last
+                        // accepted candidate with the norm row two positions behind it, and both are still
+                        // in hand because nothing has overwritten the tile since. Staging it is 9 submissions
+                        // and no head pass, and it touches no operand of the round. At k=1 (n=1) this is the
+                        // old `dense_token = pending_candidate; dense_pos = pos_first + 1` verbatim.
+                        dense_token = ar.emit[n_accepted - 1];
+                        dense_pos = ar.anchor_after;                    // the last emitted position
+                        draft_dense_row = sc.norm + (size_t)(n_accepted - 1) * engine::kHidden;
+                    }
+                    if (n_accepted < need) {
+                        // The proposals the round did NOT consume wrote draft lanes the target never
+                        // swallowed. Truncating them is a length field and moves 0 bytes
+                        // (`engine/mtp_draft.h`), and it is what keeps the draft cache the accepted prefix
+                        // rather than the attempted one — the same move the read-only side pass makes on a
+                        // reject. The count is `k - n_accepted` because exactly that many proposals were fed
+                        // and not consumed, and they are the LAST lanes appended, so a LIFO truncate removes
+                        // precisely them. At k=1 this is the single truncate this line used to do.
                         const engine::mtpmeter::PhaseGuard lane(engine::mtpmeter::kLaneBookkeeping);
-                        engine::mtpdraft::truncate_lane(mtp->st);
+                        for (int i = n_accepted; i < need; ++i) {
+                            engine::mtpdraft::truncate_lane(mtp->st);
+                        }
                     }
                     {
                         const engine::mtpmeter::PhaseGuard prints(engine::mtpmeter::kReportPrints);
                         std::printf("ACCEPT round=%d anchor=%d fed=%d cand=%d cand_pos=%d accept=%d"
-                                    " verifier=%d bonus=%d emitted=%d pos=%d->%d restored_bytes=%lld\n",
+                                    " verifier=%d bonus=%d emitted=%d pos=%d->%d restored_bytes=%lld",
                                     step, ar.anchor_before, token, pending_candidate, pending_pos,
-                                    ar.accepted ? 1 : 0, ar.verifier_token, ar.bonus_token, ar.emitted,
-                                    ar.anchor_before, ar.anchor_after, ar.restored_bytes);
+                                    ar.hit[0] != 0 ? 1 : 0, ar.verifier_token, ar.bonus_token,
+                                    ar.emitted, ar.anchor_before, ar.anchor_after, ar.restored_bytes);
+                        // The k=2 tail, appended rather than inserted: everything before it is the byte-
+                        // identical k=1 line. `accept2` is the device's row-1 equality, `row2` the third
+                        // row's argmax (the bonus on a full accept), and `restored_slot` which mid-state
+                        // was copied back (-1 when the whole prefix was accepted and nothing was).
+                        if (ar.k > 1) {
+                            std::printf(" k=%d n_accepted=%d accept2=%d cand2=%d cand2_pos=%d row2=%d"
+                                        " restored_slot=%d", ar.k, ar.n_accepted, ar.hit[1],
+                                        pending2_candidate, pending2_pos, ar.row_token[2],
+                                        ar.restored_slot);
+                        }
+                        std::printf("\n");
                     }
-                }                // The next proposal: ONE draft call per round, with the target's final-norm row of the
-                // last position the body actually FED (row 1 on an accept, row 0 on a reject or a plain
-                // step), `y_next` the last token EMITTED, and the proposed position one past that token.
-                // That is `mtp_after_step`'s alignment (`h` at q, `y_next` at q+1, proposal at q+2) with
-                // q = the last fed position, and it is one call rather than one per emitted token because
-                // an accept's second token was never fed, so no final-norm row of the target exists
-                // behind it (`ACCEPT-BUILD.md` §4g.1).
+                }
+                // The next proposals: one draft call per candidate, the first with the target's final-norm
+                // row of the last position the body actually FED and agreed with (row `n_accepted`), the
+                // ones behind it with the draft block's OWN output row `x_d` and the previous proposal as
+                // `y_next` — there is no target row behind a token the target never fed. That is
+                // `mtp_after_step`'s alignment (`h` at q, `y_next` at q+1, proposal at q+2) with q = the last
+                // fed position, and the second row is the same feedback `--mtp-draft-k` measures
+                // (`prototype/mtp_accept/DRAFT-COND.md` D4/D5, llama.cpp's `speculative.cpp:1770-1783`).
                 pending_candidate = -1;
                 pending_pos = -1;
-                const int tok_next = emitted_second >= 0 ? emitted_second : emitted_first;
-                const int draft_pos = (emitted_second >= 0 ? pos_second : pos_first) + 1;
-                // The skipped lane goes in BEFORE the round's own lane, because lane order has to stay
+                pending2_candidate = -1;
+                pending2_pos = -1;
+                const int tok_next = emit_tok[n_emit - 1];
+                const int draft_pos = emit_pos[n_emit - 1] + 1;
+                // The skipped lane goes in BEFORE the round's own lanes, because lane order has to stay
                 // ascending in position: the attention row treats `self_lane` (the last one) as the newest
                 // and reads everything before it.
                 if (dense_token >= 0) {
                     const std::string lane_why = engine::mtpdraft::refusal(mtp->st);
                     if (lane_why.empty()) {
-                        engine::mtpdraft::draft_lane(store, mtp->w, mtp->st, sc.norm, dense_token,
-                                                     dense_pos);
+                        engine::mtpdraft::draft_lane(store, mtp->w, mtp->st, draft_dense_row,
+                                                     dense_token, dense_pos);
                         if (mtp->st.lanes_max > mtp->lanes_max) mtp->lanes_max = mtp->st.lanes_max;
                     } else {
                         // Refused, not skipped silently: the round still runs, it just keeps the sparse
@@ -4374,12 +4532,36 @@ int main(int argc, char** argv) {
                     // `lanes_max=0 cap=512` a true statement about the counter and a false one about the
                     // cache. Same high-water mark, same field, now from both callers.
                     if (mtp->st.lanes_max > mtp->lanes_max) mtp->lanes_max = mtp->st.lanes_max;
+                    // The second proposal, if this round's geometry has one. `h` is the block's own output
+                    // row (`st.xd`), which is written at stage 14 and read here before any later call writes
+                    // it again — one stream, in issue order, so no sync is needed and none is taken (a sync
+                    // here would be a silent rate-changer, since this reads the PREVIOUS row's output). It is
+                    // counted as an extra draft ROW, not a draft round, exactly as the `--mtp-draft-k` ladder
+                    // counts its own feedback rows, so `MTPDRAFT rounds=` keeps its meaning.
+                    if (need > 1) {
+                        const std::string why2 = engine::mtpdraft::refusal(mtp->st);
+                        if (!why2.empty()) {
+                            std::printf("DRAFT-SKIP reason=%s would_propose_for=%d row=2\n",
+                                        why2.c_str(), draft_pos + 1);
+                        } else {
+                            const engine::mtpdraft::Proposal q =
+                                engine::mtpdraft::draft_round(store, mtp->w, mtp->st, mtp->st.xd,
+                                                              p.token, draft_pos + 1);
+                            pending2_candidate = q.token;
+                            pending2_pos = draft_pos + 1;
+                            mtp->extra_rows++;
+                            if (mtp->st.lanes_max > mtp->lanes_max) {
+                                mtp->lanes_max = mtp->st.lanes_max;
+                            }
+                        }
+                    }
                 }
-                // §07.5, applied per EMITTED token and in order. The accept's first token is a token the
+                // §07.5, applied per EMITTED token and in order. An accept's first token is a token the
                 // plain loop would never have emitted — it was the draft's guess — and it is exactly as
-                // entitled to end the run, because it is now a token the target emitted for real. A bonus
+                // entitled to end the run, because it is now a token the target emitted for real. Anything
                 // behind a stop is not emitted: it was only ever conditional on its predecessor.
                 bool stop_fired = false;
+                int last_emitted = 0;    // index into emit_tok of the last token that actually went out
                 const auto emit_one = [&](int tok, int pos) {
                     if (emit_log) std::fprintf(emit_log, "%d\n", tok);
                     std::printf("ACCEMIT step=%d pos=%d token=%d\n", step, pos, tok);
@@ -4391,20 +4573,22 @@ int main(int argc, char** argv) {
                     // explicit here because an unflushed stdout lets the writes land in a pipe buffer for
                     // the whole run, and that would be billed to whichever sync follows it.
                     const engine::mtpmeter::PhaseGuard prints(engine::mtpmeter::kReportPrints);
-                    emit_one(emitted_first, pos_first);
-                    if (emitted_second >= 0 && !stop_fired) {
-                        emit_one(emitted_second, pos_second);
-                    } else if (emitted_second >= 0) {
-                        // The bonus was priced by the body and never emitted, so `MTPSTAT`'s tally (what the
-                        // ROUND emitted) and this window (what the RUN emitted) differ by exactly this token.
-                        // Counting the difference is what lets `DECWALL` cross-check the two counts instead of
-                        // hoping they agree.
-                        gen_suppressed++;
+                    for (int i = 0; i < n_emit; ++i) {
+                        if (!stop_fired) {
+                            emit_one(emit_tok[i], emit_pos[i]);
+                            last_emitted = i;
+                        } else {
+                            // This token was priced by the body and never emitted, so `MTPSTAT`'s tally
+                            // (what the ROUND emitted) and this window (what the RUN emitted) differ by
+                            // exactly this token. Counting the difference is what lets `DECWALL` cross-check
+                            // the two counts instead of hoping they agree.
+                            gen_suppressed++;
+                        }
                     }
                 }
                 if (stop_fired) run_stopped = true;
                 if (stop_fired) gen_end = "stop_token";
-                sampled = emitted_second >= 0 && !stop_fired ? emitted_second : emitted_first;
+                sampled = emit_tok[last_emitted];
                 if (meter_round) {
                     // Closed here rather than at the top of the next iteration so a stop-terminated run
                     // still has a closed window: an unclosed one throws in the report, and the run would

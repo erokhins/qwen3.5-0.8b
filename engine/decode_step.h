@@ -212,17 +212,28 @@ struct DecodeScratch {
     // IT IS A RUNTIME POINTER, NOT A BUILD FLAG, for the standing reason: both sides live in one binary
     // so the byte-compare admission (`ACCEPT-BUILD.md` §4 cond. 2 — split row0+row1 must be
     // BIT-IDENTICAL to the batched launches at the same width) is one window, not two builds.
+    //
+    // HOW MANY SLOTS, and the rule that fixes it: ONE per row of the body EXCEPT the last. A checkpoint
+    // answers "what was the state after row r", and for the last row that question is already answered —
+    // the body's end state IS the state after it, and the live state holds it. So a 2-row body (k=1)
+    // needs 1 slot and a 3-row body (k=2) needs 2, and `submit_wave_body` refuses any other pairing.
+    // Each slot is a full set of per-layer regions, so a slot's stride is the whole `gdn_state_bytes` /
+    // `conv_window_bytes`, not one layer's slice.
     struct GdnCheckpoint {
-        float* mid_gdn = nullptr;    // [kNumGdnLayers][kNumValueHeads][kDk][kDv], layer strides as in `state.h`
-        float* mid_conv = nullptr;   // [kNumGdnLayers][kConvWindow][kConvChannels]
+        float* mid_gdn = nullptr;    // [slots][kNumGdnLayers][kNumValueHeads][kDk][kDv], layer strides as in `state.h`
+        float* mid_conv = nullptr;   // [slots][kNumGdnLayers][kConvWindow][kConvChannels]
+        // How many mid-body states these buffers hold. Arming a body of `n` rows requires exactly
+        // `n - 1`, and the width check lives where the width is (`submit_wave_body`), because a struct
+        // cannot see the call it is passed to.
+        int slots = 0;
     };
     const GdnCheckpoint* gdn_ckpt = nullptr;
-    // The one rule the field above cannot express, and `submit_wave_body` enforces it by throwing: the
-    // checkpoint is only ever armed for a body of exactly `kRows` rows (`engine/mtp_verify.h`), because
-    // "after row 0" is a statement about a two-row geometry. A wave of any other width armed by
-    // mistake — a prefill wave, which is the shipping path this must not touch — is a bug, and it says
-    // so instead of quietly writing a checkpoint nobody asked for.
-    static constexpr int kGdnCheckpointRows = 2;
+    // The widest body a checkpoint may ever be armed on, and `submit_wave_body` throws for anything
+    // beyond it: a wave of any other width armed by mistake — a prefill wave, which is the shipping path
+    // this must not touch — is a bug, and it says so instead of quietly writing a checkpoint nobody asked
+    // for. The slots-vs-rows equality below is the load-bearing half of that guard; this constant only
+    // bounds the fan-out.
+    static constexpr int kMaxCheckpointRows = 3;
 
     // How many one-row projection launches asked for a shape this device/width cannot offer and took the
     // shipped kernel instead. Counted, not assumed: `decode_run` prints it, so a run whose A/B side

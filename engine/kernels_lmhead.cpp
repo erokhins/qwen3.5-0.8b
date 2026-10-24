@@ -74,10 +74,12 @@ void lm_head_full_xbf16(const uint16_t* table, const uint16_t* h, float* logits,
 // rows-per-block constant as the shipped one-row launch — only the work per block differs, so the two are
 // directly comparable in a paired A/B.
 //
-// NROWS is accepted only as 2, and says so rather than falling back: a deeper verify (k>1) is unfunded
-// work (`prototype/mtp_draft/DRAFT-RESULT.md`: "fund a staging pass, do not fund deeper k"), and a
-// launcher that quietly served k=3 with a k=2 kernel would be the silent-substitution failure this repo
-// keeps recording.
+// TWO WIDTHS ARE INSTANTIATED: 2 (`kLmHeadBatchedRows`, the shipped k=1 round) and 3
+// (`kLmHeadBatchedRowsK2`, the k=2 round). Anything else is refused rather than fallen back on: a launcher
+// that quietly served a width it had not built would be the silent-substitution failure this repo keeps
+// recording. The third width arrived with `prototype/mtp_accept/K2-RESULT.md`, and the shape family was
+// already priced (`HEADBATCH-RESULT.md`: M=2 at 1.0019x and M=4 at 1.013x of the one-row pass), so this is
+// a funded shape rather than a template argument extrapolated from a graph.
 void lm_head_batched_xbf16(const uint16_t* table, const uint16_t* h_rows, float* logits_rows,
                            int vocab, int nrows) {
     if (warp_width() != 32) {
@@ -86,37 +88,50 @@ void lm_head_batched_xbf16(const uint16_t* table, const uint16_t* h_rows, float*
     }
     if (vocab <= 0) throw std::runtime_error("lm_head_batched_xbf16: vocab must be > 0");
     if (h_rows == nullptr) throw std::runtime_error("lm_head_batched_xbf16: h_rows is null");
-    if (nrows != kLmHeadBatchedRows) {
-        throw std::runtime_error("lm_head_batched_xbf16: this build instantiates NROWS=" +
-                                 std::to_string(kLmHeadBatchedRows) + ", asked for " +
-                                 std::to_string(nrows) + ". A deeper verify is a funding decision, not"
-                                 " a template argument.");
-    }
     constexpr int kRowsPerBlock = ROWS_PER_BLOCK;
     const int threads = 32 * kRowsPerBlock;
     const int blocks = (vocab + kRowsPerBlock - 1) / kRowsPerBlock;
-    engine::lmheadbatched::lm_head_gemv_batched<kLmHeadBatchedRows><<<blocks, threads>>>(
-        (const hip_bfloat16*)table, (const hip_bfloat16*)h_rows, logits_rows, vocab, kRowsPerBlock);
+    if (nrows == kLmHeadBatchedRows) {
+        engine::lmheadbatched::lm_head_gemv_batched<kLmHeadBatchedRows><<<blocks, threads>>>(
+            (const hip_bfloat16*)table, (const hip_bfloat16*)h_rows, logits_rows, vocab,
+            kRowsPerBlock);
+        return;
+    }
+    if (nrows == kLmHeadBatchedRowsK2) {
+        // The k=2 round's third row. Same launch shape, one more staged norm row: the block's shared
+        // stage grows from 4 KiB to 6 KiB, which is the whole of the extra footprint and the reason the
+        // width had to be named rather than derived.
+        engine::lmheadbatched::lm_head_gemv_batched<kLmHeadBatchedRowsK2><<<blocks, threads>>>(
+            (const hip_bfloat16*)table, (const hip_bfloat16*)h_rows, logits_rows, vocab,
+            kRowsPerBlock);
+        return;
+    }
+    throw std::runtime_error("lm_head_batched_xbf16: this build instantiates NROWS=" +
+                             std::to_string(kLmHeadBatchedRows) + " and " +
+                             std::to_string(kLmHeadBatchedRowsK2) + ", asked for " +
+                             std::to_string(nrows) + ". A deeper verify is a funding decision, not"
+                             " a template argument.");
 }
 
 // The accept round's verdict (M2, D-b): each logits row is argmaxed by the SHARED pair of launches — the
 // same `argmax_partials_kernel` the draft's proposal uses, then `verdict_combine_kernel` — and the round's
-// whole readback is `kVerdictWords` ints: two ids, the accept bit, and the candidate it was compared
-// against. `nrows` is the verify body's width and nothing else is accepted, for the same reason
-// `lm_head_batched_xbf16` refuses other widths: the shape that was priced is the shape that ships.
+// whole readback is `kVerdictWordsFor(nrows)` ints: one id per row, one candidate-equality bit per
+// candidate, and each candidate echoed back by the block that compared it. `nrows` is the verify body's
+// width and only the two funded widths are accepted, for the same reason `lm_head_batched_xbf16` refuses
+// other widths: the shape that was priced is the shape that ships.
 //
-// The two rows share ONE launch pair (`gridDim.y` is the row) rather than one pair per row, because §20.1's
+// The rows share ONE launch pair (`gridDim.y` is the row) rather than one pair per row, because §20.1's
 // aliasing bug came from two spellings of one address; here there is one writer of `partials` and one reader.
 //
 // Deliberately NOT billed on a stage-clock row by this launcher: it belongs to the accept round, and
 // the round states its own per-round submission bill (`MTPSTAT`'s `subs_per_round`) rather than pretending
 // to be one of §07's nine families.
-void mtp_accept_verdict(const float* logits_rows, int vocab, int nrows, int candidate,
+void mtp_accept_verdict(const float* logits_rows, int vocab, int nrows, int candidate, int cand2,
                         int* out_dev, ArgmaxWord* partials_dev) {
     if (vocab <= 0) throw std::runtime_error("mtp_accept_verdict: vocab must be > 0");
-    if (nrows != kVerdictRows) {
+    if (nrows != kVerdictRows && nrows != kVerdictRowsK2) {
         throw std::runtime_error("mtp_accept_verdict: this build reduces " +
-                                 std::to_string(kVerdictRows) +
+                                 std::to_string(kVerdictRows) + " or " + std::to_string(kVerdictRowsK2) +
                                  " logits rows, asked for " + std::to_string(nrows) +
                                  ". A deeper verify is a funding decision, not a grid dimension.");
     }
@@ -137,8 +152,8 @@ void mtp_accept_verdict(const float* logits_rows, int vocab, int nrows, int cand
                                                 engine::mtpverdict::kVerdictThreads>>>(
         logits_rows, vocab, vocab / kArgmaxChunks, kArgmaxChunks, partials_dev);
     engine::mtpverdict::verdict_combine_kernel<<<nrows, engine::mtpverdict::kVerdictThreads>>>(
-        reinterpret_cast<const engine::mtpverdict::detail::Best*>(partials_dev), kArgmaxChunks,
-        candidate, out_dev);
+        reinterpret_cast<const engine::mtpverdict::detail::Best*>(partials_dev), kArgmaxChunks, nrows,
+        candidate, cand2, out_dev);
 }
 
 // One logits row, argmaxed on device into one `ArgmaxWord`: `kArgmaxChunks` strip blocks, then one combine

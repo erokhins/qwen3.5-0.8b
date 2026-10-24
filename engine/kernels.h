@@ -406,15 +406,16 @@ void gdn_conv(const uint16_t* raw, const float* win, const float* conv_weight, f
 // `prototype/glue_copy_fold/GLUECOPY-HANDOVER.md` §2.
 void gdn_conv_roll(const uint16_t* raw, float* win, const float* conv_weight, float* u);
 // The MTP accept round's window derivation (`prototype/mtp_accept/ACCEPT-BUILD.md` §4 cond. 1, option
-// (a)). `mid_win` is a caller-owned [K-1][CH] F32 slot and receives the window as it stood AFTER row 0
-// of a multi-row body — the quantity a batched conv does not leave addressable anywhere, because it
+// (a)). `mid_win` is a caller-owned [K-1][CH] F32 slot and receives the window as it stood AFTER `tokens`
+// rows of a multi-row body — the quantity a batched conv does not leave addressable anywhere, because it
 // materialises only the END window. `win` must be the window as it stood before this body's conv, and
-// `raw` is the body's tile: the kernel reads its row 0, which is the row the accept round keeps on a
-// reject. Nothing here is recomputed with different arithmetic; the three stored values are
-// `conv_tap`'s own, evaluated where `conv_kernel`'s end condition would put them at `tokens = 1`, and
-// the shipped conv for this body runs untouched alongside it. Body and the address-level argument:
-// `engine/gdn_conv_mid_kernels.h`. Not called by the shipping path at all.
-void gdn_conv_mid_window(const uint16_t* raw, const float* win, float* mid_win);
+// `raw` is the body's tile: the kernel reads its rows 0..tokens-1, which are the rows the accept round
+// keeps. `tokens` is bounded by the conv window width (K-1), and the launcher refuses outside that range
+// rather than reading rows the tile does not have. Nothing here is recomputed with different arithmetic;
+// the stored values are `conv_tap`'s own, evaluated where `conv_kernel`'s end condition would put them at
+// that `tokens`, and the shipped conv for this body runs untouched alongside it. Body and the address-level
+// argument: `engine/gdn_conv_mid_kernels.h`. Not called by the shipping path at all.
+void gdn_conv_mid_window(const uint16_t* raw, const float* win, float* mid_win, int tokens = 1);
 void gdn_gates(const uint16_t* a_raw, const uint16_t* b_raw, const float* a_log,
                const float* dt_bias, float* g, float* beta, int tokens = 1);
 // Which SPELLING of the sequential recurrence's state walks a `gdn_rec` launch runs
@@ -946,12 +947,14 @@ void lm_head_full_xbf16(const uint16_t* table, const uint16_t* h, float* logits,
 // The batched tied head: `nrows` query rows, one pass over the 485 MiB table (§03.4, P7's 2-row verify).
 // `h_rows` is `nrows` contiguous rows of the BF16 final-norm tile and `logits_rows` `nrows` contiguous
 // vocabulary rows — one launch and one D2H for the pair, which is the whole point (`D3-RESULT.md` priced
-// the two-pass alternative at KILLED). `kLmHeadBatchedRows` is the only width instantiated, and the
-// launcher refuses any other rather than guessing: k>1 is unfunded
-// (`prototype/mtp_draft/DRAFT-RESULT.md`'s closing instruction). Bit-identity of row 0 against
-// `lm_head_full_xbf16` is claimed in `engine/lm_head_batched_kernels.h` and witnessed by
-// `prototype/mtp_verify`'s byte compare, not by the header.
+// the two-pass alternative at KILLED). Two widths are instantiated, and the launcher refuses any other
+// rather than guessing: 2 is the shipped k=1 round, and 3 is the k=2 round this build funds — the shape
+// `prototype/mtp_headbatch/HEADBATCH-RESULT.md` measured as a shape (M=2 at 1.0019x and M=4 at 1.013x of
+// the one-row pass, so the third row is inside measured territory rather than an extrapolation).
+// Bit-identity of row 0 against `lm_head_full_xbf16` is claimed in `engine/lm_head_batched_kernels.h` and
+// witnessed by `prototype/mtp_verify`'s byte compare, not by the header.
 constexpr int kLmHeadBatchedRows = 2;
+constexpr int kLmHeadBatchedRowsK2 = 3;
 void lm_head_batched_xbf16(const uint16_t* table, const uint16_t* h_rows, float* logits_rows,
                            int vocab, int nrows);
 
@@ -972,10 +975,42 @@ constexpr int kVerdictRow0Token = 0;
 constexpr int kVerdictRow1Token = 1;
 constexpr int kVerdictAccept = 2;
 constexpr int kVerdictCandidate = 3;
-// The width this build reduces, and the only one the launcher accepts: the verify body's two rows.
-// A launcher that served any `nrows` from a kernel instantiated for two would be the silent
-// substitution this repo keeps recording, so a deeper verify stays a funding decision.
+// The width this build reduces by default: the shipped k=1 round's two rows. `kVerdictRowsK2` is the
+// k=2 round's three. A launcher that served an arbitrary `nrows` from a kernel instantiated for one of
+// them would be the silent substitution this repo keeps recording, so both bounds are named and the
+// launcher refuses anything else.
 constexpr int kVerdictRows = 2;
+constexpr int kVerdictRowsK2 = 3;
+
+// THE WORD COUNT AND THE OFFSETS, as a function of the row count — ONE formula, so the k=1 layout above is
+// not a second spelling but this formula's first instance:
+//
+//     [0 .. rows-1]              this row's argmax, §03.4's rule, resolved on device
+//     [rows .. 2*rows-2]         one equality bit per CANDIDATE: bit i says argmax(row i) == candidate i
+//     [2*rows-1 .. 3*rows-3]     the same i candidates, echoed back by the block that compared them
+//
+// so `words = rows + 2*(rows-1) = 3*rows - 2`. Every row except the last had a candidate fed at it, which
+// is why there are `rows-1` of each of the latter two groups. At rows=2 this is exactly the four words
+// above (argmaxes at 0,1; the accept bit at 2; the candidate echo at 3) — the static_asserts below are the
+// witness that the k=1 layout and the formula cannot drift.
+//
+// WHY THE BITS AND NOT A RESOLVED PREFIX: the longest-correct-prefix test needs row 0's answer before it
+// can use row 1's, and these blocks are independent by design (one block per row, no cross-block order).
+// What the device resolves is the part that needs the TIE RULE — the argmax — and the part it hands back
+// is `rows-1` plain integer equalities, each one computed by the block that owns that row and accompanied
+// by the echo of the candidate it was handed, so a stale candidate is still caught. The prefix is then the
+// leading run of 1s, which is an arithmetic claim over ints already in the word, not a claim about logits.
+constexpr int kVerdictWordsFor(int rows) { return 3 * rows - 2; }
+constexpr int kVerdictHitAt(int rows, int i) { return rows + i; }
+constexpr int kVerdictEchoAt(int rows, int i) { return 2 * rows - 1 + i; }
+static_assert(kVerdictWordsFor(kVerdictRows) == kVerdictWords,
+             "the k=1 word count and the general formula must be one fact, not two");
+static_assert(kVerdictHitAt(kVerdictRows, 0) == kVerdictAccept,
+             "`kVerdictAccept` must be the formula's row-0 hit bit");
+static_assert(kVerdictEchoAt(kVerdictRows, 0) == kVerdictCandidate,
+             "`kVerdictCandidate` must be the formula's row-0 candidate echo");
+static_assert(kVerdictWordsFor(kVerdictRowsK2) == 7,
+             "the k=2 verdict word is 7 ints (28 B), one D2H; a different count means the layout moved");
 
 // How many strips ONE logits row is split across for a device argmax (`argmax_partials_kernel` + a
 // combine). It lives HERE, beside the launchers that take the partials buffer and the words it produces,
@@ -983,10 +1018,10 @@ constexpr int kVerdictRows = 2;
 // be included by exactly one TU, while every host caller that sizes a partials buffer needs the number.
 // The launcher refuses a `vocab` it cannot split evenly, so this is a claim with a guard, not a wish.
 constexpr int kArgmaxChunks = 160;
-// The widest call the engine makes an argmax over: the verifier's tile is `[kRows][kVocab]`, i.e. 2 rows,
-// and the draft's proposal is 1. Every caller sizes its partials buffer with this, so the bound is stated
-// once next to `kArgmaxChunks` instead of being re-derived at each allocation site.
-constexpr int kMaxArgmaxRows = kVerdictRows;
+// The widest call the engine makes an argmax over: the k=2 verifier's tile is `[rows][kVocab]` with
+// `kVerdictRowsK2` rows, and the draft's proposal is 1. Every caller sizes its partials buffer with this,
+// so the bound is stated once next to `kArgmaxChunks` instead of being re-derived at each allocation site.
+constexpr int kMaxArgmaxRows = kVerdictRowsK2;
 
 // One resolved argmax, in the shape BOTH sides of a device/host boundary need: the winning logit's VALUE
 // and the id it belongs to. It lives here rather than in the kernel header for the same link rule as the
@@ -1001,15 +1036,19 @@ struct ArgmaxWord {
     int index;
 };
 
-// `logits_rows` is the tile `lm_head_batched_xbf16` just wrote; `candidate` arrives as a kernel
-// argument (uploading four bytes would be a second device operation for nothing), `out_dev` has room
-// for `kVerdictWords` ints, and `partials_dev` has room for `kVerdictRows * kArgmaxChunks` words.
+// `logits_rows` is the tile `lm_head_batched_xbf16` just wrote; the candidates arrive as kernel
+// arguments (uploading four bytes would be a second device operation for nothing), `out_dev` has room for
+// `kVerdictWordsFor(nrows)` ints, and `partials_dev` has room for `nrows * kArgmaxChunks` words.
+//
+// `cand2` is the k=2 round's second candidate and is unused (pass -1) for a 2-row round, which has only
+// one candidate row. The word carries `nrows-1` hit bits and `nrows-1` echoes; see the layout comment on
+// `kVerdictWordsFor`.
 //
 // WHY THE CALLER OWNS THE PARTIALS. The tile is an artifact of the reduction and nothing outside these
 // two launches reads it, but a `hipMalloc` inside a round is a synchronisation — which is the round tax
 // this work exists to delete — so the buffer belongs to whoever owns the verdict word already. See
 // `mtpaccept::Side::verdict_partials` and the `--verify-guard` witness in `decode_run.cpp`.
-void mtp_accept_verdict(const float* logits_rows, int vocab, int nrows, int candidate,
+void mtp_accept_verdict(const float* logits_rows, int vocab, int nrows, int candidate, int cand2,
                         int* out_dev, ArgmaxWord* partials_dev);
 
 // ONE logits row, argmaxed on device and written as one `ArgmaxWord` (`argmax_partials_kernel` +

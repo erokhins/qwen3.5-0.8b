@@ -556,7 +556,9 @@ Result verify_body(const WeightStore& weights, const RequestState& target, Decod
             // host spelling, tie rule included, on real logits from real content — not on a fixture an
             // argmax kernel could have been tuned to.
             const engine::mtpmeter::PhaseGuard witness(engine::mtpmeter::kWitness);
-            kernels::mtp_accept_verdict(logits_dev, kVocab, kRows, tokens[0], verdict_dev,
+            // The 2-row verify body has one candidate, so there is no second candidate to hand the verdict
+            // kernel: -1 is the value it never reads at nrows=2 (`engine/kernels_lmhead.cpp`).
+            kernels::mtp_accept_verdict(logits_dev, kVocab, kRows, tokens[0], -1, verdict_dev,
                                         verdict_partials);
             VERIFY_CK(hipMemcpy(r.verdict, verdict_dev, sizeof(r.verdict), hipMemcpyDeviceToHost));
             r.verdict_bytes = (long long)sizeof(r.verdict);

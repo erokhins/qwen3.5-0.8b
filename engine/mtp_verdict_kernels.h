@@ -1,6 +1,6 @@
 #pragma once
-// §09 / M2 — the accept round's VERDICT: both rows' greedy argmax and the accept test, resolved ON
-// DEVICE, so a round reads back four integers instead of a vocabulary.
+// §09 / M2 — the accept round's VERDICT: every row's greedy argmax and the per-row candidate comparisons,
+// resolved ON DEVICE, so a round reads back a handful of integers instead of a vocabulary.
 //
 // WHY THIS EXISTS. An accept round has to know, before it decides anything, whether the verifier's own
 // prediction at row 0 equals the token it was asked to believe. The verifier's answer is a
@@ -9,8 +9,9 @@
 // then on a per-step host sync for 2 MB of traffic to transport two comparisons. The plan's `c`
 // column and D-b's whole argument are that this comparison must not cost a vocabulary-sized download,
 // so it stops being a download: the tile is argmaxed ON DEVICE and the round reads back
-// `kVerdictWords` ints (16 B). The row is now split across `kernels::kArgmaxChunks` blocks rather than
-// walked by one block — see `verdict_combine_kernel` for why the one-block shape was the defect.
+// `kVerdictWordsFor(rows)` ints (4 at k=1, 7 at k=2). The row is now split across
+// `kernels::kArgmaxChunks` blocks rather than walked by one block — see `verdict_combine_kernel` for why
+// the one-block shape was the defect.
 //
 // THE TIE RULE IS THE CONTRACT. `decode_step.cpp::argmax_greedy` is §03.4's only spelling and it is
 // deliberately STRICT (`if (logits[i] > logits[best])`), so the FIRST, i.e. lowest, id wins a tie;
@@ -107,7 +108,7 @@ __device__ inline int clamp_index(int i, int n) {
 // depend on arrival order, and the entire licence for splitting at all is that a TOTAL order makes the fold
 // order-independent. The extra launch costs single-digit microseconds and keeps the argument intact.
 __global__ void verdict_combine_kernel(const detail::Best* __restrict__ partials, int nchunks,
-                                       int candidate, int* __restrict__ out) {
+                                       int nrows, int candidate, int cand2, int* __restrict__ out) {
     __shared__ detail::Best best[kVerdictThreads];
 
     const int row = (int)blockIdx.x;
@@ -119,13 +120,23 @@ __global__ void verdict_combine_kernel(const detail::Best* __restrict__ partials
 
     if (threadIdx.x == 0) {
         out[kernels::kVerdictRow0Token + row] = token;
-        if (row == 0) {
-            // THE COMPARISON, on device. One equality of two ints is the whole accept test, and it is
-            // evaluated here so the round never has to bring a logits row home to ask it. `candidate`
-            // arrives as a kernel argument rather than a buffer: uploading it would be a second device
-            // operation to move four bytes, which is the mistake `embed_gather_rows`'s note records.
-            out[kernels::kVerdictAccept] = (token == candidate) ? 1 : 0;
-            out[kernels::kVerdictCandidate] = candidate;
+        // Every row except the LAST one was fed a candidate, so exactly `nrows - 1` blocks have a bit to
+        // write. At `nrows == 2` that is this block (row 0) and no other, which is byte-for-byte the shape
+        // the k=1 round wrote before a third row existed: `kernels::kVerdictAccept` is
+        // `kVerdictHitAt(2, 0)` and `kernels::kVerdictCandidate` is `kVerdictEchoAt(2, 0)` — the
+        // static_asserts in `engine/kernels.h` are what make that identity a guarantee rather than a hope.
+        if (row < nrows - 1) {
+            // THE COMPARISONS, on device. One equality of two ints is the whole per-row accept test, and it
+            // is evaluated here so the round never has to bring a logits row home to ask it. The candidates
+            // arrive as kernel arguments rather than a buffer: uploading them would be a second device
+            // operation to move eight bytes, which is the mistake `embed_gather_rows`'s note records.
+            //
+            // What this block does NOT do is decide the PREFIX: that needs another row's answer, and these
+            // blocks have no order between them by design. It writes its own bit and echoes the candidate it
+            // was handed, and the driver folds the leading run of 1s from the word (`mtp_accept.cpp`).
+            const int cand = (row == 0) ? candidate : cand2;
+            out[kernels::kVerdictHitAt(nrows, row)] = (token == cand) ? 1 : 0;
+            out[kernels::kVerdictEchoAt(nrows, row)] = cand;
         }
     }
 }

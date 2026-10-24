@@ -68,10 +68,21 @@ void gdn_conv_roll(const uint16_t* raw, float* win, const float* conv_weight, fl
 // tokens = 1 — restated from the same constants rather than taken from it, for the reason
 // `gdn_conv_roll` states: a derivation that covered fewer channels than the roll it stands in for
 // would look cheaper while leaving part of the checkpoint unwritten.
-void gdn_conv_mid_window(const uint16_t* raw, const float* win, float* mid_win) {
+void gdn_conv_mid_window(const uint16_t* raw, const float* win, float* mid_win, int tokens) {
     static_assert(CH % (256 * CONV_VEC) == 0,
                   "conv_mid_window_kernel's grid must match conv_kernel's");
-    conv_mid_window_kernel<<<CH / (256 * CONV_VEC), 256>>>((const hip_bfloat16*)raw, win, mid_win);
+    if (raw == nullptr || win == nullptr || mid_win == nullptr) {
+        throw std::runtime_error("gdn_conv_mid_window: null raw tile, carried window or destination");
+    }
+    if (tokens < 1 || tokens > kConvWindow) {
+        // The derivation reads exactly `tokens` rows of the raw tile, so a count the body does not have is
+        // a window built out of addresses nobody wrote — a wrong checkpoint, not a slower one.
+        throw std::runtime_error("gdn_conv_mid_window: tokens=" + std::to_string(tokens) +
+                                 " is outside [1, " + std::to_string(kConvWindow) + "]; the most a"
+                                 " conv window can ever be built from is K-1 rows");
+    }
+    conv_mid_window_kernel<<<CH / (256 * CONV_VEC), 256>>>((const hip_bfloat16*)raw, win, mid_win,
+                                                           tokens);
     // Billed to the caller's stage note, not to `gdn_conv`'s launch-stats row: this launch exists only
     // on an accept round, and folding it into the family row an A/B reads would move a shipped-path
     // number by the cost of the witness. `ACCEPT-BUILD.md` §4a itemises it as its own line.

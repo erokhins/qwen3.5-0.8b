@@ -545,12 +545,16 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
     // different width would otherwise write a per-layer checkpoint nobody asked for into a prefill wave,
     // which is the one thing this field is not allowed to do (`ACCEPT-BUILD.md` §4 cond. 1).
     const DecodeScratch::GdnCheckpoint* ckpt = sc.gdn_ckpt;
-    if (ckpt != nullptr && n != DecodeScratch::kGdnCheckpointRows) {
+    if (ckpt != nullptr && (n < 2 || n > DecodeScratch::kMaxCheckpointRows ||
+                            ckpt->slots != n - 1)) {
         throw std::runtime_error(
-            "submit_wave_body: a GDN checkpoint was armed for a body of " +
-            std::to_string(DecodeScratch::kGdnCheckpointRows) + " rows and asked to run " +
-            std::to_string(n) + ". 'After row 0' is a statement about the verify body's geometry;"
-            " arming it on any other body is a caller bug, not a wider checkpoint.");
+            "submit_wave_body: a GDN checkpoint with " + std::to_string(ckpt ? ckpt->slots : -1) +
+            " slot(s) was armed on a body of " + std::to_string(n) + " rows. The rule is ONE slot per"
+            " row except the last — 'after row r' is the question a slot answers, and for the last row"
+            " the body's end state already IS that answer, so the live state holds it and a slot would"
+            " be an unreferenced copy. A 2-row body therefore takes 1 slot and a 3-row body takes 2"
+            " (row 2, the last, gets none); a prefill wave armed by mistake is the other case this"
+            " throws for, and it is a caller bug rather than a wider checkpoint.");
     }
     // One hand GEMV of one projection, whichever shape the run asked for. `proj_shape_available` is asked
     // per call because what can refuse is the width and the device's warp, not the flag; a refusal is
@@ -800,10 +804,20 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                 kernels::gdn_conv(sc.g_raw, st.conv_window_layer(layer),
                                   sc.g_conv_w + (size_t)slot * kConvChannels * kConvKernel,
                                   sc.g_u, sc.conv_new, n);
-                stageclock::note(stageclock::kGdnConv);   // the derivation, its own submission
-                kernels::gdn_conv_mid_window(
-                    sc.g_raw, st.conv_window_layer(layer),
-                    sc.gdn_ckpt->mid_conv + (size_t)slot * kConvWindow * kConvChannels);
+                // One derivation per checkpoint slot, and slot `s` is the window after row `s + 1` — the
+                // same three taps through the same pinned `conv_tap`, with only the consumed-row count
+                // differing (`engine/gdn_conv_mid_kernels.h`'s "why `m` is a parameter"). They all read
+                // the window as this body FOUND it, so all of them must precede the copy below; that is
+                // also why they sit together rather than being spread through the layer.
+                for (int ms = 0; ms < ckpt->slots; ++ms) {
+                    stageclock::note(stageclock::kGdnConv);   // the derivation, its own submission
+                    kernels::gdn_conv_mid_window(
+                        sc.g_raw, st.conv_window_layer(layer),
+                        sc.gdn_ckpt->mid_conv
+                            + ((size_t)ms * kNumGdnLayers + (size_t)slot) * kConvWindow *
+                                  kConvChannels,
+                        ms + 1);
+                }
                 stageclock::note(stageclock::kCopy);
                 ENGINE_CK(hipMemcpyAsync(st.conv_window_layer(layer), sc.conv_new,
                                          (size_t)kConvWindow * kConvChannels * sizeof(float),
@@ -1089,18 +1103,23 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
                                      // above it, so both forms land on the same `gdn_rec` row of the
                                      // wave report and the A/B is a diff of one family line.
                                      sc.gdn_spell);
-                    if (ckpt != nullptr && t == 0) {
+                    if (ckpt != nullptr && t < ckpt->slots) {
                         // V1, the state half: this is the gap the span above was forced open to create.
-                        // The block this launch just advanced is this layer's contribution to S_{p+1},
-                        // and once row 1's launch runs it is gone — so one 1 MiB D2D per GDN layer per
-                        // round is what is paid so the round can be undone WITHOUT re-running the
-                        // recurrence. It bills on `copy` because that is what it is: a checkpoint that
+                        // The block this launch just advanced is this layer's contribution to the state
+                        // after row `t`, and once row `t+1`'s launch runs it is gone — so one 1 MiB D2D
+                        // per GDN layer per checkpoint slot per round is what is paid so the round can be
+                        // undone WITHOUT re-running the recurrence. Slot `t` is the state after row `t`,
+                        // which is the same numbering the derivation above and the rollback in
+                        // `engine/mtp_accept.cpp` use: one numbering, three sites, because a reject that
+                        // restored the slot beside the one it meant would not be caught by any check.
+                        // It bills on `copy` because that is what it is: a checkpoint that
                         // hid on the `gdn_rec` row would make that row read as though the recurrence had
                         // got slower, when what grew was the rollback bill.
                         stageclock::note(stageclock::kCopy);
                         ENGINE_CK(hipMemcpyAsync(
                             sc.gdn_ckpt->mid_gdn
-                                + (size_t)gdn_slot(layer) * kNumValueHeads * kDk * kDv,
+                                + ((size_t)t * kNumGdnLayers + (size_t)gdn_slot(layer)) *
+                                      kNumValueHeads * kDk * kDv,
                             st.gdn_state_layer(layer),
                             (size_t)kNumValueHeads * kDk * kDv * sizeof(float),
                             hipMemcpyDeviceToDevice));

@@ -32,33 +32,44 @@ namespace {
 constexpr const char* kHead = "lm_head.weight";   // the tied table, as `decode_step.cpp` resolves it
 }  // namespace
 
-Side allocate_side(const RequestState& st) {
+Side allocate_side(const RequestState& st, int k) {
+    if (k < kDefaultK || k > kMaxK) {
+        throw std::runtime_error("allocate_side: --mtp-k " + std::to_string(k) + " is not a funded"
+                                 " width (1 or 2); the body width, the checkpoint slot count and the"
+                                 " verdict word all derive from it, so an unfunded value is not a"
+                                 " wider round but an unallocated one");
+    }
     const StateSizes s = st.sizes();
     Side side;
+    side.k = k;
+    side.rows = rows_of_k(k);
+    side.words = engine::kernels::kVerdictWordsFor(side.rows);
+    side.ck.slots = kMidSlotsFor(side.rows);
     side.bytes_gdn = (long long)s.gdn_state_bytes;
     side.bytes_conv = (long long)s.conv_window_bytes;
-    ACCEPT_CK(hipMalloc((void**)&side.ck.mid_gdn, s.gdn_state_bytes));
-    ACCEPT_CK(hipMalloc((void**)&side.ck.mid_conv, s.conv_window_bytes));
-    ACCEPT_CK(hipMalloc((void**)&side.logits, (size_t)kRows * kVocab * sizeof(float)));
-    ACCEPT_CK(hipMalloc((void**)&side.verdict_dev,
-                        (size_t)engine::kernels::kVerdictWords * sizeof(int)));
+    // One region set per slot, each laid out with the live state's own per-layer strides, so a restore of
+    // slot `n` is two bulk copies and not a per-layer loop (`accept_round` below).
+    ACCEPT_CK(hipMalloc((void**)&side.ck.mid_gdn, (size_t)side.ck.slots * s.gdn_state_bytes));
+    ACCEPT_CK(hipMalloc((void**)&side.ck.mid_conv, (size_t)side.ck.slots * s.conv_window_bytes));
+    ACCEPT_CK(hipMalloc((void**)&side.logits, (size_t)side.rows * kVocab * sizeof(float)));
+    ACCEPT_CK(hipMalloc((void**)&side.verdict_dev, (size_t)side.words * sizeof(int)));
     ACCEPT_CK(hipMalloc((void**)&side.verdict_partials,
                         (size_t)engine::kernels::kMaxArgmaxRows *
                             engine::kernels::kArgmaxChunks *
                             sizeof(engine::kernels::ArgmaxWord)));
 
     // THE SPLIT'S BILL, derived from the same constants `decode_step.cpp`'s split sites use rather than
-    // typed in, and corrected on this pass to the DERIVATION form (§4c): the shipped batched conv is
-    // untouched, so per GDN layer the checkpoint costs exactly TWO extra submissions — the
-    // `conv_mid_window_kernel` derivation and the 1 MiB mid-state capture — plus THREE per round for the
-    // verdict (its strip launch and its combine since `ROUND-TAX.md` (B) split the row across blocks) and
-    // its 16-byte status readback. A reject restores the two regions in two bulk D2Ds.
+    // typed in, and corrected to the DERIVATION form (§4c): the shipped batched conv is untouched, so per
+    // GDN layer per SLOT the checkpoint costs exactly TWO extra submissions — the `conv_mid_window_kernel`
+    // derivation and the 1 MiB mid-state capture — plus THREE per round for the verdict (its strip launch,
+    // its combine since `ROUND-TAX.md` (B) split the row across blocks) and its status readback. A partial
+    // accept restores the ONE slot the prefix stopped at, in two bulk D2Ds.
     //
-    // The figure this replaces (`3 * kNumGdnLayers`) billed a recurrence launch the pinned form does not
-    // add: an accept round runs the per-token recurrence, which is what the shipped one-row step runs and
-    // what `--gdn-loop 1` pins the reference arm to, so there is no extra walk to pay for. If a future
-    // round ever resolves a span of 2, add `kNumGdnLayers` back here and say so on the `MTPSTAT` line.
-    side.subs_per_round = 2 * kNumGdnLayers + 3;
+    // At k=1 (slots=1) this is `2 * kNumGdnLayers + 3` = 39, the figure §4d itemises; at k=2 (slots=2) it
+    // is 75. The figure this replaces (`3 * kNumGdnLayers`) billed a recurrence launch the pinned form
+    // does not add: a round runs the per-token recurrence, which is what the shipped one-row step runs and
+    // what `--gdn-loop 1` pins the reference arm to, so there is no extra walk to pay for.
+    side.subs_per_round = 2 * kNumGdnLayers * side.ck.slots + 3;
     side.subs_per_reject = 2;
     return side;
 }
@@ -73,26 +84,42 @@ void free_side(Side& s) {
 }
 
 Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& sc, Side& side,
-                   int cur, int candidate, engine::mtpverify::Route route) {
-    if (sc.wave_rows < kRows) {
+                   int cur, int cand1, int cand2, engine::mtpverify::Route route) {
+    const int rows = side.rows;
+    const int k = side.k;
+    if (sc.wave_rows < rows) {
         throw std::runtime_error("accept_round: the scratch is " + std::to_string(sc.wave_rows) +
-                                 " rows tall and the round needs " + std::to_string(kRows));
+                                 " rows tall and the round needs " + std::to_string(rows));
     }
-    if (cur < 0 || cur >= kVocab || candidate < 0 || candidate >= kVocab) {
-        throw std::runtime_error("accept_round: token out of range (cur=" + std::to_string(cur) +
-                                 ", candidate=" + std::to_string(candidate) + ")");
+    // The candidate list, built once so the body, the verdict and the host fold all read the same array
+    // rather than three spellings of "candidate i". `cand2` is -1 exactly when the geometry has no second
+    // candidate, and that is checked rather than assumed: a k=2 round fed a missing second proposal would
+    // speculate on -1 and call it a token id.
+    const int cands[kMaxK] = {cand1, cand2};
+    if (cur < 0 || cur >= kVocab) {
+        throw std::runtime_error("accept_round: token out of range (cur=" + std::to_string(cur) + ")");
+    }
+    for (int i = 0; i < k; ++i) {
+        if (cands[i] < 0 || cands[i] >= kVocab) {
+            throw std::runtime_error("accept_round: candidate " + std::to_string(i + 1) + " is " +
+                                     std::to_string(cands[i]) + ", outside the tied table — a " +
+                                     std::to_string(k) + "-candidate round needs all " +
+                                     std::to_string(k) + " proposals");
+        }
     }
     const int anchor = st.prefix_len;
-    if (anchor + kRows > st.cap) {
-        // The round appends two KV lanes; refusing is the only honest answer, because a round that
+    if (anchor + rows > st.cap) {
+        // The round appends `rows` KV lanes; refusing is the only honest answer, because a round that
         // wrote past `cap` is a memory fault, and a silently truncated one is a wrong answer.
         throw std::runtime_error("accept_round: anchor " + std::to_string(anchor) + " + " +
-                                 std::to_string(kRows) + " rows is outside cap " +
+                                 std::to_string(rows) + " rows is outside cap " +
                                  std::to_string(st.cap) + " — the run has reached its context limit");
     }
 
     Round r;
     r.anchor_before = anchor;
+    r.rows = rows;
+    r.k = k;
 
     // THE ROUTE FORCING, for the same reason and with the same words as `mtp_verify.cpp`: under `kHand` a
     // one-row decode body is the hand GEMV and the sequential scan BY RULE, so those are the bits row 0 has
@@ -141,47 +168,46 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
     };
 
     try {
-        const int tokens[kRows] = {cur, candidate};
-        // The round IS the step: one body, two rows, at positions `anchor` and `anchor + 1`, on the
-        // request's own state, appending its own two KV lanes. `submit_wave_body` advances
-        // `prefix_len` to anchor + 2, which is the accepted answer; the reject branch below takes it
-        // back to anchor + 1.
+        const int tokens[kMaxRows] = {cur, cand1, cand2};
+        // The round IS the step: one body, `rows` rows, at positions `anchor` .. `anchor+rows-1`, on the
+        // request's own state, appending its own KV lanes. `submit_wave_body` advances `prefix_len` to
+        // anchor + rows, which is the answer only if EVERY candidate was accepted; the fold below takes it
+        // back to the last position the verifier agreed with.
         //
-        // `phase=body` here carries the mid-round checkpoint's own submissions (2 per GDN layer), and it
-        // is NOT split out: the capture is interleaved per layer inside this one call, so a boundary would
-        // mean 18 device drains inside the body whose pipelining is the thing being priced. The meter
+        // `phase=body` here carries the mid-round checkpoint's own submissions (2 per GDN layer per slot),
+        // and it is NOT split out: the capture is interleaved per layer inside this one call, so a boundary
+        // would mean 18 device drains inside the body whose pipelining is the thing being priced. The meter
         // prints that as `status=not_metered` rather than guessing at it — see `engine/mtp_meter.h`.
         {
             const engine::mtpmeter::PhaseGuard body(engine::mtpmeter::kBody);
-            submit_wave_body(weights, st, sc, tokens, kRows);
+            submit_wave_body(weights, st, sc, tokens, rows);
         }
 
-        // ONE pass over the 485 MiB table for both rows, then ONE 16-byte readback: the verdict kernel
-        // argmaxes both rows and resolves the accept test on device, so the round's whole
-        // vocabulary-sized download is four ints (`engine/mtp_verdict_kernels.h` for why the tie rule
-        // is the hard part, not the reduction).
+        // ONE pass over the 485 MiB table for all the rows, then ONE readback: the verdict kernel argmaxes
+        // every row and resolves every candidate comparison on device, so the round's whole vocabulary-sized
+        // download is a handful of ints (`engine/mtp_verdict_kernels.h` for why the tie rule is the hard
+        // part, not the reduction).
         //
         // Three phases, not one, because the funding question is exactly this split: `head` and
         // `verdict_kernel` close on an ADDED sync (`sync_added=1` — they are pure submissions today, and
         // without a wait their device time would be charged to the readback that happens to block), while
         // `verdict_readback` is a blocking D2H already (`sync_added=0`) and is the round's ENTIRE
-        // vocabulary-sized download: four ints, not 2 MB. That contrast is what `--mtp-verify`'s
-        // `logits_d2h` line is the counterpoint to.
+        // vocabulary-sized download: 4 ints at k=1, 7 at k=2, not 2 MB. That contrast is what
+        // `--mtp-verify`'s `logits_d2h` line is the counterpoint to.
         {
             const engine::mtpmeter::PhaseGuard head(engine::mtpmeter::kHead);
             kernels::lm_head_batched_xbf16((const uint16_t*)weights.at(kHead).device, sc.norm,
-                                           side.logits, kVocab, kRows);
+                                           side.logits, kVocab, rows);
         }
         {
             const engine::mtpmeter::PhaseGuard verdict(engine::mtpmeter::kVerdict);
-            kernels::mtp_accept_verdict(side.logits, kVocab, kRows, candidate, side.verdict_dev,
+            kernels::mtp_accept_verdict(side.logits, kVocab, rows, cand1, cand2, side.verdict_dev,
                                         side.verdict_partials);
         }
         {
             const engine::mtpmeter::PhaseGuard readback(engine::mtpmeter::kReadback);
             ACCEPT_CK(hipMemcpy(side.verdict_host, side.verdict_dev,
-                                (size_t)engine::kernels::kVerdictWords * sizeof(int),
-                                hipMemcpyDeviceToHost));
+                                (size_t)side.words * sizeof(int), hipMemcpyDeviceToHost));
         }
     } catch (...) {
         restore_knobs();
@@ -194,51 +220,90 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
     // (`ACCEPT-BUILD.md` §4e trap 1, whose witness is this build's own duplicate-`__device_stub__` link
     // error), and `engine/kernels_lmhead.cpp` is that TU for the verdict kernel. This file launches it
     // through `kernels::mtp_accept_verdict` and reads its word back, and needs no kernel of its own.
+    //
+    // THE FOLD, in the order the rule is written: read every row's argmax, read every per-row equality
+    // bit, then walk the prefix and stop at the first miss. The walk is on the host for one reason and it is
+    // not cost: the block that resolved row 1's bit has no order with the block that resolved row 0's, and
+    // inventing one (a third launch, or an atomic) would make the PREFIX depend on arrival order for the
+    // sake of moving three integer comparisons. What must be on device — the argmax, whose tie rule §03.4
+    // fixes — is on device, and each block echoes the candidate it compared, so a stale proposal is still
+    // caught here rather than agreed with.
     {
         // `accept_path` is the host tail of the round on BOTH branches: decoding the verdict words and the
-        // candidate-echo check. It is metered on its own so an accept's near-zero host cost is a printed
-        // fact next to a reject's restore, rather than a paragraph about it.
+        // candidate-echo check. It is metered on its own so a full accept's near-zero host cost is a printed
+        // fact next to a partial accept's restore, rather than a paragraph about it.
         const engine::mtpmeter::PhaseGuard accept_path(engine::mtpmeter::kAcceptPath);
-        r.verifier_token = side.verdict_host[engine::kernels::kVerdictRow0Token];
-        r.bonus_token = side.verdict_host[engine::kernels::kVerdictRow1Token];
-        r.accepted = side.verdict_host[engine::kernels::kVerdictAccept] != 0;
-        // The word the kernel echoed is the word it was given. Cheap, and it is the only field that can
-        // prove the comparison used THIS round's candidate rather than a stale one.
-        if (side.verdict_host[engine::kernels::kVerdictCandidate] != candidate) {
-            throw std::runtime_error("accept_round: the verdict echoes candidate " +
-                                     std::to_string(side.verdict_host[engine::kernels::kVerdictCandidate]) +
-                                     ", asked " + std::to_string(candidate));
+        for (int i = 0; i < rows; ++i) r.row_token[i] = side.verdict_host[i];
+        for (int i = 0; i < k; ++i) {
+            r.hit[i] = side.verdict_host[engine::kernels::kVerdictHitAt(rows, i)];
+            // The word the kernel echoed is the word it was given. Cheap, and it is the only field that can
+            // prove the comparison used THIS round's candidate rather than a stale one.
+            const int echo = side.verdict_host[engine::kernels::kVerdictEchoAt(rows, i)];
+            if (echo != cands[i]) {
+                throw std::runtime_error("accept_round: the verdict echoes candidate " +
+                                         std::to_string(i + 1) + " as " + std::to_string(echo) +
+                         ", asked " + std::to_string(cands[i]));
+            }
         }
+        while (r.n_accepted < k && r.hit[r.n_accepted] != 0) r.n_accepted++;
+        r.accepted = r.n_accepted == k;
+        // The two fields the k=1 log line has always printed, spelled as the rows they are: row 0's argmax
+        // (`verifier=`) and row 1's (`bonus=`, the token an accept emits after its candidate). At k=1
+        // `bonus=` is what gets emitted; on a reject it is the row the round did NOT use, exactly as it was
+        // before a third row existed.
+        r.verifier_token = r.row_token[0];
+        r.bonus_token = r.row_token[1];
+        // The emitted stream, in the order it goes out: the accepted candidates, then the verifier's token
+        // for the position after them. `emit[n]` is the bonus, and at k=1 this is [cand] + [row1 argmax] on
+        // an accept and [row0 argmax] on a reject — today's behaviour, derived rather than branched.
+        for (int i = 0; i < r.n_accepted; ++i) r.emit[i] = cands[i];
+        r.emit[r.n_accepted] = r.row_token[r.n_accepted];
+        r.n_emit = r.n_accepted + 1;
+        r.emitted = r.n_emit;
     }
 
     if (r.accepted) {
-        // Nothing to undo. The body's end state IS S_{p+2}, both norm rows were priced from it, and
-        // row 1's KV lane is the accepted candidate's own lane at its own position.
-        r.emitted = 2;
-        r.anchor_after = anchor + kRows;
+        // Nothing to undo. The body's end state IS S_{p+rows}, every norm row was priced from it, and each
+        // candidate row's KV lane is an accepted token's own lane at its own position.
+        r.anchor_after = anchor + rows;
         if (st.prefix_len != r.anchor_after) {
             throw std::runtime_error("accept_round: an accepted round left prefix_len at " +
                                      std::to_string(st.prefix_len) + ", expected " +
                                      std::to_string(r.anchor_after));
         }
     } else {
-        // A reject: the candidate is discarded and the verifier's own token takes position p+1, so the
-        // mixer state has to be S_{p+1} — the per-layer mid-checkpoint, restored in two bulk copies
-        // because both regions are contiguous with per-layer strides identical to the live state's.
-        // The KV lane row 1 wrote is NOT restored: with `prefix_len` back to p+1 it is above the prefix,
-        // which §08.6 inv. 4 makes unread, and the next round's row 0 re-stages it with the real
-        // token's K/V. That is the same 0-bytes argument `engine/mtp_verify.h` makes for the probe, and
-        // here it is load-bearing rather than a witness.
+        // The prefix stopped at n < k, so the emitted bonus sits at p+n+1 and the mixer state has to be
+        // S_{p+n+1} — mid-checkpoint slot n, restored in two bulk copies because both regions are contiguous
+        // within a slot with per-layer strides identical to the live state's. At k=1, n is 0 and this is
+        // byte-for-byte the old single-slot restore.
+        //
+        // The KV lanes the rejected candidate rows wrote are NOT restored: with `prefix_len` back to p+n+1
+        // they are above the prefix, which §08.6 inv. 4 makes unread, and the next round's row 0 re-stages
+        // them with the real tokens' K/V. That is the same 0-bytes argument `engine/mtp_verify.h` makes for
+        // the probe, and here it is load-bearing rather than a witness.
+        const int slot = r.n_accepted;
         {
             const engine::mtpmeter::PhaseGuard rollback(engine::mtpmeter::kRollback);
-            ACCEPT_CK(hipMemcpyAsync(st.gdn_state, side.ck.mid_gdn, (size_t)side.bytes_gdn,
-                                     hipMemcpyDeviceToDevice));
-            ACCEPT_CK(hipMemcpyAsync(st.conv_window, side.ck.mid_conv, (size_t)side.bytes_conv,
-                                     hipMemcpyDeviceToDevice));
-            st.prefix_len = anchor + 1;
-            r.emitted = 1;
-            r.anchor_after = anchor + 1;
-            r.restored_bytes = side.bytes();
+            // BYTE arithmetic on the slot offset, not element arithmetic: `mid_gdn`/`mid_conv` are
+            // `float *` and `bytes_gdn`/`bytes_conv` are byte counts taken from `state_sizes()`, so
+            // `mid_conv + slot * bytes_conv` would advance four bytes per element and read a quarter of
+            // the buffer past the end at slot 1 (witness: the k=2 restore faulted in the runtime's own
+            // memcpy on the second slot, while slot 0 — offset zero — was fine, which is exactly the
+            // shape a k=1-only gate cannot see).
+            ACCEPT_CK(hipMemcpyAsync(st.gdn_state,
+                                     (const char*)side.ck.mid_gdn + (size_t)slot * (size_t)side.bytes_gdn,
+                                     (size_t)side.bytes_gdn, hipMemcpyDeviceToDevice));
+            ACCEPT_CK(hipMemcpyAsync(st.conv_window,
+                                     (const char*)side.ck.mid_conv
+                                         + (size_t)slot * (size_t)side.bytes_conv,
+                                     (size_t)side.bytes_conv, hipMemcpyDeviceToDevice));
+            st.prefix_len = anchor + r.n_accepted + 1;
+            r.anchor_after = anchor + r.n_accepted + 1;
+            // ONE slot was copied back, not the side's whole capture: at k=2 the round captured two slots
+            // and restored the one the prefix stopped at, and `MTPSTAT captured_bytes=` keeps that
+            // distinction (the capture is per round, the rollback is per stop).
+            r.restored_bytes = side.slot_bytes();
+            r.restored_slot = slot;
         }
     }
 
@@ -251,18 +316,22 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
     }
     if (!broken.empty()) {
         throw std::runtime_error("accept_round: §08.6 invariant broken after the " +
-                                 std::string(r.accepted ? "accept" : "reject") + ": " + broken);
+                                 std::string(r.accepted ? "accept" : "partial accept") + ": " +
+                                 broken);
     }
     return r;
 }
 
 void tally(Stats& s, const Side& side, const Round& r) {
     s.rounds++;
-    s.body_rows += kRows;
+    s.k = side.k;
+    s.body_rows += r.rows;
     s.emitted += r.emitted;
-    s.captured_bytes += side.bytes();
-    s.verdict_bytes += engine::kernels::kVerdictWords * sizeof(int);
+    s.candidates += r.n_accepted;
+    s.captured_bytes += side.captured_bytes();
+    s.verdict_bytes += (long long)side.words * (long long)sizeof(int);
     s.split_subs += side.subs_per_round;
+    if (r.hit[0] != 0) s.depth1++;
     if (r.accepted) {
         s.accepted++;
     } else {
@@ -274,16 +343,27 @@ void tally(Stats& s, const Side& side, const Round& r) {
 
 std::string describe(const Stats& s) {
     // The counters are not allowed to disagree with each other, and a rate printed over inconsistent
-    // counters is worse than no rate: a round is exactly one accept or one reject, and an accept emits
-    // 2 while a reject emits 1, so `emitted` is determined by the other two.
+    // counters is worse than no rate: a round is exactly one full accept or one partial one, and a round
+    // emits its accepted candidates plus its own bonus token, so `emitted` is determined by the others.
+    // At k=1 `candidates == accepted` and this reduces to the old `emitted == 2*accepted + rejected`.
     if (s.rounds != s.accepted + s.rejected) {
         throw std::runtime_error("mtpaccept: rounds=" + std::to_string(s.rounds) + " != accepted " +
                                  std::to_string(s.accepted) + " + rejected " +
                                  std::to_string(s.rejected) + "; do not read a rate out of this run");
     }
-    if (s.emitted != 2 * s.accepted + s.rejected) {
+    if (s.emitted != s.candidates + s.rounds) {
         throw std::runtime_error("mtpaccept: emitted=" + std::to_string(s.emitted) +
-                                 " is not 2*accepted + rejected; the emit counts are wrong");
+                                 " is not candidates_accepted " + std::to_string(s.candidates) +
+                                 " + rounds " + std::to_string(s.rounds) +
+                                 "; the emit counts are wrong");
+    }
+    if (s.k > 1 && s.depth1 < s.accepted) {
+        // A depth-2 accept is by definition also a depth-1 accept, so this cannot happen and its presence
+        // would mean the prefix rule was not applied — the round would have accepted a candidate behind a
+        // rejected one. Checked rather than assumed because the whole losslessness argument rests on it.
+        throw std::runtime_error("mtpaccept: depth1=" + std::to_string(s.depth1) +
+                                 " is below the full-prefix count " + std::to_string(s.accepted) +
+                                 "; a candidate behind a rejected one was accepted");
     }
     std::ostringstream os;
     os << "rounds=" << s.rounds << " accepted=" << s.accepted << " rejected=" << s.rejected
@@ -291,6 +371,14 @@ std::string describe(const Stats& s) {
        << " mean_tokens_per_round=" << s.mean_emit() << " body_rows=" << s.body_rows
        << " captured_bytes=" << s.captured_bytes << " restored_bytes=" << s.restored_bytes
        << " status_d2h_bytes=" << s.verdict_bytes << " split_subs=" << s.split_subs;
+    // Appended, never inserted: everything before this point is the byte-identical k=1 line. `depth1` and
+    // `candidates` are the two numbers that make the k=2 rate readable as n1 + n2 rather than as one
+    // aggregate, and `k=` says which geometry produced all of them (the same statement the run's `MTPGEOM`
+    // line makes at k=1, where these fields would be new bytes on a byte-compared line).
+    if (s.k > 1) {
+        os << " k=" << s.k << " depth1=" << s.depth1
+           << " depth1_rate=" << s.depth1_rate() << " candidates_accepted=" << s.candidates;
+    }
     return os.str();
 }
 
