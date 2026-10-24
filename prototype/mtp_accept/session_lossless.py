@@ -140,11 +140,20 @@ def main() -> int:
     ap.add_argument("--quick", action="store_true",
                     help="only fixtures whose prompt is at most 64 ids (a worker-sized pass)")
     ap.add_argument("--only", default=None, help="comma-separated fixture names")
+    ap.add_argument("--maxsc", type=int, default=512,
+                    help="the one-pass attention ceiling in lanes (kernels::mtp_attn_max_lanes())")
+    ap.add_argument("--cross-lo", type=int, default=250,
+                    help="fixture-prompt bounds for the case that crosses the ceiling WHILE generating")
+    ap.add_argument("--cross-hi", type=int, default=900, help="bounds, same fixture search")
+    ap.add_argument("--cross-first", type=int, default=240,
+                    help="minimum tokens for turn 1 of the crossing case; the value used is whichever of"
+                         " this and (maxsc - prompt_len + 25) is larger")
     ap.add_argument("--long-gen", type=int, default=700,
                     help="tokens for the draft-cache-ceiling case (512 usable lanes ≈ 170 rounds at k=2)")
     args = ap.parse_args()
 
-    pops = population()
+    all_pops = population()
+    pops = list(all_pops)
     if not pops:
         print("NO VERDICT: no fixture under data/refs/ yielded a prompt")
         return 1
@@ -189,7 +198,25 @@ def main() -> int:
     # keep happening after it (decision 3, `prototype/mtp_accept/SESSION-ACCEPT.md`).
     plan.append(("draft-ceiling", ["reset", f"feed {' '.join(map(str, first_ids))}",
                                    f"gen {args.long_gen}"]))
+    # (f) CROSS THE ATTENTION CEILING DURING GENERATION, then feed. Every case above builds its prefix with
+    #     a `feed`, so the one-pass ceiling (MAXSC lanes) is crossed by PREFILL and a round only ever READS a
+    #     prefix somebody else built. This is the geometry `SESSION-ACCEPT.md` §8/§9 found the form gap in:
+    #     turn 1 grows past MAXSC under the decoder's own tokens, a second `feed` re-arms the adaptive
+    #     tracker, and the rounds that follow decide positions whose lanes crossed while generating. The
+    #     assertions below require the turn to have crossed and a round to have straddled the ceiling, so the
+    #     case cannot sit in the population as decoration.
+    cross_ids = next((i for _, i in all_pops if args.cross_lo <= len(i) <= args.cross_hi), None)
+    if cross_ids is None:
+        print(f"NO VERDICT: no derived fixture of {args.cross_lo}-{args.cross_hi} ids, so the"
+              " cross-then-feed case cannot be built (a missing population member is named, not skipped)")
+        return 1
+    cross_gen = max(args.cross_first, args.maxsc - len(cross_ids) + 25)
+    plan.append(("cross-then-feed",
+                 ["reset", f"feed {' '.join(map(str, cross_ids))}", f"gen {cross_gen}",
+                  f"feed {' '.join(map(str, cross_ids[-3:]))}", f"gen {args.gen}", "stats"]))
 
+    # The crossing case's turn-1 length can exceed every fixture, so the ring buffer has to cover it too.
+    cap = max(cap, len(cross_ids) + cross_gen + 3 + args.gen + 64)
     names = [n for n, _ in plan]
     assert len(names) == len(set(names)), "case names must be unique"
     n_fixture_cases = sum(1 for n, _ in plan if n.startswith("fixture:"))
@@ -211,11 +238,16 @@ def main() -> int:
             if raw.startswith("READY") or not raw:
                 break
         per: dict[str, list[str]] = {}
+        per_case_diag: dict[str, list[str]] = {}
         for case_name, cmds in plan:
             got: list[str] = []
+            mark = len(s.lines)
             for c in cmds:
                 got.extend(s.send(c))
             per[case_name] = [l for l in got if l.startswith(COMPARE)]
+            # The ACCEPT lines of THIS case only. The global `rounds_seen()` cannot say which case produced
+            # a round, and a case in which no round ran adjudicates nothing about rounds.
+            per_case_diag[case_name] = [l for l in s.lines[mark:] if l.startswith("ACCEPT ")]
             if any(l.startswith("ERROR") for l in got):
                 print(f"NO VERDICT: [{label}] case {case_name} returned an ERROR line: "
                       + next(l for l in got if l.startswith("ERROR")))
@@ -223,6 +255,7 @@ def main() -> int:
                 return 1
         sess[label], arms[label] = s, per
     rounds = sess["mtp"].rounds_seen()
+    cross_diag = per_case_diag.get("cross-then-feed", [])
     per_turn = [l for l in sess["mtp"].lines if l.startswith("MTPSTAT")]
     resets = [l for l in sess["mtp"].lines if l.startswith("DRAFT-RESET")]
     skips = [l for l in sess["mtp"].lines if l.startswith("DRAFT-SKIP")]
@@ -273,6 +306,43 @@ def main() -> int:
     if not any(l.startswith("END steps=") and " stop=0" in l for l in prompt_stop):
         print("FAIL  the prompt containing the stop id did not end with stop=0")
         bad += 1
+    # The crossing case's assertions. A case that never reached the ceiling, or reached it with no round
+    # straddling it, is not a witness for the above-ceiling geometry and must say so rather than sit green.
+    cross_plain = arms["plain"]["cross-then-feed"]
+    ends = [l for l in cross_plain if l.startswith("END ")]
+    lens = [int(l.split("len=")[1].split()[0]) for l in ends if "len=" in l]
+    if not lens:
+        print("FAIL  cross-then-feed printed no END line; the case ran nothing")
+        bad += 1
+    elif max(lens) <= args.maxsc:
+        print(f"FAIL  cross-then-feed never crossed: longest turn ended at {max(lens)} lanes, at or below"
+              f" MAXSC={args.maxsc} (the turn stopped early — a different fixture is needed)")
+        bad += 1
+    else:
+        print(f"info  cross-then-feed crossed: longest turn ended at {max(lens)} lanes"
+              f" (MAXSC={args.maxsc})")
+    anchors = []
+    for l in cross_diag:
+        if "anchor=" in l:
+            anchors.append(int(l.split("anchor=")[1].split()[0]))
+    straddle = [a for a in anchors if a + 2 > args.maxsc]
+    if not anchors:
+        print("FAIL  cross-then-feed ran no round at all: nothing above the ceiling was adjudicated")
+        bad += 1
+    elif not straddle:
+        print(f"FAIL  cross-then-feed ran {len(anchors)} rounds but none decided a position above"
+              f" MAXSC={args.maxsc} (max anchor {max(anchors)})")
+        bad += 1
+    else:
+        print(f"info  cross-then-feed: {len(anchors)} rounds, {len(straddle)} deciding at or above the"
+              f" ceiling (max anchor {max(anchors)})")
+    if "cross-then-feed" in arms and arms["plain"]["cross-then-feed"] != arms["mtp"]["cross-then-feed"]:
+        # Not a loosening: a pointer. The exact-equality predicate above stays exactly as strict as it was,
+        # and this case is red until the band decision in `SESSION-ACCEPT.md` §9.7 is taken. What belongs in
+        # the log is the fact that the divergence is adjudicated elsewhere, with the instrument that does it.
+        print("note  cross-then-feed is the §8 geometry. Its divergence is adjudicated by"
+              " session_trigger.sh / session_rowdiff.py (margin vs one bf16 ULP of the row's own top"
+              " logit); §9 established the flips there are sub-ULP ties between two legal bf16 forms.")
     print("== " + ("LOSSLESS: the mtp arm emitted the same tokens at the same positions on every case"
                    if bad == 0 else f"{bad} case(s) FAILED or unadjudicable"))
     return 0 if bad == 0 else 1

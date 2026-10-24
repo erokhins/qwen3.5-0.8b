@@ -23,6 +23,15 @@
 # THE FILE IS RED TODAY, ON PURPOSE: case B (and G) DIFFER, and that is §8. A fix is admitted when
 # every case prints ok, which is why no case here is exempt from setting the exit code.
 #
+# WHAT RED MEANS HERE, since §9: the two arms' plain STEP rows agree bit for bit, and every token that
+# differs sits at a top1-top2 margin below one bf16 ULP of the row's own top logit (`session_trigger.sh`
+# prints the ratio). So this file's exact-stream equality is a stronger demand than the format can meet
+# once a round decides a position above MAXSC; it stays red until the band decision in §9.7 is taken, and
+# a green here would mean the tie was hidden rather than resolved.
+#
+# THE POPULATION IS THE SEVEN CASES AND ALL SEVEN RUN. A case whose fixture is missing prints DIFFER/no
+# verdict and sets the exit code; nothing is skipped silently.
+#
 # NO TIMING. No millisecond figure is read or printed. Correctness only (AGENTS.md).
 # SELF-LOCKING: do not run this while holding tools/gpu_lock.sh.
 set -uo pipefail
@@ -127,7 +136,11 @@ run_pair F "reset\nfeed $PROMPT\ngen 60\nfeed 13 198\ngen 60\nfeed 760\ngen 60\n
 if [[ -n "$WIDE" ]]; then
   run_pair E "reset\nfeed $WIDE\ngen 20\nfeed 13 198 760\ngen 20\n"
 else
-  echo "skip    E: no fixture of 520-1200 ids under data/refs/"
+  # Not a skip. A case that cannot run is a hole in the population, and a hole reported as `skip` is how a
+  # gate starts passing for the reason that nothing was checked (AGENTS.md: an admission over a list typed
+  # from memory). Either the fixture is there or the run has no verdict.
+  echo "DIFFER  E: NO VERDICT - no fixture of 520-1200 ids under data/refs/, so case E cannot be adjudicated"
+  fail=1
 fi
 run_pair G "reset\nfeed $PROMPT\ngen 240\nfeed 13 198 760\ngen 20\n" "--gdn-loop 1"
 
