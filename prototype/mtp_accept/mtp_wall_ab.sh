@@ -127,14 +127,20 @@ bt=$(med base 1); at=$(med accept 1)
 bstep=$(awk -v d="$(med base 2)" -v e="$(med base 3)" 'BEGIN{if (e+0>0) printf "%.4f", d/e; else print "nan"}')
 around=$(awk -v d="$(med accept 2)" -v b="$(med accept 4)" 'BEGIN{if (b+0>0) printf "%.4f", d/b; else print "nan"}')
 echo "  cost per body: base $(printf '%6.3f' "$bstep") ms/step   accept $(printf '%6.3f' "$around") ms/round"
-awk -v bs="$bstep" -v ar="$around" 'BEGIN{
+# How many tokens a round can emit is k+1, not a constant. This line used to hardcode k=1's 2, which made it
+# print "the ceiling on any accept rate is 1.089 x base" directly above a measured +16.53 % — a print that
+# contradicts the number beside it is worse than no print, because a reader tabulates the ceiling. The parity
+# test is the same generalisation: a round is at parity when tokens/round >= round/step, and it can never emit
+# more than kmax, so parity is unreachable iff round/step >= kmax.
+case "$ACCEPT_EXTRA" in *"--mtp-k 2"*) kmax=3 ;; *) kmax=2 ;; esac
+awk -v bs="$bstep" -v ar="$around" -v kmax="$kmax" 'BEGIN{
   if (bs=="nan" || ar=="nan") { print "  NO-COST-ARITHMETIC: a median came back missing"; exit }
   r = ar/bs;
-  printf "  one round costs %.3f x one step; k=1 emits at most 2 tokens per round, so the ceiling on any", r;
-  printf " accept rate is %.3f x base\n", 2.0/r;
-  printf "  parity would need accept rate a* = round/step - 1 = %.3f  (a is a rate: it cannot exceed 1.000)", r-1.0;
-  if (r-1.0 >= 1.0) print "  — so PARITY IS UNREACHABLE AT THIS WIDTH FOR k=1 AT ANY ACCEPT RATE";
-  else print "  — parity is reachable in principle if the measured a clears a*";
+  printf "  one round costs %.3f x one step; a round emits at most %d tokens, so the ceiling on any", r, kmax;
+  printf " accept rate is %.3f x base\n", kmax/r;
+  printf "  parity would need tokens/round >= %.3f  (a round emits at most %d, and a is a rate: it cannot exceed 1.000)", r, kmax;
+  if (r >= kmax) print "  — so PARITY IS UNREACHABLE AT THIS WIDTH FOR THIS k AT ANY ACCEPT RATE";
+  else print "  — parity is reachable in principle if the measured tokens/round clears it";
 }'
 awk -v b="$bt" -v a="$at" -v p="$ADOPT_PCT" -v w="$want_tk" 'BEGIN{
   if (b=="nan" || a=="nan" || b+0<=0) { print "  NO-VERDICT: a median came back missing"; exit }
