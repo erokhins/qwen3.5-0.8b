@@ -380,6 +380,24 @@ struct Body {
     int label[kMaxRows] = {-1, -1, -1};
     bool was_round = false;
     bool stopped = false;                       // the last token is §07.5's; the caller ends the turn
+    // ---- the rows this body PRICED, which is not the same set as the rows it EMITTED ----------------
+    //
+    // Device pointer to F32 rows, `kVocab` wide, where row i is the row that DECIDED the token printed
+    // under the label `logits_pos0 + i` — the same position convention as `label[]`, because
+    // `emit[i]` is decided by row `i` on both branches (an accepted candidate is row i's argmax, and the
+    // last emit is the argmax of the row after the accepted prefix). A round prices `ar.rows` rows and
+    // emits at most that many, so the rows above `logits_emitted` were computed and dropped: a later body
+    // re-decides that position, which is why a dump keeps every row rather than the last writer winning.
+    //
+    // Filled unconditionally: it is a pointer copy and three ints. Nothing reads it unless the session's
+    // opt-in `dump` command is armed (`session_loop`), which is the instrument that compares a round's row
+    // against the plain step it replaced at the SAME position above the one-pass attention ceiling — the
+    // comparison `SESSION-ACCEPT.md` §8 names as the missing experiment. A body that never priced a row
+    // leaves `logits_dev` null, and a dump that finds null says so instead of writing a short file.
+    const float* logits_dev = nullptr;
+    int logits_rows = 0;
+    int logits_pos0 = 0;
+    int logits_emitted = 0;                     // rows below this decided a printed token
 };
 
 // Start a turn (called at `feed`, and at `reset`): the draft cache is per-request state and a `feed`

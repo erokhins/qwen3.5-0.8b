@@ -560,6 +560,12 @@ Body session_body(Session& ss, const WeightStore& store, RequestState& st, Decod
         b.n_emit = 1;
         b.tok[0] = r.token;
         b.label[0] = st.prefix_len - 1;
+        // The row this step priced: `finish_token`'s own logits buffer, one row, and the label its token
+        // printed under. Read only by the opt-in session dump (`Body`'s field comment for the contract).
+        b.logits_dev = sc.logits;
+        b.logits_rows = 1;
+        b.logits_pos0 = st.prefix_len - 1;
+        b.logits_emitted = 1;
         draft_norm_row = sc.norm;                        // row 0 is the row this step priced
         ss.plain_steps++;
     } else {
@@ -600,6 +606,14 @@ Body session_body(Session& ss, const WeightStore& store, RequestState& st, Decod
         b.n_emit = n_print;
         b.was_round = true;
         b.stopped = cut_stopped;
+        // The rows the round priced: `side.logits` is `[rows][kVocab]` F32 and is NOT rewritten by
+        // anything between here and the caller (the draft's head pass has its own logits buffer), so the
+        // dump below can still read it. `n_print` rows decided a printed token; the ones above it were
+        // priced and dropped, and a dump that dropped them would hide which row a verdict threw away.
+        b.logits_dev = ss.side->logits;
+        b.logits_rows = ar.rows;
+        b.logits_pos0 = anchor;
+        b.logits_emitted = n_print;
         {
             std::printf("ACCEPT round=%lld anchor=%d fed=%d cand=%d cand_pos=%d accept=%d k=%d"
                         " n_accepted=%d emitted=%d pos=%d->%d restored_bytes=%lld suppressed=%d",

@@ -1773,6 +1773,14 @@ void write_raw(const std::string& dir, const std::string& name, const std::vecto
 //                     emitted and ends the turn.
 //   reset             §08.4 fresh request (zero S and the conv window, P=0) -> "RESET prefix_len=0"
 //   stats             re-emit the STATE line plus "PREFIX p=<P> sampled=<id>".
+//   dump <pos>|<min> <max>|off
+//                     OPT-IN logits dump, and the only way a session writes a file: one F32 row of
+//                     `kVocab` floats per body row whose deciding-row position is inside the window,
+//                     into `--out DIR`, beside a `DUMP seq= kind= pos= emitted= file=` line. The position
+//                     key is the GEN label — the position of the row that DECIDED the token printed there
+//                     — so a step row and a round row for the same position land on the same key in the two
+//                     arms' directories and nothing has to be shifted to compare them. Off unless armed, so
+//                     the protocol bytes of an undumped session are the bytes that always shipped.
 //   quit              "BYE" and return.
 //
 // Why a mode rather than one process per turn: the load is 1.55 GB of `hipMalloc` + `hipMemcpy`
@@ -2356,10 +2364,82 @@ void verify_census_line(const VerifySide& v, const std::string& restore_witness)
     std::fflush(stdout);
 }
 
+// ---- the session's opt-in logits dump (`dump <min> [max]`) -----------------------------------------
+//
+// WHY THIS EXISTS. Nothing above the one-pass attention ceiling (MAXSC = 512 lanes,
+// `kernels::mtp_attn_max_lanes()`) has ever had its logits compared: a session wrote no dumps at all
+// (`prototype/mtp_accept/SESSION-ACCEPT.md` §5 records that as a pre-existing gap), so the §8 defect — a
+// multi-turn session past the ceiling emitting a different stream with rounds on — could only be described
+// by printed token ids. The adjudication this repo already uses for a stream flip
+// (`prototype/mtp_accept/m3_loop_rate.py`'s `flip_witness`: is the other arm's token that row's RUNNER-UP,
+// and is the top1-top2 margin below one bf16 ULP of the winning logit?) needs the ROW, not the id, and it
+// needs it from BOTH arms, because comparing a dump against a printed token is the mismatched-pair error
+// `AGENTS.md` bills for.
+//
+// THE POSITION KEY, which is the GEN label and nothing else. Row i of a body is the row that DECIDED the
+// token printed as `GEN <id> <pos>` with `pos = pos0 + i`: for a plain step that is `prefix_len - 1` after
+// the step, for a round anchored at `p` it is `p + i` (row i decided emit i on BOTH the accept and the
+// reject branch), and for a `feed`'s wave it is the last fed lane. One convention on both arms, which is
+// what makes two dumps joinable without a shift — the off-by-one this repo has been caught in twice
+// (`emitted.txt` and `sampled.txt` are not index-aligned).
+//
+// STRICTLY OPT-IN. Nothing is written unless BOTH `--out DIR` was given AND a `dump` command armed a window
+// containing the row, so an undumped session writes no file, prints no line and pays no vocabulary-sized
+// D2H. Rows come out of the device buffers the body already wrote: this reads, it does not re-price, so no
+// decision can move.
+struct SessionDumper {
+    std::string dir;            // the run's `--out DIR`; empty = no destination, so never armed
+    long long lo = 0;           // armed position window, inclusive
+    long long hi = -1;          // `hi < lo` means disarmed
+    long long seq = 0;          // monotonic, so a re-decided position gets a second file, not an overwrite
+
+    bool armed() const { return !dir.empty() && hi >= lo; }
+
+    // One file per body row inside the window. `emitted` marks the rows that decided a PRINTED token; the
+    // rows above it were priced and thrown away (a round computes `rows` rows and emits at most that many),
+    // and a dump that kept only the emitted ones could not show which row a verdict discarded.
+    void write(const char* kind, const float* dev, int rows, int pos0, int emitted) {
+        if (!armed()) return;
+        if (dev == nullptr || rows <= 0) {
+            // Loud, never silent: an armed dump that found nothing to read is the empty-parse failure
+            // class, and `DUMP-MISS` is what tells the comparator that this body priced no row here.
+            std::printf("DUMP-MISS kind=%s pos0=%d rows=%d reason=no-logits\n", kind, pos0, rows);
+            std::fflush(stdout);
+            return;
+        }
+        std::vector<float> buf(engine::kVocab);
+        for (int i = 0; i < rows; ++i) {
+            const long long pos = (long long)pos0 + i;
+            if (pos < lo || pos > hi) continue;
+            dump_d2h(buf.data(), dev + (size_t)i * engine::kVocab, engine::kVocab * sizeof(float));
+            ++seq;
+            char name[96];
+            std::snprintf(name, sizeof name, "session_%06lld_%s_%lld.bin", seq, kind, pos);
+            write_raw(dir, name, buf);   // F32, kVocab wide — the dtype every logits dump here uses
+            std::printf("DUMP seq=%lld kind=%s pos=%lld emitted=%d vocab=%d bytes=%zu file=%s\n", seq,
+                        kind, pos, i < emitted ? 1 : 0, (int)engine::kVocab,
+                        (size_t)engine::kVocab * sizeof(float), name);
+            std::fflush(stdout);
+        }
+    }
+
+  private:
+    static void dump_d2h(void* dst, const void* src, size_t bytes) {
+        const hipError_t e = hipMemcpy(dst, src, bytes, hipMemcpyDeviceToHost);
+        if (e != hipSuccess) {
+            throw std::runtime_error(std::string("session dump device-to-host copy failed: ")
+                                     + hipGetErrorString(e));
+        }
+    }
+};
+
 void session_loop(const engine::WeightStore& store, engine::RequestState& st,
-                  engine::DecodeScratch& sc, MtpSide* mtp, engine::mtpaccept::Session* ssn) {
+                  engine::DecodeScratch& sc, MtpSide* mtp, engine::mtpaccept::Session* ssn,
+                  const std::string& out_dir) {
     std::printf("READY cap=%lld\n", (long long)st.cap);
     std::fflush(stdout);
+    SessionDumper dump;
+    dump.dir = out_dir;
     // The round driver keeps its own counters (`engine::mtpaccept::Session`), because they belong to the
     // round and not to this file; the census line is `MtpSide`'s. So they are folded in AND zeroed at every
     // point the census is printed — folding without zeroing would count the same rounds once per `stats`
@@ -2445,6 +2525,11 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
                 while (words >> id) tokens.push_back((int)id);
                 engine::prefill_wave(store, st, sc, tokens, engine::PrefillLogits::kLast);
                 std::printf("FED n=%d prefix_len=%d\n", (int)tokens.size(), st.prefix_len);
+                // The wave's own deciding row — the last fed lane, the one whose argmax is left pending.
+                // `feed` is the SAME call on both arms, so dumping it is what lets a reader check that the
+                // two arms' states agreed at the turn boundary (positions agreeing, which `END`/`PREFIX`
+                // prove, is not the same claim as the priced row agreeing).
+                dump.write("feed", sc.logits, 1, (int)st.prefix_len - 1, 1);
             } else if (cmd == "gen") {
                 int emitted = 0;
                 bool stop = false;
@@ -2473,6 +2558,9 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
                         // that produced the sample this turn drops — no extra step, no drift.
                         const engine::mtpaccept::Body bd = engine::mtpaccept::session_body(
                             *ssn, store, st, sc, cur, budget - emitted);
+                        // Before anything else can re-price into those buffers: the rows THIS body priced.
+                        dump.write(bd.was_round ? "round" : "step", bd.logits_dev, bd.logits_rows,
+                                  bd.logits_pos0, bd.logits_emitted);
                         for (int i = 0; i + 1 < bd.n_emit; ++i) {
                             std::printf("GEN %d %d\n", bd.tok[i], bd.label[i]);
                             last_gen_pos = bd.label[i];
@@ -2488,6 +2576,10 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
                     }
                     const engine::StepResult r = decode_step(store, st, sc, cur, nullptr);
                     cur = r.token;
+                    // The plain arm's row, out of the same buffer the accept arm's step fallback uses
+                    // (`sc.logits`, written by `finish_token`), so the two arms' dumps are two files of one
+                    // dtype for one position rather than a dump compared against a printed id.
+                    dump.write("step", sc.logits, 1, (int)st.prefix_len - 1, 1);
                     if (mtp) {
                         // The step's row predicted position `prefix_len - 1`; `sc.norm` row 0 is the
                         // final-norm row it was priced from, and it is still there (the tail only reads
@@ -2547,8 +2639,36 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
                     // that have to agree rather than one number reading its own output.
                     mtp_census_line(*mtp, "session", engine::mtpdraft::schedule_name(mtp->track.sched));
                 }
+            } else if (cmd == "dump") {
+                // `dump <pos>` arms one position, `dump <min> <max>` a window, `dump off` disarms. The
+                // destination is the run's `--out DIR`, which a session used to ignore; this is the half of
+                // §5's recorded gap that the §8 experiment needs. Decided BEFORE any body runs, and it
+                // changes no decision — it only decides what gets written.
+                std::string first;
+                long long a = 0, b = 0;
+                if (!(words >> first)) {
+                    std::printf("ERROR dump needs `dump <pos>`, `dump <min> <max>` or `dump off`\n");
+                } else if (first == "off") {
+                    dump.hi = dump.lo - 1;
+                    std::printf("DUMP armed=0 written=%lld\n", dump.seq);
+                } else if (out_dir.empty()) {
+                    std::printf("ERROR dump needs --out DIR: the rows go beside the other dumps\n");
+                } else if (!(std::istringstream(first) >> a)) {
+                    std::printf("ERROR dump position must be an integer, got '%s'\n", first.c_str());
+                } else {
+                    b = a;
+                    long long second = 0;
+                    if (words >> second) b = second;
+                    if (b < a) {
+                        std::printf("ERROR dump window is empty: max=%lld is below min=%lld\n", b, a);
+                    } else {
+                        dump.lo = a;
+                        dump.hi = b;
+                        std::printf("DUMP armed=1 min=%lld max=%lld dir=%s\n", a, b, out_dir.c_str());
+                    }
+                }
             } else {
-                std::printf("ERROR unknown command '%s' (feed|gen|reset|stats|quit)\n",
+                std::printf("ERROR unknown command '%s' (feed|gen|reset|stats|dump|quit)\n",
                             cmd.c_str());
             }
         } catch (const std::exception& e) {
@@ -4301,7 +4421,7 @@ int main(int argc, char** argv) {
                 }
                 std::fflush(stdout);
             }
-            session_loop(store, st, sc, mtp.get(), ssn.get());
+            session_loop(store, st, sc, mtp.get(), ssn.get(), o.out_dir);
             if (sside) engine::mtpaccept::free_side(*sside);
             if (mtp) engine::mtpdraft::free_state(mtp->st);
             engine::kernels::gemm_route_shutdown();
