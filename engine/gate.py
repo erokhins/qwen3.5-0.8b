@@ -138,7 +138,9 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       `NO-RATE` a FAIL rather than a skip; and that ROUNDS ACTUALLY RAN (`rounds > 0` AND the `ACCEPT` line
       count equal to it, so the section cannot print PASS over zero records). It covers the `hand` route
       only and says so in its own output — `amortised` is not output-neutral (`CORPUS-WALL.md`). It takes
-      `--mtp-k` (default 1, the engine's default is not moved here) and derives every geometry assertion
+      `--mtp-k` (default `MTP_ROUND_K_DEFAULT`, which IS the engine's shipped default, and a witness case
+      omits the flag entirely so the engine's own default is observed rather than assumed) and derives
+      every geometry assertion
       from the formulas (`rows == k+1`, `status_words == 3*rows-2 == status_bytes/4`), so admitting a
       swept k needs no edit. No milliseconds anywhere. `--selftest` proves its teeth in process
       (`selftest_mtp_round`): a corrupted verdict word reddens exactly the case it touches, the must-not-
@@ -1151,6 +1153,43 @@ def set_route(name: str) -> None:
 # together for `--attn-tile`'s reason: a gate that judged a different config than the engine ships is
 # judging the wrong binary.
 GEMM_PINS = "all"
+
+# ---- what the MTP default flip pins on every run this gate judges ---------------------------------
+# `decode_run --mtp-accept` and `--mtp-draft` are ON by default now, at the depth `--mtp-k` names
+# (`engine/decode_run.cpp`, `prototype/mtp_accept/DEFAULT-ON.md`). Sections (a)–(l) of this file price a
+# STEP: they read `sampled.txt` and `logits<N>.bin`, they replay a per-step token list, they bill the
+# stage clock's per-step plan, and they compare launch counts that are per-step counts. An accept round
+# is not a step — it emits 1..k+1 tokens, writes `emitted.txt` instead of those two files, and adds the
+# checkpoint's own submissions — so those sections cannot judge one, and the engine REFUSES the pair
+# rather than half-supporting it. Every one of their runs therefore NAMES the plain path instead of
+# trusting a default it does not own, and asserts the echo afterwards, because a required flag that
+# silently failed to take is this repository's oldest measurement of nothing.
+#
+# Both halves are pinned, not just `--mtp-accept`: with the draft left at its new default a `--time-stages`
+# or `--time-waves` run would meet the DRAFT clock's refusal (the stage clock bills one draft round per
+# step and `--mtp-sched loop` has no integer per-step bill), which is a refusal about the wrong feature.
+# `--mtp-draft 0` is what restores the pre-flip per-step object exactly.
+MTP_STEP_PIN = ["--mtp-accept", "0", "--mtp-draft", "0"]
+
+
+def mtp_step_path_claim(run: dict, label: str) -> tuple[bool, str]:
+    """Did this run say it ran the plain per-step path? `(ok, detail)` for the caller's `check`.
+
+    Read off the engine's own `MTP mode=` line rather than off the argv, for the standing reason that a
+    flag reaching the process is not the same claim as the process honouring it (`AGENTS.md`: a stale
+    binary agrees with itself). The detail says which mode DID print, and a missing line is reported as
+    missing rather than folded into `off` — silence is not a mode.
+    """
+    mode = (run.get("mtpmode") or {}).get("mode")
+    if mode is None:
+        return False, (f"{label} printed no `MTP mode=` line at all, so nothing in this log says which"
+                       " MTP path produced it. Every run since the default flip prints one; a binary"
+                       " that predates it cannot be judged by this gate's logits sections at all")
+    if mode != "off":
+        return False, (f"{label} echoed `MTP mode={mode}` — the accept loop ran, so it wrote"
+                       " `emitted.txt` and no per-step logits. The gate asked for `--mtp-accept 0`"
+                       " and did not get it")
+    return True, f"{label} echoed `MTP mode=off`"
 
 
 def parse_pins(spec: str) -> list[str]:
@@ -4557,7 +4596,7 @@ def selftest_mtp_census() -> list[str]:
 
 def parse_run(text: str) -> dict:
     out = {"steps": [], "state": {}, "launch": {}, "launchstat": {}, "prefill": {},
-           "result": {}, "statefp": [], "mtpdraft": {}, "draft_lines": 0}
+           "result": {}, "statefp": [], "mtpdraft": {}, "draft_lines": 0, "mtpmode": {}}
     for line in text.splitlines():
         if line.startswith("STEP "):
             out["steps"].append(dict(re.findall(r"(\w+)=([^\s]+)", line)))
@@ -4589,6 +4628,14 @@ def parse_run(text: str) -> dict:
             # `DRAFT round=` so the `DRAFT-SKIP` and `DRAFT-UNADJUDICATED` lines — different events, and a
             # skipped round submits nothing — cannot join the count.
             out["draft_lines"] += 1
+        elif line.startswith("MTP mode="):
+            # WHICH MTP PATH RAN, echoed by the engine on every run since the default moved
+            # (`engine/decode_run.cpp`'s mode line). This gate's numerics sections price a STEP, so they
+            # name `--mtp-accept 0` explicitly and then assert here that the run agreed: a pin that did not
+            # take would silently judge a run that writes `emitted.txt` instead of `sampled.txt`
+            # (`AGENTS.md`: a flag one arm requires still belongs on both arms, and a required flag that
+            # silently failed to take is an 8 % measurement of nothing).
+            out["mtpmode"] = dict(re.findall(r"(\w+)=([^\s]+)", line))
         elif line.startswith("GEMM "):
             # The handle line: which GEMM a wide body ran, echoed by `decode_run` when `--gemm` was
             # named. NOT the route assertion — its `route=` field names the library ("route=hipblas
@@ -5925,6 +5972,12 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
             stale.unlink()      # section (h) must judge this run, not the last one's leftovers
         cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
                "--steps", str(n_decode), "--out", str(out_dir),
+               # Every side of this A/B prices a STEP at a wave width, so the MTP default is pinned away
+               # on all three sides (`MTP_STEP_PIN` says why both halves). It belongs on every side for the
+               # identical reason as the form flags: a width A/B whose sides silently ran different round
+               # shapes would compare two things at once -- and it could not even run, because a round
+               # refuses `--replay`, which this section uses on the deep fixtures.
+               *MTP_STEP_PIN,
                "--prefill-logits", PREFILL_LOGITS_ALL, "--wave-rows", str(rows),
                # The same route on every side of the A/B, and said out loud rather than left to the
                # default: section (h) chooses bit-identity or the cascade band on this, and the three
@@ -6042,7 +6095,16 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
 # against the forced route's ~2, and the point is that the two do not emit the same stream). A reader must
 # not mistake a green section (m) for coverage of every route the flag can name.
 
-MTP_ROUND_K_DEFAULT = 1
+# The depth the ENGINE defaults to, mirrored here on purpose and checked on device by the default-k
+# witness in `mtp_round_checks`. `engine/mtp_accept.h`'s `kDefaultK` is the one spelling and this is the
+# copy; the two moving apart silently is the `--attn-tile` trap (a gate that silently judges a different
+# config than the engine ships judges the wrong binary), and the witness reddens if the C++ default moves
+# without this one.
+MTP_ENGINE_DEFAULT_K = 2
+# Section (m)'s default depth IS the engine's default, by construction rather than by two people typing
+# the same number: the requirement is that the gate admits the depth the engine runs by default, and one
+# constant expressing that leaves no second number to drift. `--mtp-k` still overrides it on the CLI.
+MTP_ROUND_K_DEFAULT = MTP_ENGINE_DEFAULT_K
 MTP_ROUND_ROUTE_NOTE = (
     "route coverage: `hand` ONLY (asserted off each run's `MTPSTAT route=` echo). `amortised` is not"
     " covered here and is not output-neutral, so it could not be judged by this section's stream"
@@ -6450,9 +6512,17 @@ def mtp_round_verdicts(rec: dict) -> list[tuple[str, bool, str]]:
     return rows
 
 
-def mtp_round_run_case(name: str, man: dict, args, work: Path) -> dict:
+def mtp_round_run_case(name: str, man: dict, args, work: Path, *,
+                       k: int | None = None, forward_k: bool = True) -> dict:
     """One fixture through the accept loop, and back as a record. No timing, and nothing here reads a
-    millisecond field: `--steps` is a count of bodies, not a duration."""
+    millisecond field: `--steps` is a count of bodies, not a duration.
+
+    `k` overrides the depth this case runs at and `forward_k=False` leaves `--mtp-k` off the command line
+    entirely, which is how the default-k witness below reaches the engine's own default instead of the
+    depth this gate was asked for. Both default to "do what the caller asked", which is every ordinary
+    case in the population.
+    """
+    k = int(args.mtp_k if k is None else k)
     greedy = man["greedy_continuation"]
     ids = man["sources"][0]["ids"]
     depth = mtp_round_depth(greedy)
@@ -6466,7 +6536,7 @@ def mtp_round_run_case(name: str, man: dict, args, work: Path) -> dict:
     # `MTPSTAT rounds` is non-zero and at k=2 needs 3 — i.e. `k + 1`, exactly this formula. Nothing here
     # is a guess the gate relies on: if a deeper k needed more bodies than this, `rounds > 0` would go RED
     # rather than pass over an empty transcript.
-    steps = depth + args.mtp_k + 2
+    steps = depth + k + 2
     case_dir = work / "mtp_round" / name
     case_dir.mkdir(parents=True, exist_ok=True)
     stale = case_dir / "emitted.txt"
@@ -6476,8 +6546,8 @@ def mtp_round_run_case(name: str, man: dict, args, work: Path) -> dict:
     # `--ids-file` splits on COMMAS and a space-joined file reads as ONE token — and the run then
     # SUCCEEDS at width 1 (AGENTS.md). Assert the field count off the file, not off the intent.
     wrote = len(ids_file.read_text().strip().split(","))
-    rec = {"fixture": name, "k": args.mtp_k, "depth": depth, "pin": list(greedy),
-           "prompt_ids": len(ids), "steps": steps}
+    rec = {"fixture": name, "k": k, "depth": depth, "pin": list(greedy),
+           "prompt_ids": len(ids), "steps": steps, "k_forwarded": forward_k}
     if wrote != len(ids):
         rec.update({"rc": None, "ran": False, "geom": {}, "geom_lines": 0, "accept_echo": {},
                     "stat": {}, "stat_lines": 0, "wall": {}, "wall_lines": 0, "no_rate": False,
@@ -6497,8 +6567,13 @@ def mtp_round_run_case(name: str, man: dict, args, work: Path) -> dict:
            # same reason.
            "--no-stop",
            "--gemm", GEMM_ROUTE,
-           "--mtp-draft", "1", "--mtp-accept", "1", "--mtp-k", str(args.mtp_k),
+           "--mtp-draft", "1", "--mtp-accept", "1",
            "--steps", str(steps), "--out", str(case_dir)]
+    if forward_k:
+        # The depth is NAMED on every ordinary case — a case that took its geometry from a default could
+        # not be attributed to the depth this gate was asked to admit — and left off only by the witness
+        # that exists to find out what the default is.
+        cmd += ["--mtp-k", str(k)]
     rec["argv"] = cmd
     proc = subprocess.run(cmd, capture_output=True, text=True)
     log = proc.stdout + proc.stderr
@@ -6527,7 +6602,11 @@ def mtp_round_checks(args, work: Path) -> None:
     print("  " + MTP_ROUND_ROUTE_NOTE)
     print(f"  --mtp-k {args.mtp_k}: the geometry, the tally identity and the per-k assertions all follow"
           " the value asked for; a k this build does not admit makes every case fail with the engine's"
-          " own refusal, so admitting a swept k needs no edit here.")
+          " own refusal, so admitting a swept k needs no edit here. THIS RUN'S DEPTH IS NOT INHERITED"
+          f" FROM THE ENGINE: every population case names `--mtp-k {args.mtp_k}` explicitly, and one"
+          " extra witness case omits it so the engine's own default is observed rather than assumed"
+          f" (gate.py:MTP_ENGINE_DEFAULT_K = {MTP_ENGINE_DEFAULT_K}, the value the shipped"
+          " `--mtp-accept` default runs at since prototype/mtp_accept/DEFAULT-ON.md).")
     cases, excluded, n_dirs = mtp_round_population()
     for name, why in excluded:
         print(f"  [excluded] {name}: {why}")
@@ -6562,6 +6641,49 @@ def mtp_round_checks(args, work: Path) -> None:
             forks.append(f"{name} at stream index {rec['admitted_at']}")
         for nm, ok, detail in rows:
             check(ok, nm, detail)
+    # THE DEFAULT-K WITNESS. Every case above NAMED its depth, which is right for adjudicating a depth but
+    # blind to the one thing the default flip changed: what the engine runs when nothing is named. So one
+    # more case, on the first fixture that carries a pinnable stream, with `--mtp-k` LEFT OFF the command
+    # line, and three assertions on what came back. This is the `--attn-tile` rule applied to the engine's
+    # own default — a gate that admits a depth the engine does not default to has admitted the wrong
+    # binary — and it is the only case in this section that can notice the two defaults drifting apart.
+    witness_case = next(((n, m) for n, m in cases if mtp_round_depth(m["greedy_continuation"]) > 0), None)
+    if witness_case is None:
+        check(False, "a default-k witness case exists", "no fixture in the population carries a"
+                       " pinnable generation stream, so nothing here can observe the engine's default k")
+    else:
+        wname, wman = witness_case
+        set_fixture(wname)
+        wrec = mtp_round_run_case(wname + "-defaultk", wman, args, work, forward_k=False)
+        set_fixture(args.fixture)
+        wgeom = wrec.get("geom") or {}
+        wk = _mtp_num(wgeom, "k")
+        print(f"  $ {' '.join(wrec['argv'])}   # no --mtp-k: this is the engine's DEFAULT")
+        check(wrec.get("rc") == 0, "the default-k witness run exits 0",
+              f"rc={wrec.get('rc')} " + str((wrec.get('argv') or [])[-1:])[:200])
+        check(wk is not None, "the default-k witness echoed a geometry line at all",
+              f"geom lines={wrec.get('geom_lines')}, so the run never reached `MTPGEOM`")
+        check(wk == MTP_ENGINE_DEFAULT_K,
+              f"the engine's DEFAULT depth is the depth this gate mirrors ({MTP_ENGINE_DEFAULT_K})",
+              f"the run echoed MTPGEOM k={wk} with no --mtp-k on its command line;"
+              f" engine/mtp_accept.h:kDefaultK and gate.py:MTP_ENGINE_DEFAULT_K move together or this"
+              " section is admitting a depth the shipping binary does not run by default")
+        check(wk == args.mtp_k,
+              "the default the engine runs is the depth THIS run was asked to admit",
+              f"engine default k={wk}, this gate ran --mtp-k {args.mtp_k}. Passing this section says"
+              " nothing about the default unless the two are the same number")
+        # The witness is NOT counted in `totals`. Every denominator below is "the derived population", and
+        # a witness that inflated `cases` to |population| + 1 made `cases == len(cases)` fail on a run
+        # where every real fixture HAD produced its case — a denominator that counts something other than
+        # what it names is the failure this section's own header warns about. It reports its own line.
+        wst = wrec.get("stat") or {}
+        wrounds = _mtp_num(wst, "rounds") or 0
+        notes.append(
+            f"section (m)'s default-k witness: `{wname}` re-ran with NO `--mtp-k` and echoed"
+            f" MTPGEOM k={wk} (gate.MTP_ENGINE_DEFAULT_K = {MTP_ENGINE_DEFAULT_K}; this run asked for"
+            f" --mtp-k {args.mtp_k}), ran {wrounds} round(s) and emitted"
+            f" {len(wrec.get('emitted') or [])} token(s). The depth this section admits is the depth the"
+            " engine runs when nothing is named.")
     # THE DENOMINATORS. A verdict that cannot name its denominator cannot fail, so each of these is the
     # population the loop above actually saw, and the first one is the admission check itself.
     check(totals["cases"] == len(cases),
@@ -6686,6 +6808,30 @@ def mtp_round_inject_word(rec: dict, round_index: int, word_index: int) -> str:
         rec["emitted"][slot] = moved
         return "argmax word, emitted"
     return "argmax word, never emitted by this round"
+
+
+def selftest_mtp_mode() -> list[str]:
+    """Teeth for the flip's canary: `MTP mode=` must be read, and a wrong or missing one must be RED.
+
+    Three cases and no engine. The one that matters is the middle one — a run that came back on the accept
+    path while the gate pinned it off would write `emitted.txt` instead of the per-step dumps, and every
+    logits section downstream would then report a coverage gap as a numerics result. A claim that only
+    fires on a missing line is decoration, so `mode=accept` has to redden it on its own.
+    """
+    bad: list[str] = []
+
+    def report(what: str, ok: bool, detail: str = "") -> None:
+        print(f"  [{'PASS' if ok else 'FAIL'}] {what}" + (f" — {detail}" if detail else ""))
+        if not ok:
+            bad.append(what)
+
+    ok, _ = mtp_step_path_claim({"mtpmode": {"mode": "off", "draft": "0", "gdn_span": "512"}}, "x")
+    report("an `MTP mode=off` echo satisfies the per-step claim", ok)
+    ok, why = mtp_step_path_claim({"mtpmode": {"mode": "accept", "k": "2"}}, "x")
+    report("an `MTP mode=accept` echo REDDENS the per-step claim", not ok, why[:110])
+    ok, why = mtp_step_path_claim({}, "x")
+    report("a missing `MTP mode=` line is reported as missing, not as off", not ok, why[:110])
+    return bad
 
 
 def selftest_mtp_round() -> list[str]:
@@ -7010,6 +7156,10 @@ def run_gdn_spell_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay
                # default on one of them: a side that got its spelling from a default is a side whose
                # spelling the log cannot prove.
                "--gdn-spell", spell,
+               # The MTP default, pinned away on every spelling side for the section's own reason: this
+               # matrix differs ONE field, and a round would add a body, a checkpoint and a verdict to
+               # every side at once -- and refuse the `--replay` this section uses on the deep fixtures.
+               *MTP_STEP_PIN,
                # Section (j) is a matrix of SPELLINGS and nothing else, so the SHAPE is HELD at the shipped
                # `block` here rather than forwarded: `reg16` is the looped body's map and the `ship` /
                # `unroll4` sides have no looped body at all, so forwarding the run's geometry would have the
@@ -7282,6 +7432,13 @@ def dry_run(man: dict, prompt_ids: list, dec_logits: list, work: Path, break_ids
     # Same reasoning as the GEMM line above, and the same limit: the stand-in has no hipBLAS to ask, so
     # it echoes `hipblas=dry-run` and `numerics_provenance_checks` refuses to assert anything from it.
     # `gemm=` here is the route the gate was invoked with, and it is the field the route check reads.
+    # The mode line the engine has printed on every run since the MTP default flip. The stand-in is a
+    # PLAIN-PATH replay — it feeds one token per step and emits one token per step, which is exactly what
+    # `MTP mode=off` claims — so echoing it here is a true statement about this stand-in, not a line
+    # invented to satisfy a check. It matters that the check sees it: `--selftest` runs the real predicate
+    # `mtp_step_path_claim` against this output, and a stand-in that printed nothing would make the flip's
+    # canary unexercisable in the only mode a worker can run.
+    lines.append("MTP mode=off draft=0 gdn_span=1")
     lines.append(f"NUMERICS wave_rows_cap={wave_row_ceiling()} wave_rows={wave_row_ceiling()}"
                  f" gemm={GEMM_ROUTE} hipblas=dry-run")
     for i, t in enumerate(prompt_ids):
@@ -8373,6 +8530,8 @@ def selftest(fixture: str = "dec8") -> int:
     bad += selftest_form_flags()
     section("(m) the accept-round section's own teeth — synthetic records, in process, no engine")
     bad += selftest_mtp_round()
+    section("(m2) the MTP mode echo's own teeth — the flip's canary, in process, no engine")
+    bad += selftest_mtp_mode()
     # The band history has to bite here too, and bite before anything runs: an unrecorded edit to `BAND`
     # must stop the gate, not merely look suspicious in review. The injection is the real thing — a
     # scratch tree whose engine/gate.py carries a looser flat floor, sitting beside the shipped ledger —
@@ -8446,7 +8605,12 @@ def smoke_run(n_steps: int, args) -> int:
     for stale in work.glob("logits*.bin"):
         stale.unlink()
     cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
-           "--steps", str(n_steps), "--out", str(work)]
+           "--steps", str(n_steps), "--out", str(work),
+           # The smoke section counts ONE token per step (`len(decode_steps) == n_steps`), which is a
+           # statement about steps and not about rounds; a round would emit 1..k+1 tokens and write
+           # `emitted.txt`, and the count would then be wrong for a reason that has nothing to do with
+           # what this smoke is checking. Same pin and same reason as the numerics sections.
+           *MTP_STEP_PIN]
     if args.smoke_no_stop:
         # Without this the run stops where the model decides to, which on this prompt is 38 tokens
         # in — and a 300-token smoke that only grew the state 38 slots would be a 38-token smoke.
@@ -8877,9 +9041,12 @@ def main() -> int:
                          " cannot be re-adjudicated at all")
     ap.add_argument("--mtp-k", type=int, default=MTP_ROUND_K_DEFAULT, metavar="K",
                     help="how many CANDIDATES an accept round verifies, for section (m) only"
-                         " (`decode_run --mtp-k`, `engine/mtp_accept.h`). Default 1 — this gate does"
-                         " NOT flip the engine's default, and nothing outside section (m) is affected"
-                         " by it. The value is forwarded verbatim and the geometry assertions"
+                         " (`decode_run --mtp-k`, `engine/mtp_accept.h`). Default 2, which is the"
+                         " engine's own shipped default since prototype/mtp_accept/DEFAULT-ON.md, and"
+                         " section (m) runs one extra witness case with the flag OMITTED to prove the"
+                         " two are still the same number; nothing outside section (m) is affected by"
+                         " it (every other section pins `--mtp-accept 0`). The value is forwarded"
+                         " verbatim and the geometry assertions"
                          " (`rows == k+1`, `mid_slots == rows-1`, `status_words == 3*rows-2"
                          " == status_bytes/4`) and the per-k tally identity all follow it, so"
                          " admitting a swept k (3, 4) needs no edit here: a k the binary does not"
@@ -9201,7 +9368,15 @@ def main() -> int:
            # which shape produced its rows witnesses neither side — and a run that took the span from
            # the binary's default instead of from this line could be a looped run judged as a
            # per-token one, which is exactly the stale-binary null this file keeps refusing.
-           "--gdn-loop", str(args.gdn_loop)]
+           "--gdn-loop", str(args.gdn_loop),
+           # THE MOST IMPORTANT OF THESE PINS. Every section below this one judges `sampled.txt`,
+           # `logits<N>.bin` and a per-step launch bill against pinned rows, and an accept round produces
+           # none of those three things -- it writes `emitted.txt`, its verdict carries no top-logit
+           # value, and `--steps` counts rounds. The engine refuses the pair outright (a round is not a
+           # step, and `--replay` on the deep fixtures is refused for the same reason), so without this
+           # pin the whole gate would exit 2 on its own default. Pinning `--mtp-draft 0` as well is what
+           # puts the launch bill back to the pre-flip per-step shape; `MTP_STEP_PIN` carries both.
+           *MTP_STEP_PIN]
     if args.state_fp:
         # On by default: a fixture that carries fingerprint pins cannot judge G5's state half without
         # them, and a section that silently did not run is the gap P1 was written to close (§2.6). The
@@ -9304,6 +9479,13 @@ def main() -> int:
         return report()
     check(True, "decode_run exits 0")
     run = parse_run(stdout)
+    # WHICH MTP PATH RAN, asserted before a single pinned row is compared. The gate named
+    # `--mtp-accept 0 --mtp-draft 0` on this command (`MTP_STEP_PIN`), and this is the half that proves it
+    # took: a run that came back on the accept path would have written `emitted.txt` and no
+    # `logits<N>.bin`, and every section below would then be reporting a coverage gap as a numerics
+    # result -- §17's exact defect, one feature over.
+    ok, why = mtp_step_path_claim(run, "the judged run")
+    check(ok, "the judged run echoed the plain per-step MTP path this gate pinned", why)
     # Which GEMM the run says it ran. Not a formality: section (b)'s caps, section (a)'s flip rule and
     # section (h)'s band-or-bit-identity choice are all keyed on it, and a wrapper binary that quietly
     # forced the other route would otherwise be judged by the wrong band. The authoritative echo is the
@@ -10310,6 +10492,10 @@ def teacher_forced_checks(args, man: dict, prompt_ids: list, dec_logits: list, g
     else:
         cmd = [args.binary, "--model", args.model, "--ids", ",".join(map(str, prompt_ids)),
                "--steps", str(n_decode), "--out", str(tf_work),
+               # Fed-token replay, so a round is refused by the engine anyway; named on this section's
+               # runs for the same reason as on the main run -- this section's two runs must differ in the
+               # fed tokens and nothing else, and a round on one side would be a second difference.
+               *MTP_STEP_PIN,
                "--prefill-logits", args.prefill_logits,
                "--gemm", GEMM_ROUTE, "--gemm-pins", GEMM_PINS,
                "--attn-tile", args.attn_tile, "--attn-touch", args.attn_touch,
