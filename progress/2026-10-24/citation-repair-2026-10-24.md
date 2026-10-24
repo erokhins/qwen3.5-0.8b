@@ -44,7 +44,8 @@ one (the revision's text there is whatever the shift displaced). Measured on thi
 neither. Re-pointing moves a row; it cannot delete one. Driving the count to 0 would need the code put
 back at its old line numbers or the citations deleted, and the brief forbids both.
 
-After the repair the tool reads **70 rows**, which decompose exactly:
+After the repair the tool reads **70 rows** against `7e75bc2` (the state at `040ab24`; after the §12
+retargets the same diagnostic reads 96, decomposed there), which decompose exactly:
 
 | rows | what they are |
 |---|---|
@@ -91,7 +92,8 @@ of drift recurs.
 ## 4. Stale-by-substance — the list for adjudication
 
 Neither of these can be fixed by renumbering, because the text the citation named no longer exists,
-and pointing at a lookalike would be a false claim in a frozen journal. The numbers are untouched.
+and pointing at a lookalike would be a false claim in a frozen journal. `040ab24` left both untouched
+and reported them; the disposition (retarget, not retire) was decided on review and is recorded in §12.
 
 ### 4a. `engine/decode_run.cpp:153`
 
@@ -105,8 +107,8 @@ and pointing at a lookalike would be a false claim in a frozen journal. The numb
 * **The catch**: the coordinate did not name `--attn-fattn` even at the reference revision. Line 153
   was already inside the MTP comment block; `int attn_fattn = 1;` was at `:306` then and is at
   **`:349`** now. So this citation was ~150 lines off *before* today's drift, and re-pointing 153→349
-  is a retarget (an editorial act), not a re-number. Both options are open: retire the coordinate, or
-  retarget it at `engine/decode_run.cpp:349`.
+  is a retarget (an editorial act), not a re-number. Disposition (§12): retargeted at
+  `engine/decode_run.cpp:349`; retiring it would have thrown away evidence for a claim that is true.
 
 ### 4b. `engine/decode_run.cpp:1454` (and its range partner, §5)
 
@@ -128,8 +130,8 @@ and pointing at a lookalike would be a false claim in a frozen journal. The numb
 
 Its text survived and derives cleanly to **1582**, but it is the far endpoint of §4b's
 `1454-1468`. Moving one endpoint of a range whose start is stale would print `1454-1582`, so the whole
-cite was left alone. If §4b is retired, this retires with it; if §4b is retargeted at `wave_pass`,
-this becomes moot.
+cite was left alone. Disposition (§12): the range was retargeted whole, so this endpoint became moot
+rather than being moved on its own.
 
 ## 6. Four re-points whose evidence is a context window, not a unique string
 
@@ -317,8 +319,8 @@ through the same alignment, so the destinations are derived the same way as §10
 |---|---|---|---|
 | `engine/generation-limits.md:108` | bare `:2496` | `engine/decode_run.cpp` | 2496 → 2642 |
 | `progress/2026-10-17/HANDOFF_ceiling_raise.md:57` | bare `:6951` | `engine/gate.py` | 6951 → 7697 |
-| `prototype/attn_percost/A9-LC-impl.md:93` | slash siblings of the parsed `:205/397/1770` — `:205` was parsed and *is* repaired, so this list is now internally inconsistent | `engine/decode_run.cpp` | 397 → 440, 1770 → 1916 |
-| `prototype/attn_percost/A9-LC-impl.md:93` | bare `:878` (usage), `:985` (help) | `engine/decode_run.cpp` | 878 → 956, 985 → 1063 |
+| `prototype/attn_percost/A9-LC-impl.md:93` | slash siblings of the parsed `:205/397/1770` — `:205` was parsed and *was* repaired, so the list was left internally inconsistent | `engine/decode_run.cpp` | **resolved in §12**: the whole line now names the flag's real sites (420/973/4042, usage 2490, help 2668), not these alignment targets |
+| `prototype/attn_percost/A9-LC-impl.md:93` | bare `:878` (usage), `:985` (help) | `engine/decode_run.cpp` | **resolved in §12**: usage 2490, help 2668 |
 | `prototype/attn_percost/A9-LC-impl.md:135` | bare `:5257`, `:7496`, `:8547` | `engine/gate.py` | 5257 → 5304, 7496 → **8253**, 8547 → 9313 |
 | `prototype/glue_copy_fold/GLUECOPY-HANDOVER.md:275` | bare `:1853` | `engine/decode_run.cpp` | 1853 → 1999 |
 | `prototype/glue_copy_fold/GLUECOPY-HANDOVER.md:275` | bare `:542`, `:545`, `:552`, `:555` | `engine/decode_step.cpp` | **unmoved** — that file's drift starts at 1109, so there is nothing to do |
@@ -333,19 +335,100 @@ without re-deriving the whole corpus. Extending `CITE` in `citation_rot_check.py
 continuation (inheriting the nearest preceding path on the line) would put all of them into the gate,
 and that is the check worth having before the next big `gate.py` edit.
 
-## 12. Residual risks
+## 12. Follow-up on review: the retargets and the half-repaired line (`dc37dda`)
 
-1. **§4 is undecided by design.** Two coordinates (four citing lines) still name text that no longer
-   exists; they are listed with the coordinate their claim actually lives at now, and retiring or
-   retargeting them is the main agent's call.
+Three dispositions were decided on review of `040ab24`/`a01fea8` and landed as one commit. All of it is
+digit-only, same-line, line-count-neutral, and no file under `engine/`, `tools/` or `AGENTS.md` was
+ touched.
+
+**§4a and §4b were retargeted, not retired.** Retiring loses the evidence; both claims (`--attn-fattn`
+defaults to 1; `wave_pass` re-runs `prefill_wave` after `st.reset()`) are still true and still have real
+homes. Each retargeted coordinate was **already wrong at `7e75bc2`** — the cite named a comment line that
+never mentioned its subject — so this repaired citations that predate today's drift; it did not bend a
+journal to fit moved code, and that distinction is the point of writing it down.
+
+| citing line | was | now | the new home, verified by reading it |
+|---|---|---|---|
+| `A9-LC-impl.md:42` | `decode_run.cpp:153` | `decode_run.cpp:349` | `int attn_fattn = 1;   // default since the form met the device …` |
+| `E1-result.md:289` | `decode_run.cpp:153` | `decode_run.cpp:349` | same line |
+| `A7-CANDIDATES.md:25` | range `1454-1468` | range `3557-3576` | `WavePassResult wave_pass(` … the `prefill_wave` call |
+| `A7-CANDIDATES.md:25` (inner pointers of that range) | `:1453`, `:1462-1416`, `:1468` | `:3566`, `:3575-3576`, `:3581` | `st.reset();`, the `prefill_wave` call, `out.wall_ms =` |
+| `a7_host_split.sh:9` | range `1454-1468` | range `3557-3576` | same range |
+| `A9-LC-impl.md:93` | `decode_run.cpp:248/397/1770`, usage `:878`, help `:985` | `420/973/4042`, usage `:2490`, help `:2668` | see below |
+
+The inner pointers of the `A7-CANDIDATES.md:25` range moved with it because a range and the lines it
+brackets cannot disagree. Two further cites on that line were **left alone and are named here rather
+than approximated**: `:1543-1520` ("`wave_report` runs burst then stage") and `:1513-1472` ("parity
+line"). Their subjects are `wave_report`'s two-pass driver and the `WAVEPARITY` print, and choosing
+which lines stand for those is a semantic decision of the §7 class, not a shift — the numbers they carry
+were wrong at `7e75bc2` too.
+
+**`A9-LC-impl.md:93` is no longer half-repaired.** `040ab24` moved the head of its slash list and left
+the siblings dead, which reads as repaired while being half-wrong. Every number on the line now names a
+site the row's own gloss claims, checked individually:
+
+| number | what it names | the line there |
+|---|---|---|
+| `:420` | the `Options` field and its inert default (`0` = no cap) | `int attn_split_cap = engine::kernels::kAttnSplitCapOff;` |
+| `:973` | the strict parse, including both refusals | `} else if (a == "--attn-split-cap") {` (throws at `:990` and `:996`, assign at `:1002`) |
+| `:4042` | the forwarding every launch reads | `sc.attn_split_cap = o.attn_split_cap;` |
+| `:2490` | the usage string | `" [--attn-split-cap N]"` |
+| `:2668` | the help string | `"  --attn-split-cap N  an UPPER BOUND on how many lane blocks a wide query row may be cut"` |
+
+The three-site mapping is read off the row's prose and follows the convention of the row above it in the
+same table (`decode_step.h:116`, `.cpp:729`: field → forwarding). The other defensible reading of the
+three is the parse block's own three lines (`:990`, `:996`, `:1002`); it is a three-digit swap if that
+is preferred, and it is written here so the choice is visible rather than silent.
+
+Line-count neutrality of the follow-up commit, and its witness:
+
+| file | `wc -l` before | after | lines changed | proof each new coordinate is the claim's home |
+|---|---|---|---|---|
+| `prototype/attn_percost/A9-LC-impl.md` | 289 | 289 | 2 | greps at 349/420/973/4042/2490/2668 each carry the construct named |
+| `prototype/attn_wmma/E1-result.md` | 290 | 290 | 1 | `int attn_fattn = 1` at 349 |
+| `prototype/perprompt/A7-CANDIDATES.md` | 300 | 300 | 1 | 3557/3566/3575/3576/3581 carry `wave_pass`/`st.reset()`/the call/`out.wall_ms` |
+| `prototype/perprompt/a7_host_split.sh` | 230 | 230 | 1 | same range |
+
+After all three commits: `--against HEAD` still reads **0 rotted**, and `--against 7e75bc2` reads
+**96 rows**, which are not defects and must not be "fixed" (the count is a property of this document
+naming dead coordinates, so it moves when this section is edited — that is the mechanism, not a
+regression):
+
+| rows | why they exist |
+|---|---|
+| 68 | a citing line the repair substituted, seen at its new number — the §2 predicate, which is a property of the tool and not of the citations |
+| 26 | **this record document**, which necessarily names the coordinates it repaired (`decode_run.cpp:153`, `gate.py:6283`, the `A9-LC-impl.md:93` row it is describing). A repair record cannot discuss dead coordinates without the checker reading them as live claims. |
+| 2 | `specification/ASSUMPTIONS.md:28`, the A-32 row this pass re-pointed, cited by line from two 2026-10-17 handoffs — the cited line is one the repair itself substituted |
+
+Consequence for anyone reading this file later: **the shipping check is `citation_rot_check.py
+--against HEAD`, which is 0 here**; `--against <older-ref>` is a diagnostic of drift between two
+revisions and must over-report after any legitimate repair — of the code, of the citations, or of this
+record's own prose.
+
+The other three checks, re-taken after `dc37dda`: `doc_ref_check.py` ANCHOR-OK 1502 resolve /
+**34 broken** (no worse than the 34 after `040ab24`, and none of the retargeted lines appears in its
+broken list); `citation_census.py --check` **PASS** with every `expected` and `at-census` number
+unchanged — its F1 `today` column rises 295 → 301 only because this document is itself a new citing file
+carrying six F1-form citations, which is a fact about the record rather than a moved expectation; and
+`bash engine/build.sh` builds `loader_test` and `decode_run`, with no engine file touched by any of the
+three commits.
+
+## 13. Residual risks
+
+1. **§4 is closed by §12.** Both coordinates were retargeted to their claims' real homes; the clause
+   saying each was already wrong at `7e75bc2` is in §12 and in the commit message of `dc37dda`.
 2. **§7 is unfixed by design.** Roughly a dozen citations were already naming a neighbouring line at
    `7e75bc2`. Any check that compares a citation's prose to the code text (rather than coordinates to
    coordinates) would find more of these; none exists today.
 3. **§11 is stale but invisible.** Bare-`:NNN` and slash-sibling cites are not in any checker's
-   population, and one of them (`A9-LC-impl.md:93`) is now *internally* inconsistent: its head number
-   was repaired and its two siblings were not. Extending `CITE` in `citation_rot_check.py` to a
-   bare-anchor continuation (inheriting the nearest preceding path on the line) would put them in, and
-   §11 is the data to seed it with.
+   population. Seven lines besides `A9-LC-impl.md:93` (which §12 resolved) still carry drifted
+   continuation anchors — `generation-limits.md:108`, `HANDOFF_ceiling_raise.md:57`,
+   `A9-LC-impl.md:135`, `GLUECOPY-HANDOVER.md:275`, `A7-CANDIDATES.md:22`, `A7-CANDIDATES.md:23`,
+   `a7_host_split.sh:6` — and `A7-CANDIDATES.md:25` still carries the two cites §12 explains were wrong
+   at the reference revision. Extending `CITE` in `citation_rot_check.py` to a bare-anchor continuation
+   (inheriting the nearest preceding path on the line) would put them in, and §11 is the data to seed it
+   with. Nothing outside §11's enumerated set was touched, so the follow-up is a mechanical pass over a
+   closed list rather than a fresh derivation.
 4. **The checker still reads 70 rows against `7e75bc2`.** That is the residue §2 explains, not
    unfixed work — and it is *expected to stay* for as long as the MTP diff stands. Against `HEAD` it
    reads 0, and any later re-take against `7e75bc2` must classify before it panics.
