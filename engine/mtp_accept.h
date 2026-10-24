@@ -71,9 +71,12 @@
 // `prototype/mtp_accept/ACCEPT-PLAN.md`'s, not this file's to move.
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "engine/decode_step.h"
+#include "engine/mtp_adaptive.h"
+#include "engine/mtp_draft.h"
 #include "engine/mtp_verify.h"
 #include "engine/state.h"
 
@@ -296,6 +299,119 @@ void tally(Stats& s, const Side& side, const Round& r);
 // (`decode_run.cpp`) — a NEW line no comparison covers — so "every log says which geometry produced its
 // bits" is satisfied without touching a byte of `MTPSTAT` or `MTPACCEPT`.
 std::string describe(const Stats& s);
+
+// =================================================================================================
+// THE SESSION DRIVER — `--session --mtp-accept 1` (`engine/decode_run.cpp`, `session_loop`)
+// =================================================================================================
+//
+// WHY THIS IS A SEPARATE DRIVER AND NOT A REFACTOR OF THE RUN LOOP. The run loop's round block
+// (`decode_run.cpp`, the `if (aside)` branch of the generation loop) interleaves the rule with the
+// instrumentation that admits it: `ACCEPT`, `ACCEMIT`, `MTPADAPT`, `DRAFT-SKIP`, and the `DECWALL`
+// counters, and `prototype/mtp_accept/flagoff_bytecheck.sh MODE=accept` byte-compares those lines. A
+// shared body would have to reproduce every one of those prints byte for byte, which is a refactor of
+// the compared path. So this driver spells the SAME RULE out of the SAME FUNCTIONS — `accept_round`,
+// `tally`, `mtpdraft::draft_round`, `mtpdraft::draft_lane`, `mtpdraft::truncate_lane`,
+// `mtpdraft::refusal`, `mtpadapt::Tracker` — and shares no code with the run loop except
+// `restore_prefix` below. What is shared is the semantics; what is duplicated is the sequencing, and
+// the duplication is deliberate and named per step in `session_body`'s comments.
+//
+// THE ONE INVARIANT EVERY DECISION BELOW SERVES. `session_loop` re-anchors on `prefix_len` at every
+// `feed`, so the state's transcript and the printed transcript must agree in position at the end of
+// every `gen`: every printed token is CONSUMED (prefix_len advanced past it) unless it is the §07.5
+// stop token, which is printed and left pending. That is exactly the shape the flag-off `gen` loop
+// leaves — `END steps= stop= prefix_len=` keeps its meaning — and it is what makes a flag-on session's
+// GEN stream comparable to a flag-off one.
+
+// Copy mid-checkpoint `slot` of the round that ran at `anchor` back over the live mixer state and set
+// `prefix_len` to the position that slot stands for, `anchor + slot + 1`. Returns the bytes copied.
+//
+// THE PURE EXTRACTION: this is the two bulk `hipMemcpyAsync` calls and the one `prefix_len`
+// assignment that `accept_round`'s partial-accept branch used to spell inline, moved verbatim so both
+// callers take the same address arithmetic. The BYTE-offset form is load-bearing (`mid_gdn`/`mid_conv`
+// are `float *`; `bytes_gdn`/`bytes_conv` are byte counts, so element arithmetic reads a quarter of the
+// buffer past the end at slot 1 — the trap `AGENTS.md` records from the k=2 restore).
+//
+// `rows` bounds the slot because the checkpoint a round captured is `rows - 1` slots, which with
+// `--mtp-adaptive 1` can be narrower than the side's allocation. Out-of-range is a throw, not an
+// assert: a wrong slot is a device copy from outside the buffer.
+long long restore_prefix(RequestState& st, const Side& side, int anchor, int slot, int rows);
+
+// Per-session state of the driver: what outlives one body. The buffers are the caller's
+// (`allocate_side`), the draft block's weights and cache are `MtpSide`'s, and the policy tracker is
+// owned here because it is REBUILT at every turn (see `session_new_turn`).
+struct Session {
+    Side* side = nullptr;                       // ceiling-k buffers, allocated by the caller
+    engine::mtpdraft::Weights* draft_w = nullptr;
+    engine::mtpdraft::State* draft = nullptr;
+    std::unique_ptr<engine::mtpadapt::Tracker> adapt;   // null when `--mtp-adaptive 0`
+    int k_ceiling = kDefaultK;                  // `--mtp-k`, the tracker's start AND ceiling
+    engine::mtpverify::Route route = engine::mtpverify::Route::kHand;
+    // The counters printed as this turn's `MTPSTAT`. Zeroed per turn by `session_new_turn`, with the
+    // geometry fields pre-set to the side's k so `describe()` cannot report a depth no round ran.
+    Stats stats;
+    // The draft block's pending proposals: one per candidate of the NEXT round.
+    int pending = -1;
+    int pending_pos = -1;
+    int pending2 = -1;
+    int pending2_pos = -1;
+    // Census figures the run loop keeps in `MtpSide`; `session_loop` folds these into its own copy
+    // before printing `MTPDRAFT`, so the census line means the same thing in both modes.
+    long long rounds = 0;
+    long long plain_steps = 0;
+    long long suppressed = 0;                   // emits behind a stop: priced, never printed
+    long long draft_resets = 0;
+    long long made = 0;
+    long long adjudicated = 0;                  // rounds run (the round IS the adjudication)
+    long long accepted = 0;                     // ... and accepted the whole prefix
+    long long lanes_max = 0;
+    bool said_plain = false;                    // prints the abandonment once per turn
+};
+
+// One body's output: the tokens this turn must print, in order, already cut for §07.5 and for the
+// budget. `label[i]` is the GEN position — the token's absolute position minus one, which is
+// `session_loop`'s convention (`GEN` labels a token by the row that predicted it) and which equals
+// `st.prefix_len - 1` at the moment the caller prints it, exactly as in the flag-off loop. That
+// equality is not luck: a round anchored at `p = st.prefix_len` leaves `prefix_len == p + n_emit` on
+// BOTH branches (full accept `p + rows = p + k + 1`; partial `p + n + 1`, and `n_emit == n + 1`), so
+// emit `i` sits at absolute position `p + i + 1` and prints under the label `p + i`.
+struct Body {
+    int n_emit = 0;                             // 1..kMaxRows
+    int tok[kMaxRows] = {-1, -1, -1};
+    int label[kMaxRows] = {-1, -1, -1};
+    bool was_round = false;
+    bool stopped = false;                       // the last token is §07.5's; the caller ends the turn
+};
+
+// Start a turn (called at `feed`, and at `reset`): the draft cache is per-request state and a `feed`
+// re-anchors the position map, so a lane left from the previous turn would earn real softmax weight in
+// this turn's first draft and would never be evicted — `engine/mtp_draft.h` has no eviction, only
+// `reset` and the LIFO `truncate_lane`, and `--mtp-cap` is 512 lanes, so without this a multi-turn chat
+// degrades to `DRAFT-SKIP` forever after the cache fills. The policy tracker is rebuilt for the same
+// reason: abandonment is sticky per request, and a stale abandonment would silently kill speculation
+// for the life of the session. That `reset` is the precedent — the `reset` verb already does it.
+void session_new_turn(Session& ss);
+
+// One body in place of one `decode_step`: an accept round when there is a proposal for every candidate,
+// the room for its lanes, and the budget for its widest possible emit; a plain one-row step otherwise.
+//
+// THE BUDGET RULE, and why no rollback is ever needed on the budget path. A round of `k` candidates
+// emits at most `rows_of_k(k)` tokens, so `session_body` runs one only when `budget_left >=
+// rows_of_k(round_k)`. The residual one or two tokens at a turn's end are therefore plain steps. The
+// alternatives were rejected on the record: printing only the part that fits would leave the state ahead
+// of the transcript (which breaks the `feed` re-anchor), and rolling back to the budget would bill a
+// device copy to decide a question the geometry can answer for free.
+//
+// THE STOP RULE, and the one case that DOES need a rollback. §07.5 is applied per emitted token, in
+// order, generation phase only. If the stop token is a round's LAST emit the state is already exactly
+// where the transcript ended and nothing is restored. If it is a mid-round emit — the draft proposed
+// 248046 and the target agreed with it — everything behind it is suppressed (`suppressed=`) and the
+// state is cut back to the printed prefix with `restore_prefix` at slot `i`, which always exists: the
+// stop sits at emit `i <= n_emit - 2`, so `slot = i <= n_accepted - 1 <= k - 1 = rows - 2`.
+//
+// Leaves the state consistent with what it returned in every case, and returns `stopped` when the
+// caller must end the turn with the last token left pending and unstepped.
+Body session_body(Session& ss, const WeightStore& store, RequestState& st, DecodeScratch& sc,
+                  int cur, int budget_left);
 
 }  // namespace mtpaccept
 }  // namespace engine

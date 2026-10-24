@@ -9,6 +9,8 @@
 
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -303,25 +305,12 @@ Round accept_round(const WeightStore& weights, RequestState& st, DecodeScratch& 
         const int slot = r.n_accepted;
         {
             const engine::mtpmeter::PhaseGuard rollback(engine::mtpmeter::kRollback);
-            // BYTE arithmetic on the slot offset, not element arithmetic: `mid_gdn`/`mid_conv` are
-            // `float *` and `bytes_gdn`/`bytes_conv` are byte counts taken from `state_sizes()`, so
-            // `mid_conv + slot * bytes_conv` would advance four bytes per element and read a quarter of
-            // the buffer past the end at slot 1 (witness: the k=2 restore faulted in the runtime's own
-            // memcpy on the second slot, while slot 0 — offset zero — was fine, which is exactly the
-            // shape a k=1-only gate cannot see).
-            ACCEPT_CK(hipMemcpyAsync(st.gdn_state,
-                                     (const char*)side.ck.mid_gdn + (size_t)slot * (size_t)side.bytes_gdn,
-                                     (size_t)side.bytes_gdn, hipMemcpyDeviceToDevice));
-            ACCEPT_CK(hipMemcpyAsync(st.conv_window,
-                                     (const char*)side.ck.mid_conv
-                                         + (size_t)slot * (size_t)side.bytes_conv,
-                                     (size_t)side.bytes_conv, hipMemcpyDeviceToDevice));
-            st.prefix_len = anchor + r.n_accepted + 1;
+            // THE ONE SPELLING OF THE ROLLBACK, now shared with the session driver's stop cut
+            // (`restore_prefix`, whose comment records why the offsets are BYTE offsets). The copies and
+            // the `prefix_len` assignment are moved verbatim, so a partial accept restores exactly what it
+            // restored before the extraction.
+            r.restored_bytes = restore_prefix(st, side, anchor, slot, rows);
             r.anchor_after = anchor + r.n_accepted + 1;
-            // ONE slot was copied back, not the side's whole capture: at k=2 the round captured two slots
-            // and restored the one the prefix stopped at, and `MTPSTAT captured_bytes=` keeps that
-            // distinction (the capture is per round, the rollback is per stop).
-            r.restored_bytes = side.slot_bytes();
             r.restored_slot = slot;
         }
     }
@@ -414,6 +403,248 @@ std::string describe(const Stats& s) {
         os << " k_ran=" << s.k_low << ".." << s.k_high;
     }
     return os.str();
+}
+
+long long restore_prefix(RequestState& st, const Side& side, int anchor, int slot, int rows) {
+    // THE SLOT EXISTS OR THIS IS A DEVICE COPY FROM OUTSIDE THE BUFFER. A body of `rows` rows captures
+    // `rows - 1` mid-checkpoints (`kMidSlotsFor`), which with `--mtp-adaptive 1` can be narrower than the
+    // side's allocation, so the bound is the ROUND's width and not the side's.
+    if (rows < kMinK + 1 || slot < 0 || slot >= rows - 1) {
+        throw std::runtime_error("restore_prefix: slot " + std::to_string(slot) + " of a " +
+                                 std::to_string(rows) + "-row round is not a captured checkpoint"
+                                 " (a body of rows rows writes slots 0..rows-2); refusing rather than"
+                                 " copying an uninitialised state over the live one");
+    }
+    // BYTE arithmetic on the slot offset, not element arithmetic: `mid_gdn`/`mid_conv` are `float *` and
+    // `bytes_gdn`/`bytes_conv` are byte counts taken from `state_sizes()`, so `mid_conv + slot *
+    // bytes_conv` would advance four bytes per element and read a quarter of the buffer past the end at
+    // slot 1 (witness: the k=2 restore faulted in the runtime's own memcpy on the second slot, while slot
+    // 0 — offset zero — was fine, which is exactly the shape a k=1-only gate cannot see).
+    ACCEPT_CK(hipMemcpyAsync(st.gdn_state,
+                             (const char*)side.ck.mid_gdn + (size_t)slot * (size_t)side.bytes_gdn,
+                             (size_t)side.bytes_gdn, hipMemcpyDeviceToDevice));
+    ACCEPT_CK(hipMemcpyAsync(st.conv_window,
+                             (const char*)side.ck.mid_conv + (size_t)slot * (size_t)side.bytes_conv,
+                             (size_t)side.bytes_conv, hipMemcpyDeviceToDevice));
+    // The KV lanes the body wrote above this position are NOT restored: above `prefix_len` they are unread
+    // (§08.6 inv. 4) and the next append overwrites them — the same 0-bytes argument `accept_round`'s
+    // partial-accept branch has always made.
+    st.prefix_len = anchor + slot + 1;
+    // ONE slot was copied back, not the side's whole capture: at k=2 a round captures two slots and a stop
+    // restores the one the transcript ended at.
+    return side.slot_bytes();
+}
+
+namespace {
+
+// The draft cache refuses only when its lane ceiling is reached, and it has no eviction
+// (`engine/mtp_draft.h` offers `reset` and the LIFO `truncate_lane`). A session therefore needs a
+// policy for a full cache, and the policy is: reset once, print it, and retry — so a long single turn
+// that fills the 512 usable lanes keeps speculating instead of printing `DRAFT-SKIP` forever. Returns
+// the refusal that SURVIVES the reset ("" when the draft may run); a non-empty answer here is a genuine
+// geometry problem and is printed by the caller, never swallowed.
+std::string refused_after_reset(Session& ss, int for_pos) {
+    std::string why = engine::mtpdraft::refusal(*ss.draft);
+    if (why.empty()) return why;
+    std::printf("DRAFT-RESET reason=%s would_propose_for=%d\n", why.c_str(), for_pos);
+    std::fflush(stdout);
+    engine::mtpdraft::reset(*ss.draft);
+    ss.draft_resets++;
+    return engine::mtpdraft::refusal(*ss.draft);
+}
+
+// The next round's proposals, spelled as the run loop spells them: one draft row per candidate of the
+// round that is about to run, the first from the target's own final-norm row of the last position the
+// body FED and agreed with, the second from the draft block's own output row `x_d` with the previous
+// proposal as `y_next` (`prototype/mtp_accept/DRAFT-COND.md` D4/D5). `need_next` is the NEXT round's
+// depth, which the policy may have just demoted — with the policy off it is the same number as `need`.
+void produce_proposals(Session& ss, const WeightStore& store, const uint16_t* h_row,
+                       int tok_next, int draft_pos, int need_next) {
+    ss.pending = -1;
+    ss.pending_pos = -1;
+    ss.pending2 = -1;
+    ss.pending2_pos = -1;
+    if (need_next <= 0 || h_row == nullptr) return;
+    const std::string why = refused_after_reset(ss, draft_pos);
+    if (!why.empty()) {
+        std::printf("DRAFT-SKIP reason=%s would_propose_for=%d\n", why.c_str(), draft_pos);
+        std::fflush(stdout);
+        return;
+    }
+    const engine::mtpdraft::Proposal p =
+        engine::mtpdraft::draft_round(store, *ss.draft_w, *ss.draft, h_row, tok_next, draft_pos);
+    ss.pending = p.token;
+    ss.pending_pos = draft_pos;
+    ss.made++;
+    ss.lanes_max = std::max(ss.lanes_max, (long long)ss.draft->lanes_max);
+    if (need_next > 1) {
+        const std::string why2 = refused_after_reset(ss, draft_pos + 1);
+        if (!why2.empty()) {
+            std::printf("DRAFT-SKIP reason=%s would_propose_for=%d row=2\n", why2.c_str(),
+                        draft_pos + 1);
+            std::fflush(stdout);
+            return;
+        }
+        // ALIASING, safe by construction and copied from the run loop: `xd` is written at stage 14 and
+        // read at stage 3 of the next call, one stream in issue order, so no sync is needed and none is
+        // taken (a sync here would be a silent rate-changer).
+        const engine::mtpdraft::Proposal q = engine::mtpdraft::draft_round(
+            store, *ss.draft_w, *ss.draft, ss.draft->xd, p.token, draft_pos + 1);
+        ss.pending2 = q.token;
+        ss.pending2_pos = draft_pos + 1;
+        ss.lanes_max = std::max(ss.lanes_max, (long long)ss.draft->lanes_max);
+    }
+}
+
+}  // namespace
+
+void session_new_turn(Session& ss) {
+    if (ss.draft != nullptr) engine::mtpdraft::reset(*ss.draft);
+    if (ss.adapt) {
+        ss.adapt = std::make_unique<engine::mtpadapt::Tracker>(ss.k_ceiling);
+    }
+    ss.pending = ss.pending_pos = ss.pending2 = ss.pending2_pos = -1;
+    ss.said_plain = false;
+    ss.stats = Stats{};
+    // Pre-state the geometry so `describe()` of a turn that ran no round cannot report a depth it did
+    // not run (`tally` would otherwise leave `k` at the kDefaultK it is initialised to).
+    if (ss.side != nullptr) {
+        ss.stats.k = ss.side->k;
+        ss.stats.k_low = ss.side->k;
+        ss.stats.k_high = ss.side->k;
+    }
+}
+
+Body session_body(Session& ss, const WeightStore& store, RequestState& st, DecodeScratch& sc,
+                  int cur, int budget_left) {
+    Body b;
+    const int anchor = st.prefix_len;       // the absolute position `cur` occupies
+    const int round_k = ss.adapt ? ss.adapt->k() : ss.side->k;
+    // `kPlain` is not a narrower round: it means the policy abandoned speculation for this turn, and the
+    // driver then takes the branch it already had for "no proposal pending".
+    const bool speculate = round_k > engine::mtpadapt::kPlain;
+    const int need = round_k;
+    const int rows = rows_of_k(round_k);
+    // Headroom first: a round appends `rows` KV lanes and `accept_round` refuses to write past `cap`
+    // (that refusal is §08.6's), so the driver asks before it calls and pays a plain step otherwise.
+    const bool room_for_round = anchor + rows <= st.cap;
+    // The budget rule, stated in `session_body`'s contract: a round may emit `rows` tokens, so it runs
+    // only when the turn can print all of them. No budget rollback exists.
+    const bool budget_fits = budget_left >= rows;
+    // The norm row the NEXT draft stands from: the target's final-norm row of the last position the body
+    // FED and the verifier agreed with — row `n_accepted` of the tile the round just wrote, which is
+    // llama.cpp's `verify_h[min(n_accepted, rows-1)]` in the other engine's spelling.
+    const uint16_t* draft_norm_row = nullptr;
+    int n_accepted = 0;
+    engine::mtpaccept::Round ar{};
+    bool cut_stopped = false;
+    int n_print = 0;
+
+    if (!speculate || ss.pending < 0 || (need > 1 && ss.pending2 < 0) || !room_for_round ||
+        !budget_fits) {
+        // Every skip is printed: a round that did not run is a body the caller is being charged one
+        // token for, and a silently shorter speculation is the empty-parse failure class.
+        if (ss.pending >= 0 && !room_for_round) {
+            std::printf("ROUND-SKIP reason=context_limit anchor=%d cap=%lld rows=%d\n", anchor,
+                        (long long)st.cap, rows);
+        } else if (ss.pending >= 0 && room_for_round && !budget_fits) {
+            std::printf("ROUND-SKIP reason=budget_tail anchor=%d budget_left=%d rows=%d\n", anchor,
+                        budget_left, rows);
+        } else if (ss.pending >= 0 && need > 1 && ss.pending2 < 0) {
+            std::printf("ROUND-SKIP reason=short_proposal_set anchor=%d pending=%d need=%d rows=%d\n",
+                        anchor, 1, need, rows);
+            engine::mtpdraft::truncate_lane(*ss.draft);   // the orphan proposal's lane
+        }
+        std::fflush(stdout);
+        const engine::StepResult r = engine::decode_step(store, st, sc, cur, nullptr);
+        b.n_emit = 1;
+        b.tok[0] = r.token;
+        b.label[0] = st.prefix_len - 1;
+        draft_norm_row = sc.norm;                        // row 0 is the row this step priced
+        ss.plain_steps++;
+    } else {
+        ar = accept_round(store, st, sc, *ss.side, round_k, cur, ss.pending,
+                          need > 1 ? ss.pending2 : -1, ss.route);
+        tally(ss.stats, *ss.side, ar);
+        ss.rounds++;
+        ss.adjudicated++;
+        if (ar.accepted) ss.accepted++;
+        n_accepted = ar.n_accepted;
+        draft_norm_row = sc.norm + (size_t)n_accepted * kHidden;
+        if (n_accepted < need) {
+            // The proposals the round did not consume wrote lanes the target never swallowed; they are
+            // the LAST ones appended, so a LIFO truncate removes precisely them.
+            for (int i = n_accepted; i < need; ++i) engine::mtpdraft::truncate_lane(*ss.draft);
+        }
+        // §07.5 per emitted token, in order, generation phase only — the run loop's `emit_one` tail, but
+        // decided here because the state has to end where the transcript does.
+        n_print = ar.n_emit;
+        for (int i = 0; i < ar.n_emit; ++i) {
+            if (ar.emit[i] == engine::kStopToken) {
+                n_print = i + 1;
+                cut_stopped = true;
+                break;
+            }
+        }
+        if (cut_stopped && n_print < ar.n_emit) {
+            // The stop sits at emit `n_print - 1`, absolute position `anchor + n_print`, and the state
+            // must end with that token PENDING (printed, never stepped) exactly as a flag-off stop does.
+            const long long cut = restore_prefix(st, *ss.side, anchor, n_print - 1, ar.rows);
+            ss.stats.restored_bytes += cut;
+            ss.suppressed += ar.n_emit - n_print;
+        }
+        for (int i = 0; i < n_print; ++i) {
+            b.tok[i] = ar.emit[i];
+            b.label[i] = anchor + i;      // GEN label = absolute position minus one
+        }
+        b.n_emit = n_print;
+        b.was_round = true;
+        b.stopped = cut_stopped;
+        {
+            std::printf("ACCEPT round=%lld anchor=%d fed=%d cand=%d cand_pos=%d accept=%d k=%d"
+                        " n_accepted=%d emitted=%d pos=%d->%d restored_bytes=%lld suppressed=%d",
+                        (long long)ss.rounds, ar.anchor_before, cur, ss.pending,
+                        ss.pending_pos, ar.hit[0], ar.k, ar.n_accepted, ar.emitted, ar.anchor_before,
+                        ar.anchor_after, ar.restored_bytes, ar.n_emit - n_print);
+            if (ar.k > 1) {
+                std::printf(" accept2=%d cand2=%d cand2_pos=%d row2=%d restored_slot=%d", ar.hit[1],
+                            ss.pending2, ss.pending2_pos, ar.row_token[2], ar.restored_slot);
+            }
+            std::printf("\n");
+            std::fflush(stdout);
+        }
+        if (ss.adapt) {
+            const engine::mtpadapt::Change ch = ss.adapt->note(round_k, ar.emitted);
+            if (ch.fired) {
+                std::printf("MTPADAPT round=%lld k=%d est=%.4f prev_k=%d window_rounds=%d plain=%d\n",
+                            (long long)ss.rounds, ch.to, ch.est, ch.from, ch.seen,
+                            ch.to == engine::mtpadapt::kPlain ? 1 : 0);
+                std::fflush(stdout);
+            }
+        }
+    }
+
+    // The next proposals. A stopped turn is over — the token that ended it is pending and the next `feed`
+    // resets the draft cache — so drafting behind a stop would pay a whole head pass for a proposal no
+    // body will ever see.
+    if (b.stopped) {
+        ss.pending = ss.pending_pos = ss.pending2 = ss.pending2_pos = -1;
+        return b;
+    }
+    const int need_next = ss.adapt ? (ss.adapt->abandoned() ? 0 : ss.adapt->k()) : need;
+    if (need_next == 0) {
+        if (!ss.said_plain) {
+            ss.said_plain = true;      // once per turn: an event, not a heartbeat
+            std::printf("MTPADAPT-PLAIN reason=abandoned round=%lld draft_work_stopped=1\n",
+                        (long long)ss.rounds);
+            std::fflush(stdout);
+        }
+        ss.pending = ss.pending_pos = ss.pending2 = ss.pending2_pos = -1;
+        return b;
+    }
+    produce_proposals(ss, store, draft_norm_row, b.tok[b.n_emit - 1],
+                      b.label[b.n_emit - 1] + 2, need_next);
+    return b;
 }
 
 }  // namespace engine::mtpaccept

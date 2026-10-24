@@ -1570,9 +1570,32 @@ Options parse_args(int argc, char** argv) {
     // round, and the echo says which spans ran. `--mtp-midsplit` above keeps its own version of this
     // refusal: that probe byte-compares a split body against an UNSPLIT one, and the unsplit side has no
     // checkpoint to force it, so the pair really does need the flag.
-    if (o.mtp_accept && (o.session || o.sizes_only)) {
-        throw std::runtime_error("--mtp-accept replaces a run's generation steps with rounds; --session"
-                                 " hands the token budget to its caller and --sizes-only runs no steps");
+    if (o.mtp_accept && o.sizes_only) {
+        // THE `--session` HALF OF THIS REFUSAL WAS RETIRED 2026-10-26, and the retirement is the feature:
+        // `engine/mtpaccept::session_body` drives rounds on the session path now (`--session --mtp-accept
+        // 1`, `prototype/mtp_accept/SESSION-ACCEPT.md`), so the only half of the old message that is still
+        // true is the one about a run that takes no steps at all. The token budget is not an obstacle — it
+        // is a parameter the round driver is given, and a round that could not fit it is refused and paid
+        // as a plain step instead.
+        throw std::runtime_error("--mtp-accept replaces a run's generation steps with rounds, and"
+                                 " --sizes-only runs no steps");
+    }
+    if (o.mtp_meter && o.session) {
+        // Reachable now that a session can run rounds, and inert without this refusal: the meter is armed
+        // in the run path, below the point where `session_loop` returns. A meter that arms nothing and
+        // prints nothing is a flag reading as a measurement, which is this file's oldest failure.
+        throw std::runtime_error("--mtp-meter meters a run's rounds; --session has no run window to"
+                                 " close and the meter is not armed on the session path (the session"
+                                 " prints its own per-turn MTPSTAT tally instead)");
+    }
+    if (o.mtp_dense && o.session) {
+        // The dense lane stands for a position an ACCEPTED round consumed, staged from a norm row two
+        // positions behind it — the run loop has that row in hand inside the round's own iteration. The
+        // session driver (`engine/mtpaccept::session_body`) does not stage dense lanes at all, so the flag
+        // could only be inert, and an inert knob is what `--mtp-dense` is refused for elsewhere.
+        throw std::runtime_error("--mtp-dense stages the skipped lane from inside the run loop's round"
+                                 " iteration; --session rounds do not stage it, so the flag could only be"
+                                 " inert there. Run it as one prompt with --ids-file instead");
     }
     // The boundary this refusal also draws for `DECWALL`: the session REPL prints NO `DECWALL` line, because
     // a session has no run end — `gen` budgets come from the caller and the state is re-anchored at every
@@ -2334,9 +2357,21 @@ void verify_census_line(const VerifySide& v, const std::string& restore_witness)
 }
 
 void session_loop(const engine::WeightStore& store, engine::RequestState& st,
-                  engine::DecodeScratch& sc, MtpSide* mtp) {
+                  engine::DecodeScratch& sc, MtpSide* mtp, engine::mtpaccept::Session* ssn) {
     std::printf("READY cap=%lld\n", (long long)st.cap);
     std::fflush(stdout);
+    // The round driver keeps its own counters (`engine::mtpaccept::Session`), because they belong to the
+    // round and not to this file; the census line is `MtpSide`'s. So they are folded in AND zeroed at every
+    // point the census is printed — folding without zeroing would count the same rounds once per `stats`
+    // call and again at `quit`.
+    auto fold_session = [mtp, ssn]() {
+        if (mtp == nullptr || ssn == nullptr) return;
+        mtp->made += ssn->made;               ssn->made = 0;
+        mtp->adjudicated += ssn->adjudicated;  ssn->adjudicated = 0;
+        mtp->accepted += ssn->accepted;        ssn->accepted = 0;
+        mtp->lanes_max = mtp->lanes_max > ssn->lanes_max ? mtp->lanes_max : ssn->lanes_max;
+        ssn->lanes_max = 0;
+    };
     bool poisoned = false;
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -2346,7 +2381,8 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
         if (cmd.empty()) continue;
         if (cmd == "quit" || cmd == "bye") {
             if (mtp) {
-                mtp_close_run(*mtp);
+                if (ssn == nullptr) mtp_close_run(*mtp);
+                fold_session();
                 mtp_census_line(*mtp, "session",
                                 engine::mtpdraft::schedule_name(mtp->track.sched));
             }
@@ -2364,6 +2400,7 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
                 // earn real softmax weight in this turn's first draft.
                 engine::mtpdraft::reset(mtp->st);
                 mtp->track.clear();
+                if (ssn) engine::mtpaccept::session_new_turn(*ssn);
             }
             poisoned = false;
             std::printf("RESET prefix_len=0\n");
@@ -2391,6 +2428,12 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
         }
         try {
             if (cmd == "feed") {
+                // A `feed` re-anchors the position map, so it is where the round driver's per-turn state
+                // is cut: the draft cache (512 lanes, no eviction — a carried-over cache fills and then
+                // refuses forever) and the adaptive tracker (abandonment is sticky, and a stale
+                // abandonment would silently kill speculation for the life of the session). No-op when
+                // accept is off, which is what keeps a flag-off session byte-identical.
+                if (ssn) engine::mtpaccept::session_new_turn(*ssn);
                 // The pending sample first, if there is one: it is the last token the caller was
                 // shown and the state has not consumed it (see the invariant above). The wave prices
                 // only its last row, so the state's next sample is left pending at the end — which is
@@ -2416,6 +2459,32 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
                     if (cur == engine::kStopToken) {   // §07.5, generation phase
                         stop = true;
                         break;
+                    }
+                    if (ssn) {
+                        // ---- one accept round, or the plain step it falls back on, in place of the
+                        // `decode_step` below. `engine::mtpaccept::session_body` owns the rule (round vs
+                        // plain, the §07.5 cut, the next proposals) and leaves the newest sample PENDING,
+                        // which is the same shape a `decode_step` leaves, so the loop top prints it. That
+                        // is why only the first `n_emit - 1` tokens are printed here: printing all of them
+                        // and then handing the last back as `cur` printed every round's last token twice.
+                        // Per iteration the loop prints `n_emit` tokens and the body consumed `n_emit`
+                        // lanes, so `prefix_len - L0 == emitted` is maintained exactly as the flag-off
+                        // loop maintains it, and the turn's last printed token is consumed by the body
+                        // that produced the sample this turn drops — no extra step, no drift.
+                        const engine::mtpaccept::Body bd = engine::mtpaccept::session_body(
+                            *ssn, store, st, sc, cur, budget - emitted);
+                        for (int i = 0; i + 1 < bd.n_emit; ++i) {
+                            std::printf("GEN %d %d\n", bd.tok[i], bd.label[i]);
+                            last_gen_pos = bd.label[i];
+                            ++emitted;
+                        }
+                        std::fflush(stdout);
+                        cur = bd.tok[bd.n_emit - 1];
+                        // A stopped round hands its stop token back to the loop top, which prints it and
+                        // ends the turn exactly as the flag-off path does; the driver has already cut the
+                        // state to the printed prefix, so `sampled_token = cur` below leaves the stop
+                        // pending and unstepped, which is what the next `feed` expects.
+                        continue;
                     }
                     const engine::StepResult r = decode_step(store, st, sc, cur, nullptr);
                     cur = r.token;
@@ -2449,9 +2518,20 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
                 // prints, one row behind the sample it shows, so this sample's label is one past the last
                 // printed one — which is the same key `mtp_after_step` filed the pending proposal under.
                 if (mtp) {
-                    if (!stop && emitted > 0)
-                        std::printf("LASTSAMPLE pos=%d token=%d\n", last_gen_pos + 1, cur);
-                    mtp_close_run(*mtp);
+                    if (ssn) {
+                        // The turn's own round tally, and only when a round ran: a turn that paid nothing
+                        // prints nothing, so a reader can never mistake "no rounds" for "zero accept".
+                        // `MTPSTAT` is not in chat.py's TERMINAL list, so it is a diagnostic there.
+                        if (ssn->stats.rounds > 0) {
+                            std::printf("MTPSTAT %s\n",
+                                        engine::mtpaccept::describe(ssn->stats).c_str());
+                        }
+                        fold_session();
+                    } else {
+                        if (!stop && emitted > 0)
+                            std::printf("LASTSAMPLE pos=%d token=%d\n", last_gen_pos + 1, cur);
+                        mtp_close_run(*mtp);
+                    }
                 }
                 st.stopped = stop;
                 std::printf("END steps=%d stop=%d prefix_len=%d\n", emitted, stop ? 1 : 0,
@@ -2460,6 +2540,7 @@ void session_loop(const engine::WeightStore& store, engine::RequestState& st,
                 std::printf("PREFIX p=%d sampled=%d stopped=%d\n", st.prefix_len,
                             st.sampled_token, st.stopped ? 1 : 0);
                 if (mtp) {
+                    fold_session();
                     // The census is the caller's per-turn read of the side computation; the per-turn
                     // ACCEPT tally is not, and deliberately is not printed here: the harness joins the
                     // printed positions itself, so that its join and this one are two implementations
@@ -4186,7 +4267,42 @@ int main(int argc, char** argv) {
         }
 
         if (o.session) {
-            session_loop(store, st, sc, mtp.get());
+            // ---- arm the accept loop on the session path (`prototype/mtp_accept/SESSION-ACCEPT.md`) ----
+            // Allocated here, not at the run path's site below, because the session returns before that
+            // site is reached. Flag-off this block does nothing at all: no region is reserved, no line is
+            // printed, and `session_loop` takes the branch it took before rounds existed.
+            std::unique_ptr<engine::mtpaccept::Side> sside;
+            std::unique_ptr<engine::mtpaccept::Session> ssn;
+            if (o.mtp_accept) {
+                sside = std::make_unique<engine::mtpaccept::Side>(
+                    engine::mtpaccept::allocate_side(st, o.mtp_k));
+                ssn = std::make_unique<engine::mtpaccept::Session>();
+                ssn->side = sside.get();
+                ssn->draft_w = &mtp->w;
+                ssn->draft = &mtp->st;
+                ssn->k_ceiling = o.mtp_k;
+                ssn->route = o.mtp_route;
+                if (o.mtp_adaptive) {
+                    ssn->adapt = std::make_unique<engine::mtpadapt::Tracker>(o.mtp_k);
+                }
+                // The same two lines the run prints, so a session states its own geometry the way a run
+                // does. They are NEW lines on the session's stdout and part of no compared artifact.
+                std::printf("MTPACCEPT on=1 rows=%d checkpoint_bytes=%lld status_bytes=%zu"
+                            " draft_sched=%s per_step_dumps=0\n",
+                            sside->rows, sside->bytes(), (size_t)sside->words * sizeof(int),
+                            o.mtp_sched.c_str());
+                std::printf("MTPGEOM k=%d rows=%d mid_slots=%d status_words=%d subs_per_round=%d"
+                            " captured_bytes=%lld candidates_per_round=%d\n",
+                            sside->k, sside->rows, sside->ck.slots, sside->words,
+                            sside->subs_per_round, (long long)sside->captured_bytes(),
+                            engine::mtpaccept::kOfRows(sside->rows));
+                if (ssn->adapt) {
+                    std::printf("MTPADAPT %s\n", ssn->adapt->config_line().c_str());
+                }
+                std::fflush(stdout);
+            }
+            session_loop(store, st, sc, mtp.get(), ssn.get());
+            if (sside) engine::mtpaccept::free_side(*sside);
             if (mtp) engine::mtpdraft::free_state(mtp->st);
             engine::kernels::gemm_route_shutdown();
             engine::free_scratch(sc);
