@@ -66,8 +66,7 @@ refused() {
 }
 
 # runs CASE-NAME NEEDLE [args...] — must exit 0 and echo the needle.
-runs() {
-  local name="$1"; shift
+runs() {  local name="$1"; shift
   local needle="$1"; shift
   local out rc
   out="$("$BIN" --model "$MODEL" "$@" 2>&1)"; rc=$?
@@ -77,6 +76,25 @@ runs() {
   if [[ "$out" != *"$needle"* ]]; then
     echo "FAIL  $name: rc=0 but no '$needle' line: $(head -1 <<<"$out")"
     fail=$((fail+1)); return
+  fi
+  echo "ok    $name: $(grep -m1 -F "$needle" <<<"$out" | cut -c1-140)"
+  pass=$((pass+1))
+}
+
+# session_runs CASE-NAME NEEDLE [args...] — `runs` for `--session`, with stdin at /dev/null. A session
+# reads its command protocol from stdin, so a case that only wants the geometry lines printed BEFORE the
+# first command must not inherit the harness's stdin (and must not hang waiting for one). `session_loop`
+# sees EOF, exits, and exits 0 — which is what makes an rc check meaningful here.
+session_runs() {
+  local name="$1"; shift
+  local needle="$1"; shift
+  local out rc
+  out="$("$BIN" --model "$MODEL" "$@" </dev/null 2>&1)"; rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "FAIL  $name: expected rc=0, got rc=$rc: $(head -1 <<<"$out")"; fail=$((fail+1)); return
+  fi
+  if [[ "$out" != *"$needle"* ]]; then
+    echo "FAIL  $name: rc=0 but no '$needle' line: $(head -1 <<<"$out")"; fail=$((fail+1)); return
   fi
   echo "ok    $name: $(grep -m1 -F "$needle" <<<"$out" | cut -c1-140)"
   pass=$((pass+1))
@@ -170,10 +188,33 @@ refused "the wave clock vs a draft round"   "prices a prefill pass"      --ids "
 refused "round vs the stage clock"       "cannot share a run"            --ids "$IDS" --steps 1 --mtp-sched every --mtp-accept 1 --mtp-k 2 --time-stages
 refused "round vs the wave clock"        "prices a prefill pass"         --ids "$IDS" --steps 1 --mtp-accept 1 --mtp-k 2 --time-waves
 refused "round vs a replay"              "no alignment"                  --ids "$IDS" --steps 1 --mtp-accept 1 --mtp-k 2 --replay 1,2,3
-refused "round vs a session"             "hands the token budget"        --session --mtp-accept 1 --mtp-k 2
 refused "round vs sizes-only"            "runs no steps"                 --sizes-only --mtp-accept 1 --mtp-k 2
 refused "round vs the verify probe"      "not also armed"                --ids "$IDS" --steps 1 --mtp-accept 1 --mtp-k 2 --mtp-verify 1
 refused "round vs a drafted ladder"      "makes its own proposals"       --ids "$IDS" --steps 1 --mtp-accept 1 --mtp-k 2 --mtp-draft-k 2
+echo
+echo "-- the session: admitted by the round driver, with the instruments it cannot own still refused --"
+# THE `--session` REFUSAL WAS RETIRED 2026-10-26 and its replacement is asserted in both directions.
+# `engine/mtpaccept::session_body` drives rounds on the session path now, so a battery that still demanded
+# "round vs a session" would be a dead gate reddening the correct build (the `--gdn-loop` rows above are the
+# same trap, one default earlier). What IS still refused is each instrument whose object a session does not
+# have — and every one of them became REACHABLE by the retirement, because until then `--session` + a round
+# was a refusal at the flag parser and nothing downstream could be exercised. `--mtp-meter` and
+# `--mtp-dense` in particular were unreachable-by-transitivity before; they are inert-on-the-session-path
+# unless refused, which is why they are rows here at all.
+session_runs "session admits the round"          "MTPGEOM k=2 rows=3"        --session --mtp-accept 1 --mtp-k 2
+session_runs "session states its geometry"       "MTPACCEPT on=1 rows=3"     --session
+session_runs "session arms the depth policy"     "MTPADAPT on=1 k_start=2"   --session
+session_runs "a k=1 session is nameable"         "MTPGEOM k=1 rows=2"        --session --mtp-k 1
+session_runs "accept-off session echoes nothing" "READY cap="               --session --mtp-accept 0 --mtp-draft 0
+refused    "session vs the dense lane"           "stages the skipped lane"   --session --mtp-dense 1
+refused    "session vs prompt-lane seeding"      "no single prompt wave"     --session --mtp-prompt-lanes 8
+refused    "session vs the draft ladder"         "re-anchors the position map" --session --mtp-draft-k 2
+refused    "session vs the verify probe"         "has no such list"          --session --mtp-verify 1
+refused    "session vs the round meter"          "no run window to close"    --session --mtp-meter 1
+refused    "session vs the stage clock"          "one draft round per step"  --session --time-stages
+refused    "session vs the wave clock"           "prices a prefill pass"     --session --time-waves
+refused    "session vs a replay"                 "no alignment"              --session --mtp-accept 1 --replay 1,2,3
+refused    "sizes-only still refuses"            "runs no steps"             --sizes-only --mtp-accept 1
 echo
 echo "-- what the DEFAULT FLIP added: the same refusals are reachable by default, and the defaults run --"
 # THE GDN SPAN, as of 2026-10-25. Two batteries ago this file asserted `--gdn-loop 512 --mtp-accept 1`
@@ -220,7 +261,6 @@ refused "adaptive vs the stage clock"   "one draft round per step"        --ids 
 refused "adaptive vs the stage clock, named schedule" "cannot share a run" \
                                           --ids "$IDS" --steps 1 --mtp-sched every --mtp-adaptive 1 --time-stages
 refused "adaptive vs the wave clock"    "prices a prefill pass"           --ids "$IDS" --steps 1 --time-waves --mtp-adaptive 1
-refused "adaptive vs a session"         "hands the token budget"          --session --mtp-adaptive 1
 refused "adaptive vs sizes-only"        "runs no steps"                   --sizes-only --mtp-adaptive 1
 refused "adaptive vs a replay"          "no alignment"                    --ids "$IDS" --steps 1 --mtp-adaptive 1 --replay 1,2,3
 refused "adaptive vs the verify probe"  "not also armed"                  --ids "$IDS" --steps 1 --mtp-adaptive 1 --mtp-verify 1
