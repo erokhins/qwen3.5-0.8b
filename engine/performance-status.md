@@ -305,3 +305,50 @@ number, the second says which numbers cannot be trusted even when taken that way
 - **The differential harness is unusable at ≥4k lanes.** Quote 4k decode from the stage-clock burst,
   never from `context_sweep.py`: at 4,032 lanes the differential produced a spread of 29.7 % with a
   "best" faster than a 128-lane step at 32× the KV, which is not a physical result.
+
+## §7 MTP speculation is the shipping default — the measured state (2026-10-24)
+
+Since `e75e192` (+ `1a9d8c9`, `04dd3de`, `aceee97`) the default path of `engine/build/decode_run` is
+`--mtp-accept 1 --mtp-k 2 --mtp-draft 1` at N=2, chosen by measurement (`K2-RESULT.md` §7: k=1 +9.75…+10.38 %,
+k=2 +16.53/+17.76 % against a pre-registered kill line of round/step ≥ 1.95 that k=2 did not hit). The plain
+per-step path is now an explicit instrument: `--mtp-accept 0 --mtp-draft 0`, named on every harness that prices
+a per-step cost (61 files, 120 pins). Decision record: `prototype/mtp_accept/DEFAULT-ON.md`.
+
+**Decode, wall tok/s, `mtp_wall_ab.sh`, one lock hold, 5 reps, medians.** Every number below is
+`prototype/mtp_accept/mtp_wall_ab.sh` after `0c7ad84` (base arm must name the plain path — unpinned it inherited
+the new default and would have timed the accept loop against itself; the MTPSTAT canary aborted instead).
+
+| fixture | lanes | base ms/step | round ms | round/step | accept arm vs base |
+|---|---|---|---|---|---|
+| templated (`tmp/llama_input/ids_long_chat.csv`) | 4,152 | 11.098 | 20.392 | 1.837 | **+16.50 %** |
+| raw prose, long (`tmp/llama_input/ids_long.csv`) | 4,142 | — | — | 1.84 | +16.09 % (carried, `7e80400`) |
+| raw prose, pathological (`tmp/verify_body_scale/ids4032.csv`) | 4,032 | 11.295 | 19.438 | 1.721 | **−27.37 %** |
+
+The third row is not a defect and not noise: that fixture has always been the worst accept case in the tree
+(`a ≈ 0.10`). Speculation is bought back only by accept, so a default of k=2 has a break-even — with a round
+costing 1.72–1.84 × a step, `tok/round = 1 + p₁ + p₂` must clear that, i.e. **p ≈ 0.40** at k=2. Below it the
+default is a real loss, and the loss grows with the round cost. Adaptive depth (drop to k=1, or off, when a
+running accept estimate falls under the break-even) is therefore the next honest item on the MTP track, not a
+refinement.
+
+**Prefill is the default's open cost — carried, measured here, and not accepted.** `--mtp-accept` pins the GDN
+launch span to 1 for **every** body including prefill, and the span-1 GDN scan costs 449.07 ms vs 266.03 ms at
+4,096 lanes (`engine/decode_run.cpp` comment). `DECWALL prefill_ms`, medians of 3, one lock hold:
+
+| lanes | plain (`--mtp-accept 0 --gdn-loop 512`) | default (forced `gdn_span=1`) | cost |
+|---|---|---|---|
+| 1,024 | 178.5–189.4 ms → **5,508 tok/s** | 249.9–263.2 ms → 4,096 tok/s | **+37 %** |
+| 4,032 | 441.4–450.7 ms → **9,091 tok/s** | 761.0–771.8 ms → 5,257 tok/s | **+72 %** |
+
+Decode is unaffected by the span (a 1-row body already resolved to span 1 under the old default), so the MTP
+decode ratios stay clean — but the prefill headline above **replaces** the pre-MTP one until the span
+requirement is scoped to the round's own bodies (the `arm_mtp_round_attn_form` pattern at
+`engine/decode_step.h:441`). That scoping needs its own admission run, because the round's input state would
+then come from a span-512 prefill while every MTP number in this ledger was taken at span 1 throughout.
+
+**Admission state at the new default.** `engine/gate.py --fixture dec8` → `ENGINE GATE PASS`; `--selftest` →
+PASS; gate section (m) at the **default** k (18 fixtures, 92 rounds, 188 tokens) shows the same two admitted
+forks as the pre-flip record — no new bit divergence. Full-population losslessness re-taken at the default:
+49/49 corpus lines byte-identical to the plain stream, 743 rounds, 1,617 tokens, 2.176 tok/round, identical
+counters to the explicit `--mtp-k 2` run (`m3_loop_rate.sh`, `LOSSLESS=1`). `speccheck/run_all.py` 26 gates
+0 failed; op gates glue 784/0, proj_gemv 952/0, `gdn_gated_norm` DEVICE GATE PASS.
