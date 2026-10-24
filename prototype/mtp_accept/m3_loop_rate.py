@@ -194,8 +194,20 @@ def check_line(tag: str, acc_log: str, acc_dir: pathlib.Path, base_dir: pathlib.
             die(f"{tag}: {what}: {got} != {want}")
 
     eq(int(m["rounds"]), int(m["accepted"]) + int(m["rejected"]), "MTPSTAT rounds vs accepted+rejected")
-    eq(int(m["emitted"]), 2 * int(m["accepted"]) + int(m["rejected"]),
-       "MTPSTAT emitted vs 2*accepted+rejected")
+    # The emit identity, in the shape the geometry supports. At k=1 (`--mtp-k`, default) an accept emits 2
+    # and a reject emits 1, which is the relation this check used to state unconditionally. At k=2 a round
+    # emits n_accepted + 1, so the relation the engine asserts is `emitted == candidates_accepted +
+    # rounds`; MTPSTAT prints that field only when k>1, and the branch is on the FIELD'S PRESENCE rather
+    # than on a knob this harness did not set — a k=1 run cannot accidentally be judged by the k=2 rule.
+    if "candidates_accepted" in m:
+        eq(int(m["emitted"]), int(m["candidates_accepted"]) + int(m["rounds"]),
+           "MTPSTAT emitted vs candidates_accepted+rounds")
+        eq(int(m["depth1"]) >= int(m["accepted"]), True,
+           "MTPSTAT depth1 vs accepted: a depth-2 accept is also a depth-1 accept, so a depth1 below the"
+           " full-prefix count means a candidate behind a rejected one was accepted")
+    else:
+        eq(int(m["emitted"]), 2 * int(m["accepted"]) + int(m["rejected"]),
+           "MTPSTAT emitted vs 2*accepted+rejected")
     eq(int(d["rounds"]), int(m["rounds"]), "DECWALL rounds vs MTPSTAT rounds")
     eq(int(d["accepted"]), int(m["accepted"]), "DECWALL accepted vs MTPSTAT accepted")
     eq(int(d["rejected"]), int(m["rejected"]), "DECWALL rejected vs MTPSTAT rejected")
@@ -205,7 +217,11 @@ def check_line(tag: str, acc_log: str, acc_dir: pathlib.Path, base_dir: pathlib.
     eq(int(d["bodies"]), int(m["rounds"]) + int(d["plain"]), "DECWALL bodies vs rounds + plain")
     eq(len(rounds_lines), int(m["rounds"]), "ACCEPT round lines vs MTPSTAT rounds")
     n_accept_lines = sum(1 for ln in rounds_lines if ROUND_RE.match(ln).group(4) == "1")
-    eq(n_accept_lines, int(m["accepted"]), "ACCEPT accept=1 lines vs MTPSTAT accepted")
+    # `accept=` on the ACCEPT line is the FIRST candidate's equality: at k=1 that is the whole accept bit,
+    # and at k=2 it is the depth-1 hit, which MTPSTAT prints as `depth1`. Comparing the line count against
+    # whichever field the geometry defines keeps one rule per independent variable (§18's attribution point).
+    eq(n_accept_lines, int(m.get("depth1", m["accepted"])),
+       "ACCEPT accept=1 lines vs MTPSTAT " + ("depth1" if "depth1" in m else "accepted"))
 
     emitted_file = [ln.strip() for ln in (acc_dir / "emitted.txt").read_text().splitlines()
                     if ln.strip() and not ln.startswith("#")]
@@ -291,7 +307,7 @@ def main() -> int:
           f"  [appended to the accept arm only, never to the flag-off pair run]")
 
     tot = {"rounds": 0, "accepted": 0, "rejected": 0, "emitted": 0, "plain": 0, "suppressed": 0,
-           "bodies": 0}
+           "bodies": 0, "depth1": 0, "candidates": 0, "stat_emitted": 0}
     by_depth: list[tuple[int, bool]] = []
     per_line = []
     flips: list[dict] = []
@@ -319,8 +335,18 @@ def main() -> int:
             blog = None
         info = check_line(tag, log, ad, bd if args.lossless else None, blog, got)
         d, m = info["d"], info["m"]
-        for k in tot:
-            tot[k] += int(d[k])
+        for k in ("rounds", "accepted", "rejected", "emitted", "plain", "suppressed", "bodies"):
+            tot[k] += int(d[k])           # the run-window counts, off DECWALL (what the RUN did)
+        for k in ("depth1", "candidates"):
+            # Round-tally counts that exist only at k=2, off MTPSTAT (what the ROUNDS did). A k=1 run has
+            # neither field and contributes 0, which is what keeps one accumulator shape for both geometries
+            # without inventing a k=1 value the engine never printed.
+            tot[k] += int(m.get(k, 0))
+        # MTPSTAT's own emit tally, which counts ONLY what rounds emitted. `tot["emitted"]` is DECWALL's,
+        # which also carries one token per plain step, so dividing it by `rounds` mixes the two
+        # denominators — visible as a `1+n1+n2` figure that refused to match the engine's
+        # `mean_tokens_per_round` on a run with plain steps in it.
+        tot["stat_emitted"] += int(m["emitted"])
         for idx, ln in enumerate(info["rounds_lines"]):
             mt = ROUND_RE.match(ln)
             by_depth.append((idx, mt.group(4) == "1"))
@@ -391,23 +417,61 @@ def main() -> int:
           f" suppressed bonus {tot['suppressed']}")
     print(f"mean tokens per round            {tot['emitted'] / rounds:.4f}" if rounds else "n/a")
     print(f"a = accepted/rounds              {accepted}/{rounds} = {a:.4f}")
+    # The k=2 reading of the same tally. The engine's own emit identity is `emitted == candidates +
+    # rounds`, and `candidates == depth1 + accepted` at k=2 (a depth-2 accept is also a depth-1 one), so
+    # tokens per round is `1 + n1 + n2` — the same decomposition
+    # `prototype/mtp_accept/DRAFTK-RESULT.md` priced the ladder with, which is what makes the two numbers
+    # comparable instead of merely adjacent. Printed only when the geometry produced the fields; a k=1 run
+    # prints the block above and nothing here.
+    if tot["depth1"] or tot["candidates"]:
+        n1 = tot["depth1"] / rounds if rounds else 0.0
+        n2 = accepted / rounds if rounds else 0.0
+        pred = 1.0 + n1 + n2
+        got = tot["stat_emitted"] / rounds if rounds else 0.0
+        print(f"k=2 prefix ladder               n1 (cand1 accepted) = {tot['depth1']}/{rounds} = {n1:.4f}"
+              f"   n2 (cand2 as well) = {accepted}/{rounds} = {n2:.4f}")
+        print(f"tokens per round 1+n1+n2      {pred:.4f}   MTPSTAT mean_tokens_per_round {got:.4f}"
+              f"   {'consistent' if abs(pred - got) < 1e-9 else 'INCONSISTENT with the engine tally'}"
+              f"   [both over ROUNDS only; the plain steps' {tot['plain']} tokens are in"
+              f" `tokens emitted` above and not here]")
     print(f"carried side-pass figure          {CARRIED_SIDE_PASS} ({CARRIED_SIDE_PASS_FRAC})"
           f"  — geometry differs (§4i.3), agreement is expected and not owed")
-    print(f"kill line                         a < {KILL_LINE}")
+    # WHICH QUANTITY THE KILL LINE JUDGES. `KILL_LINE` was pre-registered in ACCEPT-PLAN against the rate of
+    # the FIRST proposal. At k=1 that is `a`. At k=2 the first proposal's rate is the depth-1 hit `n1`, and
+    # `a` is the whole-prefix rate, a strictly smaller quantity — a round that stops after candidate 1 still
+    # emits two tokens — so judging `a` at k=2 against a line drawn on the first proposal points the ruler at
+    # a different object than the bar names (the same error class as the `--scope form` row: a comparison
+    # whose independent variable is not what the bar is about). The quantity judged is printed, always.
+    judged = a
+    judged_name = "a = accept/rounds"
+    if tot["depth1"] or tot["candidates"]:
+        judged = tot["depth1"] / rounds if rounds else 0.0
+        judged_name = (f"n1 = depth-1 (first candidate) accept/rounds = {tot['depth1']}/{rounds}, which"
+                       " is the quantity ACCEPT-PLAN's line was drawn on")
+    print(f"kill line                         a < {KILL_LINE}   judged as: {judged_name}")
     if rounds == 0:
         print("VERDICT: NO-DENOMINATOR — nothing was adjudicated; this run is an error, not a result")
     elif rounds < args.min_rounds:
         print(f"VERDICT: INSUFFICIENT-SAMPLE — {rounds} rounds is below the {args.min_rounds}-round floor"
               f" for adjudicating a line drawn on {CARRIED_SIDE_PASS_FRAC}; run the full population")
-    elif a == 0.0:
-        print("VERDICT: BROKEN-LOOP — a = 0 exactly is a loop that never accepts, i.e. a bug report,"
-              " not a measured rate")
-    elif a < KILL_LINE:
-        print(f"VERDICT: KILL — the shipping loop measures {a:.4f} against the pre-registered kill line"
-              f" {KILL_LINE}. Per ACCEPT-PLAN.md this is not movable by the implementation.")
+    elif judged == 0.0:
+        print("VERDICT: BROKEN-LOOP — the judged rate is 0 exactly, i.e. a loop that never accepts, which"
+              " is a bug report, not a measured rate")
+    elif judged < KILL_LINE:
+        print(f"VERDICT: KILL — the loop measures {judged:.4f} on the judged quantity against the"
+              f" pre-registered kill line {KILL_LINE}. Per ACCEPT-PLAN.md this is not movable by the"
+              " implementation.")
     else:
-        print(f"VERDICT: the loop's measured {a:.4f} does not trip the kill line {KILL_LINE}"
-              f" (margin {a - KILL_LINE:+.4f}); the rate work may proceed to timing.")
+        print(f"VERDICT: the loop's measured {judged:.4f} does not trip the kill line {KILL_LINE}"
+              f" (margin {judged - KILL_LINE:+.4f}); the rate work may proceed to timing.")
+    if tot["depth1"] or tot["candidates"]:
+        # The k=2 bars are not rate bars: the funded question is what the 3-row round COSTS against the extra
+        # token it buys, and only a timing pass answers that. Stating it here is what stops a reader from
+        # taking the line above as the k=2 verdict (`prototype/mtp_accept/K2-RESULT.md` carries both bars).
+        print("NOTE(k=2): the bar on this geometry is the round COST — adopt at tok/s >= +13.6 % over base,"
+              " kill at round/step >= 1.95 — and neither is adjudicable from an accept rate. No millisecond"
+              " figure appears in this output: the timing pass is the main agent's, run blocking under one"
+              " GPU-lock hold.")
 
     print("\naccept by round ordinal in run (same buckets the carried profile used; the loop's ordinal"
           " counts ROUNDS, the side pass counted proposals):")
