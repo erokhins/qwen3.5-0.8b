@@ -443,6 +443,39 @@ constexpr int kMtpRoundAttnWide = 0;
 // later prefill waves, which is the one thing this rule is not allowed to touch.
 int arm_mtp_round_attn_form(DecodeScratch& sc);
 
+// ---- which GDN span an MTP round's body runs, as ONE rule with ONE spelling -------------------------
+//
+// THE VALUE. `submit_wave_body` runs the recurrence in token-steps of exactly this many per `gdn_rec`
+// launch when — and only when — the body is a round's. It is 1, which is the per-token walk.
+//
+// WHY THE ROUND NEEDS IT. The accept round's rollback restores a MID-ROUND checkpoint, and "the state
+// after row r" exists at an address only if the recurrence stopped there: at a span of 2 one `gdn_rec`
+// launch walks both rows inside one kernel and that state lives in no register, buffer or address a copy
+// could read (`engine/mtp_verify.h`, handed back as the finding; `prototype/mtp_accept/ACCEPT-BUILD.md`
+// §4b). Span-invariance is admitted at BIT-identity (`prototype/gdn_rec_isa/gdn_rec_isa.hip.cpp
+// --selftest-loop`, re-proved per fixture by `engine/gate.py` section (j)), so the narrower span moves
+// SUBMISSIONS and no bit — which is what makes it admissible at all rather than a band question.
+//
+// WHY IT IS NOT A WHOLE-RUN PIN, and this is the correction of 2026-10-25. `--mtp-accept` became the
+// shipping default with the span resolved to 1 for the WHOLE run, and since a prefill wave is not a round
+// that tax fell entirely on prefill: +37 % at 1,024 lanes and +72 % at 4,032 against `--gdn-loop 512`
+// (`engine/performance-status.md` §7, main-agent measured). Decode never paid it: `resolve_gdn_loop`
+// already collapses a ONE-ROW body to 1 whatever the flag says. The requirement was always about the
+// round's bodies, so the forcing lives where the round is identifiable — the armed checkpoint, the same
+// arming that distinguishes a round's body from a prefill tail for `arm_mtp_round_attn_form` above, for
+// the same reason and with the same argument (nothing at the launcher can tell a 3-row round from a 3-row
+// prefill tail; the CALLER can). Every non-round body — prefill waves, plain steps — keeps the caller's
+// span.
+//
+// It is a constant, not a flag, exactly like `kMtpRoundAttnWide`: a caller who could name a wider round
+// span would be asking for a checkpoint the body does not write, and `decode_run`'s refusal for that is
+// retired precisely because the round is no longer reachable at any other span. The assert below is the
+// compile-time half of that claim; the runtime half is `submit_wave_body`'s slot-vs-rows check.
+constexpr int kMtpRoundGdnSpan = 1;
+static_assert(kMtpRoundGdnSpan == 1,
+              "a mid-round checkpoint is a one-token-step recurrence's end state; a round body at any"
+              " other span captures a state the recurrence never wrote and restores a plausible fiction");
+
 DecodeScratch allocate_scratch(int wave_rows = kMaxWaveRows);
 void free_scratch(DecodeScratch& sc);
 

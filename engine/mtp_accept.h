@@ -46,10 +46,13 @@
 // when `sc.gdn_ckpt` is armed (see `decode_step.h`'s `GdnCheckpoint` and the two sites in
 // `decode_step.cpp`): each GDN layer gets ONE `conv_mid_window_kernel` derivation per slot — the shipped
 // batched conv is untouched — and each layer's per-token-step recurrence is followed by a 1 MiB state copy
-// after every row that has a slot. The per-token recurrence is a PIN, not a preference: `--mtp-midsplit`
-// already refuses a reference arm that is not at `--gdn-loop 1`, for the reason `ACCEPT-BUILD.md` §4b
-// records. The bill is stated in `Stats` and printed, because a cost that only exists in prose is a cost
-// nobody priced, and `slots = rows - 1` (1 at k=1, 2 at k=2):
+// after every row that has a slot. The per-token recurrence is a REQUIREMENT, not a preference, and since
+// 2026-10-25 it is met by the body rather than by the run: `submit_wave_body` takes the span from
+// `decode_step.h::kMtpRoundGdnSpan` whenever this checkpoint is armed, so `--gdn-loop` is free to mean what
+// it says for every body that is not a round (`--mtp-midsplit` still refuses a reference arm that is not at
+// `--gdn-loop 1`, because its UNSPLIT side arms nothing and so has no forcing to share — for the reason
+// `ACCEPT-BUILD.md` §4b records). The bill is stated in `Stats` and printed, because a cost that only exists
+// in prose is a cost nobody priced, and `slots = rows - 1` (1 at k=1, 2 at k=2):
 //
 //   every round   +18*slots conv-window derivations, +18*slots mid-state captures of 1 MiB, +1 verdict
 //                 launch pair, +1 status readback: slots * 20,201,472 B captured and

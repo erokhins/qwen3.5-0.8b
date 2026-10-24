@@ -953,16 +953,24 @@ void submit_wave_body(const WeightStore& weights, RequestState& st, DecodeScratc
             // on a collapse body arms nothing, and having the number named once is what lets the two
             // sequential branches below read as the two spans they are.
             //
-            // The checkpoint forces the span to 1, and that forcing is its second cost. At a span of 2
-            // ONE `gdn_rec` launch walks both rows inside one kernel, so "the state after row 0" exists
-            // in no register, buffer or address a copy could read — the finding `engine/mtp_verify.h`
-            // handed back. Walking one token-step per launch is what makes the gap exist, and
-            // span-invariance is admitted at BIT-identity, not adjacency
+            // The checkpoint forces THIS body's span to `kMtpRoundGdnSpan`, and that forcing is its
+            // second cost. At a span of 2 ONE `gdn_rec` launch walks both rows inside one kernel, so "the
+            // state after row 0" exists in no register, buffer or address a copy could read — the finding
+            // `engine/mtp_verify.h` handed back. Walking one token-step per launch is what makes the gap
+            // exist, and span-invariance is admitted at BIT-identity, not adjacency
             // (`prototype/gdn_rec_isa/gdn_rec_isa.hip.cpp --selftest-loop`; `engine/gate.py` section (j)
             // re-proves it per fixture), so the walk moves submissions and no bit. It also means the
             // caller must hold `kSeq`: `kCollapse` and `kChunk` below each submit one launch per body and
             // so have no row-0 boundary to stop at either.
-            const int gdn_span = ckpt != nullptr ? 1 : kernels::resolve_gdn_loop(sc.gdn_loop, n);
+            //
+            // The forcing is SCOPED to the body, not applied to the run, and that scoping is the whole of
+            // option (C): an armed checkpoint is exactly "a round's body", so a prefill wave keeps the
+            // caller's span and pays nothing for a requirement the round alone has
+            // (`decode_step.h`'s `kMtpRoundGdnSpan`, which carries the wall the whole-run pin cost and the
+            // reason a row-count predicate would not do). `decode_run` no longer refuses a named span
+            // alongside `--mtp-accept`, because there is no longer a span for it to contradict.
+            const int gdn_span =
+                ckpt != nullptr ? kMtpRoundGdnSpan : kernels::resolve_gdn_loop(sc.gdn_loop, n);
             if (kernels::resolve_gdn_scan(sc.gdn_scan, n) == kernels::GdnScan::kCollapse) {
                 // Route A (D-12): the sequential recurrence, resident. ONE launch per layer per body,
                 // and the SAME arithmetic per step — see `engine/gdn_collapse_kernels.h` for why that is

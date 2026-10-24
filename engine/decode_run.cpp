@@ -180,10 +180,11 @@ struct Options {
     // the per-step instruments do not own) and it refuses `--mtp-verify`, whose side pass is a 2-row body.
     int mtp_k = engine::mtpaccept::kDefaultK;
     bool mtp_k_given = false;
-    // True when the accept default resolved `--gdn-loop` to the one-token-step span because the caller
-    // named no span at all (the resolution sits beside the accept refusals). It exists so the mode echo can
-    // say which span the run got and who chose it: a NAMED span is never resolved, only honoured or refused.
-    bool mtp_span_forced = false;
+    // NOTE (2026-10-25): there used to be a `mtp_span_forced` flag here, set when the accept default
+    // resolved `--gdn-loop` to 1 for the WHOLE run. The requirement was the ROUND's and the forcing is now
+    // in `submit_wave_body` against `decode_step.h::kMtpRoundGdnSpan`, so this file resolves no span for
+    // anyone: `gdn_loop` is the caller's value or the parsed default, and `gdn_loop_given` is all the mode
+    // echo needs to say who chose it.
     // B0 of `prototype/mtp_accept/BEAT-MTP.md`: the per-phase ROUND METER (`engine/mtp_meter.h`). Default
     // OFF, and off is one null-pointer read per guard object — no allocation, no sync, no line, so a
     // flag-off run is byte-identical to a binary that does not contain the instrument. On, it prints one
@@ -1037,29 +1038,28 @@ Options parse_args(int argc, char** argv) {
     if (!o.sizes_only && !o.session && o.steps < 0) {
         throw std::runtime_error("decode_run needs --steps >= 0");
     }
-    // ---- the accept round's GDN span: RESOLVED when unnamed, REFUSED when contradicted ----------------
-    // `--mtp-accept` needs the one-token-step span, because the mid-round checkpoint it restores from is
-    // the state a per-token recurrence leaves behind after each row (`engine/mtp_accept.h`,
-    // `prototype/mtp_accept/ACCEPT-BUILD.md` §4b). Since accept became the default, that requirement would
-    // otherwise refuse every bare run, so an UNNAMED span resolves to 1 here — before every check that
-    // reads `gdn_loop`, so what the refusals below see is what the launchers will see, never a value the
-    // run has already overwritten. A NAMED span is different: `--gdn-loop 512 --mtp-accept 1` still exits 2,
-    // because retiring that refusal would change what the round's bits are admitted against (every wall
-    // number and every gate (m) run in this repo has span 1 throughout), and the run echoes which of the
-    // two happened on its `MTP mode=` line (`gdn_span=`, `forced_by=`).
+    // ---- the accept round's GDN span: NOTHING IS RESOLVED HERE ANYMORE --------------------------------
+    // `--mtp-accept` needs the one-token-step span for its OWN bodies, because the mid-round checkpoint it
+    // restores from is the state a per-token recurrence leaves behind after each row (`engine/mtp_accept.h`,
+    // `prototype/mtp_accept/ACCEPT-BUILD.md` §4b). Until 2026-10-25 this file honoured that by rewriting
+    // `gdn_loop` for the whole run when the caller named no span, and refused it when they did. Both halves
+    // are retired: the requirement was never about the run's span, and the forcing now sits at the one place
+    // that can tell a round from a prefill tail — `submit_wave_body`, against
+    // `decode_step.h::kMtpRoundGdnSpan`, keyed on the armed checkpoint in the same way
+    // `arm_mtp_round_attn_form` is.
     //
-    // WHAT IT COSTS, stated rather than hidden: span 1 is the per-token launch form for EVERY body this run
-    // submits, including the prefill wave, and `--gdn-loop 512` became the default precisely because the
-    // span-1 form is slower there — `gdn_rec` 449.07 ms at span 1 against 266.03 ms at span 512 at 4,096
-    // lanes, the ledger row this file's `--gdn-loop` note carries, against a ~370 ms 4k prefill wall.
-    // DECODE IS UNAFFECTED BY CONSTRUCTION: `kernels.h:resolve_gdn_loop(want, rows)` collapses to 1 for a
-    // one-row body whatever `want` says, so a decode step already ran the span-1 form under the old
-    // default. The prefill cost of the new default is unmeasured and is the main agent's to take; the
-    // statement of it lives in `prototype/mtp_accept/DEFAULT-ON.md`.
-    if (o.mtp_accept && !o.gdn_loop_given) {
-        o.gdn_loop = 1;
-        o.mtp_span_forced = true;
-    }
+    // WHAT THAT GIVES BACK, and why it was worth a commit: span 1 was the per-token launch form for EVERY
+    // body such a run submitted, including the prefill wave, and `--gdn-loop 512` became the default
+    // precisely because the span-1 form is slower there — prefill throughput fell +37 % at 1,024 lanes and
+    // +72 % at 4,032 against `--mtp-accept 0 --gdn-loop 512` (`engine/performance-status.md` §7, main-agent
+    // measured). Decode is unaffected by construction either way:
+    // `kernels.h:resolve_gdn_loop(want, rows)` collapses to 1 for a one-row body whatever `want` says. The
+    // span that RUNS is echoed on the `MTP mode=` line as `gdn_span_round=`/`gdn_span_other=`, because a log
+    // that prints one span when two ran is a log that cannot be read (`AGENTS.md`: a route is read back off
+    // the run, never inferred from a flag).
+    //
+    // The ordering note that used to justify this block's position survives it: every check below reads
+    // `gdn_loop`, and what they read is still exactly what the launchers will use for every body they own.
     if (o.gdn_spell_given && o.gdn_spell != engine::kernels::GdnRecSpell::kShip &&
         o.gdn_scan == engine::kernels::GdnScan::kCollapse) {
         // The re-spelled walks belong to the SEQUENTIAL kernel; `collapse` submits
@@ -1497,18 +1497,18 @@ Options parse_args(int argc, char** argv) {
                                  " in, or --mtp-accept 0 to run the plain step"
                                  " (the candidate source is the §09 block, never a guess)");
     }
-    if (o.mtp_accept && o.gdn_loop != 1) {
-        // Same PIN `--mtp-midsplit` states above, for the same reason: a round's rollback restores the
-        // mid-round checkpoint, and that address only exists when the recurrence walks one token-step per
-        // launch. A round at any other span would restore a state the body never wrote — which is a wrong
-        // token stream, not a red comparison, so it is refused at the flag rather than caught later.
-        // Reachable only when the span was NAMED: an unnamed span was resolved to 1 above.
-        throw std::runtime_error("--mtp-accept pins --gdn-loop 1 (the mid-round checkpoint it restores"
-                                 " from is a one-token-step recurrence's end state); it was given"
-                                 " --gdn-loop " + std::to_string(o.gdn_loop) + ". Drop the flag and the"
-                                 " accept default resolves the span to 1, name --gdn-loop 1, or run the"
-                                 " plain step with --mtp-accept 0");
-    }
+    // RETIRED 2026-10-25, on purpose, and the reason is recorded here because a missing refusal is
+    // invisible: this used to be `--mtp-accept && gdn_loop != 1 → exit 2`, on the argument that a round at
+    // any other span would restore a state the body never wrote — a wrong token stream, not a red
+    // comparison. That argument is still true and still enforced; what changed is that the round is no
+    // longer reachable at any other span, because `submit_wave_body` takes its span from
+    // `decode_step.h::kMtpRoundGdnSpan` whenever the mid-round checkpoint is armed. A refusal whose
+    // predicate cannot be reached is an untestable branch (see the note beside the `--mtp-k` block), and a
+    // battery that asserts it is a dead gate (`prototype/mtp_accept/default_refusals.sh`). So
+    // `--gdn-loop <any> --mtp-accept 1` is LEGAL, the caller's span applies to every body that is not a
+    // round, and the echo says which spans ran. `--mtp-midsplit` above keeps its own version of this
+    // refusal: that probe byte-compares a split body against an UNSPLIT one, and the unsplit side has no
+    // checkpoint to force it, so the pair really does need the flag.
     if (o.mtp_accept && (o.session || o.sizes_only)) {
         throw std::runtime_error("--mtp-accept replaces a run's generation steps with rounds; --session"
                                  " hands the token budget to its caller and --sizes-only runs no steps");
@@ -1588,7 +1588,8 @@ Options parse_args(int argc, char** argv) {
         o.gdn_scan != engine::kernels::GdnScan::kSeq && (o.mtp_accept || o.mtp_midsplit)) {
         // The route switch moves the route; it does not move the mid-round CHECKPOINT's requirement, which is
         // that the recurrence walk one token-step per launch so "the state after row 0" exists at an address
-        // a restore can read — the same reason `--mtp-accept` pins `--gdn-loop 1` above. An amortised round on
+        // a restore can read — the same reason `submit_wave_body` forces a checkpointed body to
+        // `kMtpRoundGdnSpan`. An amortised round on
         // `collapse` would restore a state the body never wrote, which is a wrong token stream rather than a
         // red comparison, so it is refused at the flag instead of being served a silently re-forced seq scan.
         // `seq` is the default, so the amortised route still moves the GEMM, which is where the cost is.
@@ -2680,11 +2681,15 @@ void print_usage(FILE* out) {
                  " the 1.72 us"
                  " measured submission floor (§11) — the form every pre-D54 number in this repo was"
                  " taken with, and the one an accept round REQUIRES (its mid-round checkpoint is the"
-                 " state a per-token walk leaves after each row). Since `--mtp-accept` is on by"
-                 " default, an UNNAMED span resolves to 1 for such a run and the `MTP mode=` line says"
-                 " so; naming `--gdn-loop 512` alongside speculation is REFUSED, not silently"
-                 " rewritten, because the round's bits are admitted against span-1 provenance"
-                 " (`prototype/mtp_accept/DEFAULT-ON.md` states what that costs on a prefill). A span"
+                 " state a per-token walk leaves after each row). That requirement is SCOPED to the"
+                 " round's OWN bodies — `decode_step.h::kMtpRoundGdnSpan`, applied by `submit_wave_body`"
+                 " wherever the mid-round checkpoint is armed — so this flag reaches every body that is"
+                 " not a round and naming it alongside `--mtp-accept 1` is LEGAL: the run's prefill wave"
+                 " and its plain steps keep this value and the round still walks one token-step per"
+                 " launch. The `MTP mode=` line echoes both spans (`gdn_span_round=`/`gdn_span_other=`)"
+                 " because a log that prints one span while two ran is a log that cannot be read"
+                 " (`prototype/mtp_accept/DEFAULT-ON.md` §7 records the whole-run pin this replaced and"
+                 " what that pin cost). A span"
                  " below the body size means what it says (ceil(rows/span) launches, span-invariance"
                  " proved on CPU), and a ONE-ROW body takes the per-token loop whatever this says, so"
                  " no decode bit moves under it. Inert under `--gdn-scan collapse`, which already"
@@ -2823,8 +2828,9 @@ void print_usage(FILE* out) {
                  " counts only) beside `prototype/mtp_accept/DEFAULT-ON.md` (what the flip moved). `0`"
                  " means the side state is never allocated and the generation loop is"
                  " the one that shipped without this flag — the inertness claim is a byte-compare, not a"
-                 " band. Every run prints `MTP mode=accept k=N gdn_span=S forced_by=F` or `MTP mode=off"
-                 " draft=D gdn_span=S` for exactly that reason: with the default on, silence would no"
+                 " band. Every run prints `MTP mode=accept k=N draft=D gdn_span_round=R"
+                 " gdn_span_other=S forced_by=F` or `MTP mode=off draft=D gdn_span=S` for exactly that"
+                 " reason: with the default on, silence would no"
                  " longer mean \"off\", and `sampled.txt` versus `emitted.txt` is a different object."
                  " On, one round replaces one step: the round feeds the funded `k+1`-row body"
                  " [cur at p, candidate at p+1, ...], prices all its norm rows in ONE pass over the tied"
@@ -2833,9 +2839,11 @@ void print_usage(FILE* out) {
                  " its accepted candidates plus the verifier's next token and restores nothing; a"
                  " reject emits the verifier's token and restores the body's per-layer mid-round"
                  " checkpoint (20,201,472 B per slot, in bulk copies), which is the state a reject needs"
-                 " and is why the recurrence is pinned to --gdn-loop 1 (§4b of prototype/mtp_accept/"
-                 " ACCEPT-BUILD.md): an unnamed --gdn-loop resolves to 1 for such a run and says so on"
-                 " the mode line, a NAMED one is refused rather than silently rewritten. Refused with"
+                 " and is why the recurrence walks ONE token-step per launch for the round's body (§4b of"
+                 " prototype/mtp_accept/ACCEPT-BUILD.md). That forcing is scoped to the round's bodies and"
+                 " to nothing else, so `--gdn-loop` keeps its own value for the prefill wave and the plain"
+                 " steps and any span may be named alongside this flag; the mode line says which spans ran."
+                 " Refused with"
                  " --time-stages/--time-waves, --replay/--feed, --session,"
                  " --sizes-only and --mtp-verify, because a round is not a step and those flags name a"
                  " per-step object it does not own; and it needs the draft block, since the candidate must"
@@ -3781,15 +3789,20 @@ int main(int argc, char** argv) {
         // WHICH MTP PATH RAN, on its own line, in EVERY run — including the ones where speculation is off.
         // Before the default moved, a log's silence meant "off" and that was enough; now a log that prints
         // nothing could be either path, and `sampled.txt` versus `emitted.txt` is the difference between a
-        // per-step object and a per-round one, so a reader must never infer it. `forced_by` names who chose
-        // the GDN span: the accept default (which is the penalty note above) or the caller. Field names are
-        // `mode=`/`k=`/`gdn_span=` and the values are the run's own, read from the same `Options` the
-        // launchers were built from — not from the flags, so a flag that silently did not take cannot report
-        // a path it did not run (`AGENTS.md`: assert the canary inside the window).
+        // per-step object and a per-round one, so a reader must never infer it. The two SPAN fields say how
+        // many token-steps one `gdn_rec` launch carried, split the way the engine now splits them: `round` is
+        // the body the checkpoint armed (`decode_step.h::kMtpRoundGdnSpan`, the same constant the launcher
+        // branches on, so the echo cannot disagree with the launch), `other` is every body that is not a
+        // round — the prefill wave and the plain steps — and it is the caller's span. Printing one span on a
+        // run that ran two is the ambiguity this line exists to remove. `forced_by=` says who chose `other`:
+        // `--gdn-loop` when it was named, `default` when it was not (nobody forces it anymore). Values are
+        // the run's own, read from the same `Options` the launchers were built from, not from the flags, so
+        // a flag that silently did not take cannot report a path it did not run (`AGENTS.md`: assert the
+        // canary inside the window).
         if (o.mtp_accept) {
-            std::printf("MTP mode=accept k=%d draft=%d gdn_span=%d forced_by=%s\n",
-                        o.mtp_k, o.mtp_draft, o.gdn_loop,
-                        o.mtp_span_forced ? "--mtp-accept-default" : "--gdn-loop");
+            std::printf("MTP mode=accept k=%d draft=%d gdn_span_round=%d gdn_span_other=%d forced_by=%s\n",
+                        o.mtp_k, o.mtp_draft, engine::kMtpRoundGdnSpan, o.gdn_loop,
+                        o.gdn_loop_given ? "--gdn-loop" : "default");
         } else {
             std::printf("MTP mode=off draft=%d gdn_span=%d\n", o.mtp_draft, o.gdn_loop);
         }
