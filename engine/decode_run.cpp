@@ -1054,7 +1054,10 @@ Options parse_args(int argc, char** argv) {
     // +72 % at 4,032 against `--mtp-accept 0 --gdn-loop 512` (`engine/performance-status.md` §7, main-agent
     // measured). Decode is unaffected by construction either way:
     // `kernels.h:resolve_gdn_loop(want, rows)` collapses to 1 for a one-row body whatever `want` says. The
-    // span that RUNS is echoed on the `MTP mode=` line as `gdn_span_round=`/`gdn_span_other=`, because a log
+    // `gdn_rec` family pair behind that regression — the same body at span 1 and at span 512 at 4,096
+    // lanes — is carried in `prototype/mtp_accept/DEFAULT-ON.md` §3 and priced in
+    // `engine/performance-status.md` §7; this file used to restate it and no longer does, so a timing figure
+    // in a comment cannot outlive the ledger row that owns it. The span that RUNS is echoed on the `MTP mode=` line as `gdn_span_round=`/`gdn_span_other=`, because a log
     // that prints one span when two ran is a log that cannot be read (`AGENTS.md`: a route is read back off
     // the run, never inferred from a flag).
     //
