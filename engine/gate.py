@@ -6190,7 +6190,7 @@ def mtp_round_read_run(log: str, out_dir: Path) -> dict:
         if m:
             seed, seed_line = int(m.group(1)), line.strip()
     rec = {"rc": None, "ran": False, "seed": seed, "seed_line": seed_line,
-           "geom": {}, "geom_lines": 0, "accept_echo": {},
+           "geom": {}, "geom_lines": 0, "accept_echo": {}, "mode": {},
            "stat": {}, "stat_lines": 0, "wall": {}, "wall_lines": 0, "no_rate": False,
            "rounds": [], "emitted": [], "emitted_file": None}
     for line in log.splitlines():
@@ -6202,6 +6202,11 @@ def mtp_round_read_run(log: str, out_dir: Path) -> dict:
         elif line.startswith("MTPSTAT "):
             rec["stat_lines"] += 1
             rec["stat"] = _mtp_kv(line)
+        elif line.startswith("MTP mode="):
+            # Which path ran, and — since the span requirement was scoped to the round — WHICH SPAN ran.
+            # Parsed here because the only witness that the round's body took span 1 while the prefill wave
+            # took the caller's is the engine's own line; the argv proves the ask, not the launch.
+            rec["mode"] = _mtp_kv(line)
         elif line.startswith("DECWALL "):
             rec["wall_lines"] += 1
             rec["wall"] = _mtp_kv(line)
@@ -6556,11 +6561,15 @@ def mtp_round_run_case(name: str, man: dict, args, work: Path, *,
                                                    " comma fields"})
         return rec
     cmd = [args.binary, "--model", args.model, "--ids-file", str(ids_file),
-           # A REQUIRED pin, not a preference: the mid-round checkpoint is a one-token-step recurrence's
-           # end state (`engine/mtp_accept.h`, prototype/mtp_accept/ACCEPT-BUILD.md §4b), so the accept
-           # loop refuses any other span. It belongs on the case for the same reason a required flag
-           # belongs on both arms of an A/B.
-           "--gdn-loop", "1",
+           # The recurrence SPAN the caller asked for, which since 2026-10-25 is NOT what the round runs.
+           # The round's own bodies are forced to one token-step per launch by `submit_wave_body` (the
+           # mid-round checkpoint is a per-token recurrence's end state), so this flag now only moves the
+           # prefill wave and the plain steps — and `--gdn-loop`'s default here is 512, the engine's own
+           # default, so the cases below admit the run the engine ships rather than one it does not
+           # (`AGENTS.md`: a gate's default and the engine's default move in one commit, or the gate
+           # silently judges a configuration nobody runs). `--gdn-loop 1` on this file's command line
+           # reproduces the whole-run-span record every pre-scoping number was taken with.
+           "--gdn-loop", str(args.gdn_loop),
            # §07.5 stays armed out of the comparison: a pinned continuation may legitimately contain the
            # stop id, and a run that ended on it would shorten the stream for a reason that has nothing
            # to do with the round. Same choice `prototype/mtp_accept/m3_loop_rate.py` makes, for the
@@ -6608,6 +6617,7 @@ def mtp_round_checks(args, work: Path) -> None:
           f" (gate.py:MTP_ENGINE_DEFAULT_K = {MTP_ENGINE_DEFAULT_K}, the value the shipped"
           " `--mtp-accept` default runs at since prototype/mtp_accept/DEFAULT-ON.md).")
     cases, excluded, n_dirs = mtp_round_population()
+    echoed = {"saw": []}
     for name, why in excluded:
         print(f"  [excluded] {name}: {why}")
     print(f"  population: {n_dirs} directories under data/refs/, {len(excluded)} named and excluded"
@@ -6631,6 +6641,11 @@ def mtp_round_checks(args, work: Path) -> None:
         st = rec.get("stat") or {}
         totals["rounds"] += _mtp_num(st, "rounds") or 0
         totals["tokens"] += len(rec.get("emitted") or [])
+        # The engine's own statement of which GDN SPANS ran, collected here so the population-level
+        # assertion below can name the cases that disagreed rather than print a bare red row.
+        echoed["saw"].append((name, (rec.get("mode") or {}).get("gdn_span_round"),
+                              (rec.get("mode") or {}).get("gdn_span_other"),
+                              (rec.get("mode") or {}).get("forced_by")))
         if mtp_round_depth(rec["pin"]) > 0:
             totals["adjudicable"] += 1
         print(f"  $ {' '.join(rec['argv'])}")
@@ -6641,6 +6656,28 @@ def mtp_round_checks(args, work: Path) -> None:
             forks.append(f"{name} at stream index {rec['admitted_at']}")
         for nm, ok, detail in rows:
             check(ok, nm, detail)
+    # THE SPAN CANARY, and it is read off the runs rather than asserted from the flags, for the standing
+    # reason that a flag reaching the process is not the claim that the process honoured it (`AGENTS.md`:
+    # a stale binary agrees with itself; assert the canary inside the window). Two spans are in play since
+    # the requirement was scoped to the round: the round's body walks ONE token-step per launch because its
+    # mid-round checkpoint exists at an address only then, and every other body in the same run keeps the
+    # span this gate was invoked with. `engine/gate.py`'s `--gdn-loop` default and `decode_run`'s are the
+    # same number, so on a default invocation this asserts `gdn_span_round=1 gdn_span_other=512` on every
+    # case — i.e. that the round is forced and the prefill is not, which is the whole of option C and the
+    # one thing a lossless stream comparison cannot see on its own.
+    want_round, want_other = 1, args.gdn_loop
+    off = [f"{n}: gdn_span_round={r} gdn_span_other={o} forced_by={f}"
+           for n, r, o, f in echoed["saw"]
+           if (r, o) != (str(want_round), str(want_other))]
+    check(bool(echoed["saw"]) and not off,
+          f"every case echoed the SCOPED span rule (gdn_span_round={want_round},"
+          f" gdn_span_other={want_other})",
+          "no case ran, so nothing was echoed" if not echoed["saw"] else
+          (f"{len(echoed['saw'])} cases echoed it" if not off else
+           f"{len(off)} of {len(echoed['saw'])} echoed something else: " + "; ".join(off[:4])) +
+          ". A run whose two spans print alike is a binary where the round forcing is missing or the"
+          " whole-run pin came back; either way the span the round ran is unknown and no count from this"
+          " section means what it says")
     # THE DEFAULT-K WITNESS. Every case above NAMED its depth, which is right for adjudicating a depth but
     # blind to the one thing the default flip changed: what the engine runs when nothing is named. So one
     # more case, on the first fixture that carries a pinnable stream, with `--mtp-k` LEFT OFF the command
