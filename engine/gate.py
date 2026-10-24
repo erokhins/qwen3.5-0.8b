@@ -124,6 +124,27 @@ Sections, in the order the task fixed them plus the ones the deep fixture needed
       verdict over whatever survived, which is what §17's shipped run did (`1023 missing` next to a green
       `every judged row is inside the floors` over the one row that existed).
 
+  (m) THE MTP ACCEPT ROUND — the gate `prototype/mtp_accept/K2-RESULT.md` §7 records as missing ("no gate
+      in `engine/gate.py` runs a round at all"), which is the stated blocker on making MTP the default and
+      the same gap that let a route-dependent `emitted.txt` difference survive a session. It runs the
+      shipping `--mtp-accept` loop over a population DERIVED from `data/refs/` (every directory with a
+      `manifest.json`, minus the named carried records) and asserts `cases == |population|`; losslessness
+      against the PINNED `greedy_continuation` (§10.5's alignment, spelled out: the judged stream is the
+      run's own SEED — the prefill row's sample, which the first body feeds instead of emitting — plus the
+      emitted tokens, and `stream[j] == greedy[j]` so `emitted[i] == greedy[i+1]`; depth capped at
+      `FREE_RUN_BOUND` because a free run cannot be pinned past A-18 and `--replay` is refused
+      by the loop); the per-k tally identity (`emitted == candidates + rounds`, `rounds == accepted +
+      rejected`, one `ACCEPT` line per declared round) and `MTPSTAT`/`DECWALL` counter agreement, with
+      `NO-RATE` a FAIL rather than a skip; and that ROUNDS ACTUALLY RAN (`rounds > 0` AND the `ACCEPT` line
+      count equal to it, so the section cannot print PASS over zero records). It covers the `hand` route
+      only and says so in its own output — `amortised` is not output-neutral (`CORPUS-WALL.md`). It takes
+      `--mtp-k` (default 1, the engine's default is not moved here) and derives every geometry assertion
+      from the formulas (`rows == k+1`, `status_words == 3*rows-2 == status_bytes/4`), so admitting a
+      swept k needs no edit. No milliseconds anywhere. `--selftest` proves its teeth in process
+      (`selftest_mtp_round`): a corrupted verdict word reddens exactly the case it touches, the must-not-
+      catch set is derived from the verdict layout, and the losslessness predicate is witnessed by an
+      always-pass stub that must change at least one case's colour.
+
 SCOPE — `--scope full` (the default) counts every check that fails. `--scope form` is the attention-FORM
 A/B of §16/§17: section (h)'s wave-width OUTPUT comparisons still run and still print, as
 `[DEFERRED-PASS]`/`[DEFERRED-FAIL]`, and every one of them is recorded in `wave_carry_deferred.json`
@@ -5977,6 +5998,904 @@ def run_batched_ab(args, prompt_ids: list, n_decode: int, greedy: list, replay: 
     return out
 
 
+# ---- (m) the MTP accept round — the gate `prototype/mtp_accept/K2-RESULT.md` §7 says is missing ----
+#
+# WHY. Every section above judges a plain greedy run; until this one no gate in this file had ever run a
+# round. That gap is recorded twice as a cause rather than as a to-do: `prototype/mtp_accept/ROUND-TAX.md`
+# ("Owed": `engine/gate.py` still runs no round at all) and `prototype/mtp_accept/K2-RESULT.md` §7, which
+# names it as what stands between the accept loop and a default flip — the same gap that let a
+# route-dependent `emitted.txt` difference survive a whole session. This section runs the loop and judges
+# three things a `--dry-run` cannot fake: the emitted stream against the PIN, the counters against each
+# other, and the geometry echo against the formulas that derive it. No milliseconds anywhere: every
+# predicate below is a token id, an integer counter, or an echoed geometry field, so it is a correctness
+# gate a worker may run (`AGENTS.md`: short, correctness-only, device-gate rules).
+#
+# WHY THE REFERENCE IS THE PIN AND NOT A FLAG-OFF RUN OF THIS BINARY. `prototype/mtp_accept/m3_loop_rate.py`
+# compares the accept arm's stream against a flag-off run of the same engine, which is the right rate
+# harness and the wrong adjudicator for THIS question: a defect both arms share is invisible to it, which
+# is `AGENTS.md`'s "a check whose reference side is derived from the thing under test cannot adjudicate
+# it". The pinned `greedy_continuation` is the only independent stream available, so that is what is
+# compared, per §10.5 — never a re-derivation.
+#
+# THE ALIGNMENT, which is one step down from the obvious guess. An accept run FEEDS the prompt's own
+# sample rather than emitting it (the first body is a plain step: the draft block needs a decoded step to
+# draft from), so `emitted.txt[i]` is `greedy_continuation[i + 1]`, exactly as decode step *i* is
+# (`AGENTS.md`: state which alignment a comparison used, always). Proved on device rather than assumed:
+# chunk64b's plain path sampled `1596 2047 279 3626 …` and its accept run emitted `2047 279 3626 …` — the
+# same stream with its head removed — and the head is read off the run's own
+# `STEP kind=prefill index=<last> … sampled=` line. So the judged stream is [seed] + emitted against
+# `greedy_continuation[0:]`, which makes a fork at the seed visible and names its owner: stream index 0 is
+# §06.5's y0 row, upstream of any round. Comparing `emitted` against `greedy[1:]` instead hid that, and
+# chunk64b's first token then looked like a defect the round had caused (GATE-H.md).
+#
+# THE DEPTH, which is the gate's own bound, not a taste. A FREE run can only be pinned to
+# `FREE_RUN_BOUND` tokens — past it A-18 measures two legal bf16 continuations agreeing 0.8776 of the
+# way, which is why this file switches to `--replay` deeper than that, and `--mtp-accept` refuses
+# `--replay`. A fixture whose pins carry no generation step (`p8`, `p64`, `p300` — their
+# `greedy_continuation` is the single token the prompt's last row samples) has no pinnable stream at all,
+# and says so on its own line rather than passing a comparison it cannot make.
+#
+# THE ROUTE, AND THE ONE DELIBERATELY NOT COVERED. `--mtp-route hand` only — the shipping route, asserted
+# off the run's own `MTPSTAT route=` echo rather than assumed from the flag. `amortised` is excluded and
+# the section PRINTS that exclusion, because `prototype/mtp_accept/CORPUS-WALL.md` records it as not
+# output-neutral (`prototype/mtp_accept/ROUTE-FLAG.md` prices the same geometry at 1.09-1.13 of a step
+# against the forced route's ~2, and the point is that the two do not emit the same stream). A reader must
+# not mistake a green section (m) for coverage of every route the flag can name.
+
+MTP_ROUND_K_DEFAULT = 1
+MTP_ROUND_ROUTE_NOTE = (
+    "route coverage: `hand` ONLY (asserted off each run's `MTPSTAT route=` echo). `amortised` is not"
+    " covered here and is not output-neutral, so it could not be judged by this section's stream"
+    " predicate at all — see prototype/mtp_accept/CORPUS-WALL.md and prototype/mtp_accept/ROUTE-FLAG.md."
+    " A green section (m) is coverage of the shipping path, not of the flag.")
+
+
+def mtp_stream_matches(got: list[int], want: list[int]) -> bool:
+    """The losslessness predicate, as one named function so the selftest can stub it and prove it bites.
+
+    Equality of two token-id lists over the pinnable depth. It is a function rather than an inline `==`
+    for exactly one reason: `selftest_mtp_round()` replaces it with an always-true stub and requires at
+    least one case to change colour, because a numerics predicate that cannot fail is decoration
+    (`AGENTS.md`: `gate.py`'s prefill-row lesson — witness a check by stubbing it to always pass).
+    """
+    return list(got) == list(want)
+
+
+def mtp_round_population() -> tuple[list[tuple[str, dict]], list[tuple[str, str]], int]:
+    """The fixtures this section runs over, DERIVED from the directory, never typed.
+
+    `AGENTS.md`'s admission trap: three gate claims this session asserted "18/18 — nine canonical
+    fixtures × both routes" when seven of the nine names did not exist, because the list was written from
+    memory. So the population is read out of `data/refs/` here, and every directory that is NOT in it is
+    named with a reason in the second return value — the `CARRIED_NOT_PINNED` rule (a carried file is
+    named and skipped, never silently ignored). The caller asserts `cases == |population|`.
+    """
+    refs = ROOT / "data" / "refs"
+    cases: list[tuple[str, dict]] = []
+    excluded: list[tuple[str, str]] = []
+    dirs = sorted(p for p in refs.iterdir() if p.is_dir())
+    for d in dirs:
+        if not (d / "manifest.json").exists():
+            excluded.append((d.name, "no manifest.json — not a fixture this gate can read"))
+            continue
+        if d.name in NOT_A_PIN_FIXTURE:
+            excluded.append((d.name, "carried record, not a pin set (NOT_A_PIN_FIXTURE)"))
+            continue
+        man = json.loads((d / "manifest.json").read_text())
+        ids = (man.get("sources") or [{}])[0].get("ids")
+        greedy = man.get("greedy_continuation")
+        if not ids or not isinstance(greedy, list) or not greedy:
+            excluded.append((d.name, "manifest carries no sources[0].ids / greedy_continuation,"
+                                     " so there is no prompt to feed and no stream to compare"))
+            continue
+        cases.append((d.name, man))
+    return cases, excluded, len(dirs)
+
+
+def _mtp_kv(line: str) -> dict:
+    """`key=value` pairs with ANY non-space value. A numeric-only pattern silently drops `census=ok` and
+    `ended=context_exhausted`, and a harness that reads a missing field as a refusal then invents one
+    (`prototype/mtp_accept/m3_loop_rate.py`'s `KV`, and `AGENTS.md`'s empty-parse trap)."""
+    return dict(re.findall(r"(\w+)=([^\s]+)", line))
+
+
+def _mtp_num(fields: dict, key: str):
+    try:
+        return int(fields[key])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def mtp_round_depth(greedy: list[int]) -> int:
+    """How many emitted tokens THIS fixture's pins can adjudicate, and therefore how many to ask for."""
+    return max(0, min(len(greedy) - 1, FREE_RUN_BOUND))
+
+
+def mtp_round_read_run(log: str, out_dir: Path) -> dict:
+    """Everything one accept run said, as one record — the parse half, kept apart from the judging half
+    so the selftest can hand `mtp_round_verdicts` a record it built and injected into."""
+    # The SEED: the token the first round consumes but never emits, which is the prefill row's own sample.
+    # `decode_run.cpp` prints one `STEP kind=prefill index=… sampled=…` line per prefill row and only the
+    # last row has a sample, so the LAST such line is the seed. The accept stream needs it because the
+    # round's first body CONSUMES that token rather than emitting it — the emitted file is the plain greedy
+    # stream with its first element removed, proven on device: chunk64b's plain path sampled
+    # `1596 2047 279 3626 …` and its accept run emitted `2047 279 3626 …`, the same stream minus its head
+    # (`prototype/mtp_accept/GATE-H.md` §"the alignment"). A stream comparison that ignores the seed is off
+    # by one on every fixture, and it is what made chunk64b look like a round defect at index 0.
+    seed, seed_line = None, ""
+    for line in log.splitlines():
+        m = re.search(r"STEP kind=prefill index=\d+\s+input=\d+\s+sampled=(\d+)", line)
+        if m:
+            seed, seed_line = int(m.group(1)), line.strip()
+    rec = {"rc": None, "ran": False, "seed": seed, "seed_line": seed_line,
+           "geom": {}, "geom_lines": 0, "accept_echo": {},
+           "stat": {}, "stat_lines": 0, "wall": {}, "wall_lines": 0, "no_rate": False,
+           "rounds": [], "emitted": [], "emitted_file": None}
+    for line in log.splitlines():
+        if line.startswith("MTPGEOM "):
+            rec["geom_lines"] += 1
+            rec["geom"] = _mtp_kv(line)
+        elif line.startswith("MTPACCEPT "):
+            rec["accept_echo"] = _mtp_kv(line)
+        elif line.startswith("MTPSTAT "):
+            rec["stat_lines"] += 1
+            rec["stat"] = _mtp_kv(line)
+        elif line.startswith("DECWALL "):
+            rec["wall_lines"] += 1
+            rec["wall"] = _mtp_kv(line)
+            rec["no_rate"] = "NO-RATE" in line
+        elif line.startswith("ACCEPT round="):
+            rec["rounds"].append(_mtp_kv(line))
+    path = out_dir / "emitted.txt"
+    rec["emitted_file"] = str(path)
+    if path.exists():
+        rec["emitted"] = [int(ln) for ln in path.read_text().splitlines()
+                          if ln.strip() and not ln.startswith("#")]
+    return rec
+
+
+def pin_admission(step: int, pin_vec, tie, token: int) -> tuple[bool, str]:
+    """May `token` stand where the PIN said something else? A function of the pinned row, nothing else.
+
+    The same three admissions sections (a)/(b) apply, in the same order, reused rather than re-spelled:
+    D-1's proved tie (`tie`, from `pin_tie`: the pin has no winner, and the run picked one of the ids it
+    tied at), D-2's quantization slack (`step_slack`: the pin's own top1/top2 margin is under the element
+    error this step's own band licenses, and the run's id must be one of the pin's own leaders), and — on
+    a library route only, exactly as section (a) arms it — the cascade room rule
+    (`reference_flip_admissible`: the REFERENCE's own room, in BF16 ULP, under
+    `CASCADE_BAND["flip_room_max_ulp"]`, which is where A-18's chaos floor lives).
+
+    Why this exists at all: the accept loop has no logits of its own to compare against (an accept run writes
+    `emitted.txt` and per-row argmax words), so the ONLY side a divergence can be adjudicated against is the
+    pin. Without an admission the section is redder than the gate it belongs to. The first full-population
+    device pass took exactly two off-pin tokens over 18 fixtures, and each is a row the band already excuses:
+    `chunk64b` at stream index 0, where §06.5's y0 pin TIES over ids [760, 1596] at 19.875 (one payload,
+    0x419f) and the engine's own first token is 1596 — D-1's proved tie; and `prefix24dec8` at stream index 3
+    (decode step 2), whose pin leads 23010 over 12263 by 0.0625 = 1.0 BF16 ULP against a licensed element
+    error of 0.1377, with the engine's id one of the two inside that margin — D-2's quantization slack. A gate
+    that reddens on a token the bands excuse is a gate nobody runs twice, and `--selftest` proves both colours
+    on synthetic pin rows, so neither colour depends on which fixture the selftest happens to be pointed at.
+
+    Two honest differences from sections (a)/(b), both in the NARROWER direction:
+      * those rules also PRINT the engine's own vector at the row; this one cannot. What each rule
+        ADJUDICATES is a statement about the pin, so the verdict is unchanged — only the engine's gap beside
+        it is missing, and every line that needs it says so.
+      * the room rule's precondition that the flip be attributable to an engine row is satisfied by the
+        geometry instead of a dump: every emitted token is some body row's argmax — the verifier's own
+        prediction, or a candidate the verdict proved equal to its row's argmax (`engine/mtp_accept.h`'s
+        accept rule). An emitted token cannot be anything else, which is also why a divergence here is a
+        numerics statement and not a bookkeeping one.
+    """
+    if tie is not None:
+        if token in tie["ids"]:
+            return True, (f"D-1's proved tie: the pin TIES over ids {tie['ids']} at {tie['value']}"
+                          f" (payload 0x{tie['payload']:04x}) and the run emitted {token}, one of them")
+        return False, (f"the pin ties over {tie['ids']} and the run emitted {token}, which is not one of"
+                       " them — the tie policy admits the ids the pin tied at, not any id")
+    try:
+        sl = step_slack(step, pin_vec)
+    except Exception as exc:
+        return False, f"pin step {step} unreadable by the slack reader: {exc}"
+    if sl is not None and sl["margin"] < sl["bound"]:
+        if token in sl["leaders"]:
+            return True, (f"D-2's quantization slack: pin top1 {sl['top1']} over {sl['top2']} by"
+                          f" {sl['margin']:.6g} = {sl['ulps']:.1f} BF16 ULP, under this step's licensed"
+                          f" element error {sl['bound']:.6g} ({sl['cap_src']}), and the run's {token} is"
+                          f" one of the pin's leaders {sl['leaders'][:6]}")
+        return False, (f"the pin's margin {sl['margin']:.6g} is under the licensed element error"
+                       f" {sl['bound']:.6g}, but the run emitted {token}, which is not one of the pinned"
+                       f" ids inside that margin {sl['leaders'][:6]}")
+    if route_is_library() and reference_flip_admissible(pin_vec):
+        pid, pval, pgap = top2(pin_vec)
+        _pid, p_ulp, _pg, _pv = reference_room_ulp(pin_vec)
+        return True, (f"the cascade room rule: the pin's own room here is {pgap:.6g} at top-1 {pid}"
+                      f" ({pval:.6g}) = {p_ulp:.4g} BF16 ULP, under"
+                      f" {CASCADE_BAND['flip_room_max_ulp']:.2f} ULP ({CASCADE_RULE}), so the reference"
+                      " did not decide this token. The engine's own gap is not printed: an accept run"
+                      " writes no logits row, and this file does not pretend to have one")
+    if sl is None:
+        return False, ("the pin has no unique winner this rule can price (or no policed meanrel band at"
+                       " this step), and the tie policy above already had its turn here")
+    _pid, p_ulp, pgap, pval = reference_room_ulp(pin_vec)
+    return False, (f"the pin DECIDED this token: margin {sl['margin']:.6g} = {sl['ulps']:.1f} BF16 ULP"
+                   f" is at or over this step's licensed element error {sl['bound']:.6g}"
+                   f" ({sl['cap_src']}); the pin's room is {p_ulp:.4g} BF16 ULP"
+                   + (f", at or over {CASCADE_BAND['flip_room_max_ulp']:.2f}" if route_is_library()
+                      else " — and the room rule is not armed on a non-library route")
+                   + f" (top-1 {top2(pin_vec)[0]} at {pval:.6g}, gap {pgap:.6g})")
+
+
+def mtp_round_admission(step: int, token: int) -> tuple[bool, str]:
+    """The pin-only admission for step `step`, reading that step's pinned row. See `pin_admission`."""
+    path = REFS / logits_pin(step)
+    if not path.exists():
+        return False, f"no pin file for step {step} ({path.name}), so nothing can be said about that row"
+    try:
+        tie = pin_tie(step)
+    except Exception as exc:                        # a payload the tie reader cannot widen
+        return False, f"pin {path.name} unreadable by the tie predicate: {exc}"
+    try:
+        pin_vec = load_pin(logits_pin(step))
+    except Exception as exc:
+        return False, f"pin {path.name} unreadable: {exc}"
+    return pin_admission(step, pin_vec, tie, token)
+
+
+def mtp_round_verdicts(rec: dict) -> list[tuple[str, bool, str]]:
+    """Every assertion about one accept run, as data: `(name, ok, detail)` triples.
+
+    A function returning rows rather than calling `check()` directly, because the selftest has to aim
+    injections at a record and then ask WHICH rows went red — locality is the property under test (a
+    negative every check catches proves nothing, `prototype/mlp_gemv/results.md`).
+    """
+    fx = rec["fixture"]
+    k = rec["k"]
+    rows: list[tuple[str, bool, str]] = []
+
+    def row(name: str, ok: bool, detail: object = "") -> None:
+        rows.append((f"{fx}: {name}", bool(ok), detail if isinstance(detail, str) else repr(detail)))
+
+    def both(got, want, name, note=""):
+        ok = got is not None and want is not None and int(got) == int(want)
+        row(name, ok, f"{got} vs {want}" + (f" — {note}" if note else ""))
+        return ok
+
+    if rec.get("rc") != 0:
+        row("the accept run exits 0", False,
+            (f"rc={rec.get('rc')}; the engine refused this geometry or died — a refusal is a red gate,"
+             " not a skip, because `--mtp-k` a build does not admit must not read as coverage"))
+        return rows
+    g, ae, st, w = rec["geom"], rec["accept_echo"], rec["stat"], rec["wall"]
+
+    # -- the run ran at all: one of each summary line, and the flags reached the engine ----------------
+    row("exactly one MTPGEOM line", rec["geom_lines"] == 1, f"{rec['geom_lines']}")
+    row("exactly one MTPSTAT line", rec["stat_lines"] == 1,
+        f"{rec['stat_lines']} — a run with no accept tally means the flag did not reach the engine, so"
+        " nothing below this is a result")
+    row("exactly one DECWALL line", rec["wall_lines"] == 1,
+        f"{rec['wall_lines']} — a run that printed no window never reached the generation loop")
+    if rec["geom_lines"] != 1 or rec["stat_lines"] != 1 or rec["wall_lines"] != 1:
+        return rows
+
+    # -- the geometry echo, against the formulas that derive it (`engine/mtp_accept.h`) --------------
+    rows_geom = _mtp_num(g, "rows")
+    both(g.get("k"), k, "MTPGEOM echoes the k that was asked for")
+    both(rows_geom, k + 1, "MTPGEOM rows == rows_of_k(k) == k + 1")
+    if rows_geom is None:
+        return rows
+    both(_mtp_num(g, "mid_slots"), rows_geom - 1,
+         "MTPGEOM mid_slots == kMidSlotsFor(rows) == rows - 1",
+         "one mid-checkpoint slot per row except the last")
+    both(_mtp_num(g, "status_words"), 3 * rows_geom - 2,
+         "MTPGEOM status_words == kVerdictWordsFor(rows) == 3*rows - 2")
+    both(_mtp_num(g, "candidates_per_round"), k, "MTPGEOM candidates_per_round == k")
+    both(_mtp_num(ae, "rows"), rows_geom, "MTPACCEPT rows agrees with MTPGEOM rows")
+    both(_mtp_num(ae, "status_bytes"), 4 * (3 * rows_geom - 2),
+         "MTPACCEPT status_bytes == 4 bytes x kVerdictWordsFor(rows)",
+         "the two lines state one fact twice, so they have to agree")
+
+    # -- the shipping route, read back off the run rather than assumed from the flag -----------------
+    for field, want in (("route", "hand"), ("gemm", "hand"), ("gdn_scan", "seq")):
+        row(f"MTPSTAT {field} is the forced shipping value `{want}`",
+            st.get(field) == want,
+            f"echoed {st.get(field)!r} — a route that silently failed to take would otherwise be"
+            " measured as if it had")
+
+    # -- ROUNDS ACTUALLY RAN. The structural half: a driver that parsed zero records cannot print PASS.
+    n_lines = len(rec["rounds"])
+    stat_rounds = _mtp_num(st, "rounds")
+    row("rounds actually ran: MTPSTAT rounds > 0", (stat_rounds or 0) > 0, f"rounds={stat_rounds}")
+    row("rounds actually ran: the ACCEPT line count > 0", n_lines > 0,
+        f"{n_lines} ACCEPT lines — a tally over zero records is not a pass")
+    both(n_lines, stat_rounds, "one ACCEPT line per declared round",
+         "the witness for `rounds=` comes from the transcript, not from the same counter")
+
+    # -- the per-k tally identity, folded out of the round lines themselves ---------------------------
+    per_emit = [_mtp_num(r, "emitted") for r in rec["rounds"]]
+    accept_bits = [_mtp_num(r, "accept") for r in rec["rounds"]]
+    n_acc = [_mtp_num(r, "n_accepted") if "n_accepted" in r else _mtp_num(r, "accept")
+             for r in rec["rounds"]]
+    bad_field = [i for i, v in enumerate(per_emit + accept_bits + n_acc) if v is None]
+    row("every ACCEPT line carries emitted=, accept= and the accepted-candidate count",
+        not bad_field,
+        f"missing on round-lines {bad_field[:4]}{'…' if len(bad_field) > 4 else ''}"
+        if bad_field else f"{n_lines} lines parsed")
+    if bad_field:
+        return rows
+    per_emit = [int(v) for v in per_emit]
+    accept_bits = [int(v) for v in accept_bits]
+    n_acc = [int(v) for v in n_acc]
+
+    bad = [i for i, r in enumerate(rec["rounds"])
+           if per_emit[i] != (n_acc[i] if "n_accepted" in r else accept_bits[i]) + 1]
+    row("each round emits n_accepted + 1 tokens (the accepted prefix, then the verifier's own)",
+        not bad, f"rounds {bad[:6]} emit {sum(per_emit[i] for i in bad)} over"
+                 f" {sum(n_acc[i] for i in bad) + len(bad)} expected"
+                 if bad else f"{n_lines} rounds, {sum(per_emit)} tokens")
+    both(sum(per_emit), _mtp_num(st, "emitted"),
+         "MTPSTAT emitted == the sum of the round lines' emitted fields",
+         "rounds only: plain steps' tokens belong to DECWALL, not to this tally")
+    if k == 1:
+        both(sum(accept_bits), _mtp_num(st, "accepted"),
+             "k=1 identity: the accept-bit count == MTPSTAT accepted")
+        both(_mtp_num(st, "emitted"),
+             (_mtp_num(st, "accepted") or 0) * 2 + (_mtp_num(st, "rejected") or 0),
+             "k=1 identity: emitted == 2*accepted + rejected")
+    else:
+        both(sum(n_acc), _mtp_num(st, "candidates_accepted"),
+             f"k={k} identity: the round lines' accepted candidates == MTPSTAT candidates_accepted")
+        both(_mtp_num(st, "emitted"),
+             (_mtp_num(st, "candidates_accepted") or 0) + (stat_rounds or 0),
+             f"k={k} identity: emitted == candidates_accepted + rounds")
+        both(sum(accept_bits), _mtp_num(st, "depth1"),
+             f"k={k} identity: the first candidate's accept bits == MTPSTAT depth1")
+        d1 = _mtp_num(st, "depth1")
+        acc = _mtp_num(st, "accepted")
+        row("depth1 >= accepted (a full-prefix accept is also a depth-1 accept)",
+            d1 is not None and acc is not None and d1 >= acc,
+            f"depth1={d1} accepted={acc} — depth1 below accepted would mean a candidate behind a"
+            " rejected one was accepted, which the prefix rule forbids")
+        both(_mtp_num(st, "k"), k, f"MTPSTAT echoes k= at k > 1 (appended, never inserted)")
+    both(stat_rounds, (_mtp_num(st, "accepted") or 0) + (_mtp_num(st, "rejected") or 0),
+         "MTPSTAT rounds == accepted + rejected")
+
+    # -- DECWALL against MTPSTAT: two independent counters for the same run ---------------------------
+    both(_mtp_num(w, "rounds"), stat_rounds, "DECWALL rounds == MTPSTAT rounds")
+    both(_mtp_num(w, "accepted"), _mtp_num(st, "accepted"), "DECWALL accepted == MTPSTAT accepted")
+    both(_mtp_num(w, "rejected"), _mtp_num(st, "rejected"), "DECWALL rejected == MTPSTAT rejected")
+    both(_mtp_num(w, "emitted"),
+         (_mtp_num(st, "emitted") or 0) + (_mtp_num(w, "plain") or 0) - (_mtp_num(w, "suppressed") or 0),
+         "DECWALL emitted (host emit sites) == MTPSTAT emitted + plain - suppressed",
+         "one counter from the device verdicts, one from the emit sites")
+    both(_mtp_num(w, "bodies"), (stat_rounds or 0) + (_mtp_num(w, "plain") or 0),
+         "DECWALL bodies == rounds + plain")
+    row("DECWALL billed its own run (census=ok, no NO-RATE)",
+        w.get("census") == "ok" and not rec["no_rate"],
+        f"census={w.get('census')!r} note={w.get('note')!r} — a NO-RATE line is a FAIL, not a skip:"
+        " the engine printed it because its own counters disagreed")
+
+    # -- emitted.txt, an independent source for the same count ---------------------------------------
+    both(len(rec["emitted"]), _mtp_num(w, "emitted"),
+         "emitted.txt lines == DECWALL emitted",
+         f"{rec['emitted_file']}")
+
+    # -- losslessness, against the PIN (§10.5: emitted[i] is greedy_continuation[i+1]) ----------------
+    depth = rec["depth"]
+    if depth <= 0:
+        row("losslessness against the pinned greedy continuation", True,
+            "NOT ADJUDICABLE: this fixture pins no generation step (greedy_continuation is the one"
+            " token the prompt's last row samples), so there is no pinned stream to compare. Counters"
+            " and geometry are still judged above; the stream is not, and this line says which is which.")
+        return rows
+    row("the run emitted the full pinnable depth", len(rec["emitted"]) >= depth,
+        f"{len(rec['emitted'])} emitted vs depth {depth}; ended={w.get('ended', '?')}")
+    seed = rec.get("seed")
+    if seed is None:
+        row("the run echoed the token its first round CONSUMES (the prefill row's sample)", False,
+            "no `STEP kind=prefill index=… sampled=…` line carried a sample. The round's first body FEEDS"
+            " that token rather than emitting it, so without it the stream has no defensible offset, and"
+            " guessing the offset is what made chunk64b read like a round defect at emitted index 0"
+            ' (prototype/mtp_accept/GATE-H.md, "the alignment"). Fail rather than assume.')
+        return rows
+    # THE ALIGNMENT, stated because a free run compared at the wrong index of the reference looks like total
+    # divergence (AGENTS.md). The judged stream is [seed] + emitted, compared against the pinned continuation
+    # FROM ITS FIRST TOKEN: stream[j] must equal greedy_continuation[j]. That is §10.5's
+    # `argmax(decode{s}) == greedy[s+1]` with the prefill row spelled out rather than assumed, so stream
+    # index 0 belongs to §06.5's y0 pin (`PREFILL_ROW`) and stream index j >= 1 to decode step j-1 — the row
+    # the round actually stood on, not the one an alignment guessed for it. Measured on device: chunk64b's
+    # plain path sampled `1596 2047 279 3626 …` and its accept run emitted `2047 279 3626 …`, the same
+    # stream with its head removed, which is what proved the seed was the missing element.
+    stream = [seed] + list(rec["emitted"][:depth])
+    want = list(rec["pin"][:depth + 1])
+    n_cmp = min(len(stream), len(want))
+    # The DECISION goes through `mtp_stream_matches`, not an inline `==`, so the selftest's always-pass stub
+    # changes this row's colour — the only way to prove the row is a predicate and not decoration.
+    equal = mtp_stream_matches(stream[:n_cmp], want[:n_cmp])
+    div = next((j for j in range(n_cmp) if stream[j] != want[j]), None)
+    if equal or div is None:
+        row("the run's stream == the pinned greedy continuation over the pinnable depth", True,
+            f"{n_cmp}/{depth + 1} tokens equal, the seed included (§10.5: stream[j] == greedy[j], i.e."
+            " emitted[i] == greedy[i+1])")
+        return rows
+    # A divergence is JUDGED at the first position only. Past it the run is answering a different
+    # continuation than the pin was — §10.5's alignment rule, and the reason sections (a)/(b) carry an echo
+    # window at all — so the positions beyond it are reported as one fork, not counted as N defects.
+    step = PREFILL_ROW if div == 0 else div - 1
+    where = "§06.5's y0 row, the prefill's last" if div == 0 else f"decode step {step}"
+    pin_vec = rec.get("pin_vec")
+    if pin_vec is None or div == 0:
+        admissible, why = mtp_round_admission(step, stream[div])
+    else:
+        try:
+            tie = pin_tie(step)
+        except Exception:
+            tie = None
+        admissible, why = pin_admission(step, pin_vec, tie, stream[div])
+    tail = sum(1 for j in range(div, n_cmp) if stream[j] != want[j])
+    detail = (f"first divergence at stream index {div} ({where}): engine {stream[div]}, pin"
+              f" {want[div]}. seed={seed} (`{rec.get('seed_line', '')[:66]}`). {why}")
+    if admissible:
+        rec["admitted_at"] = div
+        detail += (f" — ADMITTED, so the stream is judged over the {div} position(s) before it and the"
+                   f" {n_cmp - div} from index {div} on are an echo of that fork ({tail} of them differ),"
+                   " not a batch of separate defects")
+        if div == 0:
+            detail += (" — and the fork is UPSTREAM of any round: the engine's own first generated token"
+                       " differs from the reference's, which is §06.5's y0 row's decision (sections"
+                       " (a)/(b) judge that row with the engine's logits in hand). The round did not move.")
+    else:
+        detail += (f" — {n_cmp - div} position(s) from there on differ too, which is what a forked"
+                   " continuation looks like (§10.5) and is not extra defects")
+    row("the run's stream == the pinned greedy continuation over the pinnable depth", admissible, detail)
+    return rows
+
+
+def mtp_round_run_case(name: str, man: dict, args, work: Path) -> dict:
+    """One fixture through the accept loop, and back as a record. No timing, and nothing here reads a
+    millisecond field: `--steps` is a count of bodies, not a duration."""
+    greedy = man["greedy_continuation"]
+    ids = man["sources"][0]["ids"]
+    depth = mtp_round_depth(greedy)
+    # THE STEP BUDGET, derived from what the loop demonstrably spends. One body emits at least one token
+    # (a round emits `n_accepted + 1 >= 1`, a plain step emits 1), so `depth` bodies cover the pinnable
+    # depth; one body is the plain step the loop pays FIRST, because the draft block needs a decoded step
+    # to draft from; one body per candidate assembles the `k` proposals the round is fed; and one more
+    # because a round whose proposal set is short SKIPS whole and pays a plain step instead
+    # (`ROUND-SKIP reason=short_proposal_set`, `prototype/mtp_accept/K2-RESULT.md` §1). Measured minima on
+    # this population, which is where the `+ 1` per candidate comes from: `p8` at k=1 needs 2 bodies before
+    # `MTPSTAT rounds` is non-zero and at k=2 needs 3 — i.e. `k + 1`, exactly this formula. Nothing here
+    # is a guess the gate relies on: if a deeper k needed more bodies than this, `rounds > 0` would go RED
+    # rather than pass over an empty transcript.
+    steps = depth + args.mtp_k + 2
+    case_dir = work / "mtp_round" / name
+    case_dir.mkdir(parents=True, exist_ok=True)
+    stale = case_dir / "emitted.txt"
+    stale.unlink(missing_ok=True)          # (b)'s stale-dump rule, applied to this file's own dumps
+    ids_file = case_dir / "ids.csv"
+    ids_file.write_text(",".join(str(i) for i in ids) + "\n")
+    # `--ids-file` splits on COMMAS and a space-joined file reads as ONE token — and the run then
+    # SUCCEEDS at width 1 (AGENTS.md). Assert the field count off the file, not off the intent.
+    wrote = len(ids_file.read_text().strip().split(","))
+    rec = {"fixture": name, "k": args.mtp_k, "depth": depth, "pin": list(greedy),
+           "prompt_ids": len(ids), "steps": steps}
+    if wrote != len(ids):
+        rec.update({"rc": None, "ran": False, "geom": {}, "geom_lines": 0, "accept_echo": {},
+                    "stat": {}, "stat_lines": 0, "wall": {}, "wall_lines": 0, "no_rate": False,
+                    "rounds": [], "emitted": [], "emitted_file": str(stale),
+                    "argv": [], "fixture_failure": f"wrote {len(ids)} ids, the file has {wrote}"
+                                                   " comma fields"})
+        return rec
+    cmd = [args.binary, "--model", args.model, "--ids-file", str(ids_file),
+           # A REQUIRED pin, not a preference: the mid-round checkpoint is a one-token-step recurrence's
+           # end state (`engine/mtp_accept.h`, prototype/mtp_accept/ACCEPT-BUILD.md §4b), so the accept
+           # loop refuses any other span. It belongs on the case for the same reason a required flag
+           # belongs on both arms of an A/B.
+           "--gdn-loop", "1",
+           # §07.5 stays armed out of the comparison: a pinned continuation may legitimately contain the
+           # stop id, and a run that ended on it would shorten the stream for a reason that has nothing
+           # to do with the round. Same choice `prototype/mtp_accept/m3_loop_rate.py` makes, for the
+           # same reason.
+           "--no-stop",
+           "--gemm", GEMM_ROUTE,
+           "--mtp-draft", "1", "--mtp-accept", "1", "--mtp-k", str(args.mtp_k),
+           "--steps", str(steps), "--out", str(case_dir)]
+    rec["argv"] = cmd
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    log = proc.stdout + proc.stderr
+    parsed = mtp_round_read_run(log, case_dir)
+    # The parser owns what the LOG said and never owns the exit status; setting `rc` before this update
+    # was the bug that made all 18 cases read `rc=None` while their counters parsed fine — a record that
+    # contradicts its own evidence is worse than one that is missing a field.
+    parsed["rc"] = proc.returncode
+    parsed["ran"] = True
+    rec.update(parsed)
+    if proc.returncode != 0:
+        tail = [ln for ln in log.splitlines() if ln.strip()][:3]
+        rec["argv"].append("# refused: " + " / ".join(tail)[:300])
+    return rec
+
+
+def mtp_round_checks(args, work: Path) -> None:
+    """Section (m): the accept loop, over the derived fixture population, judged on counters and pins."""
+    section("(m) the MTP accept round — a real round per pinned fixture, judged on the PIN (§09,"
+            " prototype/mtp_accept/K2-RESULT.md §7's missing gate)")
+    if args.dry_run:
+        print("  [not adjudicated] --dry-run has no stand-in for an accept round, and inventing one would"
+              " be a stream this file made up. The predicates themselves are proved in process by"
+              " --selftest (`selftest_mtp_round`); a device run is what judges the engine.")
+        return
+    print("  " + MTP_ROUND_ROUTE_NOTE)
+    print(f"  --mtp-k {args.mtp_k}: the geometry, the tally identity and the per-k assertions all follow"
+          " the value asked for; a k this build does not admit makes every case fail with the engine's"
+          " own refusal, so admitting a swept k needs no edit here.")
+    cases, excluded, n_dirs = mtp_round_population()
+    for name, why in excluded:
+        print(f"  [excluded] {name}: {why}")
+    print(f"  population: {n_dirs} directories under data/refs/, {len(excluded)} named and excluded"
+          f" above, so the population is {len(cases)}: " + ", ".join(n for n, _ in cases))
+    totals = {"cases": 0, "ran": 0, "rounds": 0, "tokens": 0, "adjudicable": 0, "forked": 0}
+    forks: list[str] = []
+    for name, man in cases:
+        # REFS moves to the case and stays there until its verdicts are in. Reading the pins AFTER
+        # restoring the caller's fixture was the bug that made the first device pass print `pin top1
+        # 6511` beside a `chunk64b` divergence — 6511 is dec8's token, i.e. the wrong fixture's pin, and
+        # the row was reddened and explained by a dump of another fixture entirely.
+        set_fixture(name)
+        rec = mtp_round_run_case(name, man, args, work)
+        totals["cases"] += 1
+        if rec.get("fixture_failure"):
+            check(False, f"{name}: the fixture's own prompt was written and re-read intact",
+                  rec["fixture_failure"])
+            set_fixture(args.fixture)
+            continue
+        totals["ran"] += 1
+        st = rec.get("stat") or {}
+        totals["rounds"] += _mtp_num(st, "rounds") or 0
+        totals["tokens"] += len(rec.get("emitted") or [])
+        if mtp_round_depth(rec["pin"]) > 0:
+            totals["adjudicable"] += 1
+        print(f"  $ {' '.join(rec['argv'])}")
+        rows = mtp_round_verdicts(rec)
+        set_fixture(args.fixture)
+        if rec.get("admitted_at") is not None:
+            totals["forked"] += 1
+            forks.append(f"{name} at stream index {rec['admitted_at']}")
+        for nm, ok, detail in rows:
+            check(ok, nm, detail)
+    # THE DENOMINATORS. A verdict that cannot name its denominator cannot fail, so each of these is the
+    # population the loop above actually saw, and the first one is the admission check itself.
+    check(totals["cases"] == len(cases),
+          "every fixture in the derived population produced a case",
+          f"{totals['cases']} cases for {len(cases)} fixtures in the population")
+    check(totals["ran"] == len(cases),
+          "every case ran the engine (none was skipped by a fixture-writing failure)",
+          f"{totals['ran']} of {len(cases)}")
+    check(totals["rounds"] > 0,
+          "the section ran at least one round in total (it cannot be PASSing over zero records)",
+          f"{totals['rounds']} rounds across {totals['cases']} cases")
+    notes.append(
+        f"section (m): {totals['cases']} pinned fixtures ran {totals['rounds']} accept rounds at"
+        f" --mtp-k {args.mtp_k} and emitted {totals['tokens']} tokens; {totals['adjudicable']} of them"
+        f" carry a generation pin, so the losslessness predicate adjudicated {totals['adjudicable']}"
+        f" case(s) and {totals['cases'] - totals['adjudicable']} reported themselves unadjudicable for"
+        " the stream half rather than passing it."
+        + (f" {totals['forked']} of the adjudicated case(s) took a token the PIN itself could not decide"
+           f" (stream index 0 is §06.5's y0 row) and were counted as forks, not defects:"
+           f" {'; '.join(forks)}." if forks else " No case needed a divergence admitted.")
+        + " Depth per case is"
+        f" `min(len(greedy_continuation) - 1, FREE_RUN_BOUND = {FREE_RUN_BOUND})` because a FREE run"
+        " cannot be pinned past A-18's bound and `--mtp-accept` refuses `--replay`. No millisecond figure"
+        " appears in this section: it is a correctness gate, and the timing pass is the main agent's.")
+
+
+def mtp_round_synthetic(fixture: str, k: int, hits: list[int], pin: list[int],
+                        depth: int | None = None, pin_vec=None) -> dict:
+    """A PARSED accept run that satisfies every identity this section polices, built from its geometry.
+
+    The selftest's witness that the predicates are green on a clean record, and the object its injections
+    corrupt. Everything is DERIVED from `k` and `hits` (one entry per round: how many candidates that
+    round accepted), because a synthetic record typed out by hand would agree with whatever it was typed
+    to agree with. `plain = suppressed = 0` so DECWALL and MTPSTAT carry the same totals.
+
+    `pin_vec` is the pinned logits ROW the stream divergence is adjudicated against. The counter
+    injections leave it as the caller's fixture row (they never touch the stream); the stream injections
+    pass their own two-value row so the SAME run proves both colours — a token the pin could not decide,
+    and one it did — on every fixture and with no dependence on which one `--selftest` was pointed at.
+    """
+    rows_geom = k + 1
+    words = 3 * rows_geom - 2
+    rounds = len(hits)
+    cand = sum(hits)
+    emitted_total = cand + rounds
+    depth = emitted_total if depth is None else depth
+    stat = {"k": str(k), "rounds": str(rounds),
+            "accepted": str(sum(1 for h in hits if h == k)),
+            "rejected": str(sum(1 for h in hits if h < k)),
+            "emitted": str(emitted_total), "route": "hand", "gemm": "hand", "gdn_scan": "seq"}
+    if k > 1:
+        stat["depth1"] = str(sum(1 for h in hits if h >= 1))
+        stat["candidates_accepted"] = str(cand)
+    # The round lines, in the order the transcript prints them. The tokens are the PIN's own stream, so a
+    # clean record is lossless by construction and only an injection can make it diverge.
+    lines, at, pos = [], 0, 0
+    for i, h in enumerate(hits):
+        line = {"round": str(pos), "accept": "1" if h >= 1 else "0", "emitted": str(h + 1),
+                "verifier": str(pin[1 + at]), "bonus": str(pin[1 + at + h])}   # ids, as printed
+        if k > 1:
+            line["n_accepted"] = str(h)
+            line["accept2"] = "1" if h >= 2 else "0"
+        lines.append(line)
+        at += h + 1
+        pos += h + 1
+    return {"fixture": fixture, "k": k, "rc": 0, "ran": True, "depth": depth, "pin": list(pin),
+            # The seed is the pin's own first token, so [seed] + emitted reproduces the pinned
+            # continuation from position 0 — see the alignment note in `mtp_round_verdicts`.
+            "seed": pin[0], "seed_line": f"<synthetic seed {pin[0]}>",
+            "geom": {"k": str(k), "rows": str(rows_geom), "mid_slots": str(rows_geom - 1),
+                     "status_words": str(words), "candidates_per_round": str(k)},
+            "geom_lines": 1,
+            "accept_echo": {"rows": str(rows_geom), "status_bytes": str(4 * words)},
+            "stat": stat, "stat_lines": 1,
+            "wall": {"mode": "run", "bodies": str(rounds), "rounds": str(rounds), "plain": "0",
+                     "accepted": stat["accepted"], "rejected": stat["rejected"], "suppressed": "0",
+                     "emitted": str(emitted_total), "ended": "length", "census": "ok"},
+            "wall_lines": 1, "no_rate": False, "rounds": lines,
+            # Ints, exactly as `mtp_round_read_run` parses `emitted.txt`: a synthetic that held strings
+            # would be unequal to the int pin stream and every clean case would read red.
+            "emitted": [pin[i] for i in range(1, 1 + emitted_total)],
+            "emitted_file": f"<synthetic {fixture}>",
+            "pin_vec": (load_pin(logits_pin(0)) if (REFS / logits_pin(0)).exists()
+                        else np.full(1024, 1.0, np.float32)) if pin_vec is None
+                       else np.asarray(pin_vec, np.float32)}
+
+
+def mtp_round_inject_word(rec: dict, round_index: int, word_index: int) -> str:
+    """Corrupt ONE word of ONE round's verdict, the way the host fold would see it. Returns the kind.
+
+    The layout is `engine/kernels.h::kVerdictWordsFor(rows)`, spelled in
+    `engine/mtp_verdict_kernels.h`: `[0 .. rows-1]` the per-row argmax, `[rows .. 2*rows-2]` the
+    per-candidate hit bits, `[2*rows-1 .. ]` the candidate echoes the host validates against what it fed.
+    A word index at or beyond `3*rows-2` DOES NOT EXIST for this geometry and is refused, which is the
+    derived must-not-catch half: an injector that could aim at word 4 of a k=1 run (4 words) would
+    "catch" a defect the layout cannot produce, and a must-catch set that can be aimed at nothing is the
+    empty-must-catch-set trap.
+    """
+    rows_geom = int(rec["geom"]["rows"])
+    limit = 3 * rows_geom - 2
+    if not 0 <= word_index < limit:
+        raise ValueError(f"verdict word {word_index} is outside this geometry's {limit} words"
+                         f" (rows={rows_geom}, kVerdictWordsFor = 3*rows-2)")
+    line = rec["rounds"][round_index]
+    hit = int(line["accept"])
+    if rows_geom <= word_index <= 2 * rows_geom - 2:
+        # A hit bit: the fold's input, so `n_accepted` moves and the emitted count of the round does not.
+        line["accept"] = "0" if hit else "1"
+        if "n_accepted" in line:
+            line["n_accepted"] = str(0 if hit else 1)
+            line["accept2"] = "0"
+        return "hit bit"
+    row_of_word = word_index                     # [0 .. rows-1]: row `w`'s argmax
+    field = "verifier" if row_of_word == 0 else "bonus"
+    moved = int(line[field]) + 1
+    line[field] = str(moved)
+    # Did the round EMIT that row's argmax? A row the prefix stopped before is not in the stream, so the
+    # corruption is invisible there and in the counters — structurally, not by luck of the fixture.
+    at = sum(int(l["emitted"]) for l in rec["rounds"][:round_index])
+    slot = at + row_of_word
+    if slot < at + int(line["emitted"]):
+        rec["emitted"][slot] = moved
+        return "argmax word, emitted"
+    return "argmax word, never emitted by this round"
+
+
+def selftest_mtp_round() -> list[str]:
+    """The selftest half of section (m): proves the predicates can fail, and fail ONLY where aimed.
+
+    Runs in-process on records `mtp_round_synthetic` builds — the same `mtp_round_verdicts` the device
+    path calls, so the injections aim at the shipping predicates rather than at a copy of them. The
+    must-catch and must-not-catch sets are DERIVED from the verdict layout and the round geometry (see
+    `mtp_round_inject_word`), because a hand-listed set rots into "everything" the moment the fixture
+    changes (`prototype/attn_tile_model.py`'s rule, restated in `AGENTS.md`).
+    """
+    bad: list[str] = []
+    pin = list(range(1000, 1080))          # dummy ids; the predicates compare ids, they do not rank them
+
+    def colour(rows) -> dict[str, bool]:
+        return {name: ok for name, ok, _ in rows}
+
+    def report(what: str, ok: bool, detail: str = "") -> None:
+        print(f"  [{'PASS' if ok else 'FAIL'}] {what}" + (f" — {detail}" if detail else ""))
+        if not ok:
+            bad.append(what)
+
+    def red_names(rows) -> list[str]:
+        return [n for n, ok, _ in rows if not ok]
+
+    # -- 1. a clean record is green, at both funded widths, or every injection below is a colour test
+    #      against a baseline that was never green.
+    for k in (1, 2):
+        rec = mtp_round_synthetic(f"clean-k{k}", k, [1] * 3 if k == 1 else [0, 1, 2], pin)
+        red = red_names(mtp_round_verdicts(rec))
+        report(f"section (m)'s predicates are green on a clean synthetic k={k} round set", not red,
+               ("; ".join(red)[:200] if red else
+                f"{len(rec['rounds'])} rounds, {rec['stat']['emitted']} tokens, all identities hold"))
+
+    # -- 2. the same population, one case corrupted: reddens THAT case and nothing else.
+    def population(k: int):
+        return [mtp_round_synthetic(f"case{i}-k{k}", k, [1] * 3 if k == 1 else [0, 1, 2], pin)
+                for i in range(3)]
+
+    for k in (1, 2):
+        pop = population(k)
+        hit_word = k + 1        # the first hit bit sits at index `rows`, and rows == k + 1
+        kind = mtp_round_inject_word(pop[1], 1, hit_word)
+        rows = [row for rec in pop for row in mtp_round_verdicts(rec)]
+        painted = colour(rows)
+        red = [n for n, ok in painted.items() if not ok]
+        mine = [n for n in red if n.startswith("case1-")]
+        others = [n for n in red if not n.startswith("case1-")]
+        report(f"a corrupted {kind} (word {hit_word} of rows={k + 1}, k={k}) reddens the counters of"
+               " exactly the case it touches", bool(mine) and not others,
+               f"red in the aimed case: {len(mine)}; red in the two untouched cases: {len(others)}"
+               f"{'' if not others else ' -> ' + others[0]}")
+        # The derived must-not-catch: a hit-bit corruption moves the FOLD, not the tokens the device
+        # actually emitted, so the stream predicate must stay green. If it went red here the two
+        # predicates would be the same predicate wearing two names.
+        stream = [n for n in painted if "pinned greedy continuation" in n and n.startswith("case1-")]
+        report("a hit-bit corruption does NOT redden the stream predicate (it moves the fold, not the"
+               " emitted bytes), so the two predicates are independent", bool(stream)
+               and all(painted[n] for n in stream), f"stream rows: {stream}")
+
+    # -- 3. an argmax-word corruption: reddens the STREAM and not the counters. The divergence is aimed
+    #      at a step THIS fixture's pins actually DECIDE, found by asking the admission itself, because a
+    #      token the pin could not decide is admitted by D-1/D-2/the room rule and reddening one would be
+    #      the gate disagreeing with its own bands (`mtp_round_admission`'s reason for existing).
+    # -- 3. the stream predicate, on PIN ROWS THE SELFTEST BUILDS, so both colours are proved on every
+    #      fixture and not only on whichever one `--selftest` happens to be pointed at. A divergence is
+    #      admitted by D-1/D-2/the room rule when the PIN could not decide the row, and a section that
+    #      reddens such a token is redder than the bands it belongs to; a divergence at a decided row must
+    #      redden, or the row is decoration. Both halves need a pin of their own:
+    #        `loose` — top-1 40.5 over a body of 40.0s: margin 0.5 against a licensed element error of
+    #                  0.05 x mean|pin| ≈ 1.0, so the pin cannot decide and any body id is a leader;
+    #        `tight` — top-1 44.0 over the same body: margin 4.0 ≈ 16 BF16 ULP, outside the licensed error
+    #                  and outside the room rule's 0.10 ULP, so the pin decided.
+    #      Values are BF16-exact on purpose: the slack reader prices the pin in its own format, and an
+    #      off-grid value would make the case measure the reader's rounding instead of the rule.
+    def pin_row(top1_val: float, top2_val: float) -> np.ndarray:
+        v = np.zeros(4096, np.float32)
+        v[:2048] = 40.0                       # the body: mean|pin| ≈ 20, so the licensed error is ≈ 1.0
+        v[3000], v[3001] = top1_val, top2_val
+        return v
+
+    loose, tight = pin_row(40.5, 40.0), pin_row(44.0, 40.0)
+    lo_sl, ti_sl = step_slack(0, loose), step_slack(0, tight)
+    report("the two synthetic pin rows are what they claim to be (the fixture is not doing this work)",
+           lo_sl is not None and lo_sl["margin"] < lo_sl["bound"]
+           and ti_sl is not None and ti_sl["margin"] >= ti_sl["bound"],
+           f"loose: margin {lo_sl['margin']:.6g} vs bound {lo_sl['bound']:.6g}; tight: margin"
+           f" {ti_sl['margin']:.6g} vs bound {ti_sl['bound']:.6g}")
+
+    div = 3        # a middle step, so the case cannot pass by accident at index 0
+    wrong = 999_999                            # an id no pin in this tree ranks first anywhere
+    report(f"step {div} of a DECIDED pin row refuses an arbitrary token (the negative's footing)",
+           not pin_admission(div, tight, None, wrong)[0], pin_admission(div, tight, None, wrong)[1][:200])
+
+    def diverged_stream(name: str, pin_vec):
+        """A clean k=1 record, reject-only so emitted index == round index, with round `div`'s row-0
+        argmax corrupted: the stream forks at exactly one position and the counters stay consistent."""
+        rec = mtp_round_synthetic(name, 1, [0] * 8, pin, pin_vec=pin_vec)
+        kind = mtp_round_inject_word(rec, div, 0)
+        return rec, kind
+
+    rec, kind = diverged_stream("amax", tight)
+    red = set(red_names(mtp_round_verdicts(rec)))
+    report(f"a corrupted row-0 argmax word at step {div} of a DECIDED pin ({kind}) reddens the stream",
+           any("pinned greedy continuation" in n for n in red), f"reddened: {sorted(red)}")
+    report("and reddens NOTHING else (the counters are still internally consistent)",
+           len(red) == 1 and next(iter(red)).endswith("pinned greedy continuation over the pinnable"
+                                                     " depth"),
+           f"reddened: {sorted(red)}")
+    adm_rec, _ = diverged_stream("admit", loose)
+    adm_row = next(r for r in mtp_round_verdicts(adm_rec) if "pinned greedy continuation" in r[0])
+    report("the SAME corruption at a pin row that could NOT decide is ADMITTED, not counted as a defect"
+           " (the section cannot be redder than its own bands)", adm_row[1], adm_row[2][:260])
+    # The SEED gets its own case, because the seed is the bug this section nearly shipped with: a moved
+    # prefill sample makes every emitted position look wrong, and the only useful thing a gate can say is
+    # WHERE the fork is. The assertion is about attribution, not colour — a seed the fixture's y0 pin cannot
+    # decide is admitted there — so it holds on every fixture.
+    seed_rec = mtp_round_synthetic("seed", 1, [0] * 8, pin, pin_vec=tight)
+    seed_rec["seed"] = seed_rec["seed"] + 1          # the prefill row's own sample, moved by one id
+    seed_row = next(r for r in mtp_round_verdicts(seed_rec) if "stream ==" in r[0])
+    report("a moved SEED forks at stream index 0 and is attributed to §06.5's y0 row, not to a decode step",
+           "stream index 0" in seed_row[2] and "y0" in seed_row[2], seed_row[2][:240])
+
+    # D-1's proved tie, both colours, straight at the predicate: a pin with no winner admits the ids it
+    # tied at and nothing else.
+    tie = {"ids": [1001, 1002], "value": 40.5, "payload": 0x4222}
+    ok_tie, why_tie = pin_admission(0, loose, tie, 1002)
+    no_tie, why_not = pin_admission(0, loose, tie, 1003)
+    report("D-1's proved tie admits an id the pin tied at", ok_tie, why_tie[:200])
+    report("and refuses an id the pin did not tie at, even though the tie means there is no winner",
+           not no_tie, why_not[:200])
+
+    # -- 4. the geometry-derived blind spot: a word the layout cannot contain, and a row that was never
+    #      emitted. Both must be REFUSED / inert, and saying so is what makes the must-catch set derived.
+    refused = None
+    try:
+        mtp_round_inject_word(mtp_round_synthetic("k1", 1, [1, 1], pin), 0, 4)
+    except ValueError as exc:
+        refused = str(exc)
+    report("a verdict word index at or beyond 3*rows-2 is refused rather than silently aimed at nothing",
+           refused is not None, refused or "the injector accepted word 4 of a 4-word k=1 layout")
+    rec = mtp_round_synthetic("row2", 2, [0, 0, 0], pin)
+    kind = mtp_round_inject_word(rec, 0, 2)          # row 2's argmax, on a round that accepted nothing
+    inert = not red_names(mtp_round_verdicts(rec))
+    report("row 2's argmax on a round that accepted 0 candidates reddens nothing, and that is a fact"
+           " about the prefix rule, not a missing check", "never emitted" in kind and inert,
+           f"injection reported: {kind}")
+
+    # -- 5. the empty-record witness: a run with no rounds cannot print PASS.
+    rec = mtp_round_synthetic("zero", 1, [1, 1, 1], pin)
+    rec["rounds"] = []
+    red = red_names(mtp_round_verdicts(rec))
+    report("deleting the ACCEPT lines reddens the rounds-actually-ran rows",
+           any("ACCEPT line count > 0" in n for n in red)
+           and any("one ACCEPT line per declared round" in n for n in red), f"{len(red)} rows red")
+    rec2 = mtp_round_synthetic("zero2", 1, [1], pin)
+    rec2["rounds"] = []
+    rec2["stat"]["rounds"] = "0"
+    rec2["stat"]["accepted"] = "0"
+    rec2["stat"]["rejected"] = "0"
+    rec2["stat"]["emitted"] = "0"
+    rec2["wall"]["rounds"] = "0"
+    rec2["wall"]["accepted"] = "0"
+    rec2["wall"]["rejected"] = "0"
+    rec2["wall"]["emitted"] = "0"
+    rec2["wall"]["bodies"] = "0"
+    rec2["emitted"] = []
+    rec2["depth"] = 0
+    red2 = red_names(mtp_round_verdicts(rec2))
+    report("a zero-round run is red even when every counter agrees with zero (the gate is structurally"
+           " unable to PASS over no records)", any("rounds actually ran" in n for n in red2),
+           f"{len(red2)} rows red")
+
+    # -- 6. NO-RATE is a FAIL, not a skip.
+    rec = mtp_round_synthetic("norat", 1, [1, 1], pin)
+    rec["wall"].pop("census")
+    rec["wall"]["note"] = "emitted_vs_verdict_tally"
+    rec["no_rate"] = True
+    red = red_names(mtp_round_verdicts(rec))
+    report("a DECWALL that printed NO-RATE reddens instead of skipping",
+           any("billed its own run" in n for n in red), f"{len(red)} rows red")
+
+    # -- 7. a route that silently did not take cannot certify the shipping route.
+    rec = mtp_round_synthetic("route", 1, [1, 1], pin)
+    rec["stat"]["route"] = "amortised"
+    red = red_names(mtp_round_verdicts(rec))
+    report("MTPSTAT route != hand reddens (this section covers the shipping route only)",
+           any("route is the forced shipping value" in n for n in red), f"{len(red)} rows red")
+
+    # -- 8. THE STUB: force the numerics predicate to always-pass and require a case to change colour.
+    #      A check that cannot change colour under an always-pass stub was never a check
+    #      (`AGENTS.md`: `gate.py`'s prefill-row lesson, witnessed the same way).
+    global mtp_stream_matches
+    real = mtp_stream_matches
+    broken, _kind = diverged_stream("stub", tight)
+    red_real = {n for n, ok, _ in mtp_round_verdicts(broken) if not ok}
+    try:
+        mtp_stream_matches = lambda got, want: True          # noqa: E731 - the whole point of the case
+        red_stub = {n for n, ok, _ in mtp_round_verdicts(broken) if not ok}
+    finally:
+        mtp_stream_matches = real
+    changed = sorted(red_real - red_stub)
+    report("forcing the losslessness predicate to always-pass CHANGES THE COLOUR of the corrupted case"
+           " (a numerics predicate that cannot change colour under an always-pass stub was never a check)",
+           bool(changed), f"{len(changed)} row(s) went red -> green under the stub: {changed}")
+    report("and the stub changes nothing else — every other row of that record is still red for its own"
+           " reason", red_stub == set(), f"under the stub: {sorted(red_stub)} red rows remain")
+    return bad
+
+
 # ---- (j) the `gdn_rec` spellings, all run against each other --------------------------------------
 #
 # WHY A SECTION AND NOT A HOPE. `engine/gdn_rec_unroll4_kernels.h` and
@@ -7450,6 +8369,8 @@ def selftest(fixture: str = "dec8") -> int:
     bad += row_bad
     section("(i2) a side run's argv must carry every attention-form flag — in process, no engine")
     bad += selftest_form_flags()
+    section("(m) the accept-round section's own teeth — synthetic records, in process, no engine")
+    bad += selftest_mtp_round()
     # The band history has to bite here too, and bite before anything runs: an unrecorded edit to `BAND`
     # must stop the gate, not merely look suspicious in review. The injection is the real thing — a
     # scratch tree whose engine/gate.py carries a looser flat floor, sitting beside the shipped ledger —
@@ -7952,6 +8873,17 @@ def main() -> int:
                          " reported as not adjudicated rather than as passed. The value is echoed on"
                          " NUMERICS because a log that cannot name the launch shape that produced it"
                          " cannot be re-adjudicated at all")
+    ap.add_argument("--mtp-k", type=int, default=MTP_ROUND_K_DEFAULT, metavar="K",
+                    help="how many CANDIDATES an accept round verifies, for section (m) only"
+                         " (`decode_run --mtp-k`, `engine/mtp_accept.h`). Default 1 — this gate does"
+                         " NOT flip the engine's default, and nothing outside section (m) is affected"
+                         " by it. The value is forwarded verbatim and the geometry assertions"
+                         " (`rows == k+1`, `mid_slots == rows-1`, `status_words == 3*rows-2"
+                         " == status_bytes/4`) and the per-k tally identity all follow it, so"
+                         " admitting a swept k (3, 4) needs no edit here: a k the binary does not"
+                         " admit makes every case in the section fail with the engine's own refusal"
+                         " message, which is a red gate rather than a silent skip — the"
+                         " empty-parse failure class, refused in advance")
     ap.add_argument("--break-pins", type=int, default=-1, metavar="N",
                     help="with --dry-run: echo N as the in-force pin count instead of the one this"
                          " gate's own --gemm-pins spec implies. That is the bug the check exists to"
@@ -9162,6 +10094,12 @@ def main() -> int:
                      f" included, are in {record.name} beside the dumps; the same steps at identical"
                      " conditioning are judged by the same bands in section (b2), which has no echo"
                      " window and did gate.")
+    # (m) THE ACCEPT ROUND, last of the run sections: it needs its own engine runs over a population
+    # rather than this fixture's one, so nothing about it can be folded into the sections above. It is
+    # also the section whose absence `prototype/mtp_accept/K2-RESULT.md` §7 names as the blocker on
+    # making MTP the default, and the one whose absence let a route-dependent `emitted.txt` difference
+    # survive a session (`prototype/mtp_accept/ROUND-TAX.md`'s "Owed").
+    mtp_round_checks(args, work)
     return report()
 
 
