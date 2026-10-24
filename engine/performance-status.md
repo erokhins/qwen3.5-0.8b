@@ -308,6 +308,11 @@ number, the second says which numbers cannot be trusted even when taken that way
 
 ## §7 MTP speculation is the shipping default — the measured state (2026-10-24)
 
+> **Partly overtaken the same day by §8.** The prefill cost recorded below was removed by scoping the GDN span to
+> the round's own bodies, and the decode row below was overtaken by a higher number for the same reason. What
+> stands from this section: N=2's basis, the break-even accept of p ≈ 0.40, the pathological-fixture result, and
+> the admission state of the gates.
+
 Since `e75e192` (+ `1a9d8c9`, `04dd3de`, `aceee97`) the default path of `engine/build/decode_run` is
 `--mtp-accept 1 --mtp-k 2 --mtp-draft 1` at N=2, chosen by measurement (`K2-RESULT.md` §7: k=1 +9.75…+10.38 %,
 k=2 +16.53/+17.76 % against a pre-registered kill line of round/step ≥ 1.95 that k=2 did not hit). The plain
@@ -352,3 +357,57 @@ forks as the pre-flip record — no new bit divergence. Full-population lossless
 49/49 corpus lines byte-identical to the plain stream, 743 rounds, 1,617 tokens, 2.176 tok/round, identical
 counters to the explicit `--mtp-k 2` run (`m3_loop_rate.sh`, `LOSSLESS=1`). `speccheck/run_all.py` 26 gates
 0 failed; op gates glue 784/0, proj_gemv 952/0, `gdn_gated_norm` DEVICE GATE PASS.
+
+## §8 The GDN span is scoped to the round — §7's prefill cost is retired, and decode moved (2026-10-24)
+
+§7 recorded the shipping default paying **+37 % at 1,024 lanes and +72 % at 4,032** because `--mtp-accept`
+pinned the GDN span to 1 for every body. That requirement belongs to the *round*, not the run: it exists because
+the mid-round checkpoint restores a one-token-step recurrence's end state. It is now enforced where it is owed —
+`engine/decode_step.h::kMtpRoundGdnSpan = 1` is taken when the round's checkpoint is armed and `sc.gdn_loop`
+otherwise (the same arming `arm_mtp_round_attn_form` keys on), the run-wide resolution and the CLI-level refusal
+are gone, and the mode line echoes both spans:
+`MTP mode=accept k=2 draft=1 gdn_span_round=1 gdn_span_other=512 forced_by=default`.
+
+**Prefill, three arms in one lock hold, medians of 3** (`prototype/mtp_accept/scoped_prefill_ab.sh`; arms =
+scoped default / plain `--mtp-accept 0 --gdn-loop 512` / `oldpin` = `--gdn-loop 1`, i.e. what the default paid
+before this change):
+
+| lanes | scoped default | plain | oldpin (pre-scoping default) | scoped vs plain |
+|---|---|---|---|---|
+| 1,024 | 165.6–166.7 ms → **6,147 tok/s** | 165.3–167.7 ms → 6,120 tok/s | 246.2–249.0 ms → 4,135 tok/s | **±0 %** |
+| 4,032 | 442.5–456.4 ms → **9,004 tok/s** | 443.6–451.1 ms → 9,017 tok/s | 763.8–773.9 ms → 5,227 tok/s | **±1 %** |
+
+The default now costs prefill nothing — §7's regression table is retired, and the pre-MTP prefill headline is
+back (9,004 tok/s at 4,032 against §7's 5,257). `oldpin` is kept in the table so the size of what was removed
+stays visible.
+
+**Decode moved, and not for the reason one would guess.** Paired A/B at templated 4,152 lanes inside one window,
+`mtp_wall_ab.sh` with `ACCEPT_EXTRA` empty (shipping spans) versus `GDN=1` (the pre-scoping whole-run pin),
+5 reps and 2 reps respectively, same fixture, same lock discipline:
+
+| spans | base ms/step | round ms | round/step | accepted / rounds | emitted | vs base |
+|---|---|---|---|---|---|---|
+| `gdn_span_round=1 other=512` (ships) | 11.088 | 20.280 | 1.829 | **135 / 255** | 578 | **+23.44 %** |
+| whole-run span 1 (pre-scoping) | 11.044 | 20.428 | 1.850 | 117 / 255 | 548 | +15.72 % |
+
+Both reps of each arm printed identical accept counters, so this is not window noise: scoping the span raised the
+**per-round acceptance on this fixture** from 117/255 to 135/255 (0.459 → 0.529) as well as removing the prefill
+tax. **The mechanism is not established and is not claimed here.** What is measured is that the span used by the
+non-round bodies changes the state the round starts from, and with it which proposals the draft makes — the round's
+own span is 1 in both arms. Two candidate readings, both unverified: the span-512 prefill leaves a GDN state the
+draft block is better conditioned on (span 512 is also what the pinned HF reference path used, so its state is the
+closer match to every pin in this repo), or the two spans simply produce different states and one happens to suit
+this fixture. Deciding between them needs a span-1-vs-512 accept ladder on more than one fixture, which is a
+measurement, not a re-reading of this one. Either way losslessness is what adjudicates it, and it holds.
+
+**Current headline: decode +23.44 % over our own plain path at 4,152 lanes with the shipping default** (llama.cpp's
+best MTP configuration measures +13.6 % on the same prompt), and prefill unchanged from the pre-MTP ledger.
+Losslessness holds at the scoped spans: `m3_loop_rate.sh` full population — lines compared 49, identical 49,
+flipped 0, kill-line verdict 0.6703 vs 0.4568 (worker's admission; my own prior-default run had 743 rounds,
+1,617 tokens, 2.176 tok/round). Gate (m) asserts the echoed span pair on 18/18 fixtures; `default_refusals.sh`
+25 ok / 0 FAIL, with the two span refusals now positive cases and `--mtp-midsplit`'s sibling refusal kept because
+its unsplit arm arms no checkpoint.
+
+Still open, unchanged by this: the pathological 4,032 fixture is still a loss at k=2 (break-even accept p ≈ 0.40),
+so adaptive depth remains the next item; `k=3` unimplemented/ungated; `kArgmaxChunks` unswept; gate (m) depth
+bounded at 8 because `--mtp-accept` refuses `--replay`.
