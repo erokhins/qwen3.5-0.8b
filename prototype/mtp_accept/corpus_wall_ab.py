@@ -201,9 +201,19 @@ def main() -> int:
         if per_rep[-1]["cases"] != len(cases):
             die("case count changed between reps; the reps are not paired")
 
-    ratios = sorted(r["ratio"] for r in per_rep)
-    med = statistics.median(ratios)
-    best = per_rep[ratios.index(med)]
+    # Two bugs lived in these three lines. (1) With an EVEN --reps, statistics.median() averages the two middle
+    # ratios, which is a value no rep has, so ratios.index(med) raised ValueError and the harness died after doing
+    # all the device work (hit at --reps 2, worked at --reps 3 -- a crash that only appears on some configurations
+    # is a crash nobody notices until a quiet window is wasted). (2) Worse and silent: ratios was a SORTED copy
+    # while per_rep is in rep order, so ratios.index(med) named a position in one list and indexed the other. At
+    # any rep count the printed "medians" table could therefore pair rep 3's ratio with rep 1's ms/step and tok/s
+    # -- a table that looks like a median row and describes no single run. Corrected by keeping the pairing intact:
+    # sort the records themselves and report ONE rep, so ratio, ms, tok/s, a and round/step all come from the same
+    # run. With an even count the reported rep is the lower-middle one and the printed percentage is that rep's own
+    # ratio, which is what makes the table internally consistent; the strict median is no longer pretend-quoted.
+    ranked = sorted(per_rep, key=lambda r: r["ratio"])
+    best = ranked[(len(ranked) - 1) // 2]
+    med = best["ratio"]
     if a.base_ref_ms:
         drift = best["step"] / a.base_ref_ms - 1.0
         if abs(drift) > 0.25:
