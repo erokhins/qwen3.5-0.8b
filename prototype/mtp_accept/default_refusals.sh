@@ -99,6 +99,29 @@ env_runs() {
   pass=$((pass+1))
 }
 
+# silent CASE-NAME ABSENT-NEEDLE [args...] — must exit 0 AND must NOT print the needle. This is the only
+# shape that can admit a DEFAULT-OFF flag: `runs` proves a run happened, and a policy that armed itself on a
+# run that never asked would have happened too. The absence of the policy's own config line is what "default
+# 0" claims in the log, and a default that regressed to ON would change every shipping run by changing no
+# flag at all — which is the one thing this flag may not do until the main agent says so
+# (`prototype/mtp_accept/ADAPTIVE.md` §6 lists who decides what).
+silent() {
+  local name="$1"; shift
+  local needle="$1"; shift
+  local out rc
+  out="$("$BIN" --model "$MODEL" "$@" 2>&1)"; rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "FAIL  $name: expected rc=0, got rc=$rc: $(head -1 <<<"$out")"; fail=$((fail+1)); return
+  fi
+  if [[ "$out" == *"$needle"* ]]; then
+    echo "FAIL  $name: rc=0 but the run printed '$needle', so the policy armed on a run that never"
+    echo "        asked for it (the default moved): $(grep -m1 -F "$needle" <<<"$out" | cut -c1-140)"
+    fail=$((fail+1)); return
+  fi
+  echo "ok    $name: rc=0 and no '$needle' line — the default is off, and the log is what proves it"
+  pass=$((pass+1))
+}
+
 echo "== $BIN  ($(date -u +%FT%TZ))  refusals only, no timing taken"
 echo
 echo "-- the k=2 round's own refusals (K2-RESULT.md §7) --"
@@ -150,6 +173,38 @@ env_runs "QWEN_MTP_ACCEPT=0 turns it off" "MTP mode=off" QWEN_MTP_ACCEPT=0 --ids
 env_runs "QWEN_MTP_ACCEPT=0 at the default k" "MTP mode=off draft=1" QWEN_MTP_ACCEPT=0 --ids "$IDS" --steps 0
 env_runs "QWEN_MTP_DRAFT=0 alone refuses" "there is no draft block" QWEN_MTP_DRAFT=0 --ids "$IDS" --steps 1
 env_runs "QWEN_MTP_DRAFT=0 with accept off runs" "MTP mode=off draft=0" QWEN_MTP_DRAFT=0 --ids "$IDS" --steps 0 --mtp-accept 0
+echo
+echo "-- the adaptive depth: --mtp-adaptive (engine/mtp_adaptive.h), default OFF --"
+# The refusal that defines the flag. The policy consumes the verdict readback a ROUND already pays, so with
+# no round running it has no input and no effect; it is keyed on the VALUE rather than on `given`, because
+# `--mtp-adaptive 0 --mtp-accept 0` is a truthful pair that must run (unlike `--mtp-k`, which is keyed on
+# `given` because naming a depth you never run is a knob that does nothing).
+refused "adaptive with no round running" "--mtp-adaptive adapts the depth" --ids "$IDS" --steps 1 --mtp-accept 0 --mtp-adaptive 1
+refused "adaptive is a 0/1 switch"      "--mtp-adaptive takes 1"          --ids "$IDS" --steps 1 --mtp-adaptive 2
+# The per-step instruments. These refuse for the ROUND's sake, not the policy's — the policy adds no
+# instrument of its own — and the battery asserts WHICH message fires, because the accept default makes
+# several of them reachable by a bare run and a wrong-reason exit is invisible from the status code alone.
+refused "adaptive vs the stage clock"   "one draft round per step"        --ids "$IDS" --steps 1 --time-stages --mtp-adaptive 1
+refused "adaptive vs the stage clock, named schedule" "cannot share a run" \
+                                          --ids "$IDS" --steps 1 --mtp-sched every --mtp-adaptive 1 --time-stages
+refused "adaptive vs the wave clock"    "prices a prefill pass"           --ids "$IDS" --steps 1 --time-waves --mtp-adaptive 1
+refused "adaptive vs a session"         "hands the token budget"          --session --mtp-adaptive 1
+refused "adaptive vs sizes-only"        "runs no steps"                   --sizes-only --mtp-adaptive 1
+refused "adaptive vs a replay"          "no alignment"                    --ids "$IDS" --steps 1 --mtp-adaptive 1 --replay 1,2,3
+refused "adaptive vs the verify probe"  "not also armed"                  --ids "$IDS" --steps 1 --mtp-adaptive 1 --mtp-verify 1
+# The positive side. When it IS asked, the run states the whole policy in its own log BEFORE any body
+# runs — every threshold it will apply, the ceiling, and `re_promote=0` — so a later reader can re-derive
+# the decision from the transcript instead of trusting the binary, and so `engine/gate.py` section (m) can
+# parse its arithmetic off the engine rather than re-typing a constant that could drift.
+runs "adaptive on states its policy"     "MTPADAPT on=1 k_start=2"        --ids "$IDS" --steps 0 --mtp-adaptive 1
+runs "adaptive at a k=1 ceiling"         "MTPADAPT on=1 k_start=1"        --ids "$IDS" --steps 0 --mtp-adaptive 1 --mtp-k 1
+runs "adaptive leaves the geometry echo alone" "MTPGEOM k=2 rows=3 mid_slots=2" --ids "$IDS" --steps 0 --mtp-adaptive 1
+runs "adaptive echoes no re-promotion"   "re_promote=0"                   --ids "$IDS" --steps 0 --mtp-adaptive 1
+# And the default, proved by ABSENCE rather than asserted by prose. Three spellings, because the interesting
+# failures are different: a bare run, an explicit 0, and an explicit accept run at the default depth.
+silent "the DEFAULT runs no policy"              "MTPADAPT"          --ids "$IDS" --steps 0
+silent "an explicit --mtp-adaptive 0 is silent"  "MTPADAPT"          --ids "$IDS" --steps 0 --mtp-adaptive 0
+silent "no policy line on a plain accept run"    "MTPADAPT"          --ids "$IDS" --steps 0 --mtp-accept 1 --mtp-k 1
 echo
 echo "== $pass ok, $fail FAIL"
 [[ $fail -eq 0 ]] || exit 1
