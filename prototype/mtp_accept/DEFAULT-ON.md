@@ -244,7 +244,10 @@ the `--attn-tile` rule, moved in one commit; `--gdn-loop 1` on the gate's comman
 record — and it now asserts the echoed span pair on every case. `prototype/mtp_accept/m3_loop_rate.py` no
 longer forces `--gdn-loop 1` on its arms, for the same reason and with the same escape hatch (`GDN=1`
 re-takes the carried whole-run-span figure); both arms take the value from one place, so the pair can never
-differ in it.
+differ in it. `prototype/mtp_accept/mtp_wall_ab.sh` moved the same way: its `--gdn-loop 1`-on-both-arms pin is
+now `$GDN` (unset = the engine default, `GDN=1` re-takes the §7 decode table), and its canary — the one that
+runs inside the measurement window, not before it — now aborts a rep whose echoed spans disagree with what
+the arm was asked for, so a stale binary cannot report a clean null against a changed one.
 
 **Still owed by this change**, and none of it is a worker's to take: the prefill A/B at the scoped default
 against `--mtp-accept 0 --gdn-loop 512`, and the decode confirmation that k=2's +16.50 % survives the move.

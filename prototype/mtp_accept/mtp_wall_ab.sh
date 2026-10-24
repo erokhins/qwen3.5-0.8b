@@ -41,6 +41,14 @@ ADOPT_PCT=${ADOPT_PCT:-10}
 # IS the difference between the arms, so arm-specific is correct here: e.g.
 #   ACCEPT_EXTRA="--mtp-dense 1" IDS=tmp/glue_copy_fold/ab/ids4032.csv prototype/mtp_accept/mtp_wall_ab.sh
 ACCEPT_EXTRA=${ACCEPT_EXTRA:-}
+# `GDN=''` (the default, and the empty default is the point) means "pass no `--gdn-loop` at all", i.e. the
+# engine default — which since a4f2670 is what the SHIPPING loop runs: the round's bodies are forced to a
+# one-token-step span inside the engine and every other body keeps 512. `GDN=1` pins BOTH arms to the
+# whole-run span, which is how every carried figure in `M3-RESULT.md` and the §7 decode table were taken, and
+# the two arms still move together either way (`AGENTS.md`: a flag one arm requires belongs on both, and after
+# a4f2670 NO span is required — so the default stopped pinning one rather than pinning it on one arm, which
+# would price the flag instead of the loop).
+GDN=${GDN-}
 
 want_tk=$(awk -F',' '{print NF}' "$IDS") || { echo "no ids file $IDS"; exit 1; }
 [ "$want_tk" -ge 8 ] || { echo "$IDS has $want_tk fields; too few to be a fixture"; exit 1; }
@@ -54,13 +62,18 @@ trap 'tools/gpu_lock.sh release main-agent >/dev/null 2>&1' EXIT
 echo "== util at acquire: $(tools/gpu_lock.sh util | tail -1); ids fields=$want_tk steps=$STEPS reps=$REPS cap=$CAP"
 echo "== binary: $BIN ($(git log -1 --format=%h -- engine/ 2>/dev/null))  fixture: $IDS"
 echo "== accept-arm extra flags: ${ACCEPT_EXTRA:-(none — the shipping loop)}  [priced difference, so arm-specific on purpose]"
+echo "== gdn-loop on both arms: ${GDN:-(engine default — the shipping spans)}"
 
 run() { # $1 arm $2 rep -> log path
-  local arm="$1" rep="$2" extra="--gdn-loop 1" log
-  # `--gdn-loop 1` on BOTH arms, not just the accept one. The loop pins the per-token recurrence (§4b), so
-  # if only one side ran it the pair would differ in the recurrence kernel as well as in speculation — and
-  # the first take of this A/B showed exactly that, a 300 ms prefill difference that had nothing to do with
-  # the accept loop. One variable per A/B, or the number describes the wrong thing.
+  local arm="$1" rep="$2" extra="" log
+  # The span goes on BOTH arms from one variable, or the pair would differ in the recurrence's submission
+  # shape as well as in speculation — the first take of this A/B showed exactly that: a prefill gap between
+  # the arms that had nothing to do with the accept loop at all, and that swamped the quantity being priced.
+  # What it says now is "whatever
+  # `$GDN` says", and `$GDN` is empty by default because after a4f2670 the round's span is not a flag the
+  # caller can mis-set: `submit_wave_body` forces it wherever a mid-round checkpoint is armed. One variable
+  # per A/B.
+  [ -n "$GDN" ] && extra="--gdn-loop $GDN"
   # Default-on means the BASE arm has to name the plain path explicitly: since `aceee97` the engine default is
   # `--mtp-accept 1 --mtp-k 2`, so an unpinned base arm silently runs the accept loop and the A/B times the
   # accept loop against itself. The MTPSTAT canary below is what caught this — it fired as "base rep 1 printed
@@ -91,6 +104,25 @@ canary() { # $1 arm $2 rep $3 log -> aborts the script on a bad side
   [ "$(kv DECWALL "$log" census)" = "ok" ] || { echo "ABORT: $arm rep $rep DECWALL census=$(kv DECWALL "$log" census) — the engine refused to bill this run"; exit 1; }
   tk=$(kv PREFILL "$log" tokens)
   [ "$tk" = "$want_tk" ] || { echo "ABORT: $arm rep $rep prefilled tokens=$tk but $IDS has $want_tk comma fields — the fixture was not read as a list"; exit 1; }
+  st=$(grep -c '^MTPSTAT' "$log")
+  # THE SPAN CANARY, in the same window as the milliseconds (`AGENTS.md`: a paired A/B against a stale binary
+  # reads as a clean null, and every self-consistency check compiled into the binary cannot see that a
+  # different binary ran). This change is REQUIRED to move the spans the two arms print — `gdn_span_round=1`
+  # with `gdn_span_other` at whatever `$GDN` asked for on the accept arm, and the plain arm's single
+  # `gdn_span=` at the same value — so a rep whose echo disagrees is a rep of some other build, and its
+  # milliseconds are discarded before they are medianed.
+  local want_span round_span mode_span
+  want_span="${GDN:-512}"
+  round_span=$(kv "MTP mode=accept" "$log" gdn_span_round)
+  mode_span=$(kv "MTP mode=off" "$log" gdn_span)
+  if [ "$arm" = accept ]; then
+    [ "$round_span" = 1 ] || { echo "ABORT: accept rep $rep echoed gdn_span_round=${round_span:-<none>}; the round is forced to 1 by the engine, so this binary is not the one under test"; exit 1; }
+    [ "$(kv "MTP mode=accept" "$log" gdn_span_other)" = "$want_span" ] \
+      || { echo "ABORT: accept rep $rep ran its non-round bodies at gdn_span_other=$(kv "MTP mode=accept" "$log" gdn_span_other), asked $want_span"; exit 1; }
+  else
+    [ "$mode_span" = "$want_span" ] \
+      || { echo "ABORT: base rep $rep ran at gdn_span=${mode_span:-<none>}, asked $want_span — the arms would differ in the recurrence span, which is not the thing being priced"; exit 1; }
+  fi
   st=$(grep -c '^MTPSTAT' "$log")
   if [ "$arm" = base ]; then
     [ "$st" = 0 ] || { echo "ABORT: base rep $rep printed $st MTPSTAT lines; the flag is on where it must be off, so this is not a baseline"; exit 1; }
