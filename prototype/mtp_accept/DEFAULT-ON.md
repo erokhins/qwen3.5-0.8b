@@ -253,3 +253,55 @@ the arm was asked for, so a stale binary cannot report a clean null against a ch
 against `--mtp-accept 0 --gdn-loop 512`, and the decode confirmation that k=2's +16.50 % survives the move.
 Both are main-agent measurements (`engine/performance-status.md` §6), and the commands are handed over
 verbatim.
+
+## 8. Correction, 2026-10-25: the depth of a round now adapts — `--mtp-adaptive` is on by default
+
+§1–§7 fixed what a round costs and what it must not touch. This one changes **how wide a round is**, per round,
+which is the last knob in the accept loop that a caller could not previously hand to the engine.
+
+**The decision, and its basis.** `--mtp-adaptive 1` was shipped flag-gated and OFF in `4e5412e`..`e2d687a`
+(`engine/mtp_adaptive.h` is the rule, `prototype/mtp_accept/ADAPTIVE.md` the arithmetic) and is now the
+shipping default whenever `--mtp-accept` is on. The measured basis is `engine/performance-status.md` §9's
+method applied as a paired A/B per population, medians, in one lock hold each — the four rows and the
+round-count caveat are written up in `prototype/mtp_accept/ADAPTIVE.md` §7 and are not repeated here. In one
+line each: good content gives up about a point (a policy that is not supposed to fire at all, and cost ~1 pp
+when it does not), the corpus population is unchanged to marginally better, and the near-zero-accept case at
+4k goes from a −27.32 % tax to −4.10 %. The default is defensible on the content nobody wants to think about,
+which is the only content a fixed depth can get wrong.
+
+**What a caller sees.** A bare run's mode line gained one field, because with the policy on by default the
+ABSENCE of an `MTPADAPT` event line stopped meaning "no policy ran" — on good content the expected result is
+no event line at all:
+
+```
+MTP mode=accept k=2 draft=1 gdn_span_round=1 gdn_span_other=512 forced_by=default adaptive=on
+```
+
+`adaptive=off` is `--mtp-adaptive 0` or `QWEN_MTP_ADAPTIVE=0`, and it is the shape every byte-compared
+admission in this repository was taken with — including the flag-off control `LOSSLESS=1 EXTRA="--mtp-adaptive
+0" prototype/mtp_accept/m3_loop_rate.sh`, which is the one that proves the flip did not touch a verdict. The
+env override exists because `QWEN_MTP_DRAFT` / `QWEN_MTP_ACCEPT` / `QWEN_MTP_VERIFY` already set that pattern,
+and because a harness that cannot add a flag must still be able to take one away. The default is *conditional*
+on accept: `parse_args` resolves an unnamed policy to `--mtp-accept`, so `--mtp-accept 0` still runs the
+pre-MTP shipping path with no policy, no extra line, and — importantly — no refusal, while an explicit
+`--mtp-adaptive 1 --mtp-accept 0` still refuses for the reason it always did.
+
+**What moved with it**, in the same commit as the flag, per the `--attn-tile` rule that a gate's default and
+the engine's default cannot be allowed to drift:
+
+* `engine/gate.py`'s `MTP_ADAPT_DEFAULT` is 1, and section (m)'s default witness now omits BOTH `--mtp-k` and
+  `--mtp-adaptive` and asserts the three legs agree — the engine's echo (`MTPGEOM k`, the `MTPADAPT on=`
+  config line, `MTP mode=`'s `adaptive=` field), the constants gate.py mirrors, and the ceiling the policy
+  started under. Section (m) therefore admits the population through the policy by default, and both arms are
+  still nameable.
+* `prototype/mtp_accept/default_refusals.sh`'s three `silent` cases were inverted to assert PRESENCE. The
+  helper stayed, repointed at the named-off arms, because "`--mtp-adaptive 0` is honoured" is a claim with no
+  witness except the absence of a line.
+* `prototype/mtp_accept/ADAPTIVE.md` §7 holds the measured rows, the round-count caveat (abandonment cannot
+  fire before round 40, so a 32-round generation only ever gets one demotion and short generations keep most
+  of the tax), and the open list: cost bands measured on three fixtures, k ∈ {1, 2} only, and no re-promotion.
+
+**Owed by this change**, main-agent work: the three re-measurements at the new default (templated 4,152, the
+corpus 12 cases, and the near-zero case at 4k/160 rounds, each with nothing named), which become the next
+section of `engine/performance-status.md` after its §9, and that section's own row for the shipping default's
+headline.

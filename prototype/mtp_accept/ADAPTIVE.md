@@ -1,15 +1,32 @@
 # ADAPTIVE — speculation depth that adapts to what the rounds actually accept
 
-`--mtp-adaptive 0|1`, **default 0**, accepted only alongside `--mtp-accept`.
+`--mtp-adaptive 0|1`, **default 1 whenever a round runs**, accepted only alongside `--mtp-accept`.
 Implementation: `engine/mtp_adaptive.h` (the rule) and `engine/mtp_adaptive.h`'s `Tracker`, driven from the
 accept loop in `engine/decode_run.cpp`. Gate: `engine/gate.py` section (m) with `--mtp-adaptive 1`, plus
 section (m1) inside `engine/gate.py --selftest`. Refusal/default battery: `prototype/mtp_accept/
 default_refusals.sh`.
 
-**This document ships a mechanism and its gate. It does not ship a default.** The flag is off, and the only
-thing that moves it is the paired A/B in §6, which the main agent takes alone (same split as
-`prototype/mtp_accept/DEFAULT-ON.md` for the k=2 flip). No millisecond figure appears anywhere here; every
-cost quoted is a dimensionless round-to-step ratio taken from the ledger, cited by section.
+**CORRECTED 2026-10-25 — §7 below replaced the default that this document first shipped.** Everything from §0
+to §6 was written while the flag was OFF and is left as written, because it is the record of how the mechanism
+was sized and what it had to prove; the two sentences it makes stale are corrected here rather than deleted:
+
+* the flag's default is **on** whenever `--mtp-accept` is on. `Options::mtp_adaptive` stores an unresolved
+  value and `parse_args` resolves it to `--mtp-accept`, so a run with no round still carries no policy and
+  still prints no `MTPADAPT` line, and `--mtp-adaptive 0` / `QWEN_MTP_ADAPTIVE=0` name the fixed-depth run
+  every byte-compared admission in this repo was taken with;
+* every run now prints which rule ran, on the line that used to be silent about it:
+  `MTP mode=accept k=2 draft=1 gdn_span_round=1 gdn_span_other=512 forced_by=default adaptive=on`. Without
+  that field, "the log printed no `MTPADAPT` event line" stopped distinguishing a static k=2 run from an
+  adaptive one whose policy never fired — which on §3.3's arithmetic is the expected shape for good content,
+  so the silence was about to become the common case.
+
+Everything below §6 is the measured result, the round-count caveat, and what is still open. No millisecond
+figure appears anywhere here; every cost quoted is a dimensionless round-to-step ratio taken from the ledger,
+cited by section.
+
+**What this document shipped, in order.** First a mechanism and its gate, with the default held OFF until the
+paired A/B in §6 came back (§6 is the list of runs it required and who takes them, and it is the main agent's
+list, not this file's). Then, once those runs were taken, the default itself — §7.
 
 ---
 
@@ -328,6 +345,10 @@ device and no timing**:
 
 ## 6. The blocking runs (main agent: exclusive window, zero subagents, blocking, never backgrounded)
 
+**Taken.** Every command below was run by the main agent in an exclusive window and the verdicts are in §7;
+this section is kept as the protocol that produced them, including the lock discipline, because §7's numbers
+are only interpretable against it.
+
 Correctness first, then the three measurements that decide the default. All are correctness-only except the
 last three, which are the only ones that produce a rate.
 
@@ -415,3 +436,80 @@ EXTRA="--mtp-adaptive 1" OUT=/tmp/m3_adaptive prototype/mtp_accept/m3_loop_rate.
 
 Quote every adaptive percentage with `MTPADAPTSTAT`'s `rounds_k2/rounds_k1/plain` beside it. A rate for an
 adaptive run without its depth attribution is not a result — it is a mixture wearing one number.
+
+---
+
+## 7. The measured result, and the default it earned (2026-10-25)
+
+Taken by the main agent in an exclusive window, paired inside one lock hold per population, medians, by
+`engine/performance-status.md` §9's method. Quoted here and not re-taken: a worker's device run cannot enter a
+timing doc (`AGENTS.md`: GPU execution belongs to the main agent). Percentages only — no millisecond figure
+appears in this file.
+
+| population | rounds | **adaptive (the default now)** | static (`--mtp-adaptive 0`) | what it says |
+|---|---|---|---|---|
+| templated, 4,152 lanes | 256 | **+22.29 %** | +23.44 % | costs about a point on good content |
+| corpus, 12 cases at natural width | 32 | **+18.58 %** | +17.87 % | no cost, marginally better; `a` 0.5269 → 0.5376 |
+| the near-zero-accept case at 4k | **160** | **−4.10 %** | −27.32 % | the rescue — 23 points of tax taken off |
+| the same case, harness default | 32 | −23.10 % | −27.97 % | only ~5 points, and that is the limitation below |
+
+All three of §6's expected shapes held: the templated population gave up roughly the run-to-run spread and
+nothing more (est ~1.19 against a 0.95 line, so the policy is not expected to fire there at all), the corpus
+population was unchanged-to-slightly-better — so `demote_est = 0.950` is not too high, which was the failure
+mode §6 warned about — and the a ≈ 0.03 case landed near the plain arm instead of at −28 %.
+
+**The round-count caveat, which is the policy's real limitation and is written down rather than smoothed
+over.** The two observation minimums are `kMinObserveRounds = 16` (before a demotion) and
+`kMinObserveBeforeAbandon = 24` (before the sticky one), and §2 clears the window on every change, so
+**abandonment cannot fire before round 40**. A 32-round generation therefore cannot reach it at all: it gets
+one demotion, k=2 → k=1, and nothing else — which is exactly why the same content reads −23.10 % at 32 rounds
+against −4.10 % at 160. **The rescue is proportional to generation length, and short generations keep most of
+the tax.** That is a deliberate trade and not an oversight: §3.4 sized both minimums by σ precisely so the
+first demotion could not fire on noise, and the alternative — smaller samples — buys short-generation relief
+by demoting good content, which costs the whole win on the rows that were already winning. The numbers to
+remember are therefore per-length, not one number: a short request pays ~1.9 steps per round and gets a
+narrower round from round 16 onward; a long request stops paying for speculation entirely once the window has
+filled twice.
+
+### What is still open, plainly labelled
+
+* **The thresholds come from a cost band measured on three fixtures.** `cost_k1 = 1.58` is the midpoint of
+  `ROUND-TAX.md` §"The pre-registered adopt line" and `CORPUS-WALL.md`; `cost_k2 = 1.90` is the midpoint of
+  §9's four round/step figures. A midpoint with a band beside it is still a midpoint, and `cost(k)` is a
+  function of BODY WIDTH ONLY — a run whose round cost varies with context length, content type or route is
+  billed the same number as the ones that were measured. §3.3 shows the classification survives the wrong end
+  of both bands for the four §9 rows; it does not show that for content nobody has measured.
+* **Only k ∈ {1, 2} exists.** `engine/mtp_accept.h::kMaxK` is 2, so the policy has one demotion step and one
+  abandonment, and there is no deeper rung to promote onto even if a re-promotion were added.
+* **No re-promotion means a request that starts cold and gets hot stays demoted.** Depth is monotone (2 → 1 →
+  plain) by design, and that is what makes round-to-round oscillation unrepresentable rather than merely
+  discouraged. The cost of the choice is bounded by the gap between the shapes on the same content — but a
+  bounded cost is not a refund, and a server whose first tokens are boilerplate and whose later tokens are
+  predictable pays the cold-start reading for the whole request.
+* **Abandonment can never fire before round 40**, per the caveat above, and any generation shorter than that
+  cannot abandon at all. Consequence for a reader of a real log: `MTPADAPTSTAT` showing `changes=0` on a
+  32-round request says the policy had no chance to act, not that the content was fine — which is why
+  section (m) reports such a case as NOT ADJUDICABLE instead of counting it as a keep (§5.2).
+
+### What moved with the flip
+
+`engine/decode_run.cpp`: the flag's stored default is an unresolved value that `parse_args` resolves to
+`--mtp-accept`, so the policy ships with accept and a no-round run still carries none of it; `QWEN_MTP_ADAPTIVE=0|1`
+was added because the other MTP knobs already take their overrides from the environment, and BOTH spellings
+mark the knob as named so a control arm's `0` cannot be overwritten by the default; the `MTP mode=` echo
+acquired `adaptive=on|off`.
+
+`engine/gate.py`: `MTP_ADAPT_DEFAULT` is now 1 — the mirror of the engine's default, per the `--attn-tile`
+rule that the two must move in one commit — and section (m)'s default witness omits BOTH `--mtp-k` and
+`--mtp-adaptive` and asserts three legs agree: what the run echoed (`MTPGEOM k`, the `MTPADAPT on=` config
+line, the mode echo's `adaptive=` field), the constants this file mirrors, and the ceiling the policy
+started under. The on and off arms are both still exercised explicitly (`--mtp-adaptive 0|1` remain nameable,
+and `prototype/mtp_accept/m3_loop_rate.sh` keeps its `EXTRA="--mtp-adaptive 0"` flag-off control).
+`prototype/mtp_accept/default_refusals.sh`: the three cases that proved default-OFF by the ABSENCE of the
+policy's config line now prove default-ON by its PRESENCE, and `silent` was kept for the named-off arms — a
+battery that asserts the previous default goes red on the correct build and greens the regressed one.
+
+The post-flip confirmation at the shipping default (templated with no flag named, corpus with no flag named,
+the near-zero case at 4k and 160 rounds with no flag named) is the main agent's to take and write, as the next
+section of `engine/performance-status.md` after its §9; §6's commands are the shape, minus the
+`--mtp-adaptive 1` arm-difference, since the arm is now the default.
