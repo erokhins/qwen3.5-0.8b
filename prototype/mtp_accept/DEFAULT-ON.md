@@ -20,13 +20,17 @@ Three knobs move together, because the engine requires them together:
 | `--mtp-accept` | 0 | **1** |
 | `--mtp-k` | 1 | **2** |
 | `--mtp-draft` | 0 | **1** |
-| `--gdn-loop` | 512 | 512 as parsed, **resolved to 1** when accept is on and no span was named |
+| `--gdn-loop` | 512 | 512 as parsed, **resolved to 1** when accept is on and no span was named — *overtaken 2026-10-25 by §7: 512 stands, and the round's own bodies are forced to 1 inside the engine* |
 
 The option on the table was (A) flip accept only, (B) flip the mutually-required triple, (C) flip the
 triple *and* retire the `--gdn-loop` pin. **(B) was chosen.** (C) is not a default change: narrowing
 the span requirement to the round body would change what state provenance the accept round is admitted
 against, i.e. it needs its own bit-provenance admission through gate (m) and the lossless corpus. It is
 a funded follow-up, not a flag.
+
+**Overtaken 2026-10-25.** (C) was funded by measurement and landed; see §7. The diagnosis in that paragraph
+was right — it did need its own provenance admission — and the admission came back clean. The table row
+above and §2 describe the decision *as it was taken*; §7 says what runs now.
 
 `k=2` is the shipped depth, and `k=3` is not:
 
@@ -44,6 +48,13 @@ nameable: the parse range is `[kMinK, kMaxK]`, and a range of `[kDefaultK, kMaxK
 gate's own `k=1` admission cases illegal.
 
 ## 2. Why a bare run needs a span rule, and what the rule is
+
+**THE RULE TODAY (2026-10-25, §7).** Nothing in `decode_run` resolves the span anymore. `--gdn-loop` means
+what it says for every body that is not an MTP round, and the round's own bodies are forced to
+`decode_step.h::kMtpRoundGdnSpan` = 1 by `submit_wave_body` wherever the mid-round checkpoint is armed — the
+same arming that already distinguishes a round's body for `arm_mtp_round_attn_form`. `--gdn-loop <any>
+--mtp-accept 1` is legal; the `MTP mode=` line echoes both spans. Everything below this marker is the record
+of the rule as it was shipped on 2026-10-24, kept because it is the reason the round is forced at all.
 
 The accept round restores from a mid-round GDN checkpoint, which is a one-token-step recurrence's end
 state. A span of 512 batches the recurrence over a prefill body, so its checkpoint is not the state the
@@ -164,4 +175,78 @@ harness that no longer parses.
    92 rounds / 188 tokens with **the same two admitted forks as the pre-flip record** (chunk64b stream
    index 0, prefix24dec8 index 3) — i.e. the default introduced no new bit divergence.
 6. **`--gdn-loop` narrowing (option C)**, if the prefill price in §3 turns out to matter: funded follow-up
-   with its own state-provenance admission, as §1 says.
+   with its own state-provenance admission, as §1 says. → **DONE 2026-10-25**, §7. The price did matter
+   (+37 % at 1,024 lanes, +72 % at 4,032 — `engine/performance-status.md` §7), the admission was run, and it
+   is clean.
+
+## 7. Correction, 2026-10-25: the span requirement is the round's, and the whole-run pin is gone
+
+This section overtook §1's "(B) was chosen", §2's run-wide resolution rule, §3's "that penalty is not
+measured", and §6 item 6. It is appended rather than woven in because those passages are the record of a
+decision taken on stated grounds, and what changed is a measurement, not a judgement.
+
+**What was wrong.** The requirement — a round's rollback restores a mid-round checkpoint, which is a
+one-token-step recurrence's end state — is about the ROUND's bodies. The enforcement was about the RUN: an
+unnamed span resolved to 1 for the whole process, so the prefill wave walked one token-step per launch to
+satisfy a requirement it never had. §3 guessed at the shape of that cost and correctly refused to name a
+number; the main agent measured it inside one lock hold: prefill fell **+37 % at 1,024 lanes and +72 % at
+4,032** (9,091 → 5,257 tok/s) against `--mtp-accept 0 --gdn-loop 512` — `engine/performance-status.md` §7.
+Decode did not move, then or now: `resolve_gdn_loop(want, rows)` collapses a one-row body to 1 whatever the
+flag says, so a plain step ran the per-token form at either setting.
+
+**What runs now.** One rule, one spelling, in `engine/decode_step.h::kMtpRoundGdnSpan` (= 1, with a
+`static_assert`, because a wider value would capture a state the recurrence never wrote). `submit_wave_body`
+takes the span from it when `sc.gdn_ckpt` is armed and from `sc.gdn_loop` otherwise; the armed checkpoint is
+the same arming `arm_mtp_round_attn_form` keys on, chosen for the reason that header states — nothing at the
+launcher can tell a 3-row round from a 3-row prefill tail, but the caller can, and exactly two callers arm a
+round body. The CLI-level refusal `--mtp-accept && gdn_loop != 1` is retired, not weakened: there is no
+longer any span at which a round could run, so the predicate became unreachable, and a refusal no caller can
+reach is an untestable branch. `--mtp-midsplit` keeps its own version of that refusal on purpose, because
+that probe byte-compares a split body against an **unsplit** one, and the unsplit side arms no checkpoint and
+so has no forcing to share.
+
+The echo gained the second span, because a log that prints one span while two ran cannot be read:
+
+```
+MTP mode=accept k=2 draft=1 gdn_span_round=1 gdn_span_other=512 forced_by=default
+MTP mode=off draft=0 gdn_span=512
+```
+
+`gdn_span_round` is printed from `kMtpRoundGdnSpan` itself — the same constant the launcher branches on, so
+the echo cannot disagree with the launch — and `forced_by=` now names who chose `gdn_span_other`:
+`--gdn-loop` when it was named, `default` when it was not. `gdn_span_round=1` is not something a caller can
+ask for, and nothing prints `--mtp-accept-default` anymore.
+
+**The admission, run on the scoped build.** §1 named the two instruments this needed, and both now run at
+the spans the engine actually ships rather than at a pinned 1:
+
+| command | verdict |
+|---|---|
+| `engine/gate.py --fixture dec8` (sections (a)–(m), (m) at the default `k=2`) | **ENGINE GATE PASS**, 875 PASS lines, 0 FAIL. (m): 18 fixtures / 91 rounds / 190 tokens, and the fork set is the carried pair — `chunk64b` at stream index 0, `prefix24dec8` at index 3 — so the move introduced no new bit divergence |
+| `prototype/mtp_accept/m3_loop_rate.sh` (full population, lossless) | **ADMISSION: PASS** — `lines compared 49 identical 49 flipped 0`, accept arm against the flag-off greedy stream, both arms at the same prefill span. The `a`-vs-kill-line verdict is unchanged (0.6703 against 0.4568) |
+| section (m)'s new span assertion, inside the run above | **PASS** — all 18 cases echoed `gdn_span_round=1 gdn_span_other=512` |
+| `speccheck/run_all.py --quick`, `prototype/glue/run.py`, `prototype/proj_gemv/run.py`, `prototype/gdn_gated_norm/run.py --gate` | all PASS — untouched by this change, run as the standing regression set |
+
+Why the lossless corpus is the load-bearing witness and the echo is not: if the forcing were missing, a
+3-row round at span 3 would write **no** checkpoint slot at all — the capture sites sit in the per-token
+branch — so a reject would restore memory the body never wrote and the emitted stream would diverge from the
+plain one. 49/49 identical streams is therefore a claim about the launch, not about a printout. The expected
+movement did not appear: the walked span is admitted at bit identity
+(`prototype/gdn_rec_isa/gdn_rec_isa.hip.cpp --selftest-loop`, re-proved per fixture by gate section (j)), so
+feeding a round from a span-512 prefill moves no bit — and both sides of every comparison above share that
+span anyway, which is the half of the argument that does not depend on span-invariance holding.
+
+**What moved with it.** `prototype/mtp_accept/default_refusals.sh` flipped its span rows from refusals to
+positive cases asserting the echoed pair (a battery demanding a refusal the engine correctly no longer gives
+is a dead gate). `engine/gate.py` section (m) stopped pinning `--gdn-loop 1` and forwards its own
+`--gdn-loop` instead (default 512, the engine's default), so the section admits the run the engine ships —
+the `--attn-tile` rule, moved in one commit; `--gdn-loop 1` on the gate's command line reproduces the old
+record — and it now asserts the echoed span pair on every case. `prototype/mtp_accept/m3_loop_rate.py` no
+longer forces `--gdn-loop 1` on its arms, for the same reason and with the same escape hatch (`GDN=1`
+re-takes the carried whole-run-span figure); both arms take the value from one place, so the pair can never
+differ in it.
+
+**Still owed by this change**, and none of it is a worker's to take: the prefill A/B at the scoped default
+against `--mtp-accept 0 --gdn-loop 512`, and the decode confirmation that k=2's +16.50 % survives the move.
+Both are main-agent measurements (`engine/performance-status.md` §6), and the commands are handed over
+verbatim.
