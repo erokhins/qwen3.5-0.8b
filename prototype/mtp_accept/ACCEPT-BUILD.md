@@ -515,7 +515,7 @@ behind `--mtp-accept`. It is not landed, and the reason is two named problems ra
    while unable to run the rate witness is how a default-off path gets committed looking finished.
 
 What IS ready for it: `Side`/`accept_round`/`Stats`/`tally`/`describe` in the staging directory, with
-their cost figures now corrected to the derivation form (`subs_per_round = 2 * kNumGdnLayers + 2`,
+their cost figures now corrected to the derivation form (`subs_per_round = 2 * kNumGdnLayers + 3`,
 `subs_per_reject = 2`, and the header's cost block quoting §4d's table), the rollback call sites
 identical to what `--mtp-midsplit` just byte-compared, and the route forcing (hand GEMV, `kSeq`,
 per-token recurrence) matching the pin §4b established. The remaining work is the driver and those two

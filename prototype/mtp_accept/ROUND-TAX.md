@@ -70,3 +70,64 @@ fails, the argmax rule is not what this file claims and the work is reverted, no
 3. (2) verdict kernel split. Same commit as its byte-compare witness.
 4. Re-take `mtp_wall_ab.sh` / the templated-fixture three-arm window and update the ledger only if the
    adopted line is cleared.
+
+# RESULT: the tax was 1.33–1.42 ms a round, and it moved the verdict from ~0 % to ~+10 %
+
+Pre-change binary: `9228f6c` from a scratch worktree. Post: `70d0e7e`. Main agent, blocking, self-locking
+harnesses, 5 reps per arm inside one hold per invocation, medians — two independent pre/post pairs, because a
+ruler re-taken in another window is not an A/B.
+
+## Where the milliseconds were (meter, per round, templated 4,152 fixture, hand route)
+
+| phase | pre | post | delta |
+|---|---|---|---|
+| `verdict_kernel` | 0.3074 | **0.0329** | **−0.2745** |
+| `draft` | 3.6157 | **2.5613** | **−1.0544** |
+| ↳ `draft_vocab_d2h` | (inside `draft`) | 2.5340 | an 8-byte readback window now, dominated by the wait on the draft's own `lm_head` pass over the 485 MiB table — the floor that was always there |
+| ↳ `draft_argmax_host` | (inside `draft`) | `runs=0` | the host scan is gone; a zero-run row *is* the result |
+| `body` / `head` | 11.718 / 2.241 | 11.793 / 2.189 | unchanged, as intended |
+
+The two defects sum to **−1.329 ms/round**; the wall says **−1.42** (17.94 → 16.52 ms/round), the residue being
+the readback/rollback terms. Prediction booked against this file: it priced the pair at "0.5–0.9 ms" and the
+answer was 1.33–1.42 — the draft crossing alone was 1.054 ms, i.e. **29 % of the draft phase was a vocabulary
+copy plus a CPU scan**.
+
+## The pre-registered adopt line, and whether it cleared
+
+Line, fixed in this file before any measurement: `round/step` drops ≥ 0.03 at 4,152 lanes with every `ACCEPT`
+line and `emitted.txt` byte-identical on three fixtures. The byte-compare was green (and it earned its keep:
+the first cut wrote partial indices strip-relative, producing token 1422 where the host rule gives 49534 with
+an **identical top logit** — a wrong token every aggregate would have passed; it reddened only on the raw
+fixture). Measured:
+
+| arm (templated 4,152, k=1) | round/step | accept vs base |
+|---|---|---|
+| pre, sample 1 | 1.625 | −0.01 % |
+| **post, sample 1** | **1.472** | **+10.38 %** |
+| pre, sample 2 | 1.602 | +1.44 % |
+| **post, sample 2** | **1.481** | **+9.75 %** |
+| post + `--mtp-dense` + `--mtp-prompt-lanes 146` | 1.530 | +10.26 % |
+
+`round/step` fell **0.14–0.15**, five times the line. The adopt line itself cleared in two of three post
+samples (9.75 / 10.26 / 10.38) — **by a hair, not comfortably**, and the honest statement is "roughly +10 % on
+templated prose", at parity with llama.cpp's `mtp1` +9.5 % instead of 8 points behind it.
+
+**Non-stemplated prose**, the check that stops this being self-deception (raw 4,142 ids, same binary): loop
+route **+1.28 %**, dense+fan146 **+6.82 %**. Both were negative before this session (−10.9 % and −2.2 %). The
+knobs also flipped ranking: on templated prose they are now nearly free (+10.38 loop vs +10.26 with both) while
+on raw prose they are worth +5.5 points, because their ~0.5 ms of lane work is a bigger share of a cheaper
+round only when the accept it buys is low.
+
+## What this re-prices: k=2 is no longer a dead end
+
+The k=2 kill arithmetic in `DRAFTK-RESULT.md` was anchored at ~2.03 step/round because each drafted row cost
+3.64 ms. Each now costs 2.56, so a 3-row round prices at `body(3 rows) ~12.8 + head 2.19 + 2×2.56 + verdict 0.03 ≈ 20.1 ms = 1.81 step`, and the measured nested ladder (n₁+n₂ = 1.143) gives `tok/round = 2.143` → **2.143 / 1.81 = +18 %**, against llama.cpp's `mtp2` +13.6 %. That is a projection off a measured ladder and an **unmeasured 3-row body**, so it is a funding argument, not a result — but it is the opposite sign from the one this file wrote hours ago, and the bar to clear is now `n₁+n₂ > ~0.80` rather than `> 1.093`.
+
+## Owed
+
+* Nothing here is on the shipping path: `--mtp-accept` is still default-off and `engine/gate.py` still runs no
+  round at all (section (h)). Flipping the default requires that gate first — it is the same gap that let the
+  `--mtp-route` output difference go unnoticed.
+* `kArgmaxChunks = 160` is a divisor-friendly guess near the CU count, not a swept value.
+* NaN, case (c) in the kernel header: fold order *can* matter if a row contains a NaN. Pre-existing in
+  `argmax_greedy` and in the old verdict kernel, unchanged by this work; the diagnostic saw `nans=0`.
